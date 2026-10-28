@@ -14,6 +14,7 @@ pub mod regulatory;
 pub mod scan;
 pub mod security;
 pub mod station;
+pub mod supplicant;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

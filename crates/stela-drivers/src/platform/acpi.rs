@@ -25,6 +25,7 @@ pub type RegionSetup =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error(pub Status);
 pub const SUPPORT: Error = Error(0x000f);
+pub const NOT_FOUND: Error = Error(0x0005);
 pub const BAD_PARAMETER: Error = Error(0x1001);
 pub const ALREADY_EXISTS: Error = Error(0x0007);
 pub const LIMIT: Error = Error(0x0010);
@@ -340,6 +341,34 @@ impl Session {
     /// an ID, which filters by `_STA` alone.
     pub fn all_devices(&self) -> Result<Vec<Handle<'_>>, Error> {
         self.walk(ptr::null())
+    }
+    /// A copy of the firmware's first `signature` table, or `None` when it
+    /// has none, read through AcpiGetTable and released with AcpiPutTable.
+    pub fn table(&self, signature: &[u8; 4]) -> Result<Option<Vec<u8>>, Error> {
+        unsafe extern "C" {
+            fn acpi_get_table(signature: *const c_char, instance: u32, out: *mut *mut u8)
+            -> Status;
+            fn acpi_put_table(table: *mut u8);
+        }
+        let _guard = self.guard()?;
+        let name = [signature[0], signature[1], signature[2], signature[3], 0];
+        let mut table = ptr::null_mut();
+        // SAFETY: a NUL-terminated signature and an out pointer ACPICA fills
+        // while the namespace guard is held.
+        let status = unsafe { acpi_get_table(name.as_ptr().cast(), 1, &mut table) };
+        if status == NOT_FOUND.0 {
+            return Ok(None);
+        }
+        checked(status)?;
+        // SAFETY: ACPICA maps the whole table, whose header gives its length
+        // at byte 4, until acpi_put_table releases it.
+        let bytes = unsafe {
+            let length = u32::from_le_bytes(ptr::read_unaligned(table.add(4).cast::<[u8; 4]>()));
+            core::slice::from_raw_parts(table, length as usize).to_vec()
+        };
+        // SAFETY: the table acpi_get_table returned, released once.
+        unsafe { acpi_put_table(table) };
+        Ok(Some(bytes))
     }
     fn walk(&self, hid: *const c_char) -> Result<Vec<Handle<'_>>, Error> {
         let guard = self.guard()?;

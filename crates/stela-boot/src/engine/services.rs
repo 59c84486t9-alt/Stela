@@ -327,7 +327,7 @@ unsafe impl NativeServices for Services<'_> {
             .map_err(broker_refusal)
     }
 
-    fn acpi(&self) -> Option<&stela_drivers::platform::acpi::Session> {
+    fn acpi(&self) -> Option<&'static stela_drivers::platform::acpi::Session> {
         self.acpi.map(HostAcpi::session)
     }
 }

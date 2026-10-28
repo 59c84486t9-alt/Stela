@@ -144,6 +144,9 @@ impl<T: Scsi> Scsi for Owner<T> {
     fn poisoned(&self) -> bool {
         self.transport.poisoned()
     }
+    fn signals(&self) -> bool {
+        self.transport.signals()
+    }
     fn write_protect_page(&self) -> Option<u8> {
         self.transport.write_protect_page()
     }

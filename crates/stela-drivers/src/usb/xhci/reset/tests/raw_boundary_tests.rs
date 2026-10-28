@@ -119,6 +119,7 @@ fn unpublished_profile(
         command_poisoned: false,
         command_ring_stopped: false,
         unpublished: 0,
+        signalled: false,
         quiet_drains: 0,
         outstanding: None,
         finished: Vec::new(),

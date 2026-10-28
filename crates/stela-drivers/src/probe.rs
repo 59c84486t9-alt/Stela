@@ -26,6 +26,10 @@ use core::fmt;
 
 #[cfg(feature = "native-acpi")]
 mod i2c;
+#[cfg(feature = "native-acpi")]
+mod power;
+#[cfg(feature = "native-acpi")]
+pub use power::Power;
 pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
@@ -97,6 +101,17 @@ pub enum PlatformError {
     Touchpad(input::touchpad::Error),
     #[cfg(feature = "native-acpi")]
     Gpio(crate::bus::gpio::native::Error),
+    /// The embedded controller's operation regions could not be installed.
+    #[cfg(feature = "native-acpi")]
+    Ec(crate::platform::ec::binding::Failure),
+    /// The embedded controller's description could not be read.
+    #[cfg(feature = "native-acpi")]
+    EcDiscovery(crate::platform::ec::discovery::native::DiscoveryError),
+    #[cfg(feature = "native-acpi")]
+    Battery(crate::platform::battery::Error),
+    /// Finding a device or evaluating its method failed.
+    #[cfg(feature = "native-acpi")]
+    AcpiMethod(crate::platform::acpi::Error),
 }
 
 impl fmt::Display for PlatformError {
@@ -115,6 +130,14 @@ impl fmt::Display for PlatformError {
             Self::Touchpad(error) => error.fmt(f),
             #[cfg(feature = "native-acpi")]
             Self::Gpio(error) => write!(f, "GPIO controller: {error:?}"),
+            #[cfg(feature = "native-acpi")]
+            Self::Ec(error) => write!(f, "embedded controller: {error:?}"),
+            #[cfg(feature = "native-acpi")]
+            Self::EcDiscovery(error) => write!(f, "embedded controller description: {error:?}"),
+            #[cfg(feature = "native-acpi")]
+            Self::Battery(error) => write!(f, "battery: {error:?}"),
+            #[cfg(feature = "native-acpi")]
+            Self::AcpiMethod(error) => write!(f, "ACPI method: {error:?}"),
         }
     }
 }
@@ -347,6 +370,9 @@ pub struct Devices {
     /// including attaches that failed, such as the Intel VMD hierarchy behind
     /// its NVMe controller and a failed controller's mappings and DMA domain.
     pub owners: Vec<Box<dyn core::any::Any>>,
+    /// The batteries, AC adapter and lid the ACPI namespace lists.
+    #[cfg(feature = "native-acpi")]
+    pub power: Power,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -755,6 +781,8 @@ pub unsafe fn probe_with_provider(
     // its PCI fixups.
     #[cfg(feature = "native-acpi")]
     if let Some(session) = services.and_then(|services| services.acpi()) {
+        // Before any other device's methods, which may read EC fields.
+        power::attach_ec(session, &mut devices);
         let usb_released = !devices
             .platform_failures
             .iter()
@@ -763,6 +791,7 @@ pub unsafe fn probe_with_provider(
         if let Some(services) = services {
             i2c::attach(services, session, handoff.clock, &mut devices);
         }
+        power::attach_power(session, &mut devices);
     }
     devices
 }

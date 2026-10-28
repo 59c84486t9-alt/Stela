@@ -80,6 +80,11 @@ pub struct Host {
     binding: Binding,
 }
 impl Host {
+    /// Whether the host controller sends the handoff's completion signal.
+    pub fn signals(&self) -> bool {
+        self.engine.io.signals()
+    }
+
     /// # Safety
     /// `device`, binding and controller must name the same physical attachment
     /// and configuration/reset epoch. The caller owns the interface exclusively
@@ -437,6 +442,10 @@ fn read_block_zero<I: Io>(
 trait Io {
     type Ticket;
     fn ready(&mut self) -> Result<(), BlockError>;
+    /// Whether the host controller sends the handoff's completion signal.
+    fn signals(&self) -> bool {
+        false
+    }
     fn streams(&self) -> Option<u16> {
         None
     }
@@ -464,6 +473,11 @@ enum NativeTicket {
 }
 impl Io for Native {
     type Ticket = NativeTicket;
+    fn signals(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.signals())
+    }
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();
         let mut device = controller.device(self.id)?;

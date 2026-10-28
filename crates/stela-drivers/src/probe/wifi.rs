@@ -120,9 +120,30 @@ impl WifiSecret {
     }
 }
 
+impl WifiSecret {
+    /// The pairwise master key for `ssid`: the PSK itself, or the
+    /// passphrase's PBKDF2 derivation (IEEE 802.11-2020 J.4.1).
+    pub fn pmk(&self, ssid: &[u8]) -> Zeroizing<[u8; 32]> {
+        match self {
+            Self::Passphrase(passphrase) => {
+                crate::net::wifi::supplicant::passphrase_psk(passphrase.as_bytes(), ssid)
+            }
+            Self::Psk(psk) => psk.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_passphrase_derives_its_pmk_and_a_psk_is_its_own() {
+        let pmk = WifiSecret::parse(b"password").unwrap().pmk(b"IEEE");
+        assert_eq!(pmk[..4], [0xf4, 0x2c, 0x6f, 0xc5]);
+        let psk = WifiSecret::parse(&b"0f".repeat(32)).unwrap();
+        assert_eq!(*psk.pmk(b"any"), [0x0f; 32]);
+    }
 
     #[test]
     fn a_passphrase_keeps_its_characters_without_the_line_end() {

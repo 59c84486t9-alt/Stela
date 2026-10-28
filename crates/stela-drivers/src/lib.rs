@@ -17,13 +17,19 @@
 //! class: disks ([`storage`], behind [`block::BlockDevice`]), keyboards and
 //! pointers ([`input`]), raw Ethernet links ([`net`]) and the USB devices
 //! behind xHCI controllers ([`usb`]), reporting the functions it cannot take.
+//! Before any driver binds, it takes every USB host controller from firmware
+//! ([`usb::handoff`]). With the mount's [`probe::NativeServices`] it also
+//! attaches the i8042 keyboard and mouse and the I²C-HID devices and
+//! touchpads the ACPI namespace lists, NVMe disks behind Intel VMD, Intel
+//! ISH and AMD SFH sensor hubs, the embedded controller, batteries, AC
+//! adapter and lid, and the Broadcom tg3 and Aquantia AQtion adapters.
 //!
-//! [`firmware`] holds the exact device firmware catalog drivers load from.
+//! [`firmware`] holds the device firmware catalog drivers load from.
 //! [`gpu`] inventories display controllers; its feature-gated vendor ports
 //! are support libraries that initialize no GPU. [`audio`] drives HD Audio
 //! for the mount's audio check only. The Wi-Fi libraries in [`net::wifi`],
-//! USB4/Thunderbolt and I²C/SMBus in [`bus`], Type-C in [`usb::typec`] and
-//! [`platform`] (ACPICA and work contexts) are not attached by `probe` yet.
+//! USB4/Thunderbolt and SMBus in [`bus`] and Type-C in [`usb::typec`] are
+//! not attached by `probe` yet.
 #![no_std]
 #![cfg_attr(not(test), warn(clippy::undocumented_unsafe_blocks))]
 #[macro_use]
