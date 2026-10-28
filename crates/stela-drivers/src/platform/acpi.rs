@@ -793,6 +793,32 @@ impl<'a> Handle<'a> {
             raw,
         })
     }
+    /// Execute AML while discarding its result in ACPICA itself. This preserves
+    /// NULL-output evaluation semantics even when the returned object has no
+    /// supported external representation. Errors and namespace invalidation
+    /// still propagate; the actual method and all side effects execute once.
+    pub fn invoke(self, path: Option<&str>, args: &[Argument<'_>]) -> Result<(), Error> {
+        let guard = self.session.guard()?;
+        guard.bind(self.raw)?;
+        let path = path
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| BAD_PARAMETER)?;
+        let mut args = Arguments::new(args, self.session, 0)?;
+        // SAFETY: the guard binds this live namespace target. Every argument
+        // buffer remains owned/borrowed here for the call. A NULL result is the
+        // actual ACPICA API's discard request, not a fabricated return object.
+        checked(unsafe {
+            stela_acpi_evaluate(
+                self.raw,
+                path.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
+                args.objects.as_mut_ptr(),
+                args.objects.len() as u32,
+                ptr::null_mut(),
+            )
+        })?;
+        guard.check()
+    }
     pub fn evaluate(
         self,
         path: Option<&str>,

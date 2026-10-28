@@ -12,6 +12,11 @@ fn reference_fixture() -> (Services, Arc<Counts>) {
         b'P', b'R', b'0', b'0', 0x14, 8, b'E', b'C', b'H', b'O', 1, 0xa4, 0x68,
     ]);
     dsdt.extend_from_slice(&[0x14, 9, b'T', b'Y', b'P', b'E', 1, 0xa4, 0x8e, 0x68]);
+    // Name(CNT0, Zero); Method(RUN0, 1) { Store(Arg0, CNT0); Return(PR00) }
+    dsdt.extend_from_slice(&[
+        0x08, b'C', b'N', b'T', b'0', 0, 0x14, 17, b'R', b'U', b'N', b'0', 1, 0x70, 0x68, b'C',
+        b'N', b'T', b'0', 0xa4, b'P', b'R', b'0', b'0',
+    ]);
     let length = dsdt.len() as u32;
     dsdt[4..8].copy_from_slice(&length.to_le_bytes());
     checksum(&mut dsdt, 9);
@@ -122,4 +127,48 @@ fn wire_reference_metadata_retains_unrecognized_codes() {
     let arguments = Arguments::new(&[Argument::Reference(reference)], &session, 0).unwrap();
     assert_eq!(arguments.objects[0].length, 0xfedc_ba98);
     assert_eq!(budget, 0);
+}
+
+#[test]
+fn null_output_executes_side_effects_without_converting_returned_power_resource() {
+    let _serial = TEST_SERIAL.lock().unwrap();
+    let (services, counts) = reference_fixture();
+    // SAFETY: this serialized provider retains the real tables, OSL callbacks
+    // and allocations through every guarded invocation and Session shutdown.
+    let session = unsafe { Session::start(services, Mode::InterpreterOnly) }.unwrap();
+    let root = session.root();
+    assert_eq!(root.invoke(Some("RUN0"), &[Argument::Integer(9)]), Ok(()));
+    assert_eq!(
+        root.evaluate(Some("CNT0"), &[]),
+        Ok(Some(Value::Integer(9)))
+    );
+    assert_eq!(
+        root.evaluate(Some("RUN0"), &[Argument::Integer(7)]),
+        Err(SUPPORT)
+    );
+    assert_eq!(
+        root.evaluate(Some("CNT0"), &[]),
+        Ok(Some(Value::Integer(7)))
+    );
+    // The method-handle form uses the same guarded discard boundary.
+    assert_eq!(
+        session
+            .handle("\\RUN0")
+            .unwrap()
+            .invoke(None, &[Argument::Integer(11)]),
+        Ok(())
+    );
+    assert_eq!(
+        root.evaluate(Some("CNT0"), &[]),
+        Ok(Some(Value::Integer(11)))
+    );
+    assert_eq!(root.invoke(Some("MISS"), &[]), Err(NOT_FOUND));
+    assert_eq!(
+        root.evaluate(Some("CNT0"), &[]),
+        Ok(Some(Value::Integer(11)))
+    );
+    drop(session);
+    assert!(counts.destroyed.load(Ordering::SeqCst));
+    assert_eq!(counts.allocations.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.mappings.load(Ordering::SeqCst), 0);
 }
