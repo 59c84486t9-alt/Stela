@@ -5989,7 +5989,7 @@ mod tests {
             assert!(compile_for_profile(&source(&words), GUEST_BASE, profile, target()).is_ok());
         }
 
-        // Append to extended/sme_memory_tests.rs; reuse its source/profile/target helpers.
+        // Append to scalable_context/sme_memory_tests.rs; reuse its source/profile/target helpers.
 
         #[test]
         fn prepared_memory_metadata_retains_per_pc_features_helpers_and_quantities() {

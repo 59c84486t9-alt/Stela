@@ -841,7 +841,7 @@ mod tests {
                 profile: CheckedMemoryProfile,
                 target: TargetCpu,
             ) -> Self {
-                let mut code = Code::from(crate::extended::context_wrapper());
+                let mut code = Code::from(crate::scalable_context::context_wrapper());
                 checked(operand, profile).emit_context(&mut code, GUEST_PC, target);
                 code.push(0xc3);
                 Self::new(&code)

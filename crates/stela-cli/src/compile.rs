@@ -6,7 +6,7 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use stela_compiler::{
     block::BlockProfile,
-    extended::{ScalableProfile, block::ExtendedBlockProfile},
+    scalable_context::{ScalableProfile, block::ExtendedBlockProfile},
 };
 use stela_runtime::write_json;
 
@@ -23,7 +23,7 @@ pub(crate) struct CompileBlock {
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
     /// Compile for a guest execution profile.
-    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
+    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::scalable_context::PROFILE_ID, stela_compiler::scalable_context::DECLARED_PROFILE_ID])]
     guest_profile: Option<String>,
     /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
     #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
@@ -99,7 +99,7 @@ pub(crate) struct CompileLeaf {
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
     /// Compile for a guest execution profile.
-    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
+    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::scalable_context::PROFILE_ID, stela_compiler::scalable_context::DECLARED_PROFILE_ID])]
     guest_profile: Option<String>,
     /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
     #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
@@ -230,7 +230,7 @@ impl CompileBlock {
             .as_ref()
             .and_then(|plan| plan.memory_requirements());
         let compiled = if let Some(context_profile) = context_profile {
-            stela_compiler::extended::block::compile_for_profile(
+            stela_compiler::scalable_context::block::compile_for_profile(
                 window,
                 stela_compiler::GuestAddress(guest_base),
                 context_profile,
@@ -266,7 +266,7 @@ impl CompileBlock {
             manifest["guest_instructions"] =
                 serde_json::json!(compiled.source_bytes / size_of::<u32>());
             manifest["entry_prefix_bytes"] =
-                serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+                serde_json::json!(stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES);
         }
         Ok(Compiled {
             native: compiled.native.x86_64_code,
@@ -323,7 +323,7 @@ impl CompileLeaf {
         } = self;
         let memory_requirements = profile
             .map(|profile| {
-                stela_compiler::extended::memory_requirements(
+                stela_compiler::scalable_context::memory_requirements(
                     source,
                     stela_compiler::GuestAddress(guest_base),
                     profile,
@@ -332,7 +332,7 @@ impl CompileLeaf {
             })
             .transpose()?;
         let block = if let Some(profile) = profile {
-            stela_compiler::extended::compile_for_profile(
+            stela_compiler::scalable_context::compile_for_profile(
                 source,
                 stela_compiler::GuestAddress(guest_base),
                 profile,
@@ -364,7 +364,7 @@ impl CompileLeaf {
             manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_LEAF_ABI);
             manifest["execution_profile"] = scalable_execution_manifest(profile, fpmr_enabled)?;
             manifest["entry_prefix_bytes"] =
-                serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+                serde_json::json!(stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES);
             let requirements = memory_requirements
                 .context("context leaf requires compiler-derived memory metadata")?;
             use stela_compiler::context::memory::SpAlignmentRequirement;
@@ -456,7 +456,9 @@ mod tests {
     mod scalable {
         use super::*;
 
-        fn resolve(extra: &[&str]) -> Result<Option<stela_compiler::extended::ScalableProfile>> {
+        fn resolve(
+            extra: &[&str],
+        ) -> Result<Option<stela_compiler::scalable_context::ScalableProfile>> {
             let mut args = vec!["stela", "compile-leaf", "input.bin", "--output-dir", "out"];
             args.extend_from_slice(extra);
             let Command::CompileLeaf(crate::compile::CompileLeaf {
@@ -556,7 +558,7 @@ mod tests {
 
         fn resolve(
             extra: &[&str],
-        ) -> Result<Option<stela_compiler::extended::block::ExtendedBlockProfile>> {
+        ) -> Result<Option<stela_compiler::scalable_context::block::ExtendedBlockProfile>> {
             let mut args = vec!["stela", "compile-block", "input.bin", "--output-dir", "out"];
             args.extend_from_slice(extra);
             let Command::CompileBlock(crate::compile::CompileBlock {
@@ -850,7 +852,7 @@ mod tests {
     mod fpmr {
         use super::*;
         use std::hash::{Hash, Hasher};
-        use stela_compiler::extended::ScalableProfile;
+        use stela_compiler::scalable_context::ScalableProfile;
 
         fn resolve(
             command: &str,
@@ -1017,7 +1019,7 @@ mod tests {
                     );
                     assert!(
                         compile_scalable_profile(
-                            Some(stela_compiler::extended::PROFILE_ID),
+                            Some(stela_compiler::scalable_context::PROFILE_ID),
                             Some(
                                 stela_compiler::aarch64::scalable::VectorLength::from_bytes(32)
                                     .unwrap()

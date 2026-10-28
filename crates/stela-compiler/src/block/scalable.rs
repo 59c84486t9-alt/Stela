@@ -10,7 +10,7 @@ use crate::{
         sme::{extrema_scale, fp_matrix, fp_vector, fp8_conversion, fp8_matrix},
         sve::floating,
     },
-    extended::ScalableProfile,
+    scalable_context::ScalableProfile,
 };
 use alloc::format;
 
@@ -252,7 +252,7 @@ mod tests {
             TargetCpu,
             aarch64::scalable::{ScalableMode, VectorLength, profile::ScalableControls},
             block::BlockProfile,
-            extended::block::{ExtendedBlockProfile, compile_for_profile},
+            scalable_context::block::{ExtendedBlockProfile, compile_for_profile},
         };
 
         const PC: GuestAddress = GuestAddress(0x1000);

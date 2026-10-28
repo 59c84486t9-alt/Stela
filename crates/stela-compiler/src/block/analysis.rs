@@ -386,7 +386,7 @@ pub(super) fn parse(
         }
         if profile.supports_system()
             && !profile.supports_full_system()
-            && !crate::extended::ordinary_permitted(&instruction.operation)
+            && !crate::scalable_context::ordinary_permitted(&instruction.operation)
         {
             return Err(BlockAnalysisError {
                 pc,

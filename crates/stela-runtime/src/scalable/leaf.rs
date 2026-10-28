@@ -18,7 +18,7 @@ use stela_compiler::{
             profile_requirements,
         },
     },
-    extended::{self, ScalableProfile},
+    scalable_context::{self, ScalableProfile},
 };
 
 use super::{ScalableState, context::ContextLoan};
@@ -103,7 +103,7 @@ impl PreparedScalableLeaf {
             "host lacks context-leaf CPU requirements"
         );
         let source: Box<[u8]> = source.into();
-        let prepared = extended::prepare_leaf(&source, base, profile, target)
+        let prepared = scalable_context::prepare_leaf(&source, base, profile, target)
             .context("prepare context leaf and source requirements")?;
         let native = prepared.native;
         let requirements = prepared.memory_requirements;
@@ -470,7 +470,7 @@ mod tests {
         );
         assert_eq!(leaf.identity().memory_requirements.required_host_caps, 0);
         assert_eq!(leaf.source_map()[0].0, GuestAddress(GUEST_BASE));
-        assert!(leaf.native_bytes() > extended::CONTEXT_WRAPPER_BYTES);
+        assert!(leaf.native_bytes() > scalable_context::CONTEXT_WRAPPER_BYTES);
     }
 
     #[test]

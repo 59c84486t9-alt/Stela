@@ -246,9 +246,9 @@ pub(crate) fn emit(
 pub(crate) fn emit_debug_table_gpr(
     code: &mut Code,
     operand: &Operand,
-    recipe: crate::extended::debug_movement::Recipe,
+    recipe: crate::scalable_context::debug_movement::Recipe,
 ) -> Result<(), &'static str> {
-    use crate::extended::debug_movement::Recipe;
+    use crate::scalable_context::debug_movement::Recipe;
     const ZERO_REGISTER: u8 = 31;
     const TABLE_LANES: u8 = 8;
     const MOV_RAX_STATE_DISP32: &[u8] = &[0x48, 0x8b, 0x87];

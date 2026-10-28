@@ -451,7 +451,7 @@ mod tests {
         let block_profile = profile(BlockProfile::Ordinary);
         for prefix in [UNPREDICATED_PREFIX, ZEROING_PREFIX, MERGING_PREFIX] {
             let bytes = source(&[prefix, AND_DESTRUCTIVE, RET]);
-            let leaf = crate::extended::compile_for_profile(
+            let leaf = crate::scalable_context::compile_for_profile(
                 &bytes,
                 BASE,
                 block_profile.scalable(),
@@ -470,7 +470,7 @@ mod tests {
                 compile_for_profile(&bytes, BASE, block_profile, TargetCpu::Baseline).unwrap_err();
             assert!(error.to_string().contains(&format!("{:#x}", BASE.0)));
         }
-        let error = crate::extended::compile_for_profile(
+        let error = crate::scalable_context::compile_for_profile(
             &source(&[UNPREDICATED_PREFIX, FADD_Z0_SINGLE, RET]),
             BASE,
             block_profile.scalable(),

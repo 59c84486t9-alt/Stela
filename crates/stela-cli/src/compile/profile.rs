@@ -65,10 +65,10 @@ pub(crate) fn compile_scalable_profile(
     max_length: Option<stela_compiler::aarch64::scalable::VectorLength>,
     zt0_enabled: Option<bool>,
     fpmr_enabled: Option<bool>,
-) -> Result<Option<stela_compiler::extended::ScalableProfile>> {
+) -> Result<Option<stela_compiler::scalable_context::ScalableProfile>> {
     use stela_compiler::{
         aarch64::scalable::{features::ScalableFeatures, profile::ScalableControls},
-        extended::{DECLARED_PROFILE_ID, PROFILE_ID, ScalableProfile},
+        scalable_context::{DECLARED_PROFILE_ID, PROFILE_ID, ScalableProfile},
     };
     let Some(id) = id else {
         ensure!(
@@ -115,15 +115,15 @@ pub(crate) fn compile_scalable_profile(
 }
 
 pub(crate) fn compile_context_block_profile(
-    scalable: Option<stela_compiler::extended::ScalableProfile>,
+    scalable: Option<stela_compiler::scalable_context::ScalableProfile>,
     services: stela_compiler::block::BlockProfile,
     full_a64: Option<bool>,
     ebf16: Option<bool>,
     rpres: Option<bool>,
-) -> Result<Option<stela_compiler::extended::block::ExtendedBlockProfile>> {
+) -> Result<Option<stela_compiler::scalable_context::block::ExtendedBlockProfile>> {
     use stela_compiler::{
         aarch64::floating::features::NumericalFeatures, block::BlockProfile,
-        extended::block::ExtendedBlockProfile,
+        scalable_context::block::ExtendedBlockProfile,
     };
     let Some(scalable) = scalable else {
         ensure!(
@@ -147,7 +147,7 @@ pub(crate) fn compile_context_block_profile(
 }
 
 pub(crate) fn scalable_execution_manifest(
-    profile: stela_compiler::extended::ScalableProfile,
+    profile: stela_compiler::scalable_context::ScalableProfile,
     fpmr_enabled: Option<bool>,
 ) -> Result<serde_json::Value> {
     let mut execution = serde_json::json!({

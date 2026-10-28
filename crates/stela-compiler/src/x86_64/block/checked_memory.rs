@@ -3,7 +3,7 @@ use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,
     aarch64::Instruction,
     block::{Terminator, memory::CheckedOperation},
-    extended,
+    scalable_context,
     x86_64::{Emitted, asm::Code},
 };
 use alloc::vec::Vec;
@@ -17,7 +17,7 @@ pub(crate) fn emit(
     mut profile: Option<&mut crate::block::profile::CompileProfile>,
 ) -> Result<NativeBlock, CompileError> {
     let mut block = Emitted {
-        x86_64_code: Code::from(extended::context_wrapper()),
+        x86_64_code: Code::from(scalable_context::context_wrapper()),
         source_map: Vec::new(),
     };
     let mut fixups = Vec::new();

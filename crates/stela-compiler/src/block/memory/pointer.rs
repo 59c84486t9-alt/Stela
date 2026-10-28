@@ -5,7 +5,7 @@ use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{Instruction, Operation},
     context::{memory::MemoryRequirements, pointer::PointerArithmeticRequirement},
-    extended::Decoded,
+    scalable_context::Decoded,
 };
 use alloc::vec::Vec;
 

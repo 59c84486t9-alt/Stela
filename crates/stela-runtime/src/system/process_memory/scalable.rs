@@ -254,7 +254,7 @@ mod tests {
                 profile::ScalableControls,
             },
             context::{ScalableStateView, memory::MemoryImplementationProfile},
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         pub(super) const PC: u64 = 0x1000;

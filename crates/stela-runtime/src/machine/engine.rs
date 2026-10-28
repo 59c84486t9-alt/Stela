@@ -512,7 +512,7 @@ pub trait Host {
     }
 
     /// The address to call installed context-leaf code at, with
-    /// `stela_compiler::extended`'s two-argument ABI (the SVE and SME
+    /// `stela_compiler::scalable_context`'s two-argument ABI (the SVE and SME
     /// instructions run so), or `None` on a host that cannot run it. The
     /// engine calls it outside any borrow of the host, whose RAM the leaf's
     /// memory service then reads and writes.
@@ -1965,7 +1965,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
-        BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), scalable::Leaf>,
+        BTreeMap<(u64, u32, stela_compiler::scalable_context::ScalableProfile), scalable::Leaf>,
     /// The Allocation Tags of guest memory (FEAT_MTE2).
     tags: crate::machine::tags::Store,
     /// The current [`Regime::tag_checks`].

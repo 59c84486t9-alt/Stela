@@ -1,4 +1,4 @@
-//! Execution context passed to native code using the extended ABI.
+//! Execution context passed to native code using the context ABI.
 
 pub mod memory;
 pub mod pointer;

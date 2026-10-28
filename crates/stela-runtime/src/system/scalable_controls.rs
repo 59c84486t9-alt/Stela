@@ -25,7 +25,7 @@ use stela_compiler::{
         features::{ScalableFeature, ScalableFeatures},
     },
     context::memory::MemoryImplementationProfile,
-    extended::ScalableProfile,
+    scalable_context::ScalableProfile,
 };
 
 const ZEN_SHIFT: u32 = 16;
@@ -854,9 +854,13 @@ mod tests {
         let mut registers = GuestState::default();
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let prepared = stela_compiler::scalable_context::prepare_leaf(
+            &source,
+            PC,
+            profile,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
         let mut called = false;
         let result = owner.with_checked_execution(
             &prepared.execution_requirements,
@@ -891,9 +895,13 @@ mod tests {
             .unwrap();
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let prepared = stela_compiler::scalable_context::prepare_leaf(
+            &source,
+            PC,
+            profile,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
         owner
             .with_checked_execution(
                 &prepared.execution_requirements,
@@ -927,9 +935,13 @@ mod tests {
             .unwrap();
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let prepared = stela_compiler::scalable_context::prepare_leaf(
+            &source,
+            PC,
+            profile,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
         let mut called = false;
         assert_eq!(
             owner.with_checked_execution(
@@ -989,9 +1001,13 @@ mod tests {
         let mut scalable = ScalableState::new(length(16), true);
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let prepared = stela_compiler::scalable_context::prepare_leaf(
+            &source,
+            PC,
+            profile,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
         assert_eq!(
             owner.with_checked_execution(
                 &prepared.execution_requirements,

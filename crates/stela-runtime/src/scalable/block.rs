@@ -12,7 +12,7 @@ use stela_compiler::{
     GuestAddress, TargetCpu,
     block::{BlockExit, BlockProfile, ExitKind, MAX_BLOCK_INSTRUCTIONS},
     context::{CONTEXT_BLOCK_ABI, ExecutionContext},
-    extended::{CONTEXT_WRAPPER_BYTES, block::ExtendedBlockProfile},
+    scalable_context::{CONTEXT_WRAPPER_BYTES, block::ExtendedBlockProfile},
 };
 
 pub use crate::floating::scalable::CompletionError;
@@ -72,8 +72,9 @@ impl PreparedScalableBlock {
             crate::platform::cpu::admitted(target),
             "host lacks context-block requirements"
         );
-        let compiled =
-            stela_compiler::extended::block::compile_for_profile(source, base, profile, target)?;
+        let compiled = stela_compiler::scalable_context::block::compile_for_profile(
+            source, base, profile, target,
+        )?;
         ensure!(
             compiled.source_bytes > 0
                 && compiled.source_bytes.is_multiple_of(INSTRUCTION_BYTES)
@@ -270,7 +271,7 @@ mod tests {
                 },
             },
             context::ScalableStateView,
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x8000);
@@ -567,7 +568,7 @@ mod tests {
                 ScalableNumericalOperation, admit_scalable_numerical_instruction,
                 decode_scalable_numerical_instruction,
             },
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x1000);
@@ -650,7 +651,10 @@ mod tests {
                     assert_eq!(compiled.source(), word.to_le_bytes());
                     assert_eq!(
                         compiled.source_map(),
-                        &[(BASE, stela_compiler::extended::CONTEXT_WRAPPER_BYTES)]
+                        &[(
+                            BASE,
+                            stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES
+                        )]
                     );
                 }
             }
@@ -675,7 +679,7 @@ mod tests {
                 },
             },
             context::ScalableStateView,
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x1000);
@@ -1474,7 +1478,7 @@ mod tests {
                     profile::ScalableControls,
                 },
             },
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x1000);

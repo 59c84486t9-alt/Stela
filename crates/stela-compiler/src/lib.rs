@@ -14,7 +14,7 @@ pub mod aarch64;
 pub mod amx;
 pub mod block;
 pub mod context;
-pub mod extended;
+pub mod scalable_context;
 mod state;
 mod target;
 pub mod wkdm;
