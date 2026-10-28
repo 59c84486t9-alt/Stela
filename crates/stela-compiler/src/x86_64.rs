@@ -87,6 +87,12 @@ pub mod isa;
 mod literal;
 pub(crate) mod memory_context;
 pub(crate) mod memory_store;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod native;
 mod non_temporal;
 mod ordered;
 mod pc_relative;

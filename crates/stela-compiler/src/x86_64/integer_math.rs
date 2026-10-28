@@ -34,6 +34,13 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
             }
             if target.data_independent_timing() {
                 leading_zeros_without_bsr(asm, size, sign_bits);
+            } else if target.supports(TargetCpu::Lzcnt) {
+                // LZCNT counts a zero input as the operand width.
+                asm.lzcnt(size, Rax, Rax);
+                if sign_bits {
+                    // Omit the sign bit itself.
+                    asm.alu_imm8(Alu::Sub, Size::Dword, Rax, 1);
+                }
             } else {
                 let bits = size.bits();
                 asm.bsr(size, Rax, Rax);
@@ -242,6 +249,111 @@ fn divide(asm: &mut Asm, signed: bool, width: Width) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    use crate::GuestState;
+
+    const VALUES: [u64; 12] = [
+        0,
+        1,
+        0x7fff,
+        0x8000_0000,
+        0xffff_ffff,
+        0x1_0000_0000,
+        0x0000_0001_ffff_ffff,
+        0x7fff_ffff_ffff_ffff,
+        0x8000_0000_0000_0000,
+        0xffff_ffff_0000_0000,
+        0x0123_4567_89ab_cdef,
+        u64::MAX,
+    ];
+
+    /// The result of `kind` on X1 = `value` after running its code on the
+    /// host.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    fn run(kind: Kind, target: TargetCpu, value: u64, right: u64) -> u64 {
+        let mut code = Vec::new();
+        emit(&mut code, &operand(kind), target);
+        let mut state = GuestState::default();
+        state.x[1] = value;
+        state.x[2] = right;
+        super::super::native::run(&code, &mut state);
+        state.x[0]
+    }
+
+    fn lzcnt(code: &[u8]) -> bool {
+        code.windows(3).any(|bytes| bytes == [0xf3, 0x0f, 0xbd])
+            || code
+                .windows(4)
+                .any(|bytes| bytes == [0xf3, 0x48, 0x0f, 0xbd])
+    }
+
+    #[test]
+    fn leading_counts_use_lzcnt_only_where_the_host_has_it() {
+        for width in [Width::W32, Width::X64] {
+            for kind in [
+                Kind::LeadingZeros { width },
+                Kind::LeadingSignBits { width },
+            ] {
+                let code = |target| {
+                    let mut code = Vec::new();
+                    emit(&mut code, &operand(kind), target);
+                    code
+                };
+                let (fast, fallback) = (code(TargetCpu::Lzcnt), code(TargetCpu::X86_64_V2));
+                assert!(lzcnt(&fast) && !lzcnt(&fallback), "{kind:?}");
+                assert!(fast.len() < fallback.len());
+                assert!(!lzcnt(&code(
+                    TargetCpu::Lzcnt.with_data_independent_timing()
+                )));
+            }
+        }
+    }
+
+    /// CLZ and CLS on the host through LZCNT, BSR and the DIT smear, against
+    /// Rust's counts.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn leading_counts_match_on_the_host() {
+        let host = TargetCpu::detect();
+        for target in [
+            TargetCpu::X86_64_V2,
+            TargetCpu::Lzcnt,
+            TargetCpu::DataIndependentTiming,
+        ] {
+            if !host.supports(target) {
+                continue;
+            }
+            for value in VALUES {
+                let narrow = value as u32;
+                let wide_fold = value ^ ((value as i64 >> 63) as u64);
+                let narrow_fold = narrow ^ ((narrow as i32 >> 31) as u32);
+                for (kind, expected) in [
+                    (
+                        Kind::LeadingZeros { width: Width::W32 },
+                        narrow.leading_zeros(),
+                    ),
+                    (
+                        Kind::LeadingZeros { width: Width::X64 },
+                        value.leading_zeros(),
+                    ),
+                    (
+                        Kind::LeadingSignBits { width: Width::W32 },
+                        narrow_fold.leading_zeros() - 1,
+                    ),
+                    (
+                        Kind::LeadingSignBits { width: Width::X64 },
+                        wide_fold.leading_zeros() - 1,
+                    ),
+                ] {
+                    assert_eq!(
+                        run(kind, target, value, 0),
+                        u64::from(expected),
+                        "{kind:?} {value:#x} {target:?}"
+                    );
+                }
+            }
+        }
+    }
 
     fn operand(kind: Kind) -> Operand {
         Operand {
