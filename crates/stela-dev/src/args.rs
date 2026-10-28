@@ -6,7 +6,9 @@ pub fn parse_cpu_target(value: &str) -> Result<stela_compiler::TargetCpu, String
     if value == "native" {
         Ok(stela_compiler::TargetCpu::detect())
     } else {
-        value.parse()
+        value
+            .parse::<stela_compiler::TargetCpu>()
+            .map_err(|error| error.to_string())
     }
 }
 
