@@ -908,7 +908,7 @@ impl<'a> Handle<'a> {
         let gpe = match elements.first() {
             Some(Value::Package(pair)) => match pair.as_slice() {
                 [Value::Reference(block), index] => Gpe {
-                    block: Some(*block),
+                    block: Some(block.handle),
                     number: number(index)?,
                 },
                 _ => return Err(BAD_PARAMETER),
