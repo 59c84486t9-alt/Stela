@@ -616,12 +616,14 @@ impl ScopedSource {
 }
 
 fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<ExistingAlias>, Error> {
+    let wire = platform.resources.wire;
+    let written = [Some(wire.leaf), write_table];
     let aliases = aliases(
-        platform.resources.wire,
+        wire,
         &platform.resources._roots,
         &platform.snapshot,
         platform.space,
-        write_table,
+        &written.iter().flatten().copied().collect::<Vec<_>>(),
     )?;
     platform.check_context(platform.space)?;
     Ok(aliases)
@@ -637,14 +639,14 @@ pub(super) fn owned_table(wire: &Wire, physical: u64) -> Result<*mut u64, Error>
 
 /// Every existing alias the retained roots and the guest's RAM hold, with
 /// its cache policy where the roots fix one, after checking each root leads
-/// to the aperture's leaf table. `write_table` is a further table page the
-/// caller writes, whose aliases must be write-back.
+/// to the aperture's leaf table. `written` are the table pages the caller
+/// writes, whose aliases must be write-back.
 pub(super) fn aliases(
     wire: &Wire,
     catalog: &MmioRoots,
     snapshot: &Snapshot,
     space: AddressSpace,
-    write_table: Option<u64>,
+    written: &[u64],
 ) -> Result<Vec<ExistingAlias>, Error> {
     let roots = catalog.roots();
     if !roots.contains(&(snapshot.cr3 & ADDRESS)) {
@@ -658,7 +660,7 @@ pub(super) fn aliases(
         snapshot: &'a Snapshot,
         space: AddressSpace,
         image: Image,
-        write_table: Option<u64>,
+        written: &'a [u64],
     }
     fn walk(
         p: &Walk<'_>,
@@ -699,12 +701,12 @@ pub(super) fn aliases(
                 }
                 let pat_index =
                     (entry >> 3 & 3) | ((entry >> if level == 0 { 7 } else { 12 }) & 1) << 2;
-                // This is the only table page the adapter writes. Every data
-                // alias of it must agree with its proven WB CPU access and WB
+                // The adapter writes these table pages. Every data alias of
+                // them must agree with their proven WB CPU access and WB
                 // page-walker fetch policy; UC/WC/WT/unknown aliases refuse.
-                if ((physical < p.wire.leaf + PAGE && p.wire.leaf < physical + bytes)
-                    || p.write_table
-                        .is_some_and(|table| physical < table + PAGE && table < physical + bytes))
+                if p.written
+                    .iter()
+                    .any(|&table| physical < table + PAGE && table < physical + bytes)
                     && (p.snapshot.pat >> (8 * pat_index)) & 0xff != 6
                 {
                     return Err(Error::CacheConflict);
@@ -733,7 +735,7 @@ pub(super) fn aliases(
         snapshot,
         space,
         image,
-        write_table,
+        written,
     };
     // Every real root is scanned; shared table pages are visited once. Future
     // guest aliases are restricted by HostOwner to its retained RAM inventory,

@@ -13,6 +13,8 @@ const MAGIC: u64 = 0x5354_4c4d_4d49_4f31;
 const MAX_ROOTS: usize = 64;
 const MAX_MEMORY: usize = 512;
 const TABLE_BYTES: usize = 65536;
+/// Leaf tables in the aperture: 4 KiB mappings for 32 MiB.
+pub(super) const LEAVES: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -28,7 +30,12 @@ pub(super) struct Memory {
 pub(crate) struct Wire {
     magic: u64,
     pub(super) root: u64,
+    /// The aperture's first leaf table, which the scoped diagnostics use.
     pub(super) leaf: u64,
+    /// The aperture's page directory: its first `LEAVES` entries hold the
+    /// leaf tables, the rest map 2 MiB pages.
+    pub(super) directory: u64,
+    pub(super) leaves: [u64; LEAVES],
     pub(super) virtual_base: u64,
     pub(super) cores: u32,
     pub(super) levels: u32,
@@ -210,14 +217,30 @@ impl Prepared {
         // SAFETY: this private pre-EBS capture owns these exact loader pages.
         let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
         let base = crate::layout::window() + APERTURE_OFFSET;
-        let leaf =
-            crate::tables::entry(frames, root, base, 0, true)?.ok_or("MMIO aperture missing")?;
-        // SAFETY: the builder returned the first slot of a new PT for aligned base.
-        if (0..ENTRIES).any(|i| unsafe { leaf.add(i).read_volatile() } != 0) {
+        for (index, slot) in wire.leaves.iter_mut().enumerate() {
+            let address = base + (index as u64) * (PAGE << 9);
+            let leaf = crate::tables::entry(frames, root, address, 0, true)?
+                .ok_or("MMIO aperture missing")?;
+            // SAFETY: the builder returned the first slot of a new PT for an
+            // aligned address.
+            if (0..ENTRIES).any(|i| unsafe { leaf.add(i).read_volatile() } != 0) {
+                return Err("MMIO aperture overlaps an existing mapping");
+            }
+            *slot = leaf as u64;
+        }
+        let first = crate::tables::entry(frames, root, base, 1, false)?
+            .ok_or("MMIO aperture directory missing")?;
+        let directory = first as u64 & ADDRESS;
+        if first as u64 != directory {
+            return Err("MMIO aperture is not directory aligned");
+        }
+        // SAFETY: the directory the builder walked for `base`.
+        if (LEAVES..ENTRIES).any(|i| unsafe { first.add(i).read_volatile() } != 0) {
             return Err("MMIO aperture overlaps an existing mapping");
         }
         wire.root = root;
-        wire.leaf = leaf as u64;
+        wire.leaf = wire.leaves[0];
+        wire.directory = directory;
         wire.virtual_base = base;
         wire.cores = u32::try_from(cores).map_err(|_| "MMIO core count overflow")?;
         wire.levels = crate::layout::top_level() + 1;

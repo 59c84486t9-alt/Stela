@@ -9,8 +9,11 @@
 //! aperture and that no interrupt handler is running. Installations are
 //! serialized by the platform's lock and need no remote flush; once the other
 //! processors start, retirement refuses ([`aperture::Processors`]).
-use super::platform::{aliases, owned_table};
 use super::*;
+use super::{
+    capture::LEAVES,
+    platform::{aliases, owned_table},
+};
 use crate::{engine::host::HostOwner, native_smp::memory_types::Image};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -53,10 +56,46 @@ struct Captured {
     wire: &'static Wire,
 }
 
+/// The aperture's two mapping sizes: 4 KiB pages in its leaf tables and
+/// 2 MiB pages in its directory's other entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Size {
+    Page,
+    Large,
+}
+
+impl Size {
+    fn bytes(self) -> u64 {
+        match self {
+            Size::Page => PAGE,
+            Size::Large => PAGE << 9,
+        }
+    }
+    /// The slots of this size, numbered from the aperture's base in units
+    /// of this size.
+    fn slots(self) -> core::ops::Range<usize> {
+        match self {
+            Size::Page => 0..LEAVES * ENTRIES,
+            Size::Large => LEAVES..ENTRIES,
+        }
+    }
+    /// The size a request maps with: 2 MiB pages when it is 2 MiB aligned at
+    /// both ends.
+    fn of(physical: PhysicalSpan) -> Self {
+        let large = Size::Large.bytes();
+        if physical.start().is_multiple_of(large) && physical.bytes().is_multiple_of(large) {
+            Size::Large
+        } else {
+            Size::Page
+        }
+    }
+}
+
 struct Allocation {
     request: MapRequest,
+    size: Size,
     first: usize,
-    pages: usize,
+    count: usize,
 }
 
 struct Platform {
@@ -73,7 +112,10 @@ struct Platform {
 unsafe impl Send for Platform {}
 unsafe impl Sync for Platform {}
 
+/// Present, NX, and PWT and PCD for PAT entry 3, uncached.
 const RIGHTS: u64 = PRESENT | NX | (1 << 3) | (1 << 4);
+/// The processor's accessed and dirty bits.
+const ACCESSED_DIRTY: u64 = 0x60;
 
 fn current_root() -> u64 {
     let root: u64;
@@ -86,11 +128,31 @@ impl Platform {
     fn wire(&self) -> &'static Wire {
         self.captured.wire
     }
-    fn leaf(&self, index: usize) -> Result<*mut u64, Error> {
-        if index >= ENTRIES {
+    /// The entry of slot `index` of `size`.
+    fn entry(&self, size: Size, index: usize) -> Result<*mut u64, Error> {
+        if !size.slots().contains(&index) {
             return Err(Error::InvalidRange);
         }
-        Ok(owned_table(self.wire(), self.wire().leaf)?.wrapping_add(index))
+        let wire = self.wire();
+        Ok(match size {
+            Size::Page => {
+                owned_table(wire, wire.leaves[index / ENTRIES])?.wrapping_add(index % ENTRIES)
+            }
+            Size::Large => owned_table(wire, wire.directory)?.wrapping_add(index),
+        })
+    }
+    fn address(&self, size: Size, index: usize) -> u64 {
+        self.wire().virtual_base + index as u64 * size.bytes()
+    }
+    fn value(size: Size, physical: u64, protection: Protection) -> u64 {
+        physical
+            | RIGHTS
+            | if protection == Protection::ReadWrite {
+                WRITABLE
+            } else {
+                0
+            }
+            | if size == Size::Large { HUGE } else { 0 }
     }
     fn lock(&self) -> Guard<'_> {
         while self
@@ -102,14 +164,14 @@ impl Platform {
         }
         Guard(self)
     }
-    fn invalidate(&self, first: usize, pages: usize) {
+    fn invalidate(&self, size: Size, first: usize, count: usize) {
         // SAFETY: TLB maintenance only; CR4 is restored to its value.
         unsafe {
             asm!("mfence", options(nostack, preserves_flags));
             match self.flush {
                 Flush::Pages => {
-                    for index in first..first + pages {
-                        let address = self.wire().virtual_base + index as u64 * PAGE;
+                    for index in first..first + count {
+                        let address = self.address(size, index);
                         asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
                     }
                 }
@@ -183,9 +245,11 @@ unsafe impl MappingPlatform for Platform {
         if !self.resource(resource) {
             return Err(unchanged(Error::OutsideResource));
         }
-        let pages = usize::try_from(request.physical.bytes() / PAGE)
+        let size = Size::of(request.physical);
+        let count = usize::try_from(request.physical.bytes() / size.bytes())
             .map_err(|_| unchanged(Error::InvalidRange))?;
-        if pages == 0 || pages > ENTRIES {
+        let slots = size.slots();
+        if count == 0 || count > slots.len() {
             return Err(unchanged(Error::Exhausted));
         }
         let mut guard = self.lock();
@@ -193,43 +257,39 @@ unsafe impl MappingPlatform for Platform {
         mappings
             .try_reserve(1)
             .map_err(|_| unchanged(Error::Exhausted))?;
-        let first = (0..=ENTRIES - pages)
+        let first = (slots.start..=slots.end - count)
             .find(|first| {
                 mappings
                     .iter()
-                    .all(|m| first + pages <= m.first || m.first + m.pages <= *first)
+                    .filter(|m| m.size == size)
+                    .all(|m| first + count <= m.first || m.first + m.count <= *first)
             })
             .ok_or(unchanged(Error::Exhausted))?;
-        for index in first..first + pages {
-            // SAFETY: the owned leaf table, a bounded slot.
-            if unsafe { self.leaf(index).map_err(unchanged)?.read_volatile() } != 0 {
+        for index in first..first + count {
+            // SAFETY: an owned aperture table, a bounded slot.
+            if unsafe { self.entry(size, index).map_err(unchanged)?.read_volatile() } != 0 {
                 return Err(unchanged(Error::MappingFailed));
             }
         }
-        let rights = RIGHTS
-            | if request.protection == Protection::ReadWrite {
-                WRITABLE
-            } else {
-                0
-            };
         mappings.push(Allocation {
             request,
+            size,
             first,
-            pages,
+            count,
         });
-        for offset in 0..pages {
+        for offset in 0..count {
+            let physical = request.physical.start() + offset as u64 * size.bytes();
             // SAFETY: every slot was checked empty above.
             unsafe {
-                self.leaf(first + offset)
+                self.entry(size, first + offset)
                     .expect("checked")
-                    .write_volatile((request.physical.start() + offset as u64 * PAGE) | rights)
+                    .write_volatile(Self::value(size, physical, request.protection))
             };
         }
-        self.invalidate(first, pages);
+        self.invalidate(size, first, count);
         Ok(InstalledMapping {
             token: request.id,
-            cpu_base: NonNull::new((self.wire().virtual_base + first as u64 * PAGE) as *mut u8)
-                .expect("nonzero aperture"),
+            cpu_base: NonNull::new(self.address(size, first) as *mut u8).expect("nonzero aperture"),
             physical: request.physical,
             attribute: request.attribute,
             protection: request.protection,
@@ -247,31 +307,26 @@ unsafe impl MappingPlatform for Platform {
             .position(|m| m.request == request)
             .ok_or(Error::UnmapFailed)?;
         let allocation = &mappings[at];
+        let (size, first, count) = (allocation.size, allocation.first, allocation.count);
         if mapping.token != request.id
             || mapping.physical != request.physical
-            || mapping.cpu_base.as_ptr() as u64
-                != self.wire().virtual_base + allocation.first as u64 * PAGE
+            || mapping.cpu_base.as_ptr() as u64 != self.address(size, first)
         {
             return Err(Error::UnmapFailed);
         }
-        let rights = RIGHTS
-            | if request.protection == Protection::ReadWrite {
-                WRITABLE
-            } else {
-                0
-            };
-        for offset in 0..allocation.pages {
-            let expected = (request.physical.start() + offset as u64 * PAGE) | rights;
-            // Accessed and dirty belong to the processor.
-            if unsafe { self.leaf(allocation.first + offset)?.read_volatile() } & !0x60 != expected
+        for offset in 0..count {
+            let physical = request.physical.start() + offset as u64 * size.bytes();
+            let expected = Self::value(size, physical, request.protection);
+            if unsafe { self.entry(size, first + offset)?.read_volatile() } & !ACCESSED_DIRTY
+                != expected
             {
                 return Err(Error::UnmapFailed);
             }
         }
-        for offset in 0..allocation.pages {
-            unsafe { self.leaf(allocation.first + offset)?.write_volatile(0) };
+        for offset in 0..count {
+            unsafe { self.entry(size, first + offset)?.write_volatile(0) };
         }
-        self.invalidate(allocation.first, allocation.pages);
+        self.invalidate(size, first, count);
         mappings.swap_remove(at);
         Ok(())
     }
@@ -351,19 +406,52 @@ impl Source {
             held: AtomicBool::new(false),
             mappings: UnsafeCell::new(Vec::new()),
         });
-        crate::native_memory::cache::verify_writeback(
-            crate::layout::physical(wire.leaf),
-            wire.leaf,
-            PAGE as usize,
-            crate::layout::physical(0),
-        )
-        .map_err(failed)?;
-        let aliases = aliases(wire, &catalog, &snapshot, space, None)?;
+        let mut written = Vec::new();
+        written.try_reserve_exact(LEAVES + 1).map_err(failed)?;
+        written.extend_from_slice(&wire.leaves);
+        written.push(wire.directory);
+        for &table in &written {
+            crate::native_memory::cache::verify_writeback(
+                crate::layout::physical(table),
+                table,
+                PAGE as usize,
+                crate::layout::physical(0),
+            )
+            .map_err(failed)?;
+        }
+        let aliases = aliases(wire, &catalog, &snapshot, space, &written)?;
         platform.check_context(space)?;
-        for index in 0..ENTRIES {
-            // SAFETY: the owned leaf table.
-            if unsafe { platform.leaf(index)?.read_volatile() } != 0 {
+        for root in catalog.roots() {
+            let mut table = *root;
+            for level in (2..wire.levels).rev() {
+                let slot = ((wire.virtual_base >> (12 + 9 * level)) & 511) as usize;
+                // SAFETY: an owned table page.
+                let entry = unsafe { owned_table(wire, table)?.add(slot).read_volatile() };
+                if entry & (PRESENT | HUGE) != PRESENT {
+                    return Err(Error::Unavailable);
+                }
+                table = entry & ADDRESS;
+            }
+            if table != wire.directory {
                 return Err(Error::Unavailable);
+            }
+        }
+        let directory = owned_table(wire, wire.directory)?;
+        for (index, &leaf) in wire.leaves.iter().enumerate() {
+            // SAFETY: the owned directory.
+            let entry = unsafe { directory.add(index).read_volatile() };
+            if entry & (PRESENT | WRITABLE | HUGE) != (PRESENT | WRITABLE)
+                || entry & ADDRESS != leaf
+            {
+                return Err(Error::Unavailable);
+            }
+        }
+        for size in [Size::Page, Size::Large] {
+            for index in size.slots() {
+                // SAFETY: the owned aperture tables.
+                if unsafe { platform.entry(size, index)?.read_volatile() } != 0 {
+                    return Err(Error::Unavailable);
+                }
             }
         }
         // SAFETY: the inventory holds every root's and the guest RAM's
