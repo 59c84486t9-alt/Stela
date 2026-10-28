@@ -46,6 +46,7 @@ pub mod block;
 pub mod bluetooth;
 pub mod bus;
 mod bytes;
+pub mod entropy;
 pub mod firmware;
 pub mod gpu;
 pub mod input;
