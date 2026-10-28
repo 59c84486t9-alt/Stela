@@ -1,14 +1,20 @@
 //! Value parsers of the development commands' arguments.
 use std::path::PathBuf;
+
+mod error;
+pub use error::ArgumentError;
 pub use stela_cli::args::parse_address;
 
-pub fn parse_cpu_target(value: &str) -> Result<stela_compiler::TargetCpu, String> {
+pub fn parse_cpu_target(value: &str) -> Result<stela_compiler::TargetCpu, ArgumentError> {
     if value == "native" {
         Ok(stela_compiler::TargetCpu::detect())
     } else {
         value
             .parse::<stela_compiler::TargetCpu>()
-            .map_err(|error| error.to_string())
+            .map_err(|detail| ArgumentError::CpuTarget {
+                value: value.to_owned(),
+                detail: detail.to_string(),
+            })
     }
 }
 
@@ -18,12 +24,24 @@ pub struct MemoryQuery {
     pub bytes: usize,
 }
 
-pub fn parse_memory_query(value: &str) -> Result<MemoryQuery, String> {
-    let (address, bytes) = value.split_once(':').ok_or("expected ADDRESS:BYTES")?;
-    let address = parse_address(address)?;
-    let bytes = usize::try_from(parse_address(bytes)?).map_err(|error| error.to_string())?;
-    if bytes as u64 > stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES {
-        return Err("memory snapshot exceeds image memory limit".into());
+pub fn parse_memory_query(value: &str) -> Result<MemoryQuery, ArgumentError> {
+    let (address, bytes) = value
+        .split_once(':')
+        .ok_or_else(|| ArgumentError::MemoryQuery {
+            value: value.to_owned(),
+        })?;
+    let address = address_value(address)?;
+    let size = address_value(bytes)?;
+    let bytes = usize::try_from(size).map_err(|source| ArgumentError::HostSize {
+        value: size,
+        source,
+    })?;
+    let maximum = stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES;
+    if size > maximum {
+        return Err(ArgumentError::MemoryLimit {
+            bytes: size,
+            maximum,
+        });
     }
     Ok(MemoryQuery { address, bytes })
 }
@@ -34,42 +52,63 @@ pub struct LibraryInput {
     pub base: u64,
 }
 
-pub fn parse_library(value: &str) -> Result<LibraryInput, String> {
+pub fn parse_library(value: &str) -> Result<LibraryInput, ArgumentError> {
     let (path, base) = value
         .rsplit_once('@')
-        .ok_or("expected LIBRARY_PATH@ADDRESS")?;
+        .ok_or_else(|| ArgumentError::Library {
+            value: value.to_owned(),
+        })?;
     if path.is_empty() {
-        return Err("library path is empty".into());
+        return Err(ArgumentError::EmptyLibraryPath);
     }
     Ok(LibraryInput {
         path: path.into(),
-        base: parse_address(base)?,
+        base: address_value(base)?,
     })
 }
 
 pub fn parse_arm_kernel_page_shift(
     value: &str,
-) -> Result<stela_runtime::commpage::KernelPageSize, String> {
+) -> Result<stela_runtime::commpage::KernelPageSize, ArgumentError> {
     use stela_runtime::commpage::KernelPageSize;
     match value {
         "12" => Ok(KernelPageSize::FourKiB),
         "14" => Ok(KernelPageSize::SixteenKiB),
-        _ => Err("ARM kernel page shift must be 12 or 14; arm64 user shift is 14".into()),
+        _ => Err(ArgumentError::KernelPageShift {
+            value: value.to_owned(),
+        }),
     }
 }
 
 pub fn parse_scalable_vector_length(
     value: &str,
-) -> Result<stela_compiler::aarch64::scalable::VectorLength, String> {
-    let bytes = value.parse::<usize>().map_err(|error| error.to_string())?;
+) -> Result<stela_compiler::aarch64::scalable::VectorLength, ArgumentError> {
+    let bytes = value
+        .parse::<usize>()
+        .map_err(|source| ArgumentError::Unsigned {
+            value: value.to_owned(),
+            source,
+        })?;
     stela_compiler::aarch64::scalable::VectorLength::from_bytes(bytes)
-        .ok_or_else(|| "SVL bytes must be one of 16, 32, 64, 128 or 256".into())
+        .ok_or(ArgumentError::VectorLength { bytes })
 }
 
 pub fn parse_scalable_mode(
     value: &str,
-) -> Result<stela_compiler::aarch64::scalable::ScalableMode, String> {
-    let bits = value.parse::<u64>().map_err(|error| error.to_string())?;
+) -> Result<stela_compiler::aarch64::scalable::ScalableMode, ArgumentError> {
+    let bits = value
+        .parse::<u64>()
+        .map_err(|source| ArgumentError::Unsigned {
+            value: value.to_owned(),
+            source,
+        })?;
     stela_compiler::aarch64::scalable::ScalableMode::from_svcr(bits)
-        .ok_or_else(|| "SVCR must be in 0..=3".into())
+        .ok_or(ArgumentError::ScalableMode { bits })
+}
+
+fn address_value(value: &str) -> Result<u64, ArgumentError> {
+    parse_address(value).map_err(|detail| ArgumentError::Address {
+        value: value.to_owned(),
+        detail: detail.to_string(),
+    })
 }
