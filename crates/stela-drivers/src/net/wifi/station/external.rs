@@ -2,14 +2,61 @@
 // SAE authentication transport follows Linux net/mac80211/{mlme,util}.c;
 // source notices and pin are retained in wifi/THIRD_PARTY.md.
 //! Bounded OS-supplicant SAE transport. Commit/confirm/token/group/H2E bytes
-//! and status codes remain opaque to this layer. Receiving a successful-looking
-//! frame never authenticates a peer, authorizes a key or permits association.
-//! Session identity binds the complete exchange, including delayed OS replies.
+//! remain opaque to this layer; as `ieee80211_rx_mgmt_auth` does, it follows
+//! only the exchange's order and status codes, so the AP's successful confirm
+//! of the station's confirm marks the exchange authenticated. That authorizes
+//! no key. Session identity binds the complete exchange, including delayed OS
+//! replies.
 
 use super::*;
 
 const SAE: u16 = 3;
 const MAX_EXCHANGE_US: u64 = 2_000_000;
+/// IEEE80211_AUTH_WAIT_ASSOC: an authenticated exchange waits this long for
+/// its association.
+const WAIT_ASSOCIATION_US: u64 = 5_000_000;
+/// IEEE80211_AUTH_WAIT_SAE_RETRY: a status asking for another commit waits
+/// this long for the OS's retry.
+const WAIT_RETRY_US: u64 = 2_000_000;
+/// WLAN_STATUS_ANTI_CLOG_REQUIRED, _SAE_HASH_TO_ELEMENT and _SAE_PK.
+const ANTI_CLOGGING: u16 = 76;
+const HASH_TO_ELEMENT: u16 = 126;
+const SAE_PK: u16 = 127;
+
+/// The SAE progress `ieee80211_mgd_auth_data` keeps.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Progress {
+    /// `expected_transaction`: the transaction of the station's last frame.
+    expected: u16,
+    peer_confirmed: bool,
+    /// `done`: authenticated, waiting for association.
+    done: bool,
+    denied: Option<u16>,
+    deadline: u64,
+}
+impl Progress {
+    fn new(deadline: u64) -> Self {
+        Self {
+            expected: 1,
+            deadline,
+            ..Self::default()
+        }
+    }
+    pub(super) const fn denied(&self) -> Option<u16> {
+        self.denied
+    }
+    pub(super) const fn deadline(&self) -> u64 {
+        self.deadline
+    }
+    /// `ieee80211_mark_sta_auth`.
+    fn authenticated(&mut self, now: u64) -> Result<(), Error> {
+        self.done = true;
+        self.deadline = now
+            .checked_add(WAIT_ASSOCIATION_US)
+            .ok_or(Error::Overflow)?;
+        Ok(())
+    }
+}
 const AUTHENTICATION: u16 = 0x00b0;
 const FIXED_BYTES: usize = 30;
 // IEEE80211_MAX_DATA_LEN (2304), less the six fixed authentication bytes.
@@ -139,6 +186,7 @@ impl Station {
         self.epoch = epoch;
         self.serial = 0;
         self.external = Some(session.clone());
+        self.sae = Progress::new(deadline);
         self.phase = Phase::ExternalAuthenticating;
         Ok(session)
     }
@@ -211,6 +259,7 @@ impl Station {
         }
         self.epoch = session.epoch;
         self.serial = 0;
+        self.sae = Progress::new(session.deadline);
         self.external = Some(session);
         self.phase = Phase::ExternalAuthenticating;
         Ok(())
@@ -232,6 +281,17 @@ impl Station {
         }
         Ok(())
     }
+    /// Whether the exchange authenticated the station, as
+    /// `ieee80211_mark_sta_auth` records it: the AP confirmed after the
+    /// station's confirm, or before it.
+    pub fn external_authenticated(&self) -> bool {
+        self.phase == Phase::ExternalAuthenticating && self.sae.done
+    }
+    /// When the exchange ends unless it progresses: its budget, the OS's
+    /// retry wait, or the wait for association once authenticated.
+    pub fn external_deadline(&self) -> Option<u64> {
+        (self.phase == Phase::ExternalAuthenticating).then_some(self.sae.deadline)
+    }
 
     /// Build only the ordinary authentication header and fixed SAE fields.
     /// The OS supplies complete transaction/status/data, including anti-clogging
@@ -248,7 +308,10 @@ impl Station {
     ) -> Result<Vec<u8>, Error> {
         self.validate_external_authentication(session)?;
         self.clock(now)?;
-        if now >= session.deadline {
+        if self.sae.done || self.sae.denied.is_some() {
+            return Err(Error::Stale);
+        }
+        if now >= self.sae.deadline {
             return Err(Error::Timeout);
         }
         if !matches!(transaction, 1 | 2) || data.len() > MAX_AUTHENTICATION_DATA {
@@ -265,21 +328,32 @@ impl Station {
         bytes[28..30].copy_from_slice(&status.to_le_bytes());
         bytes.extend_from_slice(data);
         self.sequence = next_sequence(self.sequence);
+        self.sae.expected = transaction;
+        // ieee80211_mgd_auth: confirming a peer that already confirmed
+        // completes the exchange.
+        if transaction == 2 && self.sae.peer_confirmed {
+            self.sae.authenticated(now)?;
+        }
         Ok(bytes)
     }
 
-    /// Transport observation, never successful authentication. The caller must
-    /// retain the actual RX/peer owner; copied security bits supply no authority.
+    /// `ieee80211_rx_mgmt_auth` for the OS's exchange: `None` for a frame
+    /// mac80211 ignores, after authentication or out of the exchange's order.
+    /// The caller must retain the actual RX/peer owner; copied security bits
+    /// supply no authority.
     pub fn receive_external_authentication(
         &mut self,
         session: &Arc<Session>,
         frame: Mpdu,
         now: u64,
-    ) -> Result<Received, Error> {
+    ) -> Result<Option<Received>, Error> {
         self.validate_external_authentication(session)?;
         self.clock(now)?;
-        if now >= session.deadline {
+        if now >= self.sae.deadline {
             return Err(Error::Timeout);
+        }
+        if self.sae.done || self.sae.denied.is_some() {
+            return Ok(None);
         }
         if (
             frame.radio.band,
@@ -308,16 +382,29 @@ impl Station {
             .bytes()
             .get(24..FIXED_BYTES)
             .ok_or(Error::Wire(wire::Error::Truncated))?;
-        if u16::from_le_bytes(fixed[..2].try_into().unwrap()) != SAE
-            || !matches!(u16::from_le_bytes(fixed[2..4].try_into().unwrap()), 1 | 2)
-        {
-            return Err(Error::Wire(wire::Error::Invalid(
-                "SAE authentication transaction/algorithm",
-            )));
+        let algorithm = u16::from_le_bytes(fixed[..2].try_into().unwrap());
+        let transaction = u16::from_le_bytes(fixed[2..4].try_into().unwrap());
+        let status = u16::from_le_bytes(fixed[4..6].try_into().unwrap());
+        if algorithm != SAE || transaction < self.sae.expected || transaction > 2 {
+            return Ok(None);
         }
-        Ok(Received {
+        if status != 0 {
+            if status == ANTI_CLOGGING
+                || (transaction == 1 && matches!(status, HASH_TO_ELEMENT | SAE_PK))
+            {
+                // Waiting for the OS's next commit.
+                self.sae.deadline = now.checked_add(WAIT_RETRY_US).ok_or(Error::Overflow)?;
+            } else {
+                self.sae.denied = Some(status);
+            }
+        } else if transaction == 2 && self.sae.expected == 2 {
+            self.sae.authenticated(now)?;
+        } else if transaction == 2 {
+            self.sae.peer_confirmed = true;
+        }
+        Ok(Some(Received {
             session: session.clone(),
             frame,
-        })
+        }))
     }
 }

@@ -707,12 +707,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             && s.authentication_deadline
                 .is_some_and(|deadline| s.controller.state().control.clock.now_us() >= deadline)
         {
-            now.max(
-                s.station
-                    .external_authentication()
-                    .ok_or(Error::WrongPhase)?
-                    .deadline(),
-            )
+            now.max(s.station.external_deadline().ok_or(Error::WrongPhase)?)
         } else {
             now
         };
@@ -959,9 +954,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 if s.authentication_deadline
                     .is_some_and(|deadline| s.controller.state().control.clock.now_us() >= deadline)
                 {
+                    let deadline = s.station.external_deadline().ok_or(Error::WrongPhase)?;
                     if let Some(action) = s
                         .station
-                        .poll(now.max(session.deadline()), policy)
+                        .poll(now.max(deadline), policy)
                         .map_err(Error::Station)?
                     {
                         Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
@@ -972,11 +968,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 if let Some(guard) = six.as_deref_mut() {
                     Self::qualify_six(s, guard, six_ghz::Use::Receive(&frame), now)?;
                 }
+                let before = s.station.external_deadline();
                 let received = s
                     .station
                     .receive_external_authentication(&session, frame, now)
                     .map_err(Error::Station)?;
-                events.push(Event::ExternalAuthentication(received));
+                Self::follow_external_deadline(s, before);
+                if let Some(received) = received {
+                    events.push(Event::ExternalAuthentication(received));
+                }
                 continue;
             }
             if modern_data && matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {

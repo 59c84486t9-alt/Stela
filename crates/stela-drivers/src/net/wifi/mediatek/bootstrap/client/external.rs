@@ -123,17 +123,22 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         let began = clock.now_us();
         // Validate all OS wire input and the frontend deadline before ROC work.
+        let before = s.station.external_deadline();
         let bytes = s
             .station
             .external_authentication_transmit(session, transaction, status, data, now, policy)
             .map_err(Error::Station)?;
+        Self::follow_external_deadline(s, before);
         Self::reserve_channel(s)?;
         let after = clock
             .now_us()
             .checked_sub(began)
             .and_then(|elapsed| now.checked_add(elapsed))
             .ok_or(Error::WrongProfile)?;
-        if after >= session.deadline() {
+        if s.station
+            .external_deadline()
+            .is_none_or(|deadline| after >= deadline)
+        {
             return Err(Error::Station(station::Error::Timeout));
         }
         // Recheck restrictive policy at the actual publication boundary.
@@ -141,6 +146,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::Station(station::Error::Regulatory));
         }
         Self::submit(s, &bytes, None, true, true, source)
+    }
+
+    /// Move the native deadline as far as the station's moved: an
+    /// authenticated exchange waits for association, and a retry status
+    /// waits for the OS's next commit.
+    pub(super) fn follow_external_deadline(s: &mut Owned<I, Q, C>, before: Option<u64>) {
+        if let (Some(before), Some(after), Some(native)) = (
+            before,
+            s.station.external_deadline(),
+            s.authentication_deadline.as_mut(),
+        ) && after > before
+        {
+            *native = native.saturating_add(after - before);
+        }
     }
 
     pub(super) fn authentication_ended(s: &mut Owned<I, Q, C>, failure: Option<station::Failure>) {

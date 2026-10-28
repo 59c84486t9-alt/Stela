@@ -166,6 +166,8 @@ pub struct Station {
     phase: Phase,
     join: Option<Join>,
     external: Option<Arc<external::Session>>,
+    /// The external SAE exchange's progress.
+    sae: external::Progress,
     selected_beacon: Option<super::scan::result::Bss>,
     context: Option<Arc<AssociationContext>>,
     /// Where a channel switch moved the association of this context ticket.
@@ -192,6 +194,7 @@ impl Station {
             phase: Phase::Idle,
             join: None,
             external: None,
+            sae: external::Progress::default(),
             selected_beacon: None,
             context: None,
             switched: None,
@@ -616,13 +619,15 @@ impl Station {
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Option<Action>, Error> {
         self.clock(now_us)?;
-        if self.phase == Phase::ExternalAuthenticating
-            && self
-                .external
-                .as_ref()
-                .is_some_and(|session| self.now >= session.deadline())
-        {
-            return self.remove(Some(Failure::Timeout)).map(Some);
+        if self.phase == Phase::ExternalAuthenticating && self.external.is_some() {
+            // ieee80211_rx_mgmt_auth destroys a denied exchange; one past its
+            // timeout, or authenticated but never associated, ends too.
+            if let Some(status) = self.sae.denied() {
+                return self.remove(Some(Failure::PeerRejected(status))).map(Some);
+            }
+            if self.now >= self.sae.deadline() {
+                return self.remove(Some(Failure::Timeout)).map(Some);
+            }
         }
         let Some(pending) = self.pending else {
             return Ok(None);

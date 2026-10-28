@@ -149,8 +149,57 @@ fn actual_sae_commit_token_retry_confirm_transport_never_grants_association() {
             .unwrap();
         assert_eq!(client.poll_released().unwrap().len(), 1);
     }
+    // ieee80211_mgd_auth: confirming a peer that already confirmed
+    // authenticates; the exchange then waits for association and ignores
+    // further authentication frames.
+    assert!(client.station().external_authenticated());
+    assert_eq!(client.station().external_deadline(), Some(7 + 5_000_000));
+    incoming(&model, &response(0xb0, &[3, 0, 2, 0, 0, 0]), None, false);
+    let events = client.poll(8, &Source, &mut Policy(true)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ExternalAuthentication(_)))
+    );
+    assert!(
+        client
+            .transmit_external_authentication(&session, 2, 0, &[1], 8, &Source, &mut Policy(true))
+            .is_err()
+    );
     drop(released);
     finish(client, model, 9);
+}
+
+#[test]
+fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
+    let (mut client, model) = setup();
+    let session = client
+        .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
+        .unwrap();
+    client
+        .transmit_external_authentication(&session, 1, 0, &[19, 0], 1, &Source, &mut Policy(true))
+        .unwrap();
+    finish_tx(&model);
+    client.poll(2, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(client.poll_released().unwrap().len(), 1);
+    // The OS sees the refusal, then the exchange ends with it.
+    incoming(&model, &response(0xb0, &[3, 0, 1, 0, 1, 0]), None, false);
+    let events = client.poll(3, &Source, &mut Policy(true)).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ExternalAuthentication(rx) if rx.status() == 1))
+    );
+    client.poll_station(4, &Source, &mut Policy(true)).unwrap();
+    let events = client.poll(5, &Source, &mut Policy(true)).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ExternalAuthenticationEnded {
+            failure: Some(station::Failure::PeerRejected(1)),
+            ..
+        }
+    )));
+    finish(client, model, 6);
 }
 
 #[test]
@@ -382,12 +431,18 @@ fn actual_rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fi
         .unwrap();
     let mut oversized = vec![0; 2305];
     oversized[..6].copy_from_slice(&[3, 0, 1, 0, 0, 0]);
-    for body in [
-        oversized,
-        vec![3, 0, 1, 0, 0],
-        vec![0, 0, 2, 0, 0, 0],
-        vec![3, 0, 3, 0, 0, 0],
-    ] {
+    // ieee80211_rx_mgmt_auth ignores another algorithm or a transaction
+    // beyond the exchange's.
+    for body in [[0, 0, 2, 0, 0, 0], [3, 0, 3, 0, 0, 0]] {
+        incoming(&model, &response(0xb0, &body), None, false);
+        assert!(
+            client
+                .poll(1, &Source, &mut Policy(true))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for body in [oversized, vec![3, 0, 1, 0, 0]] {
         let raw = incoming_bytes(&response(0xb0, &body), None, false);
         // Preserve the oversized authentication body, using the real native
         // multi-descriptor path instead of overfilling one 2-KiB DMA buffer.
