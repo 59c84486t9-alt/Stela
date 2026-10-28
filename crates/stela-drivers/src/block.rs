@@ -14,6 +14,9 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+mod profile;
+pub use profile::{CallbackCounts, CallbackStats};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockError {
     /// The transfer is not a whole number of blocks.
@@ -376,6 +379,9 @@ pub struct Stats {
     pub busy: u64,
     /// The most commands at the device at once.
     pub deepest: usize,
+    /// Optional callback observations, enabled explicitly on the shared disk.
+    /// Direct work can be nested in advance; these are not additive CPU times.
+    pub callbacks: Option<CallbackStats>,
 }
 
 impl Command {
@@ -959,6 +965,7 @@ pub struct Shared(Arc<Disk>);
 
 struct Disk {
     held: AtomicBool,
+    profile_callbacks: AtomicBool,
     device: UnsafeCell<Box<dyn BlockDevice>>,
     requests: UnsafeCell<Requests>,
 }
@@ -1101,12 +1108,21 @@ impl Held<'_> {
         submitted: u64,
         run: impl FnOnce(&mut Box<dyn BlockDevice>) -> T,
     ) -> T {
+        let observing = self.0.profile_callbacks.load(Ordering::Relaxed);
         let started = crate::Clock::ticks();
         let result = run(self);
         let now = crate::Clock::ticks();
         let stats = &mut self.requests().stats;
         stats.busy += now.wrapping_sub(started);
         stats.deepest = stats.deepest.max(1);
+        if observing {
+            self.requests()
+                .stats
+                .callbacks
+                .get_or_insert_default()
+                .direct
+                .record(now.wrapping_sub(started), profile::Work::default());
+        }
         self.account(accounted, 0, submitted, now);
         result
     }
@@ -1126,6 +1142,22 @@ impl Held<'_> {
     /// while it has room. A device that takes no queued commands runs each
     /// here, its caller waiting.
     fn advance(&mut self) {
+        let observing = self.0.profile_callbacks.load(Ordering::Relaxed);
+        let started = observing.then(crate::Clock::ticks);
+        let mut work = profile::Work::default();
+        self.advance_inner(&mut work);
+        if let Some(started) = started {
+            let elapsed = crate::Clock::ticks().wrapping_sub(started);
+            self.requests()
+                .stats
+                .callbacks
+                .get_or_insert_default()
+                .advance
+                .record(elapsed, work);
+        }
+    }
+
+    fn advance_inner(&mut self, work: &mut profile::Work) {
         let mut index = 0;
         while index < self.requests().running.len() {
             let tag = self.requests().running[index].tag;
@@ -1133,6 +1165,7 @@ impl Held<'_> {
                 index += 1;
                 continue;
             };
+            work.finishes = work.finishes.saturating_add(1);
             let merged = self.requests().running.swap_remove(index);
             let now = crate::Clock::ticks();
             let merges = merged.tickets.len() as u64 - 1;
@@ -1183,6 +1216,7 @@ impl Held<'_> {
                 self.requests().waiting.pop_front();
             }
             let accounted = command.accounted(block);
+            work.starts = work.starts.saturating_add(1);
             match self.start(command) {
                 Ok(tag) => {
                     let requests = self.requests();
@@ -1217,9 +1251,32 @@ impl Shared {
     pub fn new(device: Box<dyn BlockDevice>) -> Self {
         Self(Arc::new(Disk {
             held: AtomicBool::new(false),
+            profile_callbacks: AtomicBool::new(false),
             device: UnsafeCell::new(device),
             requests: UnsafeCell::new(Requests::default()),
         }))
+    }
+
+    /// Observe callback wall time from subsequent operations. Default off;
+    /// disabling keeps earlier observations and adds no timing reads.
+    pub fn set_callback_profile(&self, enabled: bool) {
+        self.0.profile_callbacks.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Retained callback observations with one try-lock and no counter read.
+    /// None means disabled, not yet observed, or currently held by an owner.
+    /// This snapshot grants no DMA, mapping or quiescence authority.
+    pub fn callback_stats(&self) -> Option<CallbackStats> {
+        if !self.0.profile_callbacks.load(Ordering::Relaxed)
+            || self
+                .0
+                .held
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            return None;
+        }
+        Held(&self.0).requests().stats.callbacks
     }
 
     /// The disk, once no other owner is using it.
@@ -2003,6 +2060,96 @@ mod tests {
             data: vec![byte; 512],
             fua: false,
         }
+    }
+
+    #[test]
+    fn callback_profile_is_default_off_and_empty_advance_adds_no_clock_read() {
+        let _clock = crate::test_clock::virtualize();
+        let disk = Shared::new(Box::new(RamDisk::new("profile", 8, 512)));
+        let mut held = disk.lock();
+        let before = crate::Clock::ticks();
+        let single_read = crate::Clock::ticks().wrapping_sub(before);
+        let before = crate::Clock::ticks();
+        held.advance();
+        assert_eq!(crate::Clock::ticks().wrapping_sub(before), single_read);
+        assert_eq!(held.stats().callbacks, None);
+
+        disk.set_callback_profile(true);
+        let before = crate::Clock::ticks();
+        held.advance();
+        assert_eq!(crate::Clock::ticks().wrapping_sub(before), 3 * single_read);
+        let recorded = held.stats().callbacks.unwrap();
+        assert_eq!(recorded.advance.calls, 1);
+        assert_eq!(recorded.advance.maximum_ticks, single_read);
+        assert_eq!((recorded.advance.starts, recorded.advance.finishes), (0, 0));
+        assert_eq!(
+            disk.callback_stats(),
+            None,
+            "a held owner is never waited on"
+        );
+
+        disk.set_callback_profile(false);
+        let before = crate::Clock::ticks();
+        held.advance();
+        assert_eq!(crate::Clock::ticks().wrapping_sub(before), single_read);
+        assert_eq!(held.stats().callbacks, Some(recorded));
+        drop(held);
+        assert_eq!(disk.callback_stats(), None, "disabled sampling stays off");
+        disk.set_callback_profile(true);
+        let before = crate::Clock::ticks();
+        assert_eq!(disk.callback_stats(), Some(recorded));
+        assert_eq!(crate::Clock::ticks().wrapping_sub(before), single_read);
+    }
+
+    #[test]
+    fn callback_profile_times_returned_direct_errors_without_changing_them() {
+        let _clock = crate::test_clock::virtualize();
+        let disk = Shared::new(Box::new(RamDisk::new("profile", 8, 512)));
+        disk.set_callback_profile(true);
+        let mut held = disk.lock();
+        let result: Result<(), BlockError> =
+            held.direct((Direction::Write, 512), crate::Clock::ticks(), |_| {
+                Err(BlockError::Device { status: 7 })
+            });
+        assert_eq!(result, Err(BlockError::Device { status: 7 }));
+        let recorded = held.stats().callbacks.unwrap();
+        assert_eq!((recorded.direct.calls, recorded.advance.calls), (1, 0));
+        assert!(recorded.direct.elapsed_ticks > 0);
+        assert_eq!(recorded.direct.maximum_ticks, recorded.direct.elapsed_ticks);
+    }
+
+    #[test]
+    fn callback_profile_counts_queued_work_per_actual_advance() {
+        let _clock = crate::test_clock::virtualize();
+        let (delayed, (released, _, _)) = Delayed::new(RamDisk::new("profile", 64, 512), 1);
+        let disk = Shared::new(Box::new(delayed));
+        let mut window = disk.window(0, 64).unwrap();
+        let first = window.start(write(1, 1)).unwrap();
+        let second = window.start(write(2, 2)).unwrap();
+        disk.set_callback_profile(true);
+        released.set(1);
+        assert_eq!(window.finish(first), Some(Ok(None)));
+        let recorded = disk.stats().callbacks.unwrap();
+        assert_eq!(
+            (
+                recorded.advance.calls,
+                recorded.advance.starts,
+                recorded.advance.finishes
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (
+                recorded.advance.maximum_starts,
+                recorded.advance.maximum_finishes
+            ),
+            (1, 1)
+        );
+        assert_eq!(recorded.direct.calls, 0);
+        disk.set_callback_profile(false);
+        released.set(1);
+        assert_eq!(window.finish(second), Some(Ok(None)));
+        assert_eq!(disk.stats().callbacks, Some(recorded));
     }
 
     #[test]

@@ -23,7 +23,10 @@ use core::{
 };
 use stela_drivers::{
     Handoff,
-    block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
+    block::{
+        BlockDevice, BlockError, CallbackStats, Command, Direction, Finished, Identity, Shared,
+        Window,
+    },
     bus::dma::RegionAllocator,
     input::InputDevice,
     probe::{NativeServices, probe_with_provider},
@@ -266,6 +269,12 @@ impl HostDisks {
         }
     }
 
+    pub fn profile_callbacks(&self, enabled: bool) {
+        for (_, disk) in &self.disks {
+            disk.set_callback_profile(enabled);
+        }
+    }
+
     /// Each disk's I/O since it was opened, as Linux's `/proc/diskstats`:
     /// per kind its commands, KiB, mean microseconds from submission to
     /// completion and requests merged; the device's busy milliseconds and
@@ -293,7 +302,42 @@ impl HostDisks {
                 micros(stats.busy) / 1000,
                 stats.deepest
             ));
+            if let Some(callbacks) = stats.callbacks {
+                Self::report_callback(serial, callbacks, tsc_hz, "periodic");
+            }
         }
+    }
+
+    /// One bounded snapshot before stop-time persistence; never waits for a
+    /// disk owner, changes roots or accesses an active driver's registers.
+    pub fn report_callbacks(&self, tsc_hz: u64) {
+        for (serial, disk) in &self.disks {
+            match disk.callback_stats() {
+                Some(callbacks) => Self::report_callback(serial, callbacks, tsc_hz, "guest-stop"),
+                None => output::arguments(format_args!(
+                    "HOST DISK CALLBACK serial={serial} phase=guest-stop unavailable=disabled-unpublished-or-held\n"
+                )),
+            }
+        }
+    }
+
+    fn report_callback(serial: &str, callbacks: CallbackStats, tsc_hz: u64, phase: &str) {
+        let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+        let advance = callbacks.advance;
+        let direct = callbacks.direct;
+        output::arguments(format_args!(
+            "HOST DISK CALLBACK serial={serial} phase={phase} nested-not-additive=true advance_calls={} advance_total_us={} advance_max_us={} starts={} finishes={} max_starts={} max_finishes={} direct_calls={} direct_total_us={} direct_max_us={}\n",
+            advance.calls,
+            micros(advance.elapsed_ticks),
+            micros(advance.maximum_ticks),
+            advance.starts,
+            advance.finishes,
+            advance.maximum_starts,
+            advance.maximum_finishes,
+            direct.calls,
+            micros(direct.elapsed_ticks),
+            micros(direct.maximum_ticks)
+        ));
     }
 
     /// Give every disk its shutdown notice; a failure is reported and the

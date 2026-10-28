@@ -2028,6 +2028,7 @@ fn start_devices(
                 output::arguments(format_args!("host storage refusal: {error}\n"));
                 output::fatal(&format!("host storage could not be opened: {error}"))
             });
+            disks.profile_callbacks(options.profile);
             let count = |count: usize, one: &str, many: &str| {
                 format!("{count} {}", if count == 1 { one } else { many })
             };
@@ -2207,6 +2208,9 @@ fn run_machine<H: Host>(
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     let mut service = service::take().expect("the run's service");
+    if options.profile {
+        service.power().disks().report_callbacks(handoff.tsc_hz);
+    }
     service.stop();
     finish(&mut machine, stop, seconds, &options.dumps, service.power())
 }
