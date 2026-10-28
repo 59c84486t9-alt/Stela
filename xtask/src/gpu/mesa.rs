@@ -29,12 +29,6 @@ mod record;
 mod render;
 mod threadgroup;
 
-/// The explicit macOS object test uses this same canonical Rust input owner.
-/// Keep its build command and evidence in the existing implementation.
-pub(super) fn build_metal_input(evidence: &Path) -> Result<PathBuf> {
-    library::build_input_offline(evidence)
-}
-
 fn run(command: &mut Command, evidence: &Path, stage: &str) -> Result<()> {
     let path = evidence.join(format!("{stage}.log"));
     let stderr_path = evidence.join(format!("{stage}.stderr.log"));

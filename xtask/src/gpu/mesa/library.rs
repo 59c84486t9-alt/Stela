@@ -1,4 +1,4 @@
-//! Hosted library ownership uses the canonical parser and shared AIR inspector.
+//! Canonical parser archive and AIR compiler boundary checks.
 use super::{build_directory, meson::Build, run, tools};
 use anyhow::{Result, ensure};
 use object::{Architecture, Object, ObjectSymbol};
@@ -9,16 +9,6 @@ use std::{
 };
 
 pub(super) fn build_input(evidence: &Path) -> Result<PathBuf> {
-    build_input_mode(evidence, false)
-}
-
-/// Only the explicitly opted-in host object test forbids dependency fetching.
-/// Existing compiler tasks preserve their original default build behavior.
-pub(super) fn build_input_offline(evidence: &Path) -> Result<PathBuf> {
-    build_input_mode(evidence, true)
-}
-
-fn build_input_mode(evidence: &Path, offline: bool) -> Result<PathBuf> {
     let target = build_directory("metal-input");
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -26,12 +16,9 @@ fn build_input_mode(evidence: &Path, offline: bool) -> Result<PathBuf> {
         .env("CARGO_TARGET_DIR", &target)
         .env("CARGO_INCREMENTAL", "0")
         .args(["build", "--release", "--locked", "-p", "stela-metal-input"]);
-    if offline {
-        command.arg("--offline");
-    }
     run(&mut command, evidence, "metal-input")?;
     let path = target.join("release/libstela_metal_input.a");
-    ensure!(path.is_file(), "missing hosted Metal input archive");
+    ensure!(path.is_file(), "missing Metal input archive");
     Ok(path)
 }
 
@@ -53,7 +40,7 @@ pub(super) fn check_boundaries(stela: &Build) -> Result<()> {
     let host = match env::consts::ARCH {
         "x86_64" => Architecture::X86_64,
         "aarch64" => Architecture::Aarch64,
-        _ => anyhow::bail!("unsupported hosted Metal assembler architecture"),
+        _ => anyhow::bail!("unsupported Metal assembler CPU architecture"),
     };
     ensure!(architecture == host, "wrong Metal assembler CPU ABI");
     ensure!(

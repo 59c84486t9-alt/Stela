@@ -5,7 +5,6 @@ use clap::{Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 pub mod fetch;
-mod macos;
 mod mesa;
 mod nvidia;
 mod support;
@@ -48,21 +47,6 @@ pub enum Command {
     },
     /// Write each submodule's commits since its pin to its patch series.
     Export,
-    /// Build the IOKit kernel helper and separate user-space Metal library
-    /// objects for arm64e, arm64 and x86-64. No driver is installed or loaded.
-    Macos,
-    /// Run the finite library/function object contract on this macOS host,
-    /// using a real host Metal device and caller-supplied admitted archive.
-    /// This creates no Stela device/pipeline and submits no GPU work.
-    MetalLibraryTest {
-        #[arg(long)]
-        metallib: PathBuf,
-        #[arg(long)]
-        entry: String,
-        /// Matching host LLVM 23 shared library; no compiler is downloaded.
-        #[arg(long)]
-        llvm_library: PathBuf,
-    },
     /// Build NVIDIA, AMD and Intel shader compiler libraries for this host
     /// without Vulkan/OpenGL frontends, with Stela's compiler targets, and run
     /// their Meson tests.
@@ -120,16 +104,6 @@ pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Fetch { force } => fetch::fetch(force),
         Command::Export => fetch::export(),
-        Command::Macos => macos::build(),
-        Command::MetalLibraryTest {
-            metallib,
-            entry,
-            llvm_library,
-        } => macos::test_library(macos::LibraryTestOptions {
-            metallib: &metallib,
-            entry: &entry,
-            llvm_library: &llvm_library,
-        }),
         Command::Compilers {
             jobs,
             require_all_targets,
@@ -152,5 +126,24 @@ pub fn run(command: Command) -> Result<()> {
             render_inputs: &render_inputs,
         }),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    #[test]
+    fn removed_platform_prototype_commands_are_unknown() {
+        for command in ["macos", "metal-library-test"] {
+            let error = crate::Cli::try_parse_from(["xtask", "gpu", command, "--help"])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{command}"
+            );
+        }
     }
 }
