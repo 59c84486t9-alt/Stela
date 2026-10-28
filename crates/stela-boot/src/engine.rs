@@ -44,6 +44,7 @@ use host::{Config, RamRange};
 use stela_boot_core::{
     console_lines,
     options::{self, Base, System},
+    ram,
 };
 use stela_compiler::TargetCpu;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle, installed};
@@ -739,6 +740,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             }
         }
     }
+    // The guest's RAM at the configured DRAM base. A bundle's own base is
+    // read from its disk by the host drivers, which run after the host is
+    // installed; the placements then move there (`HostOwner::place_ram`).
+    let mut ram = guest_ram(handoff, &mut options).unwrap_or_else(|error| output::fatal(error));
     // The translation store the loader read, and its partition when the
     // pack can be rewritten.
     let translation_store = handoff.files[..handoff.file_count]
@@ -772,6 +777,78 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
             output::fatal("the audio check failed")
         });
+    }
+    // Serialized, the BSP runs every PE and the workers no guest code.
+    let serialized = !(options.parallel
+        || options.native_rounds
+        || options.native_shared_check
+        || options.native_bootstrap_check);
+    let partition = crate::native_smp::resources::partition(
+        handoff.native_resources.cores as usize,
+        0,
+        handoff.code.bytes,
+        handoff.pool.bytes,
+        serialized,
+    )
+    .unwrap_or_else(|error| output::fatal(error));
+    let native_tsc_base = host::rdtsc();
+    let config = Config {
+        ram: ram.clone(),
+        pool_physical: handoff.pool.physical,
+        pool_bytes: partition.pool_bytes,
+        window_root: handoff.root,
+        code_virtual: layout::code(),
+        code_physical: handoff.code.physical,
+        code_bytes: partition.code_bytes,
+        tsc_base: native_tsc_base,
+        tsc_hz: handoff.tsc_hz,
+        apic_base: handoff.apic_base,
+        placement: handoff.placement,
+        bounce: Some((layout::bounce(), handoff.bounce)),
+    };
+    // SAFETY: once on the BSP, with interrupts off and owned native resources.
+    // Retain the processor-local state through every native call and handler.
+    crate::status::begin("Installing the host processor state");
+    let mut host_owner =
+        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    if options.native_bootstrap_check {
+        host::fp_diagnostic::check(&mut host_owner.host())
+            .unwrap_or_else(|error| output::fatal(error));
+    }
+    let apic_hz = host::statistics().apic_hz;
+    crate::status::done("");
+    if options.native_clock_check {
+        // SAFETY: original loader capture remains pinned in this actual
+        // HostOwner's physmap. Parsing never supplies hardware ownership.
+        let prepared = unsafe { crate::native_mmio::captured(handoff) }
+            .map_err(|_| stela_drivers::platform::work::WorkError::Unavailable)
+            .and_then(|wire| crate::native_clock::Prepared::from_fadt(wire.fadt()))
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+                output::fatal("native clock source capture failed")
+            });
+        // SAFETY: explicit bounded UP test mode on its original HostOwner,
+        // with no other diagnostic/device owner active. The trusted fixture
+        // excludes source reset/SMM/VMM gaps over one second; this grants no
+        // arbitrary original driver execution or general PM clock profile.
+        unsafe { crate::native_clock::diagnostic::check(&mut host_owner, prepared) }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+                output::fatal("native clock fixture failed")
+            });
+        stop_here("bounded native clock fixture complete", 0x10);
+    }
+    if options.native_mmio_check {
+        // SAFETY: explicit bounded native diagnostic on the original retained
+        // handoff/owner. Success stops before guest entry; permanent mapping
+        // and IRQ registries retain this exact physical root until VM shutdown.
+        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
+            |error| {
+                output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
+                output::fatal("native MMIO root qualification failed")
+            },
+        );
+        stop_here("native MMIO root qualification complete", 0x10);
     }
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
@@ -818,7 +895,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
             }
             crate::status::begin("Starting the PC's disks and USB devices");
-            // SAFETY: before host::install, with sole ownership of DMA/controllers.
+            // SAFETY: sole ownership of the DMA pages and controllers; the
+            // probe runs in the loader's root, which reaches them.
             let storage::Opened {
                 services,
                 medium,
@@ -833,6 +911,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             } = unsafe {
                 storage::open(
                     &storage_handoff,
+                    handoff.root,
                     &storage::Partitions {
                         targets: &targets,
                         medium: options.install_source,
@@ -924,10 +1003,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             }
         };
     }
-    let ram = match guest_ram(handoff, &mut options) {
-        Ok(ram) => ram,
-        Err(error) => output::fatal(error),
-    };
+    ram::place(&mut ram, options.dram_base);
+    host_owner
+        .place_ram(options.dram_base)
+        .unwrap_or_else(|error| output::fatal(error));
     for range in &ram {
         output::arguments(format_args!(
             "GUEST DRAM pa={:#x} bytes={:#x} host={:#x}\n",
@@ -1044,79 +1123,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         None => (None, None, None, None),
     };
-    // Serialized, the BSP runs every PE and the workers no guest code.
-    let serialized = !(options.parallel
-        || options.native_rounds
-        || options.native_shared_check
-        || options.native_bootstrap_check);
-    let partition = crate::native_smp::resources::partition(
-        handoff.native_resources.cores as usize,
-        0,
-        handoff.code.bytes,
-        handoff.pool.bytes,
-        serialized,
-    )
-    .unwrap_or_else(|error| output::fatal(error));
-    let native_tsc_base = host::rdtsc();
-    let worker_ram = ram.clone();
-    let config = Config {
-        ram,
-        pool_physical: handoff.pool.physical,
-        pool_bytes: partition.pool_bytes,
-        window_root: handoff.root,
-        code_virtual: layout::code(),
-        code_physical: handoff.code.physical,
-        code_bytes: partition.code_bytes,
-        tsc_base: native_tsc_base,
-        tsc_hz: handoff.tsc_hz,
-        apic_base: handoff.apic_base,
-        placement: handoff.placement,
-        bounce: Some((layout::bounce(), handoff.bounce)),
-    };
-    // SAFETY: once on the BSP, with interrupts off and owned native resources.
-    // Retain the processor-local state through every native call and handler.
-    crate::status::begin("Installing the host processor state");
-    let mut host_owner =
-        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
-    if options.native_bootstrap_check {
-        host::fp_diagnostic::check(&mut host_owner.host())
-            .unwrap_or_else(|error| output::fatal(error));
-    }
-    let apic_hz = host::statistics().apic_hz;
-    crate::status::done("");
-    if options.native_clock_check {
-        // SAFETY: original loader capture remains pinned in this actual
-        // HostOwner's physmap. Parsing never supplies hardware ownership.
-        let prepared = unsafe { crate::native_mmio::captured(handoff) }
-            .map_err(|_| stela_drivers::platform::work::WorkError::Unavailable)
-            .and_then(|wire| crate::native_clock::Prepared::from_fadt(wire.fadt()))
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
-                output::fatal("native clock source capture failed")
-            });
-        // SAFETY: explicit bounded UP test mode on its original HostOwner,
-        // with no other diagnostic/device owner active. The trusted fixture
-        // excludes source reset/SMM/VMM gaps over one second; this grants no
-        // arbitrary original driver execution or general PM clock profile.
-        unsafe { crate::native_clock::diagnostic::check(&mut host_owner, prepared) }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
-                output::fatal("native clock fixture failed")
-            });
-        stop_here("bounded native clock fixture complete", 0x10);
-    }
-    if options.native_mmio_check {
-        // SAFETY: explicit bounded native diagnostic on the original retained
-        // handoff/owner. Success stops before guest entry; permanent mapping
-        // and IRQ registries retain this exact physical root until VM shutdown.
-        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
-            |error| {
-                output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
-                output::fatal("native MMIO root qualification failed")
-            },
-        );
-        stop_here("native MMIO root qualification complete", 0x10);
-    }
+    let worker_ram = ram;
     crate::status::begin("Starting the other host processors");
     // SAFETY: the retained physical inventory and loader-owned reservations
     // were validated before any SIPI; the BSP Host is installed, guest entry

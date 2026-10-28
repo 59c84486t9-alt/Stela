@@ -330,17 +330,19 @@ pub struct Partitions<'a> {
     pub fdr: Option<Guid>,
 }
 
-/// Open the explicitly selected partitions while the loader's identity root
-/// is still active, before host::install, and bring up every host input
-/// device and network adapter. No guessed disk/partition, no writes at open. Ownership lasts
+/// Open the explicitly selected partitions in the loader's identity root
+/// `root` ([`RestoreRoot`]), and bring up every host input device and
+/// network adapter. No guessed disk/partition, no writes at open. Ownership lasts
 /// with the returned services. Probe once for all consumers;
 /// do not reset a controller or reuse its DMA pages for a second probe.
 ///
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
-/// reserved DMA pages, and the loader root/window remain live for the boot.
+/// reserved DMA pages, `root` is the loader's root, and it and the window
+/// remain live for the boot.
 pub unsafe fn open(
     handoff: &Handoff,
+    root: u64,
     partitions: &Partitions<'_>,
     usb_disks: &[String],
     external: Option<usize>,
@@ -361,11 +363,8 @@ pub unsafe fn open(
             "host disk {serial} is both a USB storage disk and a partition target"
         ));
     }
-    let root: u64;
-    // SAFETY: engine CPL0, before switching away from the loader root.
-    unsafe {
-        asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
-    }
+    // SAFETY: forwarded caller contract; nothing below enters it again.
+    let _root = unsafe { RestoreRoot::enter(root) };
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.

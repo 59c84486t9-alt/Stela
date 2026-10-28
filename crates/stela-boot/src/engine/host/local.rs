@@ -95,6 +95,22 @@ impl Owner {
         Ok(self.clock_leases.clone())
     }
 
+    /// Lay the guest RAM out from `base` (`ram::place`), keeping its host
+    /// backing, before a guest regime, frame or registered RAM exists: the
+    /// host drivers that read a bundle's DRAM base run after `install`.
+    /// Root contexts and MMIO views see only the host spans, which stay.
+    pub(crate) fn place_ram(&mut self, base: u64) -> Result<(), &'static str> {
+        if current() != self.local.as_ptr() {
+            return Err("native Host owner migrated");
+        }
+        let state = state();
+        if state.native || state.regime.is_some() || state.registered_ram.is_some() {
+            return Err("guest RAM is placed before the guest's memory is registered");
+        }
+        super::ram::place(&mut state.ram, base);
+        Ok(())
+    }
+
     /// Adopt the existing canonical owner before a guest regime or frame is
     /// live. This replaces metadata; it allocates/copies no guest RAM.
     ///
