@@ -420,6 +420,16 @@ impl Station {
         if join.bssid != session.peer() || join.channel != session.channel() {
             return Err(Error::InvalidAddress);
         }
+        // A 6 GHz exchange associates with the beacon and RSN it authenticated.
+        if let Some(six) = session.six_ghz_observation()
+            && (!Arc::ptr_eq(six, &observed)
+                || session
+                    .six_ghz_selection()
+                    .zip(join.request.pmf())
+                    .is_none_or(|(selected, pmf)| selected.rsn() != pmf.rsn()))
+        {
+            return Err(Error::Unsupported("6GHz association outside its exchange"));
+        }
         let selection = join
             .request
             .modern()

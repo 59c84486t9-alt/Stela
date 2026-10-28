@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Explicit finite6GHz native SAE transport. A successful-looking RX or an
-//! MCU ACK cannot associate, install keys, authorize a port or enable data.
+//! Explicit finite6GHz native SAE transport, and the association request that
+//! follows its exchange. A successful-looking RX or an MCU ACK cannot
+//! configure the association, install keys, authorize a port or enable data;
+//! the response waits for association admission as any modern one does.
 use super::*;
 use station::{external::Session, wire::six_ghz::Selection};
 pub(super) use wifi::regulatory::SixGhzAuthenticationUse as Use;
@@ -214,7 +216,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
     fn current_six(s: &Owned<I, Q, C>, session: &Session) -> Result<(), Error> {
         s.station
-            .validate_external_authentication(session)
+            .validate_external_exchange(session)
             .map_err(Error::Station)?;
         let six = s.six_ghz.as_ref().ok_or(Error::WrongPhase)?;
         let observed = session.six_ghz_observation().ok_or(Error::WrongProfile)?;
@@ -324,8 +326,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             authority.with_six_ghz_authentication(self, |client, guard| {
                 let after = Self::qualify_six(client.state_mut(), guard, Use::Service, now)?;
                 let events = client.poll_inner(after, source, policy, None, Some(guard))?;
-                if client.phase() == Phase::Joining {
-                    Self::retransmit_six(client.state_mut(), guard, now, source)?;
+                let s = client.state_mut();
+                if s.phase == Phase::Joining && s.station.phase() == station::Phase::Associating {
+                    // ieee80211_sta_work: an unanswered request goes again,
+                    // and the association ends after its last try.
+                    let after = Self::six_time(s, now)?;
+                    if let Some(action) = s
+                        .station
+                        .poll(after, &mut WirePolicy)
+                        .map_err(Error::Station)?
+                    {
+                        Self::six_action(s, guard, action, now, source)?;
+                    }
+                } else if s.phase == Phase::Joining {
+                    Self::retransmit_six(s, guard, now, source)?;
                 }
                 Ok(events)
             })
@@ -357,14 +371,109 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         else {
             return Ok(());
         };
-        Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
-        Self::reserve_six_channel(s, guard, now)?;
-        Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
-        let prepared = Self::prepare_submission(s, &bytes, None, true, true)?;
-        Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
-        let receipt = Self::publish_submission(&mut s.controller, source, &bytes, prepared)?;
-        s.mlme_receipt = Some(receipt);
+        s.mlme_receipt = Some(Self::send_six(s, guard, &bytes, now, source)?);
         Ok(())
+    }
+    /// One management frame through the held transport: a freshly reserved
+    /// channel, requalified before each step toward publication.
+    fn send_six(
+        s: &mut Owned<I, Q, C>,
+        guard: &mut SixGhzAuthenticationGuard<'_>,
+        bytes: &[u8],
+        now: u64,
+        source: &dyn PageSource,
+    ) -> Result<Receipt, Error> {
+        Self::qualify_six(s, guard, Use::Transmit(bytes), now)?;
+        Self::reserve_six_channel(s, guard, now)?;
+        Self::qualify_six(s, guard, Use::Transmit(bytes), now)?;
+        let prepared = Self::prepare_submission(s, bytes, None, true, true)?;
+        Self::qualify_six(s, guard, Use::Transmit(bytes), now)?;
+        Self::publish_submission(&mut s.controller, source, bytes, prepared)
+    }
+    /// A station action while the association request is outstanding.
+    fn six_action(
+        s: &mut Owned<I, Q, C>,
+        guard: &mut SixGhzAuthenticationGuard<'_>,
+        action: Action,
+        now: u64,
+        source: &dyn PageSource,
+    ) -> Result<(), Error> {
+        match action {
+            Action::Transmit {
+                ticket,
+                channel,
+                bytes,
+            } => {
+                if channel != s.profile.ok_or(Error::WrongProfile)?.channel {
+                    return Err(Error::WrongProfile);
+                }
+                s.mlme_receipt = Some(Self::send_six(s, guard, &bytes, now, source)?);
+                s.station.submitted(ticket).map_err(Error::Station)
+            }
+            Action::Remove { ticket, failure } => {
+                Self::authentication_ended(s, failure);
+                Self::remove(s, ticket)
+            }
+            Action::Configure { .. } => Err(Error::WrongPhase),
+        }
+    }
+    /// `ieee80211_mgd_assoc` once the OS's 6 GHz SAE exchange authenticated
+    /// the station: the OS's association request goes through the held
+    /// transport, under the exchange's providers, claiming the keys a join
+    /// claims. The answered association waits for `configure_modern`.
+    ///
+    /// # Safety
+    /// The same real owner/revocation contract as begin applies.
+    pub unsafe fn associate_six_ghz_external<H: HardwarePolicy, O: OsPolicy>(
+        &mut self,
+        authority: &mut Owner<H, O>,
+        session: &Session,
+        join: Join,
+        now: u64,
+        source: &dyn PageSource,
+    ) -> Result<(), Error> {
+        Self::current_six(self.state(), session)?;
+        let s = self.state();
+        if s.phase != Phase::Joining || !s.station.external_authenticated() {
+            return Err(Error::WrongPhase);
+        }
+        let profile = s.profile.ok_or(Error::WrongProfile)?;
+        if profile.peer != join.bssid || profile.channel != join.channel {
+            return Err(Error::WrongProfile);
+        }
+        self.validate_modern_join(&join, profile)?;
+        let observed = session
+            .six_ghz_observation()
+            .ok_or(Error::WrongProfile)?
+            .clone();
+        join.request
+            .pmf()
+            .ok_or(Error::WrongProfile)?
+            .validate_peer(&observed.bss().elements, &[])
+            .map_err(|e| Error::Station(station::Error::Wire(e)))?;
+        let ciphers = join.request.key_ciphers();
+        let management_cipher = join.request.pmf().map(|pmf| pmf.management());
+        // SAFETY: both original real providers stay held through each effect.
+        let result = unsafe {
+            authority.with_six_ghz_authentication(self, |client, guard| {
+                let s = client.state_mut();
+                let after = Self::qualify_six(s, guard, Use::Service, now)?;
+                let action = s
+                    .station
+                    .associate_external_pmf(session, join, observed, after, &mut WirePolicy)
+                    .map_err(Error::Station)?;
+                s.ciphers = ciphers;
+                s.management_cipher = management_cipher;
+                Self::claim_keys(s, profile)?;
+                Self::six_action(s, guard, action, now, source)
+            })
+        }
+        .map_err(Error::Regulatory)
+        .and_then(|r| r);
+        if result.is_err() {
+            self.revoke_six();
+        }
+        result
     }
     /// Stop original work even if new providers are missing or revoked. No
     /// cleanup command emits authentication/deauthentication management frames.
@@ -387,7 +496,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             && self
                 .state()
                 .station
-                .validate_external_authentication(&session)
+                .validate_external_exchange(&session)
                 .is_ok()
         {
             // Preserve the primary refusal. Failed cleanup retains the whole

@@ -101,6 +101,8 @@ impl Profile {
             None
         }
     }
+    /// A legacy join's profile: 6 GHz associates only through the modern
+    /// path. The per-BSS TLV builders take every band, as mt7925 builds them.
     pub fn validate(self) -> Result<(), Error> {
         self.validate_inner(false)
     }
@@ -229,10 +231,7 @@ impl Profile {
     /// Broadcast slot uses the source no-link_sta path: only its own header
     /// translation TLV, distinct from a full peer and from WMWA raw updates.
     pub fn broadcast_request(self) -> Result<Vec<u8>, Error> {
-        self.broadcast_request_validated(false)
-    }
-    fn broadcast_request_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
-        self.validate_inner(allow_six)?;
+        self.validate_inner(true)?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.interface.broadcast_wcid as u8;
@@ -245,7 +244,7 @@ impl Profile {
         Ok(out)
     }
     pub fn beacon_filter(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let t = tlv(&mut b, 22, 12);
         put16(t, 4, self.beacon_interval);
@@ -255,7 +254,7 @@ impl Profile {
     /// Linux `mt7925_mcu_uni_bss_ps`: the BSS in dynamic power save, or
     /// awake.
     pub fn power_save_request(self, enable: bool) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let t = tlv(&mut b, 21, 8);
         t[4] = if enable { 2 } else { 0 };
@@ -264,7 +263,7 @@ impl Profile {
     /// Linux `mt7925_mcu_set_rssimonitor`: firmware RSSI events above
     /// `high` or below `low` dBm while `enable`.
     pub fn rssi_monitor_request(self, enable: bool, high: i8, low: i8) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let t = tlv(&mut b, 0, 8);
         t[4] = u8::from(enable);
@@ -278,7 +277,7 @@ impl Profile {
         definition: &crate::net::wifi::station::operations::ChannelDefinition,
     ) -> Result<Vec<u8>, Error> {
         use crate::net::wifi::station::phy::Width;
-        self.validate()?;
+        self.validate_inner(true)?;
         // ieee80211_frequency_to_channel
         let channel = |mhz: u32| -> u8 {
             (match self.channel.band {
@@ -326,7 +325,7 @@ impl Profile {
     }
     /// Linux `mt7925_mcu_set_timing`: the IFS TLV with only the slot time.
     pub fn timing(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let ifs = tlv(&mut b, 23, 20);
         ifs[4] = 1;
@@ -335,29 +334,19 @@ impl Profile {
     }
     /// Source explicit always-awake native profile, without runtime/deep sleep.
     pub fn awake(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         tlv(&mut b, 21, 8);
         Ok(b)
     }
     pub fn disable_beacon_pm(self) -> Result<Vec<u8>, Error> {
-        self.disable_beacon_pm_validated(false)
-    }
-    fn disable_beacon_pm_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
-        self.validate_inner(allow_six)?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         tlv(&mut b, 27, 4);
         Ok(b)
     }
     pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
-        self.filter_request_validated(enable, false)
-    }
-    fn filter_request_validated(
-        self,
-        enable: bool,
-        allow_six: bool,
-    ) -> Result<super::init::Request, Error> {
-        self.validate_inner(allow_six)?;
+        self.validate_inner(true)?;
         let mut b = vec![0; 72];
         // Actual primary PHY band_idx is 0 for this single-PHY profile,
         // distinct from the non-MLO interface's band selector ff.

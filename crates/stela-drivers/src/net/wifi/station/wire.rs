@@ -205,10 +205,8 @@ impl AssociationRequest {
         }
         let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes)
             .map_err(|_| Error::Invalid("local modern capabilities"))?;
-        if !local.matches_wire_capabilities(&observed)
-            || !matches!(local.band(), Band::Ghz2 | Band::Ghz5)
-        {
-            return Err(Error::Invalid("PMF local source/band"));
+        if !local.matches_wire_capabilities(&observed) {
+            return Err(Error::Invalid("PMF local source"));
         }
         let mut request = Self::parse_inner(capabilities, listen_interval, bytes, true, true)?;
         if request.pmf.is_none() || capabilities & 0x10 == 0 || request.legacy_wpa {

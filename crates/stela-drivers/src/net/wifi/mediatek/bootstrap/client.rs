@@ -1110,6 +1110,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 continue;
             }
             if frame.header().control & 12 == 0 {
+                // The 6 GHz association response arrives under the held
+                // transport's providers, as the exchange's frames did.
+                if s.phase == Phase::Joining
+                    && let Some(guard) = six.as_deref_mut()
+                {
+                    Self::qualify_six(s, guard, six_ghz::Use::Receive(&frame), now)?;
+                }
                 let action = s
                     .station
                     .receive(epoch, &frame, now, policy)
