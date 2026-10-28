@@ -20,6 +20,20 @@ pub type Notify = unsafe extern "C" fn(*mut c_void, u32, *mut c_void);
 pub type Region = unsafe extern "C" fn(u32, u64, u32, *mut u64, *mut c_void, *mut c_void) -> Status;
 pub type RegionSetup =
     unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> Status;
+type GpeHandler = unsafe extern "C" fn(*mut c_void, u32, *mut c_void) -> u32;
+
+/// ACPICA's fixed events (`ACPI_EVENT_*`).
+pub const EVENT_POWER_BUTTON: u32 = 2;
+pub const EVENT_SLEEP_BUTTON: u32 = 3;
+/// `ACPI_INTERRUPT_HANDLED`.
+const INTERRUPT_HANDLED: u32 = 1;
+/// `ACPI_GPE_LEVEL_TRIGGERED` and `ACPI_GPE_EDGE_TRIGGERED`.
+const GPE_LEVEL: u32 = 0x08;
+const GPE_EDGE: u32 = 0x00;
+/// `ACPI_DEVICE_NOTIFY` and `ACPI_ALL_NOTIFY`: notification values from
+/// 0x80, and every value.
+const DEVICE_NOTIFY: u32 = 2;
+const ALL_NOTIFY: u32 = 3;
 
 /// Exact ACPICA status, without collapsing firmware errors into generic success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +194,23 @@ unsafe extern "C" {
     fn acpi_os_wait_events_complete();
     fn acpi_get_sleep_type_data(state: u8, a: *mut u8, b: *mut u8) -> Status;
     fn acpi_enter_sleep_state_prep(state: u8) -> Status;
+    fn acpi_install_fixed_event_handler(
+        event: u32,
+        handler: Interrupt,
+        context: *mut c_void,
+    ) -> Status;
+    fn acpi_install_gpe_raw_handler(
+        block: *mut c_void,
+        number: u32,
+        kind: u32,
+        handler: GpeHandler,
+        context: *mut c_void,
+    ) -> Status;
+    fn acpi_clear_gpe(block: *mut c_void, number: u32) -> Status;
+    fn acpi_enable_gpe(block: *mut c_void, number: u32) -> Status;
+    fn acpi_mark_gpe_for_wake(block: *mut c_void, number: u32) -> Status;
+    fn acpi_setup_gpe_for_wake(device: *mut c_void, block: *mut c_void, number: u32) -> Status;
+    fn acpi_update_all_gpes() -> Status;
     fn acpi_install_address_space_handler(
         handle: *mut c_void,
         space: u32,
@@ -413,6 +444,97 @@ impl Session {
         checked(unsafe { acpi_enter_sleep_state_prep(state) })?;
         guard.check()
     }
+    /// A namespace guard once hardware is activated: GPE blocks and fixed
+    /// events exist only from then on.
+    fn events(&self) -> Result<NamespaceGuard<'_>, Error> {
+        if self.hardware.get() != HardwareState::Enabled {
+            return Err(SUPPORT);
+        }
+        self.guard()
+    }
+    /// Linux `acpi_wakeup_gpe_init`: `device`'s `_PRW` GPE wakes the system
+    /// and stays disabled while it runs (`acpi_setup_gpe_for_wake`); a
+    /// button's is only marked for wake (`acpi_mark_gpe_for_wake`), as its
+    /// driver may also take it at runtime ([`Self::enable_gpe`]). Either way
+    /// [`Self::update_all_gpes`] leaves it alone.
+    pub fn setup_wake_gpe(
+        &self,
+        device: Handle<'_>,
+        gpe: Gpe<'_>,
+        button: bool,
+    ) -> Result<(), Error> {
+        let guard = self.events()?;
+        let block = gpe.block.map_or(ptr::null_mut(), |block| block.raw);
+        // SAFETY: handles of this live session, under its namespace guard.
+        checked(unsafe {
+            if button {
+                acpi_mark_gpe_for_wake(block, gpe.number)
+            } else {
+                acpi_setup_gpe_for_wake(device.raw, block, gpe.number)
+            }
+        })?;
+        guard.check()
+    }
+    /// `acpi_enable_gpe`, for a GPE a driver takes while the system runs,
+    /// such as a control-method button's.
+    pub fn enable_gpe(&self, gpe: Gpe<'_>) -> Result<(), Error> {
+        let guard = self.events()?;
+        let block = gpe.block.map_or(ptr::null_mut(), |block| block.raw);
+        // SAFETY: as in `setup_wake_gpe`.
+        checked(unsafe { acpi_enable_gpe(block, gpe.number) })?;
+        guard.check()
+    }
+    /// Linux `acpi_update_all_gpes` after its namespace scan: enable every
+    /// GPE with an `_Lxx` or `_Exx` method that no `_PRW` claims for wake.
+    /// ACPICA's SCI handler then runs the method as deferred work.
+    pub fn update_all_gpes(&self) -> Result<(), Error> {
+        let guard = self.events()?;
+        // SAFETY: the live session owns ACPICA's GPE blocks.
+        checked(unsafe { acpi_update_all_gpes() })?;
+        guard.check()
+    }
+    /// As Linux's EC driver takes its GPE: a raw handler for GPE `number` of
+    /// the FADT's blocks (`acpi_install_gpe_raw_handler`) that clears its
+    /// status and sets `flag` for the driver that services the event, then
+    /// the GPE enabled.
+    pub fn flag_gpe(
+        &self,
+        number: u32,
+        edge: bool,
+        flag: &'static AtomicBool,
+    ) -> Result<(), Error> {
+        let guard = self.events()?;
+        let kind = if edge { GPE_EDGE } else { GPE_LEVEL };
+        let context = ptr::from_ref(flag).cast_mut().cast();
+        // SAFETY: `flag` lives for good; the handler only clears and flags.
+        checked(unsafe {
+            acpi_install_gpe_raw_handler(ptr::null_mut(), number, kind, flag_gpe, context)
+        })?;
+        // SAFETY: the GPE whose handler was just installed.
+        checked(unsafe { acpi_enable_gpe(ptr::null_mut(), number) })?;
+        guard.check()
+    }
+    /// `acpi_install_fixed_event_handler`, as Linux's button driver takes
+    /// the fixed power button: ACPICA enables fixed `event`, and its SCI
+    /// handler clears the event's status and sets `flag`.
+    pub fn flag_fixed_event(&self, event: u32, flag: &'static AtomicBool) -> Result<(), Error> {
+        let guard = self.events()?;
+        let context = ptr::from_ref(flag).cast_mut().cast();
+        // SAFETY: `flag` lives for good; the handler only flags.
+        checked(unsafe { acpi_install_fixed_event_handler(event, flag_event, context) })?;
+        guard.check()
+    }
+    /// Every notification the firmware sends, a system one or a device's,
+    /// with the path of the object it names, as Linux's `acpi_bus_notify`
+    /// and the drivers see them together; for reporting those no driver
+    /// takes. The callback runs as deferred work.
+    pub fn notify_all(
+        &self,
+        callback: impl Fn(Option<String>, u32) + Send + Sync + 'static,
+    ) -> Result<Notification<'_>, Error> {
+        self.root()
+            .install_notify(ALL_NOTIFY, NotifyCallback::Device(Box::new(callback)))
+    }
     /// False after native table deletion. The whole facade then returns AE_SUPPORT;
     /// native driver rebinding into a changed namespace is not implemented.
     pub fn namespace_available(&self) -> bool {
@@ -575,6 +697,14 @@ impl Drop for EcGlobalLock<'_> {
             core::mem::forget(guard);
         }
     }
+}
+
+/// A general-purpose event: its number in the FADT's GPE blocks, or in a
+/// GPE block device's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gpe<'a> {
+    pub block: Option<Handle<'a>>,
+    pub number: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -750,35 +880,46 @@ impl<'a> Handle<'a> {
     /// Resolve a retained namespace handle to its actual absolute ACPI path.
     pub fn path(self) -> Result<String, Error> {
         let guard = self.session.guard()?;
-        let mut result = RawBuffer {
-            length: u64::MAX,
-            pointer: ptr::null_mut(),
-        };
-        // SAFETY: handle belongs to this live session; ACPICA owns the result.
-        let status = unsafe { acpi_get_name(self.raw, 0, &mut result) };
-        struct Free(*mut c_void);
-        impl Drop for Free {
-            fn drop(&mut self) {
-                if !self.0.is_null() {
-                    // SAFETY: ACPICA allocated this result buffer for the caller to free once.
-                    unsafe { acpi_os_free(self.0) };
-                }
-            }
-        }
-        let _free = Free(result.pointer);
-        checked(status)?;
+        // SAFETY: handle belongs to this live session, under its guard.
+        let path = unsafe { name(self.raw) }?;
         guard.check()?;
-        if result.pointer.is_null() {
+        Ok(path)
+    }
+    /// The GPE this device's `_PRW` names, as Linux's
+    /// `acpi_bus_extract_wakeup_device_power_package` reads it: an integer,
+    /// a GPE of the FADT's blocks, or a GPE block device's reference and
+    /// index. `None` without `_PRW`.
+    pub fn wake_gpe(self) -> Result<Option<Gpe<'a>>, Error> {
+        let prw = match self.child("_PRW") {
+            Ok(prw) => prw,
+            Err(error) if error == NOT_FOUND => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(Value::Package(elements)) = prw.evaluate(None, &[])? else {
+            return Err(BAD_PARAMETER);
+        };
+        if elements.len() < 2 || !matches!(elements[1], Value::Integer(0..=5)) {
             return Err(BAD_PARAMETER);
         }
-        let length = usize::try_from(result.length).map_err(|_| LIMIT)?;
-        if length > 65536 {
-            return Err(LIMIT);
-        }
-        // SAFETY: successful ACPICA output owns exactly buffer.length bytes.
-        let bytes = unsafe { core::slice::from_raw_parts(result.pointer.cast::<u8>(), length) };
-        let text = CStr::from_bytes_until_nul(bytes).map_err(|_| BAD_PARAMETER)?;
-        String::from_utf8(text.to_bytes().to_vec()).map_err(|_| BAD_PARAMETER)
+        let number = |value: &Value<'a>| match value {
+            Value::Integer(number) => u32::try_from(*number).map_err(|_| BAD_PARAMETER),
+            _ => Err(BAD_PARAMETER),
+        };
+        let gpe = match elements.first() {
+            Some(Value::Package(pair)) => match pair.as_slice() {
+                [Value::Reference(block), index] => Gpe {
+                    block: Some(*block),
+                    number: number(index)?,
+                },
+                _ => return Err(BAD_PARAMETER),
+            },
+            Some(value) => Gpe {
+                block: None,
+                number: number(value)?,
+            },
+            None => return Err(BAD_PARAMETER),
+        };
+        Ok(Some(gpe))
     }
 
     pub fn child(self, path: &str) -> Result<Self, Error> {
@@ -900,15 +1041,24 @@ impl<'a> Handle<'a> {
         self,
         callback: impl Fn(u32) + Send + Sync + 'static,
     ) -> Result<Notification<'a>, Error> {
+        self.install_notify(DEVICE_NOTIFY, NotifyCallback::Value(Box::new(callback)))
+    }
+    fn install_notify(
+        self,
+        kind: u32,
+        callback: NotifyCallback,
+    ) -> Result<Notification<'a>, Error> {
         let guard = self.session.guard()?;
         let context = Box::new(NotifyContext {
             enabled: AtomicBool::new(true),
-            callback: Box::new(callback),
+            kind,
+            callback,
         });
         let context = Box::into_raw(context);
         // SAFETY: owned stable context is retained until removal and drain.
-        let status =
-            unsafe { acpi_install_notify_handler(self.raw, 2, notify_trampoline, context.cast()) };
+        let status = unsafe {
+            acpi_install_notify_handler(self.raw, kind, notify_trampoline, context.cast())
+        };
         if status != 0 {
             // SAFETY: installation failed, so this is the only reference to the box.
             unsafe {
@@ -959,18 +1109,78 @@ impl<'a> Handle<'a> {
         guard.check()
     }
 }
+/// The absolute path of a node of the live namespace.
+///
+/// # Safety
+/// `raw` is a node of the live namespace, which the caller keeps live.
+unsafe fn name(raw: *mut c_void) -> Result<String, Error> {
+    let mut result = RawBuffer {
+        length: u64::MAX,
+        pointer: ptr::null_mut(),
+    };
+    // SAFETY: the caller's live node; ACPICA owns the result.
+    let status = unsafe { acpi_get_name(raw, 0, &mut result) };
+    struct Free(*mut c_void);
+    impl Drop for Free {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: ACPICA allocated this result buffer for the caller to free once.
+                unsafe { acpi_os_free(self.0) };
+            }
+        }
+    }
+    let _free = Free(result.pointer);
+    checked(status)?;
+    if result.pointer.is_null() {
+        return Err(BAD_PARAMETER);
+    }
+    let length = usize::try_from(result.length).map_err(|_| LIMIT)?;
+    if length > 65536 {
+        return Err(LIMIT);
+    }
+    // SAFETY: successful ACPICA output owns exactly buffer.length bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(result.pointer.cast::<u8>(), length) };
+    let text = CStr::from_bytes_until_nul(bytes).map_err(|_| BAD_PARAMETER)?;
+    String::from_utf8(text.to_bytes().to_vec()).map_err(|_| BAD_PARAMETER)
+}
 struct NotifyContext {
     enabled: AtomicBool,
-    callback: Box<dyn Fn(u32) + Send + Sync>,
+    /// `ACPI_DEVICE_NOTIFY` or `ACPI_ALL_NOTIFY`.
+    kind: u32,
+    callback: NotifyCallback,
 }
-unsafe extern "C" fn notify_trampoline(_: *mut c_void, value: u32, context: *mut c_void) {
+enum NotifyCallback {
+    Value(Box<dyn Fn(u32) + Send + Sync>),
+    /// With the notifying object's path, for a handler of every object.
+    Device(Box<dyn Fn(Option<String>, u32) + Send + Sync>),
+}
+/// A fixed event's handler: the flag set.
+unsafe extern "C" fn flag_event(context: *mut c_void) -> u32 {
+    // SAFETY: `flag_fixed_event` passed a flag that lives for good.
+    unsafe { &*context.cast::<AtomicBool>() }.store(true, Ordering::Release);
+    INTERRUPT_HANDLED
+}
+/// A raw GPE handler: ACPICA leaves the status to it, which it clears, as
+/// Linux's EC driver does, before setting the flag.
+unsafe extern "C" fn flag_gpe(block: *mut c_void, number: u32, context: *mut c_void) -> u32 {
+    // SAFETY: ACPICA dispatches its own GPE, its GPE lock released.
+    unsafe { acpi_clear_gpe(block, number) };
+    // SAFETY: `flag_gpe` passed a flag that lives for good.
+    unsafe { &*context.cast::<AtomicBool>() }.store(true, Ordering::Release);
+    INTERRUPT_HANDLED
+}
+unsafe extern "C" fn notify_trampoline(object: *mut c_void, value: u32, context: *mut c_void) {
     // SAFETY: registration owns context through handler removal + draining.
     let context = unsafe { &*context.cast::<NotifyContext>() };
     // UNLOAD invalidates clients before deletion; context storage is still owned
     // through quiescence/core termination even when the node itself is gone.
     // SAFETY: ACPICA calls this trampoline only inside the live core.
     if context.enabled.load(Ordering::Acquire) && unsafe { stela_acpi_namespace_valid() != 0 } {
-        (context.callback)(value);
+        match &context.callback {
+            NotifyCallback::Value(callback) => callback(value),
+            // SAFETY: the object ACPICA dispatches for, in its live namespace.
+            NotifyCallback::Device(callback) => callback(unsafe { name(object) }.ok(), value),
+        }
     }
 }
 pub struct Notification<'a> {
@@ -986,8 +1196,12 @@ impl Notification<'_> {
     #[cfg(test)]
     pub(crate) fn remove_from_core_without_retiring_for_test(&self) -> Result<(), Error> {
         let guard = self.handle.session.guard()?;
+        // SAFETY: the registration's context lives until global teardown.
+        let kind = self
+            .context
+            .map_or(DEVICE_NOTIFY, |context| unsafe { &*context }.kind);
         // SAFETY: the actual live node and callback belong to this registration.
-        checked(unsafe { acpi_remove_notify_handler(self.handle.raw, 2, notify_trampoline) })?;
+        checked(unsafe { acpi_remove_notify_handler(self.handle.raw, kind, notify_trampoline) })?;
         // SAFETY: test process context; drain the real provider work queue.
         unsafe { acpi_os_wait_events_complete() };
         guard.check()
@@ -996,11 +1210,15 @@ impl Notification<'_> {
         let Some(context) = self.context.take() else {
             return Ok(());
         };
+        // SAFETY: the session keeps every registered context until global teardown.
+        let kind = unsafe { &*context }.kind;
         let result = (|| {
             let guard = self.handle.session.guard()?;
             // Only a live namespace lease may pass this node into ACPICA.
             // SAFETY: the namespace guard keeps this node live.
-            checked(unsafe { acpi_remove_notify_handler(self.handle.raw, 2, notify_trampoline) })?;
+            checked(unsafe {
+                acpi_remove_notify_handler(self.handle.raw, kind, notify_trampoline)
+            })?;
             // SAFETY: called from process context with no namespace lock held by this thread.
             unsafe {
                 acpi_os_wait_events_complete();
@@ -1653,6 +1871,129 @@ pub(crate) mod tests {
         assert_eq!(session.prepare_sleep(3), Err(Error(0x0005)));
         assert_eq!(prepared(), Some(Value::Integer(5)));
         assert_eq!(counts.port_writes.load(Ordering::SeqCst), 0);
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn wake_gpes_follow_prw_and_every_notification_reaches_the_global_handler() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let mut dsdt = include_bytes!("acpi/fixtures/namespace.aml").to_vec();
+        // Scope (\_SB) { Device (WAK1) { Name (_PRW, Package () { 0x0D, 4 }) } }
+        dsdt.extend_from_slice(&[0x10, 25, b'\\', b'_', b'S', b'B', b'_', 0x5b, 0x82, 17]);
+        dsdt.extend_from_slice(b"WAK1");
+        dsdt.extend_from_slice(&[
+            0x08, b'_', b'P', b'R', b'W', 0x12, 6, 2, 0x0a, 0x0d, 0x0a, 4,
+        ]);
+        let length = dsdt.len() as u32;
+        dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+        checksum(&mut dsdt, 9);
+        let (provider, _) = fixture_dsdt(dsdt);
+        // SAFETY: actual test provider owns all services; singleton serialized.
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let wake = session.handle("\\_SB.WAK1").unwrap();
+        assert!(session.all_devices().unwrap().contains(&wake));
+        assert_eq!(
+            wake.wake_gpe(),
+            Ok(Some(Gpe {
+                block: None,
+                number: 0x0d
+            }))
+        );
+        let ucsi = session.handle("\\_SB.UCSI").unwrap();
+        assert_eq!(ucsi.wake_gpe(), Ok(None));
+        // GPE blocks and fixed events exist only once hardware is activated.
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        assert_eq!(session.update_all_gpes(), Err(SUPPORT));
+        assert_eq!(session.flag_gpe(0x0d, true, &FLAG), Err(SUPPORT));
+        assert_eq!(
+            session.flag_fixed_event(EVENT_POWER_BUTTON, &FLAG),
+            Err(SUPPORT)
+        );
+        assert_eq!(
+            session.setup_wake_gpe(
+                wake,
+                Gpe {
+                    block: None,
+                    number: 0x0d
+                },
+                false
+            ),
+            Err(SUPPORT)
+        );
+        // System and device notifications alike, with the object's path.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target = seen.clone();
+        let all = session
+            .notify_all(move |path, value| target.lock().unwrap().push((path, value)))
+            .unwrap();
+        for value in [0x80, 0x01] {
+            ucsi.evaluate(Some("FIRE"), &[Argument::Integer(value)])
+                .unwrap();
+        }
+        // SAFETY: test process context; drains the provider's work queue.
+        unsafe { acpi_os_wait_events_complete() };
+        let path = Some(String::from("\\_SB_.UCSI"));
+        assert_eq!(*seen.lock().unwrap(), [(path.clone(), 0x80), (path, 0x01)]);
+        all.remove().unwrap();
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn wake_gpe_checks_interpreted_sleep_packages() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        for (count, elements, accepted) in [
+            (1, &[0x0a, 0x0d][..], false),
+            (2, &[0x0a, 0x0d, 0x0a, 6][..], false),
+            // ACPICA repairs an invalid numeric string to zero for this
+            // predefined object, as on Linux. Validate its interpreted value.
+            (2, &[0x0a, 0x0d, 0x0d, b'x', 0][..], true),
+            (2, &[0x0a, 0x0d, 0x0d, b'6', 0][..], false),
+        ] {
+            let mut package = alloc::vec![0x12, (elements.len() + 2) as u8, count];
+            package.extend_from_slice(elements);
+            let mut name = alloc::vec![0x08, b'_', b'P', b'R', b'W'];
+            name.extend(package);
+            let mut device = alloc::vec![0x5b, 0x82, (name.len() + 5) as u8];
+            device.extend_from_slice(b"WAK1");
+            device.extend(name);
+            let mut dsdt = include_bytes!("acpi/fixtures/namespace.aml").to_vec();
+            dsdt.extend_from_slice(&[0x10, (device.len() + 6) as u8, b'\\']);
+            dsdt.extend_from_slice(b"_SB_");
+            dsdt.extend(device);
+            let length = dsdt.len() as u32;
+            dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+            checksum(&mut dsdt, 9);
+            let (provider, _) = fixture_dsdt(dsdt);
+            // SAFETY: the serialized fixture owns the singleton's services.
+            let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+            let gpe = session.handle("\\_SB.WAK1").unwrap().wake_gpe();
+            if accepted {
+                assert_eq!(
+                    gpe,
+                    Ok(Some(Gpe {
+                        block: None,
+                        number: 13
+                    }))
+                );
+            } else {
+                assert_eq!(gpe, Err(BAD_PARAMETER));
+            }
+            session.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn activated_events_take_only_gpes_acpica_has() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        // SAFETY: reduced-hardware provider enters actual C activation without
+        // inventing legacy hardware; singleton serialized for this whole test.
+        let session =
+            unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::Hardware) }.unwrap();
+        session.update_all_gpes().unwrap();
+        // Without GPE blocks, ACPICA has no GPE 0x0D to take.
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        assert_eq!(session.flag_gpe(0x0d, true, &FLAG), Err(BAD_PARAMETER));
+        assert!(!FLAG.load(Ordering::Acquire));
         session.shutdown().unwrap();
     }
 
