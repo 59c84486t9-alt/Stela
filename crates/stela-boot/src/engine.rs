@@ -1781,7 +1781,8 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
 }
 
 /// The firmware's ACPI namespace and the owned MMIO authority, each `None`
-/// when the host does not qualify, which is reported.
+/// when the host does not qualify, which is reported. The device interrupt
+/// registry is attached here too, or its refusal reported.
 struct Platform {
     acpi: Option<&'static aml::HostAcpi>,
     mmio: Option<crate::native_mmio::Source>,
@@ -1811,6 +1812,18 @@ fn start_platform(handoff: &Handoff, host_owner: &mut host::HostOwner) -> Platfo
             output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));
         })
         .ok();
+    // SAFETY: the installed boot processor with interrupts off; the engine's
+    // IDT routes the device vectors to native_irq, and the physmap maps the
+    // local APIC in every root.
+    match unsafe {
+        crate::native_irq::start(
+            layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
+            handoff.tsc_hz,
+        )
+    } {
+        Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
+        Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
+    }
     Platform {
         acpi: host_acpi,
         mmio: native_mmio,

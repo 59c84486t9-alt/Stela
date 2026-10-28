@@ -289,7 +289,7 @@ unsafe impl NativeServices for Services<'_> {
     fn interrupts(
         &self,
     ) -> Result<&'static dyn stela_drivers::bus::irq::IrqController, ServiceError> {
-        Err(ServiceError::Unavailable)
+        crate::native_irq::service().map_err(|_| ServiceError::Unavailable)
     }
 
     fn acpi_memory(

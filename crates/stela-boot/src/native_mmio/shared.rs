@@ -6,7 +6,9 @@
 //! (`stela_boot_core::aperture::qualify`); the other host processors run
 //! with the same PAT, which their bootstrap programs from the boot
 //! processor's. An access checks only that the current root reaches the
-//! aperture and that no interrupt handler is running. Installations are
+//! aperture and that the only handler running is a device interrupt's
+//! ([`crate::native_irq`]); mapping and unmapping refuse in every handler.
+//! Installations are
 //! serialized by the platform's lock and need no remote flush; once the other
 //! processors start, retirement refuses ([`aperture::Processors`]).
 use super::*;
@@ -217,7 +219,9 @@ impl Drop for Guard<'_> {
 // flush, and retirement refuses once a remote TLB may hold the translation.
 unsafe impl MappingPlatform for Platform {
     fn check_context(&self, space: AddressSpace) -> Result<(), Error> {
-        if space != self.space || crate::engine::host::in_interrupt() {
+        if space != self.space
+            || (crate::engine::host::in_interrupt() && !crate::native_irq::in_device_dispatch())
+        {
             return Err(Error::Unavailable);
         }
         // SAFETY: the current root page is RAM the physmap reaches.
@@ -237,6 +241,9 @@ unsafe impl MappingPlatform for Platform {
         request: MapRequest,
     ) -> Result<InstalledMapping, MapFailure> {
         let unchanged = MapFailure::Unchanged;
+        if crate::engine::host::in_interrupt() {
+            return Err(unchanged(Error::Unavailable));
+        }
         self.check_context(request.address_space)
             .map_err(unchanged)?;
         if request.attribute != CacheAttribute::Uncached {
@@ -296,6 +303,9 @@ unsafe impl MappingPlatform for Platform {
         })
     }
     unsafe fn unmap(&self, request: MapRequest, mapping: InstalledMapping) -> Result<(), Error> {
+        if crate::engine::host::in_interrupt() {
+            return Err(Error::Unavailable);
+        }
         self.check_context(request.address_space)?;
         if !PROCESSORS.may_retire() {
             return Err(Error::Busy);
