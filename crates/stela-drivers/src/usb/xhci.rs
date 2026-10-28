@@ -728,20 +728,23 @@ impl Controller {
         })
     }
 
-    fn sync_command_buffers(&self) -> Result<(), BlockError> {
+    /// Before a command for `slot`, which reads that slot's structures
+    /// alone; Enable Slot and No Op name none. Transfer rings sync as TDs
+    /// are pushed.
+    fn sync_command_buffers(&self, slot: u8) -> Result<(), BlockError> {
         self.dcbaa.sync_dirty()?;
-        for state in self.slots.iter().flatten() {
-            for endpoint in state.endpoints.iter().flatten() {
-                endpoint.ring.buffer.sync_dirty()?;
-                if let Some(streams) = &endpoint.streams {
-                    streams.sync_device()?;
-                }
+        let Some(state) = self.slots.get(usize::from(slot)).and_then(Option::as_ref) else {
+            return Ok(());
+        };
+        for endpoint in state.endpoints.iter().flatten() {
+            endpoint.ring.buffer.sync_dirty()?;
+            if let Some(streams) = &endpoint.streams {
+                streams.sync_device()?;
             }
-            // Address/Configure may fetch these dequeues before the first TD.
-            // Fresh and reinitialized rings must already show unowned TRBs.
-            state.input.sync_dirty()?;
         }
-        Ok(())
+        // Address/Configure may fetch these dequeues before the first TD.
+        // Fresh and reinitialized rings must already show unowned TRBs.
+        state.input.sync_dirty()
     }
 
     fn allocate(

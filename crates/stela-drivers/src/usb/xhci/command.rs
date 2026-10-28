@@ -37,7 +37,7 @@ impl Controller {
             return Err(BlockError::Protocol("an xHCI command is outstanding"));
         }
         self.ready()?;
-        self.sync_command_buffers()?;
+        self.sync_command_buffers((control >> 24) as u8)?;
         let deadline = self.event_deadline(COMMAND_US)?;
         let address = self.commands.push(&[(parameter, status, control)])?[0];
         // Linux xhci_ring_cmd_db rings only a running command ring.
