@@ -275,6 +275,7 @@ impl Host {
                     touched: [false; 4],
                     tag: 0,
                     poisoned: false,
+                    active: None,
                     failed_data: None,
                 },
                 flags: binding.flags,
@@ -312,6 +313,26 @@ impl Host {
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError> {
         execute(&mut self.engine, self.flags, lun, cdb, data)
+    }
+
+    /// Begin a CDB as [`Self::command`] runs it, without waiting for any
+    /// of its transfers; [`Self::end`] gives its result.
+    pub(super) fn begin(
+        &mut self,
+        lun: [u8; 8],
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Result<(), BlockError> {
+        admit(self.flags, cdb, &data)?;
+        self.engine.begin(lun, cdb, data)
+    }
+    /// The begun command's result once it ended; never waits.
+    pub(super) fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        self.engine.poll(None, &mut None)
+    }
+    /// Whether a begun command has not ended.
+    pub(super) fn busy(&self) -> bool {
+        self.engine.active.is_some()
     }
 
     pub(super) fn delay(&self, micros: u64) {
@@ -369,12 +390,18 @@ fn execute<I: Io>(
     cdb: &[u8],
     data: Data<'_>,
 ) -> Result<Vec<u8>, BlockError> {
+    admit(flags, cdb, &data)?;
+    engine.command(lun, cdb, data)
+}
+
+/// The enclosure's quirks take `cdb` and its transfer.
+fn admit(flags: quirks::Flags, cdb: &[u8], data: &Data<'_>) -> Result<(), BlockError> {
     if !flags.permits(cdb) {
         return Err(BlockError::Unsupported(
             "CDB requires an unsupported enclosure operation",
         ));
     }
-    let length = match &data {
+    let length = match data {
         Data::None => 0,
         Data::In(bytes) => *bytes,
         Data::Out(bytes) => bytes.len(),
@@ -382,7 +409,7 @@ fn execute<I: Io>(
     if length > flags.max_transfer_bytes() {
         return Err(BlockError::Unsupported("UAS enclosure transfer limit"));
     }
-    engine.command(lun, cdb, data)
+    Ok(())
 }
 
 /// Linux `sd_read_block_zero` uses READ(10) when the ordinary block path uses
@@ -531,6 +558,8 @@ struct Engine<I: Io> {
     pending: [Option<I::Ticket>; 4],
     touched: [bool; 4],
     tag: u16,
+    /// The begun command, until [`Engine::poll`] returns its result.
+    active: Option<Active>,
     poisoned: bool,
     /// Input data that completed before the Sense IU failed its command,
     /// until the next command: sd keeps it when the sense is RECOVERED
@@ -551,6 +580,7 @@ impl<I: Io> Engine<I> {
             pending: core::array::from_fn(|_| None),
             touched: [false; 4],
             tag: 0,
+            active: None,
             poisoned: false,
             failed_data: None,
         })
@@ -593,8 +623,22 @@ impl<I: Io> Engine<I> {
         abort_timeout: Option<u64>,
         abort: &mut Option<AbortTaskOutcome>,
     ) -> Result<Vec<u8>, BlockError> {
+        self.begin(lun, cdb, data)?;
+        loop {
+            if let Some(result) = self.poll(abort_timeout, abort) {
+                return result;
+            }
+            self.io.pause();
+        }
+    }
+    /// Post `cdb`'s status, data and command requests without waiting for
+    /// any of them; [`Self::poll`] moves the command on.
+    fn begin(&mut self, lun: [u8; 8], cdb: &[u8], data: Data<'_>) -> Result<(), BlockError> {
         if self.poisoned || !self.buffers_present() {
             return Err(BlockError::Unsupported("UAS interface requires rebind"));
+        }
+        if self.active.is_some() {
+            return Err(BlockError::Protocol("a UAS command is already running"));
         }
         let (length, input) = match &data {
             Data::None => (0, false),
@@ -640,131 +684,177 @@ impl<I: Io> Engine<I> {
         if let Err(error) = self.post(Pipe::Command, self.command.physical(), command.len()) {
             return self.failure(error);
         }
-        let started = self.io.now();
-        let mut ready = false;
-        let mut moved = if length == 0 { Some(0) } else { None };
-        let mut terminal: Option<Status> = None;
-        loop {
-            for pipe in [Pipe::Command, Pipe::Status, Pipe::Input, Pipe::Output] {
-                let index = pipe.index();
-                let completion = self.pending[index]
-                    .as_ref()
-                    .and_then(|ticket| self.io.completed(ticket));
-                let Some(completion) = completion else {
-                    continue;
-                };
-                self.pending[index] = None;
-                let count = match completion {
-                    Ok(count) => count,
-                    Err(error) => return self.failure(error),
-                };
-                match pipe {
-                    Pipe::Command if count != command.len() => {
-                        return self.failure(PROTOCOL_ERROR);
-                    }
-                    Pipe::Command => {}
-                    Pipe::Input | Pipe::Output if count <= length => moved = Some(count),
-                    Pipe::Input | Pipe::Output => {
-                        return self.failure(PROTOCOL_ERROR);
-                    }
-                    Pipe::Status => {
-                        let frame = match self
-                            .status
-                            .bytes()
-                            .get(..count)
-                            .and_then(|bytes| status_iu(bytes, self.tag))
-                        {
-                            Some(frame) => frame,
-                            None => {
-                                return self.failure(PROTOCOL_ERROR);
-                            }
-                        };
-                        match frame {
-                            Frame::Ready(direction)
-                                if streams.is_none()
-                                    && !ready
-                                    && length != 0
-                                    && direction == input =>
-                            {
-                                ready = true;
-                                // Repost the status request before data; a fast
-                                // device may finish its CDB as soon as data ends.
-                                if let Err(error) =
-                                    self.post(Pipe::Status, self.status.physical(), IU_BUFFER_BYTES)
-                                {
-                                    return self.failure(error);
-                                }
-                                if let Err(error) = self.post(
-                                    if input { Pipe::Input } else { Pipe::Output },
-                                    self.data.physical(),
-                                    length,
-                                ) {
-                                    return self.failure(error);
-                                }
-                            }
-                            Frame::Ready(_) => {
-                                return self.failure(PROTOCOL_ERROR);
-                            }
-                            Frame::Done(status) => terminal = Some(status),
-                        }
-                    }
-                }
-            }
-            if let Some(status) = &terminal {
-                if status.code != 0 {
-                    if input && self.pending[Pipe::Input.index()].is_none() {
-                        self.failed_data = moved.map(|moved| self.data.bytes()[..moved].to_vec());
-                    }
-                    // Device-terminal error may precede host data completion.
-                    // Drain each actual outstanding contributor before any CPU
-                    // buffer access or later command is permitted.
-                    for pipe in [Pipe::Command, Pipe::Input, Pipe::Output] {
-                        if self.pending[pipe.index()].is_some() {
-                            if let Err(error) = self.io.cancel(pipe) {
-                                return self.failure(error);
-                            }
-                            self.pending[pipe.index()] = None;
-                        }
-                    }
-                    return Err(match status.response {
-                        Some(_) => BlockError::Protocol("UAS Response IU refused the command"),
-                        None => Sense::parse(&status.sense)
-                            .map_or(BlockError::CheckCondition, BlockError::Sense),
-                    });
-                }
-                if self.pending.iter().all(Option::is_none) {
-                    let Some(moved) = moved else {
-                        return self.failure(PROTOCOL_ERROR);
-                    };
-                    if !input && moved != length {
-                        return Err(BlockError::Protocol("short UAS write"));
-                    }
-                    return Ok(if input {
-                        self.data.bytes()[..moved].to_vec()
-                    } else {
-                        Vec::new()
-                    });
-                }
-            }
-            if self.io.now().wrapping_sub(started) >= abort_timeout.unwrap_or(TIMEOUT_US) {
-                if abort_timeout.is_some() {
-                    // This task and both IU buffers remain owned throughout
-                    // recovery. No later command may reuse this attachment.
-                    self.poisoned = true;
-                    *abort = Some(if terminal.is_some() {
-                        AbortTaskOutcome::NotAcknowledged(BlockError::Unsupported(
-                            "UAS task already returned terminal status",
-                        ))
-                    } else {
-                        self.abort_task(lun)
-                    });
-                    return Err(BlockError::Timeout);
-                }
-                return self.failure(BlockError::Timeout);
-            }
-            self.io.pause();
-        }
+        self.active = Some(Active {
+            lun,
+            command: command.len(),
+            length,
+            input,
+            streams,
+            started: self.io.now(),
+            ready: false,
+            moved: if length == 0 { Some(0) } else { None },
+            terminal: None,
+        });
+        Ok(())
     }
+    /// The begun command's result once it ended, failed or timed out; never
+    /// waits. `abort_timeout` replaces the command timeout with one that
+    /// aborts the task, as error handling's ABORT TASK does.
+    fn poll(
+        &mut self,
+        abort_timeout: Option<u64>,
+        abort: &mut Option<AbortTaskOutcome>,
+    ) -> Option<Result<Vec<u8>, BlockError>> {
+        let mut active = self.active.take()?;
+        let result = self.advance(&mut active, abort_timeout, abort);
+        if result.is_none() {
+            self.active = Some(active);
+        }
+        result
+    }
+    fn advance(
+        &mut self,
+        active: &mut Active,
+        abort_timeout: Option<u64>,
+        abort: &mut Option<AbortTaskOutcome>,
+    ) -> Option<Result<Vec<u8>, BlockError>> {
+        let (length, input, streams) = (active.length, active.input, active.streams);
+        for pipe in [Pipe::Command, Pipe::Status, Pipe::Input, Pipe::Output] {
+            let index = pipe.index();
+            let completion = self.pending[index]
+                .as_ref()
+                .and_then(|ticket| self.io.completed(ticket));
+            let Some(completion) = completion else {
+                continue;
+            };
+            self.pending[index] = None;
+            let count = match completion {
+                Ok(count) => count,
+                Err(error) => return Some(self.failure(error)),
+            };
+            match pipe {
+                Pipe::Command if count != active.command => {
+                    return Some(self.failure(PROTOCOL_ERROR));
+                }
+                Pipe::Command => {}
+                Pipe::Input | Pipe::Output if count <= length => active.moved = Some(count),
+                Pipe::Input | Pipe::Output => {
+                    return Some(self.failure(PROTOCOL_ERROR));
+                }
+                Pipe::Status => {
+                    let frame = match self
+                        .status
+                        .bytes()
+                        .get(..count)
+                        .and_then(|bytes| status_iu(bytes, self.tag))
+                    {
+                        Some(frame) => frame,
+                        None => {
+                            return Some(self.failure(PROTOCOL_ERROR));
+                        }
+                    };
+                    match frame {
+                        Frame::Ready(direction)
+                            if streams.is_none()
+                                && !active.ready
+                                && length != 0
+                                && direction == input =>
+                        {
+                            active.ready = true;
+                            // Repost the status request before data; a fast
+                            // device may finish its CDB as soon as data ends.
+                            if let Err(error) =
+                                self.post(Pipe::Status, self.status.physical(), IU_BUFFER_BYTES)
+                            {
+                                return Some(self.failure(error));
+                            }
+                            if let Err(error) = self.post(
+                                if input { Pipe::Input } else { Pipe::Output },
+                                self.data.physical(),
+                                length,
+                            ) {
+                                return Some(self.failure(error));
+                            }
+                        }
+                        Frame::Ready(_) => {
+                            return Some(self.failure(PROTOCOL_ERROR));
+                        }
+                        Frame::Done(status) => active.terminal = Some(status),
+                    }
+                }
+            }
+        }
+        if let Some(status) = &active.terminal {
+            if status.code != 0 {
+                if input && self.pending[Pipe::Input.index()].is_none() {
+                    self.failed_data = active
+                        .moved
+                        .map(|moved| self.data.bytes()[..moved].to_vec());
+                }
+                // Device-terminal error may precede host data completion.
+                // Drain each actual outstanding contributor before any CPU
+                // buffer access or later command is permitted.
+                for pipe in [Pipe::Command, Pipe::Input, Pipe::Output] {
+                    if self.pending[pipe.index()].is_some() {
+                        if let Err(error) = self.io.cancel(pipe) {
+                            return Some(self.failure(error));
+                        }
+                        self.pending[pipe.index()] = None;
+                    }
+                }
+                return Some(Err(match status.response {
+                    Some(_) => BlockError::Protocol("UAS Response IU refused the command"),
+                    None => Sense::parse(&status.sense)
+                        .map_or(BlockError::CheckCondition, BlockError::Sense),
+                }));
+            }
+            if self.pending.iter().all(Option::is_none) {
+                let Some(moved) = active.moved else {
+                    return Some(self.failure(PROTOCOL_ERROR));
+                };
+                if !input && moved != length {
+                    return Some(Err(BlockError::Protocol("short UAS write")));
+                }
+                return Some(Ok(if input {
+                    self.data.bytes()[..moved].to_vec()
+                } else {
+                    Vec::new()
+                }));
+            }
+        }
+        if self.io.now().wrapping_sub(active.started) >= abort_timeout.unwrap_or(TIMEOUT_US) {
+            if abort_timeout.is_some() {
+                // This task and both IU buffers remain owned throughout
+                // recovery. No later command may reuse this attachment.
+                self.poisoned = true;
+                *abort = Some(if active.terminal.is_some() {
+                    AbortTaskOutcome::NotAcknowledged(BlockError::Unsupported(
+                        "UAS task already returned terminal status",
+                    ))
+                } else {
+                    self.abort_task(active.lun)
+                });
+                return Some(Err(BlockError::Timeout));
+            }
+            return Some(self.failure(BlockError::Timeout));
+        }
+        None
+    }
+}
+
+/// A begun command: what [`Engine::poll`] has seen of it so far.
+struct Active {
+    lun: [u8; 8],
+    /// The Command IU's bytes.
+    command: usize,
+    length: usize,
+    input: bool,
+    streams: Option<u16>,
+    started: u64,
+    /// The READ or WRITE READY handshake arrived.
+    ready: bool,
+    moved: Option<usize>,
+    terminal: Option<Status>,
 }
 
 fn command_iu(tag: u16, lun: [u8; 8], cdb: &[u8]) -> Vec<u8> {
@@ -2722,6 +2812,36 @@ mod tests {
                 assert!(!engine.poisoned);
             }
         }
+    }
+    #[test]
+    fn begun_commands_end_at_later_polls_without_waiting() {
+        let length = 4096;
+        let mut memory = vec![0u64; 32 * 1024];
+        let (io, mut dma) = model(&mut memory, length, true, Fault::None);
+        let clock = io.clock.clone();
+        let mut engine = Engine::new(io, &mut dma).unwrap();
+        let (lun, cdb) = ([0; 8], rw(true, length));
+        engine.begin(lun, &cdb, Data::In(length)).unwrap();
+        assert!(engine.active.is_some());
+        assert_eq!(
+            engine.begin(lun, &cdb, Data::In(length)),
+            Err(BlockError::Protocol("a UAS command is already running"))
+        );
+        let started = clock.get();
+        let mut polls = 0;
+        let result = loop {
+            polls += 1;
+            assert!(polls < 100);
+            if let Some(result) = engine.poll(None, &mut None) {
+                break result;
+            }
+        };
+        assert_eq!(result.unwrap(), vec![0x6d; length]);
+        // The READY handshake, data and status took several looks, and
+        // none of them waited.
+        assert!(polls > 1);
+        assert_eq!(clock.get(), started);
+        assert!(engine.active.is_none() && !engine.poisoned);
     }
     #[test]
     fn no_data_commands_need_real_terminal_status_and_complete_command_td() {
