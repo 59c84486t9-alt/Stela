@@ -6,26 +6,11 @@ use crate::aarch64::{
     scalable::{ElementSize, VectorLength},
     sve::address::{Count, Destination, Kind, Operand, Saturation},
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
 
-const MOV_EAX_IMM32: u8 = 0xb8;
-const MOV_RAX_IMM32: &[u8] = &[0x48, 0xc7, 0xc0];
-const MOV_EDX_IMM32: u8 = 0xba;
-const MOV_RDX_IMM64: &[u8] = &[0x48, 0xba];
-const ADD_RAX_IMM8: &[u8] = &[0x48, 0x83, 0xc0];
-const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
-const ADD_EAX_IMM8: &[u8] = &[0x83, 0xc0];
-const SUB_EAX_IMM8: &[u8] = &[0x83, 0xe8];
-const ADD_EAX_IMM32: u8 = 0x05;
-const SUB_EAX_IMM32: u8 = 0x2d;
-const ADD_EAX_ECX: &[u8] = &[0x01, 0xc8];
-const SUB_EAX_ECX: &[u8] = &[0x29, 0xc8];
-const CMOVO_EAX_EDX: &[u8] = &[0x0f, 0x40, 0xc2];
-const CMOVB_EAX_EDX: &[u8] = &[0x0f, 0x42, 0xc2];
-const MOVSXD_RAX_EAX: &[u8] = &[0x48, 0x63, 0xc0];
-const REX_W: u8 = 0x48;
 const BITS32: u8 = 32;
 const BITS64: u8 = 64;
 const PATTERN_POW2: u8 = 0;
@@ -69,19 +54,16 @@ pub(super) fn emit_static_scalar(code: &mut Code, operand: &Operand, length: Vec
                 load(code, source);
                 if displacement != 0 {
                     if let Ok(short) = i8::try_from(displacement) {
-                        code.extend(ADD_RAX_IMM8);
-                        code.push(short as u8);
+                        code.asm().alu_imm8(Alu::Add, Size::Qword, Rax, short);
                     } else {
-                        code.extend(ADD_RAX_IMM32);
-                        code.extend(displacement.to_le_bytes());
+                        code.asm()
+                            .alu_accumulator_imm32(Alu::Add, Size::Qword, displacement);
                     }
                 }
             } else if displacement >= 0 {
-                code.push(MOV_EAX_IMM32);
-                code.extend((displacement as u32).to_le_bytes());
+                code.asm().mov_imm32(Rax, displacement as u32);
             } else {
-                code.extend(MOV_RAX_IMM32);
-                code.extend(displacement.to_le_bytes());
+                code.asm().mov_rm_imm32(Size::Qword, Rax, displacement);
             }
             store(code, register);
         }
@@ -90,8 +72,7 @@ pub(super) fn emit_static_scalar(code: &mut Code, operand: &Operand, length: Vec
             multiplier,
         }) => {
             let count = pattern_count(pattern, operand.element, length) * u32::from(multiplier);
-            code.push(MOV_EAX_IMM32);
-            code.extend(count.to_le_bytes());
+            code.asm().mov_imm32(Rax, count);
             store(code, register);
         }
         Kind::Adjust {
@@ -153,66 +134,36 @@ fn scalar_value_adjust(
             _ => unreachable!("invalid scalar saturation width"),
         };
         if bound <= u64::from(u32::MAX) {
-            code.push(MOV_EDX_IMM32);
-            code.extend((bound as u32).to_le_bytes());
+            code.asm().mov_imm32(Rdx, bound as u32);
         } else {
-            code.extend(MOV_RDX_IMM64);
-            code.extend(bound.to_le_bytes());
+            code.asm().mov_imm64(Rdx, bound);
         }
     }
-    if bits == BITS64 {
-        code.push(REX_W);
-    }
-    if let Some(count) = constant_count {
-        if count <= i8::MAX as u32 {
-            code.extend(if subtract { SUB_EAX_IMM8 } else { ADD_EAX_IMM8 });
-            code.push(count as u8);
-        } else {
-            code.push(if subtract {
-                SUB_EAX_IMM32
-            } else {
-                ADD_EAX_IMM32
-            });
-            code.extend(count.to_le_bytes());
-        }
+    let size = if bits == BITS64 {
+        Size::Qword
     } else {
-        code.extend(if subtract { SUB_EAX_ECX } else { ADD_EAX_ECX });
+        Size::Dword
+    };
+    let op = if subtract { Alu::Sub } else { Alu::Add };
+    let mut asm = code.asm();
+    match constant_count {
+        Some(count) if count <= i8::MAX as u32 => asm.alu_imm8(op, size, Rax, count as i8),
+        Some(count) => asm.alu_accumulator_imm32(op, size, count as i32),
+        None => asm.alu(op, size, Rax, Rcx),
     }
     if saturation != Saturation::Wrapping {
-        if bits == BITS64 {
-            code.push(REX_W);
-        }
-        code.extend(if saturation == Saturation::Signed {
-            CMOVO_EAX_EDX
+        let overflow = if saturation == Saturation::Signed {
+            Cond::O
         } else {
-            CMOVB_EAX_EDX
-        });
+            Cond::B
+        };
+        asm.cmov(overflow, size, Rax, Rdx);
     }
     if bits == BITS32 && saturation == Saturation::Signed {
-        code.extend(MOVSXD_RAX_EAX);
+        code.asm().movsxd(Rax, Rax);
     }
 }
 
-const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const MOV_R8_IMM64: &[u8] = &[0x49, 0xb8];
-const AND_RAX_R8: &[u8] = &[0x4c, 0x21, 0xc0];
-const AND_RDX_R8: &[u8] = &[0x4c, 0x21, 0xc2];
-const AND_RAX_RDX: &[u8] = &[0x48, 0x21, 0xd0];
-const SUB_RAX_RDX: &[u8] = &[0x48, 0x29, 0xd0];
-const ADD_RAX_RDX: &[u8] = &[0x48, 0x01, 0xd0];
-const SHR_RDX_IMM8: &[u8] = &[0x48, 0xc1, 0xea];
-const SHR_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe8];
-const IMUL_RAX_R8: &[u8] = &[0x49, 0x0f, 0xaf, 0xc0];
-const POPCNT_RAX_RAX: &[u8] = &[0xf3, 0x48, 0x0f, 0xb8, 0xc0];
-const XOR_ECX_ECX: &[u8] = &[0x31, 0xc9];
-const ADD_RCX_RAX: &[u8] = &[0x48, 0x01, 0xc1];
-const MOV_RAX_RCX: &[u8] = &[0x48, 0x89, 0xc8];
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVQ_RDX_XMM7: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xfa];
-const MOVQ_XMM7_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xf8];
-const MOVQ_RAX_XMM0: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc0];
-const MODRM_REGISTER: u8 = 0xc0;
-const HOST_REGISTER_SHIFT: u8 = 3;
 const QWORD_BITS: usize = 64;
 const QWORD_BYTES: usize = 8;
 const POPCOUNT_PAIRS: u64 = 0x5555_5555_5555_5555;
@@ -232,39 +183,38 @@ const BROADCAST_LOW_DWORD: u8 = 0;
 const DWORD_SIGN_BIT: u32 = 1 << 31;
 
 fn mask_r8(code: &mut Code, mask: u64) {
-    code.extend(MOV_R8_IMM64);
-    code.extend(mask.to_le_bytes());
+    code.asm().mov_imm64(R8, mask);
 }
 
 /// Count low RAX bits. Preserves RCX; clobbers RAX/RDX/R8 and host flags.
 fn population_count(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Popcnt) {
-        code.extend(POPCNT_RAX_RAX);
+        code.asm().popcnt(Size::Qword, Rax, Rax);
         return;
     }
-    code.extend(MOV_RDX_RAX);
-    code.extend(SHR_RDX_IMM8);
-    code.push(1);
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, 1);
     mask_r8(code, POPCOUNT_PAIRS);
-    code.extend(AND_RDX_R8);
-    code.extend(SUB_RAX_RDX);
-    code.extend(MOV_RDX_RAX);
+    let mut asm = code.asm();
+    asm.alu(Alu::And, Size::Qword, Rdx, R8);
+    asm.alu(Alu::Sub, Size::Qword, Rax, Rdx);
+    asm.mov(Size::Qword, Rdx, Rax);
     mask_r8(code, POPCOUNT_QUADS);
-    code.extend(AND_RAX_R8);
-    code.extend(SHR_RDX_IMM8);
-    code.push(2);
-    code.extend(AND_RDX_R8);
-    code.extend(ADD_RAX_RDX);
-    code.extend(MOV_RDX_RAX);
-    code.extend(SHR_RDX_IMM8);
-    code.push(4);
-    code.extend(ADD_RAX_RDX);
+    let mut asm = code.asm();
+    asm.alu(Alu::And, Size::Qword, Rax, R8);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, 2);
+    asm.alu(Alu::And, Size::Qword, Rdx, R8);
+    asm.alu(Alu::Add, Size::Qword, Rax, Rdx);
+    asm.mov(Size::Qword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, 4);
+    asm.alu(Alu::Add, Size::Qword, Rax, Rdx);
     mask_r8(code, POPCOUNT_NIBBLES);
-    code.extend(AND_RAX_R8);
+    code.asm().alu(Alu::And, Size::Qword, Rax, R8);
     mask_r8(code, POPCOUNT_BYTE_SUM);
-    code.extend(IMUL_RAX_R8);
-    code.extend(SHR_RAX_IMM8);
-    code.push(POPCOUNT_SUM_SHIFT);
+    let mut asm = code.asm();
+    asm.imul(Size::Qword, Rax, R8);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rax, POPCOUNT_SUM_SHIFT);
 }
 
 /// Read one or two complete P values, count element-leading bits into RCX.
@@ -280,21 +230,22 @@ fn count_predicate(
     let mask = (0..QWORD_BITS)
         .step_by(element.bytes())
         .fold(0, |mask, bit| mask | (1u64 << bit));
-    code.extend(XOR_ECX_ECX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rcx, Rcx);
     for chunk in 0..length.predicate_bytes().div_ceil(QWORD_BYTES) {
         read_predicate_chunk(code, source, chunk, length);
         if let Some(governing) = governing {
-            code.extend(MOVQ_XMM7_RAX);
+            code.asm().movq_to_xmm(7, Rax);
             read_predicate_chunk(code, governing, chunk, length);
-            code.extend(MOVQ_RDX_XMM7);
-            code.extend(AND_RAX_RDX);
+            let mut asm = code.asm();
+            asm.movq_from_xmm(Rdx, 7);
+            asm.alu(Alu::And, Size::Qword, Rax, Rdx);
         }
         if mask != u64::MAX {
             mask_r8(code, mask);
-            code.extend(AND_RAX_R8);
+            code.asm().alu(Alu::And, Size::Qword, Rax, R8);
         }
         population_count(code, target);
-        code.extend(ADD_RCX_RAX);
+        code.asm().alu(Alu::Add, Size::Qword, Rcx, Rax);
     }
 }
 
@@ -304,23 +255,26 @@ fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
 
 fn broadcast_eax(code: &mut Code, destination: u8, element: ElementSize) {
     if element == ElementSize::Doubleword {
-        Host::MoveGprQword.append(code, TargetCpu::Baseline);
-        code.push(MODRM_REGISTER | destination << HOST_REGISTER_SHIFT);
+        code.asm()
+            .simd(Host::MoveGprQword, destination, Rax, TargetCpu::Baseline);
         packed(code, Host::UnpackLowQword, destination, destination);
     } else {
-        code.extend(MOVD_XMM_EAX);
-        code.push(MODRM_REGISTER | destination << HOST_REGISTER_SHIFT);
+        code.asm().movd_to_xmm(destination, Rax);
         if element == ElementSize::Halfword {
             packed(code, Host::UnpackLowWord, destination, destination);
         }
-        packed(code, Host::ShuffleDword, destination, destination);
-        code.push(BROADCAST_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            destination,
+            Rm::Xmm(destination),
+            BROADCAST_LOW_DWORD,
+            TargetCpu::Baseline,
+        );
     }
 }
 
 fn broadcast_constant(code: &mut Code, value: u32, destination: u8) {
-    code.push(MOV_EAX_IMM32);
-    code.extend(value.to_le_bytes());
+    code.asm().mov_imm32(Rax, value);
     broadcast_eax(code, destination, ElementSize::Word);
 }
 
@@ -340,7 +294,7 @@ fn emit_vector_adjust(code: &mut Code, operand: &Operand, length: VectorLength, 
         unreachable!("vector adjustment");
     };
     let element = operand.element;
-    code.extend(MOV_RAX_RCX);
+    code.asm().mov(Size::Qword, Rax, Rcx);
     broadcast_eax(code, VECTOR_DELTA, element);
     if element == ElementSize::Word && saturation != Saturation::Wrapping {
         let limit = match (saturation, subtract) {
@@ -352,7 +306,12 @@ fn emit_vector_adjust(code: &mut Code, operand: &Operand, length: VectorLength, 
         };
         broadcast_constant(code, limit, VECTOR_LIMIT);
         // EAX still holds limit: threshold is limit -/+ count.
-        code.extend(if subtract { ADD_EAX_ECX } else { SUB_EAX_ECX });
+        code.asm().alu(
+            if subtract { Alu::Add } else { Alu::Sub },
+            Size::Dword,
+            Rax,
+            Rcx,
+        );
         broadcast_eax(code, VECTOR_THRESHOLD, ElementSize::Word);
         if saturation == Saturation::Unsigned {
             broadcast_constant(code, DWORD_SIGN_BIT, VECTOR_BIAS);
@@ -415,24 +374,21 @@ fn saturating_qwords(code: &mut Code, subtract: bool, saturation: Saturation) {
         if lane != 0 {
             ShiftOpcode::RightBytes.emit(code, VECTOR_RESULT, QWORD_BYTES as u8);
         }
-        code.extend(MOVQ_RAX_XMM0);
+        code.asm().movq_from_xmm(Rax, 0);
         scalar_value_adjust(code, BITS64, subtract, saturation, None);
-        Host::MoveGprQword.append(code, TargetCpu::Baseline);
-        code.push(
-            MODRM_REGISTER
-                | (if lane == 0 {
-                    VECTOR_DELTA
-                } else {
-                    VECTOR_LIMIT
-                }) << HOST_REGISTER_SHIFT,
+        code.asm().simd(
+            Host::MoveGprQword,
+            if lane == 0 {
+                VECTOR_DELTA
+            } else {
+                VECTOR_LIMIT
+            },
+            Rax,
+            TargetCpu::Baseline,
         );
     }
     packed(code, Host::UnpackLowQword, VECTOR_DELTA, VECTOR_LIMIT);
 }
-
-const MOV_ECX_IMM32: u8 = 0xb9;
-const PUSH_RCX: u8 = 0x51;
-const POP_RCX: u8 = 0x59;
 
 /// Emit a complete scalable count instruction after the shared entry profile
 /// checks. Clobbers caller-saved GPRs/XMM0..7; keeps RDI/R15 and guest status.
@@ -449,10 +405,9 @@ pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, tar
             pattern,
             multiplier,
         } => {
-            code.push(MOV_ECX_IMM32);
-            code.extend(
-                (pattern_count(pattern, operand.element, length) * u32::from(multiplier))
-                    .to_le_bytes(),
+            code.asm().mov_imm32(
+                Rcx,
+                pattern_count(pattern, operand.element, length) * u32::from(multiplier),
             );
         }
         Count::Predicate(source) => {
@@ -468,30 +423,30 @@ pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, tar
         ),
         Count::Counter { source, vectors } => {
             let bits = length.bytes() * usize::from(vectors);
-            code.extend(XOR_ECX_ECX);
+            code.asm().alu(Alu::Xor, Size::Dword, Rcx, Rcx);
             for chunk in 0..bits.div_ceil(QWORD_BITS) {
                 read_predicate_chunk(code, source, 0, length);
                 // Shared CounterToPredicate uses RCX/R8..11; preserve only the
                 // accumulating count. No helper emits a host CALL here.
-                code.push(PUSH_RCX);
+                code.asm().push(Rcx);
                 emit_counter_chunk(code, chunk, length);
-                code.push(POP_RCX);
+                code.asm().pop(Rcx);
                 let remaining = (bits - chunk * QWORD_BITS).min(QWORD_BITS);
                 let mask = (0..remaining)
                     .step_by(operand.element.bytes())
                     .fold(0, |mask, bit| mask | (1u64 << bit));
                 if mask != u64::MAX {
                     mask_r8(code, mask);
-                    code.extend(AND_RAX_R8);
+                    code.asm().alu(Alu::And, Size::Qword, Rax, R8);
                 }
                 population_count(code, target);
-                code.extend(ADD_RCX_RAX);
+                code.asm().alu(Alu::Add, Size::Qword, Rcx, Rax);
             }
         }
     }
     match (operand.destination, operand.kind) {
         (Destination::Scalar { register, .. }, Kind::Count(_)) => {
-            code.extend(MOV_RAX_RCX);
+            code.asm().mov(Size::Qword, Rax, Rcx);
             store(code, register);
         }
         (Destination::Scalar { .. }, Kind::Adjust { .. }) => emit_scalar_adjust(code, operand),

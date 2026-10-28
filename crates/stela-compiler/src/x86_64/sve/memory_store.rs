@@ -1,7 +1,8 @@
 //! SVE stores through the memory service, one element per request in ascending
 //! order. Sources and loop state live on the stack across calls.
 use super::memory as shared_address;
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, Rax, Rcx, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Disp, Mem, Patch, Size, resolve};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -30,32 +31,8 @@ const PREDICATE_OFFSET: u32 = INDEX_OFFSET + size_of::<u64>() as u32;
 const STACK_ALIGNMENT_BYTES: u32 = 16;
 const HOST_QWORD_BYTES: usize = size_of::<u64>();
 const SOURCE_XMM: u8 = 0;
-const X86_MODRM_DISP32: u8 = 0x84;
-const X86_SIB_RSP: u8 = 0x24;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const MOV_RSP_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const MOV_RAX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const MOV_ECX_RSP_DISP8: &[u8] = &[0x8b, 0x4c, 0x24];
-const MOV_RSP_DISP32_IMM32_QWORD: &[u8] = &[0x48, 0xc7, 0x84, 0x24];
-const ADD_RSP_DISP32_IMM8: &[u8] = &[0x48, 0x83, 0x84, 0x24];
-const LEA_RAX_RSP_RCX_DISP8: &[u8] = &[0x48, 0x8d, 0x44, 0x0c];
-const LEA_RAX_RSP_RCX_DISP32: &[u8] = &[0x48, 0x8d, 0x84, 0x0c];
-const MOV_RSP_DISP8_RAX: &[u8] = &[0x48, 0x89, 0x44, 0x24];
 const _: () = assert!(INDEX_OFFSET <= i8::MAX as u32);
 const _: () = assert!(REQUEST_OFFSET + MEMORY_REQUEST_DATA_OFFSET <= i8::MAX as u32);
-const CMP_RSP_DISP32_IMM32: &[u8] = &[0x48, 0x81, 0xbc, 0x24];
-const BT_RSP_DISP32_RCX: &[u8] = &[0x48, 0x0f, 0xa3, 0x8c, 0x24];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const XOR_R8D_R8D: &[u8] = &[0x45, 0x31, 0xc0];
-const MOVABS_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const AND_RAX_RCX: &[u8] = &[0x48, 0x21, 0xc8];
-const OR_R8_RAX: &[u8] = &[0x49, 0x09, 0xc0];
-const TEST_R8_R8: &[u8] = &[0x4d, 0x85, 0xc0];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JMP_REL32: &[u8] = &[0xe9];
-const JNC_REL32: &[u8] = &[0x0f, 0x83];
-const JB_REL32: &[u8] = &[0x0f, 0x82];
 
 struct Layout {
     source: u32,
@@ -76,44 +53,37 @@ fn align(bytes: u32) -> u32 {
     bytes.div_ceil(STACK_ALIGNMENT_BYTES) * STACK_ALIGNMENT_BYTES
 }
 
+fn stack(offset: u32) -> Mem {
+    Mem::base_disp32(Rsp, offset as i32)
+}
+
 fn store_stack_chunk(code: &mut Code, offset: u32, target: TargetCpu) {
-    Host::StoreUnaligned.append(code, target);
-    code.extend([X86_MODRM_DISP32, X86_SIB_RSP]);
-    code.extend(offset.to_le_bytes());
+    code.asm()
+        .simd(Host::StoreUnaligned, SOURCE_XMM, stack(offset), target);
 }
 
 fn stack_rax(code: &mut Code, offset: u32, store: bool) {
-    code.extend(if store {
-        MOV_RSP_DISP32_RAX
+    let mut asm = code.asm();
+    if store {
+        asm.mov_store(Size::Qword, stack(offset), Rax);
     } else {
-        MOV_RAX_RSP_DISP32
-    });
-    code.extend(offset.to_le_bytes());
+        asm.mov_load(Size::Qword, Rax, stack(offset));
+    }
 }
 
 fn set_index(code: &mut Code) {
-    code.extend(MOV_RSP_DISP32_IMM32_QWORD);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.extend(0_u32.to_le_bytes());
+    code.asm().mov_rm_imm32(Size::Qword, stack(INDEX_OFFSET), 0);
 }
 
 fn load_index(code: &mut Code) {
-    code.extend(MOV_ECX_RSP_DISP8);
-    code.push(INDEX_OFFSET as u8);
+    code.asm()
+        .mov_load(Size::Dword, Rcx, Mem::base_disp8(Rsp, INDEX_OFFSET as i8));
 }
 
 fn add_stack(code: &mut Code, offset: u32, bytes: u8) {
     debug_assert!(bytes <= i8::MAX as u8);
-    code.extend(ADD_RSP_DISP32_IMM8);
-    code.extend(offset.to_le_bytes());
-    code.push(bytes);
-}
-
-fn branch(code: &mut Code, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, stack(offset), bytes as i8);
 }
 
 fn copy_sources(
@@ -144,11 +114,11 @@ fn copy_predicate(code: &mut Code, predicate: u8, destination: u32, length: Vect
 }
 
 /// Snapshot P and branch around all source staging when no element is active.
-fn copy_active_predicate(code: &mut Code, store: &Store, length: VectorLength) -> usize {
+fn copy_active_predicate(code: &mut Code, store: &Store, length: VectorLength) -> Patch {
     let mask = (0..u64::BITS as usize)
         .step_by(store.element.bytes())
         .fold(0_u64, |bits, bit| bits | (1_u64 << bit));
-    code.extend(XOR_R8D_R8D);
+    code.asm().alu(Alu::Xor, Size::Dword, R8, R8);
     for chunk in 0..length.predicate_bytes().div_ceil(HOST_QWORD_BYTES) {
         read_predicate_chunk(code, store.predicate, chunk, length);
         stack_rax(
@@ -157,14 +127,15 @@ fn copy_active_predicate(code: &mut Code, store: &Store, length: VectorLength) -
             true,
         );
         if mask != u64::MAX {
-            code.extend(MOVABS_RCX_IMM64);
-            code.extend(mask.to_le_bytes());
-            code.extend(AND_RAX_RCX);
+            let mut asm = code.asm();
+            asm.mov_imm64(Rcx, mask);
+            asm.alu(Alu::And, Size::Qword, Rax, Rcx);
         }
-        code.extend(OR_R8_RAX);
+        code.asm().alu(Alu::Or, Size::Qword, R8, Rax);
     }
-    code.extend(TEST_R8_R8);
-    branch(code, JZ_REL32)
+    let mut asm = code.asm();
+    asm.test(Size::Qword, R8, R8);
+    asm.jcc(Cond::E)
 }
 
 fn submit(
@@ -181,26 +152,32 @@ fn submit(
     // point at the reached element in the immutable private source snapshot.
     // The request width selects its exact low bytes, including narrowing stores.
     load_index(code);
-    if source <= i8::MAX as u32 {
-        code.extend(LEA_RAX_RSP_RCX_DISP8);
-        code.push(source as u8);
+    let width = if source <= i8::MAX as u32 {
+        Disp::Byte
     } else {
-        code.extend(LEA_RAX_RSP_RCX_DISP32);
-        code.extend(source.to_le_bytes());
-    }
-    code.extend(MOV_RSP_DISP8_RAX);
-    code.push((REQUEST_OFFSET + MEMORY_REQUEST_DATA_OFFSET) as u8);
+        Disp::Dword
+    };
+    let mut asm = code.asm();
+    asm.lea(
+        Size::Qword,
+        Rax,
+        Mem::indexed(Rsp, Rcx, 1, source as i32).with_width(width),
+    );
+    asm.mov_store(
+        Size::Qword,
+        Mem::base_disp8(Rsp, (REQUEST_OFFSET + MEMORY_REQUEST_DATA_OFFSET) as i8),
+        Rax,
+    );
     memory::call(code, REQUEST_OFFSET);
     failures.push(memory::branch_failed(code));
 }
 
 fn loop_end(code: &mut Code, step: u8, limit: u32, start: usize) {
     add_stack(code, INDEX_OFFSET, step);
-    code.extend(CMP_RSP_DISP32_IMM32);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.extend(limit.to_le_bytes());
-    let repeat = branch(code, JB_REL32);
-    memory::patch_branch(code, repeat, start);
+    let mut asm = code.asm();
+    asm.alu_imm32(Alu::Cmp, Size::Qword, stack(INDEX_OFFSET), limit as i32);
+    let repeat = asm.jcc(Cond::B);
+    resolve(code, repeat, start);
 }
 
 fn store_loop(
@@ -213,9 +190,9 @@ fn store_loop(
 ) {
     let start = code.len();
     load_index(code);
-    code.extend(BT_RSP_DISP32_RCX);
-    code.extend(PREDICATE_OFFSET.to_le_bytes());
-    let inactive = branch(code, JNC_REL32);
+    let mut asm = code.asm();
+    asm.bt(Size::Qword, stack(PREDICATE_OFFSET), Rcx);
+    let inactive = asm.jcc(Cond::Ae);
     let descriptor = descriptor(store.address, store.non_temporal, true);
     for member in 0..store.register_count {
         let source = layout.source + u32::from(member) * length.bytes() as u32;
@@ -229,16 +206,15 @@ fn store_loop(
         );
         add_stack(code, ADDRESS_OFFSET, store.memory_element.bytes() as u8);
     }
-    let active_done = branch(code, JMP_REL32);
-    let inactive_start = code.len();
-    memory::patch_branch(code, inactive, inactive_start);
+    let mut asm = code.asm();
+    let active_done = asm.jmp();
+    asm.bind(inactive);
     add_stack(
         code,
         ADDRESS_OFFSET,
         store.memory_element.bytes() as u8 * store.register_count,
     );
-    let next_lane = code.len();
-    memory::patch_branch(code, active_done, next_lane);
+    code.asm().bind(active_done);
     loop_end(
         code,
         store.element.bytes() as u8,
@@ -333,7 +309,7 @@ pub(crate) fn emit(
         Operand::Prefetch(_) => {
             // Hint_Prefetch has a documented implementation-defined ignored
             // behavior. The shared dispatcher already checked the mode.
-            code.extend(XOR_EAX_EAX);
+            code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
             return;
         }
         Operand::Store(store) => (
@@ -349,8 +325,8 @@ pub(crate) fn emit(
         ),
     };
     let layout = Layout::new(length, source_bytes);
-    code.extend(SUB_RSP_IMM32);
-    code.extend(layout.bytes.to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Sub, Size::Qword, Rsp, layout.bytes as i32);
     memory::begin(code);
     let mut failures = Vec::new();
     if let Some(failure) = shared_address::check_sp(code, address.base, pc) {
@@ -387,16 +363,16 @@ pub(crate) fn emit(
         }
         Operand::Prefetch(_) => unreachable!("prefetch returned before stack allocation"),
     };
-    let success = code.len();
+    let mut asm = code.asm();
     if let Some(empty) = empty {
-        memory::patch_branch(code, empty, success);
+        asm.bind(empty);
     }
-    code.extend(XOR_EAX_EAX);
+    asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     for failure in failures {
         memory::patch_branch(code, failure, cleanup);
     }
-    code.extend(ADD_RSP_IMM32);
-    code.extend(layout.bytes.to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Add, Size::Qword, Rsp, layout.bytes as i32);
     shared_address::return_if_failed(code);
 }
