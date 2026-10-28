@@ -209,6 +209,12 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         // tables/local record remain pinned through every native call and park.
         let mut owner =
             unsafe { host::install(config) }.map_err(|_| "AP private host installation failed")?;
+        let apic = u32::try_from(argument.processor.apic_id).map_err(|_| "AP APIC ID")?;
+        host::join_shootdown(
+            crate::native_mmio::PROCESSORS
+                .slot(apic)
+                .ok_or("AP missing from the aperture's processors")?,
+        );
         super::context_check::check(&mut owner.host())?;
         if argument.fp_qualification {
             host::fp_diagnostic::check(&mut owner.host())?;
@@ -244,6 +250,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             argument.status.store(READY, Ordering::Release);
             let mut worker = None;
             loop {
+                crate::native_mmio::shootdown::service();
                 if argument.mailbox.poll(&mut owner, &mut worker) {
                     continue;
                 }
@@ -509,6 +516,11 @@ pub(crate) unsafe fn start(
             handoff.root,
         ));
         crate::output::flush_log();
+        // It may translate through the MMIO aperture from its first fetch,
+        // so it shares the aperture's shootdowns from now on.
+        crate::native_mmio::PROCESSORS
+            .join(destination)
+            .ok_or(StartupFailure::Resources)?;
         // SAFETY: validated physical AP and pinned complete startup resources.
         unsafe { sender.startup(destination, vector, handoff.tsc_hz) }
             .map_err(StartupFailure::Delivery)?;

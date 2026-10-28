@@ -7,6 +7,7 @@
 mod capture;
 mod ecam;
 mod shared;
+pub(crate) mod shootdown;
 use ecam::RootWindow;
 pub(crate) mod diagnostic;
 mod platform;

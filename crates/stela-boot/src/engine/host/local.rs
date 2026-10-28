@@ -7,7 +7,7 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 #[repr(C, align(64))]
@@ -22,6 +22,10 @@ pub(crate) struct Local {
     xstate_active: UnsafeCell<[u64; 2]>,
     helper_rsp: UnsafeCell<u64>,
     doorbells: AtomicU64,
+    /// This processor's aperture shootdown slot plus one, zero when it has
+    /// none, and the latest shootdown generation it has flushed.
+    shootdown_slot: AtomicUsize,
+    shootdown_flushed: AtomicU64,
     worker: UnsafeCell<Option<stela_runtime::machine::engine::publication::WorkerId>>,
     declarations: UnsafeCell<Option<stela_runtime::NativeCpuOwner>>,
 }
@@ -38,6 +42,8 @@ impl Local {
             xstate_active: UnsafeCell::new([0; 2]),
             helper_rsp: UnsafeCell::new(0),
             doorbells: AtomicU64::new(0),
+            shootdown_slot: AtomicUsize::new(0),
+            shootdown_flushed: AtomicU64::new(0),
             worker: UnsafeCell::new(None),
             declarations: UnsafeCell::new(None),
         }
@@ -348,6 +354,13 @@ pub(super) fn doorbell_counter() -> &'static AtomicU64 {
     // SAFETY: descriptor/local storage is permanently pinned through parked
     // NMI/MCE entry. Only the current physical processor selects this record.
     unsafe { &(*current()).doorbells }
+}
+
+/// This processor's aperture shootdown slot and the generation it flushed.
+pub(super) fn shootdown() -> (&'static AtomicUsize, &'static AtomicU64) {
+    // SAFETY: as in doorbell_counter.
+    let local = unsafe { &*current() };
+    (&local.shootdown_slot, &local.shootdown_flushed)
 }
 
 pub(super) fn doorbell() {

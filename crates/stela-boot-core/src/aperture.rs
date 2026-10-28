@@ -1,9 +1,10 @@
 //! The rules the native MMIO aperture's owned mappings rely on: the processor
 //! controls that make its uncached leaves uncached on Intel and AMD alike,
 //! which host processors and roots may use it, how a retired translation
-//! leaves the TLB, and where a PCI BAR sits in the CPU's physical space.
-//! Pure functions over observed register values and firmware descriptions.
-use core::sync::atomic::{AtomicBool, Ordering};
+//! leaves every processor's TLB, and where a PCI BAR sits in the CPU's
+//! physical space. Pure functions over observed register values and firmware
+//! descriptions, and the shootdown's generation bookkeeping.
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const CR0_WRITE_PROTECT: u64 = 1 << 16;
 const CR4_LA57: u64 = 1 << 12;
@@ -95,36 +96,111 @@ pub fn shares_aperture(current: u64, loader: u64) -> bool {
     current & 1 != 0 && current == loader
 }
 
-/// Which processors may hold aperture translations. Until [`share`] only the
-/// boot processor runs, so a retirement's local flush is complete; after it
-/// the other host processors may hold the translations, and with no
-/// cross-processor shootdown a retirement refuses and the mapping stays.
+/// The most processors that may share the aperture, MADT's 8-bit APIC IDs
+/// and x2APIC's beyond them alike: the boot's processor cap.
+pub const MAX_PROCESSORS: usize = 256;
+
+/// Which other host processors may hold aperture translations, and how far
+/// each has flushed. Until one [`join`]s, only the boot processor runs and a
+/// retirement's local flush is complete. After that a retirement
+/// [`request`]s a generation, interrupts every [`sharer`], and waits until
+/// each has [`acknowledge`]d it: a processor acknowledges a generation once
+/// it has flushed every aperture translation older than the request.
 /// Installation needs no remote flush, since processors do not cache
-/// not-present entries, and the authority's lock orders installations.
+/// not-present entries, and the authority's lock orders installations and
+/// retirements.
 ///
-/// [`share`]: Self::share
-#[derive(Debug, Default)]
+/// [`join`]: Self::join
+/// [`request`]: Self::request
+/// [`sharer`]: Self::sharers
+/// [`acknowledge`]: Self::acknowledge
+#[derive(Debug)]
 pub struct Processors {
-    shared: AtomicBool,
+    joined: AtomicUsize,
+    requested: AtomicU64,
+    apic: [AtomicU32; MAX_PROCESSORS],
+    acknowledged: [AtomicU64; MAX_PROCESSORS],
+}
+
+impl Default for Processors {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Processors {
     pub const fn new() -> Self {
         Self {
-            shared: AtomicBool::new(false),
+            joined: AtomicUsize::new(0),
+            requested: AtomicU64::new(0),
+            apic: [const { AtomicU32::new(0) }; MAX_PROCESSORS],
+            acknowledged: [const { AtomicU64::new(0) }; MAX_PROCESSORS],
         }
     }
 
-    /// The other host processors start: from now on they may translate
-    /// through the aperture.
-    pub fn share(&self) {
-        self.shared.store(true, Ordering::Release);
+    /// The processor with `apic` ID starts and may translate through the
+    /// aperture from now on; its slot, or `None` when every slot is taken.
+    /// Joins are made by the boot processor, before each one starts.
+    pub fn join(&self, apic: u32) -> Option<usize> {
+        let slot = self.joined.load(Ordering::Relaxed);
+        if slot == MAX_PROCESSORS {
+            return None;
+        }
+        self.apic[slot].store(apic, Ordering::Relaxed);
+        self.acknowledged[slot].store(self.requested.load(Ordering::Acquire), Ordering::Relaxed);
+        self.joined.store(slot + 1, Ordering::Release);
+        Some(slot)
     }
 
-    /// Whether a retired translation can be flushed from every processor
-    /// that may hold it.
-    pub fn may_retire(&self) -> bool {
-        !self.shared.load(Ordering::Acquire)
+    /// Whether only the boot processor may hold aperture translations.
+    pub fn alone(&self) -> bool {
+        self.joined.load(Ordering::Acquire) == 0
+    }
+
+    /// The slot of the processor with `apic` ID.
+    pub fn slot(&self, apic: u32) -> Option<usize> {
+        (0..self.joined.load(Ordering::Acquire))
+            .find(|&slot| self.apic[slot].load(Ordering::Relaxed) == apic)
+    }
+
+    /// Each joined processor's slot and APIC ID.
+    pub fn sharers(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
+        (0..self.joined.load(Ordering::Acquire))
+            .map(|slot| (slot, self.apic[slot].load(Ordering::Relaxed)))
+    }
+
+    /// Publish a flush request after the retired entries are cleared; the
+    /// generation each sharer must acknowledge. Interrupts are sent after
+    /// this store, so a processor woken by one sees the request.
+    pub fn request(&self) -> u64 {
+        self.requested.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The latest requested generation.
+    pub fn requested(&self) -> u64 {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    /// Slot `slot`'s processor flushed every translation older than
+    /// `generation`'s request.
+    pub fn acknowledge(&self, slot: usize, generation: u64) {
+        if let Some(acknowledged) = self.acknowledged.get(slot) {
+            acknowledged.fetch_max(generation, Ordering::Release);
+        }
+    }
+
+    /// The generation slot `slot`'s processor last acknowledged.
+    pub fn acknowledged(&self, slot: usize) -> u64 {
+        self.acknowledged
+            .get(slot)
+            .map_or(0, |acknowledged| acknowledged.load(Ordering::Acquire))
+    }
+
+    /// Whether every sharer but `except` (the retiring processor's slot)
+    /// acknowledged `generation`.
+    pub fn flushed(&self, generation: u64, except: Option<usize>) -> bool {
+        self.sharers()
+            .all(|(slot, _)| Some(slot) == except || self.acknowledged(slot) >= generation)
     }
 }
 
@@ -249,11 +325,39 @@ mod tests {
     }
 
     #[test]
-    fn retirement_refuses_once_other_processors_may_translate() {
+    fn a_retirement_waits_for_every_sharer_but_the_retiring_one() {
         let processors = Processors::new();
-        assert!(processors.may_retire());
-        processors.share();
-        assert!(!processors.may_retire());
+        assert!(processors.alone());
+        assert!(processors.flushed(processors.request(), None));
+        let a = processors.join(4).unwrap();
+        let b = processors.join(9).unwrap();
+        assert!(!processors.alone());
+        assert_eq!(processors.slot(9), Some(b));
+        assert_eq!(processors.slot(5), None);
+        // A processor that joins has seen every earlier request.
+        assert!(processors.flushed(processors.requested(), None));
+        let generation = processors.request();
+        assert!(!processors.flushed(generation, Some(b)));
+        processors.acknowledge(a, generation);
+        assert!(processors.flushed(generation, Some(b)));
+        assert!(!processors.flushed(generation, None));
+        processors.acknowledge(b, generation);
+        processors.acknowledge(b, generation - 1);
+        assert_eq!(processors.acknowledged(b), generation);
+        assert!(processors.flushed(generation, None));
+        assert_eq!(
+            processors.sharers().collect::<alloc::vec::Vec<_>>(),
+            [(a, 4), (b, 9)]
+        );
+    }
+
+    #[test]
+    fn joins_stop_at_the_processor_cap() {
+        let processors = Processors::new();
+        for apic in 0..MAX_PROCESSORS as u32 {
+            assert!(processors.join(apic).is_some());
+        }
+        assert_eq!(processors.join(1000), None);
     }
 
     #[test]

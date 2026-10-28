@@ -10,7 +10,8 @@
 //! ([`crate::native_irq`]); mapping and unmapping refuse in every handler.
 //! Installations are
 //! serialized by the platform's lock and need no remote flush; once the other
-//! processors start, retirement refuses ([`aperture::Processors`]).
+//! processors start, a retirement shoots the translation down on each of them
+//! ([`super::shootdown`]).
 use super::*;
 use super::{
     capture::LEAVES,
@@ -104,6 +105,8 @@ struct Platform {
     captured: Arc<Captured>,
     space: AddressSpace,
     flush: Flush,
+    /// The TSC rate the shootdown's wait is measured in.
+    tsc_hz: u64,
     /// The loader root's top-level entry for the aperture, and its slot.
     loader_entry: u64,
     slot: usize,
@@ -307,9 +310,6 @@ unsafe impl MappingPlatform for Platform {
             return Err(Error::Unavailable);
         }
         self.check_context(request.address_space)?;
-        if !PROCESSORS.may_retire() {
-            return Err(Error::Busy);
-        }
         let mut guard = self.lock();
         let mappings = guard.mappings();
         let at = mappings
@@ -337,6 +337,11 @@ unsafe impl MappingPlatform for Platform {
             unsafe { self.entry(size, first + offset)?.write_volatile(0) };
         }
         self.invalidate(size, first, count);
+        // A processor that did not acknowledge may still translate through
+        // the slots, so they stay allocated and the mapping is refused.
+        if !super::shootdown::retire(self.tsc_hz) {
+            return Err(Error::Busy);
+        }
         mappings.swap_remove(at);
         Ok(())
     }
@@ -360,7 +365,7 @@ pub(crate) struct Source {
 
 impl Source {
     /// Activate the authority on the boot processor, after `host::install`
-    /// and before the other host processors start.
+    /// and before the other host processors start; the TSC runs at `tsc_hz`.
     ///
     /// # Safety
     /// `wire` is this boot's sealed capture; `owner` is the boot processor's
@@ -368,8 +373,9 @@ impl Source {
     pub(crate) unsafe fn activate(
         wire: &'static Wire,
         owner: &mut HostOwner,
+        tsc_hz: u64,
     ) -> Result<Self, Error> {
-        if !wire.valid() || !PROCESSORS.may_retire() {
+        if !wire.valid() || !PROCESSORS.alone() {
             return Err(Error::Unavailable);
         }
         let (catalog, snapshot) = {
@@ -411,6 +417,7 @@ impl Source {
             captured: Arc::new(Captured { wire }),
             space,
             flush,
+            tsc_hz,
             loader_entry,
             slot,
             held: AtomicBool::new(false),
@@ -573,6 +580,35 @@ impl Source {
 }
 
 impl Source {
+    /// Map bus 0's first configuration page, read it, and retire the mapping
+    /// after the other host processors started: the retirement's shootdown
+    /// generation, which every processor acknowledged.
+    ///
+    /// # Safety
+    /// The caller owns bus 0's configuration space.
+    pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
+        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
+        let window = windows.first().ok_or(Error::Unavailable)?;
+        // SAFETY: forwarded from the caller.
+        let (_, resource) = unsafe { self.claim_bus(window.segment, window.start_bus) }?;
+        let mut mapping = self.authority.map(
+            resource,
+            0,
+            PAGE as usize,
+            CacheAttribute::Uncached,
+            Protection::ReadOnly,
+        )?;
+        let identity = mapping.read32(0)?;
+        let before = PROCESSORS.requested();
+        // SAFETY: the read above was the mapping's only use.
+        unsafe { mapping.retire() }?;
+        let generation = PROCESSORS.requested();
+        if identity == u32::MAX || generation == before || PROCESSORS.alone() {
+            return Err(Error::InvalidPlatformReply);
+        }
+        Ok(generation)
+    }
+
     /// Reserve the registers at `span`, which an ACPI device's `_CRS` names,
     /// when the final memory map leaves them outside RAM and they avoid the
     /// local APIC. The authority refuses a span that overlaps another

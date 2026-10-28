@@ -953,9 +953,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         None => (None, None, None, None),
     };
     let worker_ram = ram;
-    // From here the other host processors may translate through the MMIO
-    // aperture, so its mappings stay for the boot.
-    crate::native_mmio::PROCESSORS.share();
     crate::status::begin("Starting the other host processors");
     // SAFETY: the retained physical inventory and loader-owned reservations
     // were validated before any SIPI; the BSP Host is installed, guest entry
@@ -1021,6 +1018,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             }
             .unwrap_or_else(|error| output::fatal(error));
             output::terminate(0x10);
+        }
+        if let Some(mmio) = &native_mmio {
+            // SAFETY: the bootstrap check owns the host's devices; bus 0's
+            // first function is only read here.
+            let generation = unsafe { mmio.check_shootdown() }.unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-shootdown FAIL {error:?}\n"));
+                output::fatal("the MMIO aperture's shootdown failed")
+            });
+            output::arguments(format_args!(
+                "CHECK native-shootdown PASS generation={generation} processors={}\n",
+                executors.processors().len()
+            ));
         }
         output::arguments(format_args!(
             "CHECK native-bootstrap PASS physical_cores={} owned_APs={}; guest SMP execution unqualified\n",
@@ -1806,7 +1815,9 @@ fn start_platform(handoff: &Handoff, host_owner: &mut host::HostOwner) -> Platfo
     // SAFETY: this boot's capture, on the installed boot processor before
     // the other host processors start.
     let native_mmio = unsafe { crate::native_mmio::captured(handoff) }
-        .and_then(|wire| unsafe { crate::native_mmio::Source::activate(wire, host_owner) })
+        .and_then(|wire| unsafe {
+            crate::native_mmio::Source::activate(wire, host_owner, handoff.tsc_hz)
+        })
         .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
         .inspect_err(|error| {
             output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));

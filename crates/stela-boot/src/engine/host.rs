@@ -1287,6 +1287,29 @@ pub(crate) fn undelivered_doorbells() -> u64 {
     UNDELIVERED.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Join this processor to the aperture shootdown at `slot`.
+pub(crate) fn join_shootdown(slot: usize) {
+    local::shootdown()
+        .0
+        .store(slot + 1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// This processor's aperture shootdown slot and the generation it flushed.
+pub(crate) fn shootdown() -> (Option<usize>, &'static core::sync::atomic::AtomicU64) {
+    let (slot, flushed) = local::shootdown();
+    (
+        slot.load(core::sync::atomic::Ordering::Relaxed)
+            .checked_sub(1),
+        flushed,
+    )
+}
+
+/// The aperture shootdown's interrupt: flush, acknowledge, EOI.
+pub(crate) fn shootdown_interrupt() {
+    crate::native_mmio::shootdown::service();
+    state().apic.eoi();
+}
+
 pub(crate) fn doorbell_counter() -> &'static core::sync::atomic::AtomicU64 {
     local::doorbell_counter()
 }
@@ -1299,6 +1322,7 @@ pub fn stray_interrupt(_vector: u8) {
 
 /// Complete one real owner-local native return, retaining exact fault GPRs.
 fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit {
+    crate::native_mmio::shootdown::service();
     let state = state();
     state.native = false;
     state.native_ticks += rdtsc() - entered;
@@ -1798,6 +1822,7 @@ impl Host for BareHost<'_> {
     }
 
     fn wait_for_interrupt(&mut self) {
+        crate::native_mmio::shootdown::service();
         local::clear_interrupt();
         // The wait sends queued serial output until an interrupt comes,
         // opening a window for one after each burst.
