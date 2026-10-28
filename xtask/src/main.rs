@@ -80,6 +80,7 @@ mod dist;
 mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_platform;
+mod links;
 mod pages;
 mod restore_dry_run;
 mod tools;
@@ -102,6 +103,9 @@ enum Task {
     },
     /// Build the release `stela` with its matching `stela.efi` embedded.
     Dist,
+    /// Check the Markdown files' links and paths and the `cargo xtask` tasks
+    /// the tree names.
+    Links,
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
@@ -130,6 +134,7 @@ fn main() -> ExitCode {
     let result = match Cli::parse().task {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
+        Task::Links => links::run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]

@@ -180,8 +180,8 @@ impl TargetCpu {
     pub const Avx2Complete: Self = Self::Sse42Complete.with_fma().with_f16c().with_avx2();
     /// [`Self::Avx2Complete`] with AVX-512F.
     pub const Avx512Complete: Self = Self::Avx2Complete.with_avx512f();
-    /// The host tiers whose data-independent-timing lowerings `cargo xtask
-    /// dit-audit` checks, largest first.
+    /// The host tiers whose data-independent-timing lowerings are audited,
+    /// largest first.
     pub const DATA_INDEPENDENT_TIMING_TIERS: [Self; 3] = [
         Self::Avx512Complete,
         Self::Avx2Complete,
