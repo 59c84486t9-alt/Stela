@@ -1,9 +1,6 @@
 //! Exclusive stopped PCI requester retained by its VT-d context. A numeric RID
 //! or a cache-policy bit never grants this ownership or DMA coherency.
-#[cfg(not(test))]
-use super::vtd::VtdError;
-#[cfg(test)]
-use crate::boot_vtd::VtdError;
+use crate::vtd::VtdError;
 use stela_drivers::bus::pci::{CapabilityError, ConfigSpace, Function};
 
 pub struct RequesterClaim {
@@ -13,7 +10,7 @@ pub struct RequesterClaim {
 enum Owner {
     Pci(Function),
     #[cfg(test)]
-    Model(ModelOwner),
+    Model(#[expect(dead_code, reason = "dropped with the claim, counting its release")] ModelOwner),
 }
 #[cfg(test)]
 struct ModelOwner(alloc::sync::Arc<core::sync::atomic::AtomicU64>);

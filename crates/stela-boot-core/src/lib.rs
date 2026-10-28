@@ -16,6 +16,10 @@ pub mod pe;
 pub mod ram;
 pub mod record;
 pub mod remapping;
+#[cfg(target_arch = "x86_64")]
+pub mod requester;
 pub mod storage;
 pub mod topology;
+#[cfg(target_arch = "x86_64")]
+pub mod vtd;
 pub mod worker_bindings;

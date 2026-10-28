@@ -4,8 +4,7 @@ pub(crate) mod diagnostic;
 pub use stela_boot_core::dmar;
 pub use stela_boot_core::firmware_state;
 mod isolation_diagnostic;
-pub mod requester;
-pub mod vtd;
+pub use stela_boot_core::{requester, vtd};
 
 use crate::output;
 use firmware_state::{Found, Kind, TableError, Units, Window};

@@ -23,10 +23,7 @@ use stela_drivers::bus::dma::{
     pages::DmaPages,
 };
 
-#[cfg(not(test))]
-use super::requester::RequesterClaim;
-#[cfg(test)]
-use crate::boot_requester::RequesterClaim;
+use crate::requester::RequesterClaim;
 
 const PAGE: usize = 4096;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
@@ -332,7 +329,7 @@ impl<R: Registers> Drop for Guard<'_, R> {
     }
 }
 
-pub(super) fn publish() {
+pub fn publish() {
     // SAFETY: MFENCE is in the x86-64 baseline. The default memory clobber
     // prevents compiler motion; the coherent platform makes actual WB stores
     // visible before subsequent UC register/descriptor publication.
