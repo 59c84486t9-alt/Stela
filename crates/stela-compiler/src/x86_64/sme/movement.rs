@@ -37,17 +37,64 @@ fn za(displacement: usize) -> Mem {
     Mem::base_disp32(ZA, displacement as i32)
 }
 
+/// Why an SME movement cannot be emitted in the supplied execution context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Error {
+    StreamingLength {
+        required_bits: usize,
+        actual_bits: usize,
+    },
+    RequiresHaltedDebug,
+    DebugOperand {
+        kind: Kind,
+    },
+    DebugRegisterLane {
+        register: u8,
+        lane: u8,
+    },
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::StreamingLength {
+                required_bits,
+                actual_bits,
+            } => write!(
+                f,
+                "SME movement requires {required_bits} streaming bits, got {actual_bits}"
+            ),
+            Self::RequiresHaltedDebug => {
+                f.write_str("MOVT GPR/ZT0 requires a halted debug execution context")
+            }
+            Self::DebugOperand { kind } => write!(
+                f,
+                "halted MOVT emitter requires TableGpr operands, got {kind:?}"
+            ),
+            Self::DebugRegisterLane { register, lane } => write!(
+                f,
+                "invalid halted MOVT register {register} or table lane {lane}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
+
 pub(crate) fn emit(
     code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
-) -> Result<(), &'static str> {
+) -> Result<(), Error> {
     if length.bits() < usize::from(operand.requirements.minimum_current_svl_bits) {
-        return Err("SME movement requires a larger current streaming vector length");
+        return Err(Error::StreamingLength {
+            required_bits: usize::from(operand.requirements.minimum_current_svl_bits),
+            actual_bits: length.bits(),
+        });
     }
     if matches!(operand.kind, Kind::TableGpr { .. }) {
-        return Err("MOVT GPR/ZT0 requires a halted debug execution context");
+        return Err(Error::RequiresHaltedDebug);
     }
     match operand.kind {
         Kind::Tile {
@@ -225,7 +272,7 @@ pub(crate) fn emit_debug_table_gpr(
     code: &mut Code,
     operand: &Operand,
     recipe: crate::scalable_context::debug_movement::Recipe,
-) -> Result<(), &'static str> {
+) -> Result<(), Error> {
     use crate::scalable_context::debug_movement::Recipe;
     const ZERO_REGISTER: u8 = 31;
     const TABLE_LANES: u8 = 8;
@@ -235,10 +282,10 @@ pub(crate) fn emit_debug_table_gpr(
         lane,
     } = operand.kind
     else {
-        return Err("halted MOVT emitter requires TableGpr operands");
+        return Err(Error::DebugOperand { kind: operand.kind });
     };
     if register > ZERO_REGISTER || lane >= TABLE_LANES {
-        return Err("invalid halted MOVT operands");
+        return Err(Error::DebugRegisterLane { register, lane });
     }
     if direction == Direction::FromZa && register == ZERO_REGISTER {
         return Ok(());
@@ -492,7 +539,11 @@ mod tests {
         ] {
             let operand = decode(word).unwrap();
             let mut code = Code::from(vec![0x90]);
-            assert!(emit(&mut code, &operand, length, TargetCpu::Baseline).is_err());
+            let error = emit(&mut code, &operand, length, TargetCpu::Baseline).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::StreamingLength { .. } | Error::RequiresHaltedDebug
+            ));
             assert_eq!(code, [0x90]);
         }
     }

@@ -120,7 +120,7 @@ pub fn prepare(
     }
     let native_offset = code.len();
     x86_64::sme::movement::emit_debug_table_gpr(&mut code, &operand, recipe)
-        .map_err(|error| CompileError(error.into()))?;
+        .map_err(|error| CompileError(alloc::format!("{error}")))?;
     let mut asm = code.asm();
     if !discarded {
         asm.pop(Gpr::R15);
