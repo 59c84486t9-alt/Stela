@@ -123,16 +123,26 @@ pub(super) fn payload(arguments: &Run, paths: &Paths, options: String) -> Result
     Ok(install)
 }
 
+/// EFI loader, guest source bytes and boot options written to a volume.
+pub(super) struct VolumeContents<'a> {
+    pub(super) image: &'a Path,
+    pub(super) bytes: Vec<u8>,
+    pub(super) options: &'a str,
+}
+
 /// Write the boot volume: the application, `source.bin`, `stela.cfg` and
 /// what the run adds, or only the output directory for a `--usb-image`.
 /// Returns the FAT32 image of a volume too large for QEMU's directory one.
 pub(super) fn write_volume(
     arguments: &Run,
     paths: &Paths,
-    image: &Path,
-    bytes: Vec<u8>,
-    options: &str,
+    contents: VolumeContents<'_>,
 ) -> Result<Option<PathBuf>> {
+    let VolumeContents {
+        image,
+        bytes,
+        options,
+    } = contents;
     let volume = &paths.volume;
     if arguments.usb_image.is_some() {
         fs::create_dir_all(&paths.output)?;
@@ -176,15 +186,21 @@ pub(super) fn write_volume(
     })
 }
 
+/// Boot-volume image selection and checkpoint format.
+pub(super) struct VolumeOptions<'a> {
+    pub(super) fat: Option<&'a Path>,
+    pub(super) format: &'a str,
+}
+
 /// The boot volume's drive: the USB image, the FAT32 image or the
 /// directory itself, on a virtio disk unless the USB carries it.
 pub(super) fn attach_volume(
     arguments: &Run,
     paths: &Paths,
-    fat: Option<&Path>,
-    format: &str,
+    options: VolumeOptions<'_>,
     command: &mut Process,
 ) {
+    let VolumeOptions { fat, format } = options;
     // A USB's setup writes the boot log.
     let access = if arguments.usb_image.is_some() {
         "readonly=off,file=fat:rw:"
@@ -213,14 +229,20 @@ pub(super) fn attach_volume(
     }
 }
 
+/// Diagnostic disks and optional Preboot image attached to a run.
+pub(super) struct DiskImages<'a> {
+    pub(super) disks: &'a [disks::Disk],
+    pub(super) preboot: Option<&'a Preboot>,
+}
+
 /// `--storage-check`'s disks, the Preboot disk and the staging target.
 pub(super) fn attach_disks(
     arguments: &Run,
     paths: &Paths,
-    disks: &[disks::Disk],
-    preboot: Option<&Preboot>,
+    images: DiskImages<'_>,
     command: &mut Process,
 ) {
+    let DiskImages { disks, preboot } = images;
     for (index, disk) in disks.iter().enumerate() {
         disk.attach(index, command);
     }

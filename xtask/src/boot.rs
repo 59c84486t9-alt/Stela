@@ -709,21 +709,60 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         arguments.host_firmware.is_none() || system,
         "host firmware qualification requires --scenario system-kernel or another --system boot"
     );
-    let fat = storage::write_volume(&arguments, &paths, &image, bytes, &options)?;
+    let fat = storage::write_volume(
+        &arguments,
+        &paths,
+        storage::VolumeContents {
+            image: &image,
+            bytes,
+            options: &options,
+        },
+    )?;
 
     let qemu = qemu()?;
     let firmware = firmware(&qemu)?;
-    let (variables, format) = machine::variables(&arguments, &qemu, &firmware, &paths.output)?;
+    let (variables, format) = machine::variables(
+        &arguments,
+        machine::VariableStoreOptions {
+            qemu: &qemu,
+            firmware: &firmware,
+            output: &paths.output,
+        },
+    )?;
     // A USB image carries the boot bundle that `stela setup` wrote.
     let bundle = arguments.bundle.is_some() || preboot.is_some() || arguments.usb_image.is_some();
     // QEMU numbers PCI devices in the order they are given, so the parts
     // attach theirs in a fixed order.
     let mut command = machine::command(
-        &arguments, &qemu, &firmware, &variables, format, system, bundle,
+        &arguments,
+        machine::MachineOptions {
+            qemu: &qemu,
+            firmware: &firmware,
+            variables: &variables,
+            format,
+            system,
+            bundle,
+        },
     );
-    storage::attach_volume(&arguments, &paths, fat.as_deref(), format, &mut command);
+    storage::attach_volume(
+        &arguments,
+        &paths,
+        storage::VolumeOptions {
+            fat: fat.as_deref(),
+            format,
+        },
+        &mut command,
+    );
     machine::attach_exit(&arguments, &paths.output, &mut command);
-    storage::attach_disks(&arguments, &paths, &disks, preboot.as_ref(), &mut command);
+    storage::attach_disks(
+        &arguments,
+        &paths,
+        storage::DiskImages {
+            disks: &disks,
+            preboot: preboot.as_ref(),
+        },
+        &mut command,
+    );
     machine::attach_display(&arguments, bundle, &mut command);
     network::attach(&arguments, &paths.output, &mut command)?;
     machine::attach_usb(&arguments, &mut command);

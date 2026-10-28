@@ -11,15 +11,25 @@ use std::{
     process::Command as Process,
 };
 
+/// Paths used to create or reopen QEMU firmware variables.
+pub(super) struct VariableStoreOptions<'a> {
+    pub(super) qemu: &'a Path,
+    pub(super) firmware: &'a Path,
+    pub(super) output: &'a Path,
+}
+
 /// The firmware's variable store and its format. A qcow2 stick keeps its
 /// variables in a qcow2 of its own, so `savevm` can checkpoint the whole
 /// machine.
 pub(super) fn variables(
     arguments: &Run,
-    qemu: &Path,
-    firmware: &Path,
-    output: &Path,
+    options: VariableStoreOptions<'_>,
 ) -> Result<(PathBuf, &'static str)> {
+    let VariableStoreOptions {
+        qemu,
+        firmware,
+        output,
+    } = options;
     let checkpointed = arguments
         .usb_image
         .as_ref()
@@ -46,16 +56,26 @@ pub(super) fn variables(
     Ok(variables)
 }
 
+/// QEMU binary, firmware state and guest execution class.
+pub(super) struct MachineOptions<'a> {
+    pub(super) qemu: &'a Path,
+    pub(super) firmware: &'a Path,
+    pub(super) variables: &'a Path,
+    pub(super) format: &'a str,
+    pub(super) system: bool,
+    pub(super) bundle: bool,
+}
+
 /// QEMU with the machine, its CPUs and memory, and the firmware.
-pub(super) fn command(
-    arguments: &Run,
-    qemu: &Path,
-    firmware: &Path,
-    variables: &Path,
-    format: &str,
-    system: bool,
-    bundle: bool,
-) -> Process {
+pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
+    let MachineOptions {
+        qemu,
+        firmware,
+        variables,
+        format,
+        system,
+        bundle,
+    } = options;
     let usb = arguments.usb_image.is_some();
     let mut command = Process::new(qemu);
     // A USB's startup choices take a keyboard. System mode places the guest
