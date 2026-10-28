@@ -1045,7 +1045,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_ecid_is_nonzero_hex() {
+    fn ecid_requires_nonzero_hex() {
         assert_eq!(parse_ecid("0x1a2b3c4d5e6f7081"), Ok(0x1a2b_3c4d_5e6f_7081));
         assert_eq!(parse_ecid("ABCDEF"), Ok(0xab_cdef));
         assert!(parse_ecid("0").is_err());
@@ -1054,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_admits_objects_by_digest_and_restore_objects_may_sit_outside() {
+    fn manifest_admits_external_objects_by_digest() {
         let object = |tag: &str, digest: u8| im4m::Object {
             tag: tag.into(),
             properties: vec![im4m::Property {
@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_argument_keeps_its_value() {
+    fn explicit_boot_argument_is_preserved() {
         assert_eq!(
             boot_args("serial=3 rd=md1 -restore", RESTORE_MODE_ARGS),
             "serial=3 rd=md1 -restore nand-enable-reformat=0x1 -progress"

@@ -1,4 +1,4 @@
-//! Actual NVKMS types and original CPU upload over the maintained common heap.
+//! NVKMS types and upstream CPU upload over the common heap.
 use super::{NATIVE_TARGET, Sources, capture, layout, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object};
@@ -232,7 +232,7 @@ mod tests {
         ignore = "reads the sources `cargo xtask gpu fetch` checks out"
     )]
     #[test]
-    fn original_lut_upload_uses_actual_header_prefix_and_common_heap() {
+    fn lut_upload_uses_header_prefix_and_common_heap() {
         let output = tempfile::tempdir().unwrap();
         verify(
             &tools::which("clang").unwrap(),

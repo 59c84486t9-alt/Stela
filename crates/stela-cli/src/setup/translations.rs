@@ -485,7 +485,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn spare_preparation_failure_preserves_configuration_and_existing_packs() {
+    fn spare_failure_preserves_configuration_and_packs() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store {
             volume: dir.path().to_path_buf(),
@@ -516,7 +516,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_bound_fits_the_volume() {
+    fn translation_bound_fits_volume() {
         assert_eq!(
             fitting(needed_bytes(DEFAULT_PACK_BYTES)),
             DEFAULT_PACK_BYTES

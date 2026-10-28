@@ -106,7 +106,7 @@ fn text(output: &Output) -> (String, String) {
 }
 
 #[test]
-fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
+fn installed_system_runs_arm64_programs() {
     let Some(roots) = guest_roots() else {
         eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
         return;

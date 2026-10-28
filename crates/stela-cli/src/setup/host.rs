@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_is_confirmed_by_its_model_or_shown_size() {
+    fn disk_confirmation_accepts_model_or_displayed_size() {
         let disk = Disk {
             identifier: "mmcblk0".into(),
             name: "SD Card Reader".into(),

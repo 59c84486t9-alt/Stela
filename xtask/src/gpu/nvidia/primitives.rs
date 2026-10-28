@@ -98,7 +98,7 @@ mod tests {
         ignore = "reads the sources `cargo xtask gpu fetch` checks out"
     )]
     #[test]
-    fn original_nvswitch_wrappers_keep_bytes_and_full_native_lengths() {
+    fn nvswitch_wrappers_preserve_bytes_and_lengths() {
         let output = tempfile::tempdir().unwrap();
         verify(
             &tools::which("clang").unwrap(),

@@ -1,4 +1,4 @@
-//! Exercise the actual C adapter's allocator-refusal ABI in a separate process.
+//! Exercise the C adapter's allocator-refusal ABI in a separate process.
 #[cfg(test)]
 use super::capture;
 use super::{Sources, lut, tools};

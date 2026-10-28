@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chip_keeps_its_declared_version_and_reports_later_version_features() {
+    fn chip_version_gates_feature_reporting() {
         let parameters: BTreeSet<String> = [
             "v8Ap6",
             "v8Ap7",

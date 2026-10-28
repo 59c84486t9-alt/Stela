@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn original_air_evidence_cannot_substitute_a_source_fixture() {
+    fn air_evidence_requires_unchanged_input() {
         let record = |origin: &str, entry: &str| {
             Report::parse(&format!(
                 "STELA_RECORD {}\n",

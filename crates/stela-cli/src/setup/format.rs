@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn an_erased_disk_has_an_esp_and_a_named_fat32_volume_that_stela_efi_reads() {
+    fn erase_creates_bootable_fat32_layout() {
         let bytes = 2u64 << 30;
         let layout = layout(bytes, 512, "STELA", &mut counter()).unwrap();
         let mut disk = image(bytes, 512, &layout);

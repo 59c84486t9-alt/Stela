@@ -1078,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trimmed_archive_holds_the_recovery_members_and_inventories_as_them() -> Result<()> {
+    fn trimmed_archive_preserves_recovery_inventory() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let image = dir.path().join("Synthetic.ipsw");
         synthetic_ipsw(&image)?;
@@ -1194,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_inventory_hashes_only_members_no_device_check_covers() -> Result<()> {
+    fn remote_inventory_hashes_uncovered_members() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let image = dir.path().join("Synthetic.ipsw");
         synthetic_ipsw(&image)?;

@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn the_release_picker_opens_on_a_supported_build_not_the_newest() {
+    fn release_picker_defaults_to_supported_build() {
         let image = |version: &str, build: &str| Image {
             version: version.into(),
             build: build.into(),

@@ -11,7 +11,7 @@ mod nvidia;
 mod support;
 mod toolchain;
 
-/// An explicit input-owner qualification, never a physical GPU capability.
+/// Floating-point semantics required by the supplied AIR input.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum AirFpProfile {
     #[default]
@@ -78,7 +78,7 @@ pub enum Command {
         /// native LLVM 23 shared library. No GPU work is submitted.
         #[arg(long)]
         llvm_library: Option<PathBuf>,
-        /// Enable the retained AMD LLVM backend using matching LLVM 23
+        /// Enable the AMD LLVM backend using matching LLVM 23
         /// development files located by this llvm-config executable.
         #[arg(long, requires = "llvm_library")]
         llvm_config: Option<PathBuf>,
@@ -90,7 +90,7 @@ pub enum Command {
         /// Exact entry point in every supplied raw AIR input.
         #[arg(long, requires = "air_input")]
         entry: Option<String>,
-        /// Qualified floating-point profile for the unchanged raw AIR inputs.
+        /// Floating-point profile for the unchanged raw AIR inputs.
         /// Selection requires independent compiler provenance; metadata alone
         /// does not authenticate the selected private compiler profile.
         #[arg(long, value_enum, requires = "air_input")]

@@ -138,7 +138,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_bundle_names_its_executable_identity_and_launch_environment() -> Result<()> {
+    fn bundle_records_identity_and_launch_environment() -> Result<()> {
         let work = tempfile::tempdir()?;
         let path = work.path().join("Hello World.app");
         let mut environment = Dictionary::new();
@@ -166,7 +166,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_executable_outside_contents_macos_is_refused() -> Result<()> {
+    fn bundle_requires_contents_macos_executable() -> Result<()> {
         let work = tempfile::tempdir()?;
         let path = work.path().join("Bad.app");
         make(&path, info(&[("CFBundleExecutable", "../x".into())]), b"")?;

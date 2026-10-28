@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn an_apps_code_files_are_its_mach_o_files_without_framework_links() -> Result<()> {
+    fn app_code_scan_excludes_framework_links() -> Result<()> {
         let work = tempfile::tempdir()?;
         let arm = app(work.path(), "Arm", ARM64)?;
         let framework = arm.join("Contents/Frameworks/K.framework");

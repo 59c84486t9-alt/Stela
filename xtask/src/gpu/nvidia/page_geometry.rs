@@ -1,4 +1,4 @@
-//! Original RM page accessors over the actual one-time native publisher.
+//! Upstream RM page accessors over the native one-time publisher.
 use super::{Sources, capture, tools};
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
@@ -113,7 +113,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
     ignore = "reads the sources `cargo xtask gpu fetch` checks out"
 )]
 #[test]
-fn original_page_accessors_publish_only_supported_native_geometry() {
+fn page_accessors_require_supported_native_geometry() {
     let output = tempfile::tempdir().unwrap();
     verify(
         &tools::which("clang").unwrap(),

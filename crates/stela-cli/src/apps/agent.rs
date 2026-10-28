@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_agent_runs_stelad_when_apps_the_spool_or_the_log_change() -> Result<()> {
+    fn agent_watches_apps_spool_and_log() -> Result<()> {
         let work = tempfile::tempdir()?;
         let environment = environment(work.path());
         install(&environment)?;
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_agent_is_replaced_only_when_it_is_stelas() -> Result<()> {
+    fn agent_replacement_requires_stela_ownership() -> Result<()> {
         let work = tempfile::tempdir()?;
         let environment = environment(work.path());
         let legacy = legacy_path(&environment);

@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_reads_its_app_and_stela_from_its_bundle() {
+    fn launcher_reads_bundle_paths() {
         let work = tempfile::tempdir().unwrap();
         let executable = bundle(
             work.path(),
@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_without_the_marker_is_explained() {
+    fn launcher_reports_missing_bundle_marker() {
         let work = tempfile::tempdir().unwrap();
         let executable = bundle(work.path(), None);
         let message = launcher(&executable, Some(Path::new("/Users/u"))).unwrap_err();

@@ -47,7 +47,7 @@
   },
   {
     "package": "stela-cli",
-    "test": "pinned_vendor_provisioning_preserves_exact_bindings_and_redistribution_notices",
+    "test": "vendor_provisioning_binds_pins_and_notices",
     "source": "crates/stela-cli/src/setup/firmware.rs",
     "kind": "oracle",
     "inputs": [],

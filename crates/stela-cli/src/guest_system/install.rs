@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_roots_are_checked_against_their_receipts_and_published_whole() -> Result<()> {
+    fn imports_verify_receipts_before_publication() -> Result<()> {
         let work = tempfile::tempdir()?;
         let files = work.path().join("guest-files");
         let cache = work.path().join("shared-cache");
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn a_root_that_differs_from_its_receipt_leaves_nothing_installed() -> Result<()> {
+    fn root_receipt_mismatch_blocks_installation() -> Result<()> {
         let work = tempfile::tempdir()?;
         let files = work.path().join("guest-files");
         extraction(
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn an_image_of_another_build_is_refused_before_anything_is_written() -> Result<()> {
+    fn build_mismatch_blocks_installation() -> Result<()> {
         let work = tempfile::tempdir()?;
         let ipsw = work.path().join("other.ipsw");
         restore::payload::synthetic_ipsw_of(&ipsw, "99Z999")?;
@@ -655,7 +655,7 @@ mod tests {
     /// into the system volume, each listed at its guest path.
     #[test]
     #[cfg(target_os = "macos")]
-    fn a_cryptex_places_its_release_below_its_mount_and_its_cache_in_the_system() -> Result<()> {
+    fn cryptex_publishes_release_and_system_cache() -> Result<()> {
         let work = tempfile::tempdir()?;
         let volume = work.path().join("volume");
         for (path, text) in [
@@ -723,7 +723,7 @@ mod tests {
     /// A synthetic kernelcache IM4P (DER short form: SEQUENCE of IA5 "IM4P",
     /// type and description and an OCTET STRING payload) yields its version.
     #[test]
-    fn a_kernelcache_container_yields_its_version() -> Result<()> {
+    fn kernelcache_container_exposes_version() -> Result<()> {
         fn field(tag: u8, data: &[u8]) -> Vec<u8> {
             [vec![tag, data.len() as u8], data.to_vec()].concat()
         }

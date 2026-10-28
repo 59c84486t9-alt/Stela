@@ -357,7 +357,7 @@ const fn synthetic_build(build: &'static str) -> builds::Build {
 }
 
 #[test]
-fn a_build_outside_the_table_is_not_prepared() {
+fn preparation_rejects_unsupported_build() {
     let f = fixture(64 * GIB, true);
     let environment = Environment {
         builds: builds::SUPPORTED,
@@ -537,7 +537,7 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
 }
 
 #[test]
-fn a_stela_efi_of_another_interface_is_refused() {
+fn setup_rejects_efi_interface_mismatch() {
     let f = fixture(64 * GIB, false);
     fs::write(&f.efi, b"MZ without a marker").unwrap();
     let error = setup(&environment(&f.host), command(&f, &f.esp))
@@ -559,7 +559,7 @@ fn a_stela_efi_of_another_interface_is_refused() {
 }
 
 #[test]
-fn the_bundles_go_to_the_usb_s_fat32_data_partition() {
+fn setup_places_bundles_on_fat32_data_volume() {
     // The firmware cannot read HFS+, so the USB has no data partition.
     let f = fixture(GIB / 32, false);
     let error = setup(&environment(&f.host), command(&f, &f.data))
@@ -940,7 +940,7 @@ fn add_stick_ssd(f: &mut Fixture, identifier: &str, guid: &str) {
 }
 
 #[test]
-fn a_raw_partition_of_the_usb_is_the_macs_ssd_and_the_pc_disks_external() {
+fn install_maps_usb_partition_as_guest_ssd() {
     let mut f = fixture(64 * GIB, false);
     add_stick_ssd(&mut f, "disk5s4", REGION_GUID);
     let mut no_tss = command(&f, &f.esp);
@@ -983,7 +983,7 @@ fn a_raw_partition_of_the_usb_is_the_macs_ssd_and_the_pc_disks_external() {
 }
 
 #[test]
-fn a_whole_usb_disk_is_erased_first_and_an_internal_one_refused() {
+fn setup_erases_usb_and_refuses_internal_disk() {
     let f = fixture(64 * GIB, true);
     let whole = |usb: &str| f.host.whole_disk(Path::new(usb)).unwrap();
     assert_eq!(whole("/dev/disk5").as_deref(), Some("disk5"));
@@ -1033,7 +1033,7 @@ fn a_whole_usb_disk_is_erased_first_and_an_internal_one_refused() {
 }
 
 #[test]
-fn portable_usb_preparation_refuses_signing_failures_and_small_disks_before_erase() {
+fn preparation_preflights_signing_and_capacity() {
     let mut f = fixture(64 * GIB, true);
     let before = (snapshot(&f.esp), snapshot(&f.data));
     let mut opted = command(&f, Path::new("disk5"));
@@ -1066,7 +1066,7 @@ fn portable_usb_preparation_refuses_signing_failures_and_small_disks_before_eras
 }
 
 #[test]
-fn a_usb_replaced_while_preparing_is_refused_even_at_the_same_disk_number() {
+fn preparation_rejects_replaced_usb() {
     let mut f = fixture(64 * GIB, true);
     f.host.serials.insert("disk5".into(), "original".into());
     let selected = wizard::Usb::from_disk(&f.host.disks[1], &f.host);
@@ -1081,7 +1081,7 @@ fn a_usb_replaced_while_preparing_is_refused_even_at_the_same_disk_number() {
 }
 
 #[test]
-fn a_signing_setup_without_a_target_installs_on_the_disk_chosen_in_stela_efi() {
+fn targetless_setup_defers_disk_selection_to_efi() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     // The authoring computer need not have the target's CPU features.
@@ -1134,7 +1134,7 @@ fn rerun(f: &Fixture, configure: impl Fn(&mut Request)) -> Result<String> {
 }
 
 #[test]
-fn another_file_system_on_a_target_is_unmounted_and_erased_now_and_on_repair() {
+fn install_and_repair_unmount_target_filesystems() {
     let mut apfs = vec![0u8; 64];
     apfs[32..36].copy_from_slice(b"NXSB");
     let erased = |f: &Fixture| {
@@ -1184,7 +1184,7 @@ fn another_file_system_on_a_target_is_unmounted_and_erased_now_and_on_repair() {
 }
 
 #[test]
-fn an_install_reads_the_image_from_the_usb_offline_or_streams_it_online() {
+fn install_reads_offline_or_streamed_image() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     // Online: the USB holds the inventory alone, and the Install choice
@@ -1238,7 +1238,7 @@ fn an_install_reads_the_image_from_the_usb_offline_or_streams_it_online() {
 }
 
 #[test]
-fn an_offline_install_needs_the_system_image_a_recovery_archive_leaves_out() {
+fn offline_install_requires_system_image() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     let recovery = f._dir.path().join("Recovery.ipsw");
@@ -1266,7 +1266,7 @@ fn an_offline_install_needs_the_system_image_a_recovery_archive_leaves_out() {
 }
 
 #[test]
-fn an_installed_disk_boots_macos_or_recoveryos_and_keeps_its_partitions() {
+fn installed_disk_preserves_boot_choices_and_partitions() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     let before = snapshot(&f.esp);
@@ -1623,7 +1623,7 @@ fn machine_state_of_an_earlier_machine_keeps_its_ecid() {
 }
 
 #[test]
-fn a_second_disk_is_a_second_machine_chosen_at_startup() {
+fn additional_disk_gets_separate_machine_identity() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     add_disk(&mut f, true, &[], &[]);
@@ -1745,7 +1745,7 @@ fn a_second_disk_is_a_second_machine_chosen_at_startup() {
 }
 
 #[test]
-fn same_stela_update_replenishes_only_the_cache_and_preserves_custom_options() {
+fn same_revision_update_preserves_options() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let mut first = command(&f, &f.esp);
@@ -1788,7 +1788,7 @@ fn same_stela_update_replenishes_only_the_cache_and_preserves_custom_options() {
 }
 
 #[test]
-fn cache_spare_failure_blocks_efi_activation_and_update_or_rollback_can_retry() {
+fn cache_spare_failure_blocks_activation_until_retry() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let mut first = command(&f, &f.esp);
@@ -1954,7 +1954,7 @@ fn stela_updates_keep_the_old_version_and_roll_back() {
 }
 
 #[test]
-fn a_stela_update_to_a_new_bundle_schema_prepares_new_bundles_and_rolls_back() {
+fn schema_update_rebuilds_bundles_and_rolls_back() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
@@ -2026,7 +2026,7 @@ fn a_stela_update_to_a_new_bundle_schema_prepares_new_bundles_and_rolls_back() {
 }
 
 #[test]
-fn a_stela_update_prepares_the_bundles_of_a_new_revision_and_rolls_back() {
+fn revision_update_rebuilds_bundles_and_rolls_back() {
     // A setup with an install, made before setups recorded revisions.
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
@@ -2222,7 +2222,7 @@ fn stela_updates_remove_bundles_no_kept_version_boots() {
 }
 
 #[test]
-fn os_updates_add_restore_bundles_and_interrupted_updates_finish_or_roll_back() {
+fn interrupted_os_update_resumes_or_rolls_back() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let before = snapshot(&f.esp);
@@ -2295,7 +2295,7 @@ fn os_updates_add_restore_bundles_and_interrupted_updates_finish_or_roll_back() 
 }
 
 #[test]
-fn os_updates_of_an_install_write_the_new_medium_and_restore_it_keeping_the_data() {
+fn installed_os_update_preserves_user_data() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     setup(&environment(&f.host), installed_command(&f)).unwrap();
@@ -2383,7 +2383,7 @@ fn os_updates_of_an_install_write_the_new_medium_and_restore_it_keeping_the_data
 }
 
 #[test]
-fn status_reports_everything_and_repair_puts_back_what_the_record_says() {
+fn repair_restores_recorded_state() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     setup(&environment(&f.host), installed_command(&f)).unwrap();
@@ -2457,7 +2457,7 @@ fn status_reports_everything_and_repair_puts_back_what_the_record_says() {
 }
 
 #[test]
-fn no_maintenance_operation_writes_the_installed_disk_or_another_partition() {
+fn maintenance_writes_only_machine_state() {
     let mut f = fixture(64 * GIB, false);
     // An installed macOS: the Apple region holds the guest's own GPT,
     // and its containers' bytes after it stand for the user's data.
@@ -2529,7 +2529,7 @@ fn no_maintenance_operation_writes_the_installed_disk_or_another_partition() {
 }
 
 #[test]
-fn a_bundle_copy_stopped_between_its_renames_is_found_and_put_back() {
+fn repair_recovers_interrupted_bundle_rename() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     setup(&environment(&f.host), installed_command(&f)).unwrap();
@@ -2563,7 +2563,7 @@ fn a_bundle_copy_stopped_between_its_renames_is_found_and_put_back() {
 }
 
 #[test]
-fn nvram_resets_and_machine_state_backs_up_and_restores_to_its_own_machine() {
+fn machine_state_roundtrip_requires_identity() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     add_disk(&mut f, true, &[], &[]);
@@ -2814,7 +2814,7 @@ fn guest_gpt(backup: u64) -> Vec<u8> {
 }
 
 #[test]
-fn one_partition_keeps_the_machine_state_in_its_tail_outside_the_guest() {
+fn machine_state_tail_stays_outside_guest_region() {
     use stela_runtime::machine::apple::nor::CAPACITY;
     let mut f = fixture(64 * GIB, false);
     add_split_disk(&mut f, false, &[]);
@@ -3013,21 +3013,22 @@ fn one_partition_keeps_the_machine_state_in_its_tail_outside_the_guest() {
     assert_eq!(state_of(&f, REGION), state);
 }
 
+fn split_refusal(f: &Fixture, configure: impl Fn(&mut Request)) -> String {
+    let mut command = split_command(f);
+    configure(&mut command);
+    setup(&environment(&f.host), command)
+        .unwrap_err()
+        .to_string()
+}
+
 #[test]
-fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
-    let refusal = |f: &Fixture, configure: &dyn Fn(&mut Request)| {
-        let mut command = split_command(f);
-        configure(&mut command);
-        setup(&environment(&f.host), command)
-            .unwrap_err()
-            .to_string()
-    };
+fn tail_initialization_preserves_guest_region() {
     // A tail holding other bytes needs --initialize-nor, which writes a
     // fresh image there and leaves the SSD alone.
     let mut f = fixture(64 * GIB, false);
     add_split_disk(&mut f, false, &[]);
     f.host.write(REGION, tail(), b"not a NOR image").unwrap();
-    let error = refusal(&f, &|_| {});
+    let error = split_refusal(&f, |_| {});
     assert!(error.contains("disk1s2's machine state"), "{error}");
     assert!(error.contains("--initialize-nor"), "{error}");
     let mut initialize = split_command(&f);
@@ -3044,14 +3045,17 @@ fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
             .iter()
             .all(|&b| b == 0)
     );
+}
 
+#[test]
+fn guest_gpt_must_fit_before_state_tail() {
     // A guest disk that spans the whole partition is not converted; one
     // inside the SSD, laid out by an earlier one-partition install, is
     // kept.
     let blocks = SPLIT_BYTES / 512;
     let mut f = fixture(64 * GIB, false);
     add_split_disk(&mut f, false, &guest_gpt(blocks - 1));
-    let error = refusal(&f, &|c| c.erase_target = true);
+    let error = split_refusal(&f, |c| c.erase_target = true);
     assert!(error.contains("is not converted"), "{error}");
     assert!(error.contains("--nor"), "{error}");
     let mut f = fixture(64 * GIB, false);
@@ -3060,13 +3064,19 @@ fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
     assert!(plan.contains("already holds a guest disk"), "{plan}");
+}
 
+#[test]
+fn state_tail_requires_guest_capacity() {
     // The SSD before the tail must still hold 64 GB.
     let mut f = fixture(64 * GIB, false);
     add_split_disk(&mut f, false, &[]);
     f.host.partitions.get_mut(REGION).unwrap().0.bytes = 64_000_000_000;
-    assert!(refusal(&f, &|_| {}).contains("before the machine state"));
+    assert!(split_refusal(&f, |_| {}).contains("before the machine state"));
+}
 
+#[test]
+fn separate_state_partition_is_not_converted() {
     // An install with a machine-state partition of its own keeps it: its
     // Apple region is not added again as a one-partition install.
     let mut f = fixture(64 * GIB, false);
@@ -3128,7 +3138,7 @@ fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
     }
 }
 #[test]
-fn a_wifi_network_joins_every_choice_and_its_passphrase_goes_beside_them() {
+fn wifi_configuration_applies_to_all_boot_choices() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let mut joined = command(&f, &f.esp);
@@ -3174,7 +3184,7 @@ fn a_wifi_network_joins_every_choice_and_its_passphrase_goes_beside_them() {
 }
 
 #[test]
-fn observed_firmware_setup_action_requires_capability_and_preserves_dry_run() {
+fn firmware_action_checks_capability_and_dry_run() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
@@ -3217,7 +3227,7 @@ fn observed_firmware_setup_action_requires_capability_and_preserves_dry_run() {
 }
 
 #[test]
-fn large_firmware_refuses_legacy_install_update_rollback_and_reinstall_before_writes() {
+fn legacy_operations_reject_oversized_firmware() {
     use sha2::{Digest, Sha256};
     use stela_loader::host_firmware::{DIRECTORY, MOUNT_CAPABILITY, Package};
     let mut f = fixture(64 * GIB, false);
@@ -3329,7 +3339,7 @@ fn large_firmware_refuses_legacy_install_update_rollback_and_reinstall_before_wr
 }
 
 #[test]
-fn host_firmware_action_validates_dry_run_and_publishes_separately_from_guest_bundles() {
+fn host_firmware_publication_preserves_guest_bundles() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     setup(&environment(&f.host), command(&f, &f.esp)).unwrap();

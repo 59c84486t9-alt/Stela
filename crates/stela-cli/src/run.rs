@@ -448,7 +448,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shorthand_runs_the_program_with_every_option_at_its_default() -> Result<()> {
+    fn shorthand_uses_launch_defaults() -> Result<()> {
         let run = Run::shorthand(vec!["./hello".into(), "--help".into(), "x".into()])?;
         assert_eq!(run.command, ["./hello", "--help", "x"]);
         assert!(run.root.is_empty() && !run.trace && !run.statistics);
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn the_explicit_run_passes_every_word_after_the_program_through() {
+    fn run_preserves_program_arguments() {
         use clap::Parser as _;
         let crate::Command::Run(run) = crate::Cli::try_parse_from([
             "stela", "run", "--trace", "--root", "/guest", "./hello", "--help", "--model", "other",
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn fp_profile_exec_binds_a_relative_container_to_the_launch_directory() -> Result<()> {
+    fn fp_profile_resolves_relative_container() -> Result<()> {
         let mut run = Run::shorthand(vec!["hello".into()])?;
         run.fp_profile_output = Some(PathBuf::from("profiles"));
         let command = run.reexec(&[])?;
@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_profile_exec_binds_a_relative_container_to_the_launch_directory() -> Result<()> {
+    fn engine_profile_resolves_relative_container() -> Result<()> {
         let mut run = Run::shorthand(vec!["hello".into()])?;
         run.engine_profile_output = Some(PathBuf::from("metrics"));
         let command = run.reexec(&[])?;
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    fn a_stopped_run_shows_the_refusal_and_how_to_trace_it() {
+    fn stopped_run_reports_refusal_and_trace_option() {
         let message = stopped(
             Path::new("./hello"),
             anyhow!("BSD system call frob (999) is not implemented by the hosted kernel"),
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    fn exec_security_follows_the_signature_and_entitlements_of_26a434_images() -> Result<()> {
+    fn exec_security_reads_26a434_signature_and_entitlements() -> Result<()> {
         let Some(roots) = guest::guest_roots() else {
             eprintln!("skipped: no 26A434 guest roots (see tests/support/guest.rs)");
             return Ok(());

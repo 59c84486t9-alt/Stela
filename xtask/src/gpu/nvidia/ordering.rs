@@ -1,4 +1,4 @@
-//! Inspect the actual original ordering hook; this never executes a fence.
+//! Inspect the upstream ordering hook's machine code without executing it.
 use super::{NATIVE_TARGET, Sources, capture, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object, ObjectSection, ObjectSymbol};
@@ -119,7 +119,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
     ignore = "reads the sources `cargo xtask gpu fetch` checks out"
 )]
 #[test]
-fn original_ordering_hook_keeps_sfence_and_memory_clobber_across_native_abis() {
+fn ordering_hook_preserves_fences_across_native_abis() {
     let output = tempfile::tempdir().unwrap();
     verify(
         &tools::which("clang").unwrap(),

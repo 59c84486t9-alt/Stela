@@ -63,7 +63,7 @@ mod tests {
     use stela_runtime::restore::plist::{self, Limits, Value};
 
     #[test]
-    fn initialization_is_opt_in_atomic_and_never_replaces_committed_records() {
+    fn initialization_preserves_committed_fdr() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!prepare_directory(dir.path(), false).unwrap());
         let value = Value::dict([

@@ -347,7 +347,7 @@ pub fn build() -> Result<()> {
 
 #[cfg(all(test, target_os = "macos"))]
 #[test]
-fn task_memory_preserves_original_service_ownership_and_failure_contracts() {
+fn task_memory_preserves_service_ownership_and_failures() {
     let sdk_root = PathBuf::from(sdk(&["--show-sdk-path"]).unwrap().trim());
     let output = tempfile::tempdir().unwrap();
     contract(&gpu().join("iokit"), &sdk_root, output.path()).unwrap();

@@ -279,14 +279,18 @@ fn usb_serial_of(devices: &Value, disk: &str) -> Option<String> {
 fn statfs(path: &Path) -> Result<Volume> {
     use std::{ffi::CStr, os::unix::ffi::OsStrExt};
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: statfs contains integer fields and fixed byte arrays, for which
+    // all-zero initialization is valid before the syscall fills them.
     let mut info: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: a NUL-terminated path and a zeroed out-structure.
+    // SAFETY: c_path owns a NUL-terminated path and info is a writable
+    // statfs structure; both remain live through the synchronous syscall.
     if unsafe { libc::statfs(c_path.as_ptr(), &mut info) } != 0 {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("cannot inspect {}", path.display()));
     }
-    // SAFETY: statfs NUL-terminates both names.
+    // SAFETY: the successful statfs call NUL-terminated f_fstypename in info.
     let name = unsafe { CStr::from_ptr(info.f_fstypename.as_ptr()) }.to_string_lossy();
+    // SAFETY: the successful statfs call NUL-terminated f_mntfromname in info.
     let device = unsafe { CStr::from_ptr(info.f_mntfromname.as_ptr()) }.to_string_lossy();
     let filesystem = match name.as_ref() {
         "msdos" => FileSystem::Fat,
