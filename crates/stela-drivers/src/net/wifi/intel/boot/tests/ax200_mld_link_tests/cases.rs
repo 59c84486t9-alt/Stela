@@ -1,12 +1,12 @@
 use super::*;
 
 #[test]
-fn mld_active_link_and_unassign_require_every_ack_reclaim_and_real_link_reset_before_parent() {
+fn mld_unassign_reclaims_every_ack_before_releasing_phy_parent() {
     exercise(&image());
 }
 
 #[test]
-fn mld_activation_refuses_missing_rate_or_ceiling_before_native_publication() {
+fn mld_activation_refuses_unapproved_rate_or_power_before_publication() {
     for deny_rate in [false, true] {
         let bytes = image();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -58,7 +58,7 @@ fn mld_activation_refuses_missing_rate_or_ceiling_before_native_publication() {
 }
 
 #[test]
-fn missing_mld_activation_or_unassign_ack_never_releases_parent_or_rearms_after_failure() {
+fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
     for target in [0, 1, 3, 5, 6] {
         let bytes = image();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -119,7 +119,7 @@ fn missing_mld_activation_or_unassign_ack_never_releases_parent_or_rearms_after_
 
 #[test]
 #[ignore = "requires unchanged pinned AX200 firmware"]
-fn actual_ax200_mld_default_link1_activation_and_full_unassign_are_selected_commands() {
+fn pinned_ax200_firmware_selects_mld_activation_and_unassign_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
