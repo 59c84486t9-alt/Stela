@@ -10,8 +10,11 @@
 //!   controller's reset pulse (command 0xfe, the PC/AT reset line), then a
 //!   triple fault, each given half a second.
 //! - Power-off: the S5 soft-off sequence, with every GPE disabled and
-//!   every wake status cleared first. When it does not take effect, the
-//!   mount says so and halts; it never reports a power-off it did not make.
+//!   every wake status cleared first. A hardware-reduced platform, or one
+//!   without S5, uses the firmware's `ResetSystem` instead, as Linux does,
+//!   and S5 that does not take effect falls back to it. When neither takes
+//!   effect, the mount says so and halts; it never reports a power-off it
+//!   did not make.
 //! - Power button: the fixed-feature button's PWRBTN_STS, polled between
 //!   engine slices, where the firmware already runs in ACPI mode (SCI_EN):
 //!   the mount enables PWRBTN_EN and clears the status it reads. The status
@@ -90,8 +93,50 @@ fn wait(tsc_hz: u64, milliseconds: u64, mut done: impl FnMut() -> bool) -> bool 
     done()
 }
 
+/// `EFI_RESET_TYPE`'s EfiResetShutdown (UEFI 2.10 section 8.5.1).
+const EFI_RESET_SHUTDOWN: u32 = 2;
+
+/// The firmware's `ResetSystem` runtime service, whose regions the loader
+/// keeps mapped by identity in its root.
+#[derive(Clone, Copy)]
+pub struct EfiReset {
+    service: unsafe extern "efiapi" fn(u32, usize, usize, *const u8),
+    root: u64,
+}
+
+impl EfiReset {
+    /// `None` when the firmware has no `ResetSystem`.
+    pub fn new(service: u64, root: u64) -> Option<Self> {
+        (service != 0).then(|| Self {
+            // SAFETY: the firmware's ResetSystem entry the loader read from
+            // its runtime services table; code addresses fit a pointer.
+            service: unsafe {
+                core::mem::transmute::<usize, unsafe extern "efiapi" fn(u32, usize, usize, *const u8)>(
+                    service as usize,
+                )
+            },
+            root,
+        })
+    }
+
+    /// Power off through the firmware, as Linux's `efi_power_off`; returns
+    /// only when it did not.
+    fn power_off(self) {
+        output::arguments(format_args!("POWER powering off through the firmware\n"));
+        output::flush_log();
+        // SAFETY: the loader root maps the firmware's runtime regions by
+        // identity, as it left them without SetVirtualAddressMap;
+        // interrupts stay masked and the host drivers' lock is held.
+        unsafe {
+            let _root = super::storage::RestoreRoot::enter(self.root);
+            (self.service)(EFI_RESET_SHUTDOWN, 0, 0, core::ptr::null());
+        }
+    }
+}
+
 pub struct HostPowerControl {
     power: Option<HostPower>,
+    efi: Option<EfiReset>,
     tsc_hz: u64,
     /// The host disks, told before either transition.
     disks: super::storage::HostDisks,
@@ -104,9 +149,15 @@ pub struct HostPowerControl {
 impl HostPowerControl {
     /// The host's power hardware the loader found, with the fixed power
     /// button armed when there is one.
-    pub fn new(power: Option<HostPower>, tsc_hz: u64, disks: super::storage::HostDisks) -> Self {
+    pub fn new(
+        power: Option<HostPower>,
+        efi: Option<EfiReset>,
+        tsc_hz: u64,
+        disks: super::storage::HostDisks,
+    ) -> Self {
         let mut control = Self {
             power,
+            efi,
             tsc_hz,
             disks,
             button: false,
@@ -228,8 +279,18 @@ impl HostPowerControl {
         self.disks.shutdown(true);
         output::debug_exit(POWER_OFF_CODE);
         let soft_off = self.power.and_then(|power| Some((power, power.soft_off?)));
+        // Linux's `efi_poweroff_required`: a hardware-reduced platform, or
+        // one without S5, powers off through the firmware.
+        let reduced = self
+            .power
+            .is_some_and(|power| power.sleep_registers.is_some());
+        if let Some(efi) = self.efi
+            && (soft_off.is_none() || reduced)
+        {
+            efi.power_off();
+        }
         let Some((power, (a, b))) = soft_off else {
-            output::fatal("the host has no ACPI S5 soft-off sequence to power off with")
+            output::fatal("the host has no ACPI S5 soft-off sequence or firmware power-off")
         };
         // SAFETY: the FADT's GPE, PM1 and sleep registers, as Linux's
         // `acpi_hw_legacy_sleep` and `acpi_hw_extended_sleep` write them;
@@ -265,6 +326,10 @@ impl HostPowerControl {
             }
         }
         wait(self.tsc_hz, 1000, || false);
+        output::arguments(format_args!("POWER the host did not power off at S5\n"));
+        if let Some(efi) = self.efi {
+            efi.power_off();
+        }
         output::fatal("the host did not power off at S5; its firmware may need _PTS")
     }
 }

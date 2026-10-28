@@ -24,6 +24,9 @@ const REFUSED: u8 = 2;
 /// Initialized, and bringing its time-stamp counter into agreement with
 /// the BSP's, which takes part ([`tsc_sync`]).
 const SYNCING: u8 = 3;
+/// On its private descriptors and stack: the AP reads the low SIPI page no
+/// more, so the next AP may start from it.
+const ENTERED: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupFailure {
@@ -170,6 +173,8 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     unsafe {
         interrupts::install_on(tables, interrupts::interrupt);
     }
+    // Its own GDT, IDT and stack: the low page is the next AP's.
+    argument.status.store(ENTERED, Ordering::Release);
     let initialized = (|| {
         // SAFETY: CPL0 on the actual selected AP, with private descriptors.
         let observed =
@@ -373,6 +378,7 @@ pub(crate) unsafe fn start(
         layout::physical(handoff.apic_base & apic::BASE_ADDRESS),
     );
     let mut processors = Vec::with_capacity(cores - 1);
+    let mut started: Vec<Starting> = Vec::with_capacity(cores - 1);
     // SAFETY: CPL0, actual BSP; PAT exists under the validated native floor.
     let memory_source = unsafe { firmware::observe() }.map_err(|_| StartupFailure::Resources)?;
     let source_expected = topology::Snapshot {
@@ -509,7 +515,10 @@ pub(crate) unsafe fn start(
         crate::output::arguments(format_args!(
             "NATIVE SIPI delivered slot={slot} vector={vector:#x}\n"
         ));
-        let before = apic::rdtsc();
+        let since = apic::rdtsc();
+        // Linux's parallel bringup: the next AP starts as soon as this one
+        // has left the low page, and each installs its private host beside
+        // the others while the BSP takes their TSC synchronization in turn.
         loop {
             // A sealed hardware exception is an actual failed startup, not a
             // timeout or a synthetic READY. Return without reusing any owned
@@ -521,48 +530,112 @@ pub(crate) unsafe fn start(
                 return Err(StartupFailure::EarlyException { slot, cause });
             }
             match argument.status.load(Ordering::Acquire) {
-                READY => break,
-                SYNCING => {
-                    argument.tsc.source();
-                    let (adjusted, rounds) = argument.tsc.outcome();
-                    crate::output::arguments(format_args!(
-                        "NATIVE TSC slot={slot} adjusted={adjusted} rounds={rounds}\n"
-                    ));
-                }
-                REFUSED => {
-                    // SAFETY: the owner published this immutable reason before
-                    // the Acquire REFUSED observation; storage remains pinned.
-                    let reason =
-                        unsafe { *argument.refusal.get() }.expect("refused AP publishes a reason");
-                    return Err(StartupFailure::Refused { slot, reason });
-                }
-                _ if apic::rdtsc().wrapping_sub(before) >= handoff.tsc_hz => {
-                    return Err(StartupFailure::Timeout { slot });
-                }
-                _ => core::hint::spin_loop(),
+                STARTING => {}
+                REFUSED => return Err(refused(slot, argument)),
+                _ => break,
             }
+            if apic::rdtsc().wrapping_sub(since) >= handoff.tsc_hz {
+                return Err(StartupFailure::Timeout { slot });
+            }
+            serve(&mut started, &mut processors, handoff.tsc_hz)?;
+            core::hint::spin_loop();
         }
-        let processor = Processor { slot, argument };
-        let installed = processor.observation();
-        let descriptors = processor.descriptors();
-        // This is the actual Acquire READY publication after high entry,
-        // private Host/context qualification and retained observations. Flush
-        // before the next slot can reuse the low page; no new success flag or
-        // runtime stopped-worker authority is inferred from the log record.
-        crate::output::arguments(format_args!(
-            "NATIVE READY slot={slot} apic={destination:#x} cr3={:#x} cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} gdt={:#x} idt={:#x} gs={:#x}\n",
-            installed.cr3,
-            installed.cr0,
-            installed.cr4,
-            installed.efer,
-            installed.pat,
-            descriptors.rsp,
-            descriptors.gdt,
-            descriptors.idt,
-            descriptors.gs,
-        ));
-        crate::output::flush_log();
-        processors.push(processor);
+        started.push(Starting {
+            processor: Processor { slot, argument },
+            destination,
+            since,
+            synced: false,
+        });
     }
+    while !started.is_empty() {
+        serve(&mut started, &mut processors, handoff.tsc_hz)?;
+        core::hint::spin_loop();
+    }
+    crate::output::flush_log();
+    processors.sort_unstable_by_key(|processor| processor.slot);
     Ok(Executors { processors })
+}
+
+/// A started AP that is not ready yet.
+struct Starting {
+    processor: Processor,
+    destination: u32,
+    /// When its one second began, moved on by the BSP's time with others.
+    since: u64,
+    synced: bool,
+}
+
+/// Take part in each started AP's TSC synchronization, one at a time as
+/// Linux's `check_tsc_sync_source` does, and take the APs that became
+/// ready. A refusal fails startup, as does an AP that is not ready within
+/// a second of its own.
+fn serve(
+    started: &mut Vec<Starting>,
+    ready: &mut Vec<Processor>,
+    tsc_hz: u64,
+) -> Result<(), StartupFailure> {
+    let mut index = 0;
+    while index < started.len() {
+        let (slot, argument) = (
+            started[index].processor.slot,
+            started[index].processor.argument,
+        );
+        match argument.status.load(Ordering::Acquire) {
+            SYNCING if !started[index].synced => {
+                let begun = apic::rdtsc();
+                argument.tsc.source();
+                started[index].synced = true;
+                // The APs waiting meanwhile lose none of their second.
+                let spent = apic::rdtsc().wrapping_sub(begun);
+                for other in started.iter_mut() {
+                    other.since = other.since.wrapping_add(spent);
+                }
+                let (adjusted, rounds) = argument.tsc.outcome();
+                crate::output::arguments(format_args!(
+                    "NATIVE TSC slot={slot} adjusted={adjusted} rounds={rounds}\n"
+                ));
+            }
+            READY => {
+                let Starting {
+                    processor,
+                    destination,
+                    ..
+                } = started.swap_remove(index);
+                let installed = processor.observation();
+                let descriptors = processor.descriptors();
+                // This is the actual Acquire READY publication after high
+                // entry, private Host/context qualification and retained
+                // observations; no new success flag or runtime stopped-worker
+                // authority is inferred from the log record.
+                crate::output::arguments(format_args!(
+                    "NATIVE READY slot={slot} apic={destination:#x} cr3={:#x} cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} gdt={:#x} idt={:#x} gs={:#x}\n",
+                    installed.cr3,
+                    installed.cr0,
+                    installed.cr4,
+                    installed.efer,
+                    installed.pat,
+                    descriptors.rsp,
+                    descriptors.gdt,
+                    descriptors.idt,
+                    descriptors.gs,
+                ));
+                ready.push(processor);
+                continue;
+            }
+            REFUSED => return Err(refused(slot, argument)),
+            _ if apic::rdtsc().wrapping_sub(started[index].since) >= tsc_hz => {
+                return Err(StartupFailure::Timeout { slot });
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn refused(slot: usize, argument: &Argument) -> StartupFailure {
+    // SAFETY: the owner published this immutable reason before the Acquire
+    // REFUSED observation; storage remains pinned.
+    let reason = unsafe { *argument.refusal.get() }.expect("refused AP publishes a reason");
+    StartupFailure::Refused { slot, reason }
 }

@@ -2591,7 +2591,12 @@ fn run_machine<H: Host>(
         host_input,
         guest_network,
         host_nor,
-        power::HostPowerControl::new(handoff.power, handoff.tsc_hz, host_disks),
+        power::HostPowerControl::new(
+            handoff.power,
+            power::EfiReset::new(handoff.efi_reset, handoff.root),
+            handoff.tsc_hz,
+            host_disks,
+        ),
         handoff.tsc_hz,
     ));
     let started = host::rdtsc();
