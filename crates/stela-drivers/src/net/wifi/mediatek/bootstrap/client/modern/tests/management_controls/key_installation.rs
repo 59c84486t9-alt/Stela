@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn modern_management_initial_batch_uses_actual_context_guards_and_retry_ipn() {
+fn initial_key_batch_and_replay_floor() {
     let (mut driver, model, mut owner, state) = fixture();
     let before = model.response.lock().unwrap().client_commands.len();
     let session = attach(&mut driver, &mut owner);
@@ -67,7 +67,7 @@ fn modern_management_initial_batch_uses_actual_context_guards_and_retry_ipn() {
 }
 
 #[test]
-fn current_modern_key_retries_preserve_management_ipn_and_replacement_cannot_change_namespace() {
+fn key_retries_preserve_ipn_namespace() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     // Unchanged complete independent source CMAC vector (same original GTK,

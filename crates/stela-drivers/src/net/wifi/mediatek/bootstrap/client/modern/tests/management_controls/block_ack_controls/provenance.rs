@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn deferred_older_authenticated_addba_cannot_reverse_newer_delba() {
+fn older_addba_cannot_reverse_delba() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let older = observe(&mut driver, &model, &request(), 101, NOW);
@@ -51,7 +51,7 @@ fn deferred_older_authenticated_addba_cannot_reverse_newer_delba() {
 }
 
 #[test]
-fn genuine_foreign_session_and_group_bip_observations_cannot_enter_pairwise_ba() {
+fn foreign_and_group_observation_preflight() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let (mut foreign, foreign_model, mut foreign_owner, foreign_state) = fixture();
@@ -110,7 +110,7 @@ fn genuine_foreign_session_and_group_bip_observations_cannot_enter_pairwise_ba()
 }
 
 #[test]
-fn authenticated_malformed_and_non_ba_bodies_remain_original_observations() {
+fn malformed_actions_preserve_observations() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     for (step, body) in [

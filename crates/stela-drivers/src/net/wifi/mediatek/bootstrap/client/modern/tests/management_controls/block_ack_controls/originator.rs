@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn protected_originator_response_program_and_delba_wait_for_real_packet_drain() {
+fn originator_delba_waits_for_packet_drain() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     begin(&mut driver, &mut owner, &session, NOW);
@@ -59,7 +59,7 @@ fn protected_originator_response_program_and_delba_wait_for_real_packet_drain() 
 }
 
 #[test]
-fn real_native_negotiation_timeout_disables_before_guarded_protected_local_delba() {
+fn timeout_disables_before_guarded_delba() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let epoch = driver.station().association_epoch().unwrap();

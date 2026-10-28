@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn deferred_modern_envelopes_require_current_policy_and_cannot_use_unguarded_consumption() {
+fn deferred_envelope_guard_revalidation() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let first = received(&mut driver, &model, 9);
@@ -47,7 +47,7 @@ fn deferred_modern_envelopes_require_current_policy_and_cannot_use_unguarded_con
 }
 
 #[test]
-fn actual_modern_reconnect_rejects_original_received_and_tx_session_under_fresh_admission() {
+fn reconnect_rejects_stale_context_and_keys() {
     let (mut driver, model, mut old_owner, old_state) = fixture();
     let old_session = attach(&mut driver, &mut old_owner);
     let old_received = received(&mut driver, &model, 9);

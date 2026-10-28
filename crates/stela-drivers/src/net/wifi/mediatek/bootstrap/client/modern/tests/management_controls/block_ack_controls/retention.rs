@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn uncertain_protected_ba_command_and_packet_unmap_keep_complete_original_owners() {
+fn command_and_unmap_failures_retain_owners() {
     for command_failure in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);
@@ -45,7 +45,7 @@ fn uncertain_protected_ba_command_and_packet_unmap_keep_complete_original_owners
 }
 
 #[test]
-fn protected_ba_deferral_is_bounded_and_refuses_before_canonical_or_dma_changes() {
+fn bounded_deferral_preserves_frame() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     for step in 0..32 {

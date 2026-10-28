@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn protected_recipient_ack_response_and_txfree_unmap_retain_original_session() {
+fn recipient_response_retains_session() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let proof = observe(&mut driver, &model, &request(), 101, NOW);
@@ -65,7 +65,7 @@ fn protected_recipient_ack_response_and_txfree_unmap_retain_original_session() {
 }
 
 #[test]
-fn protected_recipient_delba_drains_published_positive_response_before_native_disable() {
+fn recipient_delba_waits_for_response_drain() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let proof = observe(&mut driver, &model, &request(), 101, NOW);

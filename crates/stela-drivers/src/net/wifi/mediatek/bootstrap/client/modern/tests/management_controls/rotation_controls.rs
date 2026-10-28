@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn modern_live_igtk_update_guards_real_command_and_revokes_deferred_namespace() {
+fn rotation_revokes_old_namespace() {
     let (mut driver, model, mut owner, state) = fixture();
     let first = attach(&mut driver, &mut owner);
     let delayed = received(&mut driver, &model, 9);
@@ -95,7 +95,7 @@ fn modern_live_igtk_update_guards_real_command_and_revokes_deferred_namespace() 
 }
 
 #[test]
-fn modern_live_igtk_checks_canonical_pending_ba_even_without_native_queue() {
+fn canonical_pending_block_ack_prevents_rotation() {
     let (mut driver, model, mut owner, state) = fixture();
     let first = attach(&mut driver, &mut owner);
     assert!(matches!(
@@ -147,7 +147,7 @@ fn modern_live_igtk_checks_canonical_pending_ba_even_without_native_queue() {
 }
 
 #[test]
-fn modern_live_igtk_removed_context_refuses_before_policy_or_mmio_effect() {
+fn removed_context_prevents_rotation() {
     let (mut driver, model, mut owner, state) = fixture();
     let first = attach(&mut driver, &mut owner);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);

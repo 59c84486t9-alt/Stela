@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn old_and_fresh_revoked_management_admission_never_publish_initial_key_batch() {
+fn revoked_initial_key_admission() {
     let (mut driver, model, mut owner, state) = fixture();
     let epoch = driver.station().association_epoch().unwrap();
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
@@ -61,7 +61,7 @@ fn old_and_fresh_revoked_management_admission_never_publish_initial_key_batch() 
 }
 
 #[test]
-fn actual_pending_canonical_ba_and_native_aggregation_refuse_initial_igtk_batch() {
+fn pending_block_ack_prevents_initial_igtk() {
     for mode in 0..3 {
         let (mut driver, model, mut owner, state) = fixture();
         if mode != 0 {

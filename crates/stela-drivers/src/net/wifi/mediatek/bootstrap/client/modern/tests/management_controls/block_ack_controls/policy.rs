@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn protected_ba_consumption_and_begin_reacquire_current_policy_before_state_changes() {
+fn guard_revalidation_before_block_ack_changes() {
     for begin_exchange in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);
@@ -35,7 +35,7 @@ fn protected_ba_consumption_and_begin_reacquire_current_policy_before_state_chan
 }
 
 #[test]
-fn rotated_or_disconnected_original_ba_observation_cannot_inherit_new_admission() {
+fn stale_block_ack_observation() {
     for disconnect in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let first = attach(&mut driver, &mut owner);
@@ -86,7 +86,7 @@ fn rotated_or_disconnected_original_ba_observation_cannot_inherit_new_admission(
 }
 
 #[test]
-fn policy_revocation_after_queueing_retains_exact_protected_action_without_publication() {
+fn queued_action_policy_revocation() {
     for before_command in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);

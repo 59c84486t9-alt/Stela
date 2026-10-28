@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_modern_management_tx_guards_allocation_and_retains_descriptor_free_unmap_owner() {
+fn management_tx_retains_packet_owner() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
@@ -63,7 +63,7 @@ fn actual_modern_management_tx_guards_allocation_and_retains_descriptor_free_unm
 }
 
 #[test]
-fn uncertain_modern_initial_key_batch_and_failed_tx_unmap_retain_complete_owners() {
+fn key_and_unmap_failures_retain_owners() {
     for key_failure in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         if key_failure {
