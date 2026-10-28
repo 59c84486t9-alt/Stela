@@ -142,7 +142,7 @@ fn missing_mld_peer_ack_retains_binding_and_pending_dma() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn pinned_ax200_firmware_selects_mld_station_and_tlc_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

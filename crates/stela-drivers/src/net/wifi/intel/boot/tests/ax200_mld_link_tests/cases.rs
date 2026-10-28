@@ -130,7 +130,7 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn pinned_ax200_firmware_selects_mld_activation_and_unassign_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

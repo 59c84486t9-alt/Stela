@@ -8,7 +8,7 @@ fn mld_mac_preserves_command_order_identity_and_remove_lifetimes() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
