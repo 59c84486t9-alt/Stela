@@ -24,6 +24,7 @@ use crate::{
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
+pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
 pub mod services;
@@ -38,6 +39,10 @@ pub use wifi::{WifiConfig, WifiSecret, WifiSecretError};
 pub enum Error {
     Device(BlockError),
     Realtek(realtek::Error),
+    /// The mount's [`NativeServices`] refused or lack a resource.
+    Native(ServiceError),
+    Tg3(net::tg3::Error),
+    Aqtion(net::aqtion::Error),
 }
 
 impl fmt::Display for Error {
@@ -45,6 +50,9 @@ impl fmt::Display for Error {
         match self {
             Self::Device(error) => error.fmt(f),
             Self::Realtek(error) => error.fmt(f),
+            Self::Native(error) => error.fmt(f),
+            Self::Tg3(error) => write!(f, "tg3: {error:?}"),
+            Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
         }
     }
 }
@@ -112,6 +120,8 @@ pub enum Adapter {
     Realtek(Realtek),
     Usb(UsbNet),
     UsbVendor(UsbEthernet),
+    Tg3(Box<native::Located<native::Tg3>>),
+    Aqtion(Box<native::Located<net::aqtion::Aqtion>>),
 }
 
 impl Adapter {
@@ -124,6 +134,8 @@ impl Adapter {
             Self::Igb(_) => "igb",
             Self::Realtek(_) => "realtek",
             Self::Usb(_) => "usb-cdc",
+            Self::Tg3(_) => "tg3",
+            Self::Aqtion(_) => "atlantic",
             Self::UsbVendor(device) => device.driver(),
         }
     }
@@ -138,6 +150,8 @@ impl Adapter {
             Self::Realtek(device) => &device.location,
             Self::Usb(device) => &device.location,
             Self::UsbVendor(device) => &device.location,
+            Self::Tg3(device) => &device.location,
+            Self::Aqtion(device) => &device.location,
         }
     }
 }
@@ -152,6 +166,8 @@ impl Link for Adapter {
             Self::Realtek(device) => device.mac(),
             Self::Usb(device) => device.mac(),
             Self::UsbVendor(device) => device.mac(),
+            Self::Tg3(device) => device.mac(),
+            Self::Aqtion(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
@@ -163,6 +179,8 @@ impl Link for Adapter {
             Self::Realtek(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
             Self::UsbVendor(device) => device.carrier(),
+            Self::Tg3(device) => device.carrier(),
+            Self::Aqtion(device) => device.carrier(),
         }
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
@@ -174,6 +192,8 @@ impl Link for Adapter {
             Self::Realtek(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
             Self::UsbVendor(device) => device.transmit(frame),
+            Self::Tg3(device) => device.transmit(frame),
+            Self::Aqtion(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -185,6 +205,8 @@ impl Link for Adapter {
             Self::Realtek(device) => device.receive(),
             Self::Usb(device) => device.receive(),
             Self::UsbVendor(device) => device.receive(),
+            Self::Tg3(device) => device.receive(),
+            Self::Aqtion(device) => device.receive(),
         }
     }
 }
@@ -284,6 +306,9 @@ pub struct Devices {
     /// brought up or handed over, by location, such as
     /// `0000:00:1d.0 EHCI handoff`.
     pub platform_failures: Vec<(String, PlatformError)>,
+    /// Native owners of controllers whose attach failed, kept so their
+    /// mappings and DMA domains outlive whatever the device may still do.
+    pub quarantined: Vec<Box<dyn core::any::Any>>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -386,7 +411,35 @@ pub unsafe fn probe_with_provider(
                     _ => {}
                 }
             }
-            let result = if virtio::matches(&function) {
+            let result = if let Some(kind) = native::Kind::of(&function) {
+                let Some(services) = services else {
+                    devices
+                        .failures
+                        .push((address, Error::Native(ServiceError::Unavailable)));
+                    continue;
+                };
+                let attached = match kind {
+                    native::Kind::Tg3 => {
+                        // SAFETY: the caller grants `services`' contract, and
+                        // this loop leaves `function` alone once it is claimed.
+                        let link = unsafe { native::tg3(services, address, handoff.clock) };
+                        link.map(|link| Adapter::Tg3(Box::new(link)))
+                    }
+                    native::Kind::Aqtion => {
+                        // SAFETY: as for tg3.
+                        let link = unsafe { native::aqtion(services, address, handoff.clock) };
+                        link.map(|link| Adapter::Aqtion(Box::new(link)))
+                    }
+                };
+                match attached {
+                    Ok(adapter) => devices.nics.push(adapter),
+                    Err((error, kept)) => {
+                        devices.failures.push((address, error));
+                        devices.quarantined.extend(kept);
+                    }
+                }
+                continue;
+            } else if virtio::matches(&function) {
                 virtio::VirtioBlk::new(&mut function, handoff, dma)
                     .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
             } else if function.class == nvme::CLASS {
