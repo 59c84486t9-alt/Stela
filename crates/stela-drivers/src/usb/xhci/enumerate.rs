@@ -620,39 +620,28 @@ impl Controller {
             return Err(BlockError::Unsupported("hub more than five tiers deep"));
         }
         let slot = device.slot;
-        let hub = self.control_owned(
-            slot,
-            setup(
-                DEVICE_TO_HOST | TYPE_CLASS,
-                GET_DESCRIPTOR,
-                u16::from(HUB_DESCRIPTOR) << 8,
-                0,
-                9,
-            ),
-            &[],
-        )?;
-        let length = hub::descriptor::Usb2Descriptor::length(&hub)?;
-        let bytes = if hub.len() == length {
-            hub
-        } else {
-            let bytes = self.control_owned(
+        // get_hub_descriptor: three tries for a reply holding the fixed
+        // fields and the port count.
+        let mut bytes = Vec::new();
+        for _ in 0..3 {
+            bytes = self.control_owned(
                 slot,
                 setup(
                     DEVICE_TO_HOST | TYPE_CLASS,
                     GET_DESCRIPTOR,
                     u16::from(HUB_DESCRIPTOR) << 8,
                     0,
-                    length as u16,
+                    hub::descriptor::Usb2Descriptor::REQUEST,
                 ),
                 &[],
             )?;
-            if bytes.get(..hub.len()) != Some(hub.as_slice()) {
-                return Err(BlockError::Unsupported(
-                    "USB2 hub descriptor changed during read",
-                ));
+            if bytes.len() >= hub::descriptor::Usb2Descriptor::MINIMUM {
+                break;
             }
-            bytes
-        };
+        }
+        if bytes.len() < hub::descriptor::Usb2Descriptor::MINIMUM {
+            return Err(BlockError::Unsupported("short USB2 hub descriptor"));
+        }
         let original = device
             .configurations
             .iter()

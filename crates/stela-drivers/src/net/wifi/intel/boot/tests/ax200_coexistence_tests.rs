@@ -3,6 +3,8 @@
 //! Actual canonical profile, CI command DMA/ACK/reclaim and owner retention.
 use super::*;
 use crate::net::wifi::intel::boot::coexistence::CoexistenceError;
+#[path = "ax200_link_tests.rs"]
+mod link_tests;
 const CI: Id = Id {
     group: 0,
     opcode: 0x5d,

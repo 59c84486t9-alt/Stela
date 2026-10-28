@@ -63,8 +63,8 @@ int stela_linux_page_catalog_verify(u64 generation);
  * ZERO/COMP/NOWARN/NOMEMALLOC, reclaim/IO/FS permissions and configuration-inert
  * ACCOUNT. Blocking tests DIRECT_RECLAIM; a provider must also check !atomic.
  * These queries are pure and require no entered owner. __GFP_NOFAIL is always
- * explicitly unsupported by this fallible service: graceful mode reports it
- * and returns NULL; the strict owner's reporting callback stops execution. */
+ * explicitly unsupported by this fallible service: it is reported to the
+ * owner (`stela_linux_unsupported`) and returns NULL. */
 bool stela_linux_page_request_basic(u32 gfp);
 /* Separate policy: requires RECLAIMABLE and otherwise the same basic flags.
  * A real provider may explicitly opt in to Linux's permitted unmovable RAM

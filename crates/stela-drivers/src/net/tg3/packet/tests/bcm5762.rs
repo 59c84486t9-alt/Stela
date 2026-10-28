@@ -283,8 +283,10 @@ fn actual_5762_ignored_required_register_writes_cannot_advertise_attachment() {
 }
 #[test]
 fn actual_5762_each_alternate_fix_and_ring_word_is_required_for_every_dma_effect() {
+    // A refusal leaves no DMA effect, so one attachment serves every case
+    // once each is restored.
+    let (packet, _pages, domain, peer) = attach_5762();
     for at in [0x3628, 0x4890, 0x48a0, 0x468, 0x245c] {
-        let (packet, _pages, domain, peer) = attach_5762();
         let mut p = peer.lock().unwrap();
         let saved = p.mac[&at];
         p.mac.insert(at, 0);
@@ -294,11 +296,8 @@ fn actual_5762_each_alternate_fix_and_ring_word_is_required_for_every_dma_effect
         assert!(caught.is_err(), "absent {at:x} allowed status DMA");
         assert_eq!(p.dma_effects, before);
         p.mac.insert(at, saved);
-        drop(p);
-        assert!(packet.retire().is_ok());
     }
     for at in [0x108, 0x10c, 0x208, 0x20c, 0x118, 0x218, 0x228, 0x238] {
-        let (packet, _pages, domain, peer) = attach_5762();
         let mut p = peer.lock().unwrap();
         let saved = p.sram[&at];
         p.sram.insert(at, saved ^ 1);
@@ -308,9 +307,8 @@ fn actual_5762_each_alternate_fix_and_ring_word_is_required_for_every_dma_effect
         assert!(caught.is_err(), "corrupt RCB {at:x} allowed DMA");
         assert_eq!(p.dma_effects, before);
         p.sram.insert(at, saved);
-        drop(p);
-        assert!(packet.retire().is_ok());
     }
+    assert!(packet.retire().is_ok());
 }
 #[test]
 fn actual_5762_link_loss_rebuilds_same_mappings_and_lowwater_does_not_fault_packets() {
@@ -371,17 +369,20 @@ fn actual_5762_stop_drain_unmap_failure_retains_original_epoch() {
 }
 
 #[test]
-fn actual_5762_ring_wrap_and_fatal_dma_attention_preserve_ownership() {
+fn actual_5762_transfers_and_fatal_dma_attention_preserve_ownership() {
     let (mut packet, pages, domain, peer) = attach_5762();
     assert!(packet.carrier());
-    for index in 0..4097usize {
-        let frame = vec![(index & 255) as u8; 60];
+    // The 5762 shares the 5720's ring geometry, whose wrap
+    // `wraps_actual_tx_and_rx_producer_return_indices` covers; these frames
+    // cross the 5762's own DMA prerequisites.
+    for index in 0..8usize {
+        let frame = vec![index as u8; 60];
         packet.transmit(&frame).unwrap();
         peer.lock().unwrap().receive(&frame, 0, &domain);
         assert_eq!(packet.receive().unwrap(), Some(frame));
     }
-    assert_eq!(peer.lock().unwrap().tx, 1);
-    assert_eq!(peer.lock().unwrap().ret, 1);
+    assert_eq!(peer.lock().unwrap().tx, 8);
+    assert_eq!(peer.lock().unwrap().ret, 8);
     peer.lock().unwrap().mac.insert(0x4804, 0x10);
     assert!(packet.transmit(&[0; 60]).is_err());
     assert!(matches!(

@@ -556,25 +556,6 @@ impl AppleDevices {
         lines
     }
 
-    /// Strict mode for every native coprocessor (docs/design/runtime.md
-    /// "Unsupported operations"), the default; otherwise each answers a
-    /// request it does not implement with its own error reply, where its
-    /// protocol has one.
-    pub fn set_strict(&mut self, strict: bool) {
-        let ids: Vec<DeviceId> = self.coprocessors.iter().map(|&(_, id)| id).collect();
-        for id in ids {
-            if let Some(asc) = self.bus.device_mut::<Asc>(id) {
-                asc.set_strict(strict);
-            }
-        }
-        let ids: Vec<DeviceId> = self.sep_masters.iter().map(|master| master.sep).collect();
-        for id in ids {
-            if let Some(sep) = self.bus.device_mut::<Sep>(id) {
-                sep.set_strict(strict);
-            }
-        }
-    }
-
     /// The coprocessor requests answered with an error reply for the first
     /// time since the last call, as log lines naming the coprocessor.
     pub fn take_unmodeled(&mut self) -> Vec<String> {
@@ -5064,7 +5045,9 @@ mod tests {
         devices.write(0, SUPPLY, 4, 15, 0).unwrap();
         assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(pmgr_before));
         devices.write(0, WRAPPER + 0x8800, 8, 1, 0).unwrap();
-        assert!(devices.write(0, WRAPPER + 0x8808, 8, 0x20, 0).is_err());
+        // A request the ANS firmware does not implement is reported once.
+        devices.write(0, WRAPPER + 0x8808, 8, 0x20, 0).unwrap();
+        assert_eq!(devices.take_unmodeled().len(), 1);
         devices.write(0, NVME + 0x13e8, 4, 1, 0).unwrap();
         assert_eq!(devices.read(0, NVME + 0x13e8, 4, 0), Ok(1));
         assert_eq!(devices.read(0, NVME + 0x1300, 4, 0), Ok(0xde71_ce55));

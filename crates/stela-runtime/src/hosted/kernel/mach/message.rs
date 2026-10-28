@@ -219,7 +219,7 @@ pub(super) fn send(
                             ),
                             Failure::Kern(MIG_BAD_ID),
                             Some(&subject),
-                        )?;
+                        );
                         Reply::Failure(MIG_BAD_ID)
                     }
                 }

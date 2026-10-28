@@ -135,9 +135,6 @@ pub struct Launch {
     pub fp_profile_output: Option<std::path::PathBuf>,
     /// Live engine metrics without FP sampling; exclusive with FP profiling.
     pub engine_profile_output: Option<std::path::PathBuf>,
-    /// Stop at the first unsupported operation instead of failing it as
-    /// the guest's platform does ([`unsupported`]).
-    pub strict: bool,
 }
 
 /// What a run produced.
@@ -247,7 +244,6 @@ pub fn run(launch: Launch) -> Result<Report> {
     let profile = pe::profile(&hardware, target)?;
     let identification = features::Identification(&profile.fixed);
     hardware.kernel_version = launch.kernel_versions.get(hardware.model).cloned();
-    unsupported::set_strict(launch.strict);
     unsupported::set_program(&String::from_utf8_lossy(&launch.executable_path));
     if hardware.kernel_version.is_none() {
         unsupported::note(

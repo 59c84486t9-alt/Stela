@@ -61,9 +61,6 @@ pub struct SepFirmware {
     /// Observe (`--sep-observe`): journal `sks`/`pnon`/`scrd`, advertise
     /// `scrd`.
     observe: bool,
-    /// Strict mode, which sepOS applies to its service requests
-    /// ([`SepOs::set_strict`]).
-    strict: bool,
     /// Where sepOS finds its state, until it activates.
     state: Option<state::Location>,
 }
@@ -83,17 +80,7 @@ impl SepFirmware {
             security,
             ecid,
             observe,
-            strict: true,
             state: Some(state),
-        }
-    }
-
-    /// Strict mode for sepOS's service requests ([`SepOs::set_strict`]),
-    /// now and once it activates.
-    pub fn set_strict(&mut self, strict: bool) {
-        self.strict = strict;
-        if let Phase::Active(os) = &mut self.phase {
-            os.set_strict(strict);
         }
     }
 
@@ -229,8 +216,7 @@ impl Firmware for SepFirmware {
         // escapes for a partially activated SEP.
         let location = self.state.as_ref().ok_or("sepOS activated twice")?.clone();
         let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
-        let mut os = SepOs::new(self.security).with_services(store, self.observe)?;
-        os.set_strict(self.strict);
+        let os = SepOs::new(self.security).with_services(store, self.observe)?;
         // Stela is the SEP: under its own explicit, TSS-free trust policy it
         // accepts the delivered container (evidence recorded above) and brings
         // up its native sepOS. No Apple key or signing service is consulted.
@@ -405,42 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_mode_reaches_sepos_before_and_after_it_activates() {
-        // An observed scrd request, queued then run through the DMA step.
-        let observed = |fw: &mut SepFirmware| {
-            let mut outbox = Vec::new();
-            let request = Frame {
-                service: observe::CREDENTIALS_ID,
-                tag: 1,
-                opcode: 0,
-                parameter: 0,
-                data: 0,
-            };
-            fw.receive(request.mailbox(), &mut outbox).unwrap();
-            assert!(outbox.is_empty());
-            dma(fw, &mut Ram::new(0x4000, 0x4000), false)
-        };
-        let mut fw = SepFirmware::new(
-            entropy(),
-            None,
-            0xa5a5_0004,
-            true,
-            state::Location::Volatile,
-        );
-        booted(&mut fw);
-        fw.set_strict(false);
-        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
-        deliver(&mut fw, &image, false).unwrap();
-        map_shared(&mut fw);
-        // Graceful from before activation: recorded, unanswered, no stop.
-        assert_eq!(observed(&mut fw), Ok(Vec::new()));
-        fw.set_strict(true);
-        assert_eq!(observed(&mut fw), Err(observe::REFUSAL));
-        assert_eq!(fw.drain_observations().len(), 2);
-    }
-
-    #[test]
-    fn graceful_mode_answers_a_refused_service_request_from_the_dma_step() {
+    fn refused_service_requests_get_their_failure_answer_from_the_dma_step() {
         for (tag, reason) in [
             (0x7f, "SEP keystore command is not implemented"),
             (
@@ -469,9 +420,6 @@ mod tests {
             };
             let mut ram = Ram::new(0x4000, 0x4000);
             let mut outbox = Vec::new();
-            fw.receive(request.mailbox(), &mut outbox).unwrap();
-            assert_eq!(dma(&mut fw, &mut ram, false), Err(reason));
-            fw.set_strict(false);
             fw.receive(request.mailbox(), &mut outbox).unwrap();
             let mut produced = Vec::new();
             let mut latch = InterruptLatch::new();

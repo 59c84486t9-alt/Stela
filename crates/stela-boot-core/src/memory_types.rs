@@ -1,29 +1,29 @@
 //! Initial offline-AP memory types, copied from the live BSP configuration.
 //! This is not an update protocol for an already participating processor.
-use super::topology::Snapshot;
+use crate::topology::Snapshot;
 #[path = "memory_types/amd.rs"]
-pub(crate) mod amd;
+pub mod amd;
 #[path = "memory_types/ranges.rs"]
 mod ranges;
 
-pub(crate) const CAP: u32 = 0xfe;
-pub(crate) const DEFAULT: u32 = 0x2ff;
-pub(crate) const VARIABLE_BASE: u32 = 0x200;
-pub(crate) const MAX_VARIABLE: usize = 16;
-pub(crate) const FIXED: [u32; 11] = [
+pub const CAP: u32 = 0xfe;
+pub const DEFAULT: u32 = 0x2ff;
+pub const VARIABLE_BASE: u32 = 0x200;
+pub const MAX_VARIABLE: usize = 16;
+pub const FIXED: [u32; 11] = [
     0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
 ];
-pub(crate) const MAX_WRITABLE: usize = FIXED.len() + 2 * MAX_VARIABLE;
+pub const MAX_WRITABLE: usize = FIXED.len() + 2 * MAX_VARIABLE;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Write {
+pub struct Write {
     pub index: u32,
     pub low: u32,
     pub high: u32,
 }
 
-pub(crate) struct Image {
+pub struct Image {
     pub cap: u64,
     pub physical_bits: u8,
     pub default: u64,
@@ -57,7 +57,7 @@ fn memory_type(value: u8, cap: u64) -> bool {
 }
 
 impl Image {
-    pub(crate) fn from_snapshot(snapshot: &Snapshot) -> Result<Self, &'static str> {
+    pub fn from_snapshot(snapshot: &Snapshot) -> Result<Self, &'static str> {
         if snapshot.cr0 & ((1 << 29) | (1 << 30)) != 0 {
             return Err("BSP cache-disable controls do not permit WB sharing");
         }
@@ -138,7 +138,7 @@ impl Image {
 
     /// Old contents may be uninitialized on a never-admitted AP. Hardware
     /// capacity/physical-width differences may not be normalized away.
-    pub(crate) fn compatible(&self, snapshot: &Snapshot) -> Result<(), &'static str> {
+    pub fn compatible(&self, snapshot: &Snapshot) -> Result<(), &'static str> {
         match self.amd {
             Some(source) => {
                 source.compatible(amd::State::from_snapshot(snapshot, self.physical_bits)?)?;
@@ -169,7 +169,7 @@ impl Image {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_smp::topology::{Cpuid, Msr};
+    use crate::topology::{Cpuid, Msr};
 
     fn source() -> Snapshot {
         let mut value = Snapshot::default();

@@ -108,6 +108,14 @@ impl Queue {
     pub(super) fn pending_is_present(&self) -> bool {
         self.pending.is_some()
     }
+    /// The command slot awaiting its response, before one arrived.
+    #[cfg(test)]
+    pub(super) fn awaiting(&self) -> Option<u16> {
+        self.pending
+            .as_ref()
+            .filter(|pending| pending.response.is_none())
+            .map(|pending| pending.slot)
+    }
     pub(super) fn has_matching(&self, command: u8, group: u8) -> bool {
         self.notifications
             .iter()

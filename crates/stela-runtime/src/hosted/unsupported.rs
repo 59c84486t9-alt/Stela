@@ -6,9 +6,7 @@
 //! trap, each exception type at its delivery): a `stela:` line on standard
 //! error, an entry in `~/Library/Logs/Stela/unsupported.log` and the
 //! notifier a host application installs ([`set_notifier`]), and counted in
-//! the summary the run ends with ([`summarize`]). Strict mode (`stela run
-//! --strict`, `STELA_STRICT=1`) stops the run at the first one instead, as
-//! tests, benchmarks and tool comparisons run; graceful is the default.
+//! the summary the run ends with ([`summarize`]).
 //!
 //! A service refuses with [`refuse!`] (or [`refusal`]), naming the
 //! guest-visible [`Failure`]; the dispatcher that called it turns the
@@ -19,7 +17,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// What kind of operation was unsupported.
@@ -191,8 +189,7 @@ impl fmt::Display for Report {
     }
 }
 
-static STRICT: AtomicBool = AtomicBool::new(false);
-/// Unsupported operations answered gracefully, and the distinct ones.
+/// Unsupported operations answered degraded, and the distinct ones.
 static ANSWERED: AtomicU64 = AtomicU64::new(0);
 static DISTINCT: AtomicU64 = AtomicU64::new(0);
 static NOTIFIER: OnceLock<fn(&Report)> = OnceLock::new();
@@ -207,19 +204,6 @@ fn first(key: Key) -> bool {
     reported.get_or_insert_with(HashSet::new).insert(key)
 }
 
-/// Stop at the first unsupported operation (`--strict`).
-pub fn set_strict(strict: bool) {
-    STRICT.store(strict, Ordering::SeqCst);
-}
-
-/// Whether unsupported operations stop the run: `--strict`, or
-/// `STELA_STRICT=1` in the environment.
-pub fn strict() -> bool {
-    static ENVIRONMENT: OnceLock<bool> = OnceLock::new();
-    STRICT.load(Ordering::SeqCst)
-        || *ENVIRONMENT.get_or_init(|| std::env::var_os("STELA_STRICT").is_some_and(|v| v == "1"))
-}
-
 /// Name the guest program the log's entries are about (exec's path).
 pub fn set_program(path: &str) {
     let _ = PROGRAM.set(path.to_owned());
@@ -232,19 +216,8 @@ pub fn set_notifier(notifier: fn(&Report)) -> bool {
 }
 
 /// Report the unsupported `operation` the code at `pc` asked for, which
-/// the guest sees fail as `failure`: in strict mode the error that stops
-/// the run, otherwise `Ok` after reporting it, once per kind, place and
-/// `subject`.
-pub fn report(
-    kind: Kind,
-    pc: u64,
-    operation: &str,
-    failure: Failure,
-    subject: Option<&str>,
-) -> Result<()> {
-    if strict() {
-        anyhow::bail!("{operation}");
-    }
+/// the guest sees fail as `failure`, once per kind, place and `subject`.
+pub fn report(kind: Kind, pc: u64, operation: &str, failure: Failure, subject: Option<&str>) {
     ANSWERED.fetch_add(1, Ordering::Relaxed);
     let (image, offset) = place(pc);
     let report = Report {
@@ -255,7 +228,6 @@ pub fn report(
         failure,
     };
     publish(report, subject);
-    Ok(())
 }
 
 /// A note about the run that names no code (`Kind::GuestSystem`): reported
@@ -275,7 +247,7 @@ pub fn note(kind: Kind, key: &str, text: &str) {
 
 /// The guest-visible failure of an error a service returned: an
 /// unsupported operation's, after reporting it (as [`report`] with
-/// `subject`), outside strict mode; the error itself otherwise.
+/// `subject`); any other error itself.
 pub fn recover(
     error: anyhow::Error,
     kind: Kind,
@@ -285,11 +257,8 @@ pub fn recover(
     let Some(unsupported) = error.downcast_ref::<Unsupported>() else {
         return Err(error);
     };
-    if strict() {
-        return Err(error);
-    }
     let failure = unsupported.failure;
-    report(kind, pc, &format!("{error:#}"), failure, subject)?;
+    report(kind, pc, &format!("{error:#}"), failure, subject);
     Ok(failure)
 }
 
@@ -318,7 +287,7 @@ fn summary() -> Option<String> {
     let answered = ANSWERED.load(Ordering::Relaxed);
     (answered > 0).then(|| {
         format!(
-            "stela: {answered} unsupported operations answered gracefully ({} distinct, \
+            "stela: {answered} unsupported operations answered degraded ({} distinct, \
              each reported above and in ~/Library/Logs/Stela/unsupported.log)",
             DISTINCT.load(Ordering::Relaxed)
         )
@@ -448,13 +417,13 @@ mod tests {
     }
 
     #[test]
-    fn graceful_answers_are_counted_in_the_summary() {
+    fn degraded_answers_are_counted_in_the_summary() {
         // Other tests' reports only add to the counts.
         ANSWERED.fetch_add(2, Ordering::Relaxed);
         DISTINCT.fetch_add(1, Ordering::Relaxed);
         let line = summary().unwrap();
         assert!(
-            line.contains("unsupported operations answered gracefully"),
+            line.contains("unsupported operations answered degraded"),
             "{line}"
         );
         assert!(line.contains("distinct"), "{line}");

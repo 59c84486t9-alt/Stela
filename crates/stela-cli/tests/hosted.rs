@@ -57,11 +57,16 @@ fn stela(home: &Path, directory: &Path, arguments: &[&str]) -> Output {
         .args(arguments)
         .current_dir(directory)
         .env("HOME", home)
-        .env("STELA_STRICT", "1")
         .env_remove("STELA_GUEST_ROOT")
         .env_remove("__CFBundleIdentifier")
         .output()
         .unwrap()
+}
+
+/// Whether a run's standard error ends with the summary of unsupported
+/// operations it answered degraded.
+fn answered_degraded(error: &str) -> bool {
+    error.contains("unsupported operations answered")
 }
 
 /// A program asking for what the hosted runtime lacks, and for what
@@ -275,7 +280,7 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
 }
 
 #[test]
-fn unsupported_operations_fail_as_macos_does_and_strict_mode_stops() {
+fn unsupported_operations_fail_as_macos_does() {
     let Some(roots) = guest_roots() else {
         eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
         return;
@@ -292,23 +297,12 @@ fn unsupported_operations_fail_as_macos_does_and_strict_mode_stops() {
         eprintln!("skipped: xcrun clang cannot build arm64e programs here");
         return;
     };
-    let run = |strict: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
-        command.arg("run");
-        for root in &roots {
-            command.arg("--root").arg(root);
-        }
-        if strict {
-            command.arg("--strict");
-        }
-        command
-            .arg(&program)
-            .env("HOME", &home)
-            .env_remove("STELA_STRICT")
-            .output()
-            .unwrap()
-    };
-    let output = run(false);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
+    command.arg("run");
+    for root in &roots {
+        command.arg("--root").arg(root);
+    }
+    let output = command.arg(&program).env("HOME", &home).output().unwrap();
     let (out, error) = text(&output);
     assert!(output.status.success(), "{out}{error}");
     assert_eq!(
@@ -325,13 +319,7 @@ fn unsupported_operations_fail_as_macos_does_and_strict_mode_stops() {
     );
     let log = std::fs::read_to_string(home.join("Library/Logs/Stela/unsupported.log")).unwrap();
     assert!(log.contains("fcntl F_ADDSIGS"), "{log}");
-    // Strict mode stops there instead.
-    let output = run(true);
-    let (out, error) = text(&output);
-    assert!(!output.status.success());
-    // The guest's buffered output is never flushed: the run stopped.
-    assert!(out.is_empty(), "{out}");
-    assert!(error.contains("fcntl F_ADDSIGS"), "{error}");
+    assert!(answered_degraded(&error), "{error}");
 }
 
 /// A JIT: MAP_JIT's refusals, a write faulting while the thread's view
@@ -454,11 +442,11 @@ fn map_jit_regions_follow_each_threads_write_protection() {
         let output = command
             .arg(program)
             .env("HOME", work.path())
-            .env("STELA_STRICT", "1")
             .output()
             .unwrap();
         let (out, error) = text(&output);
         assert!(output.status.success(), "{out}{error}");
+        assert!(!answered_degraded(&error), "{error}");
         out
     };
     let refusals = "supported 1\nfixed 22\nshared 22\n";
@@ -609,10 +597,7 @@ fn guest_tools_run_on_each_chosen_mac() {
             "hw.model",
             "machdep.cpu.brand_string",
         ]);
-        command
-            .env("HOME", work.path())
-            .env("STELA_STRICT", "1")
-            .env_remove("STELA_MODEL");
+        command.env("HOME", work.path()).env_remove("STELA_MODEL");
         if let Some(model) = environment {
             command.env("STELA_MODEL", model);
         }
@@ -629,6 +614,7 @@ fn guest_tools_run_on_each_chosen_mac() {
         let output = run(model, environment);
         assert!(output.status.success(), "{:?}", text(&output));
         assert_eq!(text(&output).0, expected, "{:?}", text(&output));
+        assert!(!answered_degraded(&text(&output).1), "{:?}", text(&output));
     }
     let output = run(Some("Mac0,0"), None);
     assert!(!output.status.success());

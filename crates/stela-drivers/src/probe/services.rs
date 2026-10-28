@@ -72,8 +72,8 @@ pub unsafe trait NativeServices {
     /// binding, and with it the configuration epoch it retains.
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError>;
 
-    /// Pages for driver DMA rings and buffers.
-    fn pages(&self) -> &dyn PageSource;
+    /// Pages for driver DMA rings and buffers, for the rest of the boot.
+    fn pages(&self) -> &'static dyn PageSource;
 
     /// The interrupt controller that routes MSIs to the probing CPU, for
     /// drivers that need a delivered interrupt, such as Intel's ISH.
@@ -181,7 +181,7 @@ pub(crate) mod tests {
         fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError> {
             Err(ServiceError::Unavailable)
         }
-        fn pages(&self) -> &dyn PageSource {
+        fn pages(&self) -> &'static dyn PageSource {
             &NoPages
         }
         #[cfg(feature = "native-acpi")]

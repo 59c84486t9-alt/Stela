@@ -379,7 +379,7 @@ impl HostedBench {
             None => Command::new(binary),
             Some(stela) => {
                 let mut command = Command::new(stela);
-                command.arg("run").env("STELA_STRICT", "1");
+                command.arg("run");
                 for root in roots {
                     command.arg("--root").arg(root);
                 }
@@ -435,6 +435,13 @@ impl HostedBench {
                 tail.into_iter().rev().collect::<Vec<_>>().join("\n")
             );
         }
+        // A measured run carries out every operation it meets.
+        ensure!(
+            variant.stela.is_none()
+                || !std::fs::read_to_string(&stderr)?.contains("unsupported operations answered"),
+            "the run answered unsupported operations degraded (see {})",
+            stderr.display()
+        );
         let kernels = measurement::parse(&output, expected)?;
         let kernel_seconds = kernels.iter().map(|kernel| kernel.1).sum::<f64>();
         ensure!(

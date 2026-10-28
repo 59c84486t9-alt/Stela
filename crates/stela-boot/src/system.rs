@@ -22,7 +22,7 @@ use core::{
     cell::UnsafeCell,
     ops::{Range, RangeInclusive},
 };
-use stela_boot_core::options::System;
+use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
 use stela_runtime::{
     machine::mmu::placement::Placement,
     pc::{self, gpt::Guid},
@@ -309,6 +309,17 @@ pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
     let system = System::parse(text)?;
+    // Read while the firmware's FAT driver runs; the engine reports a file
+    // it cannot use.
+    let wifi_key = system
+        .ssid
+        .as_ref()
+        .and_then(|_| {
+            let path = system.wifi_key.as_deref().unwrap_or(DEFAULT_WIFI_KEY);
+            let path = uefi::CString16::try_from(path).ok()?;
+            volume.read(uefi::fs::PathBuf::from(path)).ok()
+        })
+        .unwrap_or_default();
     let host_devices = system.storage.is_some()
         || system.preboot.is_some()
         || system.restore_source.is_some()
@@ -406,11 +417,17 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
             storage = storage::discover().ok();
         }
     }
-    Ok((source, files, storage))
+    Ok((source, files, storage, wifi_key))
 }
 
-/// `source.bin`, the bundle files, and the storage drivers' ranges.
-type Inputs = (Vec<u8>, BundleFiles, Option<stela_drivers::Handoff>);
+/// `source.bin`, the bundle files, the storage drivers' ranges and the
+/// Wi-Fi key file's bytes.
+type Inputs = (
+    Vec<u8>,
+    BundleFiles,
+    Option<stela_drivers::Handoff>,
+    Vec<u8>,
+);
 
 /// `EFI_MEMORY_RUNTIME`: the region stays the firmware's after boot
 /// services, for its runtime services.
@@ -594,8 +611,16 @@ pub fn boot(
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);
-    let result = inputs.and_then(|(source, files, storage)| {
-        load(options, source, files, storage, log, host_firmware)
+    let result = inputs.and_then(|(source, files, storage, wifi_key)| {
+        load(
+            options,
+            source,
+            files,
+            storage,
+            wifi_key,
+            log,
+            host_firmware,
+        )
     });
     match result {
         Ok(never) => match never {},
@@ -608,6 +633,7 @@ fn load(
     source: Vec<u8>,
     bundle: BundleFiles,
     storage: Option<stela_drivers::Handoff>,
+    wifi_key: Vec<u8>,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
 ) -> Result<core::convert::Infallible, &'static str> {
@@ -709,10 +735,7 @@ fn load(
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
 
-    let strict = text
-        .split_ascii_whitespace()
-        .any(|word| word == crate::engine::STRICT_OPTION);
-    let remapping = crate::native_dma::firmware_units(strict)?;
+    let remapping = crate::native_dma::firmware_units()?;
 
     let native_mmio = match crate::native_mmio::Prepared::capture() {
         Ok(prepared) => Some(prepared),
@@ -885,7 +908,7 @@ fn load(
     let map = unsafe { boot::exit_boot_services(None) };
     // SAFETY: the firmware's identity map is still loaded, the APs idle in
     // firmware code, and no Stela driver or memory reuse has started.
-    unsafe { crate::native_dma::release_firmware_units(&remapping, strict, tsc_hz) };
+    unsafe { crate::native_dma::release_firmware_units(&remapping, tsc_hz) };
     let native_mmio_region = match native_mmio {
         Some(prepared) => match prepared.finish(&map) {
             Ok(()) => prepared.region(),
@@ -982,6 +1005,10 @@ fn load(
             power,
             efi_reset: runtime.reset,
             rsdp: storage::rsdp().unwrap_or(0),
+            wifi_key: Region {
+                physical: wifi_key.as_ptr() as u64,
+                bytes: wifi_key.len() as u64,
+            },
         });
     }
     // SAFETY: boot services are over, interrupts go off now, and the new
