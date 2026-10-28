@@ -418,6 +418,13 @@ pub unsafe fn open(
         devices: core::mem::take(&mut devices.nics),
         root,
     };
+    let usb = super::usb::HostUsb::new(
+        core::mem::take(&mut devices.usb_hosts),
+        dma,
+        handoff.firmware.clone(),
+        root,
+        handoff.clock.ticks_per_microsecond * 1_000_000,
+    );
     // One disk may hold several of them: the stick holds the Mac's internal
     // SSD, the install medium, the translation store and the boot log, and
     // the internal SSD the installed system the Preboot volume names. The
@@ -548,6 +555,7 @@ pub unsafe fn open(
         fdr,
         inputs,
         links,
+        usb,
         usb_disks,
         disks: host_disks,
     })
@@ -584,6 +592,8 @@ pub struct Opened {
     pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// The xHCI controllers' topology owners, polled for hotplug.
+    pub usb: super::usb::HostUsb,
     /// Whole disks for the guest's USB mass storage, in option order.
     pub usb_disks: alloc::vec::Vec<Box<dyn BlockDevice>>,
     /// Every disk taken above, for its shutdown notice.

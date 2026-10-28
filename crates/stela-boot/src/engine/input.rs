@@ -9,7 +9,7 @@
 use super::storage::{Inputs, RestoreRoot};
 use crate::output;
 use alloc::vec::Vec;
-use stela_drivers::input::Input;
+use stela_drivers::input::{Input, InputDevice};
 use stela_runtime::machine::apple::AppleDevices;
 
 pub struct HostInput {
@@ -46,6 +46,14 @@ impl HostInput {
             leds: None,
             wanted_leds: None,
             led_failed: false,
+        }
+    }
+
+    /// Read `devices` too from now on: keyboards and pointers that arrived.
+    pub fn add(&mut self, devices: Vec<InputDevice>) {
+        for device in devices {
+            output::arguments(format_args!("INPUT host device {}\n", device.name()));
+            self.inputs.devices.push(device);
         }
     }
 

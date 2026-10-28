@@ -28,6 +28,7 @@ mod speculation;
 pub(crate) mod storage;
 mod topology;
 pub(crate) mod translations;
+mod usb;
 pub(crate) mod xstate;
 
 use crate::{
@@ -800,6 +801,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         medium,
         preboot,
         host_input,
+        host_usb,
         host_network,
         usb_disks,
         guest_network,
@@ -1672,6 +1674,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         RunIo {
             restore,
             host_input,
+            host_usb,
             guest_network,
             host_nor,
             host_disks,
@@ -1858,6 +1861,7 @@ struct HostDevices {
     medium: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     preboot: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     host_input: Option<input::HostInput>,
+    host_usb: Option<usb::HostUsb>,
     host_network: Option<Result<network::Shared, String>>,
     usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     guest_network: Option<network::GuestNetwork>,
@@ -1883,6 +1887,7 @@ fn start_devices(
         network: wants_network,
     } = wanted;
     let mut fdr_device = None;
+    let mut host_usb = None;
     let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
         if targets.is_empty()
             && options.install_source.is_none()
@@ -1932,6 +1937,7 @@ fn start_devices(
                 fdr,
                 inputs,
                 mut links,
+                usb,
                 usb_disks,
                 disks,
             } = unsafe {
@@ -1990,6 +1996,7 @@ fn start_devices(
                 translations::set_partition(store);
             }
             fdr_device = fdr;
+            host_usb = Some(usb);
             // The guest's adapter is its own: the mount's client keeps the
             // first one. Without one the Mac boots with no network, which
             // is reported once.
@@ -2032,6 +2039,7 @@ fn start_devices(
         medium,
         preboot,
         host_input,
+        host_usb,
         host_network,
         usb_disks,
         guest_network,
@@ -2045,6 +2053,7 @@ fn start_devices(
 struct RunIo {
     restore: Option<restore::Experiment>,
     host_input: Option<input::HostInput>,
+    host_usb: Option<usb::HostUsb>,
     guest_network: Option<network::GuestNetwork>,
     host_nor: Option<nor::HostNor>,
     host_disks: storage::HostDisks,
@@ -2109,6 +2118,7 @@ fn run_machine<H: Host>(
     let RunIo {
         restore,
         host_input,
+        host_usb,
         guest_network,
         host_nor,
         host_disks,
@@ -2122,7 +2132,10 @@ fn run_machine<H: Host>(
     service::install(service::Service::new(
         machine.devices.worker(),
         restore,
-        host_input,
+        service::Peripherals {
+            input: host_input,
+            usb: host_usb,
+        },
         guest_network,
         host_nor,
         power::HostPowerControl::new(
