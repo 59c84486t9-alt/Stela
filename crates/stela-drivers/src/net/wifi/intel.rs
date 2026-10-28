@@ -7,6 +7,7 @@
 //! Parsing firmware does not authenticate it or make a radio operational.
 //! DMA, ALIVE/NVM/calibration, station association and key installation must
 //! complete before a native Wi-Fi backend can provide an Ethernet link.
+pub mod attach;
 pub mod boot;
 pub mod calibration;
 pub mod command;

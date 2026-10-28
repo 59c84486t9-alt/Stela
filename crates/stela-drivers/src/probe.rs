@@ -52,6 +52,7 @@ pub enum Error {
     Aqtion(net::aqtion::Error),
     Sfh(input::sfh::Error),
     Ish(input::ish::Error),
+    IntelWifi(net::wifi::intel::attach::AttachError),
 }
 
 impl fmt::Display for Error {
@@ -65,6 +66,7 @@ impl fmt::Display for Error {
             Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
             Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
             Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
+            Self::IntelWifi(error) => write!(f, "iwlwifi: {error}"),
         }
     }
 }
@@ -169,6 +171,8 @@ pub enum Adapter {
     UsbVendor(UsbEthernet),
     Tg3(Box<native::Located<native::Tg3>>),
     Aqtion(Box<native::Located<net::aqtion::Aqtion>>),
+    #[cfg(feature = "native-acpi")]
+    IntelWifi(Box<native::Located<native::IntelWifi>>),
 }
 
 impl Adapter {
@@ -183,6 +187,8 @@ impl Adapter {
             Self::Usb(_) => "usb-cdc",
             Self::Tg3(_) => "tg3",
             Self::Aqtion(_) => "atlantic",
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(_) => "iwlwifi",
             Self::UsbVendor(device) => device.driver(),
         }
     }
@@ -199,6 +205,8 @@ impl Adapter {
             Self::UsbVendor(device) => &device.location,
             Self::Tg3(device) => &device.location,
             Self::Aqtion(device) => &device.location,
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => &device.location,
         }
     }
 }
@@ -215,6 +223,8 @@ impl Link for Adapter {
             Self::UsbVendor(device) => device.mac(),
             Self::Tg3(device) => device.mac(),
             Self::Aqtion(device) => device.mac(),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
@@ -228,6 +238,8 @@ impl Link for Adapter {
             Self::UsbVendor(device) => device.carrier(),
             Self::Tg3(device) => device.carrier(),
             Self::Aqtion(device) => device.carrier(),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.carrier(),
         }
     }
     fn signals(&self) -> bool {
@@ -241,6 +253,8 @@ impl Link for Adapter {
             Self::UsbVendor(device) => device.signals(),
             Self::Tg3(device) => device.signals(),
             Self::Aqtion(device) => device.signals(),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.signals(),
         }
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
@@ -254,6 +268,8 @@ impl Link for Adapter {
             Self::UsbVendor(device) => device.transmit(frame),
             Self::Tg3(device) => device.transmit(frame),
             Self::Aqtion(device) => device.transmit(frame),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -267,6 +283,8 @@ impl Link for Adapter {
             Self::UsbVendor(device) => device.receive(),
             Self::Tg3(device) => device.receive(),
             Self::Aqtion(device) => device.receive(),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.receive(),
         }
     }
 }
@@ -445,6 +463,70 @@ pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffP
     Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)))
 }
 
+/// Attach the Intel Wi-Fi function at `address` for `network`, reading its
+/// ACPI companion, once the regulatory database loaded.
+///
+/// # Safety
+/// [`NativeServices`]' contract holds for `services`, and nothing else
+/// reaches the function.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+unsafe fn intel_wifi(
+    services: &dyn NativeServices,
+    address: Address,
+    handoff: &Handoff,
+    firmware: &'static dyn crate::firmware::Provider,
+    network: &WifiConfig,
+    regulatory: &Option<
+        Result<
+            crate::net::wifi::regulatory::database::Database,
+            crate::net::wifi::regulatory::database::LoadError,
+        >,
+    >,
+    bridges: &[(Address, u8)],
+) -> Result<Adapter, native::Failure> {
+    use net::wifi::intel::attach::AttachError;
+    let Some(Ok(database)) = regulatory else {
+        return Err((Error::IntelWifi(AttachError::NoRegulatoryDatabase), None));
+    };
+    #[cfg(feature = "native-acpi")]
+    {
+        let session = services.acpi();
+        let companion = session.and_then(|session| native::companion(session, address, bridges));
+        // SAFETY: `companion` is this function's own, and the handoff's
+        // captured variables are this boot's.
+        let bios = unsafe {
+            net::wifi::intel::radio::bios::service::native::NativeBios::new(
+                session,
+                companion,
+                firmware,
+                handoff.wifi_platform,
+            )
+        };
+        let inputs = net::wifi::intel::link::Inputs {
+            firmware,
+            observations: handoff.wifi_platform,
+            pages: services.pages(),
+            clock: handoff.clock,
+            bios,
+            database: database.clone(),
+            network: network.clone(),
+        };
+        // SAFETY: forwarded from the caller.
+        unsafe { native::intel_wifi(services, address, inputs) }
+            .map(|link| Adapter::IntelWifi(Box::new(link)))
+    }
+    #[cfg(not(feature = "native-acpi"))]
+    {
+        let _ = (
+            services, address, handoff, firmware, network, database, bridges,
+        );
+        Err((Error::IntelWifi(AttachError::NoNamespace), None))
+    }
+}
+
 /// Enumerate and attach devices using an explicit exact firmware provider.
 /// A loader can observe consumer requirements while delegating the original
 /// lookup result, without reconstructing device identities outside drivers.
@@ -476,6 +558,8 @@ pub unsafe fn probe_with_provider(
     // Intel ISHs, attached once the scan has looked for a Mehlow host bridge.
     let mut sensor_hubs = Vec::new();
     let mut mehlow = false;
+    // Each PCI bridge and its secondary bus, for ACPI companion lookups.
+    let mut bridges = Vec::new();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
@@ -485,6 +569,10 @@ pub unsafe fn probe_with_provider(
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
             mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
+            if function.class[..2] == [6, 4] {
+                use crate::bus::pci::ConfigSpace;
+                bridges.push((address, function.config().read8(0x19)));
+            }
             if function.class[..2] == [2, 0x80] {
                 if wifi.is_none() {
                     devices.device_failures.push((
@@ -539,6 +627,31 @@ pub unsafe fn probe_with_provider(
                     }
                     native::Kind::Ish => {
                         sensor_hubs.push(address);
+                        continue;
+                    }
+                    native::Kind::IntelWifi => {
+                        let Some(network) = wifi else {
+                            continue;
+                        };
+                        // SAFETY: as for tg3 below; the companion is this
+                        // function's own.
+                        match unsafe {
+                            intel_wifi(
+                                services,
+                                address,
+                                handoff,
+                                firmware,
+                                network,
+                                &devices.regulatory,
+                                &bridges,
+                            )
+                        } {
+                            Ok(link) => devices.nics.push(link),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
                         continue;
                     }
                     native::Kind::Vmd => {
@@ -864,6 +977,46 @@ mod tests {
         );
         assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
         assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory
+    }
+
+    #[test]
+    fn wifi_without_regulatory_data_never_claims_the_adapter() {
+        let services = services::tests::Refusing::default();
+        let handoff = Handoff {
+            ecam: Vec::new(),
+            mapped: Vec::new(),
+            dma: 0..0,
+            clock: crate::Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            bluetooth_platform: Default::default(),
+            wifi_platform: Default::default(),
+            completion: None,
+        };
+        let firmware = handoff_provider(&handoff);
+        let network = WifiConfig {
+            ssid: b"test".to_vec(),
+            secret: WifiSecret::parse(b"test passphrase").unwrap(),
+            country: None,
+        };
+        let address = Address {
+            segment: 0,
+            bus: 1,
+            device: 0,
+            function: 0,
+        };
+        // SAFETY: the refusing services cannot grant hardware access.
+        let result =
+            unsafe { intel_wifi(&services, address, &handoff, firmware, &network, &None, &[]) };
+        assert!(matches!(
+            result,
+            Err((
+                Error::IntelWifi(net::wifi::intel::attach::AttachError::NoRegulatoryDatabase),
+                None
+            ))
+        ));
+        assert!(services.requests.borrow().is_empty());
     }
 
     #[test]
