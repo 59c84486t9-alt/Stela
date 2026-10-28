@@ -7,7 +7,11 @@ fn cancellation_drains_intervals_and_stale_events() {
     for failure in [None, Some(STOP_ENDPOINT), Some(SET_DEQUEUE)] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: This cancellation fixture retains the unresized backing vector
+        // through queued transfers, stale events and ring reuse. No device or
+        // asynchronous worker can access those CPU-addressed allocations.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 64, true);
         controller
             .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
@@ -53,7 +57,11 @@ fn cancellation_drains_intervals_and_stale_events() {
 fn ring_capacity_and_descriptor_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: All ring-wrap and descriptor-preflight allocations remain inside this
+    // live stable vector. The model services them only synchronously while the test
+    // retains their handles.
+    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     controller
         .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)

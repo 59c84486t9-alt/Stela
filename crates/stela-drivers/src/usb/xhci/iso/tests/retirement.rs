@@ -12,7 +12,11 @@ fn endpoint_retirement_retains_or_quarantines_rings() {
     ] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: This endpoint-retirement fixture owns the full u64 backing vector
+        // for every ring and payload. It never resizes it; model callbacks are
+        // synchronous, including failure and quarantine checks.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 64, true);
         let endpoints = [
             endpoint(1, HIGH_SPEED),
@@ -87,7 +91,11 @@ fn stalled_cancellation_retains_buffers() {
     for silent in [STOP_ENDPOINT, SET_DEQUEUE] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: The stalled-cancellation fixture retains this vector throughout all
+        // queued transfers and model callbacks. No physical controller or background
+        // worker can access it after the test scope.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
         controller
             .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
@@ -114,7 +122,11 @@ fn stalled_cancellation_retains_buffers() {
     }
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: This fresh fatal-status fixture owns a separate, stable RAM extent for
+    // its DMA allocations; all model users finish synchronously before the backing
+    // vector is dropped.
+    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     controller
         .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)

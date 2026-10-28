@@ -14,7 +14,11 @@ fn reconfiguration_reuses_ring_cursor() {
     for context_bytes in [32, 64] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: The reconfiguration fixture keeps this unresized vector alive
+        // across every ring-cache reuse. All DMA addresses are CPU pointers into it
+        // and all device-peer callbacks are synchronous.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, context_bytes, true);
         let endpoints = [endpoint(1, HIGH_SPEED), endpoint(0x82, HIGH_SPEED)];
         controller.configure(1, &endpoints, None, &mut dma).unwrap();
@@ -91,7 +95,11 @@ fn reconfiguration_reuses_ring_cursor() {
 fn allocation_failure_retains_reclaimed_rings() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: This allocation-failure fixture retains the original backing for both
+    // reclaimed rings and retry allocations. No callback can outlive the vector or
+    // access it concurrently.
+    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     let first = endpoint(1, HIGH_SPEED);
     controller.configure(1, &[first], None, &mut dma).unwrap();
@@ -131,7 +139,11 @@ fn replacement_failure_quarantines_ring() {
     for silent in [false, true] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: This replacement-failure fixture owns the stable RAM extent
+        // throughout rejected/unacknowledged model operations. Quarantine creates no
+        // physical DMA or background accessor.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
         let endpoint = endpoint(1, HIGH_SPEED);
         controller
@@ -185,7 +197,11 @@ fn replacement_failure_quarantines_ring() {
 fn endpoint_owner_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: This owner-preflight fixture retains all original and foreign ring
+    // allocations within its live vector; validation and any model accesses are
+    // synchronous.
+    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 64, true);
     let foreign = endpoint(0x82, HIGH_SPEED);
     let available = endpoint(1, HIGH_SPEED);

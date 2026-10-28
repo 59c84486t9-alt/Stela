@@ -35,20 +35,32 @@ struct Hardware {
 impl Hardware {
     fn word(address: u64) -> u32 {
         assert!(address > 65536 && address.is_multiple_of(4));
+        // SAFETY: Private callers derive this aligned word address from retained
+        // command/event/context allocations. Their identity-mapped test backing stays
+        // live throughout the synchronous model access.
         unsafe { (address as *const u32).read_volatile() }
     }
     fn long(address: u64) -> u64 {
         assert!(address > 65536 && address.is_multiple_of(8));
+        // SAFETY: Private callers use an eight-byte-aligned address within retained
+        // descriptor/context RAM. The identity-mapped allocation remains live and no
+        // hardware or concurrent writer accesses it.
         unsafe { (address as *const u64).read_volatile() }
     }
     fn state(&mut self, dci: u8, state: u32) {
         let at = self.output + u64::from(dci) * self.context_bytes as u64;
+        // SAFETY: output names the retained 32-context output allocation; callers
+        // supply a valid endpoint DCI and 32/64-byte context stride. The synchronous
+        // model exclusively updates its state word.
         unsafe {
             (at as *mut u32).write_volatile(Self::word(at) & !7 | state);
         }
     }
     fn event(&mut self, parameter: u64, code: u32, dci: u8, residual: usize, kind: u32) {
         let at = self.events + (self.event_index % RING_TRBS * TRB) as u64;
+        // SAFETY: events names the retained event-ring allocation; modulo RING_TRBS
+        // selects a complete aligned TRB. Model callbacks serialize writes and the
+        // controller retains backing while consuming events.
         unsafe {
             (at as *mut u64).write_volatile(parameter);
             ((at + 8) as *mut u32).write_volatile(code << 24 | residual as u32);
@@ -101,6 +113,10 @@ impl Hardware {
                         }
                         let from = parameter + (u64::from(ep) + 1) * self.context_bytes as u64;
                         let to = self.output + u64::from(ep) * self.context_bytes as u64;
+                        // SAFETY: The published input and retained output contexts
+                        // are distinct allocations. ep is in 2..32, and both
+                        // allocations contain the complete selected 32/64-byte
+                        // context; no model callback accesses them concurrently.
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 from as *const u8,
@@ -213,13 +229,19 @@ impl Hardware {
         if matches!(code, SUCCESS | SHORT_PACKET) && residual <= td.bytes {
             let n = td.bytes - residual;
             if dci & 1 != 0 {
+                // SAFETY: The active TD came from a retained published payload and n
+                // is bounded by td.bytes. The caller keeps the whole payload
+                // allocation live; this synchronous IN completion is its sole writer.
                 unsafe {
                     core::ptr::write_bytes(td.buffer as *mut u8, 0x5a, n);
                 }
             } else {
-                self.output_bytes.extend_from_slice(unsafe {
-                    core::slice::from_raw_parts(td.buffer as *const u8, n)
-                });
+                self.output_bytes.extend_from_slice(
+                    // SAFETY: This OUT TD names a live retained payload and n is bounded
+                    // by td.bytes. The slice is read only for this immediate copy, with
+                    // no concurrent device writer or escaping borrow.
+                    unsafe { core::slice::from_raw_parts(td.buffer as *const u8, n) },
+                );
             }
         }
         self.event(td.trb, code, dci, residual, TRANSFER_EVENT);

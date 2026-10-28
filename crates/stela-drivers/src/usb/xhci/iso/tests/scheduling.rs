@@ -7,7 +7,11 @@ fn scheduled_wrap_and_subframes() {
     for context_bytes in [32, 64] {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: The scheduling fixture owns this entire stable vector through every
+        // retained frame ticket and payload completion; all model accesses occur
+        // synchronously before it is dropped.
+        unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, HIGH_SPEED, context_bytes, true);
         c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
             .unwrap();
@@ -48,7 +52,11 @@ fn scheduled_wrap_and_subframes() {
 fn scheduled_window_and_phase_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: The window-preflight fixture retains this unresized vector across
+    // accepted and rejected schedules. Its CPU-addressed allocations have no hardware
+    // or asynchronous users.
+    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();
@@ -111,7 +119,11 @@ fn scheduled_window_and_phase_preflight() {
 fn late_continuation_and_asap_missed_service() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: This late-continuation fixture owns all ring/payload RAM until
+    // synchronous missed-service and cancellation checks finish; the vector never
+    // moves its allocation or resizes.
+    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();

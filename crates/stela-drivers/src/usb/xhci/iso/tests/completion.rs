@@ -13,7 +13,11 @@ fn packet_and_transport_failures() {
     ] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: The completion-fault fixture retains this stable vector for all
+        // allocated rings and payloads. Only synchronous model callbacks access its
+        // identity-mapped addresses.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
         controller
             .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
@@ -38,7 +42,11 @@ fn packet_and_transport_failures() {
 fn ring_xrun_and_missed_service_events() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma =
+    // SAFETY: This xrun fixture keeps the entire vector alive and unresized while its
+    // command, event and payload handles are used; there is no physical DMA or
+    // asynchronous model access.
+    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     controller
         .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
@@ -91,7 +99,11 @@ fn incompatible_completions_retain_tickets() {
     for code in [6, 22, 36, 99] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma =
+        // SAFETY: This incompatible-event fixture retains its own stable RAM extent
+        // through all ticket checks; malformed events cannot create a hardware or
+        // background user of that memory.
+        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
         controller
             .configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
