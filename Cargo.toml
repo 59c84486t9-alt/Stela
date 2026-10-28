@@ -35,7 +35,7 @@ default-members = [
     "crates/stela-runtime",
 ]
 # The UEFI application builds for its own target with aborting panics.
-exclude = ["crates/stela-boot"]
+exclude = ["crates/stela-boot", "third_party/smoltcp"]
 resolver = "2"
 
 [workspace.package]
@@ -88,3 +88,7 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+[patch.crates-io]
+# Canonical vendored upstream source plus the reviewed SLAAC corrections.
+smoltcp = { path = "third_party/smoltcp" }

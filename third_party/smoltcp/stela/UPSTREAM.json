@@ -1,0 +1,17 @@
+{
+  "package": "smoltcp",
+  "version": "0.14.0",
+  "repository": "https://github.com/smoltcp-rs/smoltcp",
+  "commit": "cbfe05f835cfc75bf781addc1c0eb2e1a0df1ea3",
+  "crate_url": "https://crates.io/api/v1/crates/smoltcp/0.14.0/download",
+  "crate_sha256": "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f",
+  "license": "0BSD",
+  "patches": [
+    "patches/0001-slaac-progress-and-dual-stack-routes.patch"
+  ],
+  "patched_files": {
+    "src/iface/slaac.rs": "0d02809e52e349f09279eaea0f09f0515fb3cf7616c3b6a19319cb475a85154e",
+    "src/iface/interface/mod.rs": "154b7e8d19dcca1571c01cf985e76bdfa28f528ea4c3ace2194a51a849fa387c",
+    "src/iface/interface/ipv6.rs": "e905cec97c4e441035afc6bb63eb1689318fa38d80f2df4d9e9c01ddd2cf83e9"
+  }
+}

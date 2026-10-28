@@ -1,0 +1,91 @@
+--- a/src/iface/slaac.rs
++++ b/src/iface/slaac.rs
+@@ -201,9 +201,7 @@
+         }
+ 
+         // Advertisement might be unsolicited
+-        if self.phase == Phase::Discovering {
+-            self.phase = Phase::Maintaining;
+-        }
++        self.phase = Phase::Maintaining;
+     }
+ 
+     fn prefix_expire_sync_required(&self, now: Instant) -> bool {
+@@ -259,10 +257,10 @@
+     pub(crate) fn rs_sent(&mut self, now: Instant) {
+         match self.phase {
+             Phase::Start | Phase::Discovering if self.retry_rs_at <= now => {
++                self.num_solicitations = self.num_solicitations.saturating_sub(1);
+                 if self.num_solicitations == 0 {
+                     self.phase = Phase::None;
+                 } else {
+-                    self.num_solicitations -= 1;
+                     self.phase = Phase::Discovering;
+                     self.retry_rs_at = now + RTR_SOLICITATION_INTERVAL;
+                 }
+@@ -362,22 +360,38 @@
+     }
+ 
+     #[test]
++    fn exhausted_router_solicitations_have_no_expired_poll_timer() {
++        let mut slaac = Slaac::new();
++        let mut now = Instant::ZERO;
++        for _ in 0..MAX_RTR_SOLICITATIONS {
++            assert!(slaac.rs_required(now));
++            slaac.rs_sent(now);
++            now += RTR_SOLICITATION_INTERVAL;
++        }
++        assert!(!slaac.rs_required(now));
++        assert_eq!(slaac.poll_at(now), None);
++        slaac.process_advertisement(&SOURCE, VALID, Some(PREFIX), now);
++        assert_eq!(slaac.phase, Phase::Maintaining);
++        assert!(slaac.poll_at(now).unwrap() > now);
++    }
++
++    #[test]
+     fn test_ra_state() {
+         let mut slaac = Slaac::new();
+         assert_eq!(slaac.phase, Phase::Start);
+         let now = Instant::from_millis(1);
+         assert!(!slaac.has_ra_update());
+ 
+-        // Unsolicited advertisement
++        // An unsolicited advertisement also starts lifetime maintenance.
+         slaac.process_advertisement(&SOURCE, VALID, Some(PREFIX), now);
+-        assert_eq!(slaac.phase, Phase::Start);
++        assert_eq!(slaac.phase, Phase::Maintaining);
+         assert!(slaac.has_ra_update());
+ 
+         let now = Instant::from_secs(300);
+         slaac.rs_sent(now);
+-        assert_eq!(slaac.phase, Phase::Discovering);
+-
+-        // Solicited advertisement
++        assert_eq!(slaac.phase, Phase::Maintaining);
++
++        // Renewed advertisement
+         slaac.process_advertisement(&SOURCE, VALID, Some(PREFIX), now);
+         slaac.process_advertisement(&SOURCE, VALID, Some(PREFIX), now);
+         assert_eq!(slaac.phase, Phase::Maintaining);
+--- a/src/iface/interface/mod.rs
++++ b/src/iface/interface/mod.rs
+@@ -618,7 +618,7 @@
+ 
+         #[cfg(feature = "proto-ipv6-slaac")]
+         if self.inner.slaac_enabled {
+-            res = res.min(self.inner.slaac.poll_at(timestamp));
++            res = res.into_iter().chain(self.inner.slaac.poll_at(timestamp)).min();
+         }
+ 
+         res
+--- a/src/iface/interface/ipv6.rs
++++ b/src/iface/interface/ipv6.rs
+@@ -685,7 +685,7 @@
+                         (IpCidr::Ipv6(cidr), IpAddress::Ipv6(via_router)) => {
+                             !route.same_route(cidr, via_router)
+                         }
+-                        _ => false,
++                        _ => true,
+                     }) {
+                         let _ = routes.push(Route {
+                             cidr: route.cidr.into(),

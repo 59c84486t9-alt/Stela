@@ -68,3 +68,7 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 all = "warn"
+
+[patch.crates-io]
+# Same dependency source as the root workspace; no second network stack.
+smoltcp = { path = "../../third_party/smoltcp" }
