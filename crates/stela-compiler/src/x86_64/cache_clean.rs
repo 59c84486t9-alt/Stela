@@ -15,7 +15,7 @@ use crate::aarch64::{
     system::registers::{Direction, Encoding},
 };
 use crate::block::{SystemInstruction, system::SystemOperation};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Gpr, Mem, Size};
 
 /// SYS #3, C7, Cm, #1 of each operation.
 const DC_CVAC: Encoding = Encoding::new(1, 3, 7, 10, 1);
@@ -88,7 +88,8 @@ pub(crate) fn emit(code: &mut Code, rt: u8, checks: super::MemoryChecks) {
         },
     );
     super::range_check(code, checks, super::Access::read(1));
-    code.extend([0x0f, 0xb6, 0x08]); // movzx ecx,byte [rax]
+    code.asm()
+        .movzx(Size::Dword, Gpr::Rcx, Size::Byte, Mem::base(Gpr::Rax, 0));
 }
 
 #[cfg(test)]
@@ -157,7 +158,9 @@ mod tests {
         state.x[7] = memory.as_ptr() as u64 + 1;
         let mut code = Code::new();
         emit(&mut code, 7, super::super::MemoryChecks::DEFAULT);
-        code.extend([0x89, 0xc8, 0xc3]); // mov eax,ecx; ret
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Gpr::Rax, Gpr::Rcx);
+        asm.ret();
         // SAFETY: private anonymous memory, RX after the copy, unmapped
         // after the call; the code reads one byte of `memory`.
         let read = unsafe {

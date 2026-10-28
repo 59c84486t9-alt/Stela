@@ -4,7 +4,7 @@ use super::{
     offset, right_operand,
 };
 use crate::aarch64::register_offset::{IndexExtend, Operand};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size};
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     address(
@@ -47,15 +47,6 @@ pub(super) fn address(
     super::address_checks(code, checks, bytes, access);
 }
 
-const MOV_ECX_STATE: [u8; 2] = [0x8b, 0x8f];
-const MOVSXD_RCX_STATE: [u8; 3] = [0x48, 0x63, 0x8f];
-const MOV_RCX_STATE: [u8; 3] = [0x48, 0x8b, 0x8f];
-const ADD_RAX_STATE: [u8; 3] = [0x48, 0x03, 0x87];
-const SHL_RCX_IMM8: [u8; 3] = [0x48, 0xc1, 0xe1];
-/// LEA RAX,[RAX+RCX*scale]: the SIB byte's scale field, RCX index, RAX base.
-const LEA_RAX_RAX_RCX: [u8; 3] = [0x48, 0x8d, 0x04];
-const SIB_RCX_INDEX_RAX_BASE: u8 = 0x08;
-const SIB_SCALE_SHIFT: u8 = 6;
 /// The largest shift a SIB scale applies (times eight).
 const MAX_SCALE_SHIFT: u8 = 3;
 
@@ -66,26 +57,29 @@ pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, s
     let Some(slot) = offset(index) else {
         return;
     };
+    let state = Mem::base_disp32(Gpr::Rdi, slot as i32);
+    let mut asm = code.asm();
     match extend {
-        IndexExtend::Uxtw => code.extend(MOV_ECX_STATE),
-        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_STATE),
+        IndexExtend::Uxtw => asm.mov_load(Size::Dword, Gpr::Rcx, state),
+        IndexExtend::Sxtw => asm.movsxd(Gpr::Rcx, state),
         IndexExtend::Lsl | IndexExtend::Sxtx if shift == 0 => {
-            code.extend(ADD_RAX_STATE);
-            code.extend(slot.to_le_bytes());
+            asm.alu_load(Alu::Add, Size::Qword, Gpr::Rax, state);
             return;
         }
-        IndexExtend::Lsl | IndexExtend::Sxtx => code.extend(MOV_RCX_STATE),
+        IndexExtend::Lsl | IndexExtend::Sxtx => asm.mov_load(Size::Qword, Gpr::Rcx, state),
     }
-    code.extend(slot.to_le_bytes());
     let scale = if shift > MAX_SCALE_SHIFT {
-        code.extend(SHL_RCX_IMM8);
-        code.push(shift);
+        asm.shift_imm(ShiftOp::Shl, Size::Qword, Gpr::Rcx, shift);
         0
     } else {
         shift
     };
-    code.extend(LEA_RAX_RAX_RCX);
-    code.push(scale << SIB_SCALE_SHIFT | SIB_RCX_INDEX_RAX_BASE);
+    // RAX + RCX * 2^scale, the SIB scale applying the shift.
+    asm.lea(
+        Size::Qword,
+        Gpr::Rax,
+        Mem::indexed(Gpr::Rax, Gpr::Rcx, 1 << scale, 0),
+    );
 }
 
 fn transfer(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
@@ -107,22 +101,28 @@ fn transfer(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
             );
         }
         MemoryTransfer::Load { signed, width } => {
-            if width == Width::X64 {
-                code.push(0x48);
-            }
+            let size = Size::of(width == Width::X64);
+            let address = Mem::base(Gpr::Rax, 0);
+            let mut asm = code.asm();
             match (operand.bytes, signed) {
-                (1, false) => code.extend([0x0f, 0xb6, 0x08]),
-                (2, false) => code.extend([0x0f, 0xb7, 0x08]),
-                (1, true) => code.extend([0x0f, 0xbe, 0x08]),
-                (2, true) => code.extend([0x0f, 0xbf, 0x08]),
-                (4, true) => code.extend([0x63, 0x08]),
-                (4 | 8, false) => code.extend([0x8b, 0x08]),
+                (1, false) => asm.movzx(size, Gpr::Rcx, Size::Byte, address),
+                (2, false) => asm.movzx(size, Gpr::Rcx, Size::Word, address),
+                (1, true) => asm.movsx(size, Gpr::Rcx, Size::Byte, address),
+                (2, true) => asm.movsx(size, Gpr::Rcx, Size::Word, address),
+                (4, true) => {
+                    debug_assert!(size == Size::Qword);
+                    asm.movsxd(Gpr::Rcx, address);
+                }
+                (4 | 8, false) => asm.mov_load(size, Gpr::Rcx, address),
                 _ => unreachable!("decoder validates signed register-offset size"),
             }
             // A load to ZR still accesses memory and can fault.
             if let Some(displacement) = offset(operand.data) {
-                code.extend([0x48, 0x89, 0x8f]);
-                code.extend(displacement.to_le_bytes());
+                asm.mov_store(
+                    Size::Qword,
+                    Mem::base_disp32(Gpr::Rdi, displacement as i32),
+                    Gpr::Rcx,
+                );
             }
         }
     }

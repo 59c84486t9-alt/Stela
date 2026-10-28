@@ -4,31 +4,10 @@ use crate::aarch64::{
     Width,
     literal::{Operand, Transfer},
 };
-use crate::x86_64::asm::Code;
-
-/// Family-local baseline opcodes; address/state displacements follow separately.
-#[derive(Clone, Copy)]
-enum Opcode {
-    MoveAddress,
-    LoadWord,
-    LoadDoubleword,
-    LoadSignedWord,
-}
-
-impl Opcode {
-    fn emit(self, code: &mut Code) {
-        code.extend(match self {
-            Self::MoveAddress => &[0x48, 0xb8][..], // movabs rax,imm64
-            Self::LoadWord => &[0x8b, 0x00],        // mov eax,[rax], zeroextends RAX
-            Self::LoadDoubleword => &[0x48, 0x8b, 0x00], // mov rax,[rax]
-            Self::LoadSignedWord => &[0x48, 0x63, 0x00], // movsxd rax,[rax]
-        });
-    }
-}
+use crate::x86_64::asm::{Code, Gpr, Mem, Size};
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
-    Opcode::MoveAddress.emit(code);
-    code.extend(operand.address.to_le_bytes());
+    code.asm().mov_imm64(Gpr::Rax, operand.address);
     let bytes = match operand.transfer {
         Transfer::Integer {
             width: Width::X64,
@@ -45,13 +24,15 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
             width,
             signed,
         } => {
+            let address = Mem::base(Gpr::Rax, 0);
+            let mut asm = code.asm();
             match (width, signed) {
-                (Width::W32, false) => Opcode::LoadWord,
-                (Width::X64, false) => Opcode::LoadDoubleword,
-                (Width::X64, true) => Opcode::LoadSignedWord,
+                // MOV EAX zero-extends RAX.
+                (Width::W32, false) => asm.mov_load(Size::Dword, Gpr::Rax, address),
+                (Width::X64, false) => asm.mov_load(Size::Qword, Gpr::Rax, address),
+                (Width::X64, true) => asm.movsxd(Gpr::Rax, address),
                 (Width::W32, true) => unreachable!("literal signed load writes X register"),
             }
-            .emit(code);
             // ZR discards only the result; its access and possible fault remain.
             store(code, destination);
         }

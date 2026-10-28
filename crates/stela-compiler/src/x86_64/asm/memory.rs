@@ -2,7 +2,37 @@
 //! generic legacy encoding.
 use super::{Alu, Asm, Gpr, Mem, Rm, Size};
 
+/// PREFETCHh cache hints, numbered by their ModRM reg digit (0F 18 /digit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Prefetch {
+    /// `prefetchnta`: non-temporal, minimizing cache pollution.
+    Nta,
+    /// `prefetcht0`: into every cache level.
+    T0,
+    /// `prefetcht1`: into level 2 and outward.
+    T1,
+    /// `prefetcht2`: into level 3 and outward.
+    T2,
+}
+
 impl Asm<'_> {
+    /// `prefetchnta`, `prefetcht0`, `prefetcht1` or `prefetcht2 m8`
+    /// (0F 18 /digit).
+    pub(crate) fn prefetch(&mut self, hint: Prefetch, memory: Mem) {
+        self.legacy(
+            Size::Dword,
+            None,
+            &[0x0f, 0x18],
+            hint as u8,
+            false,
+            Rm::Mem(memory),
+        );
+    }
+    /// `rdtsc` (0F 31): EDX:EAX = the time-stamp counter.
+    pub(crate) fn rdtsc(&mut self) {
+        self.fixed(&[0x0f, 0x31]);
+    }
     /// `ud2` (0F 0B): raise #UD.
     pub(crate) fn ud2(&mut self) {
         self.fixed(&[0x0f, 0x0b]);
@@ -68,6 +98,19 @@ mod tests {
         let rdx = Mem::base(Rdx, 0);
         for (expected, code) in [
             (&[0x0f, 0x0b][..], one(|a| a.ud2())),
+            (&[0x0f, 0x31], one(|a| a.rdtsc())),
+            (
+                &[0x0f, 0x18, 0x00],
+                one(|a| a.prefetch(Prefetch::Nta, Mem::base(Rax, 0))),
+            ),
+            (
+                &[0x0f, 0x18, 0x5c, 0xc8, 0x10],
+                one(|a| a.prefetch(Prefetch::T2, Mem::indexed(Rax, Rcx, 8, 0x10))),
+            ),
+            (
+                &[0x0f, 0x18, 0x90, 0, 1, 0, 0],
+                one(|a| a.prefetch(Prefetch::T1, Mem::base(Rax, 0x100))),
+            ),
             (&[0x0f, 0xae, 0xf0], one(|a| a.mfence())),
             (&[0x3c, 12], one(|a| a.alu_accumulator_imm8(Alu::Cmp, 12))),
             (

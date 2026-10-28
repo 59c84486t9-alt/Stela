@@ -13,7 +13,7 @@ use crate::aarch64::{
     system::registers::{Direction, Encoding},
 };
 use crate::block::{SystemInstruction, system::SystemOperation};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Size, resolve};
 
 /// DC ZVA: SYS #3, C7, C4, #1.
 const DC_ZVA: Encoding = Encoding::new(1, 3, 7, 4, 1);
@@ -53,24 +53,33 @@ pub(crate) fn emit(code: &mut Code, rt: u8, bytes: u16, checks: super::MemoryChe
     // block is.
     super::range_check(code, checks, super::Access::write(bytes));
     let mask = -i32::from(bytes);
-    if let Ok(mask) = i8::try_from(mask) {
-        code.extend([0x48, 0x83, 0xe0, mask as u8]); // and rax,-bytes
-    } else {
-        code.extend([0x48, 0x25]); // and rax,-bytes
-        code.extend(mask.to_le_bytes());
+    let mut asm = code.asm();
+    match i8::try_from(mask) {
+        Ok(mask) => asm.alu_imm8(Alu::And, Size::Qword, Gpr::Rax, mask),
+        Err(_) => asm.alu_accumulator_imm32(Alu::And, Size::Qword, mask),
     }
-    code.extend([0x31, 0xc9]); // xor ecx,ecx
+    asm.alu(Alu::Xor, Size::Dword, Gpr::Rcx, Gpr::Rcx);
     if bytes < 8 {
-        code.extend([0x89, 0x08]); // mov [rax],ecx
+        asm.mov_store(Size::Dword, Mem::base(Gpr::Rax, 0), Gpr::Rcx);
     } else if bytes <= UNROLLED_BYTES {
         for offset in (0..bytes).step_by(8) {
-            code.extend([0x48, 0x89, 0x48, offset as u8]); // mov [rax+offset],rcx
+            asm.mov_store(
+                Size::Qword,
+                Mem::base_disp8(Gpr::Rax, offset as i8),
+                Gpr::Rcx,
+            );
         }
     } else {
-        code.push(0xba); // mov edx,bytes/8
-        code.extend((u32::from(bytes) / 8).to_le_bytes());
-        // mov [rax+rdx*8-8],rcx; dec edx; jnz back to the store
-        code.extend([0x48, 0x89, 0x4c, 0xd0, 0xf8, 0xff, 0xca, 0x75, 0xf7]);
+        asm.mov_imm32(Gpr::Rdx, u32::from(bytes) / 8);
+        let store = asm.len();
+        asm.mov_store(
+            Size::Qword,
+            Mem::indexed(Gpr::Rax, Gpr::Rdx, 8, -8),
+            Gpr::Rcx,
+        );
+        asm.dec(Size::Dword, Gpr::Rdx);
+        let back = asm.jcc8(Cond::Ne);
+        resolve(code, back, store);
     }
 }
 
@@ -128,7 +137,7 @@ mod tests {
             state.x[5] = block + u64::from(bytes) - 1;
             let mut code = Code::new();
             emit(&mut code, 5, bytes, super::super::MemoryChecks::DEFAULT);
-            code.push(0xc3); // ret
+            code.asm().ret();
             // SAFETY: private anonymous memory, RX after the copy, unmapped
             // after the call; the code writes only inside `memory`.
             unsafe {
