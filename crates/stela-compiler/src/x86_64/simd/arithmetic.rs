@@ -6,7 +6,7 @@ mod half;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, Entry, INPUT_MINIMUM_EXPONENT, Input,
-    LEFT_VECTOR, MOVLHPS_XMM1_XMM2, MOVQ_XMM0_XMM0, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
+    LEFT_VECTOR, clear_high_qword, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
     SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_scalar, commit_inexact, emit_opcode,
     environment, exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
     read_inputs, read_numerical_right, read_numerical_vector, reject_other_status, resolve,
@@ -293,7 +293,7 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
     result_sign(code, operand);
     match operand.shape {
         Shape::Scalar if !zeroed => clear_scalar(code, operand.format, LEFT_VECTOR),
-        Shape::Vector64 => code.extend(MOVQ_XMM0_XMM0),
+        Shape::Vector64 => clear_high_qword(code, 0),
         Shape::Scalar | Shape::Vector128 => {}
     }
     commit(code, operand.destination, LEFT_VECTOR);
@@ -469,7 +469,7 @@ fn emit_vector(
             u32::BITS as u8 - SINGLE_EXPONENT_BIAS_BITS,
         );
         ShiftOpcode::LeftDword.emit(code, EXPONENT_VECTOR, Format::Single.fraction_bits() as u8);
-        code.extend(MOVLHPS_XMM1_XMM2);
+        code.asm().movlhps(1, crate::x86_64::asm::Rm::Xmm(2));
     }
     environment(code);
     emit_opcode(
@@ -504,7 +504,7 @@ fn emit_vector(
     commit_inexact(code);
     result_sign(code, operand);
     if operand.shape == Shape::Vector64 {
-        code.extend(MOVQ_XMM0_XMM0);
+        clear_high_qword(code, 0);
     }
     commit(code, operand.destination, LEFT_VECTOR);
     finish(code, sticky, full, operand)

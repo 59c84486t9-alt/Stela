@@ -1,8 +1,8 @@
 //! BFMLAL with SSE2 or FMA3.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, commit_ah0_inexact, emit_fma,
-    emit_opcode, environment_alternative_nearest, guard_ah0_exceptions, prepare_vector_input_range,
+    ArithmeticOpcode, Condition, FusedOpcode, branch, commit_ah0_inexact, emit_fma, emit_opcode,
+    environment_alternative_nearest, guard_ah0_exceptions, prepare_vector_input_range,
     prepare_vector_result_range, reject_other_status, reject_product_status, resolve,
     restore_environment, restore_environment_with_product, save_product_status,
     vector_exponent_range,
@@ -74,7 +74,7 @@ pub(in crate::x86_64) fn emit(
 ) {
     let native_fma = target.supports(TargetCpu::Fma);
     if native_fma {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     guard_ah0_exceptions(code, &mut helper);

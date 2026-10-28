@@ -102,6 +102,17 @@ fn packed(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8) {
     opcode.register(code, destination, source, crate::TargetCpu::Baseline);
 }
 
+/// [`packed`] with an 8-bit immediate.
+fn packed_imm(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8, immediate: u8) {
+    opcode.emit_imm(
+        code,
+        destination,
+        crate::x86_64::asm::Rm::Xmm(source),
+        immediate,
+        crate::TargetCpu::Baseline,
+    );
+}
+
 fn subtract_opcode(lane_bytes: u8) -> SimdOpcode {
     match lane_bytes {
         1 => Host::SubByte,

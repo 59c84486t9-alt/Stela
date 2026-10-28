@@ -2,7 +2,7 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::helper_section;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, MOVQ_XMM0_XMM0, branch, clear_scalar, exponent_range, jump,
+    Condition, INPUT_MINIMUM_EXPONENT, clear_high_qword, branch, clear_scalar, exponent_range, jump,
     prepare_vector_input_range, read_numerical_vector, resolve, test_control,
     vector_exponent_range, vector_normal_or_zero_range, zero_scalar,
 };
@@ -340,7 +340,7 @@ fn finish_binary(code: &mut Code, format: Format, shape: Shape, destination: u8)
             packed(code, Host::MoveAligned, RESULT_VECTOR, ORIGINAL_LEFT_VECTOR);
         }
     } else if shape == Shape::Vector64 {
-        code.extend(MOVQ_XMM0_XMM0);
+        clear_high_qword(code, 0);
     }
     commit(code, destination, RESULT_VECTOR);
 }

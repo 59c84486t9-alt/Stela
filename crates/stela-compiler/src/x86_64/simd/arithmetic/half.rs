@@ -5,7 +5,7 @@ mod product;
 
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, VZEROUPPER, branch, emit_opcode_to, prepare_vector_input_range,
+    ArithmeticOpcode, Condition, branch, emit_opcode_to, prepare_vector_input_range,
     read_numerical_right, read_numerical_vector, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed, read_vector};
@@ -111,7 +111,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
     let checked_widening =
         !packed_product && operand.shape != Shape::Scalar && target.supports(TargetCpu::F16c);
     if checked_widening {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     // Ordinary binary keeps retained enables and fresh status under every AH.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);

@@ -1,7 +1,7 @@
 //! FSQRT: SSE2 for positive normals, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, VZEROUPPER, branch,
+    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, branch,
     clear_scalar, commit_inexact, environment_round, positive_exponent_range,
     prepare_vector_input_range, read_inputs, read_numerical_vector, reject_other_status, resolve,
     restore_environment, sticky_inexact, sticky_result_check, test_control,
@@ -247,7 +247,7 @@ pub(in crate::x86_64) fn emit(
     if checked_half {
         // F16C requires usable AVX. Pay this prefix per body before legacy
         // guards, avoiding a transition from arbitrary caller upper YMM state.
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     // The sticky-inexact path (`numerical::sticky_inexact`) for S and D: the

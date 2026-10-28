@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use super::{
     commit,
-    numerical::{Condition, MOVQ_XMM0_XMM0, branch, read_numerical_vector, resolve, test_control},
+    numerical::{Condition, clear_high_qword, branch, read_numerical_vector, resolve, test_control},
 };
 
 const LEFT: u8 = 0;
@@ -66,7 +66,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         }
     }
     if operand.shape == Shape::Vector64 {
-        code.extend(MOVQ_XMM0_XMM0);
+        clear_high_qword(code, 0);
     }
     commit(code, operand.destination, LEFT);
     code.push(0xe9); // JMP rel32 skips the cold numerical exit.

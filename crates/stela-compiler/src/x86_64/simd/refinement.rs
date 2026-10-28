@@ -3,7 +3,7 @@ use super::super::isa::ShiftOpcode;
 use super::numerical::jump;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
-    RESULT_MINIMUM_EXPONENT, VZEROUPPER, branch, clear_scalar, commit_ah0_inexact, emit_fma,
+    RESULT_MINIMUM_EXPONENT, branch, clear_scalar, commit_ah0_inexact, emit_fma,
     emit_opcode_to, environment_alternative_nearest, exponent_range, guard_ah0_exceptions,
     prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
     reject_other_status, reject_product_status, resolve, restore_environment,
@@ -249,7 +249,7 @@ fn widened_single_fallback(code: &mut Code, operand: &Operand, helper_start: usi
 fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let native_fma = target.supports(TargetCpu::Fma);
     if native_fma {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     guard_ah0_exceptions(code, &mut helper);

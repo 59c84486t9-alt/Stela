@@ -1,7 +1,7 @@
 //! FMLAL/FMLSL on normal half inputs with one final rounding.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, clear_scalar, commit_inexact,
+    ArithmeticOpcode, Condition, FusedOpcode, branch, clear_scalar, commit_inexact,
     emit_fma, emit_opcode, environment, prepare_vector_input_range, read_numerical_right,
     read_numerical_vector, reject_other_status, resolve, restore_environment, test_control,
     vector_exponent_range, vector_half_exponent_range, widen_half_to_single,
@@ -135,7 +135,7 @@ pub(in crate::x86_64) fn emit(
 ) {
     assert!(operand.shape != Shape::Scalar, "FHM requires vector lanes");
     if target.supports(TargetCpu::F16c) || use_fma(operand, target) {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);

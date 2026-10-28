@@ -1,7 +1,7 @@
 //! Exact finite Half FMA, with one integer rounding to the target format.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, VZEROUPPER, branch, emit_fma, emit_opcode_to, jump,
+    ArithmeticOpcode, Condition, branch, emit_fma, emit_opcode_to, jump,
     prepare_vector_input_range, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed};
@@ -111,7 +111,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         target
     };
     if widening.supports(TargetCpu::F16c) || target.supports(TargetCpu::Fma) {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     // FPMulAdd retains enabled exceptions under either AH setting.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);

@@ -5,7 +5,7 @@ mod half;
 
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, commit_inexact, emit_fma,
+    ArithmeticOpcode, Condition, FusedOpcode, branch, commit_inexact, emit_fma,
     emit_opcode, environment, prepare_vector_input_range, prepare_vector_result_range,
     read_numerical_vector, reject_other_status, reject_product_status, resolve,
     restore_environment, restore_environment_with_product, save_product_status, test_control,
@@ -226,7 +226,7 @@ pub(in crate::x86_64) fn emit(
         && target.supports(TargetCpu::Fma);
     let native_f16c = operand.format == Format::Half && target.supports(TargetCpu::F16c);
     if native_fma || native_f16c {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     prepare_sources(code, operand);
     if operand.format == Format::Half {
