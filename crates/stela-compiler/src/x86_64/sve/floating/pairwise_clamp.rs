@@ -1,4 +1,5 @@
 //! SVE pairwise min/max and FCLAMP.
+use super::minmax::{guard_zero_pairs, selection};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -7,7 +8,7 @@ use crate::{
         sve::floating::arithmetic::{Inputs, Kind, Operand, ResultShape},
     },
     x86_64::{
-        isa::{ShiftOpcode, SimdOpcode as Host},
+        isa::SimdOpcode as Host,
         scalable::{
             load_z_chunk,
             numerical::{self, Environment, Output},
@@ -25,74 +26,8 @@ const ACTIVE: u8 = 2;
 const CLASSIFICATION_SCRATCH: [u8; 3] = [3, 4, 5];
 const PREDICATE_SCRATCH: u8 = CLASSIFICATION_SCRATCH[0];
 const CLASSIFICATION_MASKS: [u8; 2] = [6, 7];
-const ZERO_PAIR: u8 = CLASSIFICATION_SCRATCH[0];
-const ZERO_VECTOR: u8 = CLASSIFICATION_SCRATCH[1];
-const DOUBLE_ZERO_SCRATCH: u8 = CLASSIFICATION_SCRATCH[2];
 const OLD_DESTINATION: u8 = CLASSIFICATION_SCRATCH[0];
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const PACKED_DOUBLE_PREFIX: u8 = 0x66;
-const REMOVE_SIGN_BITS: u8 = 1;
-const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-
-#[repr(u8)]
-enum SelectionOpcode {
-    Minimum = 0x5d,
-    Maximum = 0x5f,
-}
-
-/// Reject only active pairs whose two magnitudes are zero. Removing the sign
-/// after OR accepts exactly-one-zero inputs while retaining every signed-zero
-/// tie for the shared semantic helper. Double requires both dwords to be zero.
-/// LEFT/RIGHT/ACTIVE and the invariant classification masks remain live.
-fn guard_zero_pairs(
-    code: &mut Vec<u8>,
-    format: Format,
-    failures: &mut Vec<usize>,
-    target: TargetCpu,
-) {
-    Host::MoveAligned.register(code, ZERO_PAIR, LEFT, target);
-    Host::Or.register(code, ZERO_PAIR, RIGHT, target);
-    match format {
-        Format::Single => ShiftOpcode::LeftDword,
-        Format::Double => ShiftOpcode::LeftQword,
-        Format::Half => unreachable!("native min/max width validated before emission"),
-    }
-    .emit(code, ZERO_PAIR, REMOVE_SIGN_BITS);
-    Host::Xor.register(code, ZERO_VECTOR, ZERO_VECTOR, target);
-    Host::EqualDword.register(code, ZERO_PAIR, ZERO_VECTOR, target);
-    if format == Format::Double {
-        Host::ShuffleDword.register(code, DOUBLE_ZERO_SCRATCH, ZERO_PAIR, target);
-        code.push(SWAP_ADJACENT_DWORDS);
-        Host::And.register(code, ZERO_PAIR, DOUBLE_ZERO_SCRATCH, target);
-    }
-    Host::And.register(code, ZERO_PAIR, ACTIVE, target);
-    Host::ByteSignMask.register(code, GPR_RAX, ZERO_PAIR, target);
-    code.extend(TEST_EAX_EAX);
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
-}
-
-fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
-    let opcode = match operation {
-        MinMaxOperation::Minimum | MinMaxOperation::MinimumNumber => SelectionOpcode::Minimum,
-        MinMaxOperation::Maximum | MinMaxOperation::MaximumNumber => SelectionOpcode::Maximum,
-    };
-    if format == Format::Double {
-        code.push(PACKED_DOUBLE_PREFIX);
-    }
-    code.extend([
-        SSE_ESCAPE,
-        opcode as u8,
-        MODRM_REGISTER | (LEFT << MODRM_REGISTER_SHIFT) | RIGHT,
-    ]);
-}
 
 const EVEN_DWORDS: u8 = 0x88;
 const ODD_DWORDS: u8 = 0xdd;

@@ -1,4 +1,5 @@
 //! FCMP/FCCMP and AdvSIMD FCMEQ/FCMGE/FCMGT/FACGE/FACGT.
+use super::scalar_format;
 use crate::aarch64::floating::{Format, comparison::Predicate};
 
 use super::arithmetic::Shape;
@@ -6,11 +7,6 @@ use super::arithmetic::Shape;
 const REGISTER_MASK: u32 = 31;
 const LEFT_SHIFT: u32 = 5;
 const RIGHT_SHIFT: u32 = 16;
-const FORMAT_SHIFT: u32 = 22;
-const FORMAT_MASK: u32 = 3;
-const FORMAT_SINGLE: u32 = 0;
-const FORMAT_DOUBLE: u32 = 1;
-const FORMAT_HALF: u32 = 3;
 const VECTOR_Q: u32 = 1 << 30;
 const SIMD_DOUBLE: u32 = 1 << 22;
 const SIMD_SCALAR_PREFIX: u32 = 0x50000000;
@@ -90,15 +86,6 @@ impl Operand {
 
 fn register(word: u32, shift: u32) -> u8 {
     ((word >> shift) & REGISTER_MASK) as u8
-}
-
-fn scalar_format(word: u32) -> Result<Format, ()> {
-    match (word >> FORMAT_SHIFT) & FORMAT_MASK {
-        FORMAT_SINGLE => Ok(Format::Single),
-        FORMAT_DOUBLE => Ok(Format::Double),
-        FORMAT_HALF => Ok(Format::Half),
-        _ => Err(()),
-    }
 }
 
 /// None denotes another family; Err denotes reserved scalar ftype or vector1D.
@@ -212,6 +199,7 @@ fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aarch64::simd::{FORMAT_DOUBLE, FORMAT_HALF, FORMAT_SHIFT, FORMAT_SINGLE};
 
     const FORMATS: [(u32, Format); 3] = [
         (FORMAT_SINGLE, Format::Single),

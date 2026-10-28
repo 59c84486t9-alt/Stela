@@ -27,6 +27,27 @@ fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, target:
     opcode.register(code, destination, source, target);
 }
 
+/// Load `value` repeated in each `element` lane of `xmm`, through RAX.
+pub(super) fn repeated_constant(code: &mut Vec<u8>, xmm: u8, element: ElementSize, value: u64) {
+    let limbs = value.to_le_bytes();
+    let repeated: [u8; core::mem::size_of::<u64>()] =
+        core::array::from_fn(|i| limbs[i % element.bytes()]);
+    code.extend([0x48, 0xb8]); // mov rax, imm64
+    code.extend(repeated);
+    packed(code, Host::MoveGprQword, xmm, 0, TargetCpu::Baseline);
+    packed(code, Host::UnpackLowQword, xmm, xmm, TargetCpu::Baseline);
+}
+
+/// Store `xmm` to, or load it from, the stack slot at RSP + `slot`.
+pub(super) fn stack_vector(code: &mut Vec<u8>, xmm: u8, slot: u8, store: bool) {
+    code.extend(if store {
+        [0xf3, 0x0f, 0x7f] // movdqu [rsp + disp8], xmm
+    } else {
+        [0xf3, 0x0f, 0x6f] // movdqu xmm, [rsp + disp8]
+    });
+    code.extend([0x44 | xmm << 3, 0x24, slot]);
+}
+
 #[derive(Clone, Copy)]
 enum Mapping {
     Immediate,

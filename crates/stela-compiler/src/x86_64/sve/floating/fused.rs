@@ -144,15 +144,6 @@ fn negate_baseline(
     }
 }
 
-fn fused_opcode(operation: FusedOperation) -> FusedOpcode {
-    match operation {
-        FusedOperation::Add => FusedOpcode::MultiplyAdd,
-        FusedOperation::Subtract => FusedOpcode::NegativeMultiplyAdd,
-        FusedOperation::NegatedAdd => FusedOpcode::NegativeMultiplySubtract,
-        FusedOperation::NegatedSubtract => FusedOpcode::MultiplySubtract,
-    }
-}
-
 /// Emit the fourteen fused forms, natively only for normal single and double
 /// values; software completion handles the rest. RDI/R15 and the guest sources
 /// survive; RAX/RCX/RDX, flags and XMM0-7 are clobbered. `TargetCpu::Fma`
@@ -234,7 +225,7 @@ pub(in crate::x86_64) fn emit(
                 code,
                 operand.format,
                 Shape::Vector128,
-                fused_opcode(operation),
+                FusedOpcode::from(operation),
                 target,
             );
             // FMA has completed; clean upper AVX state before legacy guards or any exit.

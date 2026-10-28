@@ -1,4 +1,5 @@
 //! Integer multiplies, widening arithmetic and absolute differences.
+use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
 use crate::{
     TargetCpu,
@@ -7,19 +8,6 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-fn arithmetic(lane: u8, subtract: bool) -> Host {
-    match (subtract, lane) {
-        (false, 1) => Host::AddByte,
-        (false, 2) => Host::AddWord,
-        (false, 4) => Host::AddDword,
-        (false, 8) => Host::AddQword,
-        (true, 1) => Host::SubByte,
-        (true, 2) => Host::SubWord,
-        (true, 4) => Host::SubDword,
-        (true, 8) => Host::SubQword,
-        _ => unreachable!("reviewed lane size"),
-    }
-}
 /// Extend the selected 64-bit input half into doubled-width lanes. XMM3 is the
 /// extension mask; extending one operand never changes the other in XMM0/1.
 pub(super) fn extend(code: &mut Vec<u8>, xmm: u8, lane: u8, upper: bool, signed: bool) {
@@ -125,10 +113,10 @@ fn accumulate(code: &mut Vec<u8>, destination: u8, lane: u8, operation: Accumula
     }
     read_vector(code, destination, 1);
     if operation == Accumulate::Subtract {
-        packed(code, arithmetic(lane, true), 1, 0);
+        packed(code, add_or_subtract(lane, true), 1, 0);
         1
     } else {
-        packed(code, arithmetic(lane, false), 0, 1);
+        packed(code, add_or_subtract(lane, false), 0, 1);
         0
     }
 }
@@ -155,26 +143,18 @@ fn absolute_difference(code: &mut Vec<u8>, lane: u8, signed: bool, target: Targe
         packed(code, Host::Or, 0, 1);
     } else {
         packed(code, Host::MoveAligned, 5, 0);
-        packed(code, arithmetic(lane, true), 5, 1);
+        packed(code, add_or_subtract(lane, true), 5, 1);
         // Keep the wrapped difference in XMM5 while comparison uses XMM0..4.
         // Ordering decides the direction of subtraction before interpreting ABS.
         greater(code, lane, !signed, target);
         packed(code, Host::EqualDword, 1, 1);
         packed(code, Host::Xor, 0, 1);
         packed(code, Host::Xor, 5, 0);
-        packed(code, arithmetic(lane, true), 5, 0);
+        packed(code, add_or_subtract(lane, true), 5, 0);
         packed(code, Host::MoveAligned, 0, 5);
     }
 }
 
-fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
-    let bytes = value.to_le_bytes();
-    constant(
-        code,
-        xmm,
-        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
-    );
-}
 fn indexed(code: &mut Vec<u8>, lane: u8, index: u8) {
     if lane == 2 {
         // Halfword shuffles leave the other 64-bit half unchanged. Broadcast
@@ -388,11 +368,11 @@ fn rounded_accumulate_half(
     }
     if subtract {
         packed(code, Host::Xor, 1, 1);
-        packed(code, arithmetic(lane * 2, true), 1, 0);
+        packed(code, add_or_subtract(lane * 2, true), 1, 0);
         packed(code, Host::MoveAligned, 0, 1);
     }
     lane_constant(code, 1, lane * 2, 1u64 << (bits - 2));
-    packed(code, arithmetic(lane * 2, false), 0, 1);
+    packed(code, add_or_subtract(lane * 2, false), 0, 1);
     if lane == 2 {
         Shift::ArithmeticDword.emit(code, 0, bits - 1);
     } else {
@@ -406,7 +386,7 @@ fn rounded_accumulate_half(
     packed(code, Host::MoveAligned, 5, 0);
     read_vector(code, operand.destination, 0);
     extend(code, 0, lane, upper, true);
-    packed(code, arithmetic(lane * 2, false), 0, 5);
+    packed(code, add_or_subtract(lane * 2, false), 0, 5);
     clamp_rounded_accumulate(code, lane, active);
 }
 
@@ -483,7 +463,7 @@ fn high_product(code: &mut Vec<u8>, operand: &Operand, upper: bool, active: u8, 
     // Compute (product + 2^(n-2)) >> (n-1), avoiding a doubled-product overflow.
     if rounding {
         lane_constant(code, 1, lane * 2, 1u64 << (lane * 8 - 2));
-        packed(code, arithmetic(lane * 2, false), 0, 1);
+        packed(code, add_or_subtract(lane * 2, false), 0, 1);
     }
     if lane == 2 {
         Shift::ArithmeticDword.emit(code, 0, 15);
@@ -497,7 +477,7 @@ fn high_product(code: &mut Vec<u8>, operand: &Operand, upper: bool, active: u8, 
         shuffle(code, 3, 4, 0xb1);
         packed(code, Host::And, 4, 3);
     }
-    packed(code, arithmetic(lane * 2, false), 0, 4);
+    packed(code, add_or_subtract(lane * 2, false), 0, 4);
     super::saturating::publish_qc(code, active * 2);
     if lane == 2 {
         packed(code, Host::PackSignedDwordToWord, 0, 0);
@@ -687,7 +667,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
                 extend(code, 0, lane, upper, signed);
             }
             extend(code, 1, lane, upper, signed);
-            packed(code, arithmetic(lane * 2, subtract), 0, 1);
+            packed(code, add_or_subtract(lane * 2, subtract), 0, 1);
         }
         Kind::Difference {
             signed,

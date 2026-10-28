@@ -1,4 +1,5 @@
 //! Integer pairwise combines, across-lane reductions and bit counts.
+use super::rearrange::lane_constant;
 use super::{
     Host, commit, packed, read_vector, rearrange::constant, shifts::logical_shift, shuffle,
 };
@@ -33,14 +34,6 @@ fn equal_opcode(lane: u8) -> Host {
         4 => Host::EqualDword,
         _ => unreachable!(),
     }
-}
-fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
-    let bytes = value.to_le_bytes();
-    constant(
-        code,
-        xmm,
-        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
-    );
 }
 fn select_minmax(code: &mut Vec<u8>, lane: u8, signed: bool, maximum: bool, target: TargetCpu) {
     let native = match (signed, maximum, lane) {

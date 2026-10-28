@@ -1,5 +1,6 @@
 //! Saturating arithmetic. XMM4 accumulates the per-lane FPSR.QC mask; overflow is
 //! detected before clamping.
+use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
 use crate::{
     GuestState, TargetCpu,
@@ -8,27 +9,6 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
-    let bytes = value.to_le_bytes();
-    constant(
-        code,
-        xmm,
-        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
-    );
-}
-fn arithmetic(lane: u8, sub: bool) -> Host {
-    match (sub, lane) {
-        (false, 1) => Host::AddByte,
-        (false, 2) => Host::AddWord,
-        (false, 4) => Host::AddDword,
-        (false, 8) => Host::AddQword,
-        (true, 1) => Host::SubByte,
-        (true, 2) => Host::SubWord,
-        (true, 4) => Host::SubDword,
-        (true, 8) => Host::SubQword,
-        _ => unreachable!("reviewed lane width"),
-    }
-}
 pub(super) fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, lane: u8) {
     if lane == 1 {
         packed(code, Host::Xor, destination, destination);
@@ -65,7 +45,7 @@ fn clamp_result(code: &mut Vec<u8>) {
 }
 pub(super) fn add_sub(code: &mut Vec<u8>, lane: u8, signed: bool, sub: bool) {
     packed(code, Host::MoveAligned, 2, 0);
-    packed(code, arithmetic(lane, sub), 2, 1);
+    packed(code, add_or_subtract(lane, sub), 2, 1);
     if lane <= 2 {
         let opcode = match (signed, sub, lane) {
             (true, false, 1) => Host::AddSignedSaturatingByte,
@@ -136,7 +116,7 @@ fn absolute_or_negate(code: &mut Vec<u8>, lane: u8, negate: bool, target: Target
     }
     if negate {
         packed(code, Host::Xor, 1, 1);
-        packed(code, arithmetic(lane, true), 1, 0);
+        packed(code, add_or_subtract(lane, true), 1, 0);
         packed(code, Host::MoveAligned, 0, 1);
     } else if lane <= 4 && target >= TargetCpu::Ssse3 {
         match lane {
@@ -149,10 +129,10 @@ fn absolute_or_negate(code: &mut Vec<u8>, lane: u8, negate: bool, target: Target
     } else {
         sign_mask(code, 1, 0, lane);
         packed(code, Host::Xor, 0, 1);
-        packed(code, arithmetic(lane, true), 0, 1);
+        packed(code, add_or_subtract(lane, true), 0, 1);
     }
     // Wrapped -MIN/ABS(MIN) is MIN: adding the all-one mask produces MAX.
-    packed(code, arithmetic(lane, false), 0, 4);
+    packed(code, add_or_subtract(lane, false), 0, 4);
 }
 fn mixed_add(code: &mut Vec<u8>, lane: u8, unsigned_result: bool) {
     if !unsigned_result {
@@ -164,7 +144,7 @@ fn mixed_add(code: &mut Vec<u8>, lane: u8, unsigned_result: bool) {
     } else {
         sign_mask(code, 6, 1, lane);
         packed(code, Host::MoveAligned, 2, 0);
-        packed(code, arithmetic(lane, false), 2, 1);
+        packed(code, add_or_subtract(lane, false), 2, 1);
         unsigned_carry(code, lane);
         packed(code, Host::Xor, 4, 6);
         packed(code, Host::EqualDword, 5, 5);

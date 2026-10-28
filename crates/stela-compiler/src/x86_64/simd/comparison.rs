@@ -5,6 +5,7 @@ use super::numerical::{
     clear_scalar, exponent_range, prepare_vector_input_range, read_numerical_vector, resolve,
     test_control, vector_exponent_range,
 };
+use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
 use crate::{
     GuestAddress, GuestState, TargetCpu,
@@ -16,7 +17,6 @@ use crate::{
             comparison::{CompareSource, Operand},
         },
     },
-    block::ExitKind,
 };
 use alloc::vec::Vec;
 
@@ -71,7 +71,6 @@ const TEST_ECX_ECX: &[u8] = &[0x85, 0xc9];
 const TEST_RCX_RCX: &[u8] = &[0x48, 0x85, 0xc9];
 const AND_EAX_IMMEDIATE: u8 = 0x25;
 const CMP_EAX_IMMEDIATE: u8 = 0x3d;
-const JMP_RELATIVE: u8 = 0xe9;
 const MOVSS_XMM6_XMM0: &[u8] = &[0xf3, 0x0f, 0x10, 0xf0];
 const MOVSD_XMM6_XMM0: &[u8] = &[0xf2, 0x0f, 0x10, 0xf0];
 const PINSRW_XMM6_EAX_0: &[u8] = &[0x66, 0x0f, 0xc4, 0xf0, 0];
@@ -82,24 +81,6 @@ enum FlagSelect {
     Below = 0x42,
     Less = 0x4c,
     Sign = 0x48,
-}
-
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_RELATIVE);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
-}
-
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    let completed = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success_start);
 }
 
 fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {

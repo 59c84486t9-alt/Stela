@@ -1,4 +1,5 @@
 //! Half-precision lane unpacking, rounding and packing for normal values.
+use super::numerical::jump;
 use alloc::vec::Vec;
 mod kernel;
 use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test_control};
@@ -15,7 +16,6 @@ pub(super) const RESULT: u8 = 6;
 pub(super) const ORIGINAL_LEFT: u8 = 7;
 const ZERO: u8 = 2;
 const FIRST_LANE: u8 = 0;
-const JMP_REL32: u8 = 0xe9;
 const SIGN_BITS: u32 = 1;
 const FPCR_ROUNDING_LOW: u32 = 1 << FPCR_ROUNDING_SHIFT;
 const FPCR_ROUNDING_HIGH: u32 = FPCR_ROUNDING_LOW << 1;
@@ -122,13 +122,6 @@ const MOVD_XMM6_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xf0];
 const CVTSS2SD_XMM6_XMM6: &[u8] = &[0xf3, 0x0f, 0x5a, 0xf6];
 const MOVQ_XMM6_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xf0];
 const ADD_RAX_R9: &[u8] = &[0x4c, 0x01, 0xc8];
-
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
-}
 
 fn shift(code: &mut Vec<u8>, opcode: &[u8], amount: u8) {
     code.extend(opcode);

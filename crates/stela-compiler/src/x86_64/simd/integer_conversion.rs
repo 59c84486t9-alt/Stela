@@ -1,4 +1,5 @@
 //! Conversions between FP and integers.
+use super::numerical::jump;
 use super::numerical::{
     ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar,
     commit_inexact, emit_opcode, environment_round, exponent_range, prepare_vector_input_range,
@@ -62,7 +63,6 @@ const SHUFPS_XMM1_BROADCAST: &[u8] = &[0x0f, 0xc6, 0xc9, 0];
 const UNPCKLPD_XMM1_XMM1: &[u8] = &[0x66, 0x0f, 0x14, 0xc9];
 const UCOMISS_XMM0_XMM1: &[u8] = &[0x0f, 0x2e, 0xc1];
 const UCOMISD_XMM0_XMM1: &[u8] = &[0x66, 0x0f, 0x2e, 0xc1];
-const JMP_REL32: u8 = 0xe9;
 const RESULT_VECTOR: u8 = 0;
 const TEMPORARY_VECTOR: u8 = 1;
 const INTEGER_ACCUMULATOR: u8 = 6;
@@ -73,13 +73,6 @@ const UNSIGNED_HIGH_EXPONENT: i16 = 63;
 
 fn helper(code: &mut Vec<u8>, pc: GuestAddress) {
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-}
-
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
 }
 
 fn scalar_conversion(code: &mut Vec<u8>, format: Format, opcode: u8, wide: bool) {

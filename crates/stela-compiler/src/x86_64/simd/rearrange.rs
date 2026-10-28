@@ -16,6 +16,31 @@ pub(super) fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
     packed(code, Host::UnpackLowQword, xmm, 7);
 }
 
+/// Load `value` repeated in each `lane`-byte lane of `xmm` (clobbers RCX and XMM7).
+pub(super) fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
+    let bytes = value.to_le_bytes();
+    constant(
+        code,
+        xmm,
+        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
+    );
+}
+
+/// Packed ADD or SUB for `lane`-byte lanes.
+pub(super) fn add_or_subtract(lane: u8, subtract: bool) -> Host {
+    match (subtract, lane) {
+        (false, 1) => Host::AddByte,
+        (false, 2) => Host::AddWord,
+        (false, 4) => Host::AddDword,
+        (false, 8) => Host::AddQword,
+        (true, 1) => Host::SubByte,
+        (true, 2) => Host::SubWord,
+        (true, 4) => Host::SubDword,
+        (true, 8) => Host::SubQword,
+        _ => unreachable!("lane of 1, 2, 4 or 8 bytes"),
+    }
+}
+
 fn load_lane(code: &mut Vec<u8>, source: LaneSource, bytes: u8) {
     use crate::aarch64::Register;
     let offset = match source {

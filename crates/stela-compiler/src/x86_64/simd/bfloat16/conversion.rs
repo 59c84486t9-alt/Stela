@@ -1,5 +1,6 @@
 //! BFCVT/BFCVTN by integer rounding, with a software path for special values.
 use super::super::super::isa::ShiftOpcode;
+use super::super::numerical::helper_section;
 use super::super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, branch, exponent_range, guard_ah0_exceptions,
     integer_rounding_policy, prepare_vector_input_range, quantize_bfloat_packed,
@@ -15,7 +16,6 @@ use crate::{
             bfloat16::{ConversionMode, ConversionOperand},
         },
     },
-    block::ExitKind,
 };
 use alloc::vec::Vec;
 
@@ -45,7 +45,6 @@ const PEXTRW_EAX_XMM0_LOW: &[u8] = &[0x66, 0x0f, 0xc5, 0xc0, 0];
 const MOVD_XMM0_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc0];
 const PINSRW_XMM0_EAX_LOW: &[u8] = &[0x66, 0x0f, 0xc4, 0xc0, 0];
 const MOVLHPS_XMM1_XMM0: &[u8] = &[0x0f, 0x16, 0xc8];
-const JMP_REL32: u8 = 0xe9;
 
 fn input_guard(code: &mut Vec<u8>, mode: ConversionMode, helper: &mut Vec<usize>) {
     if mode == ConversionMode::Scalar {
@@ -89,19 +88,6 @@ fn packed_overflow_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     code.push(TEST_EAX_IMM32);
     code.extend(VECTOR_LANE_MASK.to_le_bytes());
     helper.push(branch(code, Condition::NotZero));
-}
-
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    code.push(JMP_REL32);
-    let completed = code.len();
-    code.extend(0i32.to_le_bytes());
-    let helper_start = code.len();
-    super::super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success);
 }
 
 fn commit_inexact(code: &mut Vec<u8>) {

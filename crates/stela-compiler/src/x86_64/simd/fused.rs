@@ -13,7 +13,7 @@ use super::{Host, commit, packed};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, fused::FusedOperation},
+        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format},
         simd::{arithmetic::Shape, fused::Operand},
     },
     block::ExitKind,
@@ -34,21 +34,12 @@ const DOUBLE_PREFIX: u8 = 0xf2;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 
-fn fused_opcode(operation: FusedOperation) -> FusedOpcode {
-    match operation {
-        FusedOperation::Add => FusedOpcode::MultiplyAdd,
-        FusedOperation::Subtract => FusedOpcode::NegativeMultiplyAdd,
-        FusedOperation::NegatedAdd => FusedOpcode::NegativeMultiplySubtract,
-        FusedOperation::NegatedSubtract => FusedOpcode::MultiplySubtract,
-    }
-}
-
 fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     emit_fma(
         code,
         operand.format,
         operand.shape,
-        fused_opcode(operand.operation),
+        FusedOpcode::from(operand.operation),
         target,
     );
 }

@@ -1,4 +1,5 @@
 //! Per-lane variable shifts by unsigned counts.
+use super::repeated_constant;
 use crate::x86_64::simd::shifts::{
     logical_shift as shared_logical_shift, right_shift as shared_right_shift,
 };
@@ -33,22 +34,12 @@ pub(super) fn avx2_opcode(
         _ => None,
     }
 }
-const MOV_RAX_IMM64: [u8; 2] = [0x48, 0xb8];
 const ADJACENT_DWORDS: u8 = 0xb1;
 const HIGH_DWORD_SIGN: u8 = 0xf5;
 const DWORD_SIGN_SHIFT: u8 = u32::BITS as u8 - 1;
 const WORD_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
-}
-fn constant(code: &mut Vec<u8>, xmm: u8, element: ElementSize, value: u64) {
-    let limbs = value.to_le_bytes();
-    let repeated: [u8; core::mem::size_of::<u64>()] =
-        core::array::from_fn(|i| limbs[i % element.bytes()]);
-    code.extend(MOV_RAX_IMM64);
-    code.extend(repeated);
-    packed(code, Host::MoveGprQword, xmm, 0);
-    packed(code, Host::UnpackLowQword, xmm, xmm);
 }
 /// Byte logical masks use one repeated qword constant, avoiding two-limb setup.
 fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane: u8, amount: u8, left: bool) {
@@ -70,7 +61,7 @@ fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane: u8, amount: u8, left: bool) 
     } else {
         u16::from(u8::MAX) >> amount
     };
-    constant(code, 5, ElementSize::Byte, u64::from(mask));
+    repeated_constant(code, 5, ElementSize::Byte, u64::from(mask));
     packed(code, Host::And, xmm, 5);
 }
 /// Arithmetic word shifts independently sign-extend each even and odd byte.
@@ -179,7 +170,7 @@ pub(super) fn chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
     }
     packed(code, Host::MoveAligned, 2, 1);
     if element == ElementSize::Byte {
-        constant(code, 5, element, u64::from(u8::MAX) ^ (bits as u64 - 1));
+        repeated_constant(code, 5, element, u64::from(u8::MAX) ^ (bits as u64 - 1));
         packed(code, Host::And, 2, 5);
     } else {
         logical_shift(code, 2, lane, bits.trailing_zeros() as u8, false);

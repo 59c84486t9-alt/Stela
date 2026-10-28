@@ -105,7 +105,7 @@ fn immediate(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
 /// after OR accepts exactly-one-zero inputs while retaining every signed-zero
 /// tie for the shared semantic helper. Double requires both dwords to be zero.
 /// LEFT/RIGHT/ACTIVE and the invariant classification masks remain live.
-fn guard_zero_pairs(
+pub(super) fn guard_zero_pairs(
     code: &mut Vec<u8>,
     format: Format,
     failures: &mut Vec<usize>,
@@ -134,7 +134,7 @@ fn guard_zero_pairs(
     code.extend(0_i32.to_le_bytes());
 }
 
-fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
+pub(super) fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
     let opcode = match operation {
         MinMaxOperation::Minimum | MinMaxOperation::MinimumNumber => SelectionOpcode::Minimum,
         MinMaxOperation::Maximum | MinMaxOperation::MaximumNumber => SelectionOpcode::Maximum,

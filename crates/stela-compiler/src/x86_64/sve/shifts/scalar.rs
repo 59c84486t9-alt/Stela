@@ -1,4 +1,5 @@
 //! Scalar element shifts and saturation.
+use super::stack_vector;
 use crate::aarch64::{
     scalable::ElementSize,
     sve::shifts::{Count, Kind},
@@ -12,9 +13,6 @@ const SOURCE_SLOT: u8 = 0;
 const COUNT_SLOT: u8 = 16;
 const RESULT_SLOT: u8 = 32;
 pub(super) const STACK_BYTES: u8 = 48;
-const MOVDQU_STORE_RSP: [u8; 3] = [0xf3, 0x0f, 0x7f];
-const MOVDQU_LOAD_RSP: [u8; 3] = [0xf3, 0x0f, 0x6f];
-const MODRM_STACK_DISP8: u8 = 0x44;
 const STACK_SIB: u8 = 0x24;
 const MOVZX_EAX_BYTE_RSP: [u8; 3] = [0x0f, 0xb6, 0x44];
 const MOVSX_RAX_BYTE_RSP: [u8; 4] = [0x48, 0x0f, 0xbe, 0x44];
@@ -47,15 +45,6 @@ const MOV_BYTE_RSP_AL: [u8; 2] = [0x88, 0x44];
 const MOV_WORD_RSP_AX: [u8; 3] = [0x66, 0x89, 0x44];
 const MOV_DWORD_RSP_EAX: [u8; 2] = [0x89, 0x44];
 const MOV_QWORD_RSP_RAX: [u8; 3] = [0x48, 0x89, 0x44];
-
-fn stack_vector(code: &mut Vec<u8>, xmm: u8, slot: u8, store: bool) {
-    code.extend(if store {
-        MOVDQU_STORE_RSP
-    } else {
-        MOVDQU_LOAD_RSP
-    });
-    code.extend([MODRM_STACK_DISP8 | xmm << 3, STACK_SIB, slot]);
-}
 
 fn load_lane(code: &mut Vec<u8>, bytes: usize, signed: bool, slot: u8) {
     code.extend_from_slice(match (bytes, signed) {

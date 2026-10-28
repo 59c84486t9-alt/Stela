@@ -1,4 +1,5 @@
 //! FP min/max: scalar, vector, pairwise and across-lane forms.
+use super::scalar_format;
 use crate::aarch64::floating::{Format, minmax::MinMaxOperation};
 
 use super::arithmetic::Shape;
@@ -6,11 +7,6 @@ use super::arithmetic::Shape;
 const REGISTER_MASK: u32 = 31;
 const LEFT_SHIFT: u32 = 5;
 const RIGHT_SHIFT: u32 = 16;
-const FORMAT_SHIFT: u32 = 22;
-const FORMAT_MASK: u32 = 3;
-const FORMAT_SINGLE: u32 = 0;
-const FORMAT_DOUBLE: u32 = 1;
-const FORMAT_HALF: u32 = 3;
 const VECTOR_Q: u32 = 1 << 30;
 const SIMD_DOUBLE: u32 = 1 << 22;
 const VECTOR_PAIRWISE: u32 = 1 << 29;
@@ -100,15 +96,6 @@ impl Operand {
 
 fn register(word: u32, shift: u32) -> u8 {
     ((word >> shift) & REGISTER_MASK) as u8
-}
-
-fn scalar_format(word: u32) -> Result<Format, ()> {
-    match (word >> FORMAT_SHIFT) & FORMAT_MASK {
-        FORMAT_SINGLE => Ok(Format::Single),
-        FORMAT_DOUBLE => Ok(Format::Double),
-        FORMAT_HALF => Ok(Format::Half),
-        _ => Err(()),
-    }
 }
 
 fn vector_shape(word: u32) -> Shape {
@@ -265,6 +252,7 @@ fn decode_reduction(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aarch64::simd::{FORMAT_DOUBLE, FORMAT_HALF, FORMAT_SHIFT, FORMAT_SINGLE};
 
     const SCALAR_OPERATIONS: [(u32, MinMaxOperation); 4] = [
         (SCALAR_FMAX, MinMaxOperation::Maximum),

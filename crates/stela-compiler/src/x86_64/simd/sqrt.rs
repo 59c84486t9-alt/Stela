@@ -7,6 +7,7 @@ use super::numerical::{
     restore_environment, sticky_inexact, sticky_result_check, test_control,
     vector_positive_exponent_range,
 };
+use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
 use crate::{
     GuestAddress, TargetCpu,
@@ -14,7 +15,6 @@ use crate::{
         floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format},
         simd::{arithmetic::Shape, sqrt::Operand},
     },
-    block::ExitKind,
 };
 use alloc::vec::Vec;
 
@@ -29,7 +29,6 @@ const ROUNDING_PARITY: u8 = 7;
 const FIRST_LANE: u8 = 0;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
-const JMP_REL32: u8 = 0xe9;
 const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
 const MOVD_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0x6e];
 const PINSRW_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0xc4];
@@ -52,13 +51,6 @@ const HALF_BIAS_POSITION: u8 = HALF_TO_SINGLE_BIAS.trailing_zeros() as u8;
 const HALF_BIAS_DIGITS: u8 = (HALF_TO_SINGLE_BIAS >> HALF_BIAS_POSITION).ilog2() as u8 + 1;
 const UPPER_HALF_BYTES: u8 = (u64::BITS / u8::BITS) as u8;
 
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
-}
-
 fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
@@ -71,19 +63,6 @@ fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
         vector_positive_exponent_range(code, operand.format, operand.shape, SOURCE);
         helper.push(branch(code, Condition::NotZero));
     }
-}
-
-/// Every branch enters with the caller's complete MXCSR and stack restored.
-/// Guest status and destination commits follow this common cold helper section.
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    let completed = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success_start);
 }
 
 fn square_root(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {

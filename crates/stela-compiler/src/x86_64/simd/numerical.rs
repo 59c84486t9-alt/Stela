@@ -110,6 +110,18 @@ pub(in crate::x86_64) enum FusedOpcode {
     NegativeMultiplySubtract = 0x9e,
 }
 
+impl From<crate::aarch64::floating::fused::FusedOperation> for FusedOpcode {
+    fn from(operation: crate::aarch64::floating::fused::FusedOperation) -> Self {
+        use crate::aarch64::floating::fused::FusedOperation;
+        match operation {
+            FusedOperation::Add => Self::MultiplyAdd,
+            FusedOperation::Subtract => Self::NegativeMultiplyAdd,
+            FusedOperation::NegatedAdd => Self::NegativeMultiplySubtract,
+            FusedOperation::NegatedSubtract => Self::MultiplySubtract,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Rounding {
     Fpcr,
@@ -305,8 +317,43 @@ pub(in crate::x86_64) struct ColdSplit {
     pub(in crate::x86_64) result: u8,
 }
 
+/// Jump over a cold section that exits to software completion at `pc`, and
+/// point each `helper` branch at that section. Every branch enters it with
+/// the caller's MXCSR and stack restored; success continues after it.
+pub(in crate::x86_64) fn helper_section(
+    code: &mut Vec<u8>,
+    helper: &[usize],
+    pc: crate::GuestAddress,
+) {
+    let completed = jump(code);
+    let helper_start = code.len();
+    super::super::block::direct_exit(code, pc, crate::block::ExitKind::FloatingPoint);
+    let success = code.len();
+    for &patch in helper {
+        resolve(code, patch, helper_start);
+    }
+    resolve(code, completed, success);
+}
+
+/// Packed single-precision `opcode` on whole XMM registers.
+pub(in crate::x86_64) fn single_vector_arithmetic(
+    code: &mut Vec<u8>,
+    opcode: ArithmeticOpcode,
+    destination: u8,
+    source: u8,
+) {
+    emit_opcode_to(
+        code,
+        crate::aarch64::floating::Format::Single,
+        crate::aarch64::simd::arithmetic::Shape::Vector128,
+        opcode,
+        destination,
+        source,
+    );
+}
+
 /// An unconditional `jmp rel32` to resolve later.
-pub(super) fn jump(code: &mut Vec<u8>) -> usize {
+pub(in crate::x86_64) fn jump(code: &mut Vec<u8>) -> usize {
     code.push(JMP_REL32);
     let patch = code.len();
     code.extend(0i32.to_le_bytes());

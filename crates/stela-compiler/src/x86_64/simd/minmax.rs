@@ -1,5 +1,6 @@
 //! FP min/max: normal-or-zero S/D selection and normal H integer ordering.
 use super::super::isa::ShiftOpcode;
+use super::numerical::helper_section;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, MOVQ_XMM0_XMM0, branch, clear_scalar, exponent_range, jump,
     prepare_vector_input_range, read_numerical_vector, resolve, test_control,
@@ -17,7 +18,6 @@ use crate::{
             minmax::{BinaryMode, Operand},
         },
     },
-    block::ExitKind,
 };
 use alloc::vec::Vec;
 
@@ -216,19 +216,6 @@ fn input_guard(
         }
         helper.push(branch(code, Condition::NotZero));
     }
-}
-
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    // Scalar zero and normal success have different flags. Every failed guard
-    // has its own helper patch, so success must not depend on stale flags.
-    let success = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, success, success_start);
 }
 
 fn shuffle(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, control: u8) {

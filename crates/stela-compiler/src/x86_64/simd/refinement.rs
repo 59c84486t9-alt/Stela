@@ -1,5 +1,6 @@
 //! FRECPS/FRSQRTS: exact-product SSE2, FMA3, or widened arithmetic for half.
 use super::super::isa::ShiftOpcode;
+use super::numerical::jump;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
     RESULT_MINIMUM_EXPONENT, VZEROUPPER, branch, clear_scalar, commit_ah0_inexact, emit_fma,
@@ -38,7 +39,6 @@ const SSE_ESCAPE: u8 = 0x0f;
 const SINGLE_PREFIX: u8 = 0xf3;
 const DOUBLE_PREFIX: u8 = 0xf2;
 const MOV_SCALAR: u8 = 0x10;
-const JMP_REL32: u8 = 0xe9;
 const SIGN_BITS: u32 = 1;
 const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
 const MOVD_XMM0_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc0];
@@ -72,13 +72,6 @@ const MOV_PRODUCT_EAX: &[u8] = &[0x89, 0x44, 0x24, MXCSR_PRODUCT_SLOT];
 const OR_EAX_R9D: &[u8] = &[0x44, 0x09, 0xc8];
 const OR_ECX_R10D: &[u8] = &[0x44, 0x09, 0xd1];
 const ADD_RSP_MXCSR: &[u8] = &[0x48, 0x83, 0xc4, MXCSR_STACK_BYTES];
-
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
-}
 
 fn constant(code: &mut Vec<u8>, format: Format, kind: Kind, destination: u8) {
     packed(code, Host::EqualDword, destination, destination);

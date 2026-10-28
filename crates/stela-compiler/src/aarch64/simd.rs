@@ -345,6 +345,23 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
+/// The scalar FP `ftype` field and its values.
+const FORMAT_SHIFT: u32 = 22;
+const FORMAT_SINGLE: u32 = 0;
+const FORMAT_DOUBLE: u32 = 1;
+const FORMAT_HALF: u32 = 3;
+
+/// A scalar FP instruction's format from its `ftype` field (bits 22-23).
+fn scalar_format(word: u32) -> Result<crate::aarch64::floating::Format, ()> {
+    use crate::aarch64::floating::Format;
+    match (word >> FORMAT_SHIFT) & 3 {
+        FORMAT_SINGLE => Ok(Format::Single),
+        FORMAT_DOUBLE => Ok(Format::Double),
+        FORMAT_HALF => Ok(Format::Half),
+        _ => Err(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -68,7 +68,7 @@ fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             code,
             Format::Double,
             Shape::Scalar,
-            super::fused_opcode(operand.operation),
+            super::super::numerical::FusedOpcode::from(operand.operation),
             target,
         );
     } else {

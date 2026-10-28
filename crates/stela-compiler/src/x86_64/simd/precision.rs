@@ -1,5 +1,6 @@
 //! FCVT between FP formats: SSE2 or integer paths, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
+use super::numerical::helper_section;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR, RESULT_MINIMUM_EXPONENT, Rounding,
     branch, clear_scalar, commit_inexact, environment_round, exponent_range,
@@ -48,7 +49,6 @@ const SUB_EAX_1: &[u8] = &[0x83, 0xe8, 1];
 const CMP_EAX_IMM8: &[u8] = &[0x83, 0xf8];
 const SETNE_AL: &[u8] = &[0x0f, 0x95, 0xc0];
 const MOVZX_EAX_AL: &[u8] = &[0x0f, 0xb6, 0xc0];
-const JMP_REL32: u8 = 0xe9;
 const HALF_EXPONENT_BITS: u8 = 5;
 const HALF_EXPONENT_MASK: u32 = (1 << HALF_EXPONENT_BITS) - 1;
 const HALF_NORMAL_EXPONENT_COUNT: u8 = HALF_EXPONENT_MASK as u8 - 1;
@@ -77,21 +77,6 @@ const DWORD_SIGN_TO_LSB_SHIFT: u8 = u32::BITS as u8 - 1;
 fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
-}
-
-/// Keep all failure branches ahead of guest-state commit. No private host
-/// environment may remain installed when this common helper section is emitted.
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    code.push(JMP_REL32);
-    let completed = code.len();
-    code.extend(0i32.to_le_bytes());
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success_start);
 }
 
 fn scalar_commit(code: &mut Vec<u8>, destination: u8, format: Format) {

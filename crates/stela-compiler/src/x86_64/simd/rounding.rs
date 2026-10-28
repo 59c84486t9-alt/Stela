@@ -1,4 +1,5 @@
 //! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked.
+use super::numerical::{helper_section, jump};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod kernel;
 use super::super::isa::ShiftOpcode;
@@ -16,7 +17,6 @@ use crate::{
         },
         simd::{arithmetic::Shape, rounding::Operand},
     },
-    block::ExitKind,
 };
 
 const RESULT: u8 = 0;
@@ -38,7 +38,6 @@ const BITS_PER_BYTE: u32 = u8::BITS;
 const REGISTER_DIRECT: u8 = 0xc0;
 const REGISTER_SHIFT: u8 = 3;
 const SSE_ESCAPE: u8 = 0x0f;
-const JMP_RELATIVE: u8 = 0xe9;
 const MOVD_TO_EAX: &[u8] = &[0x66, 0x0f, 0x7e];
 const MOVD_FROM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
 const MOVQ_TO_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
@@ -118,13 +117,6 @@ enum Direction {
     Positive,
     Negative,
     Zero,
-}
-
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_RELATIVE);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
 }
 
 fn immediate(code: &mut Vec<u8>, instruction: &[u8], value: u32) {
@@ -749,17 +741,6 @@ fn checked_rounding(
     }
     checked_bounds(code, operand, helper);
     checked_inexact(code, operand);
-}
-
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    let completed = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success);
 }
 
 fn commit_result(code: &mut Vec<u8>, operand: &Operand) {

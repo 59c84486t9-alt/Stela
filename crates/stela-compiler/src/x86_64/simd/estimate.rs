@@ -1,5 +1,6 @@
 //! FRECPE/FRSQRTE/FRECPX through exact integer arithmetic.
 use super::super::isa::ShiftOpcode;
+use super::numerical::helper_section;
 use super::numerical::{
     ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar,
     emit_opcode, environment_round, exponent_range, exponent_range_below, positive_exponent_range,
@@ -16,7 +17,6 @@ use crate::{
             estimate::{Kind, Operand},
         },
     },
-    block::ExitKind,
 };
 use alloc::vec::Vec;
 
@@ -43,7 +43,6 @@ const FIRST_LANE: u8 = 0;
 const ACCUMULATOR_GPR: u8 = 0;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
-const JMP_REL32: u8 = 0xe9;
 const MOV_EAX_IMM32: u8 = 0xb8;
 const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
 const MOVQ_RAX_XMM_PREFIX: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
@@ -196,22 +195,6 @@ fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
         }
         helper.push(branch(code, Condition::NotZero));
     }
-}
-
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    if helper.is_empty() {
-        return;
-    }
-    code.push(JMP_REL32);
-    let completed = code.len();
-    code.extend(0i32.to_le_bytes());
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success_start);
 }
 
 /// Keep sign, biased exponent and the top eight fraction bits in each dword.
@@ -511,6 +494,8 @@ pub(in crate::x86_64) fn emit(
     } else {
         floating_estimate(code, operand, target);
     }
-    helper_section(code, &helper, pc);
+    if !helper.is_empty() {
+        helper_section(code, &helper, pc);
+    }
     commit_result(code, operand);
 }

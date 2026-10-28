@@ -1,8 +1,9 @@
 //! BFDOT with fixed round-to-odd intermediates.
 use super::super::super::isa::ShiftOpcode;
+use super::super::numerical::single_vector_arithmetic;
 use super::super::numerical::{
     ArithmeticOpcode, Condition, ENVIRONMENT_STACK_BYTES, MXCSR_INEXACT, Rounding, branch,
-    capture_environment_status, clear_environment_status, emit_opcode_to, environment_round,
+    capture_environment_status, clear_environment_status, environment_round,
     prepare_vector_input_range, read_numerical_vector, reject_other_status, resolve,
     restore_environment, vector_exponent_range,
 };
@@ -67,17 +68,6 @@ enum SumCheck {
     ExactVector,
 }
 
-fn arithmetic(code: &mut Vec<u8>, opcode: ArithmeticOpcode, destination: u8, source: u8) {
-    emit_opcode_to(
-        code,
-        Format::Single,
-        Shape::Vector128,
-        opcode,
-        destination,
-        source,
-    );
-}
-
 fn compare_equal(code: &mut Vec<u8>, destination: u8, source: u8) {
     code.extend([
         SSE_ESCAPE,
@@ -137,7 +127,7 @@ fn widen_pairs(code: &mut Vec<u8>, shape: Shape) {
 
 fn odd_add(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
     packed(code, Host::MoveAligned, ORIGINAL_LEFT, LEFT);
-    arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
     // Round-toward-zero overflow can clamp to the largest finite value, so
     // check the host status before the result classifier or residual hides it.
     guard_real_status(code, rollback);
@@ -159,7 +149,7 @@ fn odd_add(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: S
     // operand's residual is exact by Sterbenz and differs from the other input.
     // Numeric equality also admits signed-zero inputs and exact cancellation.
     packed(code, Host::MoveAligned, FIRST_RESIDUAL, LEFT);
-    arithmetic(
+    single_vector_arithmetic(
         code,
         ArithmeticOpcode::Subtract,
         FIRST_RESIDUAL,
@@ -167,7 +157,7 @@ fn odd_add(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: S
     );
     compare_equal(code, FIRST_RESIDUAL, RIGHT);
     packed(code, Host::MoveAligned, SECOND_RESIDUAL, LEFT);
-    arithmetic(code, ArithmeticOpcode::Subtract, SECOND_RESIDUAL, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Subtract, SECOND_RESIDUAL, RIGHT);
     compare_equal(code, SECOND_RESIDUAL, ORIGINAL_LEFT);
     packed(code, Host::And, FIRST_RESIDUAL, SECOND_RESIDUAL);
     packed(code, Host::EqualDword, ODD_BIT, ODD_BIT);
@@ -189,8 +179,8 @@ fn pair_sum(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: 
     for source in [LEFT, RIGHT, LEFT_ODD, RIGHT_ODD] {
         guard_normal(code, shape, source, rollback);
     }
-    arithmetic(code, ArithmeticOpcode::Multiply, LEFT, RIGHT);
-    arithmetic(code, ArithmeticOpcode::Multiply, LEFT_ODD, RIGHT_ODD);
+    single_vector_arithmetic(code, ArithmeticOpcode::Multiply, LEFT, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Multiply, LEFT_ODD, RIGHT_ODD);
     guard_real_status(code, rollback);
     // BF16 products have at most sixteen significant bits. Every admitted
     // normal Single product is exact; tiny/overflowing stages use the core.

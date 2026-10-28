@@ -1,5 +1,6 @@
 //! Classic BFDOT with round-to-odd intermediates.
 use super::{LEFT, RIGHT};
+use crate::x86_64::simd::numerical::single_vector_arithmetic;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,8 +11,7 @@ use crate::{
         isa::{ShiftOpcode, SimdOpcode as Host},
         scalable::numerical::{self, Frame},
         simd::numerical::{
-            ArithmeticOpcode, Condition, branch, emit_opcode_to, prepare_vector_input_range,
-            vector_exponent_range,
+            ArithmeticOpcode, Condition, branch, prepare_vector_input_range, vector_exponent_range,
         },
     },
 };
@@ -44,17 +44,6 @@ pub(super) fn install_environment(code: &mut Vec<u8>, frame: &Frame) {
     code.push(MOV_EAX_IMMEDIATE);
     code.extend(MXCSR_ROUND_ZERO.to_le_bytes());
     numerical::install_mxcsr(code, frame);
-}
-
-fn arithmetic(code: &mut Vec<u8>, opcode: ArithmeticOpcode, destination: u8, source: u8) {
-    emit_opcode_to(
-        code,
-        Format::Single,
-        Shape::Vector128,
-        opcode,
-        destination,
-        source,
-    );
 }
 
 fn guard_normal(code: &mut Vec<u8>, source: u8, failures: &mut Vec<usize>) {
@@ -96,14 +85,14 @@ fn compare_equal(code: &mut Vec<u8>, destination: u8, source: u8) {
 
 fn odd_add(code: &mut Vec<u8>, frame: &Frame, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::MoveAligned.register(code, ORIGINAL_LEFT, LEFT, target);
-    arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
     guard_real_status(code, frame, failures);
     prepare_vector_input_range(code, Format::Single);
     guard_normal_or_zero(code, LEFT, failures, target);
     // Both residuals are exact only for an exact sum. For an inexact sum, the
     // dominant operand residual is exact (Sterbenz), and the other differs.
     Host::MoveAligned.register(code, FIRST_RESIDUAL, LEFT, target);
-    arithmetic(
+    single_vector_arithmetic(
         code,
         ArithmeticOpcode::Subtract,
         FIRST_RESIDUAL,
@@ -111,7 +100,7 @@ fn odd_add(code: &mut Vec<u8>, frame: &Frame, failures: &mut Vec<usize>, target:
     );
     compare_equal(code, FIRST_RESIDUAL, RIGHT);
     Host::MoveAligned.register(code, SECOND_RESIDUAL, LEFT, target);
-    arithmetic(code, ArithmeticOpcode::Subtract, SECOND_RESIDUAL, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Subtract, SECOND_RESIDUAL, RIGHT);
     compare_equal(code, SECOND_RESIDUAL, ORIGINAL_LEFT);
     Host::And.register(code, FIRST_RESIDUAL, SECOND_RESIDUAL, target);
     Host::EqualDword.register(code, ODD_BIT, ODD_BIT, target);
@@ -138,8 +127,8 @@ pub(super) fn pair_sum(
     for source in [LEFT, RIGHT, LEFT_ODD, RIGHT_ODD] {
         guard_normal(code, source, failures);
     }
-    arithmetic(code, ArithmeticOpcode::Multiply, LEFT, RIGHT);
-    arithmetic(code, ArithmeticOpcode::Multiply, LEFT_ODD, RIGHT_ODD);
+    single_vector_arithmetic(code, ArithmeticOpcode::Multiply, LEFT, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Multiply, LEFT_ODD, RIGHT_ODD);
     guard_real_status(code, frame, failures);
     guard_normal(code, LEFT, failures);
     guard_normal(code, LEFT_ODD, failures);
