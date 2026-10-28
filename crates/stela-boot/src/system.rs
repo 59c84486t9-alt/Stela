@@ -734,6 +734,16 @@ fn load(
         .ok()
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
+    let random_seed = match crate::entropy::retain_seed() {
+        Ok((region, source)) => {
+            output::arguments(format_args!("HOST entropy seeded source={source}\n"));
+            region
+        }
+        Err(error) => {
+            output::arguments(format_args!("UNSUPPORTED host entropy: {error}\n"));
+            Region::default()
+        }
+    };
 
     let remapping = crate::native_dma::firmware_units()?;
 
@@ -976,6 +986,7 @@ fn load(
         handoff.write(Handoff {
             magic: MAGIC,
             options: options_region,
+            random_seed,
             source: source_region,
             files,
             file_count,

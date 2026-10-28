@@ -229,6 +229,10 @@ impl<'a> Services<'a> {
 // requesters have with the remapping units off. The ACPI namespace is
 // offered only with the i8042's interrupts masked.
 unsafe impl NativeServices for Services<'_> {
+    fn entropy(&self) -> Result<Arc<dyn stela_drivers::entropy::Entropy>, ServiceError> {
+        crate::random::source()
+    }
+
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
         let mut config = self.config(address)?;
         self.stop(&mut config);

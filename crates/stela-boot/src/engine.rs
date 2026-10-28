@@ -655,6 +655,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: this reserved heap is unused and its RW+NX physmap is shared by
     // every native root for the complete engine lifetime.
     unsafe { crate::ALLOCATOR.initialize(heap as *mut u8, handoff.heap.bytes as usize) };
+    // SAFETY: this loader-owned private seed is retained in the shared physmap,
+    // exclusively consumed here before any native service is published.
+    if let Err(error) = unsafe { crate::random::initialize(handoff.random_seed) } {
+        output::arguments(format_args!("HOST entropy unavailable: {error:?}\n"));
+    }
     // SAFETY: this phase owns that exact reserved heap and retained WB mapping.
     unsafe {
         crate::native_memory::initialize(

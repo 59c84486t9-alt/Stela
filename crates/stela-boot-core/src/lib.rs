@@ -15,6 +15,7 @@ pub mod madt;
 pub mod memory_types;
 pub mod options;
 pub mod paging_controls;
+pub mod random;
 pub mod passthrough;
 pub mod pe;
 pub mod ram;

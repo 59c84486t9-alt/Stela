@@ -132,6 +132,9 @@ pub struct Handoff {
     pub magic: u64,
     /// `stela.cfg`.
     pub options: Region,
+    /// Exclusive 256-bit pre-EBS seed, erased by the engine on consumption.
+    /// An empty region means no qualified entropy source was available.
+    pub random_seed: Region,
     /// `source.bin`: the guest image, when no boot bundle is configured.
     pub source: Region,
     /// The boot bundle's `bundle.json` and every file it lists.

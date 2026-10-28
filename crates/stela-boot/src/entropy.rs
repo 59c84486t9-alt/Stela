@@ -46,3 +46,100 @@ pub fn prepare<const BYTES: usize, const REQUESTS: usize>(
             })
     })
 }
+
+/// Retain one private ChaCha20 seed before firmware services end. Firmware
+/// RNG is preferred; qualified architectural hardware randomness is the
+/// fallback. Failed sources never publish partial seed material.
+pub fn retain_seed() -> Result<(crate::handoff::Region, &'static str), &'static str> {
+    let mut seed = [0; 32];
+    let source = match firmware_seed(&mut seed) {
+        Ok(()) => "uefi-rng",
+        Err(_) => match hardware_seed(&mut seed) {
+            Ok(source) => source,
+            Err(error) => {
+                erase(&mut seed);
+                return Err(error);
+            }
+        },
+    };
+    let page = match uefi::boot::allocate_pages(
+        uefi::boot::AllocateType::AnyPages,
+        uefi::boot::MemoryType::LOADER_DATA,
+        1,
+    ) {
+        Ok(page) => page,
+        Err(_) => {
+            erase(&mut seed);
+            return Err("no private page for the host entropy seed");
+        }
+    };
+    // SAFETY: this fresh loader page is exclusive and holds all 32 bytes.
+    unsafe { core::ptr::copy_nonoverlapping(seed.as_ptr(), page.as_ptr(), seed.len()) };
+    erase(&mut seed);
+    Ok((
+        crate::handoff::Region {
+            physical: page.as_ptr() as u64,
+            bytes: 32,
+        },
+        source,
+    ))
+}
+
+fn firmware_seed(seed: &mut [u8; 32]) -> Result<(), &'static str> {
+    use uefi::{boot, proto::rng::Rng};
+    let handle =
+        boot::get_handle_for_protocol::<Rng>().map_err(|_| "UEFI RNG protocol is unavailable")?;
+    let mut rng = boot::open_protocol_exclusive::<Rng>(handle)
+        .map_err(|_| "UEFI RNG protocol could not be opened")?;
+    let mut pool = prepare::<32, 1>(&mut rng, [32])?;
+    pool.fill(seed)
+}
+
+fn erase(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: the byte is exclusively borrowed and clearing must survive
+        // dead-store elimination after the source's last ordinary use.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+fn hardware_seed(seed: &mut [u8; 32]) -> Result<&'static str, &'static str> {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let maximum = __cpuid(0).eax;
+    let rdseed = maximum >= 7 && __cpuid_count(7, 0).ebx & (1 << 18) != 0;
+    let rdrand = maximum >= 1 && __cpuid(1).ecx & (1 << 30) != 0;
+    if !rdseed && !rdrand {
+        return Err("no qualified firmware or CPU entropy source");
+    }
+    for chunk in seed.chunks_mut(8) {
+        let Some(word) = hardware_word(rdseed) else {
+            erase(seed);
+            return Err("CPU entropy source did not complete the seed");
+        };
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(if rdseed { "rdseed" } else { "rdrand" })
+}
+
+fn hardware_word(seed: bool) -> Option<u64> {
+    for _ in 0..128 {
+        let (value, ready): (u64, u8);
+        // SAFETY: CPUID qualified this instruction before entry. It changes
+        // only its destination and flags, and executes before native takeover.
+        unsafe {
+            if seed {
+                core::arch::asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ready,
+                    options(nomem, nostack));
+            } else {
+                core::arch::asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ready,
+                    options(nomem, nostack));
+            }
+        }
+        if ready != 0 {
+            return Some(value);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
