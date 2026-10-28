@@ -337,3 +337,59 @@ fn a_bound_six_ghz_session_is_fenced_and_removes_through_its_own_codec() {
     }
     .unwrap();
 }
+
+#[test]
+fn a_six_ghz_sae_frame_goes_again_once_its_wait_passes() {
+    let (mut driver, model) = six_setup();
+    let observed = observe(&mut driver, &model);
+    let permission = Rc::new(Permission::default());
+    permission.hardware.set(true);
+    permission.os.set(true);
+    let mut owner = reg::Owner::new(Hardware(permission.clone()), Os(permission.clone())).unwrap();
+    // SAFETY: the modeled requester owns this controller and both providers.
+    let session = unsafe {
+        driver.begin_six_ghz_external_authentication(
+            &mut owner,
+            &observed,
+            Selection::new(selected()).unwrap(),
+            six_profile(),
+            10,
+            1_000_000,
+        )
+    }
+    .unwrap();
+    // SAFETY: as above.
+    unsafe {
+        driver.transmit_six_ghz_external_authentication(
+            &mut owner,
+            &session,
+            1,
+            0,
+            &[19, 0],
+            25,
+            &Source,
+        )
+    }
+    .unwrap();
+    let first = finish_tx_on(&model, 1).remove(0);
+    for now in [30, 600_000] {
+        // SAFETY: as above.
+        unsafe {
+            driver.poll_six_ghz_external_authentication(
+                &mut owner,
+                &session,
+                now,
+                &Source,
+                &mut Policy,
+            )
+        }
+        .unwrap();
+        if now == 30 {
+            // The first frame's TX-free; no TX status came, so its wait runs.
+            assert!(finish_tx_on(&model, 1).is_empty());
+            assert_eq!(driver.poll_released().unwrap().len(), 1);
+        }
+    }
+    let second = finish_tx_on(&model, 1).remove(0);
+    assert_eq!(second[24..], first[24..]);
+}

@@ -291,7 +291,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 // Includes potentially slow source allocation/map/coherence work;
                 // publish_submission's actual submit_if repeats native expiry.
                 Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
-                Self::publish_submission(&mut s.controller, source, &bytes, prepared)
+                let receipt =
+                    Self::publish_submission(&mut s.controller, source, &bytes, prepared)?;
+                s.mlme_receipt = Some(receipt);
+                Ok(receipt)
             })
         }
         .map_err(Error::Regulatory)
@@ -320,7 +323,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let result = unsafe {
             authority.with_six_ghz_authentication(self, |client, guard| {
                 let after = Self::qualify_six(client.state_mut(), guard, Use::Service, now)?;
-                client.poll_inner(after, source, policy, None, Some(guard))
+                let events = client.poll_inner(after, source, policy, None, Some(guard))?;
+                if client.phase() == Phase::Joining {
+                    Self::retransmit_six(client.state_mut(), guard, now, source)?;
+                }
+                Ok(events)
             })
         }
         .map_err(Error::Regulatory)
@@ -329,6 +336,35 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             self.revoke_six();
         }
         result
+    }
+    /// `ieee80211_auth` sending the OS's last SAE frame again once its wait
+    /// passed, on a freshly reserved channel, requalified as the first was.
+    fn retransmit_six(
+        s: &mut Owned<I, Q, C>,
+        guard: &mut SixGhzAuthenticationGuard<'_>,
+        now: u64,
+        source: &dyn PageSource,
+    ) -> Result<(), Error> {
+        let queue = s.controller.state().data_tx.as_ref().unwrap();
+        if queue.outstanding_tokens() != 0 || queue.pending_descriptors() != 0 {
+            return Ok(());
+        }
+        let after = Self::six_time(s, now)?;
+        let Some(bytes) = s
+            .station
+            .external_retransmission(after, &mut WirePolicy)
+            .map_err(Error::Station)?
+        else {
+            return Ok(());
+        };
+        Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
+        Self::reserve_six_channel(s, guard, now)?;
+        Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
+        let prepared = Self::prepare_submission(s, &bytes, None, true, true)?;
+        Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
+        let receipt = Self::publish_submission(&mut s.controller, source, &bytes, prepared)?;
+        s.mlme_receipt = Some(receipt);
+        Ok(())
     }
     /// Stop original work even if new providers are missing or revoked. No
     /// cleanup command emits authentication/deauthentication management frames.

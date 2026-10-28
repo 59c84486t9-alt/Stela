@@ -153,7 +153,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
 
     /// `ieee80211_auth` sending the OS's last SAE frame again once its wait
     /// passed, on a freshly reserved channel as `drv_mgd_prepare_tx` reserves
-    /// one. A 6 GHz exchange keeps its single guarded try.
+    /// one. A 6 GHz exchange retransmits under its own guards.
     pub(super) fn retransmit_external(
         s: &mut Owned<I, Q, C>,
         now: u64,
