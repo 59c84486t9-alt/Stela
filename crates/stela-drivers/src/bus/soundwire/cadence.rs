@@ -63,29 +63,7 @@ pub unsafe trait Registers: 'static {
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ErrorKind {
-    Configuration,
-    Length,
-    Allocation,
-    Io,
-    Link,
-    ForeignResponse,
-    Timeout,
-    Nack,
-    Ignored,
-    Faulted,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Error {
-    pub kind: ErrorKind,
-    pub offset: Option<usize>,
-    /// A command store was attempted and may have reached a peripheral.
-    pub issued: bool,
-    /// Completed controller byte commands, including SCP page writes, preceding
-    /// this batch; never a replay request.
-    pub completed: usize,
-}
+pub use super::{Error, ErrorKind};
 
 /// A serialized device register message. Page writes precede every paged
 /// message, even when the same page was used previously; no stale page cache.

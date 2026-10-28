@@ -24,6 +24,20 @@ const PARAMETERS: usize = 0x544;
 const DIRECT: u32 = 1 << 15;
 const SSC_ENABLE: u32 = 1 << 31;
 
+/// Run `operation` with the vendor configuration write-protect field
+/// `(at, mask, open)` opened through the chip's checked `update`, closing it
+/// afterwards even when `operation` fails; the first error is returned.
+fn unlocked_with<T>(
+    c: &mut dyn ConfigSpace,
+    update: fn(&mut dyn ConfigSpace, u16, u32, u32) -> Result<(), BlockError>,
+    (at, mask, open): (u16, u32, u32),
+    operation: impl FnOnce(&mut dyn ConfigSpace) -> Result<T, BlockError>,
+) -> Result<T, BlockError> {
+    let result = update(c, at, mask, open).and_then(|()| operation(c));
+    let close = update(c, at, mask, 0);
+    result.and_then(|value| close.map(|()| value))
+}
+
 fn update(r: &mut dyn Registers, at: usize, mask: u32, bits: u32) -> Result<(), BlockError> {
     let previous = r.read32(at);
     if previous == u32::MAX {

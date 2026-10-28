@@ -464,6 +464,20 @@ impl<C: ConfigSpace> Function<C> {
         interrupts
     }
 
+    /// Set or clear Bus Master Enable alone, by a native word store that
+    /// leaves the Status register's write-one-to-clear bits alone, and report
+    /// whether the function reads back exactly that Command value.
+    pub fn set_bus_master(&mut self, enabled: bool) -> bool {
+        let previous = self.config.read16(COMMAND);
+        let desired = if enabled {
+            previous | COMMAND_BUS_MASTER
+        } else {
+            previous & !COMMAND_BUS_MASTER
+        };
+        self.config.write16(COMMAND, desired);
+        self.config.read16(COMMAND) == desired
+    }
+
     /// Enable memory decoding and bus mastering without changing interrupt
     /// controls. The driver must first establish its DMA and interrupt policy.
     /// This does not program MSI/MSI-X routes or install interrupt handlers.

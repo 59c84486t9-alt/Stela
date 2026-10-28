@@ -106,15 +106,6 @@ impl NativeRegisters {
         }
         Ok((self.function, self.mapping))
     }
-    fn pointer(&self, offset: usize) -> Result<core::ptr::NonNull<u32>, Error> {
-        if !offset.is_multiple_of(4) {
-            return Err(Error::RegisterUnavailable(offset));
-        }
-        self.mapping
-            .address(offset, 4)
-            .map(|p| p.cast())
-            .map_err(|_| Error::RegisterUnavailable(offset))
-    }
 }
 impl Registers for NativeRegisters {
     fn check_authority(&mut self) -> Result<(), Error> {
@@ -169,25 +160,23 @@ impl Registers for NativeRegisters {
         Ok(())
     }
     fn read32(&mut self, offset: usize) -> Result<u32, Error> {
-        let pointer = self.pointer(offset)?;
-        // SAFETY: retained exclusive native UC BAR2; checked aligned dword span.
-        Ok(unsafe { pointer.as_ptr().read_volatile() })
+        self.mapping
+            .read32(offset)
+            .map_err(|_| Error::RegisterUnavailable(offset))
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
-        let pointer = self.pointer(offset)?;
+        if !offset.is_multiple_of(4) {
+            return Err(Error::RegisterUnavailable(offset));
+        }
         self.quiescent = false;
-        // SAFETY: same exact exclusive mapping and width, no safe RAM alias.
-        unsafe { pointer.as_ptr().write_volatile(value) };
-        Ok(())
+        self.mapping
+            .write32(offset, value)
+            .map_err(|_| Error::RegisterUnavailable(offset))
     }
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.check_authority()?;
-        let config = self.function.config();
-        let previous = config.read16(4);
-        let desired = if enabled { previous | 4 } else { previous & !4 };
         self.master = None;
-        config.write16(4, desired);
-        if config.read16(4) != desired {
+        if !self.function.set_bus_master(enabled) {
             return Err(Error::PciAuthority);
         }
         self.master = Some(enabled);

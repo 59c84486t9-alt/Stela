@@ -331,19 +331,12 @@ impl<R: ring::Registers> Channel<R> {
         if self.phase != Phase::Disabled {
             return Err(Error::Busy);
         }
-        if !self.tx_released {
-            // SAFETY: caller establishes actual final drain for both rings.
-            unsafe {
-                self.tx.release()?;
-            }
-            self.tx_released = true;
-        }
-        if !self.rx_released {
-            // SAFETY: as above; successful TX release does not authorize RX.
-            unsafe {
-                self.rx.release()?;
-            }
-            self.rx_released = true;
+        // SAFETY: the caller proves final drain of both rings.
+        unsafe {
+            ring::release_pair(
+                (&mut self.tx, &mut self.tx_released),
+                (&mut self.rx, &mut self.rx_released),
+            )?;
         }
         self.phase = Phase::Released;
         Ok(())

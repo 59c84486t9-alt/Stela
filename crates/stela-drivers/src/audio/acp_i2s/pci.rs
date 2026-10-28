@@ -160,38 +160,19 @@ impl Registers for NativeRegisters {
     }
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.associated()?;
-        let config = self.function.config();
-        let previous = config.read16(4);
-        let desired = if enabled { previous | 4 } else { previous & !4 };
-        // Native word store preserves adjacent PCI W1C status.
         self.master = None;
-        config.write16(4, desired);
-        if config.read16(4) != desired {
+        if !self.function.set_bus_master(enabled) {
             return Err(Error::PciAuthority);
         }
         self.master = Some(enabled);
         Ok(())
     }
+    /// An unmapped or misaligned register reads as all ones and ignores writes.
     fn read32(&mut self, offset: usize) -> u32 {
-        if !offset.is_multiple_of(4) {
-            return u32::MAX;
-        }
-        let Ok(pointer) = self.mapping.address(offset, 4) else {
-            return u32::MAX;
-        };
-        // SAFETY: checked native UC mapping, exclusive retained ACP function,
-        // natural alignment and the device's actual 32-bit register width.
-        unsafe { pointer.as_ptr().cast::<u32>().read_volatile() }
+        self.mapping.read32(offset).unwrap_or(u32::MAX)
     }
     fn write32(&mut self, offset: usize, value: u32) {
-        if !offset.is_multiple_of(4) {
-            return;
-        }
-        let Ok(pointer) = self.mapping.address(offset, 4) else {
-            return;
-        };
-        // SAFETY: same owned native register mapping and access width.
-        unsafe { pointer.as_ptr().cast::<u32>().write_volatile(value) };
+        let _ = self.mapping.write32(offset, value);
     }
 }
 

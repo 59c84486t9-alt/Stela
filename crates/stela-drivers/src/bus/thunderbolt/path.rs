@@ -843,10 +843,8 @@ impl<R: Registers> Activate<R> {
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
         self.next_poll = now;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn request(&self) -> Result<(Hop, Address, Option<[u32; 2]>), Error> {
