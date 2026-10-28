@@ -1,7 +1,7 @@
 //! Checked LDP/LDPSW/STP/LDNP/STNP as one pair request to the memory service.
 //! Load destinations and base writeback are written only after both elements
 //! succeed.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
 
 use crate::{
     aarch64::{AddressMode, MemoryTransfer, Operation, Register, Width, non_temporal::Data},
@@ -30,17 +30,14 @@ const STACK_ALIGNMENT_BYTES: u32 = 16;
 const STACK_BYTES: u32 = (WRITEBACK_OFFSET + size_of::<u64>() as u32)
     .div_ceil(STACK_ALIGNMENT_BYTES)
     * STACK_ALIGNMENT_BYTES;
-const SUB_RSP_IMM8: &[u8] = &[0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: &[u8] = &[0x48, 0x83, 0xc4];
-const MOV_RSP_DISP8_EAX: &[u8] = &[0x89, 0x44, 0x24];
-const MOV_RSP_DISP8_RAX: &[u8] = &[0x48, 0x89, 0x44, 0x24];
-const MOV_RAX_RSP_DISP8: &[u8] = &[0x48, 0x8b, 0x44, 0x24];
-const MOV_RSP_DISP8_RDX: &[u8] = &[0x48, 0x89, 0x54, 0x24];
-const REX_W: u8 = 0x48;
-const MOV_FROM_STAGING: u8 = 0x8b;
-const MOVSXD_FROM_STAGING: u8 = 0x63;
-const RAX_RSP_DISP8: &[u8] = &[0x44, 0x24];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+
+/// The private staging slot at `offset`.
+fn staging(offset: u32) -> Mem {
+    Mem::base_disp8(
+        Gpr::Rsp,
+        i8::try_from(offset).expect("pair private staging fits disp8"),
+    )
+}
 
 /// Validated source operands, shared by temporal and non-temporal GPR pairs.
 /// Source-permitted constrained NOP encodings are decoded as Operation::Nop
@@ -230,32 +227,30 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
+/// The operand size of a `bytes`-wide pair element.
+fn size(bytes: u8) -> Size {
+    Size::of(bytes == DOUBLEWORD_BYTES)
+}
+
 fn save_source(code: &mut Code, register: Register, bytes: u8, destination: u32) {
     load(code, register);
-    code.extend(if bytes == WORD_BYTES {
-        MOV_RSP_DISP8_EAX
-    } else {
-        MOV_RSP_DISP8_RAX
-    });
-    code.push(u8::try_from(destination).expect("pair private staging fits disp8"));
+    code.asm()
+        .mov_store(size(bytes), staging(destination), Gpr::Rax);
 }
 
 /// Read the private callback output with the source extension semantics.
 fn load_result(code: &mut Code, bytes: u8, signed: bool, width: Width, source: u32) {
-    if width == Width::X64 {
-        code.push(REX_W);
-    }
-    code.push(if signed {
-        MOVSXD_FROM_STAGING
-    } else {
-        MOV_FROM_STAGING
-    });
     debug_assert!(matches!(
         (bytes, signed),
         (WORD_BYTES, true) | (WORD_BYTES | DOUBLEWORD_BYTES, false)
     ));
-    code.extend(RAX_RSP_DISP8);
-    code.push(u8::try_from(source).expect("pair private staging fits disp8"));
+    let mut asm = code.asm();
+    if signed {
+        debug_assert!(width == Width::X64);
+        asm.movsxd(Gpr::Rax, staging(source));
+    } else {
+        asm.mov_load(Size::of(width == Width::X64), Gpr::Rax, staging(source));
+    }
 }
 
 /// Emit an inner checked-context body. The caller has validated the descriptor,
@@ -264,8 +259,8 @@ fn load_result(code: &mut Code, bytes: u8, signed: bool, width: Width, source: u
 /// RAM prefixes visible and return through the enclosing context wrapper.
 pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     debug_assert!(operand.is_valid());
-    code.extend(SUB_RSP_IMM8);
-    code.push(STACK_BYTES as u8);
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, STACK_BYTES as i8);
     memory::begin(code);
     let sp_failure = if matches!(operand.profile, Profile::NormalWb(profile)
         if profile.sp_requirement() == SpAlignmentRequirement::Enabled)
@@ -295,8 +290,8 @@ pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
         },
     );
     if operand.mode != AddressMode::Offset {
-        code.extend(MOV_RSP_DISP8_RDX);
-        code.push(WRITEBACK_OFFSET as u8);
+        code.asm()
+            .mov_store(Size::Qword, staging(WRITEBACK_OFFSET), Gpr::Rdx);
     }
     memory::request(
         code,
@@ -324,19 +319,19 @@ pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
         }
     }
     if operand.mode != AddressMode::Offset {
-        code.extend(MOV_RAX_RSP_DISP8);
-        code.push(WRITEBACK_OFFSET as u8);
+        code.asm()
+            .mov_load(Size::Qword, Gpr::Rax, staging(WRITEBACK_OFFSET));
         // A validated base is never ZR; no source is re-read after callback.
         store(code, operand.base);
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
     memory::patch_branch(code, callback_failure, cleanup);
     if let Some(failure) = sp_failure {
         memory::patch_branch(code, failure, cleanup);
     }
-    code.extend(ADD_RSP_IMM8);
-    code.push(STACK_BYTES as u8);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, STACK_BYTES as i8);
     address::return_if_failed(code);
 }
 

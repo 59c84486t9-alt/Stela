@@ -1,6 +1,6 @@
 //! Direct stores to private RAM, keeping the completed prefix when a later page
 //! faults. The protection granule is assumed to be at least 4 KiB.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size};
 use alloc::vec::Vec;
 pub(crate) mod checked_pair;
 pub(crate) mod checked_scalar;
@@ -16,30 +16,6 @@ const VECTOR_BYTES: u8 = 16;
 /// input at this boundary; a full-width shuffle also avoids a merge dependency.
 const HIGH_QWORD_SCRATCH_XMM: u8 = 2;
 const DUPLICATE_HIGH_QWORD: u8 = 0xee;
-const OPERAND_SIZE_PREFIX: u8 = 0x66;
-const REP_PREFIX: u8 = 0xf3;
-const SSE_ESCAPE: u8 = 0x0f;
-const MOVD_STORE: u8 = 0x7e;
-const MOVQ_STORE: u8 = 0xd6;
-const MOVDQU_STORE: u8 = 0x7f;
-const REX_PREFIX: u8 = 0x40;
-const REX_WIDE: u8 = 0x08;
-const REX_EXTENDED_SOURCE: u8 = 0x04;
-const REGISTER_SHIFT: u8 = 3;
-const RCX_REGISTER: u8 = 1;
-const R8_REGISTER_LOW: u8 = 0;
-const MODRM_DISP8: u8 = 0x40;
-const MOV_BYTE: u8 = 0x88;
-const MOV_WORD_OR_WIDER: u8 = 0x89;
-const LEA_R10D_RAX_DISP8: &[u8] = &[0x44, 0x8d, 0x50];
-const XOR_R10D_EAX: &[u8] = &[0x41, 0x31, 0xc2];
-const TEST_R10D_IMM32: &[u8] = &[0x41, 0xf7, 0xc2];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JMP_REL32: u8 = 0xe9;
-const MOV_RCX_R8: &[u8] = &[0x4c, 0x89, 0xc1];
-const MOVQ_RCX_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const SHR_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe9];
-const MODRM_RCX: u8 = 0xc1;
 
 #[derive(Clone, Copy)]
 pub(super) enum Source {
@@ -72,29 +48,55 @@ pub(super) fn aligned_register_offset(
 /// source remains whole, including where the block retains XMM0 for a later
 /// instruction.
 pub(super) fn emit(code: &mut Code, bytes: u8, displacement: u8, source: Source, aligned: bool) {
+    emit_marking(code, bytes, displacement, source, aligned, &mut None);
+}
+
+/// [`emit`], pushing the end of each instruction to `ends` when given.
+fn emit_marking(
+    code: &mut Code,
+    bytes: u8,
+    displacement: u8,
+    source: Source,
+    aligned: bool,
+    ends: &mut Option<Vec<usize>>,
+) {
     debug_assert!(bytes.is_power_of_two() && bytes <= VECTOR_BYTES);
     debug_assert!(displacement == 0 || displacement == bytes);
     if bytes == 1 || aligned {
         fast(code, bytes, displacement, source);
+        mark(code, ends);
         return;
     }
     // An access crossing a 4 KiB boundary flips address bit 12. Comparing
     // against the pair's base may conservatively include the second element.
-    code.extend(LEA_R10D_RAX_DISP8);
-    code.push(displacement + bytes - 1);
-    code.extend(XOR_R10D_EAX);
-    code.extend(TEST_R10D_IMM32);
-    code.extend(PROTECTION_GRANULE_BYTES.to_le_bytes());
-    code.extend(JZ_REL32);
-    let fast_jump = code.len();
-    code.extend(0i32.to_le_bytes());
-    prefix_store(code, bytes, displacement, source);
-    code.push(JMP_REL32);
-    let done_jump = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch_jump(code, fast_jump);
+    let mut asm = code.asm();
+    asm.lea(
+        Size::Dword,
+        Gpr::R10,
+        Mem::base_disp8(Gpr::Rax, (displacement + bytes - 1) as i8),
+    );
+    mark(code, ends);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R10, Gpr::Rax);
+    mark(code, ends);
+    code.asm()
+        .test_imm(Size::Dword, Gpr::R10, PROTECTION_GRANULE_BYTES as i32);
+    mark(code, ends);
+    let fast_jump = code.asm().jcc(Cond::E);
+    mark(code, ends);
+    prefix_store(code, bytes, displacement, source, ends);
+    let done_jump = code.asm().jmp();
+    mark(code, ends);
+    code.asm().bind(fast_jump);
     fast(code, bytes, displacement, source);
-    patch_jump(code, done_jump);
+    mark(code, ends);
+    code.asm().bind(done_jump);
+}
+
+/// Push the code's length, the end of the instruction just emitted, to `ends`.
+fn mark(code: &Code, ends: &mut Option<Vec<usize>>) {
+    if let Some(ends) = ends {
+        ends.push(code.len());
+    }
 }
 
 /// The page-crossing store of a halfword, word or doubleword staged in RCX to
@@ -106,84 +108,58 @@ pub(super) fn crossing_store(bytes: u8) -> Option<(Vec<u8>, Vec<usize>)> {
         return None;
     }
     let mut code = Code::new();
-    emit(&mut code, bytes, 0, Source::Rcx, false);
     // LEA, XOR, TEST and JZ; every byte's shift but the first and its byte
     // store; JMP; then the fast path's one store.
-    let mut ends = Vec::new();
-    let mut end = 0;
-    for length in [
-        LEA_R10D_RAX_DISP8.len() + 1,
-        XOR_R10D_EAX.len(),
-        TEST_R10D_IMM32.len() + size_of::<u32>(),
-        JZ_REL32.len() + size_of::<i32>(),
-    ] {
-        end += length;
-        ends.push(end);
-    }
-    for byte in 0..bytes {
-        if byte != 0 {
-            end += SHR_RCX_IMM8.len() + 1;
-            ends.push(end);
-        }
-        // MOV [RAX], CL, or MOV [RAX+disp8], CL.
-        end += if byte == 0 { 2 } else { 3 };
-        ends.push(end);
-    }
-    end += 1 + size_of::<i32>();
-    ends.push(end);
-    ends.push(code.len());
-    Some((code.into_bytes(), ends))
+    let mut ends = Some(Vec::new());
+    emit_marking(&mut code, bytes, 0, Source::Rcx, false, &mut ends);
+    Some((code.into_bytes(), ends.unwrap_or_default()))
 }
 
 fn fast(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
-    let register = match source {
-        Source::Xmm(xmm) => {
-            let (prefix, opcode) = match bytes {
-                DWORD_BYTES => (OPERAND_SIZE_PREFIX, MOVD_STORE),
-                QWORD_BYTES => (OPERAND_SIZE_PREFIX, MOVQ_STORE),
-                VECTOR_BYTES => (REP_PREFIX, MOVDQU_STORE),
-                _ => unreachable!("narrow vectors are staged through RCX"),
-            };
-            code.extend([prefix, SSE_ESCAPE, opcode]);
-            xmm
-        }
+    let target = Mem::base(Gpr::Rax, i32::from(displacement));
+    let mut asm = code.asm();
+    match source {
+        Source::Xmm(xmm) => match bytes {
+            DWORD_BYTES => asm.movd_from_xmm(target, xmm),
+            QWORD_BYTES => asm.movq_store(xmm, target),
+            VECTOR_BYTES => asm.movdqu_store(target, xmm),
+            _ => unreachable!("narrow vectors are staged through RCX"),
+        },
         Source::Rcx | Source::R8 => {
             debug_assert!(bytes <= QWORD_BYTES);
-            if bytes == HALFWORD_BYTES {
-                code.push(OPERAND_SIZE_PREFIX);
-            }
-            let rex = if bytes == QWORD_BYTES { REX_WIDE } else { 0 }
-                | if matches!(source, Source::R8) {
-                    REX_EXTENDED_SOURCE
-                } else {
-                    0
-                };
-            if rex != 0 {
-                code.push(REX_PREFIX | rex);
-            }
-            code.push(if bytes == 1 {
-                MOV_BYTE
+            let size = match bytes {
+                1 => Size::Byte,
+                HALFWORD_BYTES => Size::Word,
+                DWORD_BYTES => Size::Dword,
+                _ => Size::Qword,
+            };
+            let register = if matches!(source, Source::R8) {
+                Gpr::R8
             } else {
-                MOV_WORD_OR_WIDER
-            });
-            if matches!(source, Source::R8) {
-                R8_REGISTER_LOW
-            } else {
-                RCX_REGISTER
-            }
+                Gpr::Rcx
+            };
+            asm.mov_store(size, target, register);
         }
-    };
-    code.push((register << REGISTER_SHIFT) | if displacement == 0 { 0 } else { MODRM_DISP8 });
-    if displacement != 0 {
-        code.push(displacement);
     }
 }
 
-fn prefix_store(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
+fn prefix_store(
+    code: &mut Code,
+    bytes: u8,
+    displacement: u8,
+    source: Source,
+    ends: &mut Option<Vec<usize>>,
+) {
     match source {
         Source::Rcx => {}
-        Source::R8 => code.extend(MOV_RCX_R8),
-        Source::Xmm(xmm) => extract_qword(code, xmm),
+        Source::R8 => {
+            code.asm().mov(Size::Qword, Gpr::Rcx, Gpr::R8);
+            mark(code, ends);
+        }
+        Source::Xmm(xmm) => {
+            extract_qword(code, xmm);
+            mark(code, ends);
+        }
     }
     for byte in 0..bytes {
         if byte == QWORD_BYTES {
@@ -194,31 +170,29 @@ fn prefix_store(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
                 xmm, HIGH_QWORD_SCRATCH_XMM,
                 "store input aliases its scratch"
             );
-            SimdOpcode::ShuffleDword.register(
+            SimdOpcode::ShuffleDword.register_imm(
                 code,
                 HIGH_QWORD_SCRATCH_XMM,
                 xmm,
+                DUPLICATE_HIGH_QWORD,
                 crate::TargetCpu::Baseline,
             );
-            code.push(DUPLICATE_HIGH_QWORD);
+            mark(code, ends);
             extract_qword(code, HIGH_QWORD_SCRATCH_XMM);
+            mark(code, ends);
         } else if byte != 0 {
-            code.extend(SHR_RCX_IMM8);
-            code.push(BYTE_BITS);
+            code.asm()
+                .shift_imm(ShiftOp::Shr, Size::Qword, Gpr::Rcx, BYTE_BITS);
+            mark(code, ends);
         }
         fast(code, 1, displacement + byte, Source::Rcx);
+        mark(code, ends);
     }
 }
 
+/// RCX = the low qword of `xmm`.
 fn extract_qword(code: &mut Code, xmm: u8) {
-    code.extend(MOVQ_RCX_XMM);
-    code.push(MODRM_RCX | (xmm << REGISTER_SHIFT));
-}
-
-fn patch_jump(code: &mut [u8], displacement: usize) {
-    let relative = i32::try_from(code.len() - displacement - size_of::<i32>())
-        .expect("bounded ordinary-store branch");
-    code[displacement..displacement + size_of::<i32>()].copy_from_slice(&relative.to_le_bytes());
+    code.asm().movq_from_xmm(Gpr::Rcx, xmm);
 }
 
 #[cfg(test)]
