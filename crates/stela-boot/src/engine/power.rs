@@ -9,8 +9,10 @@
 //! - Restart: the FADT's reset register, then the 8042 keyboard
 //!   controller's reset pulse (command 0xfe, the PC/AT reset line), then a
 //!   triple fault, each given half a second.
-//! - Power-off: the S5 soft-off sequence, with every GPE disabled and
-//!   every wake status cleared first. A hardware-reduced platform, or one
+//! - Power-off: the firmware's `\_PTS(5)` through its AML ([`super::aml`]),
+//!   then the S5 soft-off sequence with the sleep types its `\_S5`
+//!   evaluates, every GPE disabled and every wake status cleared first. A
+//!   hardware-reduced platform, or one
 //!   without S5, uses the firmware's `ResetSystem` instead, as Linux does,
 //!   and S5 that does not take effect falls back to it. When neither takes
 //!   effect, the mount says so and halts; it never reports a power-off it
@@ -40,38 +42,38 @@ const KEYBOARD_STATUS: u16 = 0x64;
 const KEYBOARD_INPUT_FULL: u8 = 1 << 1;
 const KEYBOARD_PULSE_RESET: u8 = 0xfe;
 
-unsafe fn out8(port: u16, value: u8) {
+pub(super) unsafe fn out8(port: u16, value: u8) {
     // SAFETY: the caller's port.
     unsafe { asm!("out dx, al", in("dx") port, in("al") value, options(nostack, preserves_flags)) }
 }
 
-unsafe fn in8(port: u16) -> u8 {
+pub(super) unsafe fn in8(port: u16) -> u8 {
     let value;
     // SAFETY: the caller's port.
     unsafe { asm!("in al, dx", in("dx") port, out("al") value, options(nostack, preserves_flags)) }
     value
 }
 
-unsafe fn out16(port: u16, value: u16) {
+pub(super) unsafe fn out16(port: u16, value: u16) {
     // SAFETY: the caller's port.
     unsafe { asm!("out dx, ax", in("dx") port, in("ax") value, options(nostack, preserves_flags)) }
 }
 
-unsafe fn in16(port: u16) -> u16 {
+pub(super) unsafe fn in16(port: u16) -> u16 {
     let value;
     // SAFETY: the caller's port.
     unsafe { asm!("in ax, dx", in("dx") port, out("ax") value, options(nostack, preserves_flags)) }
     value
 }
 
-unsafe fn out32(port: u16, value: u32) {
+pub(super) unsafe fn out32(port: u16, value: u32) {
     // SAFETY: the caller's port.
     unsafe {
         asm!("out dx, eax", in("dx") port, in("eax") value, options(nostack, preserves_flags))
     }
 }
 
-unsafe fn in32(port: u16) -> u32 {
+pub(super) unsafe fn in32(port: u16) -> u32 {
     let value;
     // SAFETY: the caller's port.
     unsafe {
@@ -136,6 +138,8 @@ impl EfiReset {
 
 pub struct HostPowerControl {
     power: Option<HostPower>,
+    /// The firmware's AML, which prepares S5 and evaluates its sleep types.
+    acpi: Option<super::aml::HostAcpi>,
     efi: Option<EfiReset>,
     tsc_hz: u64,
     /// The host disks, told before either transition.
@@ -151,12 +155,14 @@ impl HostPowerControl {
     /// button armed when there is one.
     pub fn new(
         power: Option<HostPower>,
+        acpi: Option<super::aml::HostAcpi>,
         efi: Option<EfiReset>,
         tsc_hz: u64,
         disks: super::storage::HostDisks,
     ) -> Self {
         let mut control = Self {
             power,
+            acpi,
             efi,
             tsc_hz,
             disks,
@@ -278,7 +284,16 @@ impl HostPowerControl {
         output::close_logs();
         self.disks.shutdown(true);
         output::debug_exit(POWER_OFF_CODE);
-        let soft_off = self.power.and_then(|power| Some((power, power.soft_off?)));
+        // Linux's acpi_power_off_prepare: `\_PTS(5)`, and S5's sleep types
+        // as the firmware's AML evaluates them, over those the mount read
+        // from a literal `\_S5`.
+        let evaluated = self
+            .acpi
+            .as_ref()
+            .and_then(super::aml::HostAcpi::prepare_soft_off);
+        let soft_off = self
+            .power
+            .and_then(|power| Some((power, evaluated.or(power.soft_off)?)));
         // Linux's `efi_poweroff_required`: a hardware-reduced platform, or
         // one without S5, powers off through the firmware.
         let reduced = self
