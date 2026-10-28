@@ -815,6 +815,21 @@ fn avx2_register_shift(
     signed: bool,
     target: TargetCpu,
 ) -> bool {
+    // Narrow and qword recipes lengthen dependent shifts, so automatic
+    // selection uses full dword vectors. See the compiler ISA research record.
+    if operand.lane_bytes != 4 || operand.bytes != 16 {
+        return false;
+    }
+    emit_avx2_register_shift_candidate(code, operand, counts, signed, target)
+}
+
+fn emit_avx2_register_shift_candidate(
+    code: &mut Code,
+    operand: &Operand,
+    counts: u8,
+    signed: bool,
+    target: TargetCpu,
+) -> bool {
     use crate::x86_64::isa::VexShiftOpcode;
     if !target.supports(TargetCpu::Avx2)
         || target.data_independent_timing()
@@ -1129,38 +1144,41 @@ mod tests {
     #[test]
     fn avx2_register_shifts_keep_other_recipes_and_reduce_code() {
         for lane in [1, 2, 4, 8] {
-            for (round, saturating) in [(false, false), (true, false), (false, true), (true, true)]
-            {
-                let operand = Operand {
-                    kind: Kind::Register {
-                        signed: true,
-                        round,
-                        saturating,
-                        counts: 1,
-                    },
-                    destination: 2,
-                    source: 0,
-                    lane_bytes: lane,
-                    amount: 0,
-                    bytes: 16,
-                };
-                let mut baseline = Code::new();
-                emit(&mut baseline, &operand, TargetCpu::Baseline);
-                let mut avx2 = Code::new();
-                emit(&mut avx2, &operand, TargetCpu::Avx2);
-                if lane >= 4 && !round && !saturating {
-                    assert!(avx2.len() < baseline.len());
-                    assert!(avx2.windows(3).any(|w| w == [0xc5, 0xf8, 0x77]));
-                } else {
-                    assert_eq!(avx2, baseline);
+            for bytes in [8, 16] {
+                for (round, saturating) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let operand = Operand {
+                        kind: Kind::Register {
+                            signed: true,
+                            round,
+                            saturating,
+                            counts: 1,
+                        },
+                        destination: 2,
+                        source: 0,
+                        lane_bytes: lane,
+                        amount: 0,
+                        bytes,
+                    };
+                    let mut baseline = Code::new();
+                    emit(&mut baseline, &operand, TargetCpu::Baseline);
+                    let mut avx2 = Code::new();
+                    emit(&mut avx2, &operand, TargetCpu::Avx2);
+                    if lane == 4 && bytes == 16 && !round && !saturating {
+                        assert!(avx2.len() < baseline.len());
+                        assert!(avx2.windows(3).any(|w| w == [0xc5, 0xf8, 0x77]));
+                    } else {
+                        assert_eq!(avx2, baseline);
+                    }
+                    let mut dit = Code::new();
+                    emit(
+                        &mut dit,
+                        &operand,
+                        TargetCpu::Avx2.with_data_independent_timing(),
+                    );
+                    assert_eq!(dit, baseline);
                 }
-                let mut dit = Code::new();
-                emit(
-                    &mut dit,
-                    &operand,
-                    TargetCpu::Avx2.with_data_independent_timing(),
-                );
-                assert_eq!(dit, baseline);
             }
         }
     }
@@ -1229,52 +1247,62 @@ mod tests {
                             amount: 0,
                             bytes,
                         };
-                        let mut code = Code::new();
-                        emit(&mut code, &operand, TargetCpu::Avx2);
-                        code.asm().ret();
-                        let native = Native::new(&code);
-                        for raw in 0..=u8::MAX {
-                            let mut state = GuestState {
-                                fpsr: 0x0800_001f,
-                                nzcv: 0xa000_0000,
-                                ..GuestState::default()
-                            };
-                            let data = match raw % 5 {
-                                0 => 0,
-                                1 => u64::MAX,
-                                2 => 0x8000_0000_8000_0000,
-                                3 => 1,
-                                _ => 0x0123_4567_89ab_cdef,
-                            };
-                            state.v[usize::from(source)] = [data, !data];
-                            if counts != source {
-                                let c: [u8; 16] = core::array::from_fn(|i| {
-                                    if i % usize::from(lane) == 0 {
-                                        raw.wrapping_add((i * 13) as u8)
-                                    } else {
-                                        0xd3
-                                    }
-                                });
-                                state.v[usize::from(counts)] = [
-                                    u64::from_le_bytes(c[..8].try_into().unwrap()),
-                                    u64::from_le_bytes(c[8..].try_into().unwrap()),
-                                ];
+                        let mut candidate = Code::new();
+                        assert!(emit_avx2_register_shift_candidate(
+                            &mut candidate,
+                            &operand,
+                            counts,
+                            signed,
+                            TargetCpu::Avx2
+                        ));
+                        let mut selected = Code::new();
+                        emit(&mut selected, &operand, TargetCpu::Avx2);
+                        for mut code in [candidate, selected] {
+                            code.asm().ret();
+                            let native = Native::new(&code);
+                            for raw in 0..=u8::MAX {
+                                let mut state = GuestState {
+                                    fpsr: 0x0800_001f,
+                                    nzcv: 0xa000_0000,
+                                    ..GuestState::default()
+                                };
+                                let data = match raw % 5 {
+                                    0 => 0,
+                                    1 => u64::MAX,
+                                    2 => 0x8000_0000_8000_0000,
+                                    3 => 1,
+                                    _ => 0x0123_4567_89ab_cdef,
+                                };
+                                state.v[usize::from(source)] = [data, !data];
+                                if counts != source {
+                                    let c: [u8; 16] = core::array::from_fn(|i| {
+                                        if i % usize::from(lane) == 0 {
+                                            raw.wrapping_add((i * 13) as u8)
+                                        } else {
+                                            0xd3
+                                        }
+                                    });
+                                    state.v[usize::from(counts)] = [
+                                        u64::from_le_bytes(c[..8].try_into().unwrap()),
+                                        u64::from_le_bytes(c[8..].try_into().unwrap()),
+                                    ];
+                                }
+                                let expected = reference(
+                                    state.v[usize::from(source)],
+                                    state.v[usize::from(counts)],
+                                    usize::from(lane),
+                                    usize::from(bytes),
+                                    signed,
+                                );
+                                native.run(&mut state, &mut ExecutionContext::default());
+                                assert_eq!(
+                                    state.v[usize::from(destination)],
+                                    expected,
+                                    "{lane} {bytes} {signed} {destination}/{source}/{counts} {raw}"
+                                );
+                                assert_eq!(state.fpsr, 0x0800_001f);
+                                assert_eq!(state.nzcv, 0xa000_0000);
                             }
-                            let expected = reference(
-                                state.v[usize::from(source)],
-                                state.v[usize::from(counts)],
-                                usize::from(lane),
-                                usize::from(bytes),
-                                signed,
-                            );
-                            native.run(&mut state, &mut ExecutionContext::default());
-                            assert_eq!(
-                                state.v[usize::from(destination)],
-                                expected,
-                                "{lane} {bytes} {signed} {destination}/{source}/{counts} {raw}"
-                            );
-                            assert_eq!(state.fpsr, 0x0800_001f);
-                            assert_eq!(state.nzcv, 0xa000_0000);
                         }
                     }
                 }
