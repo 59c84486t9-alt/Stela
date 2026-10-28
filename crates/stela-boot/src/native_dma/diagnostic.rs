@@ -432,6 +432,7 @@ impl Prepared {
                 &crate::native_memory::SOURCE,
                 &requesters,
                 self.hardware.physical_bits,
+                &[],
             )
         }
         .map_err(|error| format!("VT-d takeover: {error:?}; no normal probing permitted"))?;

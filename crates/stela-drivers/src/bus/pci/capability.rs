@@ -1,6 +1,8 @@
 //! Capability-list walks of one function's configuration space: the standard
 //! list from the Capabilities Pointer (0x34) and the PCI Express extended list
-//! from 0x100. Each walk checks alignment, range, cycles and body overlap once.
+//! from 0x100. Each walk checks alignment, range, cycles and body overlap once;
+//! a headers walk of the standard list reserves only each entry's header, for
+//! a driver that reads no body the walk would size.
 //!
 //! Register layouts and sizes follow Linux include/uapi/linux/pci_regs.h
 //! (`PCI_CAP_*_SIZEOF`, `PCI_EXT_CAP_*_SIZEOF`). A pointer with its reserved
@@ -152,6 +154,15 @@ pub fn capabilities<C: ConfigSpace + ?Sized>(config: &C) -> Capabilities<Config<
     Capabilities::new(Config(config))
 }
 
+/// The standard capability list of `config`, reserving only each header: the
+/// caller sizes and checks the bodies it reads with [`overlap`].
+pub fn capability_headers<C: ConfigSpace + ?Sized>(config: &C) -> Capabilities<Config<'_, C>> {
+    Capabilities {
+        bodies: false,
+        ..Capabilities::new(Config(config))
+    }
+}
+
 /// The extended capability list of `config`.
 pub fn extended_capabilities<C: ConfigSpace + ?Sized>(
     config: &C,
@@ -234,6 +245,8 @@ pub struct Capabilities<R> {
     state: State,
     cells: Cells<1>,
     header_type: Option<u8>,
+    /// Whether bodies are sized and reserved, or only headers.
+    bodies: bool,
 }
 
 impl<R: CapabilityRead> Capabilities<R> {
@@ -243,6 +256,7 @@ impl<R: CapabilityRead> Capabilities<R> {
             state: State::Start,
             cells: Cells::EMPTY,
             header_type: None,
+            bodies: true,
         }
     }
 
@@ -274,7 +288,11 @@ impl<R: CapabilityRead> Capabilities<R> {
         if id == 0xff {
             return Err(CapabilityError::Malformed { offset }.into());
         }
-        let (bytes, layout) = self.extent(offset, id)?;
+        let (bytes, layout) = if self.bodies {
+            self.extent(offset, id)?
+        } else {
+            (2, Layout::Header)
+        };
         if offset + bytes > STANDARD_END {
             return Err(CapabilityError::OutOfRange { offset }.into());
         }
@@ -723,6 +741,31 @@ mod tests {
         space.put16(0x42, 3);
         let entry = capabilities(&space).next().unwrap().unwrap();
         assert_eq!((entry.bytes, entry.layout), (2, Layout::Unsupported));
+    }
+
+    #[test]
+    fn a_headers_walk_accepts_a_body_shorter_than_its_layout() {
+        let mut space = Space::new();
+        space.0[0x34] = 0x58;
+        space.standard(0x58, 0x05, 0x5c); // 32-bit MSI: ten bytes from 0x58
+        space.standard(0x5c, 0x08, 0);
+        assert_eq!(
+            space.walk(),
+            [
+                Ok((0x58, 5, 10)),
+                Err(CapabilityError::Overlap { offset: 0x5c })
+            ]
+        );
+        let headers: Vec<_> = capability_headers(&space)
+            .map(|entry| entry.map(|c| (c.offset, c.id, c.bytes, c.layout)))
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                Ok((0x58, 5, 2, Layout::Header)),
+                Ok((0x5c, 8, 2, Layout::Header))
+            ]
+        );
     }
 
     #[test]

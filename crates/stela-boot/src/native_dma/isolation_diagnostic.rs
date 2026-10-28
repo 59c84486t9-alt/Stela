@@ -154,6 +154,7 @@ pub(super) fn run(mut prepared: Prepared) -> Result<String, String> {
             &crate::native_memory::SOURCE,
             &requesters,
             prepared.hardware.physical_bits,
+            &[],
         )
     }
     .map_err(|e| format!("isolation takeover: {e:?}"))?;
