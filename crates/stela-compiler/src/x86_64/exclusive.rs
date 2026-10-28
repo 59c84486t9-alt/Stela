@@ -362,9 +362,9 @@ pub(crate) fn emit_context(
     }
     code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
-    memory::patch_branch(code, callback_failure, cleanup);
+    crate::x86_64::asm::resolve(code, callback_failure, cleanup);
     if let Some(failure) = sp_failure {
-        memory::patch_branch(code, failure, cleanup);
+        crate::x86_64::asm::resolve(code, failure, cleanup);
     }
     code.asm()
         .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);

@@ -1,6 +1,6 @@
 //! SP alignment checks and address arithmetic for checked accesses.
 use super::fault;
-use crate::x86_64::asm::{Code, Cond, Gpr, Mem, Size};
+use crate::x86_64::asm::{Code, Cond, Gpr, Mem, Patch, Size};
 use crate::x86_64::load;
 use crate::{
     aarch64::{AddressMode, Register, register_offset::IndexExtend},
@@ -9,10 +9,10 @@ use crate::{
 
 const STACK_ALIGNMENT_MASK: u8 = 15;
 
-/// Check SP before the offset is applied. The caller patches the returned rel32
-/// to its cleanup. On failure RAX holds the faulting SP. Clobbers RAX/RCX/RDX
+/// Check SP before the offset is applied. The caller resolves the returned
+/// branch to its cleanup. On failure RAX holds the faulting SP. Clobbers RAX/RCX/RDX
 /// and flags.
-pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize> {
+pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<Patch> {
     if base != Register::Sp {
         return None;
     }
@@ -24,7 +24,7 @@ pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize
     let mut asm = code.asm();
     let failed = asm.jmp();
     asm.bind(aligned);
-    Some(failed.offset())
+    Some(failed)
 }
 
 /// Return only after scratch cleanup. The checked outer CALL wrapper owns R15.

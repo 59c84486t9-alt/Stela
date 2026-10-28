@@ -145,7 +145,7 @@ fn submit(
     bytes: u32,
     descriptor: u32,
     pc: u64,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     stack_rax(code, ADDRESS_OFFSET, false);
     memory::request(code, REQUEST_OFFSET, source, bytes, descriptor, pc);
@@ -187,7 +187,7 @@ fn store_loop(
     layout: &Layout,
     length: VectorLength,
     pc: u64,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     let start = code.len();
     load_index(code);
@@ -230,7 +230,7 @@ fn whole_loop(
     layout: &Layout,
     bytes: usize,
     pc: u64,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     let start = code.len();
     submit(
@@ -371,7 +371,7 @@ pub(crate) fn emit(
     asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     for failure in failures {
-        memory::patch_branch(code, failure, cleanup);
+        crate::x86_64::asm::resolve(code, failure, cleanup);
     }
     code.asm()
         .alu_imm32(Alu::Add, Size::Qword, Rsp, layout.bytes as i32);

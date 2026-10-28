@@ -4,7 +4,7 @@ use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::aarch64::floating::{FPCR_AH, FPCR_NEP};
 use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Size};
-use crate::x86_64::simd::encode::{cond, guest};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
     aarch64::simd::floating::{Operand, SignOperation},
@@ -184,13 +184,13 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             lane_bytes,
             condition,
         } => {
-            let predicate = super::super::condition(code, condition);
+            let predicate = super::super::condition_holds(code, condition, false);
             load_lane(code, left, lane_bytes, false);
-            if let Some(jcc) = predicate {
+            if let Some(holds) = predicate {
                 load_lane(code, right, lane_bytes, true); // MOV loads preserve predicate flags.
                 // CMOV on the false condition: RAX/EAX takes RCX/ECX.
                 code.asm().cmov(
-                    cond(jcc ^ 1),
+                    holds.negate(),
                     if lane_bytes == 8 {
                         Size::Qword
                     } else {

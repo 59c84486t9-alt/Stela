@@ -147,7 +147,7 @@ fn request(
     source_offset: usize,
     destination_offset: u32,
     pc: u64,
-    failed: &mut Vec<usize>,
+    failed: &mut Vec<Patch>,
 ) {
     code.asm()
         .mov_load(Size::Qword, Rax, stack(scratch.address));
@@ -196,7 +196,7 @@ fn lanes(
     length: VectorLength,
     scratch: Scratch,
     pc: u64,
-    failed: &mut Vec<usize>,
+    failed: &mut Vec<Patch>,
 ) {
     let bytes = if operand.kind == Kind::ReplicateQuad {
         VECTOR_CHUNK_BYTES
@@ -229,7 +229,7 @@ fn scalar_replicate(
     length: VectorLength,
     scratch: Scratch,
     pc: u64,
-    failed: &mut Vec<usize>,
+    failed: &mut Vec<Patch>,
     target: TargetCpu,
 ) {
     let mut active = Vec::new();
@@ -381,7 +381,7 @@ pub(crate) fn emit(
     code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     for failed in failed {
-        scalable::memory::patch_branch(code, failed, cleanup);
+        crate::x86_64::asm::resolve(code, failed, cleanup);
     }
     code.asm()
         .alu_imm32(Alu::Add, Size::Qword, Rsp, scratch.bytes as i32);
