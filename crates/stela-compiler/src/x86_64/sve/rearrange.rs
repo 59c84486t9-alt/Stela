@@ -1,6 +1,7 @@
 //! SVE permutes with SSE2 or SSSE3. Sources are snapshotted only for permutes
 //! that cross chunks.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rsp};
+use crate::x86_64::asm::{Alu, Code, Mem, Rm, Size};
 mod dynamic;
 
 use crate::TargetCpu;
@@ -9,13 +10,6 @@ use crate::aarch64::sve::rearrange::{InterleaveKind, Operand};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const MOVABS_RAX_IMM64: &[u8] = &[0x48, 0xb8];
-const MODRM_STACK_DISP32: u8 = 0x84;
-const STACK_SIB: u8 = 0x24;
-const XMM_FIELD_SHIFT: u8 = 3;
-const MODRM_REGISTER: u8 = 0xc0;
 const FIRST: u8 = 0;
 const SECOND: u8 = 1;
 const REVERSE_SCRATCH: u8 = 2;
@@ -35,22 +29,18 @@ const BYTE_REVERSE_LOW: u64 = 0x0809_0a0b_0c0d_0e0f;
 const BYTE_REVERSE_HIGH: u64 = 0x0001_0203_0405_0607;
 
 fn stack_memory(code: &mut Code, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
-    opcode.append(code, target);
-    code.push(MODRM_STACK_DISP32 | (xmm << XMM_FIELD_SHIFT));
-    code.push(STACK_SIB);
-    code.extend((offset as u32).to_le_bytes());
+    code.asm()
+        .simd(opcode, xmm, Mem::base_disp32(Rsp, offset as i32), target);
 }
 
 fn constant(code: &mut Code, value: u64, xmm: u8, target: TargetCpu) {
-    code.extend(MOVABS_RAX_IMM64);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (xmm << XMM_FIELD_SHIFT));
+    code.asm().mov_imm64(Rax, value);
+    code.asm().simd(Host::MoveGprQword, xmm, Rax, target);
 }
 
 fn shuffle(code: &mut Code, opcode: Host, xmm: u8, control: u8, target: TargetCpu) {
-    opcode.register(code, xmm, xmm, target);
-    code.push(control);
+    code.asm()
+        .simd_imm(opcode, xmm, Rm::Xmm(xmm), control, target);
 }
 
 struct Snapshot {
@@ -70,8 +60,8 @@ impl Snapshot {
         let register = (crossing && length.chunks() > 1 && sources.contains(&destination))
             .then_some(destination);
         if register.is_some() {
-            code.extend(SUB_RSP_IMM32);
-            code.extend((length.bytes() as u32).to_le_bytes());
+            code.asm()
+                .alu_imm32(Alu::Sub, Size::Qword, Rsp, length.bytes() as i32);
             for chunk in 0..length.chunks() {
                 load_z_chunk(code, destination, chunk, FIRST, length, target);
                 stack_memory(
@@ -102,8 +92,8 @@ impl Snapshot {
 
     fn finish(self, code: &mut Code) {
         if self.register.is_some() {
-            code.extend(ADD_RSP_IMM32);
-            code.extend((self.length.bytes() as u32).to_le_bytes());
+            code.asm()
+                .alu_imm32(Alu::Add, Size::Qword, Rsp, self.length.bytes() as i32);
         }
     }
 }
@@ -282,8 +272,8 @@ fn extract(code: &mut Code, operand: Operand, length: VectorLength, target: Targ
             };
             snapshot.load(code, next_register, next_chunk, SECOND, target);
             if target.supports(TargetCpu::Ssse3) {
-                Host::AlignBytes.register(code, SECOND, FIRST, target);
-                code.push(shift);
+                code.asm()
+                    .simd_imm(Host::AlignBytes, SECOND, Rm::Xmm(FIRST), shift, target);
                 Host::MoveAligned.register(code, FIRST, SECOND, target);
             } else {
                 Shift::RightBytes.emit(code, FIRST, shift);
