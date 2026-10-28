@@ -31,7 +31,8 @@ impl Ram {
     fn new() -> Self {
         let mut bytes = vec![0u64; 4096];
         let base = bytes.as_mut_ptr() as u64;
-        // SAFETY: unique retained vector, identity-mapped for this DMA peer.
+        // SAFETY: bytes owns the aligned allocation for the entire controller
+        // test. This synchronous peer accesses it only during register polling.
         let allocator = unsafe { RegionAllocator::new(base..base + (bytes.len() * 8) as u64) };
         Self {
             _bytes: bytes,
@@ -169,7 +170,8 @@ impl Peer {
             return;
         }
         let corb = u64::from(self.get(0x40, 4)) | (u64::from(self.get(0x44, 4)) << 32);
-        // SAFETY: actual controller-published live CORB allocation/index.
+        // SAFETY: corb names a controller-allocated ring in retained fixture RAM;
+        // wp is its published in-range entry. Polling serializes peer and CPU use.
         let command =
             unsafe { core::ptr::read_volatile((corb as *const u32).add(usize::from(wp))) }.to_le();
         self.commands.push(command);
@@ -182,7 +184,8 @@ impl Peer {
         let rirb = u64::from(self.get(0x50, 4)) | (u64::from(self.get(0x54, 4)) << 32);
         let next = (self.get(0x58, 2) + 1) % 256;
         let extra = if self.wrong_codec { 1 } else { command >> 28 };
-        // SAFETY: actual live RIRB allocation, 256 entries, two native words.
+        // SAFETY: rirb names the retained 256-entry fixture ring. next is reduced
+        // modulo 256, and each entry has two aligned u32 words.
         unsafe {
             let destination = (rirb as *mut u32).add(next as usize * 2);
             core::ptr::write_volatile(destination, response.to_le());
@@ -259,7 +262,9 @@ fn controller(ram: &mut Ram) -> (Controller<RegistersPeer, Clock>, Rc<RefCell<Pe
     let peer = Rc::new(RefCell::new(Peer::new()));
     let registers = RegistersPeer(peer.clone());
     let clock = Clock(Rc::new(Cell::new(0)));
-    // SAFETY: exclusively owned register peer and retained coherent RAM fixture.
+    // SAFETY: the Rc peer is used synchronously by this controller, with no
+    // firmware or background DMA. ram retains its coherent allocation until
+    // the controller is dropped.
     let controller = unsafe {
         Controller::new(
             registers,

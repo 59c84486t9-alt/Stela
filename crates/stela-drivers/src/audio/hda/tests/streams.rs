@@ -265,6 +265,7 @@ fn dma_ring_and_mmio_bounds() {
 fn mmio_claim_bounds() {
     // SAFETY: these invalid ranges are rejected before any MMIO is touched.
     assert!(unsafe { MmioRegisters::claim(0, 0x1000) }.is_err());
+    // SAFETY: the undersized extent is rejected before an MMIO pointer is made.
     assert!(unsafe { MmioRegisters::claim(0x1000, 0x400) }.is_err());
 }
 

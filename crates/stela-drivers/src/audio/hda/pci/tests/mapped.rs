@@ -13,6 +13,8 @@ fn modern_profile_requires_mapped_preflight() {
         );
         assert!(function.config().writes.is_empty());
         let registers = MappedModel::new();
+        // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+        // aliases are used sequentially. No firmware or background DMA can race them.
         let adapter = unsafe {
             prepare_with_registers(
                 &mut function,
@@ -72,6 +74,8 @@ fn pci_preflight_precedes_mmio() {
             11 => function.config().words[4] = 0xfebe_0000,
             _ => (),
         }
+        // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+        // aliases are used sequentially. No firmware or background DMA can race them.
         let result = unsafe {
             prepare_with_registers(&mut function, bar, &timer, ownership, registers.clone())
         };
@@ -118,6 +122,8 @@ fn invalid_link_state_precedes_pci_writes() {
         registers.set(0x540, frequencies);
         registers.set(0x544, value);
         let before = registers.bytes.borrow().clone();
+        // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+        // aliases are used sequentially. No firmware or background DMA can race them.
         let result = unsafe {
             prepare_with_registers(
                 &mut function,
@@ -142,6 +148,8 @@ fn invalid_link_state_precedes_pci_writes() {
         registers.set(0x540, 0x3f);
         registers.set(0x544, clock | powered);
         let before = registers.bytes.borrow().clone();
+        // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+        // aliases are used sequentially. No firmware or background DMA can race them.
         let adapter = unsafe {
             prepare_with_registers(
                 &mut function,
@@ -173,6 +181,8 @@ fn dsp_profiles_rejected_before_mmio() {
                     | (u32::from(class[1]) << 16)
                     | (u32::from(class[2]) << 8);
                 let registers = MappedModel::new();
+                // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+                // aliases are used sequentially. No firmware or background DMA can race them.
                 let result = unsafe {
                     prepare_with_registers(
                         &mut function,
@@ -201,6 +211,8 @@ fn failed_interrupt_reads_rejected() {
             } else {
                 function.config().set16(offset + 2, u16::MAX);
             }
+            // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+            // aliases are used sequentially. No firmware or background DMA can race them.
             let result = unsafe {
                 prepare_with_registers(
                     &mut function,
@@ -267,6 +279,8 @@ fn active_dma_blocks_preparation() {
         registers.set(0x14, 0x500);
         registers.set(0x500, 0x1003_0000);
         registers.set(offset, value);
+        // SAFETY: The PCI function and mapped byte vector are owned by this test; Rc
+        // aliases are used sequentially. No firmware or background DMA can race them.
         let result = unsafe {
             prepare_with_registers(
                 &mut function,

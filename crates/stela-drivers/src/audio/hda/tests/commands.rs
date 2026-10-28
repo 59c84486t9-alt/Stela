@@ -14,6 +14,8 @@ fn pci_preparation_and_duplex() {
         model.borrow_mut().reset_gate = Some(gate.clone());
         let (mut function, pci_timer, bar) = pci::tests::modern_pci_model_for(device);
         pci::tests::connect_reset_gate(&mut function, gate.clone());
+        // SAFETY: Function and register fixtures describe the same BAR and share the reset
+        // gate. No firmware or other CPU uses these synchronous models.
         let registers = unsafe {
             pci::prepare_with_registers(
                 &mut function,
@@ -27,6 +29,8 @@ fn pci_preparation_and_duplex() {
         let selected = registers.config();
         let timer = model.borrow().clock.clone();
         let mut controller =
+            // SAFETY: The prepared adapter owns this model's register/reset path. fixture
+            // keeps all coherent DMA backing live while the controller polls it.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected) }.unwrap();
         assert!(gate.get()); //The model asserts every CRST write occurs with gate clear.
         assert_eq!(controller.link_clock().unwrap().unwrap().mhz, 24);

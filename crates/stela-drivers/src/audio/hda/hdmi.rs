@@ -69,24 +69,26 @@ pub struct DisplayAudioState {
     pub generation: u64,
     pub connected: bool,
 }
-/// Actual original GPU/HDA coordination owner. Merely implementing an ID table
-/// or copying an ELD blob does not satisfy this interface.
+/// Coordinate an HDA function with its GPU display-audio route.
 ///
 /// # Safety
-/// Retain the original actual HDA function and GPU port/sink association,
-/// exclusive audio route, powered HDA registers/link and firmware exclusion.
-/// The original HDA MMIO/power grant cannot be revoked while this owner is
-/// retained, even on observe failure; bounded stream/codec stop remains valid.
-/// GPU sink availability may change and must revoke new playback immediately.
-/// `observe` must query live authority and report every sink/ELD/modeset change;
-/// absence of a native service MUST fail. `enable_audio` performs/acknowledges
-/// real rate/clock/link coordination; `disable_audio` quiesces it even after
-/// hotplug. Never release authority merely because this Arc is dropped. Calls
-/// use the controller Timer's absolute microsecond deadline; return errors on
-/// access/acknowledgement uncertainty. Port identities/numeric BDFs alone do
-/// not establish requester, remapping, MMIO, DMA or power authority.
-/// The HDA constructor's unique coherent identity-reachable boot-lifetime RAM
-/// contract still applies; unavailable IOMMU services are never a bypass grant.
+/// Retain the matching HDA function, GPU connector/sink and device entry,
+/// exclusive audio route, powered HDA registers/link and firmware exclusion
+/// throughout attachment, errors, reset and controller Drop. Register access
+/// and bounded stream/codec stop must remain valid after an observe failure.
+/// A disconnected or unavailable sink immediately prevents new playback.
+///
+/// `observe` queries the live native service, returning an error when it is
+/// unavailable, and reports every sink, ELD, modeset and ownership-epoch change.
+/// `enable_audio` acknowledges rate, clock and link configuration;
+/// `disable_audio` quiesces that configuration after hotplug as well as normal
+/// playback. Calls use the controller Timer's absolute microsecond deadline
+/// and return errors on access or acknowledgement uncertainty. Dropping the Arc
+/// alone must not revoke the HDA access grant.
+///
+/// The platform must supply the requester, IOMMU, MMIO, DMA and power grants;
+/// numeric BDF/port identities do not supply those resources. The constructor
+/// also requires unique, coherent, identity-reachable RAM retained for the boot.
 pub unsafe trait DisplayAudioPort {
     fn identity(&self) -> DisplayAudioIdentity;
     fn observe(&self, deadline_us: u64) -> Result<DisplayAudioState, Error>;
@@ -284,13 +286,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         self.verb(Verb::short(codec, pin, PIN_SENSE, device)?)
     }
-    /// Bind a genuine original GPU/HDA port owner. No ELD can be supplied by
-    /// the caller. Intel/AMD vendor profiles are refused.
+    /// Attach a platform-owned GPU/HDA display-audio route. ELD is read through
+    /// the codec command transport. Intel/AMD vendor profiles are refused.
+    ///
     /// # Safety
-    /// `owner` must retain and coordinate THIS actual controller/function,
-    /// graph codec, physical pin and device entry. Its unsafe trait contract
-    /// must hold for the complete attachment, including failures, reset and
-    /// controller Drop.
+    /// `owner` must retain and coordinate this controller/function, graph codec,
+    /// physical pin and device entry. Its unsafe trait contract applies through
+    /// failures, reset and controller Drop.
     pub unsafe fn attach_hdmi_port(
         &mut self,
         graph: &CodecGraph,
@@ -737,8 +739,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let index = self.hdmi_index(id)?;
         self.close_hdmi(id)?;
         let mut port = self.hdmi_ports[index].take().unwrap();
-        // SAFETY: exact route/stream/packet/converter/GPU stop succeeded; this
-        // is the only place ordinary release of this retained owner is allowed.
+        // SAFETY: close_hdmi acknowledged stream, converter and GPU stop.
+        // Taking the port removes its stored Arc; ManuallyDrop prevents an
+        // automatic second release after this explicit drop.
         unsafe {
             ManuallyDrop::drop(&mut port.owner);
         }
@@ -759,7 +762,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// A mere request to enter D3, PMCSR capability or cleared software RUN is
     /// not proof. Successful shutdown must have acknowledged every DMA/command
     /// stop and every codec/GPU route effect in the original D0 epoch.
-    #[allow(dead_code)] // Consumer is the separately owned native PCI lifecycle.
+    #[allow(
+        dead_code,
+        reason = "PCI suspend is a preserved native lifecycle boundary; HDMI retirement is exercised before the production PCI suspend consumer is wired"
+    )] // Consumer is the separately owned native PCI lifecycle.
     pub(super) fn retire_hdmi_for_pci_suspend(&mut self) -> Result<(), Error> {
         if !self.stopped
             || self.lifecycle_failed
@@ -770,8 +776,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         for entry in &mut self.hdmi_ports {
             if let Some(mut port) = entry.take() {
-                // SAFETY: actual complete shutdown established quiet above;
-                // retain None tombstones so no same-epoch ID can be recycled.
+                // SAFETY: the stopped, command_quiet and lifecycle checks above
+                // establish completed shutdown. Taking the entry removes its
+                // stored Arc, which is explicitly released exactly once.
                 unsafe {
                     ManuallyDrop::drop(&mut port.owner);
                 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Cirrus codec control tests.
 use super::*;
-// Included by hda.rs's existing Cirrus register/DMA model. Source-only: UNRUN.
+// Exercises Cirrus controls through the shared command-ring/DMA model.
 mod cs4213 {
     use super::*;
 
@@ -432,7 +432,7 @@ mod power {
             assert!(controller.routes.is_empty() && controller.cirrus_codecs.is_empty());
         }
     }
-    // New shared composition regression. Source-only: UNRUN.
+    // Shared PCI/codec composition regression.
     #[test]
     fn cs421x_suspended_pcm_owner_survives_failed_controller_reset() {
         for cs4210 in [false, true] {

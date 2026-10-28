@@ -73,6 +73,8 @@ fn lewisburg_uses_separate_tags() {
             AttachError::MappedPreflightRequired
         );
         assert!(function.config().writes.is_empty());
+        // SAFETY: The local PCH function and byte-vector register model are the sole
+        // platform owners and remain live through the adapter's borrow.
         let adapter = unsafe {
             prepare_with_registers(
                 &mut function,

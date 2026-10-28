@@ -16,22 +16,30 @@ fn reset_binding_preflight() {
     let (mut function, state) = reset_pci(&model);
     let prepared = pci::tests::modern_prepared_model(function.address);
     assert!(matches!(
+        // SAFETY: This prepared modern identity requires mapped preflight, so claim_mmio
+        // returns InvalidConfiguration before constructing or accessing an MMIO pointer.
         unsafe { prepared.claim_mmio() },
         Err(Error::InvalidConfiguration)
     ));
     let prepared = pci::tests::modern_prepared_model(function.address);
     function.address.device = 28;
     assert!(matches!(
+        // SAFETY: The PCI and register models are local to this test and have no firmware
+        // or concurrent device owner. A mismatched BDF is rejected before binding.
         unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) },
         Err(pci::AttachError::IdentityChanged)
     ));
     function.address.device = 27;
     let prepared = pci::tests::modern_prepared_model(function.address);
     let registers =
+        // SAFETY: The PCI and register models are local to this test and have no firmware
+        // or concurrent device owner. A mismatched BDF is rejected before binding.
         unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }.unwrap();
     let pci_reads = state.borrow().reads;
     let timer = model.borrow().clock.clone();
     assert!(matches!(
+        // SAFETY: The adapter and clock use this test's synchronous register model.
+        // fixture retains unique coherent DMA storage throughout controller use.
         unsafe { Controller::new(registers, timer, &mut fixture.allocator, config()) },
         Err(Error::InvalidConfiguration)
     ));
@@ -47,6 +55,8 @@ fn clock_gate_brackets_each_reset() {
     let (mut function, state) = reset_pci(&model);
     let prepared = pci::tests::modern_prepared_model(function.address);
     let registers =
+        // SAFETY: The PCI and register models are local to this test and have no firmware
+        // or concurrent device owner. A mismatched BDF is rejected before binding.
         unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }.unwrap();
     let timer = model.borrow().clock.clone();
     // Once is the profile minimum; an explicit caller may elect bounded
@@ -59,6 +69,8 @@ fn clock_gate_brackets_each_reset() {
         ..modern_config()
     };
     let mut controller =
+        // SAFETY: The adapter and clock use this test's synchronous register model.
+        // fixture retains unique coherent DMA storage throughout controller use.
         unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected) }.unwrap();
     controller.reinitialize().unwrap();
     model.borrow_mut().codec_ready_after_resets = 3;
@@ -100,10 +112,14 @@ fn reset_control_failure_attempts_cleanup() {
         }
         let prepared = pci::tests::modern_prepared_model(function.address);
         let registers =
+            // SAFETY: The PCI and register models are local to this test and have no firmware
+            // or concurrent device owner. A mismatched BDF is rejected before binding.
             unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }
                 .unwrap();
         let timer = model.borrow().clock.clone();
         assert!(matches!(
+            // SAFETY: The adapter and clock use this test's synchronous register model.
+            // fixture retains unique coherent DMA storage throughout controller use.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) },
             Err(Error::PciResetControl { offset: 0x48 })
         ));
@@ -133,10 +149,14 @@ fn failed_reset_retains_dma_until_recovery() {
         let (mut function, state) = reset_pci(&model);
         let prepared = pci::tests::modern_prepared_model(function.address);
         let registers =
+            // SAFETY: The PCI and register models are local to this test and have no firmware
+            // or concurrent device owner. A mismatched BDF is rejected before binding.
             unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }
                 .unwrap();
         let timer = model.borrow().clock.clone();
         let mut controller =
+            // SAFETY: The adapter and clock use this test's synchronous register model.
+            // fixture retains unique coherent DMA storage throughout controller use.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
                 .unwrap();
         let id = controller

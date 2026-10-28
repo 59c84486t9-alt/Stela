@@ -398,6 +398,8 @@ fn controller<'a>(
         transition_timeout_us: 100,
         ..registers.config()
     };
+    // SAFETY: The adapter retains this test's PCI/MMIO model and ram owns the coherent
+    // DMA allocation. Model activity occurs only while the controller is polled.
     unsafe { Controller::new(registers, clock, &mut ram.allocator, config) }.unwrap()
 }
 

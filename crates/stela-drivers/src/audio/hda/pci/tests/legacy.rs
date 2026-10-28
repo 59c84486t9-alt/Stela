@@ -109,8 +109,9 @@ fn absent_pm_preserves_wide_bar() {
 fn unknown_ownership_rejected() {
     for ownership in [Ownership::Unknown, Ownership::Dsp] {
         let (mut function, timer, bar) = fixture(0);
-        // SAFETY: isolated model; refusal must occur before any mutation.
         assert_eq!(
+            // SAFETY: function is a local PCI model with no firmware or other
+            // hardware owner. Unknown/DSP ownership is rejected before mutation.
             unsafe { prepare(&mut function, bar, &timer, ownership) }.unwrap_err(),
             AttachError::Ownership
         );

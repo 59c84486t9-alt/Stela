@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Sigmatel codec control tests.
 use super::*;
-// Included by the existing SigmaTel native register/DMA model. UNRUN.
+// Exercises SigmaTel controls through the shared command-ring/DMA model.
 mod idt95 {
     use super::*;
 
@@ -138,7 +138,7 @@ mod idt95 {
         );
         assert_eq!(access_counts(&model), before);
     }
-    // New composition regression, UNRUN: canonical dispatch and failed reset
+    // Canonical dispatch and failed reset
     // must retain the same IDT port/PCM authority, not just a vendor handle.
     #[test]
     fn idt95_failed_reset_retains_port() {

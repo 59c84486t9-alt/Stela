@@ -423,7 +423,9 @@ impl Prepared {
         if self.identity.requires_mapped_preflight() {
             return Err(super::super::Error::InvalidConfiguration);
         }
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: preparation validated this BAR extent. The caller keeps that
+        // range identity-mapped and uncached, with exclusive PCI ownership and
+        // stable power/decode until controller shutdown.
         unsafe { MmioRegisters::claim(self.base, self.bytes) }
     }
 }
@@ -654,7 +656,9 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             .preflight_clock(&mut registers)
             .map_err(AttachError::MmioPreflight)?;
     }
-    // SAFETY: covered by this function's own safety contract.
+    // SAFETY: the caller supplies exclusive platform ownership, power and a
+    // matching register mapping. Preflight above checked D0, stopped DMA and
+    // the identity-selected link controls before configuration writes.
     let prepared = unsafe {
         prepare_inner(
             function,
@@ -665,7 +669,9 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             true,
         )
     }?;
-    // SAFETY: covered by this function's own safety contract.
+    // SAFETY: preparation and the retained register implementation refer to
+    // the same BAR/function checked above. Moving registers into the adapter
+    // retains that mapping while function remains exclusively borrowed.
     unsafe { prepared.bind_registers(function, registers) }
 }
 
@@ -693,7 +699,9 @@ pub unsafe fn prepare<C: ConfigSpace>(
     timer: &impl Timer,
     ownership: Ownership,
 ) -> Result<Prepared, AttachError> {
-    // SAFETY: covered by this function's own safety contract.
+    // SAFETY: the caller has powered and quiesced this exclusively owned
+    // function and supplies its sized BAR and coherent DMA prerequisites.
+    // Unknown board evidence adds no target-specific grant.
     unsafe { prepare_with_board(function, bar0, timer, ownership, BoardIdentity::Unknown) }
 }
 
@@ -711,7 +719,9 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     ownership: Ownership,
     board: BoardIdentity<'_>,
 ) -> Result<Prepared, AttachError> {
-    // SAFETY: covered by this function's own safety contract.
+    // SAFETY: the caller retains exclusive PCI/platform ownership, stable
+    // power and coherent reachable DMA, and supplies firmware-derived board
+    // identity. This path performs no mapped-register preflight.
     unsafe { prepare_inner(function, bar0, timer, ownership, board, false) }
 }
 
