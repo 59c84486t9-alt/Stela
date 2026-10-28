@@ -193,13 +193,19 @@ impl<'a> AssignedRoster<'a> {
             cores,
         })
     }
-    /// Narrow the admitted source roster before any Plan borrows it. The
-    /// complete executors/capture remain retained; removed workers stay parked.
-    pub(crate) fn limit(&mut self, count: usize) -> Result<(), String> {
-        if count == 0 || count > self.cores.len() {
+    /// Select actual started workers before any Plan borrows this roster.
+    /// Physical IDs stay unchanged; omitted executors remain retained/parked.
+    pub(crate) fn select(&mut self, workers: &[usize]) -> Result<(), String> {
+        if workers.is_empty()
+            || !workers.contains(&0)
+            || workers.iter().enumerate().any(|(index, worker)| {
+                workers[..index].contains(worker)
+                    || !self.cores.iter().any(|core| core.worker == *worker)
+            })
+        {
             return Err("active source roster exceeds retained physical workers".into());
         }
-        self.cores.truncate(count);
+        self.cores.retain(|core| workers.contains(&core.worker));
         Ok(())
     }
 }
@@ -399,7 +405,16 @@ impl<'a> Source<'a> {
         profile: CpuProfile,
         capture: &Capture,
     ) -> Result<Prepared<'s>, String> {
-        let classes = roster
+        let classes = Self::host_classes(roster, capture)?;
+        self.prepare_with_classes(roster, profile, &classes)
+    }
+
+    #[cfg(not(test))]
+    fn host_classes(
+        roster: &dyn RetainedRoster,
+        capture: &Capture,
+    ) -> Result<Vec<native::CoreClass>, String> {
+        roster
             .cores()
             .iter()
             .map(|core| {
@@ -420,8 +435,54 @@ impl<'a> Source<'a> {
                 }
                 Ok(snapshot.core_class())
             })
-            .collect::<Result<Vec<_>, &str>>()?;
-        self.prepare_with_classes(roster, profile, &classes)
+            .collect::<Result<Vec<_>, &str>>()
+            .map_err(String::from)
+    }
+
+    fn guest_classes(&self) -> Result<Vec<native::CoreClass>, String> {
+        let resources = self.resources.resources();
+        resources
+            .slots
+            .iter()
+            .map(|slot| {
+                let kind = resources
+                    .kinds
+                    .iter()
+                    .find(|kind| Some(kind.id) == slot.kind)
+                    .ok_or("assigned source core kind is unknown")?;
+                Ok(match kind.cluster_type {
+                    b'P' => native::CoreClass::Performance,
+                    b'E' => native::CoreClass::Efficiency,
+                    _ => native::CoreClass::Unknown,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn select_on(
+        &self,
+        roster: &mut AssignedRoster<'_>,
+        capture: &Capture,
+    ) -> Result<(), String> {
+        let boot = self
+            .resources
+            .resources()
+            .slots
+            .iter()
+            .position(|slot| slot.reg == self.boot_reg)
+            .ok_or("assigned source omits the original boot PE")?;
+        let placement = native::placement(
+            &self.guest_classes()?,
+            &Self::host_classes(roster, capture)?,
+            boot,
+        )
+        .map_err(|error| format!("assigned host core placement: {error:?}"))?;
+        let workers = placement
+            .iter()
+            .map(|index| roster.cores()[*index].worker)
+            .collect::<Vec<_>>();
+        roster.select(&workers)
     }
 
     fn prepare_with_classes<'s>(
@@ -442,22 +503,7 @@ impl<'a> Source<'a> {
             .iter()
             .position(|slot| slot.reg == self.boot_reg)
             .ok_or("assigned source omits the original boot PE")?;
-        let guest = resources
-            .slots
-            .iter()
-            .map(|slot| {
-                let kind = resources
-                    .kinds
-                    .iter()
-                    .find(|kind| Some(kind.id) == slot.kind)
-                    .ok_or("assigned source core kind is unknown")?;
-                Ok(match kind.cluster_type {
-                    b'P' => native::CoreClass::Performance,
-                    b'E' => native::CoreClass::Efficiency,
-                    _ => native::CoreClass::Unknown,
-                })
-            })
-            .collect::<Result<Vec<_>, &str>>()?;
+        let guest = self.guest_classes()?;
         let placement = native::placement(&guest, host, boot)
             .map_err(|error| format!("assigned host core placement: {error:?}"))?;
         for (ordinal, slot) in resources.slots.iter().enumerate() {

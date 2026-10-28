@@ -1118,9 +1118,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         full_profile.processors.len().max(1),
     )
     .unwrap_or_else(|error| output::fatal(error));
-    roster
-        .limit(active_workers)
-        .unwrap_or_else(|error| output::fatal(&error));
     output::arguments(format_args!(
         "NATIVE ACTIVE workers={active_workers} parked={} source_PEs={}\n",
         handoff.native_resources.cores as usize - active_workers,
@@ -1162,6 +1159,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         _ => output::fatal("selected bundle source, live tree and board must be retained together"),
     };
+    if let Some(source) = &topology_source {
+        source
+            .select_on(
+                &mut roster,
+                native_processors.expect("validated native roster"),
+            )
+            .unwrap_or_else(|error| output::fatal(&error));
+    } else {
+        roster
+            .select(&[0])
+            .unwrap_or_else(|error| output::fatal(&error));
+    }
     let mut assigned = topology_source.as_ref().map(|source| {
         source
             .prepare_on(

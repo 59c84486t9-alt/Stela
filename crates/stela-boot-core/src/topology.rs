@@ -108,16 +108,18 @@ pub enum PlacementError {
 /// Host index zero runs the guest boot slot. Exact class matches are reserved
 /// before an unmatched guest can consume another class's worker. Unknown
 /// workers, then other unused workers, fill any remaining slots in host order.
-/// Homogeneous host classes keep the original BSP-first assignment.
+/// Homogeneous host classes keep the original BSP-first assignment. When the
+/// guest has fewer slots, choose from the complete retained host roster; a
+/// matching class beyond the first guest-count workers remains eligible.
 pub fn placement(
     guest: &[CoreClass],
     host: &[CoreClass],
     boot: usize,
 ) -> Result<Vec<usize>, PlacementError> {
-    if guest.is_empty() || guest.len() != host.len() {
+    if guest.is_empty() || guest.len() > host.len() {
         return Err(PlacementError::Cardinality);
     }
-    if guest.len() > MAX_CORES {
+    if host.len() > MAX_CORES {
         return Err(PlacementError::Capacity);
     }
     if boot >= guest.len() {
@@ -782,11 +784,33 @@ mod tests {
     }
 
     #[test]
+    fn placement_searches_all_retained_workers_when_guest_has_fewer_slots() {
+        use CoreClass::{Efficiency as E, Performance as P, Unknown as U};
+        assert_eq!(placement(&[P, E], &[P, P, P, E], 0), Ok(vec![0, 3]));
+        assert_eq!(placement(&[E, P], &[P, P, P, E], 1), Ok(vec![3, 0]));
+        assert_eq!(placement(&[E], &[P, P, P, E], 0), Ok(vec![0]));
+        assert_eq!(placement(&[P, E], &[U, U, U, U], 0), Ok(vec![0, 1]));
+        let classes = [U, P, E, CoreClass::LowPower];
+        for guest_bits in 0..16 {
+            let guest = core::array::from_fn::<_, 2, _>(|i| classes[guest_bits >> (i * 2) & 3]);
+            for host_bits in 0..256 {
+                let host = core::array::from_fn::<_, 4, _>(|i| classes[host_bits >> (i * 2) & 3]);
+                for boot in 0..2 {
+                    let result = placement(&guest, &host, boot).unwrap();
+                    assert_eq!(result[boot], 0);
+                    assert_ne!(result[0], result[1]);
+                    assert!(result.iter().all(|worker| *worker < host.len()));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn placement_rejects_invalid_rosters() {
         use CoreClass::Unknown as U;
         assert_eq!(placement(&[], &[], 0), Err(PlacementError::Cardinality));
         assert_eq!(
-            placement(&[U], &[U, U], 0),
+            placement(&[U, U], &[U], 0),
             Err(PlacementError::Cardinality)
         );
         assert_eq!(placement(&[U], &[U], 1), Err(PlacementError::Bootstrap));

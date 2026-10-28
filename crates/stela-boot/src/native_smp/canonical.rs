@@ -266,8 +266,9 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
     {
         return Err("canonical active PE roster exceeds the retained physical workers");
     }
-    bindings::validate(cores, boot_processor, assignments)?;
-    for slot in 1..cores {
+    bindings::validate(cores, reserved, boot_processor, assignments)?;
+    for binding in assignments.iter().filter(|binding| binding.worker.0 != 0) {
+        let slot = binding.worker.0;
         let selected = capture.processors[capture.selected[slot] as usize];
         let Some(processor) = executors
             .processors()

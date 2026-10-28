@@ -5,15 +5,17 @@ use stela_runtime::machine::engine::publication::WorkerBinding;
 
 pub fn validate(
     cores: usize,
+    physical_workers: usize,
     boot_processor: usize,
     bindings: &[WorkerBinding],
 ) -> Result<(), &'static str> {
-    if cores == 0 || boot_processor >= cores || bindings.len() != cores {
+    if cores == 0 || cores > physical_workers || boot_processor >= cores || bindings.len() != cores
+    {
         return Err("canonical native assignment has an incomplete PE/worker roster");
     }
     for (index, binding) in bindings.iter().enumerate() {
         if binding.pe >= cores
-            || binding.worker.0 >= cores
+            || binding.worker.0 >= physical_workers
             || bindings[..index]
                 .iter()
                 .any(|earlier| earlier.pe == binding.pe || earlier.worker == binding.worker)
@@ -52,10 +54,11 @@ mod tests {
                 worker: WorkerId(1),
             },
         ];
-        assert_eq!(validate(4, 2, &bindings), Ok(()));
-        assert!(validate(4, 0, &bindings).is_err());
+        assert_eq!(validate(4, 4, 2, &bindings), Ok(()));
+        assert!(validate(4, 4, 0, &bindings).is_err());
         assert_eq!(
             validate(
+                1,
                 1,
                 0,
                 &[WorkerBinding {
@@ -80,9 +83,9 @@ mod tests {
             },
         ];
         for (cores, boot) in [(0, 0), (1, 0), (2, 2), (3, 1)] {
-            assert!(validate(cores, boot, &good).is_err());
+            assert!(validate(cores, cores, boot, &good).is_err());
         }
-        assert!(validate(2, 1, &good[..1]).is_err());
+        assert!(validate(2, 2, 1, &good[..1]).is_err());
         for bad in [
             [good[0], good[0]],
             [
@@ -107,7 +110,24 @@ mod tests {
                 },
             ],
         ] {
-            assert!(validate(2, 1, &bad).is_err());
+            assert!(validate(2, 2, 1, &bad).is_err());
         }
+    }
+    #[test]
+    fn a_guest_subset_retains_sparse_actual_worker_ids() {
+        use stela_runtime::machine::engine::publication::WorkerId;
+        let bindings = [
+            WorkerBinding {
+                pe: 0,
+                worker: WorkerId(0),
+            },
+            WorkerBinding {
+                pe: 1,
+                worker: WorkerId(7),
+            },
+        ];
+        assert_eq!(validate(2, 8, 0, &bindings), Ok(()));
+        assert!(validate(2, 7, 0, &bindings).is_err());
+        assert!(validate(2, 1, 0, &bindings).is_err());
     }
 }
