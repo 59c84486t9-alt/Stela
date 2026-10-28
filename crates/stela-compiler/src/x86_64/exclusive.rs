@@ -453,10 +453,9 @@ mod tests {
                     core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.cast(), bytes.len())
                 };
                 // SAFETY: the allocation is live and covers CODE_ALLOCATION_BYTES; copying has finished.
-                assert_eq!(
-                    unsafe { mprotect(pointer, CODE_ALLOCATION_BYTES, PROT_READ_EXECUTE) },
-                    0
-                );
+                let protection =
+                    unsafe { mprotect(pointer, CODE_ALLOCATION_BYTES, PROT_READ_EXECUTE) };
+                assert_eq!(protection, 0);
                 Self {
                     pointer,
                     bytes: bytes.into_bytes(),
