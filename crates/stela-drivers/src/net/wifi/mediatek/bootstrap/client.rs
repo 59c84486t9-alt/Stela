@@ -103,6 +103,16 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
+/// `ieee80211_drop_unencrypted_mgmt`'s verdict on a PMF association's robust
+/// management frame.
+enum Unencrypted {
+    Accept,
+    Drop,
+    /// `cfg80211_rx_unprot_mlme_mgmt`, then drop.
+    Report,
+    /// An unprotected departure before the handshake's keys.
+    Depart,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
     Idle,
@@ -988,7 +998,47 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if (s.management.is_some() || s.station.requires_protected_management())
                 && wifi::security::management::robust(&frame)
             {
+                let pmf = s.station.requires_protected_management();
+                if pmf {
+                    match Self::unencrypted_management(s, &frame) {
+                        Unencrypted::Accept => {}
+                        Unencrypted::Drop => continue,
+                        Unencrypted::Report => {
+                            events.push(Event::UnprotectedDeparture(f));
+                            continue;
+                        }
+                        Unencrypted::Depart => {
+                            let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
+                            let body = frame.bytes().get(24..).unwrap_or(&[]);
+                            let action = s
+                                .station
+                                .receive_protected_departure(epoch, &frame, body)
+                                .map_err(Error::Station)?;
+                            Self::action_guarded(
+                                s,
+                                action,
+                                now,
+                                source,
+                                policy,
+                                guard.as_deref_mut(),
+                            )?;
+                            continue;
+                        }
+                    }
+                }
                 let received = Self::receive_management(s, frame, &f.bytes)?;
+                // ieee80211_rx_mgmt_deauth: the AP's authenticated departure
+                // ends the association; the OS sees the frame too.
+                if pmf && matches!(received.frame().header().control & 0x00fc, 0x00a0 | 0x00c0) {
+                    let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
+                    let action = s
+                        .station
+                        .receive_protected_departure(epoch, received.frame(), received.body())
+                        .map_err(Error::Station)?;
+                    events.push(Event::ProtectedManagement(received));
+                    Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
+                    continue;
+                }
                 if !Self::channel_switch_action(s, received.frame(), received.body()) {
                     events.push(Event::ProtectedManagement(received));
                 }
@@ -1152,6 +1202,38 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.phase = Phase::NeedsDrain;
         Ok(())
     }
+    /// `ieee80211_drop_unencrypted_mgmt` for a robust frame on a PMF
+    /// association. A frame protected with keys the association does not
+    /// hold yet is dropped, as one `ieee80211_rx_h_decrypt` cannot decrypt;
+    /// the PTK and IGTK are installed together, so one protected unicast
+    /// frame between them is dropped too.
+    fn unencrypted_management(s: &Owned<I, Q, C>, frame: &Mpdu) -> Unencrypted {
+        let h = frame.header();
+        let departure = matches!(h.control & 0x00fc, 0x00a0 | 0x00c0);
+        let keyed = s
+            .ptk
+            .as_ref()
+            .is_some_and(|key| key.slot().installed().is_some());
+        if !h.receiver.is_multicast() {
+            return match (h.protected(), keyed, departure) {
+                (true, true, _) if s.management.is_some() => Unencrypted::Accept,
+                (true, ..) => Unencrypted::Drop,
+                // Permit unprotected departures during the 4-way handshake.
+                (false, false, true) => Unencrypted::Depart,
+                (false, true, true) => Unencrypted::Report,
+                (false, _, false) => Unencrypted::Drop,
+            };
+        }
+        // BIP leaves the Protected field clear; its MMIE carries the key.
+        let bytes = frame.bytes();
+        let mmie = bytes.len() >= 24 + 18 && bytes[bytes.len() - 18..][..2] == [76, 16];
+        match (mmie, departure) {
+            (false, true) => Unencrypted::Report,
+            (false, false) => Unencrypted::Drop,
+            (true, _) if s.management.is_some() => Unencrypted::Accept,
+            (true, _) => Unencrypted::Drop,
+        }
+    }
     pub fn disconnect(&mut self) -> Result<(), Error> {
         let s = self.state_mut();
         if !matches!(
@@ -1282,6 +1364,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
 }
 pub enum Event {
     ProtectedManagement(management::Received),
+    /// `cfg80211_rx_unprot_mlme_mgmt`: a PMF association dropped this
+    /// unprotected deauthentication or disassociation; the OS may check the
+    /// AP with an SA Query.
+    UnprotectedDeparture(crate::net::wifi::mediatek::ring::rx::Frame),
     ExternalAuthentication(station::external::Received),
     ExternalAuthenticationEnded {
         session: Arc<station::external::Session>,

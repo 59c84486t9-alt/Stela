@@ -53,12 +53,17 @@ fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
         &link.receive().unwrap().unwrap()[12..14],
         &0x800u16.to_be_bytes()
     );
-    // A protected deauthentication reaches the OS.
-    incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 2)), false);
+    // An authenticated SA Query response reaches the OS.
+    incoming(
+        &model,
+        &response(0x40d0, &[8, 1, 3, 4]),
+        Some((1, 0, 2)),
+        false,
+    );
     link.service().unwrap();
     assert!(drain_notices(&mut link).iter().any(|notice| matches!(
         &notice.event,
-        LinkEvent::Controller(Event::ProtectedManagement(rx)) if rx.body() == [7, 0]
+        LinkEvent::Controller(Event::ProtectedManagement(rx)) if rx.body() == [8, 1, 3, 4]
     )));
     // The departure is encrypted, as IEEE80211_STA_MFP_ENABLED leaves it.
     let departed = depart(&mut link, &model);

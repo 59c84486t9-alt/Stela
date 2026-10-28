@@ -499,6 +499,58 @@ impl Station {
         self.remove(Some(Failure::Transmit))
     }
 
+    /// The AP's departure from a PMF association, `body` being the frame's
+    /// reason code onward: authenticated by its keys, or in the clear before
+    /// the 4-way handshake installs them, which `ieee80211_drop_unencrypted_mgmt`
+    /// permits.
+    pub fn receive_protected_departure(
+        &mut self,
+        epoch: u64,
+        frame: &Mpdu,
+        body: &[u8],
+    ) -> Result<Action, Error> {
+        if epoch != self.epoch {
+            return Err(Error::Stale);
+        }
+        let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
+        if (
+            frame.radio.band,
+            frame.radio.channel,
+            frame.radio.frequency_mhz,
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
+            return Err(Error::WrongChannel);
+        }
+        if frame.fcs_error || frame.monitor_only {
+            return Err(Error::Wire(wire::Error::Integrity));
+        }
+        if join.request.pmf().is_none()
+            || !matches!(
+                frame.header().control & TYPE_SUBTYPE,
+                DISASSOCIATION | DEAUTHENTICATION
+            )
+        {
+            return Err(Error::Unsupported("protected departure"));
+        }
+        // check_peer's addressing, for a frame that may be protected.
+        let header = frame.header();
+        if header.control & 0x800c != 0 || header.length != 24 || header.fragmented() {
+            return Err(Error::Unsupported("nonordinary management frame"));
+        }
+        if (header.receiver != self.local && header.receiver != Mac::BROADCAST)
+            || header.transmitter != Some(join.bssid)
+            || frame.bytes()[16..22] != join.bssid.0
+        {
+            return Err(Error::Wire(wire::Error::WrongPeer));
+        }
+        let reason = body
+            .first_chunk()
+            .map(|reason| u16::from_le_bytes(*reason))
+            .ok_or(Error::Wire(wire::Error::Truncated))?;
+        self.remove(Some(Failure::PeerDeparture(reason)))
+    }
+
     /// `epoch` must be retained from the actual firmware/RX association context;
     /// never retag old deferred RX by looking up the current epoch at delivery.
     pub fn receive(

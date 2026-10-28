@@ -600,20 +600,24 @@ fn actual_prekey_eapol_has_distinct_guarded_transport_and_no_robust_fallback() {
     assert!(driver.authorize_port(epoch).is_err());
     assert!(driver.begin_tx_block_ack(6, 0, 108).is_err());
     assert!(driver.poll(108, &Source, &mut Policy(true)).is_err());
+    // ieee80211_drop_unencrypted_mgmt drops a robust action before keys,
+    // but permits a departure during the 4-way handshake.
     let commands = model.response.lock().unwrap().client_commands.len();
-    for (at, bytes) in [
-        (108, response(0xc0, &[7, 0])),
-        (109, response(0xd0, &[3, 2, 0, 0, 37, 0])),
-    ] {
-        incoming(&model, &bytes, None, false);
-        assert!(poll(&mut driver, &mut owner, &state, at).is_err());
-        assert_eq!(driver.station().phase(), station::Phase::Associated);
-        assert!(driver.station().block_ack_idle());
-        assert_eq!(
-            model.response.lock().unwrap().client_commands.len(),
-            commands
-        );
-    }
+    incoming(&model, &response(0xd0, &[3, 2, 0, 0, 37, 0]), None, false);
+    assert!(
+        poll(&mut driver, &mut owner, &state, 108)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(driver.station().phase(), station::Phase::Associated);
+    assert!(driver.station().block_ack_idle());
+    assert_eq!(
+        model.response.lock().unwrap().client_commands.len(),
+        commands
+    );
+    incoming(&model, &response(0xc0, &[7, 0]), None, false);
+    poll(&mut driver, &mut owner, &state, 109).unwrap();
+    assert_eq!(driver.station().phase(), station::Phase::Disconnecting);
 }
 
 #[test]
@@ -666,9 +670,27 @@ fn actual_pmf_port_requires_current_all_key_acks_and_independent_os_handshake() 
             .iter()
             .any(|event| matches!(event, Event::Ingress(station::data::Ingress::Data(_))))
     );
-    // Actual hardware-authenticated robust RX remains an observation, never an
-    // automatic departure. Its delayed effect must reacquire current OS guards.
-    incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 2)), false);
+    // Once keyed, an unprotected departure is reported and dropped, as is a
+    // group one without an MMIE.
+    let mut group = response(0xc0, &[7, 0]);
+    group[4..10].fill(255);
+    for frame in [response(0xc0, &[7, 0]), group] {
+        incoming(&model, &frame, None, false);
+        let events = poll(&mut driver, &mut owner, &state, 112).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [Event::UnprotectedDeparture(_)]
+        ));
+        assert_eq!(driver.station().phase(), station::Phase::Associated);
+    }
+    // An authenticated SA Query response is the OS's. Its delayed effect must
+    // reacquire current OS guards.
+    incoming(
+        &model,
+        &response(0x40d0, &[8, 1, 3, 4]),
+        Some((1, 0, 2)),
+        false,
+    );
     let mut events = poll(&mut driver, &mut owner, &state, 112).unwrap();
     let Event::ProtectedManagement(received) = events.pop().unwrap() else {
         panic!("authenticated PMF envelope")
@@ -682,7 +704,7 @@ fn actual_pmf_port_requires_current_all_key_acks_and_independent_os_handshake() 
         })
     }
     .unwrap();
-    assert_eq!(value, [7, 0]);
+    assert_eq!(value, [8, 1, 3, 4]);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     unsafe {
         driver.transmit_management_modern(
@@ -701,6 +723,17 @@ fn actual_pmf_port_requires_current_all_key_acks_and_independent_os_handshake() 
         0x4000
     );
     assert_eq!(&sent[0][24..], &[8, 0, 3, 4]);
+    poll(&mut driver, &mut owner, &state, 113).unwrap();
+    driver.poll_released().unwrap();
+    // ieee80211_rx_mgmt_deauth: the AP's authenticated departure ends the
+    // association, and the OS sees it.
+    incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 3)), false);
+    let events = poll(&mut driver, &mut owner, &state, 114).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ProtectedManagement(rx) if rx.body() == [7, 0]
+    )));
+    assert_eq!(driver.station().phase(), station::Phase::Disconnecting);
 }
 
 #[test]
@@ -854,7 +887,12 @@ fn actual_pmf_igtk_rotation_revokes_old_session_and_preserves_current_data_keys(
     let first = attach(&mut driver, &mut owner);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &first) }.unwrap();
-    incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 9)), false);
+    incoming(
+        &model,
+        &response(0x40d0, &[8, 1, 3, 4]),
+        Some((1, 0, 9)),
+        false,
+    );
     let mut events = poll(&mut driver, &mut owner, &state, 110).unwrap();
     let Event::ProtectedManagement(delayed) = events.pop().unwrap() else {
         panic!("original authenticated envelope")
