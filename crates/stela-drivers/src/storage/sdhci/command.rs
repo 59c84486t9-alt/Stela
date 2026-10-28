@@ -52,7 +52,7 @@ impl Engine {
         data: Option<Data>,
     ) -> Result<[u32; 4], BlockError> {
         self.healthy()?;
-        let result = self.execute_inner(command, argument, response, data, false);
+        let result = self.execute_inner(command, argument, response, data, false, false);
         if let Err(error) = result {
             if command == SD_SWITCH_VOLTAGE {
                 // CMD11 may have taken effect even without a completion. An
@@ -72,6 +72,7 @@ impl Engine {
         response: Response,
         data: Option<Data>,
         tolerate_response_crc: bool,
+        defer: bool,
     ) -> Result<[u32; 4], BlockError> {
         self.check_card()?;
         let inhibit = INHIBIT_COMMAND
@@ -206,6 +207,9 @@ impl Engine {
         if errors != 0 {
             return Err(BlockError::Device { status: result[0] });
         }
+        if defer && (dma || (data.is_none() && response == Response::Busy)) {
+            return Ok(result);
+        }
         if let Some(data) = data {
             if !dma {
                 self.pio(data)?;
@@ -234,6 +238,7 @@ impl Engine {
             Response::Status,
             None,
             !crc_fatal,
+            false,
         );
         result.map(|_| ()).map_err(|error| self.retire_error(error))
     }
@@ -256,23 +261,67 @@ impl Engine {
     pub(super) fn wait_interrupt(&mut self, wanted: u32, timeout: u64) -> Result<u32, BlockError> {
         let deadline = self.clock.deadline(timeout);
         loop {
-            self.check_card()?;
-            let status = self.registers.read32(INTERRUPT);
-            if status & ERROR != 0 {
-                return if status & ERROR == COMMAND_TIMEOUT | (1 << 15) {
-                    Err(BlockError::Timeout)
-                } else {
-                    Err(BlockError::Device { status })
-                };
-            }
-            if status & wanted != 0 {
-                return Ok(status);
-            }
-            if deadline.passed() {
-                return Err(BlockError::Timeout);
+            if let Some(result) = self.poll_interrupt(wanted, deadline) {
+                return result;
             }
             core::hint::spin_loop();
         }
+    }
+    /// One look for `wanted` or an error interrupt, or the deadline.
+    pub(super) fn poll_interrupt(
+        &mut self,
+        wanted: u32,
+        deadline: Deadline,
+    ) -> Option<Result<u32, BlockError>> {
+        if let Err(error) = self.check_card() {
+            return Some(Err(error));
+        }
+        let status = self.registers.read32(INTERRUPT);
+        if status & ERROR != 0 {
+            return Some(if status & ERROR == COMMAND_TIMEOUT | (1 << 15) {
+                Err(BlockError::Timeout)
+            } else {
+                Err(BlockError::Device { status })
+            });
+        }
+        if status & wanted != 0 {
+            return Some(Ok(status));
+        }
+        deadline.passed().then_some(Err(BlockError::Timeout))
+    }
+    /// Issue a block command's DMA transfer, or an R1b command, up to its
+    /// response, leaving the data or busy phase to [`Self::poll_end`]. A
+    /// PIO transfer runs whole.
+    pub(super) fn issue_deferred(
+        &mut self,
+        command: Opcode,
+        argument: u32,
+        response: Response,
+        data: Option<Data>,
+    ) -> Result<(), BlockError> {
+        self.healthy()?;
+        self.execute_inner(command, argument, response, data, false, true)
+            .map(drop)
+            .map_err(|error| self.retire_error(error))
+    }
+    /// One look at the deferred data or busy phase: its end, an error, or
+    /// its deadline.
+    pub(super) fn poll_end(
+        &mut self,
+        busy: bool,
+        deadline: Deadline,
+    ) -> Option<Result<(), BlockError>> {
+        let result = self.poll_interrupt(DATA_END, deadline)?.and_then(|_| {
+            self.registers.write32(INTERRUPT, DATA_END | DMA_END);
+            fence(Ordering::Acquire);
+            if busy && self.registers.read32(PRESENT) & (INHIBIT_DATA | DATA0) != DATA0 {
+                return Err(BlockError::Unsupported(
+                    "SDHCI busy response did not release DAT0",
+                ));
+            }
+            self.check_card()
+        });
+        Some(result.map_err(|error| self.retire_error(error)))
     }
     fn pio(&mut self, data: Data) -> Result<(), BlockError> {
         let interrupt = if data.read { READ_READY } else { WRITE_READY };
@@ -312,21 +361,7 @@ impl Engine {
         read: bool,
     ) -> Result<(), BlockError> {
         self.live(id)?;
-        let medium = self.medium.as_ref().unwrap();
-        let address = if medium.sector_addressed {
-            lba
-        } else {
-            lba.checked_mul(512)
-                .ok_or(BlockError::Unsupported("SDHCI byte address overflow"))?
-        };
-        let address = u32::try_from(address)
-            .map_err(|_| BlockError::Unsupported("SDHCI card address exceeds32bits"))?;
-        let command = match (read, bytes > 512) {
-            (true, false) => READ_SINGLE,
-            (true, true) => READ_MULTIPLE,
-            (false, false) => WRITE_SINGLE,
-            (false, true) => WRITE_MULTIPLE,
-        };
+        let (command, address) = self.block_command(lba, bytes, read)?;
         self.execute(
             command,
             address,
@@ -343,5 +378,174 @@ impl Engine {
         }
         self.wait_card_ready()?;
         self.live(id)
+    }
+    /// The read or write command for `bytes` from `lba`, and its argument.
+    fn block_command(
+        &self,
+        lba: u64,
+        bytes: usize,
+        read: bool,
+    ) -> Result<(Opcode, u32), BlockError> {
+        let medium = self.medium.as_ref().unwrap();
+        let address = if medium.sector_addressed {
+            lba
+        } else {
+            lba.checked_mul(512)
+                .ok_or(BlockError::Unsupported("SDHCI byte address overflow"))?
+        };
+        let address = u32::try_from(address)
+            .map_err(|_| BlockError::Unsupported("SDHCI card address exceeds32bits"))?;
+        let command = match (read, bytes > 512) {
+            (true, false) => READ_SINGLE,
+            (true, true) => READ_MULTIPLE,
+            (false, false) => WRITE_SINGLE,
+            (false, true) => WRITE_MULTIPLE,
+        };
+        Ok((command, address))
+    }
+    /// Run the started block command to its result.
+    pub(super) fn settle(&mut self) {
+        while self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.result.is_none() && running.transfer.is_some())
+        {
+            self.advance();
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+    /// Move the started block command on as far as it goes without waiting.
+    pub(super) fn advance(&mut self) {
+        let Some(mut running) = self.running.take() else {
+            return;
+        };
+        if running.result.is_none()
+            && let Some(transfer) = running.transfer.as_mut()
+        {
+            running.result = loop {
+                match self.step(transfer) {
+                    None => break None,
+                    Some(Ok(false)) => {}
+                    Some(Ok(true)) => {
+                        let data = core::mem::take(&mut transfer.data);
+                        break Some(Ok(transfer.read.then_some(data)));
+                    }
+                    Some(Err(error)) => break Some(Err(error)),
+                }
+            };
+        }
+        self.running = Some(running);
+    }
+    /// One move of `transfer` without waiting: `true` once all of it is
+    /// done, `false` when it moved on, `None` while it waits. Each part is
+    /// Linux's `mmc_blk_mq_issue_rw_rq` and `mmc_blk_card_busy`: the
+    /// transfer, STOP_TRANSMISSION after more than one block, then CMD13
+    /// until the card is ready again.
+    fn step(&mut self, transfer: &mut Transfer) -> Option<Result<bool, BlockError>> {
+        let timer = |clock: Clock, us| clock.try_deadline(us).map_err(|_| BlockError::Timeout);
+        let phase = match transfer.phase {
+            None => {
+                if transfer.done == transfer.bytes {
+                    return Some(Ok(true));
+                }
+                let part = (transfer.bytes - transfer.done).min(TRANSFER_BYTES);
+                let lba = transfer.lba + (transfer.done / 512) as u64;
+                let read = transfer.read;
+                if !read {
+                    self.data.bytes_mut()[..part]
+                        .copy_from_slice(&transfer.data[transfer.done..transfer.done + part]);
+                }
+                self.live(transfer.generation)
+                    .and_then(|()| self.block_command(lba, part, read))
+                    .and_then(|(command, address)| {
+                        let data = Data {
+                            bytes: part,
+                            block: 512,
+                            read,
+                            pio: false,
+                        };
+                        self.issue_deferred(command, address, Response::Status, Some(data))
+                    })
+                    .and_then(|()| {
+                        Ok(Phase::Data {
+                            deadline: timer(self.clock, DATA_US)?,
+                            part,
+                        })
+                    })
+            }
+            Some(Phase::Data { deadline, part }) => {
+                self.poll_end(false, deadline)?.and_then(|()| {
+                    let deadline = timer(self.clock, DATA_US)?;
+                    if part > 512 {
+                        self.issue_deferred(STOP_TRANSMISSION, 0, Response::Busy, None)?;
+                        Ok(Phase::Stop { deadline, part })
+                    } else {
+                        Ok(Phase::Ready {
+                            deadline,
+                            next: None,
+                            part,
+                        })
+                    }
+                })
+            }
+            Some(Phase::Stop { deadline, part }) => self.poll_end(true, deadline)?.and_then(|()| {
+                Ok(Phase::Ready {
+                    deadline: timer(self.clock, DATA_US)?,
+                    next: None,
+                    part,
+                })
+            }),
+            Some(Phase::Ready {
+                deadline,
+                next,
+                part,
+            }) => {
+                if next.is_some_and(|next| !next.passed()) {
+                    return None;
+                }
+                if deadline.passed() {
+                    return Some(Err(self.retire_error(BlockError::Timeout)));
+                }
+                let status = match self.execute(
+                    SEND_STATUS,
+                    u32::from(self.rca) << 16,
+                    Response::Status,
+                    None,
+                ) {
+                    Ok(response) => response[0],
+                    Err(error) => return Some(Err(error)),
+                };
+                if status & (1 << 8) == 0 || status >> 9 & 15 != 4 {
+                    return match timer(self.clock, 1000) {
+                        Ok(next) => {
+                            transfer.phase = Some(Phase::Ready {
+                                deadline,
+                                next: Some(next),
+                                part,
+                            });
+                            None
+                        }
+                        Err(error) => Some(Err(error)),
+                    };
+                }
+                if let Err(error) = self.live(transfer.generation) {
+                    return Some(Err(error));
+                }
+                if transfer.read {
+                    transfer.data.extend_from_slice(&self.data.bytes()[..part]);
+                }
+                transfer.done += part;
+                transfer.phase = None;
+                return Some(Ok(false));
+            }
+        };
+        match phase {
+            Ok(phase) => {
+                transfer.phase = Some(phase);
+                Some(Ok(false))
+            }
+            Err(error) => Some(Err(error)),
+        }
     }
 }

@@ -4,8 +4,8 @@
 //! Native polled SDHCI storage with retained host and generation-bound cards.
 //! SD/SDHC/SDXC and eMMC user-area access share the actual command engine.
 use crate::{
-    Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity},
+    Clock, Deadline, Handoff,
+    block::{BlockDevice, BlockError, Command, Finished, Identity},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         pci::{ConfigSpace, Function},
@@ -265,6 +265,44 @@ struct Engine {
     medium: Option<Medium>,
     fault: Option<BlockError>,
     last_failure: Option<Failure>,
+    /// The block command started on the host, and the next one's tag.
+    running: Option<Running>,
+    next_tag: u32,
+}
+
+/// A started block command: a DMA read or write moved a bounce buffer's
+/// worth at a time, or another command's result.
+struct Running {
+    tag: u32,
+    transfer: Option<Transfer>,
+    result: Option<Finished>,
+}
+
+struct Transfer {
+    generation: u64,
+    lba: u64,
+    read: bool,
+    bytes: usize,
+    /// The data written, or read so far.
+    data: Vec<u8>,
+    done: usize,
+    phase: Option<Phase>,
+}
+
+/// Where a part of a transfer of `part` bytes waits.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// Its DMA data phase.
+    Data { deadline: Deadline, part: usize },
+    /// STOP_TRANSMISSION's busy, after more than one block.
+    Stop { deadline: Deadline, part: usize },
+    /// The card programming or reading, until CMD13 reports it ready; the
+    /// next CMD13 waits for `next`, a millisecond on, the first none.
+    Ready {
+        deadline: Deadline,
+        next: Option<Deadline>,
+        part: usize,
+    },
 }
 
 /// Actual architectural registers captured after acknowledged host reset.
@@ -346,6 +384,8 @@ impl Host {
             medium: None,
             fault: None,
             last_failure: None,
+            running: None,
+            next_tag: 0,
         };
         engine.configure_host()?;
         Ok(Self {
@@ -354,6 +394,7 @@ impl Host {
     }
     pub fn poll(&mut self) -> Result<Option<Card>, BlockError> {
         let mut c = self.inner.borrow_mut();
+        c.settle();
         c.healthy()?;
         let changed = c.observe_medium()?;
         if c.medium.is_some() && !changed {
@@ -400,6 +441,7 @@ impl Card {
     /// This does not replay failed I/O or establish an interrupt producer.
     pub fn retune(&mut self) -> Result<(), BlockError> {
         let mut c = self.inner.borrow_mut();
+        c.settle();
         c.check_live(self.generation)?;
         let mut info = c.medium.as_ref().unwrap().info.clone();
         let rca = c.rca;
@@ -415,6 +457,7 @@ impl BlockDevice for Card {
     }
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         let mut c = self.inner.borrow_mut();
+        c.settle();
         c.live(self.generation)?;
         self.identity.check(lba, buffer.len())?;
         for (index, chunk) in buffer.chunks_mut(TRANSFER_BYTES).enumerate() {
@@ -426,6 +469,7 @@ impl BlockDevice for Card {
     }
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         let mut c = self.inner.borrow_mut();
+        c.settle();
         c.live(self.generation)?;
         self.identity.check_write(lba, data.len())?;
         if self.info.kind == Kind::Sd && c.registers.read32(PRESENT) & WRITE_ALLOWED == 0 {
@@ -447,6 +491,7 @@ impl BlockDevice for Card {
     /// medium reports.
     fn flush_cache(&mut self) -> Result<(), BlockError> {
         let mut c = self.inner.borrow_mut();
+        c.settle();
         c.live(self.generation)?;
         if !self.identity.features.write_cache {
             return Err(BlockError::Unsupported("the card reports no cache"));
@@ -458,6 +503,7 @@ impl BlockDevice for Card {
         self.flush()?;
         if power_off {
             let mut c = self.inner.borrow_mut();
+            c.settle();
             c.live(self.generation)?;
             let notify = c.medium.as_ref().is_some_and(|medium| medium.notify);
             // A notified MMC may stop accepting commands until power cycles.
@@ -473,6 +519,90 @@ impl BlockDevice for Card {
             c.finish_ios()?;
         }
         Ok(())
+    }
+    /// One command at a time: a DMA read or write is started under the
+    /// caller's lock and moved on at later looks ([`Self::finish`]); any
+    /// other command, or a transfer by PIO, runs whole at its start.
+    fn depth(&self) -> usize {
+        1
+    }
+    fn room(&self) -> bool {
+        self.inner.borrow().running.is_none()
+    }
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        let command = command.within(&self.identity, 0)?;
+        let mut c = self.inner.borrow_mut();
+        c.live(self.generation)?;
+        if c.running.is_some() {
+            return Err(BlockError::Protocol(
+                "an SD host runs one command at a time",
+            ));
+        }
+        let tag = c.next_tag;
+        c.next_tag = tag.wrapping_add(1);
+        let transfer = match (command, c.dma_mode) {
+            (Command::Read { lba, bytes }, Some(_)) => Ok(Transfer {
+                generation: self.generation,
+                lba,
+                read: true,
+                bytes,
+                data: Vec::new(),
+                done: 0,
+                phase: None,
+            }),
+            (
+                Command::Write {
+                    lba,
+                    data,
+                    fua: false,
+                },
+                Some(_),
+            ) => {
+                if self.info.kind == Kind::Sd && c.registers.read32(PRESENT) & WRITE_ALLOWED == 0 {
+                    return Err(BlockError::ReadOnly);
+                }
+                Ok(Transfer {
+                    generation: self.generation,
+                    lba,
+                    read: false,
+                    bytes: data.len(),
+                    data,
+                    done: 0,
+                    phase: None,
+                })
+            }
+            (command, _) => Err(command),
+        };
+        match transfer {
+            Ok(transfer) => {
+                c.running = Some(Running {
+                    tag,
+                    transfer: Some(transfer),
+                    result: None,
+                });
+                c.advance();
+            }
+            Err(command) => {
+                drop(c);
+                let result = self.execute(command);
+                self.inner.borrow_mut().running = Some(Running {
+                    tag,
+                    transfer: None,
+                    result: Some(result),
+                });
+            }
+        }
+        Ok(tag)
+    }
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        let mut c = self.inner.borrow_mut();
+        if c.running.as_ref()?.tag != tag {
+            return None;
+        }
+        c.advance();
+        let result = c.running.as_mut()?.result.take()?;
+        c.running = None;
+        Some(result)
     }
 }
 impl Engine {
