@@ -161,7 +161,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
     let result = unsafe { host.execute_context(trap, &mut state, &mut context) };
     if !matches!(result, Some(NativeExit::Fault(fault)) if fault.offset == 0
         && fault.cause == FaultCause::InvalidOpcode && !fault.write && fault.address == 0
-        && fault.registers[7] == state_pointer && fault.registers[6] == context_pointer)
+        && fault.registers.get(7) == Some(state_pointer) && fault.registers.get(6) == Some(context_pointer))
         || state != expected
     {
         return Err("native context hardware recovery differs");

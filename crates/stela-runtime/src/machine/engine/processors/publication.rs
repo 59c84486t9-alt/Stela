@@ -1022,7 +1022,9 @@ mod tests {
                 address: 0xabcd_0000,
                 write: true,
                 cause: FaultCause::InvalidOpcode,
-                registers: core::array::from_fn(|i| 0x100 + i as u64),
+                registers: stela_compiler::block::HostGprSnapshot::legacy(core::array::from_fn(
+                    |i| 0x100 + i as u64,
+                )),
             })
         }
         fn set_regime(&mut self, _: &Regime) {}
@@ -1520,7 +1522,9 @@ mod tests {
                         address: 0xabcd_0000,
                         write: true,
                         cause: FaultCause::InvalidOpcode,
-                        registers: core::array::from_fn(|i| 0x100 + i as u64),
+                        registers: stela_compiler::block::HostGprSnapshot::legacy(
+                            core::array::from_fn(|i| 0x100 + i as u64)
+                        ),
                     })
                 );
                 Ok::<_, ()>(())

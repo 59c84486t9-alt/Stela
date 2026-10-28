@@ -54,9 +54,20 @@ use stela_compiler::TargetCpu;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle, installed};
 use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::engine::{Call, step_timing};
-use {stela_contracts::Chip, stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile, stela_runtime::machine::Event, stela_runtime::machine::Host, stela_runtime::machine::Machine, stela_runtime::machine::PeerState, stela_runtime::machine::Stop, stela_runtime::machine::Transition, stela_runtime::machine::apple::AicInput, stela_runtime::machine::apple::AicLayout, stela_runtime::machine::apple::AppleDevices, stela_runtime::machine::apple::ConsoleBusy, stela_runtime::machine::apple::ConsoleSink, stela_runtime::machine::apple::Range, stela_runtime::machine::exception::Pstate, stela_runtime::machine::identification::Speculation, stela_runtime::machine::mount, stela_runtime::machine::registers::encodings::DCZID_EL0, stela_runtime::machine::soc, stela_runtime::machine::system::Register};
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
+use {
+    stela_contracts::Chip, stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile,
+    stela_runtime::machine::Event, stela_runtime::machine::Host, stela_runtime::machine::Machine,
+    stela_runtime::machine::PeerState, stela_runtime::machine::Stop,
+    stela_runtime::machine::Transition, stela_runtime::machine::apple::AicInput,
+    stela_runtime::machine::apple::AicLayout, stela_runtime::machine::apple::AppleDevices,
+    stela_runtime::machine::apple::ConsoleBusy, stela_runtime::machine::apple::ConsoleSink,
+    stela_runtime::machine::apple::Range, stela_runtime::machine::exception::Pstate,
+    stela_runtime::machine::identification::Speculation, stela_runtime::machine::mount,
+    stela_runtime::machine::registers::encodings::DCZID_EL0, stela_runtime::machine::soc,
+    stela_runtime::machine::system::Register,
+};
 
 /// The most of the engine heap (at least 512 MiB) `--storage-ram` may
 /// take for written blocks; a restore or recovery boot writes far less.
@@ -2643,7 +2654,7 @@ fn run<H: Host>(
             #[cfg(feature = "native-profile")]
             output::arguments(format_args!(
                 "NATIVE BOARD {:?}\n",
-                machine.devices.with(AppleDevices::advance_statistics)
+                machine.devices.with(|devices| devices.advance_statistics())
             ));
             #[cfg(feature = "native-profile")]
             {

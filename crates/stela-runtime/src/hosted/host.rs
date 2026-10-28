@@ -129,7 +129,7 @@ impl HostFault {
             address: self.address,
             write: self.write,
             cause,
-            registers: self.registers,
+            registers: stela_compiler::block::HostGprSnapshot::legacy(self.registers),
         }
     }
 }

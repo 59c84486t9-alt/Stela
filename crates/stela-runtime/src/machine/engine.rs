@@ -342,13 +342,19 @@ pub struct NativeFault {
     pub address: u64,
     pub write: bool,
     pub cause: FaultCause,
-    /// The host GPRs at the faulting instruction, RAX through R15 by x86
-    /// register number: guest registers whose frame slots a region has not
-    /// yet written back live there, where the block's fault recovery table
-    /// (`stela_compiler::block::FaultRecovery`) names them.
-    pub registers: [u64; 16],
+    /// Host GPRs in architectural encoding order at the faulting instruction.
+    /// A platform supplies the extended bank only after actually capturing it
+    /// or qualifying its architectural initialization state. Recovery refuses
+    /// a missing bank before publishing any recovered guest register.
+    pub registers: stela_compiler::block::HostGprSnapshot,
 }
 
+// Retain the complete interrupt capture inline: native fault return must not
+// allocate or borrow storage that the next entry can overwrite.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the owned native interrupt capture is returned without allocation or a borrowed frame lifetime"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeExit {
     Exit { next_pc: u64, kind: u64 },
@@ -991,6 +997,8 @@ pub enum RequirementKind {
     /// apply to a guest.
     VmState(&'static str),
     Native(&'static str),
+    /// Register residency cannot be recovered from the retained host capture.
+    FaultRecovery(stela_compiler::block::FaultRecoveryError),
     /// Detailed refusal before an actual checked native frame was executed.
     NativePreparation(String),
 }
@@ -1058,6 +1066,7 @@ impl fmt::Display for Requirement {
                 "entering an EL1&0 guest with nonzero Apple VM state in {register}"
             )?,
             RequirementKind::Native(detail) => write!(f, "native execution: {detail}")?,
+            RequirementKind::FaultRecovery(cause) => write!(f, "native fault recovery: {cause}")?,
             RequirementKind::NativePreparation(detail) => {
                 write!(f, "native preparation: {detail}")?
             }
@@ -5546,13 +5555,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn native_fault(&mut self, index: usize, fault: NativeFault) -> Step {
         // Guest registers a region kept in host registers across the access.
-        if let Some(table) = self.fault_recovery.get(&index) {
-            stela_compiler::block::FaultRecovery::apply(
+        if let Some(table) = self.fault_recovery.get(&index)
+            && let Err(cause) = stela_compiler::block::FaultRecovery::apply(
                 table,
                 fault.offset,
                 &fault.registers,
                 &mut self.cpu.state,
-            );
+            )
+        {
+            let mut requirement = self.requirement(RequirementKind::FaultRecovery(cause));
+            requirement.pc = self.faulting_pc(index, fault.offset);
+            return Err(Stop::Unsupported(requirement));
         }
         let pc = self.faulting_pc(index, fault.offset);
         self.retire_before(index, pc);
@@ -8007,6 +8020,46 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_extended_fault_state_cannot_partially_recover_or_retire() {
+        use stela_compiler::block::{FaultRecovery, FaultRecoveryError, HostGprSnapshot};
+        let mut machine = machine(&[0x9100_0400, 0xd400_0001]);
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("prepared block");
+        };
+        machine.cpu.state.x[0] = 11;
+        machine.cpu.state.x[1] = 22;
+        let before = machine.cpu.state.clone();
+        let pc = machine.cpu.pc;
+        let retired = machine.cpu.retired;
+        machine.fault_recovery.insert(
+            index,
+            vec![FaultRecovery {
+                start: 0,
+                end: usize::MAX,
+                registers: vec![(0, 0), (1, 16)],
+            }],
+        );
+        let stopped = machine.native_fault(
+            index,
+            NativeFault {
+                offset: 0,
+                address: 0x40,
+                write: false,
+                cause: FaultCause::InvalidOpcode,
+                registers: HostGprSnapshot::legacy([99; 16]),
+            },
+        );
+        assert!(matches!(stopped, Err(Stop::Unsupported(Requirement {
+            pc: failed_pc,
+            kind: RequirementKind::FaultRecovery(FaultRecoveryError::ExtendedStateUnavailable { register: 16 }),
+            ..
+        })) if failed_pc == BASE));
+        assert_eq!(machine.cpu.state, before);
+        assert_eq!(machine.cpu.pc, pc);
+        assert_eq!(machine.cpu.retired, retired);
+    }
+
+    #[test]
     fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
         // add x0, x0, #1; svc #0
         let mut machine = machine(&[0x9100_0400, 0xd400_0001]);
@@ -8137,7 +8190,7 @@ mod tests {
             .set(SystemRegister::CPTR_EL2, 0, 0b11 << 20);
         let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) & !(SCTLR_A | SCTLR_NAA);
         let ud = NativeExit::Fault(NativeFault {
-            registers: [0; 16],
+            registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset: 0,
             address: 0,
             write: false,
@@ -8245,7 +8298,7 @@ mod tests {
         machine.translations_changed();
         let outside = |cause| {
             NativeExit::Fault(NativeFault {
-                registers: [0; 16],
+                registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
                 offset: 0,
                 address: 0,
                 write: false,
@@ -8903,7 +8956,7 @@ mod tests {
             .0
             .wrapping_sub(machine.blocks[0].code.0);
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
-            registers: [0; 16],
+            registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: 0x40,
             write: false,
@@ -9242,7 +9295,7 @@ mod tests {
             .0
             .wrapping_sub(machine.blocks[0].code.0);
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
-            registers: [0; 16],
+            registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: 0x40,
             write: false,
@@ -10008,7 +10061,7 @@ mod tests {
         machine.cpu.state.x[3] = 0x4000_0040;
         let offset = machine.blocks[0].source_map[1].1;
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
-            registers: [0; 16],
+            registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: 0x4000_0040,
             write: false,
@@ -11697,7 +11750,7 @@ mod tests {
         machine.cpu.pc = base;
         let offset = machine.blocks[0].source_map[1].1;
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
-            registers: [0; 16],
+            registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: BASE + 0x100,
             write: true,
@@ -12882,7 +12935,7 @@ mod tests {
         machine.cpu.state.x[0] = BASE + 0x100;
         let watched = |address, write| {
             NativeExit::Fault(NativeFault {
-                registers: [0; 16],
+                registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
                 offset: 0,
                 address,
                 write,

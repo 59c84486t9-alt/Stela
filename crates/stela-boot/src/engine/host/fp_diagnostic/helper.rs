@@ -501,7 +501,7 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 expected.reserved = STARTED;
                 if !matches!(result, NativeExit::Fault(fault) if fault.offset == return_offset
                     && fault.cause == FaultCause::NonCanonical && fault.address == MISSING && !fault.write
-                    && fault.registers == observed.expected_registers)
+                    && observed.expected_registers.iter().enumerate().all(|(index, value)| fault.registers.get(index as u8) == Some(*value)))
                     || observed.returned_registers != [0; 16]
                     || observed.fp_errors != u64::MAX
                 {

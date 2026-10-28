@@ -7,6 +7,7 @@
 
 mod analysis;
 mod features;
+mod host_gprs;
 pub mod loop_budget;
 pub mod memory;
 pub mod pauth_lr;
@@ -24,6 +25,7 @@ pub use analysis::{
 };
 use analysis::{ParsedBlock, analyze_parsed, parse};
 pub use features::{BlockProfile, Features};
+pub use host_gprs::{FaultRecoveryError, HostGprSnapshot};
 pub use memory::{
     CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
     ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -243,16 +245,38 @@ pub struct FaultRecovery {
 }
 
 impl FaultRecovery {
-    /// Write the values `table` names for a fault at native `offset` from
-    /// the host GPRs at the fault, RAX through R15, into `state`.
-    pub fn apply(table: &[Self], offset: usize, host: &[u64; 16], state: &mut crate::GuestState) {
+    /// Settle the active recovery mappings from a normalized host snapshot.
+    /// All indices and required banks are checked before the first guest write.
+    pub fn apply(
+        table: &[Self],
+        offset: usize,
+        host: &HostGprSnapshot,
+        state: &mut crate::GuestState,
+    ) -> Result<(), FaultRecoveryError> {
         const SP: u8 = 31;
-        for entry in table
-            .iter()
-            .filter(|entry| (entry.start..entry.end).contains(&offset))
-        {
+        let active = || {
+            table
+                .iter()
+                .filter(move |entry| (entry.start..entry.end).contains(&offset))
+        };
+        for entry in active() {
             for &(guest, register) in &entry.registers {
-                let value = host[usize::from(register)];
+                if guest > SP {
+                    return Err(FaultRecoveryError::InvalidGuestRegister { register: guest });
+                }
+                if register >= 32 {
+                    return Err(FaultRecoveryError::InvalidHostRegister { register });
+                }
+                if host.get(register).is_none() {
+                    return Err(FaultRecoveryError::ExtendedStateUnavailable { register });
+                }
+            }
+        }
+        for entry in active() {
+            for &(guest, register) in &entry.registers {
+                let value = host
+                    .get(register)
+                    .expect("active recovery mappings validated");
                 if guest == SP {
                     state.sp = value;
                 } else {
@@ -260,6 +284,7 @@ impl FaultRecovery {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -1583,13 +1608,13 @@ mod tests {
         ];
         let host: [u64; 16] = core::array::from_fn(|register| 0x100 + register as u64);
         let mut state = crate::GuestState::default();
-        FaultRecovery::apply(&table, 9, &host, &mut state);
+        FaultRecovery::apply(&table, 9, &HostGprSnapshot::legacy(host), &mut state).unwrap();
         assert_eq!((state.x[3], state.sp, state.x[4]), (0x109, 0x106, 0));
         let mut state = crate::GuestState::default();
-        FaultRecovery::apply(&table, 10, &host, &mut state);
+        FaultRecovery::apply(&table, 10, &HostGprSnapshot::legacy(host), &mut state).unwrap();
         assert_eq!((state.x[3], state.sp, state.x[4]), (0, 0, 0x10a));
         let mut state = crate::GuestState::default();
-        FaultRecovery::apply(&table, 3, &host, &mut state);
+        FaultRecovery::apply(&table, 3, &HostGprSnapshot::legacy(host), &mut state).unwrap();
         assert_eq!(state, crate::GuestState::default());
     }
 

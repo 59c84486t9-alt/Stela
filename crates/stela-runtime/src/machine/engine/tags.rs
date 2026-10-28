@@ -1165,7 +1165,7 @@ mod tests {
             let offset = machine.blocks[0].source_map[0].1;
             let exit = |cause| {
                 NativeExit::Fault(NativeFault {
-                    registers: [0; 16],
+                    registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
                     offset,
                     address: DATA,
                     write: false,
