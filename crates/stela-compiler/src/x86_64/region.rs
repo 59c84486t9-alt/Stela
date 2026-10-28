@@ -3007,9 +3007,11 @@ mod tests {
                         MemoryTransfer::Store,
                         bytes,
                         data,
-                        base,
-                        -16,
-                        AddressMode::Offset,
+                        super::super::ImmediateAddress {
+                            base,
+                            displacement: -16,
+                            mode: AddressMode::Offset,
+                        },
                     );
                     let region = emit_clean_load_prefix_with(
                         &input,
