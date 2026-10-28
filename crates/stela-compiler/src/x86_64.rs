@@ -103,6 +103,7 @@ mod integer_unary;
 pub mod isa;
 mod literal;
 pub(crate) mod memory_context;
+mod memory_recipe;
 pub(crate) mod memory_store;
 #[cfg(all(
     test,
@@ -278,50 +279,17 @@ fn memory(
     data: Register,
     address: ImmediateAddress,
 ) {
-    let ImmediateAddress {
-        base,
-        displacement,
-        mode,
-    } = address;
-    let access = Access::of(transfer == MemoryTransfer::Store, bytes.into());
-    memory_address(code, checks, address, bytes, access);
-    match transfer {
-        MemoryTransfer::Store => {
-            right_operand(code, data, Width::X64, Shift::Lsl, 0);
-            memory_store::emit(
-                code,
-                bytes,
-                0,
-                memory_store::Source::Rcx,
-                checks.stack_alignment
-                    && memory_store::aligned_immediate(base, displacement, mode, bytes),
-            );
-        }
-        MemoryTransfer::Load { signed, width } => {
-            use asm::{Gpr::Rcx, Size};
-            let size = Size::of(width == Width::X64);
-            let source = accessed();
-            let mut asm = code.asm();
-            match (bytes, signed) {
-                (1, false) => asm.movzx(size, Rcx, Size::Byte, source),
-                (2, false) => asm.movzx(size, Rcx, Size::Word, source),
-                (1, true) => asm.movsx(size, Rcx, Size::Byte, source),
-                (2, true) => asm.movsx(size, Rcx, Size::Word, source),
-                (4, true) => {
-                    debug_assert!(width == Width::X64, "LDRSW writes an X register");
-                    asm.movsxd(Rcx, source);
-                }
-                (4 | 8, false) => asm.mov_load(size, Rcx, source),
-                _ => unreachable!("decoder validates signed scalar size"),
-            }
-            // Even a discarded load performs the memory access and can fault.
-            if let Some(offset) = offset(data) {
-                asm.mov_store(Size::Qword, frame(offset), Rcx);
-            }
-        }
-    }
-    // A failed native memory instruction cannot update the base register.
-    memory_writeback(code, base, mode);
+    memory_recipe::scalar(
+        code,
+        checks,
+        memory_recipe::Scalar {
+            transfer,
+            bytes,
+            data,
+            address,
+        },
+        None,
+    );
 }
 
 /// Guest checks fixed into a block's native memory accesses. Each failed
@@ -595,12 +563,12 @@ impl RangeCheck {
         code.into_bytes()
     }
 
-    /// If `code` starts with a check of any placement, its length and the
-    /// end of each of its eight host instructions, which the region cost
-    /// gates count one by one.
+    /// Golden-byte oracle for a check of any placement. The fragment ends
+    /// include the translated descriptor data and must not be used as counts.
+    #[cfg(test)]
     pub(crate) fn at(code: &[u8]) -> Option<(usize, &'static [usize])> {
         // The ends with INC and with ADD, with a UD2 and with the
-        // translated variant's call (whose two access bytes count as one).
+        // translated variant's call (including a separate access-data fragment).
         const ENDS: [[&[usize]; 2]; 2] = [
             [
                 &[3, 7, 9, 12, 14, 16, 26, 30],
@@ -679,8 +647,10 @@ impl RangeCheck {
 
 /// The translated variant's call, from `mov rcx,rax` through the jump
 /// past the mask.
+#[cfg(test)]
 const TRANSLATION_CALL_BYTES: u8 = 19;
 /// `mov rcx,masked; cmova rax,rcx`.
+#[cfg(test)]
 const MASK_BYTES: u8 = 14;
 
 /// What a guest access makes, which the translated variant's helper
@@ -734,17 +704,26 @@ pub(crate) fn stack_alignment_check(code: &mut Code) {
 /// `test al,unit-1; jz +2; ud2`: #UD unless RAX is a multiple of `unit`.
 fn alignment_test(asm: &mut asm::Asm, unit: u8) {
     asm.test_accumulator_imm(asm::Size::Byte, i32::from(unit - 1));
+    alignment_tail(asm);
+}
+
+fn alignment_tail(asm: &mut asm::Asm) {
     let aligned = asm.jcc8(asm::Cond::E);
     asm.ud2();
     asm.bind(aligned);
 }
+fn stack_alignment_check_register(code: &mut Code, register: asm::Gpr) {
+    let mut asm = code.asm();
+    asm.test_imm(asm::Size::Byte, register, 15);
+    alignment_tail(&mut asm);
+}
 
-/// The bytes of [`stack_alignment_check`], which the region cost gates
-/// find it by.
+/// Golden bytes of the SP alignment check.
+#[cfg(test)]
 pub(crate) const STACK_ALIGNMENT_CHECK: [u8; 6] = [0xa8, 15, 0x74, 2, 0x0f, 0x0b];
 
-/// The end of each of the three host instructions of
-/// [`STACK_ALIGNMENT_CHECK`], which the region cost gates count.
+/// Fragment ends in the independent golden-byte oracle.
+#[cfg(test)]
 pub(crate) const STACK_ALIGNMENT_CHECK_ENDS: [usize; 3] = [2, 4, 6];
 
 /// The guest range check of `access`'s address in RAX, in the variant
@@ -794,19 +773,7 @@ fn memory_address(
     unit: u8,
     access: Access,
 ) {
-    let ImmediateAddress {
-        base,
-        displacement,
-        mode,
-    } = address;
-    load(code, base);
-    if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
-        // Arm checks SP alignment before address addition. A native UD2 is a
-        // mapped fault boundary, not guest exception delivery.
-        stack_alignment_check(code);
-    }
-    address_add(code, displacement, mode);
-    address_checks(code, checks, unit, access);
+    memory_recipe::address(code, checks, address, unit, access, None);
 }
 
 /// An immediate offset added to the base in RAX, modulo 2^64 and without
@@ -855,53 +822,17 @@ fn memory_pair(
     data: [Register; 2],
     address: ImmediateAddress,
 ) {
-    let ImmediateAddress {
-        base,
-        displacement,
-        mode,
-    } = address;
-    let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
-    memory_address(code, checks, address, bytes, access);
-    match transfer {
-        MemoryTransfer::Store => {
-            use asm::{Alu, Gpr::R8, Size};
-            right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
-            match offset(data[1]) {
-                Some(offset) => code.asm().mov_load(Size::Qword, R8, frame(offset)),
-                None => code.asm().alu(Alu::Xor, Size::Dword, R8, R8),
-            }
-            let aligned = checks.stack_alignment
-                && memory_store::aligned_immediate(base, displacement, mode, bytes);
-            memory_store::emit(code, bytes, 0, memory_store::Source::Rcx, aligned);
-            memory_store::emit(code, bytes, bytes, memory_store::Source::R8, aligned);
-        }
-        MemoryTransfer::Load { signed, width } => {
-            use asm::{
-                Gpr::{R8, Rax, Rcx},
-                Mem, Size,
-            };
-            let size = Size::of(width == Width::X64);
-            let mut asm = code.asm();
-            for (destination, source) in
-                [(Rcx, accessed()), (R8, Mem::base_disp8(Rax, bytes as i8))]
-            {
-                if signed {
-                    debug_assert!(width == Width::X64, "LDPSW writes X registers");
-                    asm.movsxd(destination, source);
-                } else {
-                    asm.mov_load(size, destination, source);
-                }
-            }
-            // Commit only after both loads succeeded, including discarded/ZR
-            // destinations. RAX/RDX retain address and potential writeback.
-            for (register, staged) in [(data[0], Rcx), (data[1], R8)] {
-                if let Some(offset) = offset(register) {
-                    asm.mov_store(Size::Qword, frame(offset), staged);
-                }
-            }
-        }
-    }
-    memory_writeback(code, base, mode);
+    memory_recipe::pair(
+        code,
+        checks,
+        memory_recipe::Pair {
+            transfer,
+            bytes,
+            data,
+            address,
+        },
+        None,
+    );
 }
 
 fn right_operand(code: &mut Code, register: Register, width: Width, shift: Shift, amount: u8) {

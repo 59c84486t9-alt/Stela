@@ -36,6 +36,28 @@ impl Checkpoint {
     }
 }
 
+/// A complete emitted fragment, including its exact instruction count.
+/// Both endpoints belong to the same unmodified Code buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Span {
+    start: Checkpoint,
+    end: Checkpoint,
+}
+impl Span {
+    pub(crate) const fn start(self) -> Checkpoint {
+        self.start
+    }
+    pub(crate) const fn end(self) -> Checkpoint {
+        self.end
+    }
+    pub(crate) const fn instructions(self) -> usize {
+        self.end.instructions - self.start.instructions
+    }
+    pub(crate) const fn is_empty(self) -> bool {
+        self.start.bytes == self.end.bytes
+    }
+}
+
 impl Code {
     pub(crate) const fn new() -> Self {
         Self {
@@ -69,6 +91,22 @@ impl Code {
             bytes: self.bytes.len(),
             instructions: self.instructions,
         }
+    }
+    /// Record complete instructions emitted since this buffer's checkpoint.
+    pub(crate) fn span_since(&self, start: Checkpoint) -> Span {
+        let end = self.checkpoint();
+        assert!(start.bytes <= end.bytes && start.instructions <= end.instructions);
+        Span { start, end }
+    }
+    /// Copy a fragment from its unmodified source buffer. Internal branches and
+    /// instruction-associated data move together; no byte decoding is involved.
+    pub(crate) fn append_span(&mut self, source: &Code, span: Span) {
+        assert!(
+            span.end.bytes <= source.bytes.len() && span.end.instructions <= source.instructions
+        );
+        self.bytes
+            .extend_from_slice(&source.bytes[span.start.bytes..span.end.bytes]);
+        self.instructions += span.instructions();
     }
     /// Move the instructions emitted after `at` into a separate buffer.
     pub(crate) fn split_off(&mut self, at: Checkpoint) -> Self {
@@ -1488,5 +1526,40 @@ mod tests {
             ]
         );
         assert_eq!(count, 3);
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+    use crate::x86_64::asm::Gpr;
+
+    #[test]
+    fn spans_keep_inline_data_and_internal_branches_without_counting_data() {
+        let mut source = Code::new();
+        source.asm().nop();
+        let start = source.checkpoint();
+        {
+            let mut asm = source.asm();
+            asm.call_rm(Gpr::Rax);
+            asm.data(&[8, 1]);
+            let skip = asm.jmp8();
+            asm.ud2();
+            asm.bind(skip);
+        }
+        let span = source.span_since(start);
+        source.asm().ret();
+        assert_eq!(span.instructions(), 3);
+        assert_eq!((span.start().offset(), span.end().offset()), (1, 9));
+        let mut copied = Code::new();
+        copied.asm().nop();
+        copied.append_span(&source, span);
+        assert_eq!(copied.instructions(), 4);
+        assert_eq!(*copied, [0x90, 0xff, 0xd0, 8, 1, 0xeb, 2, 0x0f, 0x0b]);
+        assert_eq!(source.instructions(), 5);
+        let empty = source.span_since(source.checkpoint());
+        assert!(empty.is_empty());
+        copied.append_span(&source, empty);
+        assert_eq!(copied.instructions(), 4);
     }
 }

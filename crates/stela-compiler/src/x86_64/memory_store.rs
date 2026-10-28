@@ -99,10 +99,9 @@ fn mark(code: &Code, ends: &mut Option<Vec<usize>>) {
     }
 }
 
-/// The page-crossing store of a halfword, word or doubleword staged in RCX to
-/// [RAX] (`emit` without alignment), and the end of each of its
-/// instructions: the region emitter reuses these bytes exactly, and its cost
-/// gates count them on both sides.
+/// Golden-byte and instruction-boundary oracle for an unaligned scalar store.
+/// Production regions copy the shared emitter's typed span and count.
+#[cfg(test)]
 pub(super) fn crossing_store(bytes: u8) -> Option<(Vec<u8>, Vec<usize>)> {
     if !matches!(bytes, HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES) {
         return None;

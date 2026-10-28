@@ -1,6 +1,9 @@
 //! Multi-instruction scalar regions that keep guest values in host registers and
 //! settle the full register bank at every exit.
-use crate::x86_64::asm::Code;
+use super::memory_recipe::{
+    self, Kind as MemoryKind, Recipe as MemoryRecipe, Segment as MemorySegment,
+};
+use crate::x86_64::asm::{Code, Gpr};
 use alloc::vec;
 use alloc::vec::Vec;
 mod allocation;
@@ -127,12 +130,13 @@ struct Emitter<'a> {
 impl Emitter<'_> {
     fn emit(&mut self, encode: impl FnOnce(&mut Code)) {
         let start = self.output.code.len();
+        let instructions = self.output.code.instructions();
         encode(&mut self.output.code);
         let end = self.output.code.len();
         debug_assert!(end > start);
         // Value allocation tracks versions, not per-instruction locations.
         debug_assert!(self.allocation.is_some() || location::valid(&self.locations));
-        self.output.stats.native_instructions += 1;
+        self.output.stats.native_instructions += self.output.code.instructions() - instructions;
     }
 
     fn spill(&mut self, index: usize, at_exit: bool) {
@@ -326,56 +330,47 @@ impl Emitter<'_> {
         mode: AddressMode,
     ) -> Result<(), RegionError> {
         const STAGING: [HostGpr; 2] = [HostGpr::Rcx, HostGpr::R8];
-        let base_slot = slot(base).expect("eligible base");
         // As `memory` selects `memory_store::emit`'s fast path.
         let crossing = data.len() == 1
             && bytes != BYTE_LOAD_BYTES
             && !(self.checks.stack_alignment
                 && super::memory_store::aligned_immediate(base, displacement, mode, bytes));
-        let mut raw = Code::new();
-        let selected = if let &[first, second] = data {
-            super::memory_pair(
-                &mut raw,
+        let (raw, recipe) = if let &[first, second] = data {
+            memory_recipe::pair_recipe(
                 self.memory_checks(),
-                MemoryTransfer::Store,
-                bytes,
-                [first, second],
-                crate::x86_64::ImmediateAddress {
-                    base,
-                    displacement,
-                    mode,
+                memory_recipe::Pair {
+                    transfer: MemoryTransfer::Store,
+                    bytes,
+                    data: [first, second],
+                    address: crate::x86_64::ImmediateAddress {
+                        base,
+                        displacement,
+                        mode,
+                    },
                 },
-            );
-            encoding::ordinary_pair_store_ends(
-                &raw,
-                bytes,
-                base_slot,
-                [slot(first), slot(second)],
-                displacement,
             )
         } else {
-            super::memory(
-                &mut raw,
+            memory_recipe::scalar_recipe(
                 self.memory_checks(),
-                MemoryTransfer::Store,
-                bytes,
-                data[0],
-                crate::x86_64::ImmediateAddress {
-                    base,
-                    displacement,
-                    mode,
+                memory_recipe::Scalar {
+                    transfer: MemoryTransfer::Store,
+                    bytes,
+                    data: data[0],
+                    address: crate::x86_64::ImmediateAddress {
+                        base,
+                        displacement,
+                        mode,
+                    },
                 },
-            );
-            encoding::ordinary_store_ends(
-                &raw,
-                bytes,
-                base_slot,
-                slot(data[0]),
-                displacement,
-                crossing,
             )
         };
-        let (ends, data_segment) = selected.ok_or(RegionError::ChangedMemoryEncoding)?;
+        if !recipe.complete(&raw)
+            || data.iter().enumerate().any(|(index, _)| {
+                recipe.stage(index) != Some(if index == 0 { Gpr::Rcx } else { Gpr::R8 })
+            })
+        {
+            return Err(RegionError::ChangedMemoryEncoding);
+        }
         let cached_base = self.cached(base);
         // The guest range check and the first element overwrite RCX, and
         // the second element R8, before a staged value would be read: a
@@ -383,10 +378,7 @@ impl Emitter<'_> {
         // preparation writes when it is dirty. Any other register holding
         // an element is copied, as with a fault table it may hold a value
         // the frame does not yet have.
-        let clobbers = STAGING[..data.len()]
-            .iter()
-            .fold(0, |mask, host| mask | host.mask())
-            | if crossing { HostGpr::R10.mask() } else { 0 };
+        let clobbers = recipe.clobbers();
         let cached_data: Vec<Option<HostGpr>> = data
             .iter()
             .map(|&register| {
@@ -398,18 +390,14 @@ impl Emitter<'_> {
         // The base keeps out of the registers the access overwrites.
         self.pinned_hosts |= clobbers;
         let access_start = self.output.code.len();
-        let address = self.access_address(base, displacement, &raw, &ends, cached_base);
-        for segment in address + 1..ends.len() {
-            let (start, end) = (ends[segment - 1], ends[segment]);
-            let element = segment
-                .checked_sub(data_segment)
-                .filter(|&index| index < data.len());
-            if let Some(index) = element
-                && let Some(host) = cached_data[index]
+        self.access_address(base, displacement, &raw, &recipe, cached_base);
+        for segment in recipe.body() {
+            if let MemoryKind::Stage { element, .. } = segment.kind
+                && let Some(host) = cached_data[element]
             {
-                self.emit(|code| encoding::copy(code, STAGING[index], host, Width::X64));
+                self.emit(|code| encoding::copy(code, STAGING[element], host, Width::X64));
             } else {
-                self.emit(|code| code.asm().fixed(&raw[start..end]));
+                self.emit_recipe_segment(&raw, segment);
             }
         }
         self.finish_access(access_start, live, &[]);
@@ -441,34 +429,29 @@ impl Emitter<'_> {
         displacement: i32,
         mode: AddressMode,
     ) -> Result<(), RegionError> {
-        // Obtain the real existing raw-memory emission before mutating output.
-        // If its selected form changes, decline this whole candidate prefix.
-        let mut raw = Code::new();
-        super::memory(
-            &mut raw,
+        let (raw, recipe) = memory_recipe::scalar_recipe(
             self.memory_checks(),
-            transfer,
-            bytes,
-            data,
-            crate::x86_64::ImmediateAddress {
-                base,
-                displacement,
-                mode,
+            memory_recipe::Scalar {
+                transfer,
+                bytes,
+                data,
+                address: crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
             },
         );
-        let ends = encoding::ordinary_load_ends(
-            &raw,
-            bytes,
-            slot(base).expect("eligible base"),
-            slot(data),
-            displacement,
-        )
-        .ok_or(RegionError::ChangedMemoryEncoding)?;
+        if !recipe.complete(&raw) || recipe.result(0) != Some(Gpr::Rcx) {
+            return Err(RegionError::ChangedMemoryEncoding);
+        }
         let cached_base = self.cached(base);
-        let live = self.prepare_access(HostGpr::Rcx.mask(), &[data]);
+        let live = self.prepare_access(recipe.clobbers(), &[data]);
         let start = self.output.code.len();
-        let address = self.access_address(base, displacement, &raw, &ends, cached_base);
-        self.emit_segments(&raw, &ends[address..]);
+        self.access_address(base, displacement, &raw, &recipe, cached_base);
+        for segment in recipe.body() {
+            self.emit_recipe_segment(&raw, segment);
+        }
         self.finish_access(start, live, &[data]);
         self.retain_clean_result(data, HostGpr::Rcx);
         self.output.stats.clean_loads += 1;
@@ -476,32 +459,16 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// The address of an Offset access in RAX, in place of the shared
-    /// recipe's base load, SP alignment check and LEA, which end at
-    /// `ends[index]` for the returned `index`. A base in a register (`cached`,
-    /// or loaded into a free pool register when the region reads it again)
-    /// has its own low byte tested and one LEA adds the offset; otherwise
-    /// the shared recipe stays. A fault still finds the frame exact: every
-    /// dirty value has settled.
+    /// Replace only the shared base/check/offset prefix when a guest base
+    /// already lives in a host register. All remaining semantic spans are copied.
     fn access_address(
         &mut self,
         base: Register,
         displacement: i32,
-        raw: &[u8],
-        ends: &[usize],
+        raw: &Code,
+        recipe: &MemoryRecipe,
         cached: Option<HostGpr>,
-    ) -> usize {
-        // The ends of the shared base load and, when checked, of its SP
-        // check's TEST, JZ and UD2.
-        const BASE_LOAD: usize = 0;
-        const TEST: usize = 1;
-        const TRAP: usize = 3;
-        let checked = base == Register::Sp && self.checks.stack_alignment;
-        let index = if checked { TRAP } else { BASE_LOAD } + usize::from(displacement != 0);
-        debug_assert_eq!(
-            checked,
-            raw[ends[BASE_LOAD]..].starts_with(&super::STACK_ALIGNMENT_CHECK)
-        );
+    ) {
         let guest = slot(base).expect("eligible base");
         let free = POOL
             .iter()
@@ -520,25 +487,25 @@ impl Emitter<'_> {
                 })
         });
         if let Some(host) = host {
-            if checked {
-                self.emit(|code| encoding::test_low_byte(code, host, 15));
-                // The shared JZ and UD2.
-                self.emit_segments(raw, &ends[TEST..=TRAP]);
+            if recipe.checked_sp() {
+                self.emit(|code| {
+                    super::stack_alignment_check_register(
+                        code,
+                        crate::x86_64::simd::encode::gpr(host as u8),
+                    )
+                });
             }
             self.emit(|code| encoding::lea(code, HostGpr::Rax, host, displacement));
             self.output.stats.address_cache_hits += 1;
         } else {
-            self.emit_segments(raw, &[&[0][..], &ends[..=index]].concat());
+            for segment in recipe.address_prefix() {
+                self.emit_recipe_segment(raw, segment);
+            }
         }
-        index
     }
 
-    /// Each shared instruction `raw[ends[k - 1]..ends[k]]`, one
-    /// instruction of the shared recipe each.
-    fn emit_segments(&mut self, raw: &[u8], ends: &[usize]) {
-        for pair in ends.windows(2) {
-            self.emit(|code| code.asm().fixed(&raw[pair[0]..pair[1]]));
-        }
+    fn emit_recipe_segment(&mut self, raw: &Code, segment: &MemorySegment) {
+        self.emit(|code| code.append_span(raw, segment.span));
     }
 
     /// The checks of the shared memory emitter whose bytes the current
@@ -672,32 +639,31 @@ impl Emitter<'_> {
         displacement: i32,
         mode: AddressMode,
     ) -> Result<(), RegionError> {
-        let mut raw = Code::new();
-        super::memory_pair(
-            &mut raw,
+        let (raw, recipe) = memory_recipe::pair_recipe(
             self.memory_checks(),
-            transfer,
-            bytes,
-            data,
-            crate::x86_64::ImmediateAddress {
-                base,
-                displacement,
-                mode,
+            memory_recipe::Pair {
+                transfer,
+                bytes,
+                data,
+                address: crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
             },
         );
-        let ends = encoding::ordinary_pair_load_ends(
-            &raw,
-            bytes,
-            slot(base).expect("eligible base"),
-            data.map(slot),
-            displacement,
-        )
-        .ok_or(RegionError::ChangedMemoryEncoding)?;
+        if !recipe.complete(&raw)
+            || [recipe.result(0), recipe.result(1)] != [Some(Gpr::Rcx), Some(Gpr::R8)]
+        {
+            return Err(RegionError::ChangedMemoryEncoding);
+        }
         let cached_base = self.cached(base);
-        let live = self.prepare_access(HostGpr::Rcx.mask() | HostGpr::R8.mask(), &data);
+        let live = self.prepare_access(recipe.clobbers(), &data);
         let start = self.output.code.len();
-        let address = self.access_address(base, displacement, &raw, &ends, cached_base);
-        self.emit_segments(&raw, &ends[address..]);
+        self.access_address(base, displacement, &raw, &recipe, cached_base);
+        for segment in recipe.body() {
+            self.emit_recipe_segment(&raw, segment);
+        }
         self.finish_access(start, live, &data);
         // Both accesses precede either destination commit in the unchanged
         // shared emitter. A second-access fault leaves both old values intact.
@@ -1287,6 +1253,7 @@ pub fn admits_ordinary(region: &OptimizedRegion, baseline_code: &Code) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod recipes;
     use super::*;
     use crate::aarch64::{Logical, Shift};
     use alloc::vec;
@@ -1859,16 +1826,16 @@ mod tests {
             },
         );
         assert_eq!(
-            encoding::ordinary_load_ends(&raw, 1, 15, Some(16), -255),
+            recipes::ordinary_load_ends(&raw, 1, 15, Some(16), -255),
             Some(vec![7, 14, 17, 24])
         );
         for index in 0..raw.len() {
             let mut mutated = raw.clone();
             mutated[index] ^= 1;
-            assert!(encoding::ordinary_load_ends(&mutated, 1, 15, Some(16), -255).is_none());
+            assert!(recipes::ordinary_load_ends(&mutated, 1, 15, Some(16), -255).is_none());
         }
         raw.push(0x90);
-        assert!(encoding::ordinary_load_ends(&raw, 1, 15, Some(16), -255).is_none());
+        assert!(recipes::ordinary_load_ends(&raw, 1, 15, Some(16), -255).is_none());
     }
 
     #[test]
@@ -1924,13 +1891,13 @@ mod tests {
                     },
                 );
                 let selected = slot(data);
-                let ends = encoding::ordinary_load_ends(&raw, bytes, 15, selected, -255).unwrap();
+                let ends = recipes::ordinary_load_ends(&raw, bytes, 15, selected, -255).unwrap();
                 assert_eq!(ends.last(), Some(&raw.len()));
                 for index in 0..raw.len() {
                     let mut mutated = raw.clone();
                     mutated[index] ^= 1;
                     assert!(
-                        encoding::ordinary_load_ends(&mutated, bytes, 15, selected, -255).is_none()
+                        recipes::ordinary_load_ends(&mutated, bytes, 15, selected, -255).is_none()
                     );
                 }
                 for other in [BYTE_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES]
@@ -1938,9 +1905,7 @@ mod tests {
                     .chain([DOUBLEWORD_LOAD_BYTES])
                     .filter(|&other| other != bytes)
                 {
-                    assert!(
-                        encoding::ordinary_load_ends(&raw, other, 15, selected, -255).is_none()
-                    );
+                    assert!(recipes::ordinary_load_ends(&raw, other, 15, selected, -255).is_none());
                 }
             }
         }
@@ -2062,7 +2027,7 @@ mod tests {
             },
         );
         let ends = |raw: &[u8], bytes, base, data| {
-            encoding::ordinary_pair_load_ends(raw, bytes, base, data, -8)
+            recipes::ordinary_pair_load_ends(raw, bytes, base, data, -8)
         };
         assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(17)]).is_some());
         assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(16)]).is_none());
@@ -2668,7 +2633,7 @@ mod tests {
                 // aligned offset never does.
                 let crossing = |bytes| bytes != BYTE_LOAD_BYTES && base != Register::Sp;
                 let ends = |raw: &[u8], bytes| {
-                    encoding::ordinary_store_ends(
+                    recipes::ordinary_store_ends(
                         raw,
                         bytes,
                         slot(base).unwrap(),
@@ -2681,7 +2646,7 @@ mod tests {
                 assert_eq!(selected.last(), Some(&raw.len()));
                 if bytes != BYTE_LOAD_BYTES {
                     assert!(
-                        encoding::ordinary_store_ends(
+                        recipes::ordinary_store_ends(
                             &raw,
                             bytes,
                             slot(base).unwrap(),
@@ -2727,7 +2692,7 @@ mod tests {
                     },
                 );
                 let ends = |raw: &[u8], bytes| {
-                    encoding::ordinary_pair_store_ends(raw, bytes, 31, data.map(slot), -16)
+                    recipes::ordinary_pair_store_ends(raw, bytes, 31, data.map(slot), -16)
                 };
                 assert!(ends(&raw, bytes).is_some());
                 for index in 0..raw.len() {
@@ -3045,5 +3010,70 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn translated_range_data_has_no_instruction_cost() {
+        let instructions: Vec<_> = [16, 24]
+            .into_iter()
+            .enumerate()
+            .map(|(index, displacement)| {
+                instruction(
+                    index as u64,
+                    Operation::Memory {
+                        transfer: MemoryTransfer::Load {
+                            signed: false,
+                            width: Width::X64,
+                        },
+                        bytes: 8,
+                        data: Register::X(index as u8 + 2),
+                        base: Register::X(1),
+                        displacement,
+                        mode: AddressMode::Offset,
+                    },
+                )
+            })
+            .collect();
+        let checks = super::super::MemoryChecks {
+            guest_range: true,
+            translated: true,
+            translation_helper: 0x1000,
+            ..super::super::MemoryChecks::DEFAULT
+        };
+        let mut check = Code::new();
+        checks.range.emit_translated(
+            &mut check,
+            checks.translation_helper,
+            super::super::Access::of(false, 8),
+        );
+        // Five test instructions, MOV/MOFFS/CALL/JMP, and two mask instructions.
+        // The two descriptor bytes following CALL contribute no instruction.
+        assert_eq!(check.instructions(), 11);
+        let mut baseline = Code::new();
+        for input in &instructions {
+            super::super::emit_instruction(
+                &mut baseline,
+                input,
+                &mut vec![],
+                crate::TargetCpu::Baseline,
+                checks,
+            );
+        }
+        let region =
+            emit_clean_load_prefix_with(&instructions, checks, false, Some(&[true, true])).unwrap();
+        assert_eq!(baseline.instructions(), 30);
+        // Two translated checks contain data after CALL, not two extra instructions.
+        assert_eq!(region.code.instructions(), 29);
+        assert_eq!(region.stats.native_instructions, 29);
+        assert!(region.code.len() < baseline.len());
+        assert!(admits_ordinary(&region, &baseline));
+        std::eprintln!(
+            "TRANSLATED_COUNT baseline={} candidate={} stats={} bytes={}/{} admitted={}",
+            baseline.instructions(),
+            region.code.instructions(),
+            region.stats.native_instructions,
+            baseline.len(),
+            region.code.len(),
+            admits_ordinary(&region, &baseline)
+        );
     }
 }
