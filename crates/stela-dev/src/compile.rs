@@ -2,7 +2,6 @@
 use crate::args::*;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use clap::Parser;
 use std::path::{Path, PathBuf};
 use stela_compiler::{
     block::BlockProfile,
@@ -424,33 +423,6 @@ impl Compiled {
         write_json(&output.join("manifest.json"), &self.manifest)?;
         println!("{}", serde_json::to_string_pretty(&self.manifest)?);
         Ok(())
-    }
-}
-
-/// The scalable guest profile a `compile-leaf` command line declares, if any.
-pub fn context_leaf_profile(arguments: &[&str]) -> Result<Option<ScalableProfile>> {
-    match crate::Cli::try_parse_from(arguments)?.command {
-        crate::Command::CompileLeaf(command) => command.profile(),
-        _ => anyhow::bail!("expected compile-leaf"),
-    }
-}
-
-/// The contextual block profile a `compile-block` command line selects, if its
-/// guest is scalable.
-pub fn context_block_profile(arguments: &[&str]) -> Result<Option<ExtendedBlockProfile>> {
-    match crate::Cli::try_parse_from(arguments)?.command {
-        crate::Command::CompileBlock(command) => Ok(command.profiles()?.1),
-        _ => anyhow::bail!("expected compile-block"),
-    }
-}
-
-/// Compile `source` as the `compile-leaf` or `compile-block` command line in
-/// `arguments` would, without reading the input or writing outputs.
-pub fn compile(arguments: &[&str], source: &[u8]) -> Result<Compiled> {
-    match crate::Cli::try_parse_from(arguments)?.command {
-        crate::Command::CompileLeaf(command) => command.compile(source),
-        crate::Command::CompileBlock(command) => command.compile(source),
-        _ => anyhow::bail!("expected compile-leaf or compile-block"),
     }
 }
 

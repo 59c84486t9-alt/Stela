@@ -93,6 +93,10 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg_attr(
+        not(feature = "fetched-sources"),
+        ignore = "reads the sources `cargo xtask gpu fetch` checks out"
+    )]
     #[test]
     fn original_nvswitch_wrappers_keep_bytes_and_full_native_lengths() {
         let output = tempfile::tempdir().unwrap();

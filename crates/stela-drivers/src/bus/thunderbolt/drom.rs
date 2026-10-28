@@ -587,10 +587,9 @@ impl<R: Registers> Read<R> {
             )
         }) {
             self.stage = Stage::Port(index);
-            self.deadline = now
-                .checked_add(REQUEST_MS)
-                .ok_or(Error::ClockOverflow)?
-                .min(self.job_deadline);
+            self.deadline =
+                crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+                    .ok_or(Error::ClockOverflow)?;
             return Ok(None);
         }
         if !self.current() {

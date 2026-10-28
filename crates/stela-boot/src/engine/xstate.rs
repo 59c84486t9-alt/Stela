@@ -3,6 +3,10 @@
 //! This unit enables no processor feature and admits no compiler target. The
 //! real entry stub must save the whole actual enabled state before Rust runs.
 //! Standard XSAVE64/XRSTOR64 only; every entry owns a separate IST image.
+#[cfg(all(test, target_arch = "x86_64"))]
+use crate::boot_msr as msr;
+#[cfg(all(not(test), target_arch = "x86_64"))]
+use crate::cpu::msr;
 use core::marker::PhantomData;
 
 const LEGACY_BYTES: usize = 512;
@@ -40,10 +44,7 @@ const CR4_FP_REQUIRED: u64 = (1 << 9) | (1 << 10);
 const CR4_OSXSAVE: u64 = 1 << 18;
 const CR4_CET: u64 = 1 << 23;
 const FXSR_SSE_SSE2: u32 = (1 << 24) | (1 << 25) | (1 << 26);
-const EFER: u32 = 0xc000_0080;
 const EFER_FAST_FXSR: u64 = 1 << 14;
-const IA32_XSS: u32 = 0xda0;
-const IA32_XFD: u32 = 0x1c4;
 const SAVE_ERROR_POINTERS: u32 = 1 << 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,14 +406,10 @@ fn cpuid(leaf: u32, subleaf: u32) -> Registers {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn msr(index: u32) -> u64 {
-    let (low, high): (u32, u32);
-    // SAFETY: internal callers have checked CPL0 and this exact MSR's
+fn msr(register: msr::Msr) -> u64 {
+    // SAFETY: internal callers have checked CPL0 and this register's
     // architectural enumeration; no caller-supplied index is exposed.
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nostack, preserves_flags));
-    }
-    u64::from(low) | u64::from(high) << 32
+    unsafe { register.read() }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -436,10 +433,10 @@ fn read_controls(layout: &Layout) -> Controls {
     Controls {
         cr0,
         cr4,
-        efer: msr(EFER),
+        efer: msr(msr::EFER),
         xcr0,
-        xss: layout.xss.then(|| msr(IA32_XSS)),
-        xfd: layout.xfd.then(|| msr(IA32_XFD)),
+        xss: layout.xss.then(|| msr(msr::XSS)),
+        xfd: layout.xfd.then(|| msr(msr::XFD)),
     }
 }
 
@@ -466,10 +463,7 @@ fn qualify_error_pointers(identity: Registers) -> Result<(), LayoutError> {
 
 #[cfg(target_arch = "x86_64")]
 fn actual_processor() -> Result<u32, LayoutError> {
-    #[cfg(test)]
-    use crate::boot_native_topology as topology;
-    #[cfg(not(test))]
-    use crate::native_smp::topology;
+    use stela_boot_core::topology;
     let maximum = cpuid(0, 0).eax;
     let extended = cpuid(0x8000_0000, 0).eax;
     let mut snapshot = topology::Snapshot::default();

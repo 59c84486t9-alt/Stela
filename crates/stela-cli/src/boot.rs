@@ -88,7 +88,7 @@ const RESTORE: Roles = Roles {
 };
 
 #[derive(Subcommand)]
-pub(crate) enum BootCommand {
+pub enum BootCommand {
     /// Lay out a model's kernel collection, SPTM, TXM, DeviceTree and trust
     /// cache in guest physical memory for `stela.efi`.
     Prepare(Box<Prepare>),
@@ -100,7 +100,7 @@ pub(crate) enum BootCommand {
 }
 
 #[derive(Args)]
-pub(crate) struct Check {
+pub struct Check {
     /// A directory `boot prepare` wrote.
     bundle: PathBuf,
 }
@@ -287,6 +287,12 @@ fn mount(
             usb: UsbCables::default(),
             scanout: Some(Box::new(Discard)),
             firmware: &firmware,
+            build: manifest
+                .target
+                .as_ref()
+                .map(|target| stela_runtime::builds::find(&target.product_build))
+                .transpose()
+                .map_err(|error| error.to_string())?,
         },
         &mut |arguments| log.push(arguments.to_string().trim_end().to_owned()),
     )?;
@@ -324,7 +330,7 @@ fn mount(
 }
 
 #[derive(Args)]
-pub(crate) struct Prepare {
+pub struct Prepare {
     #[arg(skip)]
     quiet: bool,
     #[arg(long, required_unless_present = "disk", conflicts_with = "disk")]
@@ -485,7 +491,7 @@ pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
 }
 
 impl BootCommand {
-    pub(crate) fn run(self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         match self {
             Self::Prepare(command) => (*command).run(),
             Self::Check(command) => command.run(),

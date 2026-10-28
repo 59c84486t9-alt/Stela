@@ -15,7 +15,7 @@ use stela_runtime::{
 };
 
 /// An image file as a reader source.
-pub(crate) struct Image {
+pub struct Image {
     file: File,
     bytes: u64,
 }
@@ -31,7 +31,7 @@ impl ReadAt for Image {
     }
 }
 
-pub(crate) fn open_image(path: &Path) -> Result<Image> {
+pub fn open_image(path: &Path) -> Result<Image> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let bytes = file.metadata()?.len();
     Ok(Image { file, bytes })
@@ -54,7 +54,7 @@ fn role_name(role: u16) -> &'static str {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum ApfsCommand {
+pub enum ApfsCommand {
     /// List the image's containers, volumes and snapshots.
     Info { image: PathBuf },
     /// List a directory.
@@ -72,7 +72,7 @@ pub(crate) enum ApfsCommand {
 }
 
 #[derive(Args)]
-pub(crate) struct Target {
+pub struct Target {
     image: PathBuf,
     /// A path from the volume root.
     path: String,
@@ -125,7 +125,7 @@ fn snapshot_json(snapshot: &Snapshot) -> Value {
 }
 
 impl ApfsCommand {
-    pub(crate) fn run(self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         match self {
             Self::Info { image } => {
                 let mut source = open_image(&image)?;

@@ -1,6 +1,6 @@
 //! The kernel boot bundle as the UEFI mount consumes it.
 //!
-//! `stela boot prepare` writes `bundle.json` and the files it lists; the
+//! `stela-dev boot prepare` writes `bundle.json` and the files it lists; the
 //! format is in `docs/design/runtime.md#kernel-boot-bundle`. Before boot
 //! services end the mount reads every file and [`Manifest::verify`]s each
 //! file and region hash. [`Verified::load`] then writes the regions into

@@ -1,7 +1,7 @@
 //! The boot of a staged macOS update: the objects macOS left on its
 //! container's Update volume (APFS role 0xc0), built into a boot bundle in
 //! `no_std`, so `stela.efi` boots it when NVRAM's `boot-command` is
-//! `upgrade` and `stela boot prepare --disk --upgrade` writes the same one.
+//! `upgrade` and `stela-dev boot prepare --disk --upgrade` writes the same one.
 //!
 //! The 26A434 J473 LLB upgrade (image offset 0x448c) mounts the Update
 //! volume at `/boot` and runs `/boot/iBEC`; that iBEC (iBoot 0x5634) loads

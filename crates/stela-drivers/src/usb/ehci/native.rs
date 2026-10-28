@@ -88,21 +88,8 @@ impl Native {
     fn r(&mut self) -> &mut NativeResources {
         self.resources.as_mut().expect("retained native owner")
     }
-    fn word(&self, offset: usize) -> Result<*mut u32, Error> {
-        if !offset.is_multiple_of(4) {
-            return Err(Error::Register);
-        }
-        let pointer = self
-            .resources
-            .as_ref()
-            .ok_or(Error::Register)?
-            .registers
-            .address(offset, 4)
-            .map_err(|_| Error::Register)?;
-        if !(pointer.as_ptr() as usize).is_multiple_of(4) {
-            return Err(Error::Register);
-        }
-        Ok(pointer.as_ptr().cast())
+    fn registers(&self) -> Result<&Mapping, Error> {
+        Ok(&self.resources.as_ref().ok_or(Error::Register)?.registers)
     }
 }
 impl Hardware for Native {
@@ -144,19 +131,22 @@ impl Hardware for Native {
         if r.pci.config().read16(4) & 0x406 != 0x402 {
             return Err(Error::Register);
         }
-        self.word(0)?;
+        self.registers()?
+            .address(0, 4)
+            .ok()
+            .filter(|pointer| (pointer.as_ptr() as usize).is_multiple_of(4))
+            .ok_or(Error::Register)?;
         Ok(())
     }
     fn read32(&mut self, offset: usize) -> Result<u32, Error> {
-        // SAFETY: retained checked live aligned UC mapping.
-        Ok(u32::from_le(unsafe { self.word(offset)?.read_volatile() }))
+        self.registers()?
+            .read32(offset)
+            .map_err(|_| Error::Register)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
-        // SAFETY: retained checked live aligned UC mapping and sole writer.
-        unsafe {
-            self.word(offset)?.write_volatile(value.to_le());
-        }
-        Ok(())
+        self.registers()?
+            .write32(offset, value)
+            .map_err(|_| Error::Register)
     }
     fn config_read(&mut self, offset: u16) -> Result<u32, Error> {
         if offset > 252 || !offset.is_multiple_of(4) {

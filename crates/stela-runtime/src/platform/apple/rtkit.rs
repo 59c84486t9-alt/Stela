@@ -135,8 +135,6 @@ const CONTROL_ENDPOINT: u64 = 0xffff << CONTROL_ENDPOINT_SHIFT;
 const ENABLE: u64 = 2;
 const DISABLE: u64 = 1;
 
-/// The protocol version the coprocessor offers.
-pub const VERSION: u64 = 12;
 /// The IOP power state of a running coprocessor.
 pub const POWER_ON: u64 = 0x20;
 const IOP_STATES: [u64; 4] = [0x201, WAKE, 0x202, 0];
@@ -224,6 +222,9 @@ pub struct RtKit {
     cpu_stopped: bool,
     ap_power: u64,
     power_nap: bool,
+    /// The management protocol version it offers and accepts (the build's
+    /// `rtkit_version`).
+    version: u64,
 }
 
 fn management(kind: u64, fields: u64) -> Message {
@@ -239,8 +240,9 @@ impl RtKit {
     pub fn new(
         endpoints: Vec<(u8, Box<dyn Endpoint>)>,
         management: Management,
+        version: u64,
     ) -> Result<Self, &'static str> {
-        Self::with_system_endpoints(endpoints, management, SystemEndpoints::default())
+        Self::with_system_endpoints(endpoints, management, SystemEndpoints::default(), version)
     }
 
     /// Original RTBuddy consumes trace and IOReporting on system endpoints3/4.
@@ -252,6 +254,7 @@ impl RtKit {
         endpoints: Vec<(u8, Box<dyn Endpoint>)>,
         management: Management,
         system: SystemEndpoints,
+        version: u64,
     ) -> Result<Self, &'static str> {
         let mut map = BTreeMap::new();
         for (number, endpoint) in endpoints {
@@ -278,6 +281,7 @@ impl RtKit {
             cpu_stopped: false,
             ap_power: 0,
             power_nap: false,
+            version,
         })
     }
 
@@ -325,7 +329,7 @@ impl RtKit {
 
     fn hello(&mut self, outbox: &mut Vec<Message>) {
         self.stage = Stage::Hello;
-        outbox.push(management(HELLO, VERSION | VERSION << 16));
+        outbox.push(management(HELLO, self.version | self.version << 16));
     }
 
     /// Group `group`'s bitmap: the management and crashlog endpoints and the
@@ -401,8 +405,8 @@ impl RtKit {
         let fields = payload & !TYPE;
         match (kind, self.stage) {
             (HELLO_REPLY, Stage::Hello) => {
-                if fields & !HELLO_FLAGS != VERSION | VERSION << 16 {
-                    return Err("RTKit HELLO_REPLY did not choose version 12");
+                if fields & !HELLO_FLAGS != self.version | self.version << 16 {
+                    return Err("RTKit HELLO_REPLY did not choose the offered version");
                 }
                 self.roll_call(0, outbox);
                 Ok(())
@@ -588,11 +592,14 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    const VERSION: u64 = crate::builds::DEFAULT.rtkit_version;
+
     #[test]
     fn a_physical_reset_clears_enumeration_without_reusing_boot_quiescence() {
         let mut kit = RtKit::new(
             vec![(0x20, Box::new(super::super::pmp::Pmp::default()))],
             Management::Ordinary,
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap()
         .quiesced();
@@ -645,6 +652,7 @@ mod tests {
                 (0x41, Box::new(Complement)),
             ],
             management_kind,
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let mut outbox = Vec::new();
@@ -655,7 +663,12 @@ mod tests {
 
     #[test]
     fn cold_system_binding_keeps_the_started_session_and_precedes_roll_call() {
-        let mut kit = RtKit::new(Vec::new(), Management::Ordinary).unwrap();
+        let mut kit = RtKit::new(
+            Vec::new(),
+            Management::Ordinary,
+            crate::builds::DEFAULT.rtkit_version,
+        )
+        .unwrap();
         let mut initial = Vec::new();
         kit.start(&mut initial).unwrap();
         kit.attach_cold_system_endpoints(SystemEndpoints {
@@ -681,7 +694,12 @@ mod tests {
 
     #[test]
     fn late_or_duplicate_native_binding_refuses_before_changing_the_endpoint_map() {
-        let mut kit = RtKit::new(Vec::new(), Management::Enumeration).unwrap();
+        let mut kit = RtKit::new(
+            Vec::new(),
+            Management::Enumeration,
+            crate::builds::DEFAULT.rtkit_version,
+        )
+        .unwrap();
         let mut initial = Vec::new();
         kit.start(&mut initial).unwrap();
         mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap();
@@ -700,6 +718,7 @@ mod tests {
                 trace: Some(Box::new(Complement)),
                 reporting: None,
             },
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         assert!(
@@ -721,6 +740,7 @@ mod tests {
                 trace: Some(Box::new(Complement)),
                 reporting: Some(Box::new(Complement)),
             },
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let mut output = Vec::new();
@@ -765,7 +785,8 @@ mod tests {
         assert!(
             RtKit::new(
                 vec![(IOREPORTING, Box::new(Complement))],
-                Management::Ordinary
+                Management::Ordinary,
+                crate::builds::DEFAULT.rtkit_version
             )
             .is_err()
         );
@@ -949,6 +970,7 @@ mod tests {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
             Management::Ordinary,
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let raw = |rtkit: &mut RtKit, payload| step(rtkit, 0, payload).unwrap();
@@ -991,6 +1013,7 @@ mod tests {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
             Management::Ordinary,
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap()
         .quiesced();
@@ -1047,6 +1070,7 @@ mod tests {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Board::default()) as Box<dyn Endpoint>)],
             Management::Ordinary,
+            crate::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         rtkit.start(&mut Vec::new()).unwrap();
@@ -1081,7 +1105,21 @@ mod tests {
     #[test]
     fn endpoints_are_application_endpoints_once_each() {
         let one = || Box::new(Complement) as Box<dyn Endpoint>;
-        assert!(RtKit::new(vec![(0x2, one())], Management::Ordinary).is_err());
-        assert!(RtKit::new(vec![(0x20, one()), (0x20, one())], Management::Ordinary).is_err());
+        assert!(
+            RtKit::new(
+                vec![(0x2, one())],
+                Management::Ordinary,
+                crate::builds::DEFAULT.rtkit_version
+            )
+            .is_err()
+        );
+        assert!(
+            RtKit::new(
+                vec![(0x20, one()), (0x20, one())],
+                Management::Ordinary,
+                crate::builds::DEFAULT.rtkit_version
+            )
+            .is_err()
+        );
     }
 }

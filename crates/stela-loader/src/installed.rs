@@ -1,6 +1,6 @@
 //! The kernel boot bundle of an installed system, built from its APFS
 //! container's Preboot volume (`stela_runtime::preboot`), in `no_std` so
-//! `stela.efi` builds the same bundle `stela boot prepare --disk` writes.
+//! `stela.efi` builds the same bundle `stela-dev boot prepare --disk` writes.
 //!
 //! The volume group is the one NVRAM's boot volume names
 //! (`stela_loader::boot_selection`), else any. Within a group the boot

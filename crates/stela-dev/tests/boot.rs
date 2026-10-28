@@ -15,7 +15,7 @@ const MH_EXECUTE: u32 = 2;
 const MH_FILESET: u32 = 12;
 
 fn cli(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_stela"))
+    Command::new(env!("CARGO_BIN_EXE_stela-dev"))
         .current_dir(root)
         .args(args)
         .output()

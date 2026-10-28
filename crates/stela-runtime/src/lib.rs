@@ -19,6 +19,7 @@ pub mod amx;
 pub mod apfs;
 pub mod blocks;
 pub mod boot_bundle;
+pub mod builds;
 mod checksum;
 pub mod clock;
 #[cfg(feature = "std")]

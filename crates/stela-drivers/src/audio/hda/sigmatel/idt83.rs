@@ -4,7 +4,7 @@
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2005 Embedded Alley Solutions, Inc., Matt Porter.
 //! Copyright (c) 2004 Takashi Iwai. See audio/THIRD_PARTY.md.
-use super::super::{CodecGraph, Controller, PinSense, Registers, Verb};
+use super::super::{CodecGraph, Controller, Registers, Verb};
 use super::port_power;
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::vec::Vec;
@@ -21,7 +21,7 @@ pub struct Idt83PowerReport {
 }
 #[derive(Clone)]
 pub(super) struct State {
-    ports: port_power::State,
+    pub(super) ports: port_power::State,
 }
 impl State {
     pub(super) fn report(&self) -> Result<Idt83PowerReport, Error> {
@@ -71,23 +71,5 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::RouteRejected);
         }
         self.refresh_idt_ports(graph, group, &mut state.ports)
-    }
-    pub(super) fn refresh_idt83(
-        &mut self,
-        graph: &CodecGraph,
-        group: u8,
-        state: &mut State,
-    ) -> Result<(), Error> {
-        self.refresh_idt_ports(graph, group, &mut state.ports)
-    }
-    pub(super) fn update_idt83_pin(
-        &mut self,
-        address: u8,
-        group: u8,
-        state: &mut State,
-        pin: u8,
-        sense: PinSense,
-    ) -> Result<(), Error> {
-        self.update_idt_port(address, group, &mut state.ports, pin, sense)
     }
 }

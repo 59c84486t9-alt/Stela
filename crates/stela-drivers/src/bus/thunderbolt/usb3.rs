@@ -463,18 +463,14 @@ impl<R: Registers> Allocate<R> {
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
         self.next_poll = now;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn acknowledge(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.enter(stage, now)?;
-        self.deadline = now
-            .checked_add(ACK_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, ACK_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn request(&self) -> Result<(Address, Option<[u32; 1]>), Error> {
@@ -1135,21 +1131,15 @@ impl<R: Registers> ActivateTunnel<R> {
     }
     fn enter(&mut self, stage: TunnelStage, now: u64) -> Result<(), Error> {
         self.stage = stage;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn start_path(&mut self, index: usize, now: u64) -> Result<(), Error> {
-        let deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
-        let job = now
-            .checked_add(10_000)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        let deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
+        let job = crate::bus::thunderbolt::stage_deadline(now, 10_000, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         let prepared = self.prepared[index]
             .take()
             .ok_or(Error::UnexpectedReceipt)?;
@@ -1748,10 +1738,8 @@ impl<R: Registers> StopTunnel<R> {
     fn enter(&mut self, stage: StopStage, now: u64) -> Result<(), Error> {
         self.stage = stage;
         self.next_poll = now;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn request(&self) -> Result<StopRequest, Error> {

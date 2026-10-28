@@ -687,6 +687,28 @@ impl<R: Registers> Ring<R> {
     }
 }
 
+/// Release a TX/RX ring pair, TX first, recording each ring once released
+/// so that a retry after a failed invalidation resumes with the other.
+///
+/// # Safety
+/// As for [`Ring::release`], for both rings.
+pub(super) unsafe fn release_pair<R: Registers>(
+    (tx, tx_released): (&mut Ring<R>, &mut bool),
+    (rx, rx_released): (&mut Ring<R>, &mut bool),
+) -> Result<(), Error> {
+    if !*tx_released {
+        // SAFETY: the caller proves final TX DMA/IRQ/work drain.
+        unsafe { tx.release()? };
+        *tx_released = true;
+    }
+    if !*rx_released {
+        // SAFETY: the caller proves final RX DMA/IRQ/work drain.
+        unsafe { rx.release()? };
+        *rx_released = true;
+    }
+    Ok(())
+}
+
 impl<R: Registers> Drop for Ring<R> {
     fn drop(&mut self) {
         if self.descriptors.published && self.phase != Phase::Released {

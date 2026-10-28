@@ -29,7 +29,8 @@
 //! ## Bring-up
 //!
 //! The coprocessor says hello with its interface version (type 0, subtype
-//! 0, value [`VERSION`], checked by the AP's handler 0x3d7e47c when the
+//! 0, the build's `dcp_link_version` from [`crate::builds`], checked by
+//! the AP's handler 0x3d7e47c when the
 //! `iomfb_version_check` boot-arg is set). The AP's `link_state_init`
 //! (0x3d7c7a0) writes the [`RegionHeader`] at the start of its region and
 //! announces the region's DVA (type 0, subtype 1). The coprocessor answers
@@ -64,9 +65,6 @@
 /// personality `AppleDCPLinkServiceSoC`).
 pub const IOMFB_ENDPOINT: u8 = 0x37;
 
-/// The interface version of the 26A434 link library (the AP's global at
-/// kernel file offset 0x5bd9bd8).
-pub const VERSION: u32 = 211;
 /// The payload alignment the coprocessor announces. The AP allocates its
 /// calls at multiples of it; the interface leaves the value to the
 /// coprocessor (the AP only raises one below 4), and 0x40 is a cache line.
@@ -102,10 +100,10 @@ const TOKEN_SHIFT: u32 = 48;
 const FIELD: u64 = 0xffff;
 
 /// The interface CRC the AP checks the ready message against: CRC-32 of
-/// the version's four bytes, extended by the empty interface string the
-/// 26A434 AP hashes after them (handler 0x3d7e528).
-pub fn interface_crc() -> u32 {
-    crate::payload::gpt::crc32(&VERSION.to_le_bytes())
+/// the interface `version`'s four bytes, extended by the empty interface
+/// string the 26A434 AP hashes after them (handler 0x3d7e528).
+pub fn interface_crc(version: u32) -> u32 {
+    crate::payload::gpt::crc32(&version.to_le_bytes())
 }
 
 /// Which side owns a stream.
@@ -328,7 +326,8 @@ mod tests {
 
     #[test]
     fn the_interface_crc_is_the_26a434_value() {
-        assert_eq!(interface_crc(), 0x15a5_c96b);
+        let version = crate::builds::find("26A434").unwrap().dcp_link_version;
+        assert_eq!(interface_crc(version), 0x15a5_c96b);
     }
 
     #[test]

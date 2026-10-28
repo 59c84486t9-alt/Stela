@@ -11,7 +11,6 @@ use super::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
     pci::{ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
 };
-use core::ptr::NonNull;
 
 mod child;
 pub mod spi;
@@ -174,12 +173,11 @@ pub unsafe trait ChildAccess: Registers {
 
 pub type NativeResources = (Function<OwnedConfig>, Mapping);
 /// Real owned UC mapping and the canonical stopped requester's original
-/// configuration owner. The CPU pointer is never a physical remap address.
+/// configuration owner.
 pub struct NativeRegisters {
     function: Function<OwnedConfig>,
     mapping: Mapping,
     base: u64,
-    pointer: NonNull<u32>,
 }
 impl NativeRegisters {
     /// # Safety
@@ -233,24 +231,23 @@ impl NativeRegisters {
             {
                 return Err(Error::Configuration);
             }
-            Ok((base, pointer.cast()))
+            Ok(base)
         })();
         match checked {
-            Ok((base, pointer)) => Ok(Self {
+            Ok(base) => Ok(Self {
                 function,
                 mapping,
                 base,
-                pointer,
             }),
             Err(error) => Err((error, (function, mapping))),
         }
     }
-    fn address(&self, offset: usize) -> Result<NonNull<u32>, Error> {
+    /// `offset` as a register of the window.
+    fn register(offset: usize) -> Result<usize, Error> {
         if !offset.is_multiple_of(4) || offset > WINDOW_BYTES - 4 {
             return Err(Error::Mapping);
         }
-        // SAFETY: claim validates the whole retained UC window; checked offset.
-        Ok(unsafe { NonNull::new_unchecked(self.pointer.as_ptr().add(offset / 4)) })
+        Ok(offset)
     }
     fn into_resources(self) -> NativeResources {
         (self.function, self.mapping)
@@ -280,15 +277,14 @@ unsafe impl Registers for NativeRegisters {
         self.base
     }
     fn read32(&mut self, offset: usize) -> Result<u32, Error> {
-        let pointer = self.address(offset)?;
-        // SAFETY: actual owned aligned UC window, no concurrent register owner.
-        Ok(unsafe { pointer.as_ptr().read_volatile() })
+        self.mapping
+            .read32(Self::register(offset)?)
+            .map_err(|_| Error::Mapping)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
-        let pointer = self.address(offset)?;
-        // SAFETY: same actual retained UC register mapping and ordered DWORDs.
-        unsafe { pointer.as_ptr().write_volatile(value) };
-        Ok(())
+        self.mapping
+            .write32(Self::register(offset)?, value)
+            .map_err(|_| Error::Mapping)
     }
 }
 

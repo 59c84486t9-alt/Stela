@@ -9,7 +9,7 @@
 //! wake-enabled SoundWire manager. Mixed SoundWire/PDM service requires the
 //! separate shared controller authority and is deliberately refused here.
 //! SOF, I2S, ACP7D/E/F and an Apple audio frontend are separate backends.
-use super::acp_pdm::{self, DmaConfig, Profile};
+use super::acp_pdm::{self, Profile};
 pub use super::acp_pdm::{
     CAPTURE_FORMAT, CapturePeriod, Error, Identity, Phase, Position, Registers, State,
 };
@@ -108,33 +108,7 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Ps70> {
         config: Config,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
-        if config.ownership != Ownership::ExclusiveDirect
-            || config.acp_config != Some(0)
-            || config.soundwire == SoundWireOwnership::ActiveOrUnknown
-        {
-            return Err(Error::Ownership);
-        }
-        if config.child
-            != Some(DmicChild {
-                address: 2,
-                audio_device_type: 2,
-            })
-            || matches!(
-                config.wov,
-                WovObservation::Value(0) | WovObservation::Unavailable
-            )
-        {
-            return Err(Error::MicrophoneAbsent);
-        }
-        Self::claim_profile(
-            registers,
-            timer,
-            DmaConfig {
-                dma_address_bits: config.dma_address_bits,
-                gain: config.gain,
-            },
-            domain,
-        )
+        Self::claim_profile(registers, timer, config.direct()?, domain)
     }
     /// Copy one source-completed period using the actual retained coherent
     /// domain, with pre/post-copy overrun checks. Discard destination on error.

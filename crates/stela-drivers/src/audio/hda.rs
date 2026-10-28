@@ -183,6 +183,20 @@ pub struct Controller<R, T> {
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
+    /// A vendor codec profile's common precondition: `graph` belongs to this
+    /// controller, no failure needs a reset and the controller is running.
+    fn vendor_codec_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        if graph.token != self.token {
+            return Err(Error::InvalidCodecGraph);
+        }
+        if self.routing_failed || self.lifecycle_failed || self.command_poisoned {
+            return Err(Error::NeedsReset);
+        }
+        if self.stopped {
+            return Err(Error::Shutdown);
+        }
+        Ok(())
+    }
     /// Claim and reset a controller, then start its CORB/RIRB DMA engines.
     ///
     /// # Safety

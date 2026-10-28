@@ -20,7 +20,7 @@ use super::{
 };
 use crate::bus::{
     i2c::Timer,
-    pci::{Address, Bar, ConfigSpace, Function},
+    pci::{Address, Bar, ConfigSpace, Function, Layout},
 };
 
 mod power;
@@ -57,7 +57,6 @@ const PCI_STATUS: u16 = 6;
 const PCI_CLASS: u16 = 8;
 const PCI_HEADER: u16 = 0x0e;
 const PCI_BAR0: u16 = 0x10;
-const PCI_CAPABILITIES: u16 = 0x34;
 const PCI_SUBSYSTEM: u16 = 0x2c;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_MASTER: u16 = 1 << 2;
@@ -71,7 +70,9 @@ const SCH_HDA_DEVC: u16 = 0x78;
 const SCH_NOSNOOP: u16 = 1 << 11;
 const CGCTL: u16 = 0x48;
 const CGCTL_MISCBDCGE: u32 = 1 << 6;
+#[cfg(test)]
 const MSI_ADDRESS_64: u16 = 1 << 7;
+#[cfg(test)]
 const MSI_VECTOR_MASK: u16 = 1 << 8;
 const PM_STATE: u16 = 3;
 const PM_PME_ENABLE: u16 = 1 << 8;
@@ -448,76 +449,35 @@ fn capabilities<C: ConfigSpace>(
             Ok(found)
         };
     }
-    let mut occupied = [false; 256];
     // Capability bodies and controls are checked separately so the one owned
     // PCIe Device Control field is allowed without allowing body/body aliases.
-    let mut offset = config.read8(PCI_CAPABILITIES);
-    while offset != 0 {
-        if offset < 0x40 || offset & 3 != 0 {
-            return Err(AttachError::InvalidCapabilities);
-        }
-        let offset16 = u16::from(offset);
-        let id = config.read8(offset16);
+    for entry in config.capabilities() {
+        let entry = entry.map_err(|_| AttachError::InvalidCapabilities)?;
+        let (offset16, id) = (entry.offset, entry.id);
         let mut owned_pcie_device_control = false;
-        let (slot, bytes) = match id {
-            CAP_PM => (Some(&mut found.pm), 8),
-            CAP_MSI => {
-                // Control must fit before reading the length-dependent body.
-                if offset16 + 4 > 0x100 {
-                    return Err(AttachError::InvalidCapabilities);
-                }
-                let control = config.read16(offset16 + 2);
-                if control == u16::MAX {
-                    return Err(AttachError::InvalidCapabilities);
-                }
-                let bytes = match (
-                    control & MSI_ADDRESS_64 != 0,
-                    control & MSI_VECTOR_MASK != 0,
-                ) {
-                    (false, false) => 10,
-                    (true, false) => 14,
-                    (false, true) => 20,
-                    (true, true) => 24,
-                };
-                (Some(&mut found.msi), bytes)
-            }
+        let slot = match id {
+            CAP_PM => Some(&mut found.pm),
+            CAP_MSI => Some(&mut found.msi),
             CAP_MSIX => {
-                if offset16 + 4 > 0x100 || config.read16(offset16 + 2) == u16::MAX {
+                if config.read16(offset16 + 2) == u16::MAX {
                     return Err(AttachError::InvalidCapabilities);
                 }
-                (Some(&mut found.msix), 12)
+                Some(&mut found.msix)
             }
             CAP_PCIE => {
-                if offset16 + 4 > 0x100 {
+                if entry.layout != Layout::Sized {
                     return Err(AttachError::InvalidCapabilities);
                 }
-                let flags = config.read16(offset16 + 2);
-                let version = flags & 15;
-                let kind = (flags >> 4) & 15;
+                let kind = (config.read16(offset16 + 2) >> 4) & 15;
                 owned_pcie_device_control =
                     offset16 + 8 == SCH_HDA_DEVC && matches!(kind, 0 | 1 | 9);
-                // pci_regs.h's endpoint extents distinguish an integrated
-                // endpoint (no link) from a linked endpoint and bridge/port.
-                let bytes = match (version, kind) {
-                    (1, 9 | 10) => 12,
-                    (1, 0 | 1) => 20,
-                    (1, 4..=8) => 36,
-                    (2, 9 | 10) => 0x2c,
-                    (2, 0 | 1) => 0x34,
-                    (2, 4..=8) => 0x3c,
-                    _ => return Err(AttachError::InvalidCapabilities),
-                };
-                (Some(&mut found.pcie), bytes)
+                Some(&mut found.pcie)
             }
-            // Unknown bodies are not touched or sized. Reserve their headers
-            // so a known body cannot alias them or loop through them later.
-            _ => (None, 2),
+            // Unknown bodies are not touched; the walk reserves their headers.
+            _ => None,
         };
-        let end = usize::from(offset16 + bytes);
-        let start = usize::from(offset);
-        if end > occupied.len() || occupied[start..end].iter().any(|used| *used) {
-            return Err(AttachError::InvalidCapabilities);
-        }
+        let start = usize::from(offset16);
+        let end = start + usize::from(entry.bytes);
         if reset_policy == ResetPolicy::IntelClockGate
             && ((start < usize::from(CGCTL + 4) && usize::from(CGCTL) < end)
                 // An unknown body's end cannot prove vendor-control ownership.
@@ -535,14 +495,12 @@ fn capabilities<C: ConfigSpace>(
                 return Err(AttachError::InvalidCapabilities);
             }
         }
-        occupied[start..end].fill(true);
         if let Some(slot) = slot {
             if slot.is_some() {
                 return Err(AttachError::InvalidCapabilities);
             }
             *slot = Some(offset16);
         }
-        offset = config.read8(offset16 + 1);
     }
     // PCH78 is Device Control, so require its actual known endpoint owner.
     // Missing/unknown capabilities do not authorize writing an ambiguous body.

@@ -62,22 +62,9 @@ unsafe impl<P: 'static> Registers for NativeRegisters<P> {
         self.bytes
     }
     fn read32(&mut self, offset: usize) -> Result<u32, IoError> {
-        if offset & 3 != 0 {
-            return Err(IoError);
-        }
-        let p = self.mapping.address(offset, 4).map_err(|_| IoError)?;
-        // SAFETY: checked aligned live original aperture word.
-        Ok(u32::from_le(unsafe {
-            p.as_ptr().cast::<u32>().read_volatile()
-        }))
+        self.mapping.read32(offset).map_err(|_| IoError)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError> {
-        if offset & 3 != 0 {
-            return Err(IoError);
-        }
-        let p = self.mapping.address(offset, 4).map_err(|_| IoError)?;
-        // SAFETY: checked aligned live original aperture word.
-        unsafe { p.as_ptr().cast::<u32>().write_volatile(value.to_le()) };
-        Ok(())
+        self.mapping.write32(offset, value).map_err(|_| IoError)
     }
 }

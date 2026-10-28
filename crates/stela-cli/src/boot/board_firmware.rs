@@ -5,7 +5,7 @@
 //! `usbc-fw-personality`). The IPSW has no member holding it for Apple
 //! silicon (`EFI/USBCUpdater` holds Intel Macs' images); the restore ramdisk
 //! carries it as `/usr/standalone/firmware/<name>` for restored to flash. So
-//! `stela boot prepare` reads the board the bundle's DeviceTree describes
+//! `stela-dev boot prepare` reads the board the bundle's DeviceTree describes
 //! ([`stela_runtime::machine::soc::board`], as the engine reads it), and takes
 //! each image it names from the same IPSW's decoded restore ramdisk. The
 //! source map records the ramdisk member, its SHA-256 and the path inside

@@ -4,9 +4,9 @@
 //! the loader that prepared it) and [`Kind`], in
 //! `stela/boot/<build>/<leaf>` of the USB's FAT32 data partition:
 //!
-//! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
+//! - `restore-<ECID>`: a machine's restore bundle (`stela-dev boot prepare
 //!   --restore`), which the Install macOS choice boots;
-//! - `update-<ECID>`: a machine's update restore bundle (`stela boot
+//! - `update-<ECID>`: a machine's update restore bundle (`stela-dev boot
 //!   prepare --restore --update`), which earlier setups' Update macOS
 //!   (Stela) choice booted; setup prepares none now;
 //! - any of these with `-s<schema>` for another schema and `-r<revision>`
@@ -17,8 +17,8 @@
 //! A bundle is copied to a `.partial` sibling and renamed into place, so an
 //! interrupted copy is never taken for a bundle; the bundle it replaces is
 //! set aside as `.previous` until then, so a stop between the two renames
-//! leaves it whole, and the next install or `--repair` puts it back
-//! ([`recover`]), while `--status` reports what is left ([`leftovers`]).
+//! leaves it whole, and the next install or `repair` puts it back
+//! ([`recover`]), while `status` reports what is left ([`leftovers`]).
 //! The setup record keeps the
 //! SHA-256 of its `bundle.json`, whose file list carries every file's
 //! SHA-256, so [`verify`] checks the whole bundle.

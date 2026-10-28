@@ -387,10 +387,8 @@ impl<R: Registers> Activate<R> {
     }
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn start_path(&mut self, index: usize, now: u64) -> Result<(), Error> {
@@ -402,14 +400,10 @@ impl<R: Registers> Activate<R> {
         let owner = retained.pending[index]
             .take()
             .ok_or(Error::UnexpectedReceipt)?;
-        let deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
-        let job = now
-            .checked_add(10_000)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        let deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
+        let job = crate::bus::thunderbolt::stage_deadline(now, 10_000, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         // SAFETY: preflight protected both actual plans and retained all native
         // rights, link and first-path storage before the first publication.
         self.path = Some(unsafe {
@@ -765,10 +759,8 @@ impl<R: Registers> Stop<R> {
     }
     fn enter(&mut self, stage: StopStage, now: u64) -> Result<(), Error> {
         self.stage = stage;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn request(&self) -> (Route, u8, Address, Option<[u32; 2]>) {

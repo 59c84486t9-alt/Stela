@@ -31,6 +31,11 @@ use stela_runtime::{
 /// original Apple guest process and its requested server.
 pub const RELAY_BUFFER: usize = 1 << 20;
 
+/// What the screen says when DHCP gives the first adapter no lease.
+const NO_LEASE: &str = "No IPv4 address from DHCP. Connect Ethernet to a network with DHCP, or \
+                        create an Offline installer so macOS comes from the USB; Apple's signing \
+                        may still need a network.";
+
 /// The host's network adapters and the loader root they are reached in.
 pub struct Links {
     pub devices: Vec<Adapter>,
@@ -104,7 +109,16 @@ impl HostNetwork {
             },
             Ticking(clock),
         );
-        let config = stack.dhcp().map_err(|error| format!("{error}"))?;
+        let config = stack.dhcp().map_err(|error| match error {
+            NetError::Dhcp(why) => {
+                output::arguments(format_args!("NETWORK adapter {location} {why}\n"));
+                String::from(NO_LEASE)
+            }
+            NetError::NoCarrier => format!(
+                "adapter {location} has no link: connect its cable to a network with a DHCP server"
+            ),
+            error => format!("{error}"),
+        })?;
         output::arguments(format_args!(
             "NETWORK address={} router={:?} dns={:?}\n",
             config.address, config.router, config.dns
@@ -325,15 +339,4 @@ impl GuestNetwork {
     }
 }
 
-/// `http://HOST[:PORT]/PATH` as the host and the path.
-pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or("only http:// URLs are supported")?;
-    let at = rest.find('/').ok_or("URL without a path")?;
-    let (host, path) = rest.split_at(at);
-    if host.is_empty() {
-        return Err("URL without a host");
-    }
-    Ok((host, path))
-}
+pub use stela_boot_core::options::split_url;

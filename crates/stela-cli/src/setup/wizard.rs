@@ -1,7 +1,8 @@
 //! A small Clack-style front end to the same setup command used by scripts.
 use super::{
-    InstallImage, Setup,
-    host::{Disk, Host},
+    InstallImage, Request,
+    host::{self, Disk, Host, Removal},
+    wifi,
 };
 use crate::{progress::Phase, restore};
 use anyhow::{Context, Result, ensure};
@@ -24,6 +25,7 @@ pub(super) struct Usb {
     id: String,
     name: String,
     bytes: u64,
+    removal: Removal,
     serial: Option<String>,
 }
 
@@ -33,6 +35,7 @@ impl Usb {
             id: disk.identifier.clone(),
             name: disk.name.clone(),
             bytes: disk.bytes,
+            removal: disk.removal,
             serial: host.serial(&disk.identifier).ok().flatten(),
         }
     }
@@ -44,7 +47,7 @@ impl Usb {
             .find(|d| d.identifier == self.id)
             .context("the selected USB was disconnected; run setup again")?;
         ensure!(
-            !disk.internal && !disk.system && *self == Self::from_disk(&disk, host),
+            disk.erasable() && *self == Self::from_disk(&disk, host),
             "the selected USB changed; run setup again and choose it again"
         );
         Ok(())
@@ -55,15 +58,33 @@ impl Usb {
     }
 
     fn size(&self) -> String {
-        if self.bytes == 0 {
-            "size unavailable".into()
-        } else {
-            format!("{:.1} GB", self.bytes as f64 / 1e9)
-        }
+        host::size_text(self.bytes)
     }
 
     fn description(&self) -> String {
         format!("{} · {} · {}", self.name, self.size(), self.id)
+    }
+
+    /// Its model or size, typed back to erase a disk other than a USB.
+    fn typed_back(&self) -> Result<String> {
+        cliclack::log::warning(format!(
+            "{} ({}, {}) is not a USB disk.",
+            self.name,
+            self.size(),
+            self.id
+        ))?;
+        let (name, bytes) = (self.name.clone(), self.bytes);
+        let expected = format!("Type {} or {}", self.name, self.size());
+        Ok(cliclack::input("Type its model or size to erase it")
+            .placeholder(&format!("{} or {}", self.name, self.size()))
+            .validate(move |typed: &String| {
+                if host::names_disk(&name, bytes, typed) {
+                    Ok(())
+                } else {
+                    Err(expected.clone())
+                }
+            })
+            .interact()?)
     }
 
     /// The name and size people recognize, for the erase warning.
@@ -89,30 +110,8 @@ fn local_image(path: &Path) -> Result<LocalImage> {
     Ok(plist::from_reader(std::io::Cursor::new(bytes))?)
 }
 
-pub(super) fn check_creation(command: &Setup) -> Result<()> {
-    ensure!(
-        !command.status
-            && !command.repair
-            && !command.uninstall
-            && !command.update_stela
-            && !command.update_os
-            && !command.rollback
-            && command.next_boot.is_none()
-            && !command.reset_nvram
-            && command.backup_state.is_none()
-            && command.restore_state.is_none()
-            && !command.boot_log
-            && !command.configures()
-            && command.host_firmware.is_none()
-            && command.host_firmware_requirements.is_none(),
-        "maintenance commands need --usb; run `stela setup` alone to create an installer"
-    );
-    Ok(())
-}
-
 /// `false` is cancellation. No disk is written by this function.
-pub(super) fn configure(command: &mut Setup, host: &dyn Host) -> Result<bool> {
-    check_creation(command)?;
+pub(super) fn configure(command: &mut Request, host: &dyn Host) -> Result<bool> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
         "interactive setup needs a terminal; scripts should pass --usb and --ipsw or --fetch"
@@ -129,7 +128,7 @@ pub(super) fn configure(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     }
 }
 
-fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
+fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
     cliclack::set_theme(theme::Stela::default());
     crate::progress::follow(theme::rail());
     cliclack::intro(
@@ -140,7 +139,7 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     let disks = host.disks()?;
     let choices: Vec<_> = disks
         .iter()
-        .filter(|d| !d.internal && !d.system)
+        .filter(|d| d.erasable())
         .map(|d| Usb::from_disk(d, host))
         .collect();
     ensure!(
@@ -151,7 +150,8 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     let mut images = None;
     let mut names = catalog::cached_names();
     let mut first = true;
-    let mut preferred_build = command.build_explicit.then(|| command.build.clone());
+    // `--build`, or the newest supported build.
+    let mut preferred_build = Some(command.build.clone());
     loop {
         let rows: Vec<_> = choices
             .iter()
@@ -242,6 +242,8 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
             let manifest =
                 local_image(&path).with_context(|| format!("reading {}", path.display()))?;
             progress.finish();
+            stela_runtime::builds::find(&manifest.product_build)
+                .with_context(|| path.display().to_string())?;
             command.ipsw = Some(path);
             command.fetch = false;
             command.build = manifest.product_build.clone();
@@ -283,8 +285,13 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
         models.sort();
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
+        if command.install_image == Some(InstallImage::Online) {
+            choose_wifi(command)?;
+        } else {
+            (command.wifi, command.wifi_passphrase) = (None, None);
+        }
         // Every setup installs macOS, which needs TSS personalization, so the
-        // wizard does not offer it as a choice; `--no-tss` withdraws the
+        // wizard does not offer it as a choice; `configure --no-tss` withdraws the
         // opt-in from an existing setup.
         cliclack::set_theme(theme::Stela { extras: true });
         let extras = cliclack::multiselect("5 / 6  Choose extras")
@@ -313,7 +320,7 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
         cliclack::note(
             "6 / 6  Review",
             format!(
-                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\nProfiling  {}\nSigning    Apple personalizes the boot files during setup",
+                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}Profiling  {}\nSigning    Apple personalizes the boot files during setup",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
@@ -322,6 +329,11 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
                 names
                     .get(command.model())
                     .map_or(command.model(), String::as_str),
+                match (&command.wifi, command.install_image) {
+                    (Some(ssid), _) => format!("Wi-Fi      {ssid}\n"),
+                    (None, Some(InstallImage::Online)) => "Wi-Fi      None (Ethernet)\n".into(),
+                    (None, _) => String::new(),
+                },
                 if command.profile { "On" } else { "Off" },
             ),
         )?;
@@ -338,6 +350,9 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
             .interact()?
         {
             0 => {
+                if usb.removal == Removal::Typed {
+                    command.confirm_disk = Some(usb.typed_back()?);
+                }
                 usb.verify(host)?;
                 return Ok(true);
             }
@@ -348,6 +363,52 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
             }
         }
     }
+}
+
+/// A network installer's Wi-Fi: a network this computer sees or knows, one
+/// typed in, or none.
+fn choose_wifi(command: &mut Request) -> Result<()> {
+    let progress = Phase::spinner("Looking for Wi-Fi networks");
+    let networks = wifi::host_networks();
+    progress.finish();
+    const ETHERNET: usize = usize::MAX;
+    const TYPED: usize = usize::MAX - 1;
+    let mut select = cliclack::select("Wi-Fi during installation").item(
+        ETHERNET,
+        "No Wi-Fi",
+        "Connect the PC to Ethernet during installation",
+    );
+    for (index, ssid) in networks.iter().enumerate() {
+        select = select.item(index, ssid, "");
+    }
+    let initial = command
+        .wifi
+        .as_ref()
+        .and_then(|ssid| networks.iter().position(|known| known == ssid))
+        .unwrap_or(if command.wifi.is_some() {
+            TYPED
+        } else {
+            ETHERNET
+        });
+    let choice = select
+        .item(TYPED, "Another network", "Type its name")
+        .initial_value(initial)
+        .interact()?;
+    let ssid = match choice {
+        ETHERNET => {
+            (command.wifi, command.wifi_passphrase) = (None, None);
+            return Ok(());
+        }
+        TYPED => cliclack::input("Network name")
+            .default_input(command.wifi.as_deref().unwrap_or_default())
+            .validate(|name: &String| wifi::ssid(name).map(|_| ()))
+            .interact()?,
+        index => networks[index].clone(),
+    };
+    cliclack::log::warning("The passphrase is stored in plaintext on the USB.")?;
+    command.wifi_passphrase = Some(wifi::ask_passphrase(&ssid)?);
+    command.wifi = Some(ssid);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -373,21 +434,15 @@ mod tests {
     #[test]
     fn maintenance_without_a_usb_is_refused_before_opening_prompts() {
         use clap::Parser;
-        for action in [
-            "--status",
-            "--repair",
-            "--uninstall",
-            "--update-stela",
-            "--no-tss",
+        for words in [
+            &["status"][..],
+            &["repair"],
+            &["uninstall"],
+            &["update", "stela"],
+            &["configure", "--no-tss"],
         ] {
-            let crate::Command::Setup(command) =
-                crate::Cli::try_parse_from(["stela", "setup", action])
-                    .unwrap()
-                    .command
-            else {
-                panic!("not setup");
-            };
-            assert!(check_creation(&command).is_err(), "{action}");
+            let line = ["stela", "setup"].into_iter().chain(words.iter().copied());
+            assert!(crate::Cli::try_parse_from(line).is_err(), "{words:?}");
         }
     }
 }

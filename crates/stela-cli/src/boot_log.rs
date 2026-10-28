@@ -3,7 +3,7 @@
 //! whole-disk image by the partition's GUID or from a raw partition at a
 //! byte offset. `--in-target` reads it from the tail of an Apple region
 //! that also holds the machine state (`pc::machine_state`), as a setup with
-//! `--target` alone lays it out. `stela setup --boot-log` reads the same
+//! `--target` alone lays it out. `stela setup boot-log` reads the same
 //! region of a setup's install.
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;

@@ -176,21 +176,15 @@ impl<R: Registers> Activate<R> {
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
         self.next_poll = now;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn start_path(&mut self, index: usize, now: u64) -> Result<(), Error> {
-        let deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
-        let job = now
-            .checked_add(10_000)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        let deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
+        let job = crate::bus::thunderbolt::stage_deadline(now, 10_000, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         let channel = self.channel.take().ok_or(Error::UnexpectedReceipt)?;
         let prepared = self.prepared[index]
             .take()
@@ -298,10 +292,9 @@ impl<R: Registers> Activate<R> {
                 }
                 rate(*word)?;
                 lanes(*word)?;
-                self.wait_deadline = now
-                    .checked_add(HANDSHAKE_MS)
-                    .ok_or(Error::ClockOverflow)?
-                    .min(self.job_deadline);
+                self.wait_deadline =
+                    crate::bus::thunderbolt::stage_deadline(now, HANDSHAKE_MS, self.job_deadline)
+                        .ok_or(Error::ClockOverflow)?;
                 self.enter(Stage::HandshakeRead, now)?;
             }
             Stage::HandshakeRead => {
@@ -403,10 +396,9 @@ impl<R: Registers> Activate<R> {
                 if i == 0 {
                     self.enter(Stage::EnableRead(1), now)?;
                 } else {
-                    self.wait_deadline = now
-                        .checked_add(DPRX_MS)
-                        .ok_or(Error::ClockOverflow)?
-                        .min(self.job_deadline);
+                    self.wait_deadline =
+                        crate::bus::thunderbolt::stage_deadline(now, DPRX_MS, self.job_deadline)
+                            .ok_or(Error::ClockOverflow)?;
                     self.enter(Stage::Dprx, now)?;
                 }
             }
