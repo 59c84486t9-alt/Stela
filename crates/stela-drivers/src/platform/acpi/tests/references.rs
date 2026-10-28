@@ -172,3 +172,6 @@ fn null_output_executes_side_effects_without_converting_returned_power_resource(
     assert_eq!(counts.allocations.load(Ordering::SeqCst), 0);
     assert_eq!(counts.mappings.load(Ordering::SeqCst), 0);
 }
+
+#[cfg(all(unix, target_arch = "x86_64"))]
+mod roles;

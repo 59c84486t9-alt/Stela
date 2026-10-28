@@ -36,6 +36,12 @@ pub mod scheduling;
 #[cfg(target_arch = "x86_64")]
 pub mod service;
 
+mod reservation;
+#[cfg(all(test, unix, target_arch = "x86_64"))]
+pub(crate) mod test_support;
+use reservation::Layout;
+pub use reservation::{FirmwareQueue, FirmwareRole, ReservationPolicy};
+
 pub type Callback = unsafe extern "C" fn(*mut c_void);
 pub type RetainedOwner = Arc<dyn Any + Send + Sync>;
 #[cfg(target_arch = "x86_64")]
@@ -74,6 +80,8 @@ enum Lane {
     Notify,
     Service,
     Firmware,
+    Portal,
+    Gpe,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextId(u64);
@@ -172,7 +180,7 @@ struct Job {
 }
 struct State<const N: usize> {
     jobs: [Option<Job>; N],
-    reserved_services: bool,
+    layout: Layout,
     next: u64,
     closed: bool,
     poisoned: bool,
@@ -281,7 +289,7 @@ impl<const N: usize> Queue<N> {
             owner: ManuallyDrop::new(owner),
             state: ManuallyDrop::new(UnsafeCell::new(State {
                 jobs: [None; N],
-                reserved_services: false,
+                layout: Layout::Ordinary,
                 next: 1,
                 closed: false,
                 poisoned: false,
@@ -348,17 +356,10 @@ impl<const N: usize> Queue<N> {
         if state.closed || state.poisoned || self.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        let range = if state.reserved_services {
-            match lane {
-                Lane::Service => N - 2..N - 1,
-                Lane::Firmware => N - 1..N,
-                _ => 0..N - 2,
-            }
-        } else {
-            0..N
-        };
-        let slot = range
+        let ranges = state.layout.admission(lane, N)?;
+        let slot = ranges
             .into_iter()
+            .flatten()
             .find(|index| state.jobs[*index].is_none())
             .ok_or(WorkError::Full)?;
         let sequence = state.next;
@@ -397,6 +398,34 @@ impl<const N: usize> Queue<N> {
             callback,
             context,
         )
+    }
+    /// Claim one of the named policy's two actual portal continuations before
+    /// accepting the callback/context. Full means neither idle worker is free;
+    /// no request is hidden behind two blocked ordinary AML evaluations.
+    ///
+    /// # Safety
+    /// The actual provider/request retains callback, context and every reachable
+    /// owner until genuine completion or quarantine, as for [`Self::execute`].
+    /// Rejection transfers nothing. This supplies no ACPICA or native entry grant.
+    pub unsafe fn execute_portal(
+        &self,
+        callback: Callback,
+        context: *mut c_void,
+    ) -> Result<Ticket, WorkError> {
+        self.enqueue_lane(Lane::Portal, callback, context)
+    }
+    /// Admit serial GPE work into its independent reserved lane. Spare ordinary
+    /// admission slots may hold pending GPE jobs; ordinary stacks never run them.
+    ///
+    /// # Safety
+    /// The actual provider retains the callback/context through completion or
+    /// quarantine. On error it still owns them and no callback was admitted.
+    pub unsafe fn execute_gpe(
+        &self,
+        callback: Callback,
+        context: *mut c_void,
+    ) -> Result<Ticket, WorkError> {
+        self.enqueue_lane(Lane::Gpe, callback, context)
     }
     pub fn close(&self) -> Result<(), WorkError> {
         let mut g = self.lock()?;
@@ -710,6 +739,7 @@ struct Task {
 #[cfg(target_arch = "x86_64")]
 pub struct Runtime<const N: usize> {
     queue: Arc<Queue<N>>,
+    layout: Layout,
     tasks: ManuallyDrop<UnsafeCell<Vec<Task>>>,
     dispatch: UnsafeCell<context::Frame>,
     current: Cell<usize>,
@@ -718,6 +748,7 @@ pub struct Runtime<const N: usize> {
     service_started: Cell<bool>,
     firmware_started: Cell<bool>,
     firmware_turn: Cell<bool>,
+    firmware_cursor: Cell<usize>,
     service_domain: ManuallyDrop<UnsafeCell<Option<Arc<service::Domain<N>>>>>,
     _local: PhantomData<*mut ()>,
     _pinned: PhantomPinned,
@@ -776,11 +807,21 @@ impl<const N: usize> Runtime<N> {
         reserve_service: bool,
         reserve_firmware: bool,
     ) -> Result<Pin<Box<Self>>, WorkError> {
-        if (reserve_service && stacks.len() < 5)
-            || (reserve_firmware && (!reserve_service || stacks.len() < 6 || N < 3))
-        {
-            return Err(WorkError::Unavailable);
-        }
+        let layout = match (reserve_service, reserve_firmware) {
+            (false, false) => Layout::Ordinary,
+            (true, false) => Layout::LinuxService,
+            (true, true) => Layout::FirmwareControl,
+            (false, true) => return Err(WorkError::Unavailable),
+        };
+        Self::with_layout_controls(queue, stacks, controls, layout)
+    }
+    fn with_layout_controls(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        controls: context::Controls,
+        layout: Layout,
+    ) -> Result<Pin<Box<Self>>, WorkError> {
+        layout.validate(stacks.len(), N)?;
         let mut tasks = Vec::new();
         tasks
             .try_reserve_exact(stacks.len())
@@ -790,13 +831,7 @@ impl<const N: usize> Runtime<N> {
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .map_err(|_| WorkError::Exhausted)?;
             tasks.push(Task {
-                lane: match index {
-                    0 => Lane::Foreground,
-                    1 => Lane::Notify,
-                    2 if reserve_service => Lane::Service,
-                    3 if reserve_firmware => Lane::Firmware,
-                    _ => Lane::General,
-                },
+                lane: layout.lane(index),
                 stack,
                 id: ContextId(id),
                 frame: context::Frame::new(controls),
@@ -806,7 +841,7 @@ impl<const N: usize> Runtime<N> {
                 draining: false,
                 binding: None,
                 signal: Arc::new(WakeSignal {
-                    service: reserve_service && index == 2,
+                    service: layout.lane(index) == Lane::Service,
                     sequence: AtomicU64::new(0),
                     pending: AtomicBool::new(false),
                 }),
@@ -815,7 +850,12 @@ impl<const N: usize> Runtime<N> {
         {
             let mut admission = queue.lock()?;
             let state = admission.state();
-            if reserve_firmware && state.jobs[N - 2..].iter().any(Option::is_some) {
+            // Native worker permits require an empty pre-admission queue: a
+            // legacy Notify job in an ordinary slot otherwise bypasses the two
+            // real-worker limit. Legacy constructors keep their prior contract.
+            if (layout == Layout::NativeFirmware16 && state.jobs.iter().any(Option::is_some))
+                || state.jobs[N - layout.slots()..].iter().any(Option::is_some)
+            {
                 return Err(WorkError::Busy);
             }
             if queue
@@ -825,12 +865,13 @@ impl<const N: usize> Runtime<N> {
             {
                 return Err(WorkError::Busy);
             }
-            // The real constructor atomically reserves both admission slots.
+            // The real constructor atomically reserves its actual admission slots.
             // Existing queued jobs are never moved, discarded or reinterpreted.
-            state.reserved_services = reserve_firmware;
+            state.layout = layout;
         }
         let executor = Box::pin(Self {
             queue,
+            layout,
             tasks: ManuallyDrop::new(UnsafeCell::new(tasks)),
             dispatch: UnsafeCell::new(context::Frame::new(controls)),
             current: Cell::new(NONE),
@@ -839,6 +880,7 @@ impl<const N: usize> Runtime<N> {
             service_started: Cell::new(false),
             firmware_started: Cell::new(false),
             firmware_turn: Cell::new(true),
+            firmware_cursor: Cell::new(0),
             service_domain: ManuallyDrop::new(UnsafeCell::new(None)),
             _local: PhantomData,
             _pinned: PhantomPinned,
@@ -965,6 +1007,15 @@ impl<const N: usize> Runtime<N> {
         // SAFETY: current_id validated the current index, state and retained stack.
         Ok(unsafe { (*self.task(self.current.get())).lane } == Lane::Firmware)
     }
+    /// Actual constructor role after validating CPU, current job and real RSP.
+    /// The tag is observation, never an execution or native service capability.
+    pub fn firmware_role_current(&self) -> Result<Option<FirmwareRole>, WorkError> {
+        self.current_id()?;
+        // SAFETY: current_id validated the current index/state/retained stack.
+        Ok(self
+            .layout
+            .role(unsafe { (*self.task(self.current.get())).lane }))
+    }
     /// Check actual CPU/current/RSP before identifying the reserved service.
     pub fn service_current(&self) -> Result<bool, WorkError> {
         self.current_id()?;
@@ -1085,7 +1136,7 @@ impl<const N: usize> Runtime<N> {
         self: Pin<&Self>,
     ) -> Result<scheduling::SchedulingHandle<N>, WorkError> {
         self.current_id()?;
-        if self.domain().is_none() || self.firmware_current()? {
+        if self.domain().is_none() || self.firmware_role_current()?.is_some() {
             return Err(WorkError::Unavailable);
         }
         let wake = self.wake_handle()?;
@@ -1258,6 +1309,38 @@ impl<const N: usize> Runtime<N> {
         unsafe { self.queue.cpu.restore(flags) };
         Ok(ParkOutcome::Resumed)
     }
+    /// # Safety
+    /// Qualified taskless dispatcher at IF0; all retained task frames are stopped.
+    unsafe fn next_firmware(&self, count: usize) -> Option<usize> {
+        for offset in 0..count {
+            let index = (self.firmware_cursor.get() + offset) % count;
+            // SAFETY: bounded immutable task vector, stopped under dispatcher IF0.
+            let task = unsafe { &*self.task(index) };
+            if self.layout.role(task.lane).is_none()
+                || !matches!(task.state, TaskState::Ready | TaskState::Runnable)
+            {
+                continue;
+            }
+            if task.state == TaskState::Ready && matches!(task.lane, Lane::Notify | Lane::Portal) {
+                let sequence = match task.job {
+                    Some((_, job)) => job.sequence,
+                    None => self.queue.cpu.fatal(WorkError::CorruptContext),
+                };
+                let earlier = (0..count).any(|peer| {
+                    // SAFETY: same stopped task vector; this read cannot switch or invoke work.
+                    let other = unsafe { &*self.task(peer) };
+                    other.lane == task.lane
+                        && other.state == TaskState::Ready
+                        && other.job.is_some_and(|(_, job)| job.sequence < sequence)
+                });
+                if earlier {
+                    continue;
+                }
+            }
+            return Some(index);
+        }
+        None
+    }
     /// Run at most one genuine task continuation. No callback is inline here:
     /// actual RIP/RSP switch onto its distinct owned stack precedes callback.
     /// Caller is the main dispatcher outside locks/IRQ/native guest execution.
@@ -1286,10 +1369,7 @@ impl<const N: usize> Runtime<N> {
         // SAFETY: the task list's length never changes after construction.
         let count = unsafe { (*self.tasks.get()).len() };
         let mut selected = None;
-        let mut firmware = None;
-        // SAFETY: the immutable constructor layout always retains at least four
-        // tasks; this qualified taskless dispatcher owns their metadata at IF0.
-        let has_firmware = unsafe { (*self.task(3)).lane } == Lane::Firmware;
+        let has_firmware = self.layout.role(Lane::Firmware).is_some();
         for n in 0..count {
             let i = (if due_service { 2 } else { self.cursor.get() } + n) % count;
             // SAFETY: no task runs while the dispatcher steps, so this is the only
@@ -1342,8 +1422,7 @@ impl<const N: usize> Runtime<N> {
                 task.state = TaskState::Runnable;
             }
             if matches!(task.state, TaskState::Ready | TaskState::Runnable) {
-                if task.lane == Lane::Firmware {
-                    firmware = Some(i);
+                if self.layout.role(task.lane).is_some() {
                     continue;
                 }
                 if self.domain().is_none() {
@@ -1386,6 +1465,9 @@ impl<const N: usize> Runtime<N> {
                 }
             }
         }
+        // SAFETY: the qualified dispatcher still holds actual IF0; all task
+        // frames are stopped and no mutable task borrow survives the scan.
+        let firmware = unsafe { self.next_firmware(count) };
         // Firmware is outside Linux FIFO ranks. At most one firmware turn
         // separates eligible non-firmware turns; an idle peer set permits it to
         // continue. Due Linux deadline/IRQ work retains its existing precedence.
@@ -1402,6 +1484,9 @@ impl<const N: usize> Runtime<N> {
         };
         if !(due_service && i == 2) {
             self.firmware_turn.set(Some(i) != firmware);
+            if Some(i) == firmware {
+                self.firmware_cursor.set((i + 1) % count);
+            }
             self.cursor.set((i + 1) % count);
         }
         // SAFETY: immutable selected actual job at IF0; no borrow spans switch.
@@ -1482,6 +1567,109 @@ impl<const N: usize> Runtime<N> {
         }
         Ok(())
     }
+    /// # Safety
+    /// The qualified dispatcher/current task owns this Runtime, the queue lock
+    /// holds IF0, all peers are suspended, and no task borrow spans this call.
+    unsafe fn peer_progress(&self, current: usize, state: &State<N>) -> bool {
+        if current == NONE {
+            return true;
+        }
+        let lane_index = |lane| match lane {
+            Lane::Foreground => 0,
+            Lane::Notify => 1,
+            Lane::General => 2,
+            Lane::Service => 3,
+            Lane::Firmware => 4,
+            Lane::Portal => 5,
+            Lane::Gpe => 6,
+        };
+        let mut queued_lanes = [false; 7];
+        for job in state.jobs.iter().flatten().filter(|job| !job.running) {
+            queued_lanes[lane_index(job.lane)] = true;
+        }
+        // SAFETY: caller holds the actual same-CPU IF0 queue guard and all peer
+        // frames are stopped. This read neither switches nor retains references.
+        unsafe {
+            (&*self.tasks.get()).iter().enumerate().any(|(i, task)| {
+                i != current
+                    && match task.state {
+                        TaskState::Ready | TaskState::Runnable => true,
+                        TaskState::Blocked => task.signal.pending.load(Ordering::Acquire),
+                        TaskState::Idle => queued_lanes[lane_index(task.lane)],
+                        TaskState::Running => false,
+                    }
+            })
+        }
+    }
+    /// Join only the selected firmware queue's jobs accepted before this call.
+    /// Ordinary callbacks queued later, including same-queue chains, belong to
+    /// a later flush boundary. This matches pinned Linux flush_workqueue;
+    /// it is distinct from final close/drain and does not close admission.
+    ///
+    /// The OSL caller must synchronize the real SCI hardirq first, then join
+    /// Gpe and Notify in that order with separate captures: GPE work may enqueue
+    /// Notify work. This method alone grants no IRQ/provider capability.
+    /// Joining from the selected queue refuses self-deadlock. Pending/TimedOut
+    /// retain every admitted callback/context. Only NativeFirmware16 has these
+    /// distinct queues; legacy constructor contracts remain unchanged.
+    pub fn join_firmware(
+        self: Pin<&Self>,
+        queue: FirmwareQueue,
+        deadline: u64,
+    ) -> Result<(), WorkError> {
+        self.queue.process()?;
+        if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        if self.layout != Layout::NativeFirmware16 {
+            return Err(WorkError::Unavailable);
+        }
+        let lane = queue.lane();
+        let current = self.current.get();
+        if current != NONE {
+            self.current_id()?;
+            // SAFETY: actual current frame was checked; its immutable lane is
+            // fixed before publication and is never changed by a callback/IRQ.
+            if unsafe { (*self.task(current)).lane == lane } {
+                return Err(WorkError::WouldDeadlock);
+            }
+        }
+        let boundary = self.queue.lock()?.state().next;
+        loop {
+            let current = self.current.get();
+            if current != NONE {
+                self.current_id()?;
+            }
+            let (pending, progress) = {
+                let mut guard = self.queue.lock()?;
+                let state = guard.state();
+                let pending = state
+                    .jobs
+                    .iter()
+                    .flatten()
+                    .any(|job| job.lane == lane && job.sequence < boundary);
+                // SAFETY: real queue guard holds IF0, current was checked and
+                // no task borrow survives the snapshot or any later switch.
+                (pending, unsafe { self.peer_progress(current, state) })
+            };
+            if !pending {
+                return Ok(());
+            }
+            if self.queue.cpu.ticks() >= deadline {
+                return Err(WorkError::TimedOut);
+            }
+            if current == NONE {
+                if !self.step()? {
+                    return Err(WorkError::Pending);
+                }
+            } else {
+                if !progress {
+                    return Err(WorkError::Pending);
+                }
+                self.yield_now()?;
+            }
+        }
+    }
     /// Drain every admitted job. From a callback, exclude only that active job;
     /// ordered Notify/foreground jobs behind it are a real cycle and refuse.
     /// Callers of mandatory-void OSL drains must fail closed on an error.
@@ -1538,44 +1726,9 @@ impl<const N: usize> Runtime<N> {
                 {
                     return Err(WorkError::WouldDeadlock);
                 }
-                let mut queued_lanes = [false; 5];
-                for job in s.jobs.iter().flatten().filter(|job| !job.running) {
-                    let lane = match job.lane {
-                        Lane::Foreground => 0,
-                        Lane::Notify => 1,
-                        Lane::General => 2,
-                        Lane::Service => 3,
-                        Lane::Firmware => 4,
-                    };
-                    queued_lanes[lane] = true;
-                }
-                // A queued job requires an Idle continuation in its own lane.
-                // Snapshot both jobs and peer eligibility under this same IF0
-                // queue guard; the current drain never counts itself.
-                // SAFETY: the qualified CPU owns this task table; all peers
-                // are suspended and no task reference crosses a switch.
-                let peer_progress = current == NONE
-                    || unsafe {
-                        (&*self.tasks.get()).iter().enumerate().any(|(i, task)| {
-                            i != current
-                                && match task.state {
-                                    TaskState::Ready | TaskState::Runnable => true,
-                                    TaskState::Blocked => {
-                                        task.signal.pending.load(Ordering::Acquire)
-                                    }
-                                    TaskState::Idle => {
-                                        queued_lanes[match task.lane {
-                                            Lane::Foreground => 0,
-                                            Lane::Notify => 1,
-                                            Lane::General => 2,
-                                            Lane::Service => 3,
-                                            Lane::Firmware => 4,
-                                        }]
-                                    }
-                                    TaskState::Running => false,
-                                }
-                        })
-                    };
+                // SAFETY: qualified same-CPU queue guard holds IF0; no task
+                // reference survives the snapshot or any later switch.
+                let peer_progress = unsafe { self.peer_progress(current, s) };
                 (pending, peer_progress)
             };
             if !pending {
@@ -1770,6 +1923,29 @@ impl<const N: usize> Executor<N> {
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_reserved_controls(
                 queue, stacks, controls, true, true,
+            )?),
+        })
+    }
+    /// Apply the named sixteen-stack qualification policy. The layout reserves
+    /// real workers and admission slots; it supplies no native IRQ/AML/provider
+    /// capability. The queue must be empty (Busy otherwise), so every admitted
+    /// Portal/Notify job first claims an actual idle-worker permit. Existing
+    /// constructors keep their original layouts/contracts.
+    pub fn new_with_policy(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        policy: ReservationPolicy,
+    ) -> Result<Self, WorkError> {
+        Runtime::<N>::validate_stacks(&queue, &stacks)?;
+        let layout = match policy {
+            ReservationPolicy::NativeFirmware16 => Layout::NativeFirmware16,
+        };
+        layout.validate(stacks.len(), N)?;
+        // SAFETY: same qualified native construction boundary as new().
+        let controls = unsafe { context::controls()? };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_layout_controls(
+                queue, stacks, controls, layout,
             )?),
         })
     }

@@ -134,3 +134,6 @@ fn ticket_identity_and_sequence_exhaustion() {
 // Guard-paged stacks come from the host's POSIX mmap.
 #[cfg(all(target_arch = "x86_64", unix))]
 mod switched;
+
+#[cfg(all(target_arch = "x86_64", unix))]
+mod native_policy;
