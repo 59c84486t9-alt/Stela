@@ -1,5 +1,4 @@
 //! Value parsers of the development commands' arguments.
-use std::path::PathBuf;
 
 mod error;
 pub use error::ArgumentError;
@@ -44,40 +43,6 @@ pub fn parse_memory_query(value: &str) -> Result<MemoryQuery, ArgumentError> {
         });
     }
     Ok(MemoryQuery { address, bytes })
-}
-
-#[derive(Debug, Clone)]
-pub struct LibraryInput {
-    pub path: PathBuf,
-    pub base: u64,
-}
-
-pub fn parse_library(value: &str) -> Result<LibraryInput, ArgumentError> {
-    let (path, base) = value
-        .rsplit_once('@')
-        .ok_or_else(|| ArgumentError::Library {
-            value: value.to_owned(),
-        })?;
-    if path.is_empty() {
-        return Err(ArgumentError::EmptyLibraryPath);
-    }
-    Ok(LibraryInput {
-        path: path.into(),
-        base: address_value(base)?,
-    })
-}
-
-pub fn parse_arm_kernel_page_shift(
-    value: &str,
-) -> Result<stela_runtime::commpage::KernelPageSize, ArgumentError> {
-    use stela_runtime::commpage::KernelPageSize;
-    match value {
-        "12" => Ok(KernelPageSize::FourKiB),
-        "14" => Ok(KernelPageSize::SixteenKiB),
-        _ => Err(ArgumentError::KernelPageShift {
-            value: value.to_owned(),
-        }),
-    }
 }
 
 pub fn parse_scalable_vector_length(

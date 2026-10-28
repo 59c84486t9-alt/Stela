@@ -1,26 +1,9 @@
-//! Mach-O planning and dependency discovery.
+//! Pure Mach-O mapping and chained-fixup plans.
 use crate::{args::*, input::pauth_all_keys_context};
 use anyhow::{Context, Result};
 use clap::Args;
 use std::path::PathBuf;
 use stela_loader as macho;
-
-#[derive(Args)]
-pub(crate) struct DiscoverImages {
-    input: PathBuf,
-    #[arg(long)]
-    guest_root: PathBuf,
-    #[arg(long)]
-    guest_path: Option<String>,
-    #[arg(long, value_parser = ["arm64", "arm64e"])]
-    architecture: Option<String>,
-    #[arg(long, value_parser = parse_address)]
-    image_base: Option<u64>,
-    #[arg(long, default_value = "0x50000000000", value_parser = parse_address)]
-    library_base: u64,
-    #[arg(long, default_value = "0x10000000000", value_parser = parse_address)]
-    library_stride: u64,
-}
 
 #[derive(Args)]
 pub(crate) struct PlanFixups {
@@ -39,37 +22,6 @@ pub(crate) struct PlanExecutable {
     input: PathBuf,
     #[arg(long, value_parser = ["arm64", "arm64e"])]
     architecture: Option<String>,
-}
-
-impl DiscoverImages {
-    pub(crate) fn run(self) -> Result<()> {
-        let Self {
-            input,
-            guest_root,
-            guest_path,
-            architecture,
-            image_base,
-            library_base,
-            library_stride,
-        } = self;
-        let discovery = macho::dependency_graph::discover(
-            &input,
-            macho::dependency_graph::DiscoveryOptions {
-                guest_root,
-                guest_path,
-                architecture,
-                image_base,
-                library_base,
-                library_stride,
-            },
-        )?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"kind":"dependency_discovery",
-            "graph":discovery.graph,"complete_binary_verified":false}))?
-        );
-        Ok(())
-    }
 }
 
 impl PlanFixups {

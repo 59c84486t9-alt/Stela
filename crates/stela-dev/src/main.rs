@@ -6,7 +6,6 @@ use stela_cli::{apfs, boot, efi, restore};
 
 mod args;
 mod compile;
-mod dyld_entry;
 mod execute;
 mod images;
 mod input;
@@ -36,18 +35,10 @@ enum Command {
     PrepareLeaf(compile::PrepareLeaf),
     /// Run raw code through native block dispatch.
     RunBlocks(execute::RunBlocks),
-    /// Map a trusted image's initial segments and probe its translated entry.
-    RunMappedImage(execute::RunMappedImage),
-    /// Bind a set of images and run from an entry point.
-    RunLinkedImages(execute::RunLinkedImages),
-    /// Run original dyld's startup prefix.
-    ProbeDyldEntry(execute::ProbeDyldEntry),
     /// Validate an Apple executable's guest mappings and unresolved loader work.
     PlanExecutable(loader::PlanExecutable),
     /// Validate and plan supported chained rebases without mapping or execution.
     PlanFixups(loader::PlanFixups),
-    /// Discover image dependencies inside a guest filesystem.
-    DiscoverImages(loader::DiscoverImages),
     /// Discover and fetch restore images directly from Apple's public feed.
     #[command(subcommand)]
     Images(images::ImagesCommand),
@@ -88,12 +79,8 @@ impl Command {
             Self::CompileBlock(command) => command.run(),
             Self::PrepareLeaf(command) => command.run(),
             Self::RunBlocks(command) => command.run(),
-            Self::RunMappedImage(command) => command.run(),
-            Self::RunLinkedImages(command) => command.run(),
-            Self::ProbeDyldEntry(command) => command.run(),
             Self::PlanExecutable(command) => command.run(),
             Self::PlanFixups(command) => command.run(),
-            Self::DiscoverImages(command) => command.run(),
             Self::Images(command) => command.run(),
             Self::ImageManifest(command) => command.run(),
             Self::ExtractImage(command) => command.run(),
@@ -138,5 +125,34 @@ mod tests {
         ] {
             assert!(help.contains(command), "{command}: {help}");
         }
+    }
+    #[test]
+    fn removed_process_commands_and_cache_option_are_unknown() {
+        for command in [
+            "run-mapped-image",
+            "run-linked-images",
+            "probe-dyld-entry",
+            "discover-images",
+        ] {
+            let error = Cli::try_parse_from(["stela-dev", command, "--help"])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{command}"
+            );
+        }
+        let error = Cli::try_parse_from([
+            "stela-dev",
+            "extract-guest-files",
+            "image.dmg",
+            "--output",
+            "root",
+            "--shared-cache",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }

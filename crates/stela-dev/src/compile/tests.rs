@@ -245,78 +245,26 @@ mod services {
 
     #[test]
     fn clock_requires_pauth_profile() {
-        for args in [
-            vec![
-                "stela",
-                "run-blocks",
-                "code",
-                "--clock-snapshot",
-                "clock.json",
-            ],
-            vec![
-                "stela",
-                "probe-dyld-entry",
-                "dyld",
-                "--executable",
-                "app",
-                "--bootstrap-clock",
-            ],
-            vec![
-                "stela",
-                "probe-dyld-entry",
-                "dyld",
-                "--executable",
-                "app",
-                "--clock-snapshot",
-                "clock.json",
-            ],
-            vec![
-                "stela",
+        assert!(
+            Cli::try_parse_from([
+                "stela-dev",
                 "compile-block",
                 "code",
                 "--output-dir",
                 "out",
-                "--software-clock",
-            ],
-        ] {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
-        assert!(
-            Cli::try_parse_from([
-                "stela",
-                "probe-dyld-entry",
-                "dyld",
-                "--executable",
-                "app",
-                "--software-pauth-ib-key",
-                "key.json",
-                "--bootstrap-clock",
-                "--clock-snapshot",
-                "clock.json"
+                "--software-clock"
             ])
-            .is_ok()
+            .is_err()
         );
         assert!(
             Cli::try_parse_from([
-                "stela",
+                "stela-dev",
                 "compile-block",
                 "code",
                 "--output-dir",
                 "out",
                 "--software-pauth",
                 "--software-clock"
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "stela",
-                "run-blocks",
-                "code",
-                "--software-pauth-ib-key",
-                "key.json",
-                "--clock-snapshot",
-                "clock.json"
             ])
             .is_ok()
         );

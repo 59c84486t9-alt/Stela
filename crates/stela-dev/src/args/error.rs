@@ -30,13 +30,6 @@ pub enum ArgumentError {
         bytes: u64,
         maximum: u64,
     },
-    Library {
-        value: String,
-    },
-    EmptyLibraryPath,
-    KernelPageShift {
-        value: String,
-    },
     VectorLength {
         bytes: usize,
     },
@@ -58,14 +51,6 @@ impl fmt::Display for ArgumentError {
             Self::MemoryLimit { bytes, maximum } => write!(
                 f,
                 "memory snapshot {bytes} exceeds image memory limit {maximum}"
-            ),
-            Self::Library { value } => {
-                write!(f, "library input {value:?}: expected LIBRARY_PATH@ADDRESS")
-            }
-            Self::EmptyLibraryPath => f.write_str("library path is empty"),
-            Self::KernelPageShift { value } => write!(
-                f,
-                "ARM kernel page shift {value:?} must be 12 or 14; arm64 user shift is 14"
             ),
             Self::VectorLength { bytes } => {
                 write!(f, "SVL bytes {bytes} must be one of 16, 32, 64, 128 or 256")

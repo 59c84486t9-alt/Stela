@@ -1,4 +1,4 @@
-//! JSON and file inputs: register state, PAuth keys, guest memory and clocks.
+//! JSON and file inputs: register state, PAuth keys and guest memory.
 use anyhow::{Context, Result, ensure};
 use std::{fs::File, path::PathBuf};
 
@@ -230,30 +230,6 @@ pub(crate) fn memory_hashes(
     }))).collect()
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ClockSnapshotInput {
-    pub(crate) counter: u64,
-    pub(crate) sleep_ticks: u64,
-}
-
-pub(crate) fn clock_snapshot(path: &std::path::Path) -> Result<stela_runtime::clock::Snapshot> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    File::open(path)?.take(4097).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() <= 4096,
-        "clock snapshot input exceeds 4096 bytes"
-    );
-    let input: ClockSnapshotInput = serde_json::from_slice(&bytes)?;
-    let snapshot = stela_runtime::clock::Snapshot {
-        counter: input.counter,
-        sleep_ticks: input.sleep_ticks,
-    };
-    snapshot.awake_ticks()?;
-    Ok(snapshot)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn pauth_clock_arguments() {
+    fn pauth_argument_constraints() {
         assert!(
             Cli::try_parse_from([
                 "stela",
@@ -355,7 +331,7 @@ mod tests {
                 "--clock-snapshot",
                 "clock.json"
             ])
-            .is_ok()
+            .is_err()
         );
     }
 
@@ -405,37 +381,6 @@ mod tests {
         let mut conflicting = region;
         conflicting["initial_bytes"] = serde_json::json!([]);
         assert!(raw_initial_bytes(&serde_json::from_value(conflicting)?, folder.path()).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn snapshot_input_validation() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("clock.json");
-        for input in [
-            r#"{"counter":10,"sleep_ticks":11}"#,
-            r#"{"counter":-1,"sleep_ticks":0}"#,
-            r#"{"counter":10}"#,
-            r#"{"counter":10,"sleep_ticks":0,"frequency":1}"#,
-            r#"{"counter":10,"counter":11,"sleep_ticks":0}"#,
-        ] {
-            std::fs::write(&path, input)?;
-            assert!(clock_snapshot(&path).is_err());
-        }
-        let valid = r#"{"counter":130,"sleep_ticks":40}"#;
-        let mut boundary = valid.to_owned();
-        boundary.extend(std::iter::repeat_n(' ', 4096 - valid.len()));
-        std::fs::write(&path, &boundary)?;
-        assert_eq!(
-            clock_snapshot(&path)?,
-            stela_runtime::clock::Snapshot {
-                counter: 130,
-                sleep_ticks: 40
-            }
-        );
-        boundary.push(' ');
-        std::fs::write(&path, boundary)?;
-        assert!(clock_snapshot(&path).is_err());
         Ok(())
     }
 }
