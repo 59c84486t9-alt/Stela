@@ -60,6 +60,18 @@ unsafe impl BiosIo for ClockBios {
         }
     }
 }
+pub(super) fn clock_bios(drops: &Arc<AtomicUsize>, board_case: Option<u8>) -> ClockBios {
+    ClockBios {
+        inner: RadioBios {
+            drops: drops.clone(),
+            unavailable: false,
+            absent: false,
+        },
+        clock_error: None,
+        country_error: None,
+        board_case,
+    }
+}
 pub(super) fn setup_bytes() -> Vec<u8> {
     let mut bytes = lari_bytes(false, 6);
     let mut at = 88;

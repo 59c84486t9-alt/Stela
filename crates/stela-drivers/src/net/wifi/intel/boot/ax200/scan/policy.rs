@@ -19,7 +19,7 @@ impl<'a, Q: BootIo, B: BiosIo> Hardware<'_, 'a, Q, B> {
     fn boot(&mut self) -> &mut RomBoot<'a, Q> {
         &mut self.board.scan.mcc.setup.lari.radio.initialized.boot
     }
-    fn channel(&self, band: Band, number: u16) -> Option<Channel> {
+    pub(super) fn channel(&self, band: Band, number: u16) -> Option<Channel> {
         let information = &self.board.initialized_nvm().information;
         let sku_bit = match band {
             Band::Ghz2 => 1,

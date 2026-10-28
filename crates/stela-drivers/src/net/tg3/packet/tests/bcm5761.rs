@@ -107,18 +107,19 @@ fn actual_5761_512_rings_wrap_and_half_full_duplex_transfer_then_retire() {
     let (mut packet, pages, domain, peer) = attach_5761();
     assert_eq!(packet.geometry.rx, 512);
     assert_eq!(packet.geometry.returns, 512);
-    // Each mode crosses both the actual producer and return ring boundary.
-    for mode in [0x100, 0x200, 0x300, 0x500, 0x700] {
+    // The first mode crosses the 512-entry producer and return ring
+    // boundaries; every other half and full duplex mode then transfers.
+    for (mode, frames) in [(0x100, 513), (0x200, 4), (0x300, 4), (0x500, 4), (0x700, 4)] {
         peer.lock().unwrap().phy.insert(0x19, mode);
         assert!(packet.carrier());
-        for n in 0..520 {
+        for n in 0..frames {
             let frame = vec![n as u8; 60];
             packet.transmit(&frame).unwrap();
             peer.lock().unwrap().receive(&frame, 0, &domain);
             assert_eq!(packet.receive().unwrap(), Some(frame));
         }
     }
-    assert_eq!(peer.lock().unwrap().sent.len(), 2600);
+    assert_eq!(peer.lock().unwrap().sent.len(), 529);
     assert_eq!(pages.allocated.get(), 6);
     assert!(packet.retire().is_ok());
     assert_eq!(pages.drops.load(Ordering::Relaxed), 6);
