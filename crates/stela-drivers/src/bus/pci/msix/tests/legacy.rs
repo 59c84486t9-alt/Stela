@@ -6,6 +6,8 @@ use super::*;
 fn enable_order_and_pending_delivery() {
     for vectors in [1, 2, 65, 2048] {
         let (mut owner, m) = attach(fixture(vectors));
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program(MESSAGE) }.unwrap();
         {
             let m = m.lock().unwrap();
@@ -23,12 +25,16 @@ fn enable_order_and_pending_delivery() {
         }
         m.lock().unwrap().pending = true;
         m.lock().unwrap().callback_published = true;
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask() }.unwrap();
         assert_eq!(m.lock().unwrap().emitted, [MESSAGE]);
         owner.mask().unwrap();
         assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0xc000);
         owner.disable().unwrap();
         assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0x4000);
+        // SAFETY: All model deliveries finish synchronously while holding the peripheral
+        // mutex. No hardware or background callback can race release of these retained owners.
         let owners = unsafe { owner.release() }.unwrap();
         assert_eq!(owner.address(), Err(Error::Released));
         drop(owners);
@@ -61,6 +67,8 @@ fn invalid_extents_return_owners() {
             }
         }
         let (function, retained, bars) = f.owners;
+        // SAFETY: The function and BARs are the fixture's Arc-backed peripheral owners.
+        // There is no asynchronous source; invalid configuration returns owners before writes.
         let result = unsafe { MsixConfig::new(function, retained, bars) };
         let (_, owners) = match result {
             Err(error) => error,
@@ -85,7 +93,11 @@ fn invalid_extents_return_owners() {
 fn failed_access_poisoning() {
     let (mut baseline, m) = attach(fixture(2));
     m.lock().unwrap().callback_published = true;
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { baseline.program(MESSAGE) }.unwrap();
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { baseline.unmask() }.unwrap();
     baseline.disable().unwrap();
     let events = m.lock().unwrap().events.len();
@@ -106,7 +118,11 @@ fn failed_access_poisoning() {
                 m.callback_published = true;
             }
             let result = (|| {
+                // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+                // callbacks stay retained; table writes and message emission run synchronously.
                 unsafe { owner.program(MESSAGE) }?;
+                // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+                // under its mutex, including failures injected after a modeled hardware effect.
                 unsafe { owner.unmask() }?;
                 owner.disable()
             })();
@@ -114,8 +130,12 @@ fn failed_access_poisoning() {
             assert!(owner.needs_reset());
             let count = m.lock().unwrap().events.len();
             assert_eq!(owner.mask(), Err(Error::Quarantined));
+            // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+            // under its mutex, including failures injected after a modeled hardware effect.
             assert_eq!(unsafe { owner.unmask() }, Err(Error::Quarantined));
             assert!(matches!(
+                // SAFETY: All model deliveries finish synchronously while holding the peripheral
+                // mutex. No hardware or background callback can race release of these retained owners.
                 unsafe { owner.release() },
                 Err(Error::Quarantined)
             ));
@@ -129,8 +149,12 @@ fn failed_access_poisoning() {
 #[test]
 fn changed_message_blocks_unmask() {
     let (mut owner, m) = attach(fixture(2));
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     assert_eq!(unsafe { owner.unmask() }, Err(Error::NotProgrammed));
     assert_eq!(
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe {
             owner.program(MsiMessage {
                 address: 3,
@@ -140,16 +164,24 @@ fn changed_message_blocks_unmask() {
         Err(Error::InvalidMessage)
     );
     assert!(!owner.needs_reset());
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program(MESSAGE) }.unwrap();
     m.lock().unwrap().memory[(TABLE / 4) as usize + 2] ^= 1;
     assert!(matches!(
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask() },
         Err(Error::Readback { .. })
     ));
     assert!(owner.needs_reset());
     let (mut owner, m) = attach(fixture(2));
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program(MESSAGE) }.unwrap();
     m.lock().unwrap().put(0x58, 4, (PBA + 8) as u32);
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     assert_eq!(unsafe { owner.unmask() }, Err(Error::CapabilityChanged));
     assert!(owner.needs_reset());
 }

@@ -177,6 +177,9 @@ impl ConfigSpace for Config {
         panic!("MSI-X must not replay adjacent config W1C with DWORD writes");
     }
 }
+// SAFETY: write16 changes only its two config bytes under the peripheral mutex;
+// write32 rejects access rather than replaying adjacent W1C status. The Config Arc
+// retains all simulated config storage through the owning function lifetime.
 unsafe impl MsiConfigSpace for Config {}
 impl Drop for Config {
     fn drop(&mut self) {
@@ -188,6 +191,9 @@ struct Bar {
     span: PhysicalSpan,
     drops: Arc<AtomicU64>,
 }
+// SAFETY: span is immutable and the Arc retains the peripheral storage. Native
+// DWORD model operations are serialized by its mutex, check table bounds/masks,
+// and preserve before/after-effect failures without revoking the backing.
 unsafe impl BarAccess for Bar {
     fn physical_span(&self) -> PhysicalSpan {
         self.span
@@ -321,6 +327,8 @@ fn fixture(vectors: u16) -> Fixture {
 }
 fn attach(f: Fixture) -> (MsixConfig<Config, Bar>, Arc<Mutex<Peripheral>>) {
     let (function, retained, bars) = f.owners;
+    // SAFETY: The function and BARs are the fixture's Arc-backed peripheral owners.
+    // There is no asynchronous source; invalid configuration returns owners before writes.
     let owner = match unsafe { MsixConfig::new(function, retained, bars) } {
         Ok(owner) => owner,
         Err((error, _)) => panic!("attach {error:?}"),
@@ -551,10 +559,18 @@ fn selected_masks(m: &Peripheral, selected: &[u16]) {
 
 fn indexed_sequence(owner: &mut MsixConfig<Config, Bar>) -> Result<(), Error> {
     for index in [0, 1, 2] {
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(index, message(index)) }?;
     }
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 1]) }?;
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(2, message(2)) }?;
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 1, 2]) }?;
     owner.disable()
 }
@@ -653,12 +669,13 @@ mod allocation {
         fn stela_test_allocations_end() -> Counts;
     }
     pub fn arm() {
-        // SAFETY: the window covers this thread only, so the harness thread
-        // keeps allocating; this is the existing canonical hosted-heap ABI.
+        // SAFETY: the isolated test arms this thread's canonical C allocation
+        // counter; the parent harness and unrelated threads remain unarmed.
         unsafe { stela_test_allocations_begin(true) };
     }
     pub fn disarm() -> usize {
-        // SAFETY: same exclusive controller finishes before any test assertions.
+        // SAFETY: this closes the current thread's window before assertions
+        // allocate. Counts matches the canonical C ABI's three u64 fields.
         let counts = unsafe { stela_test_allocations_end() };
         assert_eq!((counts.heap_try, counts.pages), (0, 0));
         usize::try_from(counts.heap).unwrap()
@@ -691,12 +708,18 @@ fn metadata_allocation_failure() {
         m.delivered_entries.reserve(2048);
         m.publish(0);
     }
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program(MESSAGE) }.unwrap();
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask() }.unwrap();
     let before = m.lock().unwrap().memory.clone();
     let config = m.lock().unwrap().config;
     let events = m.lock().unwrap().events.len();
     allocation::arm();
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     let result = unsafe { owner.program_indexed(2047, message(2047)) };
     let attempts = allocation::disarm();
     assert_eq!(result, Err(Error::Allocation));
@@ -707,26 +730,42 @@ fn metadata_allocation_failure() {
     assert_eq!(m.lock().unwrap().memory, before);
     assert_eq!(m.lock().unwrap().config, config);
     allocation::arm();
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     let programmed = unsafe { owner.program(MESSAGE) };
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     let unmasked = unsafe { owner.unmask() };
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     let indexed = unsafe { owner.program_indexed(0, MESSAGE) };
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     let selected = unsafe { owner.unmask_indices(&[0]) };
     let attempts = allocation::disarm();
     assert_eq!(
         (programmed, unmasked, indexed, selected, attempts),
         (Ok(()), Ok(()), Ok(()), Ok(()), 0)
     );
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(2047, message(2047)) }.unwrap();
     assert_eq!(owner.messages.len(), 2047);
     m.lock().unwrap().publish(2046);
     m.lock().unwrap().publish(2047);
     allocation::arm();
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     let programmed = unsafe { owner.program_indexed(2046, message(2046)) };
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     let unmasked = unsafe { owner.unmask_indices(&[0, 2046, 2047]) };
     let attempts = allocation::disarm();
     assert_eq!((programmed, unmasked, attempts), (Ok(()), Ok(()), 0));
     assert_eq!(core::mem::size_of::<EntrySet>(), 256);
     assert!(core::mem::size_of::<MsixConfig<Config, Bar>>() < 2048);
+    // SAFETY: All model deliveries finish synchronously while holding the peripheral
+    // mutex. No hardware or background callback can race release of these retained owners.
     drop(unsafe { owner.release() }.unwrap());
 }
 

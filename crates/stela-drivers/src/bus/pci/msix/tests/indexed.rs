@@ -8,6 +8,8 @@ fn legacy_trace_parity() {
         let (mut owner, m) = attach(fixture(vectors));
         let f = fixture(vectors);
         let (function, retained, bars) = f.owners;
+        // SAFETY: The function and BARs are the fixture's Arc-backed peripheral owners.
+        // There is no asynchronous source; invalid configuration returns owners before writes.
         let mut old = match unsafe { original::LegacyReference::new(function, retained, bars) } {
             Ok(owner) => owner,
             Err(_) => panic!("original attach"),
@@ -25,14 +27,20 @@ fn legacy_trace_parity() {
                 assert_eq!(a.emitted, b.emitted);
             }};
         }
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
         let invalid = MsiMessage {
             address: 3,
             data: 0,
         };
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         compare!(unsafe { owner.program(invalid) }, unsafe {
             old.program(invalid)
         });
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         compare!(unsafe { owner.program(MESSAGE) }, unsafe {
             old.program(MESSAGE)
         });
@@ -41,18 +49,30 @@ fn legacy_trace_parity() {
             model.callback_published = true;
             model.pending = true;
         }
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
         compare!(owner.mask(), old.mask());
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         compare!(unsafe { owner.program(message(1)) }, unsafe {
             old.program(message(1))
         });
         compare!(owner.disable(), old.disable());
         assert_eq!(owner.vectors(), old.vectors());
         assert_eq!(owner.needs_reset(), old.needs_reset());
+        // SAFETY: All model deliveries finish synchronously while holding the peripheral
+        // mutex. No hardware or background callback can race release of these retained owners.
         drop(unsafe { owner.release() }.unwrap());
+        // SAFETY: All model deliveries finish synchronously while holding the peripheral
+        // mutex. No hardware or background callback can race release of these retained owners.
         drop(unsafe { old.release() }.unwrap());
         assert_eq!(owner.address(), old.address());
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         compare!(unsafe { owner.program(MESSAGE) }, unsafe {
             old.program(MESSAGE)
         });
@@ -75,6 +95,8 @@ fn sparse_indices_and_pending_delivery() {
         indices.dedup();
         let before = m.lock().unwrap().memory.clone();
         for &index in &indices {
+            // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+            // callbacks stay retained; table writes and message emission run synchronously.
             unsafe { owner.program_indexed(index, message(index)) }.unwrap();
         }
         {
@@ -95,6 +117,8 @@ fn sparse_indices_and_pending_delivery() {
             }
             assert!(m.emitted.is_empty());
         }
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask_indices(&indices) }.unwrap();
         {
             let m = m.lock().unwrap();
@@ -129,6 +153,8 @@ fn sparse_indices_and_pending_delivery() {
                 matches!(m.events.iter().rev().find(|event| matches!(event, Event::ConfigWrite(..))), Some(Event::ConfigWrite(0x52, control)) if control & 0xc000 == 0x8000)
             );
         }
+        // SAFETY: All model deliveries finish synchronously while holding the peripheral
+        // mutex. No hardware or background callback can race release of these retained owners.
         drop(unsafe { owner.release() }.unwrap());
     }
 }
@@ -137,9 +163,13 @@ fn sparse_indices_and_pending_delivery() {
 fn live_peer_preservation() {
     let (mut owner, m) = attach(fixture(66));
     for index in [0, 63, 64] {
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(index, message(index)) }.unwrap();
         m.lock().unwrap().publish(index);
     }
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 63, 64]) }.unwrap();
     let before = m.lock().unwrap().memory.clone();
     {
@@ -149,6 +179,8 @@ fn live_peer_preservation() {
         // its new message is being installed or peer delivery is restored.
     }
     let start = m.lock().unwrap().events.len();
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(65, message(65)) }.unwrap();
     {
         let m = m.lock().unwrap();
@@ -175,17 +207,27 @@ fn live_peer_preservation() {
         }));
     }
     m.lock().unwrap().publish(65);
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 63, 64, 65]) }.unwrap();
     assert_eq!(m.lock().unwrap().delivered_entries, [0, 63, 64, 65]);
     owner.mask().unwrap();
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(65, message(65)) }.unwrap();
     assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0xc000);
     selected_masks(&m.lock().unwrap(), &[]);
     // Retarget a formerly live entry under an explicitly modeled stopped target;
     // the unrelated live peer remains enabled; no stale target request exists.
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(64, message(64)) }.unwrap();
     selected_masks(&m.lock().unwrap(), &[0]);
+    // SAFETY: All model deliveries finish synchronously while holding the peripheral
+    // mutex. No hardware or background callback can race release of these retained owners.
     drop(unsafe { owner.release() }.unwrap());
 }
 
@@ -194,28 +236,46 @@ fn legacy_calls_invalidate_indexed_replay() {
     for use_program in [false, true] {
         let (mut owner, m) = attach(fixture(65));
         for index in [0, 64] {
+            // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+            // callbacks stay retained; table writes and message emission run synchronously.
             unsafe { owner.program_indexed(index, message(index)) }.unwrap();
             m.lock().unwrap().publish(index);
         }
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
         if use_program {
+            // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+            // callbacks stay retained; table writes and message emission run synchronously.
             unsafe { owner.program(MESSAGE) }.unwrap();
             selected_masks(&m.lock().unwrap(), &[]);
+            // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+            // under its mutex, including failures injected after a modeled hardware effect.
             unsafe { owner.unmask() }.unwrap();
         } else {
+            // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+            // under its mutex, including failures injected after a modeled hardware effect.
             unsafe { owner.unmask() }.unwrap();
         }
         selected_masks(&m.lock().unwrap(), &[0]);
         let events = m.lock().unwrap().events.clone();
         assert_eq!(
+            // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+            // under its mutex, including failures injected after a modeled hardware effect.
             unsafe { owner.unmask_indices(&[0, 64]) },
             Err(Error::NotProgrammed)
         );
         assert_eq!(m.lock().unwrap().events, events);
         assert!(!owner.needs_reset());
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(64, message(64)) }.unwrap();
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
         selected_masks(&m.lock().unwrap(), &[0, 64]);
+        // SAFETY: All model deliveries finish synchronously while holding the peripheral
+        // mutex. No hardware or background callback can race release of these retained owners.
         drop(unsafe { owner.release() }.unwrap());
     }
 }
@@ -224,25 +284,37 @@ fn legacy_calls_invalidate_indexed_replay() {
 fn invalid_selection_is_transactional() {
     let (mut owner, m) = attach(fixture(65));
     for index in [0, 64] {
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(index, message(index)) }.unwrap();
         m.lock().unwrap().publish(index);
     }
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
     let memory = m.lock().unwrap().memory.clone();
     let config = m.lock().unwrap().config;
     let events = m.lock().unwrap().events.clone();
     for indices in [&[][..], &[0, 0][..], &[65][..], &[0, 1][..]] {
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         assert!(unsafe { owner.unmask_indices(indices) }.is_err());
     }
     assert_eq!(
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(65, message(1)) },
         Err(Error::InvalidIndex)
     );
     assert_eq!(
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(u16::MAX, message(1)) },
         Err(Error::InvalidIndex)
     );
     assert_eq!(
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe {
             owner.program(MsiMessage {
                 address: 3,
@@ -252,6 +324,8 @@ fn invalid_selection_is_transactional() {
         Err(Error::InvalidMessage)
     );
     assert_eq!(
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe {
             owner.program_indexed(
                 64,
@@ -273,11 +347,15 @@ fn invalid_selection_is_transactional() {
     let saved = owner.layout;
     owner.layout.table_offset = u64::MAX - 7;
     assert_eq!(
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(64, message(1)) },
         Err(Error::InvalidTable)
     );
     owner.layout = saved;
     assert_eq!(m.lock().unwrap().events, events);
+    // SAFETY: All model deliveries finish synchronously while holding the peripheral
+    // mutex. No hardware or background callback can race release of these retained owners.
     drop(unsafe { owner.release() }.unwrap());
 }
 
@@ -290,6 +368,8 @@ fn indexed_access_failure_quarantines() {
     m.lock().unwrap().queue_on_guard.extend([0, 1]);
     indexed_sequence(&mut baseline).unwrap();
     let count = m.lock().unwrap().events.len();
+    // SAFETY: All model deliveries finish synchronously while holding the peripheral
+    // mutex. No hardware or background callback can race release of these retained owners.
     drop(unsafe { baseline.release() }.unwrap());
     for after_effect in [false, true] {
         for failure in 1..=count {
@@ -320,13 +400,19 @@ fn indexed_access_failure_quarantines() {
             }
             let events = m.lock().unwrap().events.len();
             assert_eq!(
+                // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+                // under its mutex, including failures injected after a modeled hardware effect.
                 unsafe { owner.unmask_indices(&[0, 1]) },
                 Err(Error::Quarantined)
             );
             assert_eq!(
+                // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+                // callbacks stay retained; table writes and message emission run synchronously.
                 unsafe { owner.program_indexed(2, MESSAGE) },
                 Err(Error::Quarantined)
             );
+            // SAFETY: All model deliveries finish synchronously while holding the peripheral
+            // mutex. No hardware or background callback can race release of these retained owners.
             assert_eq!(unsafe { owner.release() }.err(), Some(Error::Quarantined));
             assert_eq!(m.lock().unwrap().events.len(), events);
             drop(owner);
@@ -340,16 +426,24 @@ fn peer_corruption_blocks_global_unmask() {
     for corrupt_peer in [false, true] {
         let (mut owner, m) = attach(fixture(3));
         for index in 0..3 {
+            // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+            // callbacks stay retained; table writes and message emission run synchronously.
             unsafe { owner.program_indexed(index, message(index)) }.unwrap();
             m.lock().unwrap().publish(index);
         }
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask_indices(&[0, 1]) }.unwrap();
         let word = (TABLE / 4) as usize + 4 + 2;
         m.lock().unwrap().memory[word] ^= 1;
         let start = m.lock().unwrap().events.len();
         let result = if corrupt_peer {
+            // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+            // callbacks stay retained; table writes and message emission run synchronously.
             unsafe { owner.program_indexed(2, message(2)) }
         } else {
+            // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+            // under its mutex, including failures injected after a modeled hardware effect.
             unsafe { owner.unmask_indices(&[0, 1, 2]) }
         };
         assert!(matches!(result, Err(Error::Readback { .. })));
@@ -378,9 +472,13 @@ fn changed_layout_quarantines() {
         ];
         let (mut owner, m) = attach(f);
         for index in 0..3 {
+            // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+            // callbacks stay retained; table writes and message emission run synchronously.
             unsafe { owner.program_indexed(index, message(index)) }.unwrap();
             m.lock().unwrap().publish(index);
         }
+        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask_indices(&[0, 1]) }.unwrap();
         {
             let mut m = m.lock().unwrap();
@@ -395,6 +493,8 @@ fn changed_layout_quarantines() {
             }
         }
         let start = m.lock().unwrap().events.len();
+        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+        // callbacks stay retained; table writes and message emission run synchronously.
         assert!(unsafe { owner.program_indexed(2, message(2)) }.is_err());
         assert!(owner.needs_reset());
         if case < 6 {
@@ -406,6 +506,8 @@ fn changed_layout_quarantines() {
         } else {
             assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0xc000);
         }
+        // SAFETY: All model deliveries finish synchronously while holding the peripheral
+        // mutex. No hardware or background callback can race release of these retained owners.
         assert_eq!(unsafe { owner.release() }.err(), Some(Error::Quarantined));
         drop(owner);
         assert!(drops.iter().all(|drop| drop.load(Ordering::Relaxed) == 0));
@@ -447,6 +549,8 @@ fn vector_zero_literal_trace() {
         expected
     };
     let (mut owner, m) = attach(fixture(2));
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program(MESSAGE) }.unwrap();
     let mut expected = prefix();
     expected.extend([
@@ -461,6 +565,8 @@ fn vector_zero_literal_trace() {
     assert_eq!(m.lock().unwrap().events, expected);
     m.lock().unwrap().events.clear();
     m.lock().unwrap().publish(0);
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask() }.unwrap();
     let mut expected = prefix();
     expected.extend([
@@ -473,23 +579,35 @@ fn vector_zero_literal_trace() {
     expected.extend(discovery);
     expected.extend([Event::ConfigWrite(0x52, 0x8001), Event::ConfigRead(0x52, 2)]);
     assert_eq!(m.lock().unwrap().events, expected);
+    // SAFETY: All model deliveries finish synchronously while holding the peripheral
+    // mutex. No hardware or background callback can race release of these retained owners.
     drop(unsafe { owner.release() }.unwrap());
 }
 
 #[test]
 fn missing_zero_preflight_preserves_peer() {
     let (mut owner, m) = attach(fixture(65));
+    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
+    // callbacks stay retained; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(64, message(64)) }.unwrap();
     m.lock().unwrap().publish(64);
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[64]) }.unwrap();
     let events = m.lock().unwrap().events.clone();
     let memory = m.lock().unwrap().memory.clone();
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     assert_eq!(unsafe { owner.unmask() }, Err(Error::NotProgrammed));
     assert!(owner.live.contains(64));
     assert_eq!(owner.message_at(64), Some(message(64)));
     assert!(!owner.needs_reset());
     assert_eq!(m.lock().unwrap().events, events);
     assert_eq!(m.lock().unwrap().memory, memory);
+    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[64]) }.unwrap();
+    // SAFETY: All model deliveries finish synchronously while holding the peripheral
+    // mutex. No hardware or background callback can race release of these retained owners.
     drop(unsafe { owner.release() }.unwrap());
 }
