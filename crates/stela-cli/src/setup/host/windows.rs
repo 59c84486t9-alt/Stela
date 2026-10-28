@@ -264,7 +264,7 @@ fn nvme_serial(drive: &File) -> Option<String> {
     ];
     for (field, bytes) in fields
         .iter()
-        .zip(input[header..header + data].chunks_exact_mut(4))
+        .zip(input[header..header + data].as_chunks_mut::<4>().0)
     {
         bytes.copy_from_slice(&field.to_le_bytes());
     }
