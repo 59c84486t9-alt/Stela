@@ -8,7 +8,7 @@
 //! 1024-byte command line, so that is the revision emitted here.
 use alloc::string::String;
 use anyhow::{Result, ensure};
-use serde::Serialize;
+pub use stela_runtime::boot_bundle::schema::{BootArgs, Video};
 
 pub const BOOT_LINE_LENGTH: usize = 1024;
 pub const REVISION: u16 = 3;
@@ -43,103 +43,69 @@ pub mod offset {
 /// `sizeof(boot_args)`.
 pub const BYTES: usize = offset::MEM_SIZE_ACTUAL + 8;
 
-/// `Boot_Video`: the framebuffer XNU draws its console on.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct Video {
-    pub base: u64,
-    pub display: u64,
-    pub row_bytes: u64,
-    pub width: u64,
-    pub height: u64,
-    pub depth: u64,
+pub fn encode(args: &BootArgs) -> Result<[u8; BYTES]> {
+    ensure!(
+        args.command_line.len() < BOOT_LINE_LENGTH && !args.command_line.contains('\0'),
+        "boot-args must be under {BOOT_LINE_LENGTH} bytes without NUL"
+    );
+    let mut out = [0u8; BYTES];
+    let mut put = |at: usize, bytes: &[u8]| out[at..at + bytes.len()].copy_from_slice(bytes);
+    put(offset::REVISION, &args.revision.to_le_bytes());
+    put(offset::VERSION, &args.version.to_le_bytes());
+    put(offset::VIRT_BASE, &args.virt_base.to_le_bytes());
+    put(offset::PHYS_BASE, &args.phys_base.to_le_bytes());
+    put(offset::MEM_SIZE, &args.mem_size.to_le_bytes());
+    put(
+        offset::TOP_OF_KERNEL_DATA,
+        &args.top_of_kernel_data.to_le_bytes(),
+    );
+    put(offset::VIDEO_BASE, &args.video.base.to_le_bytes());
+    put(offset::VIDEO_DISPLAY, &args.video.display.to_le_bytes());
+    put(offset::VIDEO_ROW_BYTES, &args.video.row_bytes.to_le_bytes());
+    put(offset::VIDEO_WIDTH, &args.video.width.to_le_bytes());
+    put(offset::VIDEO_HEIGHT, &args.video.height.to_le_bytes());
+    put(offset::VIDEO_DEPTH, &args.video.depth.to_le_bytes());
+    put(offset::MACHINE_TYPE, &args.machine_type.to_le_bytes());
+    put(offset::DEVICE_TREE, &args.device_tree.to_le_bytes());
+    put(
+        offset::DEVICE_TREE_LENGTH,
+        &args.device_tree_length.to_le_bytes(),
+    );
+    put(offset::COMMAND_LINE, args.command_line.as_bytes());
+    put(offset::BOOT_FLAGS, &args.boot_flags.to_le_bytes());
+    put(offset::MEM_SIZE_ACTUAL, &args.mem_size_actual.to_le_bytes());
+    Ok(out)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BootArgs {
-    pub revision: u16,
-    pub version: u16,
-    /// Kernel virtual address of `phys_base` in XNU's physical aperture.
-    pub virt_base: u64,
-    pub phys_base: u64,
-    /// Bytes of memory from `phys_base` that the kernel may manage.
-    pub mem_size: u64,
-    pub top_of_kernel_data: u64,
-    pub video: Video,
-    pub machine_type: u32,
-    /// Kernel virtual address of the flattened DeviceTree.
-    pub device_tree: u64,
-    pub device_tree_length: u32,
-    pub command_line: String,
-    pub boot_flags: u64,
-    /// Installed DRAM, including memory below `phys_base`.
-    pub mem_size_actual: u64,
-}
-
-impl BootArgs {
-    pub fn encode(&self) -> Result<[u8; BYTES]> {
-        ensure!(
-            self.command_line.len() < BOOT_LINE_LENGTH && !self.command_line.contains('\0'),
-            "boot-args must be under {BOOT_LINE_LENGTH} bytes without NUL"
-        );
-        let mut out = [0u8; BYTES];
-        let mut put = |at: usize, bytes: &[u8]| out[at..at + bytes.len()].copy_from_slice(bytes);
-        put(offset::REVISION, &self.revision.to_le_bytes());
-        put(offset::VERSION, &self.version.to_le_bytes());
-        put(offset::VIRT_BASE, &self.virt_base.to_le_bytes());
-        put(offset::PHYS_BASE, &self.phys_base.to_le_bytes());
-        put(offset::MEM_SIZE, &self.mem_size.to_le_bytes());
-        put(
-            offset::TOP_OF_KERNEL_DATA,
-            &self.top_of_kernel_data.to_le_bytes(),
-        );
-        put(offset::VIDEO_BASE, &self.video.base.to_le_bytes());
-        put(offset::VIDEO_DISPLAY, &self.video.display.to_le_bytes());
-        put(offset::VIDEO_ROW_BYTES, &self.video.row_bytes.to_le_bytes());
-        put(offset::VIDEO_WIDTH, &self.video.width.to_le_bytes());
-        put(offset::VIDEO_HEIGHT, &self.video.height.to_le_bytes());
-        put(offset::VIDEO_DEPTH, &self.video.depth.to_le_bytes());
-        put(offset::MACHINE_TYPE, &self.machine_type.to_le_bytes());
-        put(offset::DEVICE_TREE, &self.device_tree.to_le_bytes());
-        put(
-            offset::DEVICE_TREE_LENGTH,
-            &self.device_tree_length.to_le_bytes(),
-        );
-        put(offset::COMMAND_LINE, self.command_line.as_bytes());
-        put(offset::BOOT_FLAGS, &self.boot_flags.to_le_bytes());
-        put(offset::MEM_SIZE_ACTUAL, &self.mem_size_actual.to_le_bytes());
-        Ok(out)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
-        ensure!(bytes.len() >= BYTES, "boot_args needs {BYTES} bytes");
-        let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
-        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
-        let line = &bytes[offset::COMMAND_LINE..offset::COMMAND_LINE + BOOT_LINE_LENGTH];
-        let end = line.iter().position(|&b| b == 0).unwrap_or(line.len());
-        Ok(Self {
-            revision: u16_at(offset::REVISION),
-            version: u16_at(offset::VERSION),
-            virt_base: u64_at(offset::VIRT_BASE),
-            phys_base: u64_at(offset::PHYS_BASE),
-            mem_size: u64_at(offset::MEM_SIZE),
-            top_of_kernel_data: u64_at(offset::TOP_OF_KERNEL_DATA),
-            video: Video {
-                base: u64_at(offset::VIDEO_BASE),
-                display: u64_at(offset::VIDEO_DISPLAY),
-                row_bytes: u64_at(offset::VIDEO_ROW_BYTES),
-                width: u64_at(offset::VIDEO_WIDTH),
-                height: u64_at(offset::VIDEO_HEIGHT),
-                depth: u64_at(offset::VIDEO_DEPTH),
-            },
-            machine_type: u32_at(offset::MACHINE_TYPE),
-            device_tree: u64_at(offset::DEVICE_TREE),
-            device_tree_length: u32_at(offset::DEVICE_TREE_LENGTH),
-            command_line: String::from_utf8(line[..end].to_vec())?,
-            boot_flags: u64_at(offset::BOOT_FLAGS),
-            mem_size_actual: u64_at(offset::MEM_SIZE_ACTUAL),
-        })
-    }
+pub fn decode(bytes: &[u8]) -> Result<BootArgs> {
+    ensure!(bytes.len() >= BYTES, "boot_args needs {BYTES} bytes");
+    let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let line = &bytes[offset::COMMAND_LINE..offset::COMMAND_LINE + BOOT_LINE_LENGTH];
+    let end = line.iter().position(|&b| b == 0).unwrap_or(line.len());
+    Ok(BootArgs {
+        revision: u16_at(offset::REVISION),
+        version: u16_at(offset::VERSION),
+        virt_base: u64_at(offset::VIRT_BASE),
+        phys_base: u64_at(offset::PHYS_BASE),
+        mem_size: u64_at(offset::MEM_SIZE),
+        top_of_kernel_data: u64_at(offset::TOP_OF_KERNEL_DATA),
+        video: Video {
+            base: u64_at(offset::VIDEO_BASE),
+            display: u64_at(offset::VIDEO_DISPLAY),
+            row_bytes: u64_at(offset::VIDEO_ROW_BYTES),
+            width: u64_at(offset::VIDEO_WIDTH),
+            height: u64_at(offset::VIDEO_HEIGHT),
+            depth: u64_at(offset::VIDEO_DEPTH),
+        },
+        machine_type: u32_at(offset::MACHINE_TYPE),
+        device_tree: u64_at(offset::DEVICE_TREE),
+        device_tree_length: u32_at(offset::DEVICE_TREE_LENGTH),
+        command_line: String::from_utf8(line[..end].to_vec())?,
+        boot_flags: u64_at(offset::BOOT_FLAGS),
+        mem_size_actual: u64_at(offset::MEM_SIZE_ACTUAL),
+    })
 }
 
 #[cfg(test)]
@@ -180,17 +146,17 @@ mod tests {
             boot_flags: BOOT_FLAG_DARK_BOOT,
             mem_size_actual: 0x2_0000_0000,
         };
-        let bytes = args.encode()?;
+        let bytes = encode(&args)?;
         assert_eq!(
             &bytes[offset::COMMAND_LINE..offset::COMMAND_LINE + 2],
             b"-v"
         );
-        assert_eq!(BootArgs::decode(&bytes)?, args);
+        assert_eq!(decode(&bytes)?, args);
         let long = BootArgs {
             command_line: "x".repeat(BOOT_LINE_LENGTH),
             ..args
         };
-        assert!(long.encode().is_err());
+        assert!(encode(&long).is_err());
         Ok(())
     }
 }

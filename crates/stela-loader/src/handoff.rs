@@ -7,7 +7,7 @@
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
 use anyhow::{Result, ensure};
-use serde::Serialize;
+pub use stela_runtime::boot_bundle::schema::BootCommand;
 use stela_runtime::machine::soc;
 
 const ROOT: &str = "/";
@@ -15,48 +15,6 @@ const CPUS: &str = "/cpus";
 const ARM_IO: &str = "/arm-io";
 const PLATFORM_NAME: &str = "platform-name";
 const ENVIRONMENTS: &str = "osenvironments";
-
-/// The previous boot stage's command, not the OS environment or root device.
-/// Known codes come from 26A434 J473 LLB's dispatch table at raw 0x1544e8
-/// (0x38-byte entries, command at +0x30), or its received-iBEC path at
-/// 0x132c/0x2075c. The setter at 0xc76c0 records the byte at handoff +0xc;
-/// iBoot imports that byte at 0xea4c8 and publishes it without remapping.
-/// Values whose origin is unknown remain unrepresentable here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-#[repr(u8)]
-pub enum BootCommand {
-    Fsboot = 1,
-    Kcgen = 2,
-    Upgrade = 3,
-    RecoverSystem = 4,
-    TetheredRestore = 7,
-    FieldDiags = 8,
-    FsbootSafe = 9,
-    Recover = 11,
-    FieldDiagsPaired = 13,
-    PostUpgrade = 14,
-}
-
-impl TryFrom<u8> for BootCommand {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::Fsboot),
-            2 => Ok(Self::Kcgen),
-            3 => Ok(Self::Upgrade),
-            4 => Ok(Self::RecoverSystem),
-            7 => Ok(Self::TetheredRestore),
-            8 => Ok(Self::FieldDiags),
-            9 => Ok(Self::FsbootSafe),
-            11 => Ok(Self::Recover),
-            13 => Ok(Self::FieldDiagsPaired),
-            14 => Ok(Self::PostUpgrade),
-            _ => Err("boot command has no modeled previous-stage origin"),
-        }
-    }
-}
 
 /// The command of a disk-loaded installed system. LLB promotes fsboot to
 /// fsboot-safe when `-x` is set (0xd41d8..0xd4224), while post-upgrade keeps

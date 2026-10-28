@@ -2496,7 +2496,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What iBoot left in the core lock registers (`machine::ctrr`): every
     /// cluster and PE takes it now, and again when it starts. The boot
     /// mount calls this before the first instruction.
-    pub fn hand_off_core_locks(&mut self, handoff: ctrr::Handoff) {
+    pub fn hand_off_core_locks(&mut self, handoff: ctrr::CoreLocks) {
         let handoff = alloc::sync::Arc::new(handoff);
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             processors::Peer::Parked(parked) => Some(parked.cpu_mut()),

@@ -15,11 +15,13 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-use serde::Deserialize;
 
-/// Schema4 binds the selected boot CPU to the original and prepared ADTs.
-/// Older readers started PE0 even when preparation selected another PE.
-pub const SCHEMA_VERSION: u32 = 4;
+pub mod schema;
+pub use schema::{
+    BootCpu, BootCpuSelection, CoreLocks, Encoding, Manifest, Options, Patch, PatchSource,
+    SCHEMA_VERSION, Source, Target,
+};
+use schema::{File, Region};
 pub const MANIFEST_FILE: &str = "bundle.json";
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 /// Guest DRAM is backed by 2 MiB host frames.
@@ -64,149 +66,6 @@ impl fmt::Display for BundleError {
 }
 
 impl core::error::Error for BundleError {}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Options {
-    pub dram_base: u64,
-    pub dram_size: u64,
-    pub phys_base: u64,
-    /// The OS environment iBoot enters (`/chosen osenvironment`), such as
-    /// `recoveryos`; `None` is macOS.
-    #[serde(default)]
-    pub osenvironment: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct File {
-    pub name: String,
-    pub bytes: u64,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Region {
-    pub name: String,
-    pub file: String,
-    pub file_offset: u64,
-    pub bytes: u64,
-    pub guest_pa: u64,
-    pub memory_bytes: u64,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Patch {
-    pub source: String,
-    pub required: bool,
-    pub region: String,
-    pub file: String,
-    pub file_offset: u64,
-    pub bytes: u64,
-    pub encoding: String,
-    pub field: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Entry {
-    pub image: String,
-    pub virtual_address: u64,
-    pub physical_address: u64,
-}
-
-/// A physical range iBoot programs into a memory-controller lock group.
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub struct Programmed {
-    pub base: u64,
-    pub bytes: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BootArgs {
-    pub command_line: String,
-}
-
-/// Selected restore identity as written by the loader, never inferred from
-/// template DeviceTree IDs or from a source filename.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Target {
-    pub product_type: String,
-    pub device_class: String,
-    pub product_version: String,
-    pub product_build: String,
-    pub variant: String,
-    pub chip_id: Option<u32>,
-    pub board_id: Option<u32>,
-}
-
-/// Exact input provenance serialized by preparation. File verification alone
-/// does not authenticate its container or an Apple signature.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Source {
-    pub component: String,
-    pub member: String,
-    pub container_sha256: String,
-    pub payload_type: String,
-    pub description: String,
-    pub decoded_bytes: u64,
-    pub decoded_sha256: String,
-}
-
-/// Preparation policy, distinct from the selected CPU's source identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BootCpuSelection {
-    /// The original first CPU, the automatic policy.
-    First,
-    /// The first original P-core, the automatic policy of earlier bundles.
-    FirstPerformance,
-    Explicit,
-}
-
-/// Original CPU identity selected by preparation. `original_index` is source
-/// provenance, never a prepared or runtime logical PE index.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct BootCpu {
-    pub path: String,
-    pub affinity: u32,
-    pub cluster_type: u8,
-    pub original_index: usize,
-    pub selection: BootCpuSelection,
-}
-
-/// The fields of `bundle.json` the mount uses; others are ignored.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Manifest {
-    pub schema_version: u32,
-    /// Generic authored images may omit Apple provenance. The Apple boot mount
-    /// requires complete selected target/source/original ADT before loading.
-    #[serde(default)]
-    pub target: Option<Target>,
-    #[serde(default)]
-    pub sources: Vec<Source>,
-    pub options: Options,
-    /// Authored diagnostics may omit this; genuine Apple intake requires and
-    /// verifies it against immutable source and prepared/live CPU identities.
-    #[serde(default)]
-    pub boot_cpu: Option<BootCpu>,
-    pub files: Vec<File>,
-    pub regions: Vec<Region>,
-    pub entry: Entry,
-    pub entry_x0: u64,
-    pub boot_args: BootArgs,
-    pub top_of_kernel_data: u64,
-    pub patches: Vec<Patch>,
-    /// Positive preparation admission evidence, already serialized by the
-    /// loader. Older bundles without it retain required lifecycle coverage.
-    #[serde(default)]
-    pub hidden_devices: Vec<String>,
-    /// The AMCC CTRR-A region iBoot programs, when the bundle has one.
-    #[serde(default)]
-    pub read_only_region: Option<Programmed>,
-    /// What iBoot leaves in the cores' lock registers (M4 and later), for
-    /// `machine::Machine::hand_off_core_locks`.
-    #[serde(default)]
-    pub core_locks: Option<crate::machine::ctrr::Handoff>,
-}
 
 /// The firmware framebuffer as the guest sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,10 +132,7 @@ impl Manifest {
     /// managed range, sized for `/chosen dram-size`
     /// ([`crate::machine::tag_storage`]), so its value follows the machine's
     /// DRAM rather than the prepared one.
-    pub fn core_locks(
-        &self,
-        machine: &Machine,
-    ) -> Result<Option<crate::machine::ctrr::Handoff>, BundleError> {
+    pub fn core_locks(&self, machine: &Machine) -> Result<Option<CoreLocks>, BundleError> {
         let Some(mut locks) = self.core_locks.clone() else {
             return Ok(None);
         };
@@ -314,7 +170,7 @@ pub struct LoadedRegion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedPatch {
     pub field: String,
-    pub source: String,
+    pub source: PatchSource,
     pub guest_pa: u64,
     pub value: Vec<u8>,
 }
@@ -492,20 +348,20 @@ impl<'a> Verified<'a> {
         };
         let bytes = usize::try_from(patch.bytes).map_err(|_| error("size overflows"))?;
         let options = &self.manifest.options;
-        let value = match (patch.source.as_str(), patch.field.as_str()) {
-            ("dram-size", "/chosen dram-size" | "boot_args.memSizeActual") => {
+        let value = match (patch.source, patch.field.as_str()) {
+            (PatchSource::DramSize, "/chosen dram-size" | "boot_args.memSizeActual") => {
                 Some(u64_value(machine.dram_bytes))
             }
-            ("dram-size", "boot_args.memSize") => Some(u64_value(
+            (PatchSource::DramSize, "boot_args.memSize") => Some(u64_value(
                 machine.managed_end().map_err(error)? - options.phys_base,
             )),
-            ("entropy", _) => {
+            (PatchSource::Entropy, _) => {
                 let mut random = vec![0; bytes];
                 entropy(&mut random).map_err(BundleError::Entropy)?;
                 Some(random)
             }
-            ("timebase", _) => Some(u64_value(machine.timebase_hz)),
-            ("framebuffer", field) => match machine.framebuffer {
+            (PatchSource::Timebase, _) => Some(u64_value(machine.timebase_hz)),
+            (PatchSource::Framebuffer, field) => match machine.framebuffer {
                 None => None,
                 Some(screen) => {
                     let command_line = machine
@@ -551,14 +407,14 @@ impl<'a> Verified<'a> {
                     })
                 }
             },
-            ("nvram", "/chosen nvram-proxy-data") => {
+            (PatchSource::Nvram, "/chosen nvram-proxy-data") => {
                 machine.nvram.as_ref().map(|nvram| nvram.proxy.clone())
             }
-            ("nvram", "/chosen nvram-current-bank") => machine
+            (PatchSource::Nvram, "/chosen nvram-current-bank") => machine
                 .nvram
                 .as_ref()
                 .map(|nvram| nvram.bank.to_le_bytes().to_vec()),
-            ("boot-args", _) => match &machine.boot_args {
+            (PatchSource::BootArgs, _) => match &machine.boot_args {
                 None => None,
                 Some(line) => {
                     if line.len() >= bytes || line.contains('\0') {
@@ -569,13 +425,12 @@ impl<'a> Verified<'a> {
                     Some(value)
                 }
             },
-            _ => return Err(error("unknown patch source or field")),
+            _ => return Err(error("unknown field for its source")),
         };
         if let Some(value) = &value {
-            let width = match patch.encoding.as_str() {
-                "u64-le" => U64_BYTES,
-                "bytes" | "c-string" => value.len(),
-                _ => return Err(error("unknown encoding")),
+            let width = match patch.encoding {
+                Encoding::U64Le => U64_BYTES,
+                Encoding::Bytes | Encoding::CString => value.len(),
             };
             if value.len() != bytes || value.len() != width {
                 return Err(error("value does not fill the slot"));
@@ -684,7 +539,7 @@ impl<'a> Verified<'a> {
             }
             patches.push(AppliedPatch {
                 field: patch.field.clone(),
-                source: patch.source.clone(),
+                source: patch.source,
                 guest_pa,
                 value,
             });

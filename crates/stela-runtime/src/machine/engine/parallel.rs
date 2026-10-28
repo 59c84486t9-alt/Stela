@@ -575,7 +575,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub fn start_parallel(
         &mut self,
         hub: Arc<Hub>,
-        core_locks: Arc<ctrr::Handoff>,
+        core_locks: Arc<ctrr::CoreLocks>,
         address: u64,
     ) -> Step {
         for (pe, peer) in self.peers.iter_mut().enumerate() {

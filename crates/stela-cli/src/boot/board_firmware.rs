@@ -100,7 +100,7 @@ pub(super) fn from_ramdisk(
                     "board device firmware /{path} in the {} (decoded SHA-256 {})",
                     ramdisk.source.component, ramdisk.source.decoded_sha256
                 ),
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: digest,
             };
             Ok((
@@ -135,7 +135,7 @@ mod tests {
                 container_sha256: "c".repeat(64),
                 payload_type: "rdsk".into(),
                 description: String::new(),
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: digest,
             },
             bytes,

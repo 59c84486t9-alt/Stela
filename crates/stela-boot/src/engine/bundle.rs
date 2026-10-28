@@ -72,7 +72,7 @@ pub struct Entry {
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
     /// What iBoot leaves in the cores' lock registers (M4 and later).
-    pub core_locks: stela_runtime::machine::ctrr::Handoff,
+    pub core_locks: stela_runtime::machine::ctrr::CoreLocks,
 }
 
 pub(super) fn contents(file: &File) -> &'static [u8] {

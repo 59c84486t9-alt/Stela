@@ -1530,7 +1530,7 @@ mod tests {
         enabled: bool,
         execute_inside_only: bool,
     ) {
-        use crate::machine::ctrr::{self, Field, Generation, Region};
+        use crate::machine::ctrr::{self, Field, Generation, LockRegion};
         match ctrr::generation(machine.profile.chip) {
             Generation::A => {
                 let mut cluster = machine.cpu.ctrr.borrow_mut();
@@ -1556,10 +1556,10 @@ mod tests {
                 } else {
                     &mut machine.cpu.ctrr_core.el1
                 };
-                bank.write(Region::CtrrC, Field::Lower, first).unwrap();
-                bank.write(Region::CtrrC, Field::Upper, last).unwrap();
+                bank.write(LockRegion::CtrrC, Field::Lower, first).unwrap();
+                bank.write(LockRegion::CtrrC, Field::Upper, last).unwrap();
                 bank.write(
-                    Region::CtrrC,
+                    LockRegion::CtrrC,
                     Field::Control,
                     if enabled { ctrr::CTRR_ENABLE } else { 0 },
                 )

@@ -1862,7 +1862,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let target = target(options.parallel);
     let speculation = speculation::probe();
     let mut read_only_region = None;
-    let mut core_locks = stela_runtime::machine::ctrr::Handoff::default();
+    let mut core_locks = stela_runtime::machine::ctrr::CoreLocks::default();
     let mut hidden_devices = Vec::new();
     let mut loaded_tree = None;
     let mut loaded_source = None;

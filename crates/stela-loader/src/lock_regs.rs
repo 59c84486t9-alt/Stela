@@ -72,7 +72,8 @@ use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use core::ops::Range;
-use stela_runtime::machine::ctrr::{Handoff, Locked, Region};
+pub use stela_runtime::boot_bundle::schema::Programmed;
+use stela_runtime::machine::ctrr::{CoreLocks, LockRegion, Locked};
 
 pub const AMCC: &str = "/chosen/lock-regs/amcc";
 pub const IOA: &str = "/chosen/lock-regs/ioa";
@@ -640,14 +641,6 @@ fn publish_controller(
     Ok(true)
 }
 
-/// A physical range iBoot programs into a lock group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct Programmed {
-    pub group: &'static str,
-    pub base: u64,
-    pub bytes: u64,
-}
-
 /// The CTRR-A region iBoot programs: `[start, end)`, which must be whole
 /// pages of the group above `dram_base`.
 pub fn ctrr_a(
@@ -671,7 +664,7 @@ pub fn ctrr_a(
         "CTRR-A region {start:#x}..{end:#x} is not whole {page:#x}-byte pages above {dram_base:#x}"
     );
     Ok(Programmed {
-        group: group.name,
+        group: group.name.into(),
         base: start,
         bytes: end - start,
     })
@@ -699,7 +692,7 @@ pub fn core_handoff(
     region: impl Fn(&str) -> Option<Range<u64>>,
     kernel_ctrr: bool,
     tag_offset: u64,
-) -> Result<Handoff> {
+) -> Result<CoreLocks> {
     let either = |name: &'static str, fallback: &'static str| {
         if region(name).is_some() {
             name
@@ -721,18 +714,18 @@ pub fn core_handoff(
     let kernel_text = either("AuxKC-rx", "BootKC-rx");
     let mut spans = alloc::vec![
         (
-            Region::CtrrC,
+            LockRegion::CtrrC,
             span(either("CL4-rx", "DeviceTree"), "SPTM-rx")?
         ),
-        (Region::CtxrA, span("SPTM-rx", "SPTM-rx")?),
-        (Region::CtxrB, span(secure_kernel, secure_kernel)?),
-        (Region::CtxrC, span("TXM-rx", "TXM-bx")?),
-        (Region::CtxrD, span(kernel_text, "BootKC-bx")?),
+        (LockRegion::CtxrA, span("SPTM-rx", "SPTM-rx")?),
+        (LockRegion::CtxrB, span(secure_kernel, secure_kernel)?),
+        (LockRegion::CtxrC, span("TXM-rx", "TXM-bx")?),
+        (LockRegion::CtxrD, span(kernel_text, "BootKC-bx")?),
     ];
     if kernel_ctrr {
-        spans.push((Region::CtrrD, span("TXM-ro", "BootKC-rs")?));
+        spans.push((LockRegion::CtrrD, span("TXM-ro", "BootKC-rs")?));
     }
-    Ok(Handoff {
+    Ok(CoreLocks {
         locked: spans
             .into_iter()
             .map(|(region, (first, last))| Locked {
@@ -1004,7 +997,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(
-            (region.group, region.base, region.bytes),
+            (region.group.as_str(), region.base, region.bytes),
             ("amcc-ctrr-a", 0x8_0200_0000, 0x579_0000)
         );
     }
@@ -1115,27 +1108,27 @@ pub(crate) mod tests {
                 .map(|locked| (locked.first, locked.last))
         };
         assert_eq!(
-            bounds(Region::CtrrC),
+            bounds(LockRegion::CtrrC),
             Some((0x100_06fb_8000, 0x100_0710_bfff))
         );
         assert_eq!(
-            bounds(Region::CtrrD),
+            bounds(LockRegion::CtrrD),
             Some((0x100_0193_8000, 0x100_06fb_7fff))
         );
         assert_eq!(
-            bounds(Region::CtxrA),
+            bounds(LockRegion::CtxrA),
             Some((0x100_070a_4000, 0x100_0710_bfff))
         );
         assert_eq!(
-            bounds(Region::CtxrB),
+            bounds(LockRegion::CtxrB),
             Some((0x100_0945_0000, 0x100_0945_3fff))
         );
         assert_eq!(
-            bounds(Region::CtxrC),
+            bounds(LockRegion::CtxrC),
             Some((0x100_0196_8000, 0x100_019c_3fff))
         );
         assert_eq!(
-            bounds(Region::CtxrD),
+            bounds(LockRegion::CtxrD),
             Some((0x100_019c_c000, 0x100_054a_3fff))
         );
         assert!(handoff.legacy_locked);

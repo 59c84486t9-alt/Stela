@@ -11,10 +11,10 @@
 //! `_write_boot_args`. The format is specified in
 //! `docs/design/runtime.md#kernel-boot-bundle`.
 use crate::aic;
-use crate::apple_device_tree::{DeviceTree, Placeholder};
+use crate::apple_device_tree::DeviceTree;
 use crate::boot_args::{self, BootArgs, Video};
 use crate::boot_manifests;
-use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
+use crate::boot_policy::{self, Decision, SealedVolume};
 use crate::carveouts::{self, Placed};
 use crate::darts;
 use crate::devices;
@@ -23,19 +23,20 @@ use crate::gpu_dvfs;
 use crate::handoff;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
-use crate::lock_regs::{self, Programmed};
+use crate::lock_regs;
 use crate::nvram;
 use crate::root_selection;
 use crate::soc_variant;
 use crate::trust_cache;
-use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
 use stela_runtime::machine::{ctrr, identification, soc, tag_storage};
 use stela_runtime::sha256;
 
-/// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
-pub const SCHEMA_VERSION: u32 = 4;
+pub use stela_runtime::boot_bundle::schema::{
+    BootCpu, BootCpuSelection, Encoding, Entry, File, Image, Manifest, Options, OverlayProperty,
+    Patch, PatchSource, PlaceholderDecision, Region, SCHEMA_VERSION, Source, Target,
+};
+
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup --update-stela`).
 pub const REVISION: u32 = 30;
@@ -75,33 +76,9 @@ const CPU_FREQUENCY_PROPERTIES: [&str; 3] = [
 const MEMORY_MAP_ENTRY_BYTES: usize = 16;
 const HIBERNATION_KEY_BYTES: usize = 0x30;
 
-/// One Apple input, kept with the identity of the restore member it came from.
-#[derive(Debug, Clone, Serialize)]
-pub struct Source {
-    pub component: String,
-    pub member: String,
-    pub container_sha256: String,
-    pub payload_type: String,
-    pub description: String,
-    pub decoded_bytes: usize,
-    pub decoded_sha256: String,
-}
-
 pub struct Input<'a> {
     pub bytes: &'a [u8],
     pub source: Source,
-}
-
-/// Board facts taken from the selected restore identity.
-#[derive(Debug, Clone, Serialize)]
-pub struct Target {
-    pub product_type: String,
-    pub device_class: String,
-    pub product_version: String,
-    pub product_build: String,
-    pub variant: String,
-    pub chip_id: Option<u32>,
-    pub board_id: Option<u32>,
 }
 
 pub struct Inputs<'a> {
@@ -149,253 +126,6 @@ impl Inputs<'_> {
 pub struct RootHash<'a> {
     pub volume: SealedVolume,
     pub im4p: Option<Input<'a>>,
-}
-
-/// One DeviceTree value supplied from outside the restore image, such as a
-/// device model's register map; nodes along `path` are created as needed.
-#[derive(Debug, Clone, Serialize)]
-pub struct OverlayProperty {
-    pub path: String,
-    pub property: String,
-    #[serde(serialize_with = "hex_bytes")]
-    pub value: Vec<u8>,
-}
-
-fn hex_bytes<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(&hex::encode(bytes))
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Options {
-    pub dram_base: u64,
-    pub dram_size: u64,
-    /// Lowest physical address handed to the kernel (`boot_args.physBase`);
-    /// a bundle raises it past iBoot's carveouts (`carveouts`).
-    pub phys_base: u64,
-    /// First region's distance above `phys_base`.
-    pub load_offset: u64,
-    pub boot_args: String,
-    /// Explicit `/cpus` child name; absent selects the first performance CPU
-    /// in the retained original DeviceTree order.
-    pub boot_cpu: Option<String>,
-    /// The generic timer rate (`CNTFRQ_EL0`) the machine presents.
-    pub timebase_frequency: u64,
-    /// Board configuration values by syscfg key, such as `SrNm` or `WMac`.
-    pub syscfg: BTreeMap<String, Vec<u8>>,
-    /// MAC addresses by provider name, such as `wifiaddr` or `ethaddr`.
-    pub mac_addresses: BTreeMap<String, Vec<u8>>,
-    pub security: SecurityPolicy,
-    /// The OS environment iBoot enters, such as `darwinos-ramdisk` for a
-    /// restore ramdisk; `None` is macOS.
-    pub osenvironment: Option<boot_policy::OsEnvironment>,
-    /// The actual previous-stage entry origin; independent of the OS
-    /// environment. `None` leaves the boot-command handoff unresolved.
-    pub boot_command: Option<handoff::BootCommand>,
-    /// The volume the kernel roots from (`/chosen apfs-preboot-uuid`,
-    /// `boot-uuid`, `associated-volume-group`, `boot-objects-path`); `None`
-    /// keeps the template's values.
-    pub root: Option<root_selection::Root>,
-    /// The machine's ECID, nonzero and unique per machine, for `/chosen`
-    /// `unique-chip-id`, `die-id` and `unique-device-id`; `None` keeps the
-    /// template's zeros and lists the rows as unresolved.
-    pub ecid: Option<u64>,
-    /// Applied after every other DeviceTree change.
-    pub overlay: Vec<OverlayProperty>,
-}
-
-/// The defaults of `stela boot prepare` for an installed system: 8 GiB of
-/// DRAM at 0x8_0000_0000, verbose boot, the first performance CPU booting
-/// with a 24 MHz generic timer, and Reduced Security with SIP enabled.
-impl Options {
-    /// These options with guest DRAM, and the physical base at the same
-    /// distance into it, at `base` (a board's [`Inputs::dram_base`]); `None`
-    /// keeps them.
-    pub fn placed_at(&self, base: Option<u64>) -> Self {
-        let Some(base) = base else {
-            return self.clone();
-        };
-        Self {
-            dram_base: base,
-            phys_base: base + (self.phys_base - self.dram_base),
-            ..self.clone()
-        }
-    }
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        const DRAM_BASE: u64 = 0x8_0000_0000;
-        Self {
-            dram_base: DRAM_BASE,
-            dram_size: 0x2_0000_0000,
-            phys_base: DRAM_BASE,
-            load_offset: 0,
-            boot_args: "-v".into(),
-            boot_cpu: None,
-            timebase_frequency: 24_000_000,
-            syscfg: BTreeMap::new(),
-            mac_addresses: BTreeMap::new(),
-            security: SecurityPolicy {
-                mode: boot_policy::SecurityMode::Reduced,
-                sip_bits: 0,
-                sepfw_load_at_boot: None,
-            },
-            osenvironment: None,
-            boot_command: None,
-            root: None,
-            ecid: None,
-            overlay: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct File {
-    pub name: String,
-    pub bytes: usize,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Region {
-    /// The `/chosen/memory-map` entry naming this region.
-    pub name: String,
-    pub file: String,
-    pub file_offset: u64,
-    /// Bytes copied from the file.
-    pub bytes: u64,
-    pub guest_pa: u64,
-    /// Bytes reserved at `guest_pa`; those after `bytes` are zeroed.
-    pub memory_bytes: u64,
-    pub sha256: String,
-    /// Link-time address of the region's first byte, for image regions.
-    pub virtual_address: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Entry {
-    pub image: String,
-    pub virtual_address: u64,
-    pub physical_address: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Image {
-    pub name: String,
-    pub file: String,
-    pub uuid: Option<String>,
-    pub vm_base: u64,
-    pub vm_bytes: u64,
-    pub entry: Entry,
-    pub fileset_entries: usize,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PatchSource {
-    /// Guest RAM size chosen at boot.
-    DramSize,
-    /// The firmware framebuffer the kernel console draws on.
-    Framebuffer,
-    /// Fresh random bytes for every boot.
-    Entropy,
-    /// The kernel command line.
-    BootArgs,
-    /// The generic timer rate the machine presents.
-    Timebase,
-    /// The current bank of the machine's persistent NOR, when it has one.
-    Nvram,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Encoding {
-    U64Le,
-    Bytes,
-    /// NUL-terminated within the field; the rest of the field is zero.
-    CString,
-}
-
-/// One fixed-size field the UEFI mount may rewrite before entry.
-#[derive(Debug, Clone, Serialize)]
-pub struct Patch {
-    pub source: PatchSource,
-    pub required: bool,
-    pub region: String,
-    pub file: String,
-    pub file_offset: u64,
-    pub bytes: u64,
-    pub encoding: Encoding,
-    /// The DeviceTree path and property, or the `boot_args` field.
-    pub field: String,
-    pub prepared_hex: String,
-    pub rule: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PlaceholderDecision {
-    #[serde(flatten)]
-    pub placeholder: Placeholder,
-    pub resolution: String,
-}
-
-/// Why preparation selected this original CPU node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BootCpuSelection {
-    /// The original first `/cpus` child, the PE whose position the kernel's
-    /// per-CPU tables assume for the boot processor.
-    First,
-    Explicit,
-}
-
-/// Selected boot PE provenance, tied to the immutable input DeviceTree.
-/// The original index is a source coordinate, never a runtime logical PE ID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BootCpu {
-    pub path: String,
-    /// Original u32 `reg`, retaining its die/cluster/core affinity bits.
-    pub affinity: u32,
-    pub cluster_type: u8,
-    pub original_index: usize,
-    pub selection: BootCpuSelection,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Manifest {
-    pub schema_version: u32,
-    /// [`REVISION`].
-    pub revision: u32,
-    pub target: Target,
-    pub options: Options,
-    pub boot_cpu: BootCpu,
-    pub sources: Vec<Source>,
-    pub files: Vec<File>,
-    pub regions: Vec<Region>,
-    /// Where execution starts: SPTM's entry, at EL2-equivalent privilege.
-    pub entry: Entry,
-    /// x0 on entry: the physical address of `boot_args`.
-    pub entry_x0: u64,
-    pub images: Vec<Image>,
-    pub boot_args: BootArgs,
-    pub device_tree_bytes: usize,
-    pub top_of_kernel_data: u64,
-    /// iBoot's carveouts, below the managed range.
-    pub carveouts: Vec<Placed>,
-    /// The region iBoot programs into the AMCC's CTRR-A lock group, from
-    /// the first region through `SPTM-rx` (`lock_regs`).
-    pub read_only_region: Option<Programmed>,
-    /// What iBoot leaves in the cores' lock registers on the M4 and later
-    /// (`lock_regs::core_handoff`).
-    pub core_locks: Option<ctrr::Handoff>,
-    /// The DeviceTree nodes whose `compatible` names no modeled device and
-    /// was removed (`devices`).
-    pub hidden_devices: Vec<String>,
-    pub patches: Vec<Patch>,
-    pub placeholders: Vec<PlaceholderDecision>,
-    /// Boot-policy and manifest values written into `/chosen`.
-    pub security: Vec<Decision>,
-    pub unresolved: Vec<String>,
 }
 
 pub struct Bundle {
@@ -944,7 +674,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         device_tree_region,
         device_tree.len(),
     )?;
-    let boot_args_bytes = boot_args.encode()?.to_vec();
+    let boot_args_bytes = boot_args::encode(&boot_args)?.to_vec();
     let boot_args_pa = boot_args_region.guest_pa;
 
     let mut patches = device_tree_patches(tree, device_tree_region)?;
@@ -969,15 +699,15 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         revision: REVISION,
-        target: inputs.target.clone(),
+        target: Some(inputs.target.clone()),
         options: options.clone(),
-        boot_cpu: shaped.boot_cpu,
+        boot_cpu: Some(shaped.boot_cpu),
         sources: sources(inputs, ramdisk_source),
         files: files
             .iter()
             .map(|(name, bytes)| File {
                 name: name.clone(),
-                bytes: bytes.len(),
+                bytes: bytes.len() as u64,
                 sha256: sha256(bytes),
             })
             .collect(),
@@ -986,7 +716,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         entry_x0: boot_args_pa,
         images: manifest_images,
         boot_args,
-        device_tree_bytes: device_tree_bytes as usize,
+        device_tree_bytes,
         top_of_kernel_data,
         carveouts,
         read_only_region,
@@ -2386,7 +2116,9 @@ fn boot_args_patches(region: &Region, bytes: &[u8]) -> Vec<Patch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot_policy::SecurityPolicy;
     use crate::kernel_collection::tests::{BASE, Builder};
+    use alloc::collections::BTreeMap;
     use object::macho;
 
     const PAGE: u64 = PAGE_BYTES;
@@ -3245,7 +2977,7 @@ mod tests {
                 .all(|c| c.base >= 0x8_0000_0000 && c.base + c.bytes <= phys_base)
         );
         // CTRR-A covers the read-only run, ending where SPTM's data starts.
-        let ctrr = manifest.read_only_region.unwrap();
+        let ctrr = manifest.read_only_region.clone().unwrap();
         assert_eq!(ctrr.base, manifest.regions[0].guest_pa);
         assert_eq!(ctrr.base + ctrr.bytes, region("SPTM-rw").guest_pa);
 
@@ -3320,20 +3052,20 @@ mod tests {
         );
         assert_eq!(
             manifest.boot_cpu,
-            BootCpu {
+            Some(BootCpu {
                 path: "/cpus/cpu0".into(),
                 affinity: 0,
                 cluster_type: b'E',
                 original_index: 0,
                 selection: BootCpuSelection::Explicit,
-            }
+            })
         );
         assert_eq!(
             tree.property("/chosen", "chip-id").unwrap().as_u32(),
             Some(0x8112)
         );
 
-        let args = BootArgs::decode(file(BOOT_ARGS_FILE))?;
+        let args = boot_args::decode(file(BOOT_ARGS_FILE))?;
         assert_eq!(
             args.device_tree,
             region("DeviceTree").guest_pa - args.phys_base + args.virt_base
@@ -3481,7 +3213,7 @@ mod tests {
         let ctxr_b = core_locks
             .locked
             .iter()
-            .find(|locked| locked.region == ctrr::Region::CtxrB)
+            .find(|locked| locked.region == ctrr::LockRegion::CtxrB)
             .unwrap();
         assert_eq!(
             (ctxr_b.first, ctxr_b.last),

@@ -263,7 +263,7 @@ pub struct Cpu {
     pub ctrr_core: super::ctrr::Core,
     /// What iBoot left in the core lock registers, which every PE and
     /// cluster starts from.
-    pub core_locks: alloc::sync::Arc<super::ctrr::Handoff>,
+    pub core_locks: alloc::sync::Arc<super::ctrr::CoreLocks>,
     /// The region the memory controller has locked against writes, first
     /// and last byte, as the engine last read it from the devices.
     pub memory_lock: super::mmu::MemoryLocks,

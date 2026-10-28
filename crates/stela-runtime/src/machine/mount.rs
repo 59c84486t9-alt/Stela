@@ -81,13 +81,13 @@ impl MemoryResources {
 /// before it locks them (`amcc`). CTRR-B stays unprogrammed.
 pub fn memory_locks(
     read_only_region: Option<(u64, u64)>,
-    core_locks: &ctrr::Handoff,
+    core_locks: &ctrr::CoreLocks,
 ) -> amcc::Programmed {
     let mut programmed = amcc::ctrr_a(read_only_region);
     for locked in &core_locks.locked {
         let group = match locked.region {
-            ctrr::Region::CtrrC => 2,
-            ctrr::Region::CtrrD => 3,
+            ctrr::LockRegion::CtrrC => 2,
+            ctrr::LockRegion::CtrrD => 3,
             _ => continue,
         };
         programmed[group] = Some((locked.first, locked.last + 1 - locked.first));

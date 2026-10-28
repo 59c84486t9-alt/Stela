@@ -107,7 +107,7 @@ pub(crate) fn spawn<H: Host>(
 struct Pe {
     pe: usize,
     devices: Board,
-    core_locks: Arc<ctrr::Handoff>,
+    core_locks: Arc<ctrr::CoreLocks>,
     strict: bool,
     profile: CpuProfile,
     target: TargetCpu,

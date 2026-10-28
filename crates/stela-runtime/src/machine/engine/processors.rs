@@ -778,7 +778,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
         // Its cluster-scoped implementation-defined registers too
         // (`impdef::Scope::Cluster`). A new cluster's CTRR registers, and
-        // every PE's own, start from what iBoot left (`ctrr::Handoff`).
+        // every PE's own, start from what iBoot left (`ctrr::CoreLocks`).
         cpu.core_locks = self.cpu.core_locks.clone();
         cpu.ctrr_core = ctrr::Core::handed_off(&cpu.core_locks);
         // In parallel, the cluster's state outlives its PEs on the hub.
@@ -1905,9 +1905,9 @@ mod tests {
             })
             .collect();
         let mut machine = board_on(Chip::AppleM5, &[], super::super::NoDevices, identities);
-        let handoff = ctrr::Handoff {
+        let handoff = ctrr::CoreLocks {
             locked: alloc::vec![ctrr::Locked {
-                region: ctrr::Region::CtxrA,
+                region: ctrr::LockRegion::CtxrA,
                 first: 0x100_070a_4000,
                 last: 0x100_0710_bfff,
             }],
