@@ -7,7 +7,7 @@ use alloc::vec;
 use model::*;
 
 #[test]
-fn cold_native_requester_walks_exact_pages_permissions_unmap_and_retirement() {
+fn requester_mapping_lifecycle() {
     let (mut unit, peer) = model::unit();
     assert_eq!(
         peer.walk(0x20, 4096),
@@ -100,7 +100,7 @@ fn cold_native_requester_walks_exact_pages_permissions_unmap_and_retirement() {
 }
 
 #[test]
-fn foreign_and_stale_mapping_tokens_refuse_before_mmio_or_ram_mutation() {
+fn foreign_and_stale_mapping_tokens() {
     let (mut unit, peer) = model::unit();
     let mut first = unsafe { unit.attach(function(0x20)) }.unwrap();
     let mut second = unsafe { unit.attach(function(0x21)) }.unwrap();
@@ -154,7 +154,7 @@ fn foreign_and_stale_mapping_tokens_refuse_before_mmio_or_ram_mutation() {
 }
 
 #[test]
-fn native_queue_wraps_and_requires_exact_store_even_after_head_advances() {
+fn queue_wrap_and_completion_store() {
     let (mut unit, peer) = model::unit();
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     // More than512 actual commands wraps the real ring multiple times. The
@@ -239,7 +239,7 @@ fn native_queue_wraps_and_requires_exact_store_even_after_head_advances() {
 }
 
 #[test]
-fn failed_removal_preserves_payload_and_original_requester_until_real_retirement() {
+fn failed_unmap_retains_payload() {
     let (mut unit, peer) = model::unit();
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     let mapping = requester
@@ -265,7 +265,7 @@ fn failed_removal_preserves_payload_and_original_requester_until_real_retirement
 }
 
 #[test]
-fn cold_and_firmware_refusals_precede_native_publication() {
+fn cold_preflight_refusals() {
     for mutation in [0, 1, 2, 3, 4, 5] {
         let (inspection, platform, peer, mut bytes) = inputs();
         match mutation {
@@ -298,7 +298,7 @@ fn unit_with_entries(entries: &[u8]) -> (Unit<Platform>, Peer) {
 }
 
 #[test]
-fn an_alias_shares_its_sources_domain_and_a_shared_alias_has_none_of_its_own() {
+fn alias_domain_ownership() {
     let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     let pages = peer.pages(4096);
@@ -326,7 +326,7 @@ fn an_alias_shares_its_sources_domain_and_a_shared_alias_has_none_of_its_own() {
 }
 
 #[test]
-fn device_settings_reach_the_dte_and_later_entries_override_earlier_ones() {
+fn device_settings_override_order() {
     // SysMgt=01 and Lint1Pass on every requester, then plain settings for
     // 0x20; an IOAPIC special entry names only an interrupt source.
     let (unit, _) = unit_with_entries(&[
@@ -341,7 +341,7 @@ fn device_settings_reach_the_dte_and_later_entries_override_earlier_ones() {
 }
 
 #[test]
-fn each_device_setting_reaches_its_dte_bit() {
+fn device_setting_bits() {
     // INITPass, EIntPass, NMIPass, Lint0Pass, Lint1Pass and SysMgt=10, one
     // requester each.
     let (unit, _) = unit_with_entries(&[
@@ -361,7 +361,7 @@ fn each_device_setting_reaches_its_dte_bit() {
 }
 
 #[test]
-fn an_alias_range_reaches_the_window_under_its_alias_and_shares_one_domain() {
+fn alias_range_window() {
     // 0x20..=0x22 DMA as 0x30.
     let (mut unit, peer) = unit_with_entries(&[0x43, 0x20, 0, 0, 0, 0x30, 0, 0, 4, 0x22, 0, 0]);
     let pages = peer.pages(4096);
@@ -378,7 +378,7 @@ fn an_alias_range_reaches_the_window_under_its_alias_and_shares_one_domain() {
 }
 
 #[test]
-fn window_requesters_reach_its_memory_until_they_attach() {
+fn window_handoff_on_attach() {
     let (mut unit, peer) = model::unit();
     let pages = peer.pages(8192);
     let physical = pages.physical_pages()[0];
@@ -405,7 +405,7 @@ fn window_requesters_reach_its_memory_until_they_attach() {
 }
 
 #[test]
-fn uncovered_and_attached_requesters_are_refused() {
+fn requester_coverage_and_exclusivity() {
     let (inspection, platform, peer, bytes) = inputs_with_entries(&[2, 0x20, 0, 0]);
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     let mut unit = unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap();
@@ -430,7 +430,7 @@ fn uncovered_and_attached_requesters_are_refused() {
 }
 
 #[test]
-fn initial_and_final_completion_timeouts_quarantine_original_unit_resources() {
+fn completion_timeout_quarantines_unit() {
     let (inspection, platform, peer, bytes) = inputs();
     peer.mode(Mode::HeadOnly);
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
@@ -459,7 +459,7 @@ fn initial_and_final_completion_timeouts_quarantine_original_unit_resources() {
 }
 
 #[test]
-fn original_guard_teardown_unwinds_keep_requester_and_unit_owners_quarantined() {
+fn guard_unwind_quarantines_resources() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     for remove in [false, true] {
         let (mut unit, peer) = model::unit();
@@ -521,7 +521,7 @@ fn original_guard_teardown_unwinds_keep_requester_and_unit_owners_quarantined() 
 }
 
 #[test]
-fn failed_actual_dte_attachment_retains_original_function_root_and_rid_reservation() {
+fn failed_dte_attach_retains_requester() {
     let (mut unit, peer) = model::unit();
     let (function, counters) = function_with_counters(0x20);
     let references = Rc::strong_count(&unit.engine);
@@ -559,7 +559,7 @@ fn failed_actual_dte_attachment_retains_original_function_root_and_rid_reservati
 }
 
 #[test]
-fn actual_ivinfo_widths_reserved_bits_and_hats_admission_precede_publication() {
+fn ivinfo_profile_admission() {
     let ordinary = 1u32 | (48 << 8) | (48 << 15);
     for (info, features) in [
         (ordinary | (1 << 23), 1 << 6), // Reserved IVinfo upper byte.
@@ -590,7 +590,7 @@ fn actual_ivinfo_widths_reserved_bits_and_hats_admission_precede_publication() {
 }
 
 #[test]
-fn actual_unit_capability_width_bounds_firmware_and_cpu_payload_admission() {
+fn hardware_width_bounds_payload() {
     let info = 1u32 | (48 << 8) | (48 << 15);
     for miscellaneous in [
         0,
