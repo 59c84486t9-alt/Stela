@@ -2943,6 +2943,7 @@ mod tests {
             build,
             version: "27.0",
             dcp_link_version: builds::DEFAULT.dcp_link_version,
+            rtkit_version: builds::DEFAULT.rtkit_version,
         }
     }
 

@@ -54,6 +54,7 @@ use super::ring::{self, Kind, Shared};
 use super::signal;
 use super::uat;
 use super::work_decode;
+use crate::builds::Build;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -1085,10 +1086,14 @@ pub struct Coprocessor {
 
 impl Coprocessor {
     /// `family`'s GFX coprocessor, whose RTKit manages its power ordinarily
-    /// (`power-managed`).
-    pub fn new(family: &'static Family) -> Result<Self, &'static str> {
+    /// (`power-managed`), speaking `build`'s RTKit version.
+    pub fn new(family: &'static Family, build: &Build) -> Result<Self, &'static str> {
         let (endpoints, protocol) = endpoints(family);
-        let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
+        let rtkit = RtKit::new(
+            endpoints,
+            super::super::rtkit::Management::Ordinary,
+            build.rtkit_version,
+        )?;
         Ok(Self {
             rtkit,
             protocol,
@@ -1101,11 +1106,12 @@ impl Coprocessor {
     pub fn with_power(
         family: &'static Family,
         power: super::sgx::FirmwarePower,
+        build: &Build,
     ) -> Result<Self, &'static str> {
         if family != power.family() {
             return Err("GFX firmware power owner belongs to a different GPU family");
         }
-        let mut coprocessor = Self::new(family)?;
+        let mut coprocessor = Self::new(family, build)?;
         coprocessor.power = Some(power);
         Ok(coprocessor)
     }
@@ -1244,7 +1250,7 @@ mod tests {
     }
 
     fn booted_gfx(family: &'static Family) -> Coprocessor {
-        let mut firmware = Coprocessor::new(family).unwrap();
+        let mut firmware = Coprocessor::new(family, crate::builds::DEFAULT).unwrap();
         firmware.start(&mut Vec::new()).unwrap();
         for payload in [
             2 << 52 | 12 | 12 << 16,
@@ -1285,9 +1291,10 @@ mod tests {
                 .unwrap();
             let mut sgx = Sgx::new(gpu).unwrap();
             let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
-            let mut firmware = Coprocessor::with_power(family, power.clone()).unwrap();
+            let mut firmware =
+                Coprocessor::with_power(family, power.clone(), crate::builds::DEFAULT).unwrap();
             let other = if family == &G14G { &G13G } else { &G14G };
-            assert!(Coprocessor::with_power(other, power.clone()).is_err());
+            assert!(Coprocessor::with_power(other, power.clone(), crate::builds::DEFAULT).is_err());
             // A truthful target binding alone is not enough to acknowledge
             // unimplemented config-dependent callback effects.
             firmware.protocol.0.borrow_mut().initdata_va = Some(ROOT);

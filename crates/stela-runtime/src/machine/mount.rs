@@ -226,6 +226,8 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         firmware,
         build,
     } = inputs;
+    let build =
+        build.ok_or("the board's coprocessors need the boot bundle's supported macOS build")?;
     let place = |device: super::soc::Device| {
         (
             Range {
@@ -269,7 +271,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_spi_nor(spi)?;
     }
     match (board.ans.as_ref(), backing) {
-        (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
+        (Some(ans), Some(backing)) => devices.add_ans(ans, backing, build)?,
         (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
         (None, Some(_)) => {
             return Err(
@@ -279,10 +281,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         (None, None) => (),
     }
     if let Some(smc) = board.smc.as_ref() {
-        devices.add_smc(smc)?;
+        devices.add_smc(smc, build)?;
     }
     if let Some(pmp) = board.pmp.as_ref() {
-        devices.add_pmp(pmp)?;
+        devices.add_pmp(pmp, build)?;
     }
     for spmi in &board.spmis {
         // A newly created Stela PMIC starts with its own oscillator origin
@@ -460,7 +462,6 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             )?;
         }
         let scanout = scanout.ok_or("visible external DCP requires one actual scanout")?;
-        let build = build.ok_or("DCP requires the boot bundle's supported macOS build")?;
         let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
         devices.add_dcpext(
             range(dcp.wrapper),
@@ -721,7 +722,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
     // bridge) and owns only the bytes they leave.
     if let Some(gfx) = board.gfx.as_ref() {
-        devices.add_gfx(gfx)?;
+        devices.add_gfx(gfx, build)?;
     }
     // Finalize only after every native constructor, including SGX's final
     // overlapping-window placement, has registered its actual banks.

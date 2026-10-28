@@ -2634,7 +2634,7 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        devices.add_smc(&smc).unwrap();
+        devices.add_smc(&smc, crate::builds::DEFAULT).unwrap();
         let epoch = pmu::RtcEpoch {
             counter: 100,
             ticks: 0,

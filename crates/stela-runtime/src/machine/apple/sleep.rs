@@ -227,18 +227,21 @@ mod tests {
             .add_aic_for_processors(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0), 4)
             .unwrap();
         devices
-            .add_smc(&SmcController {
-                wrapper: (0x2_3e40_0000, 0x6c000),
-                interrupts: [0x1f4, 0x1f3, 0x1f6, 0x1f5],
-                watchdog: None,
-                region: (REGION, 0x10_0000),
-                gpio_keys: Vec::new(),
-                quiesced: true,
-                wake_bits: WakeBits {
-                    power_button: Some(0),
-                    rtc: Some(48),
+            .add_smc(
+                &SmcController {
+                    wrapper: (0x2_3e40_0000, 0x6c000),
+                    interrupts: [0x1f4, 0x1f3, 0x1f6, 0x1f5],
+                    watchdog: None,
+                    region: (REGION, 0x10_0000),
+                    gpio_keys: Vec::new(),
+                    quiesced: true,
+                    wake_bits: WakeBits {
+                        power_button: Some(0),
+                        rtc: Some(48),
+                    },
                 },
-            })
+                crate::builds::DEFAULT,
+            )
             .unwrap();
         devices
             .add_wake_masks(MASKS, [u32::MAX; wake::WORDS], Some(SMC_WAKE))

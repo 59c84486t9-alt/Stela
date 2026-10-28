@@ -18,6 +18,10 @@ pub struct Build {
     /// coprocessor announces and the AP hashes into the interface CRC
     /// (`platform::apple::dcp::link`).
     pub dcp_link_version: u32,
+    /// The RTKit management protocol version every RTKit coprocessor offers
+    /// in its HELLO and the AP's RTBuddy accepts
+    /// (`platform::apple::rtkit`).
+    pub rtkit_version: u64,
 }
 
 /// Every supported build, newest first.
@@ -26,6 +30,7 @@ pub const SUPPORTED: &[Build] = &[Build {
     version: "27.0.1",
     // The AP's global at 26A434 kernel file offset 0x5bd9bd8.
     dcp_link_version: 211,
+    rtkit_version: 12,
 }];
 
 /// The build setup and `stela install-system` download when none is named:
@@ -75,6 +80,7 @@ mod tests {
     #[test]
     fn an_unlisted_build_is_refused_naming_the_supported_ones() {
         assert_eq!(find("26A434").unwrap().dcp_link_version, 211);
+        assert_eq!(find("26A434").unwrap().rtkit_version, 12);
         assert_eq!(DEFAULT.build, "26A434");
         let error = find("26B5040").unwrap_err();
         assert_eq!(

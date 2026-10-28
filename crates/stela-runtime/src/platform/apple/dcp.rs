@@ -366,7 +366,7 @@ impl Coprocessor {
             })
             .collect();
         endpoints.push((IOMFB_ENDPOINT, Box::new(Iomfb(link.clone()))));
-        let rtkit = RtKit::new(endpoints, Management::Ordinary)?;
+        let rtkit = RtKit::new(endpoints, Management::Ordinary, build.rtkit_version)?;
         Ok(Self { rtkit, link, afk })
     }
 
