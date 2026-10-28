@@ -24,6 +24,9 @@ fn backing_limit_rollback_preserves_mapping() {
     // established12K; the next full8K pin exceeds the24K byte budget, even
     // though logical node capacity and its initial4K lower bound fit.
     assert_eq!(
+        // SAFETY: The fresh crossing IOVA and live payload pin are exclusive to this
+        // synchronous model. Full backing-budget rejection must preserve every
+        // already-retained table and mapping.
         unsafe { tree.map(0x3fff_f000, pages, Direction::Bidirectional) },
         Err(TranslationError::ResourceLimit)
     );
@@ -63,7 +66,13 @@ fn backing_limit_rollback_preserves_mapping() {
         monitor.walk(root, 3, 0x4000_0000).unwrap().physical,
         0x701000
     );
+    // SAFETY: The retried crossing mapping has finished all software walks; its
+    // payload is not used by a device or deferred worker and the established mapping
+    // stays separately retained.
     unsafe { tree.unmap(0x3fff_f000) }.unwrap();
+    // SAFETY: The established zero-page mapping is idle after the crossing retry was
+    // removed; no asynchronous requester, software walker or worker can access its
+    // pin.
     unsafe { tree.unmap(0) }.unwrap();
     retired(tree, &monitor);
     assert_eq!(retained.load(Ordering::Relaxed), 1);
@@ -89,6 +98,9 @@ fn native_pins_and_provider_tail_budget() {
         // SAFETY: a complete fresh child pin exceeds the byte budget even
         // though a second logical4K table fits the node/index budget.
         assert_eq!(
+            // SAFETY: The candidate pin is live and its symbolic IOVA is exclusive.
+            // The model has no requester; rejecting oversized native backing must
+            // precede child publication.
             unsafe { tree.map(0, payload(0x300000, &drops), Direction::ToDevice) },
             Err(TranslationError::ResourceLimit)
         );
@@ -120,6 +132,9 @@ fn native_pins_and_provider_tail_budget() {
             unsafe { tree.map(0, payload(0x500000, &retry), Direction::ToDevice) }.unwrap();
             assert_eq!(monitor.walk(root, 2, 0).unwrap().physical, 0x500000);
             assert_eq!(tree.state.as_ref().unwrap().backing_bytes, 8192);
+            // SAFETY: The smaller retry has completed its software walk and has no
+            // requester or deferred user; removal releases only that exact retained
+            // payload mapping.
             unsafe { tree.unmap(0) }.unwrap();
             assert_eq!(retry.load(Ordering::Relaxed), 1);
         }

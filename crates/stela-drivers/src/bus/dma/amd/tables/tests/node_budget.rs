@@ -11,6 +11,9 @@ fn node_budget_staging_rollback() {
     // SAFETY: two idle pages cross a 1GiB path boundary. Root + three
     // staged pages fit, but the fourth child exceeds the four-node policy.
     assert_eq!(
+        // SAFETY: Both payload pages have live backing and the fresh crossing IOVA is
+        // exclusive. The synchronous software model must exhaust its node budget
+        // before publishing an edge.
         unsafe { tree.map(0x3fff_f000, pages, Direction::ToDevice) },
         Err(TranslationError::ResourceLimit)
     );
@@ -40,11 +43,19 @@ fn node_budget_staging_rollback() {
     // SAFETY: rollback left the model healthy; both smaller paths fit the
     // exact retained four-table budget and exclusively owned IOVAs.
     unsafe { tree.map(0, payload(0x500000, &first), Direction::ToDevice) }.unwrap();
+    // SAFETY: The second IOVA is disjoint from the retained first mapping and fits
+    // the rolled-back node budget. Its payload pin stays owned and no requester or
+    // concurrent walker exists.
     unsafe { tree.map(0x20_0000, payload(0x600000, &second), Direction::ToDevice) }.unwrap();
     assert_eq!(monitor.live_tables(), 4);
     assert_eq!(monitor.walk(root, 3, 0).unwrap().physical, 0x500000);
     assert_eq!(monitor.walk(root, 3, 0x20_0000).unwrap().physical, 0x600000);
+    // SAFETY: The first exact model mapping has no hardware, worker or outstanding
+    // software reader; the disjoint second mapping retains its own independent pin.
     unsafe { tree.unmap(0) }.unwrap();
+    // SAFETY: The remaining exact second mapping is idle, with no hardware or
+    // deferred user. Its last synchronous software walk has completed before pin
+    // release.
     unsafe { tree.unmap(0x20_0000) }.unwrap();
     retired(tree, &monitor);
     assert_eq!(first.load(Ordering::Relaxed), 1);
@@ -142,7 +153,13 @@ fn staged_failure_preserves_existing_mapping() {
                 monitor.walk(root, 3, 0x3fff_f000).unwrap().physical,
                 0x700000
             );
+            // SAFETY: The retried crossing mapping is idle after its walk; the
+            // established zero-page mapping remains independently retained. The model
+            // has no asynchronous requester.
             unsafe { tree.unmap(0x3fff_f000) }.unwrap();
+            // SAFETY: The established zero-page mapping has no outstanding reader,
+            // worker or physical requester after the retry was removed; its exact pin
+            // may now be released.
             unsafe { tree.unmap(0) }.unwrap();
             retired(tree, &monitor);
             assert_eq!(retained.load(Ordering::Relaxed), 1);
@@ -164,6 +181,9 @@ fn empty_table_budget_and_pin_reuse() {
         let first = Arc::new(AtomicUsize::new(0));
         // SAFETY: exclusively reserved synchronous software IOVA.
         unsafe { tree.map(0, payload(0x300000, &first), Direction::ToDevice) }.unwrap();
+        // SAFETY: The just-established model mapping has no asynchronous user and its
+        // software accesses are complete. Removing it leaves table pins retained for
+        // the subsequent reuse checks.
         unsafe { tree.unmap(0) }.unwrap();
         assert_eq!(first.load(Ordering::Relaxed), 1);
         assert_eq!(monitor.live_tables(), 3);
@@ -174,6 +194,9 @@ fn empty_table_budget_and_pin_reuse() {
         // SAFETY: this disjoint idle IOVA needs a fourth table; the owner
         // must count its retained empty leaf rather than reassign that pin.
         assert_eq!(
+            // SAFETY: The disjoint candidate owns live backing and an idle symbolic
+            // IOVA. The software model must count retained empty tables and reject
+            // the new path before publication.
             unsafe { tree.map(0x20_0000, payload(0x500000, &rejected), Direction::ToDevice) },
             Err(TranslationError::ResourceLimit)
         );
@@ -194,6 +217,9 @@ fn empty_table_budget_and_pin_reuse() {
                 .unwrap();
             assert_eq!(monitor.walk(root, 3, address).unwrap().physical, 0x700000);
             assert_eq!(monitor.state.lock().unwrap().allocation_calls, calls);
+            // SAFETY: This exact packed or reused IOVA is idle after its synchronous
+            // walk. There is no device or background walker, so its current payload
+            // pin can be removed safely.
             unsafe { tree.unmap(address) }.unwrap();
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert_eq!(monitor.words(), before);

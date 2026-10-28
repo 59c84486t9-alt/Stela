@@ -30,6 +30,9 @@ fn mapping_admission_preflight() {
         let rejected = Arc::new(AtomicUsize::new(0));
         // SAFETY: only numeric metadata is intentionally inadmissible.
         assert_eq!(
+            // SAFETY: The payload owns live CPU storage with symbolic physical
+            // labels, and the model has no requester. Only numeric range metadata is
+            // invalid; validation must reject it before mutation.
             unsafe { tree.map(address, payload(pa, &rejected), Direction::ToDevice) },
             Err(expected)
         );
@@ -43,6 +46,9 @@ fn mapping_admission_preflight() {
         let pages = pin(vec![0x500000, 0x501000], 12, rejected.clone(), None).into();
         // SAFETY: model deliberately probes an overlapping reserved interval.
         assert_eq!(
+            // SAFETY: Both candidate payload pages have live backing and no
+            // asynchronous users. The intentionally overlapping symbolic interval
+            // must fail without changing the established mapping.
             unsafe { tree.map(address, pages, Direction::ToDevice) },
             Err(TranslationError::Overlap)
         );
@@ -53,6 +59,9 @@ fn mapping_admission_preflight() {
     let before = monitor.state.lock().unwrap().publications;
     // SAFETY: the fixed model context explicitly refuses this payload policy.
     assert_eq!(
+        // SAFETY: The candidate pin is live and exclusive; the synchronous provider
+        // deliberately rejects its policy before any table publication or requester
+        // can use it.
         unsafe { tree.map(0x4000, payload(0x600000, &rejected), Direction::ToDevice) },
         Err(TranslationError::Payload(DmaError::VisibilityFailed))
     );
@@ -65,9 +74,15 @@ fn mapping_admission_preflight() {
     // Exact-start removal only, not an interior or absent interval.
     // SAFETY: synchronous fixture has no in-flight hardware accesses.
     assert_eq!(
+        // SAFETY: The model has no device, worker or asynchronous walker. This
+        // invalid interior start must be refused without releasing the retained
+        // original mapping.
         unsafe { tree.unmap(0x2001) },
         Err(TranslationError::NotMapped)
     );
+    // SAFETY: The exact 0x2000 model mapping is idle and all software walks have
+    // returned; no requester, worker or asynchronous access can race invalidation and
+    // pin release.
     unsafe { tree.unmap(0x2000) }.unwrap();
     assert_eq!(retained.load(Ordering::Relaxed), 1);
     retired(tree, &monitor);

@@ -42,6 +42,9 @@ fn host_modes_and_top_level_slots() {
             for slot in 128..512 {
                 // SAFETY: the exact retained root allocation, read-only model.
                 assert_eq!(
+                    // SAFETY: The monitor guard retains this exact 512-word aligned
+                    // root allocation and excludes retirement; slots 128..512 are in
+                    // bounds and no model writer runs during this read.
                     unsafe { (root.cpu as *const u64).add(slot).read_volatile() },
                     0
                 );
@@ -68,6 +71,9 @@ fn final_mode_six_native_span() {
     let pages = pin(vec![0x300000], 13, rejected.clone(), None).into();
     // SAFETY: an oversized numeric IOVA interval must fail before mutation.
     assert_eq!(
+        // SAFETY: The 8K payload pin remains live and the model has no requester.
+        // Only the overflowing numeric IOVA extent is rejected, before it can publish
+        // a mapping.
         unsafe { tree.map(u64::MAX - 4095, pages, Direction::ToDevice) },
         Err(TranslationError::AddressLimit)
     );
@@ -140,6 +146,9 @@ fn virtual_aperture_and_host_capacity() {
         // SAFETY: an address representable by mode3 but outside the actual
         // admitted aperture must not alias or mutate any retained mapping.
         assert_eq!(
+            // SAFETY: The candidate payload has live backing with symbolic addresses.
+            // No hardware or worker is present; the out-of-aperture IOVA must fail
+            // before any retained table changes.
             unsafe { tree.map(address, payload(0x500000, &rejected), Direction::FromDevice) },
             Err(TranslationError::AddressLimit)
         );

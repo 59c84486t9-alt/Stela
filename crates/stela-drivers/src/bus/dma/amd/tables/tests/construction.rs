@@ -23,7 +23,11 @@ fn unpublished_root_failures() {
             // SAFETY: an isolated unpublished root cannot be used by a
             // device. Unwinding its initial publication must release it.
             assert!(
-                catch_unwind(AssertUnwindSafe(|| unsafe {
+                catch_unwind(AssertUnwindSafe(||
+                // SAFETY: This software root has never escaped or reached a device.
+                // The injected publication unwind occurs while its fresh CPU pin and
+                // provider remain owned by construction.
+                unsafe {
                     PageTables::new(
                         hardware,
                         TableLevel::new(2).unwrap(),
@@ -82,6 +86,9 @@ fn node_budget_endpoints() {
         assert_eq!(monitor.walk(root, 1, 0).unwrap().physical, 0x300000);
         assert_eq!(monitor.state.lock().unwrap().allocation_calls, 1);
         assert_eq!(tree.state.as_ref().unwrap().backing_bytes, 4096);
+        // SAFETY: This exact root-only model mapping has no requester or deferred
+        // user, and the synchronous walker has returned before its payload pin is
+        // removed.
         unsafe { tree.unmap(0) }.unwrap();
         retired(tree, &monitor);
         assert_eq!(drops.load(Ordering::Relaxed), 1);

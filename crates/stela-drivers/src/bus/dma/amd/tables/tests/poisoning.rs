@@ -35,11 +35,17 @@ fn uncertain_publication_retains_pins() {
         let replacement = Arc::new(AtomicUsize::new(0));
         // SAFETY: refusal must precede any attempted IOVA/payload reuse.
         assert_eq!(
+            // SAFETY: The replacement payload has live backing but no requester. The
+            // poisoned model owner must reject attempted IOVA reuse before replacing
+            // any retained original pin.
             unsafe { tree.map(0x8000, payload(0x700000, &replacement), Direction::ToDevice) },
             Err(TranslationError::Poisoned)
         );
         assert_eq!(replacement.load(Ordering::Relaxed), 1);
         assert_eq!(
+            // SAFETY: There is no actual requester or asynchronous walker in the
+            // model. The poisoned owner must reject removal while retaining every
+            // uncertain original mapping pin.
             unsafe { tree.unmap(0x8000) },
             Err(TranslationError::Poisoned)
         );
@@ -86,6 +92,9 @@ fn unmap_failures_and_callback_unwinds() {
         let rejected = Arc::new(AtomicUsize::new(0));
         // SAFETY: attempting reuse exercises the poisoned-owner refusal only.
         assert_eq!(
+            // SAFETY: The fresh candidate pin has live CPU backing and no
+            // asynchronous user. Reuse of the poisoned symbolic IOVA must fail before
+            // altering or releasing its original pin.
             unsafe { tree.map(0, payload(0x500000, &rejected), Direction::ToDevice) },
             Err(TranslationError::Poisoned)
         );
@@ -108,7 +117,11 @@ fn unmap_failures_and_callback_unwinds() {
         // SAFETY: idle fixture injects unwind during fresh cache visibility,
         // live parent/leaf publication, or acknowledged-completion callback.
         assert!(
-            catch_unwind(AssertUnwindSafe(|| unsafe {
+            catch_unwind(AssertUnwindSafe(||
+            // SAFETY: The fresh payload and table provider stay owned during this
+            // synchronous callback. Injected publication or invalidation unwind
+            // cannot involve a device or outlive its retained pins.
+            unsafe {
                 tree.map(0, payload(0x300000, &drops), Direction::ToDevice)
             }))
             .is_err()
@@ -124,6 +137,9 @@ fn unmap_failures_and_callback_unwinds() {
         let rejected = Arc::new(AtomicUsize::new(0));
         // SAFETY: caught provider unwind grants no mapping or IOVA reuse.
         assert_eq!(
+            // SAFETY: The replacement pin is live and unused by any requester. The
+            // caught provider unwind leaves the model poisoned, so this reuse attempt
+            // must fail before touching original ownership.
             unsafe { tree.map(0, payload(0x500000, &rejected), Direction::ToDevice) },
             Err(TranslationError::Poisoned)
         );
@@ -166,6 +182,9 @@ fn exposed_tree_drop_quarantine() {
     // SAFETY: the isolated model has no actual requester; failed completion
     // conservatively models an exposed, uncertain payload mapping.
     assert_eq!(
+        // SAFETY: The candidate payload has live CPU backing and no device or worker.
+        // Injected invalidation failure models uncertainty while the table owner
+        // retains the exposed payload pin.
         unsafe { tree.map(0, payload(0x300000, &drops), Direction::Bidirectional) },
         Err(TranslationError::Invalidation(DmaError::InvalidationFailed))
     );

@@ -39,6 +39,9 @@ fn unpublished_child_rollback() {
         let retry = Arc::new(AtomicUsize::new(0));
         // SAFETY: pre-mutation rollback left this exact model IOVA reusable.
         unsafe { tree.map(0, payload(0x500000, &retry), Direction::ToDevice) }.unwrap();
+        // SAFETY: The retry mapping is exclusively owned by this synchronous software
+        // model; all reads have returned and no hardware or deferred user can access
+        // its payload during removal.
         unsafe { tree.unmap(0) }.unwrap();
         assert_eq!(retry.load(Ordering::Relaxed), 1);
         retired(tree, &monitor);
@@ -97,6 +100,9 @@ fn deeper_staging_rollback() {
         // SAFETY: complete staging rollback leaves the exact IOVA reusable.
         unsafe { tree.map(0, payload(0x500000, &retry), Direction::ToDevice) }.unwrap();
         assert_eq!(monitor.walk(root, 3, 0).unwrap().physical, 0x500000);
+        // SAFETY: The smaller retry mapping is idle after the synchronous walk; no
+        // device, worker or concurrent table reader exists while unmap releases its
+        // exact payload.
         unsafe { tree.unmap(0) }.unwrap();
         assert_eq!(retry.load(Ordering::Relaxed), 1);
         retired(tree, &monitor);
