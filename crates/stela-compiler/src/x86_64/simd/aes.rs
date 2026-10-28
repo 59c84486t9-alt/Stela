@@ -1,6 +1,6 @@
 //! AES: constant-time SSE2 circuits, or AES-NI when available. All sources are
 //! read before the destination is written.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Gpr};
 mod sbox;
 
 use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle};
@@ -25,14 +25,13 @@ const FORWARD_COLUMN_ORDER: [u8; 4] = [0xe4, 0x39, 0x4e, 0x93];
 const INVERSE_COLUMN_ORDER: [u8; 4] = [0xe4, 0x93, 0x4e, 0x39];
 const BYTE_REPLICATION: u64 = 0x0101_0101_0101_0101;
 const FIELD_REDUCTION: u8 = 0x1b;
-const MOVABS_RCX: [u8; 2] = [0x48, 0xb9];
 const SHIFT_ROWS: [u8; 16] = [0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11];
 const INVERSE_SHIFT_ROWS: [u8; 16] = [0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3];
 /// Broadcast a byte without a memory pool or an additional SIMD clobber.
 fn byte_constant(code: &mut Code, destination: u8, value: u8) {
-    code.extend(MOVABS_RCX);
-    code.extend((u64::from(value) * BYTE_REPLICATION).to_le_bytes());
-    packed(code, Host::MoveGprQword, destination, RCX); // RCX -> XMM.
+    code.asm()
+        .mov_imm64(Gpr::Rcx, u64::from(value) * BYTE_REPLICATION);
+    packed(code, Host::MoveGprQword, destination, RCX);
     packed(code, Host::UnpackLowQword, destination, destination);
 }
 
@@ -66,8 +65,7 @@ fn shift_rows(code: &mut Code, inverse: bool, target: TargetCpu) {
     };
     for (row, control) in order.into_iter().enumerate() {
         let mask = u64::from(u8::MAX) << (row * usize::from(BYTE_BITS));
-        code.extend(MOVABS_RCX);
-        code.extend((mask * COLUMN_REPLICATION).to_le_bytes());
+        code.asm().mov_imm64(Gpr::Rcx, mask * COLUMN_REPLICATION);
         packed(code, Host::MoveGprQword, MASK, RCX);
         packed(code, Host::UnpackLowQword, MASK, MASK);
         if row == 0 {

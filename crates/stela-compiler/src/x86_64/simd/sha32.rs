@@ -1,6 +1,7 @@
 //! 32-bit lane encodings shared by the SHA1 and SHA256 recipes.
 use super::{Host, packed, vector_offset};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Rm, ShiftOp, Size};
+use crate::x86_64::simd::encode::{gpr, guest};
 
 pub(super) const WORD_BITS: u8 = 32;
 pub(super) const WORD_BYTES: u8 = WORD_BITS / 8;
@@ -10,19 +11,6 @@ pub(super) const HIGH_WORD_BYTE: u8 = WORD_BYTES * 3;
 pub(super) const RESULT: u8 = 0;
 const PACK_PAIR: u8 = 1;
 const PACK_LAST: u8 = 2;
-const LOW_REGISTER_MASK: u8 = 7;
-const EXTENDED_REGISTER_SHIFT: u8 = 3;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_STATE_DISPLACEMENT: u8 = 0x87; // [rdi+disp32]
-const REX_BASE: u8 = 0x40;
-const REX_REGISTER_SHIFT: u8 = 2;
-const NO_EXTENDED_OPERAND: u8 = 0;
-const PACKED_PREFIX: u8 = 0x66;
-const MOVD_XMM_RM32: [u8; 2] = [0x0f, 0x6e];
-const ROTATE_IMMEDIATE: u8 = 0xc1;
-const ROL_GROUP: u8 = 0;
-const ROR_GROUP: u8 = 1;
 
 #[derive(Clone, Copy)]
 pub(super) enum Scalar32 {
@@ -33,41 +21,24 @@ pub(super) enum Scalar32 {
     Or,
 }
 impl Scalar32 {
-    fn opcode(self) -> u8 {
-        match self {
-            Self::Move => 0x8b,
-            Self::Add => 0x03,
-            Self::Xor => 0x33,
-            Self::And => 0x23,
-            Self::Or => 0x0b,
-        }
+    /// `op destination, rm` in the load direction.
+    fn emit(self, code: &mut Code, destination: u8, rm: Rm) {
+        let mut asm = code.asm();
+        let op = match self {
+            Self::Move => return asm.mov_load(Size::Dword, gpr(destination), rm),
+            Self::Add => Alu::Add,
+            Self::Xor => Alu::Xor,
+            Self::And => Alu::And,
+            Self::Or => Alu::Or,
+        };
+        asm.alu_load(op, Size::Dword, gpr(destination), rm);
     }
     pub(super) fn register(self, code: &mut Code, destination: u8, source: u8) {
-        rex(code, destination, source);
-        code.extend([
-            self.opcode(),
-            MODRM_REGISTER
-                | ((destination & LOW_REGISTER_MASK) << MODRM_REGISTER_SHIFT)
-                | (source & LOW_REGISTER_MASK),
-        ]);
+        self.emit(code, destination, Rm::Reg(gpr(source)));
     }
     pub(super) fn state(self, code: &mut Code, destination: u8, vector: u8, lane: u8) {
-        rex(code, destination, NO_EXTENDED_OPERAND);
-        code.extend([
-            self.opcode(),
-            MODRM_STATE_DISPLACEMENT | ((destination & LOW_REGISTER_MASK) << MODRM_REGISTER_SHIFT),
-        ]);
-        code.extend(
-            (vector_offset(vector) + u32::from(lane) * u32::from(WORD_BYTES)).to_le_bytes(),
-        );
-    }
-}
-fn rex(code: &mut Code, destination: u8, source: u8) {
-    let prefix = REX_BASE
-        | ((destination >> EXTENDED_REGISTER_SHIFT) << REX_REGISTER_SHIFT)
-        | (source >> EXTENDED_REGISTER_SHIFT);
-    if prefix != REX_BASE {
-        code.push(prefix);
+        let offset = vector_offset(vector) + u32::from(lane) * u32::from(WORD_BYTES);
+        self.emit(code, destination, Rm::Mem(guest(offset)));
     }
 }
 
@@ -77,30 +48,18 @@ pub(super) enum Rotate32 {
 }
 impl Rotate32 {
     pub(super) fn emit(self, code: &mut Code, register: u8, amount: u8) {
-        rex(code, NO_EXTENDED_OPERAND, register);
-        let group = match self {
-            Self::Left => ROL_GROUP,
-            Self::Right => ROR_GROUP,
+        let op = match self {
+            Self::Left => ShiftOp::Rol,
+            Self::Right => ShiftOp::Ror,
         };
-        code.extend([
-            ROTATE_IMMEDIATE,
-            MODRM_REGISTER | (group << MODRM_REGISTER_SHIFT) | (register & LOW_REGISTER_MASK),
-            amount,
-        ]);
+        code.asm().shift_imm(op, Size::Dword, gpr(register), amount);
     }
 }
 pub(super) fn move_to_vector(code: &mut Code, xmm: u8, register: u8) {
-    code.push(PACKED_PREFIX);
-    rex(code, xmm, register);
-    code.extend(MOVD_XMM_RM32);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | (register & LOW_REGISTER_MASK));
+    code.asm().movd_to_xmm(xmm, gpr(register));
 }
 pub(super) fn read_scalar_vector(code: &mut Code, xmm: u8, vector: u8) {
-    code.push(PACKED_PREFIX);
-    rex(code, xmm, NO_EXTENDED_OPERAND);
-    code.extend(MOVD_XMM_RM32);
-    code.push(MODRM_STATE_DISPLACEMENT | (xmm << MODRM_REGISTER_SHIFT));
-    code.extend(vector_offset(vector).to_le_bytes());
+    code.asm().movd_to_xmm(xmm, guest(vector_offset(vector)));
 }
 /// Pack four zero-extended words into RESULT; PACK_PAIR/PACK_LAST are scratch.
 pub(super) fn pack_state(code: &mut Code, words: [u8; WORDS_PER_VECTOR]) {

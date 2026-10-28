@@ -1,6 +1,7 @@
 //! SHA512: scalar large sigmas and packed small sigmas.
 use super::{Host, commit, packed, read_vector, shuffle, vector_offset};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
     aarch64::simd::sha512::{Kind, Operand},
@@ -26,19 +27,6 @@ const LARGE_SIGMA0_ROTATIONS: [u8; 3] = [28, 34, 39];
 const LARGE_SIGMA1_ROTATIONS: [u8; 3] = [14, 18, 41];
 
 // Only caller-saved registers; RDI remains the GuestState pointer.
-#[derive(Clone, Copy)]
-#[repr(u8)]
-enum Gpr {
-    Rax = 0,
-    Rcx = 1,
-    Rdx = 2,
-    Rsi = 6,
-    R8 = 8,
-    R9 = 9,
-    R10 = 10,
-    R11 = 11,
-}
-
 const W0: Gpr = Gpr::Rax;
 const W1: Gpr = Gpr::Rcx;
 const X0: Gpr = Gpr::Rdx;
@@ -48,63 +36,42 @@ const Y1: Gpr = Gpr::R9;
 const VALUE: Gpr = Gpr::R10;
 const SIGMA: Gpr = Gpr::R11;
 
-const REX_W: u8 = 0x48;
-const REX_R: u8 = 0x04;
-const REX_B: u8 = 0x01;
-const REGISTER_LOW_MASK: u8 = 7;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const REGISTER_DIRECT: u8 = 0xc0;
-const STATE_DISPLACEMENT: u8 = 0x87; // mod=10, base=RDI
-const QWORD_LOAD: u8 = 0x8b;
-const QWORD_STORE: u8 = 0x89;
-const SHIFT_IMMEDIATE: u8 = 0xc1;
-const ROTATE_RIGHT_GROUP: u8 = 1 << MODRM_REGISTER_SHIFT;
-
-/// Baseline REX.W register/register instructions, destination in ModRM:r/m.
+/// Baseline 64-bit register/register instructions.
 #[derive(Clone, Copy)]
-#[repr(u8)]
 enum QwordOpcode {
-    Add = 0x01,
-    Or = 0x09,
-    And = 0x21,
-    Xor = 0x31,
-    Move = 0x89,
+    Add,
+    Or,
+    And,
+    Xor,
+    Move,
 }
 
 impl QwordOpcode {
     fn emit(self, code: &mut Code, destination: Gpr, source: Gpr) {
-        let destination = destination as u8;
-        let source = source as u8;
-        let rex =
-            REX_W | if source >= 8 { REX_R } else { 0 } | if destination >= 8 { REX_B } else { 0 };
-        code.extend([
-            rex,
-            self as u8,
-            REGISTER_DIRECT
-                | ((source & REGISTER_LOW_MASK) << MODRM_REGISTER_SHIFT)
-                | (destination & REGISTER_LOW_MASK),
-        ]);
+        let mut asm = code.asm();
+        let op = match self {
+            Self::Add => Alu::Add,
+            Self::Or => Alu::Or,
+            Self::And => Alu::And,
+            Self::Xor => Alu::Xor,
+            Self::Move => return asm.mov(Size::Qword, destination, source),
+        };
+        asm.alu(op, Size::Qword, destination, source);
     }
 }
 
 fn state_qword(code: &mut Code, vector: u8, lane: u32, register: Gpr, load: bool) {
-    let register = register as u8;
-    code.extend([
-        REX_W | if register >= 8 { REX_R } else { 0 },
-        if load { QWORD_LOAD } else { QWORD_STORE },
-        STATE_DISPLACEMENT | ((register & REGISTER_LOW_MASK) << MODRM_REGISTER_SHIFT),
-    ]);
-    code.extend((vector_offset(vector) + lane * QWORD_BYTES).to_le_bytes());
+    let memory = guest(vector_offset(vector) + lane * QWORD_BYTES);
+    if load {
+        code.asm().mov_load(Size::Qword, register, memory);
+    } else {
+        code.asm().mov_store(Size::Qword, memory, register);
+    }
 }
 
 fn rotate(code: &mut Code, destination: Gpr, amount: u8) {
-    let register = destination as u8;
-    code.extend([
-        REX_W | if register >= 8 { REX_B } else { 0 },
-        SHIFT_IMMEDIATE,
-        REGISTER_DIRECT | ROTATE_RIGHT_GROUP | (register & REGISTER_LOW_MASK),
-        amount,
-    ]);
+    code.asm()
+        .shift_imm(ShiftOp::Ror, Size::Qword, destination, amount);
 }
 
 fn large_sigma(

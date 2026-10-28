@@ -35,7 +35,6 @@ const MAJORITY_FUNCTION: u8 = 2;
 const REVERSE_DWORDS: u8 = 0x1b;
 const SWAP_QWORDS: u8 = 0x4e;
 const BROADCAST_LOW_DWORD: u8 = 0;
-const MOV_EAX_IMM32: u8 = 0xb8;
 // Intel SHA1RNDS4's immediate selects these FIPS 180-4 section 4.2.1 constants.
 // Arm's message operand already contains whatever round constants it requires.
 const CHOOSE_CONSTANT: u32 = 0x5a827999;
@@ -97,15 +96,13 @@ fn rounds_sha(code: &mut Code, operand: &Operand, target: TargetCpu) {
     // MOVD reads only Sn[31:0], zeros its upper lanes, and adds E to W0 only.
     read_scalar_vector(code, LEFT, operand.left);
     packed(code, Host::AddDword, RIGHT, LEFT);
-    code.push(MOV_EAX_IMM32);
-    code.extend(constant.to_le_bytes());
+    code.asm().mov_imm32(crate::x86_64::asm::Gpr::Rax, constant);
     move_to_vector(code, TEMPORARY, EAX);
     shuffle(code, TEMPORARY, TEMPORARY, BROADCAST_LOW_DWORD);
     packed(code, Host::SubDword, RIGHT, TEMPORARY); // cancel Intel's built-in K in all rounds
     shuffle(code, RESULT, RESULT, REVERSE_DWORDS);
     shuffle(code, RIGHT, RIGHT, REVERSE_DWORDS);
-    Host::Sha1Rounds4.register(code, RESULT, RIGHT, target);
-    code.push(function);
+    Host::Sha1Rounds4.register_imm(code, RESULT, RIGHT, function, target);
     shuffle(code, RESULT, RESULT, REVERSE_DWORDS);
 }
 

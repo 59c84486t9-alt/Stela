@@ -1,5 +1,5 @@
 //! EOR3, BCAX, RAX1 and XAR with SSE2.
-use super::{Host, commit, packed, read_vector};
+use super::{Host, commit, packed, packed_imm, read_vector};
 use crate::x86_64::asm::Code;
 use crate::{
     aarch64::simd::sha3::{Kind, Operand},
@@ -23,8 +23,13 @@ fn rotate_right(code: &mut Code, rotation: u8) {
     match rotation {
         NO_ROTATION => {}
         DWORD_BITS => {
-            packed(code, Host::ShuffleDword, RESULT, RESULT);
-            code.push(SWAP_DWORDS_IN_QWORDS);
+            packed_imm(
+                code,
+                Host::ShuffleDword,
+                RESULT,
+                RESULT,
+                SWAP_DWORDS_IN_QWORDS,
+            );
         }
         WORD_BITS | ROTATE_RIGHT_THREE_WORDS => {
             let selector = if rotation == WORD_BITS {
@@ -33,8 +38,7 @@ fn rotate_right(code: &mut Code, rotation: u8) {
                 ROTATE_WORDS_RIGHT_THREE
             };
             for opcode in [Host::ShuffleLowWord, Host::ShuffleHighWord] {
-                packed(code, opcode, RESULT, RESULT);
-                code.push(selector);
+                packed_imm(code, opcode, RESULT, RESULT, selector);
             }
         }
         _ => {
