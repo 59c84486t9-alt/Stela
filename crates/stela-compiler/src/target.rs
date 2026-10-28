@@ -98,6 +98,39 @@ impl HostCpuid {
     }
 }
 
+/// The vendor of a host CPU as its documented memory-ordering guarantees
+/// apply, from the CPUID leaf 0 vendor string. This is the compiler's one
+/// vendor policy:
+///
+/// - Intel (`GenuineIntel`): an unaligned load within one cache line is
+///   single-copy atomic (SDM Vol. 3A 9.1.1, [`TargetCpu::LineAtomic`]), and
+///   with AVX an aligned 16-byte load is ([`TargetCpu::AtomicLoad16`]).
+/// - AMD (`AuthenticAMD`) and Hygon (`HygonGenuine`): with AVX an aligned
+///   16-byte load is single-copy atomic (APM 24593 rev. 3.44 7.3.2); an
+///   unaligned load is atomic only inside an aligned quadword. Hygon's cores
+///   are licensed AMD Zen designs that follow AMD's manuals, as Linux treats
+///   them (`arch/x86/kernel/cpu/hygon.c`).
+/// - Zhaoxin (`  Shanghai  `), Centaur (`CentaurHauls`) and every other
+///   vendor: no published guarantee for either, so their hosts take the
+///   CMPXCHG16B and split-load paths until one is documented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    Intel,
+    Amd,
+    Other,
+}
+
+impl Vendor {
+    /// The vendor of the CPUID leaf 0 EBX, EDX and ECX values `vendor`.
+    pub const fn from_cpuid(vendor: [u32; 3]) -> Self {
+        match vendor {
+            TargetCpu::INTEL_VENDOR => Self::Intel,
+            TargetCpu::AMD_VENDOR | TargetCpu::HYGON_VENDOR => Self::Amd,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// A feature that detection leaves to the caller: the bare-metal boot
 /// declares it, or it is a compilation mode.
 const fn declared(_: &HostCpuid) -> bool {
@@ -148,13 +181,14 @@ features! {
     /// fault on its VEX encodings, so an Intel host needs AVX for it (as
     /// Rust's `std_detect`).
     Bmi1, with_bmi1, "+bmi1", |cpu| {
-        HostCpuid::bit(cpu.leaf7_ebx, 3) && (cpu.vendor != TargetCpu::INTEL_VENDOR || cpu.avx())
+        HostCpuid::bit(cpu.leaf7_ebx, 3)
+            && (!matches!(Vendor::from_cpuid(cpu.vendor), Vendor::Intel) || cpu.avx())
     };
     /// Minimum requirements for legacy XMM AES instructions, independent of SSE tiers.
     Aes, with_aes, "+aes", |cpu| HostCpuid::bit(cpu.leaf1_ecx, 25);
     /// Minimum requirements for legacy XMM SHA instructions, independent of SSE tiers.
     Sha, with_sha, "+sha", |cpu| HostCpuid::bit(cpu.leaf7_ebx, 29);
-    /// Aligned 16-byte atomic loads: Intel/AMD vendor guarantees with AVX hardware.
+    /// Aligned 16-byte atomic loads: the [`Vendor`] guarantee with AVX hardware.
     /// Lowering uses legacy SSE2, independently of OS-enabled AVX state.
     AtomicLoad16, with_atomic_load16, "+atomic-load16", |cpu| {
         TargetCpu::atomic_load16_guaranteed(cpu.vendor, cpu.leaf1_ecx)
@@ -169,12 +203,13 @@ features! {
     Avx512f, with_avx512f, "+avx512f", |cpu| {
         cpu.avx512_state() && HostCpuid::bit(cpu.leaf7_ebx, 16)
     };
-    /// An Intel processor: since the P6 family, an unaligned load that lies
-    /// within one cache line is single-copy atomic (Intel SDM Vol. 3A,
-    /// 9.1.1, "Guaranteed Atomic Operations"). A 16-byte granule never
-    /// crosses a line, so an ordered load inside one is a plain load. AMD
-    /// guarantees this only inside a naturally aligned quadword.
-    LineAtomic, with_line_atomic, "+line-atomic", |cpu| cpu.vendor == TargetCpu::INTEL_VENDOR;
+    /// An unaligned load that lies within one cache line is single-copy
+    /// atomic: an Intel processor since the P6 family ([`Vendor`]). A 16-byte
+    /// granule never crosses a line, so an ordered load inside one is a
+    /// plain load.
+    LineAtomic, with_line_atomic, "+line-atomic", |cpu| {
+        matches!(Vendor::from_cpuid(cpu.vendor), Vendor::Intel)
+    };
     /// The host runs the instructions on Intel's data operand independent
     /// timing list with timing independent of their data: Intel's
     /// IA32_UARCH_MISC_CTL.DOITM (MSR 1B01H bit 0, enumerated by
@@ -233,13 +268,19 @@ impl TargetCpu {
         u32::from_le_bytes(*b"enti"),
         u32::from_le_bytes(*b"cAMD"),
     ];
+    /// Hygon's vendor identity in CPUID0 EBX, EDX, ECX order.
+    pub const HYGON_VENDOR: [u32; 3] = [
+        u32::from_le_bytes(*b"Hygo"),
+        u32::from_le_bytes(*b"nGen"),
+        u32::from_le_bytes(*b"uine"),
+    ];
 
     /// Classify the documented aligned cacheable 16-byte load guarantee from
-    /// CPUID.0 vendor and CPUID.1 ECX. Intel SDM Guaranteed Atomic Operations and
-    /// AMD APM 24593 rev. 3.44 §7.3.2 require AVX hardware; OS AVX state is separate.
-    /// These raw values alone are not authority to enter native code or RAM.
+    /// CPUID.0 vendor and CPUID.1 ECX ([`Vendor`]): it requires AVX hardware;
+    /// OS AVX state is separate. These raw values alone are not authority to
+    /// enter native code or RAM.
     pub const fn atomic_load16_guaranteed(vendor: [u32; 3], leaf1_ecx: u32) -> bool {
-        matches!(vendor, Self::INTEL_VENDOR | Self::AMD_VENDOR)
+        matches!(Vendor::from_cpuid(vendor), Vendor::Intel | Vendor::Amd)
             && leaf1_ecx & CPUID_AVX_HARDWARE != 0
     }
 
@@ -616,7 +657,11 @@ mod tests {
 
     #[test]
     fn atomic_load16_requires_a_documented_vendor_and_independent_avx_hardware() {
-        for vendor in [TargetCpu::INTEL_VENDOR, TargetCpu::AMD_VENDOR] {
+        for vendor in [
+            TargetCpu::INTEL_VENDOR,
+            TargetCpu::AMD_VENDOR,
+            TargetCpu::HYGON_VENDOR,
+        ] {
             assert!(!TargetCpu::atomic_load16_guaranteed(vendor, 0));
             // OSXSAVE/XSAVE/CX16 do not grant the independent plain-load fact.
             assert!(!TargetCpu::atomic_load16_guaranteed(
@@ -630,13 +675,44 @@ mod tests {
         }
         for vendor in [
             [0; 3],
-            [
-                u32::from_le_bytes(*b"Hygo"),
-                u32::from_le_bytes(*b"nGen"),
-                u32::from_le_bytes(*b"uine"),
-            ],
+            vendor_id(b"  Shanghai  "),
+            vendor_id(b"CentaurHauls"),
         ] {
+            assert_eq!(Vendor::from_cpuid(vendor), Vendor::Other);
             assert!(!TargetCpu::atomic_load16_guaranteed(vendor, u32::MAX));
+        }
+    }
+
+    /// A vendor string in CPUID leaf 0 EBX, EDX, ECX order.
+    fn vendor_id(name: &[u8; 12]) -> [u32; 3] {
+        let word = |at: usize| u32::from_le_bytes(name[at..at + 4].try_into().unwrap());
+        [word(0), word(4), word(8)]
+    }
+
+    #[test]
+    fn hygon_follows_amd_and_only_intel_is_line_atomic() {
+        assert_eq!(vendor_id(b"HygonGenuine"), TargetCpu::HYGON_VENDOR);
+        assert_eq!(vendor_id(b"AuthenticAMD"), TargetCpu::AMD_VENDOR);
+        for (name, vendor) in [
+            (b"GenuineIntel", Vendor::Intel),
+            (b"AuthenticAMD", Vendor::Amd),
+            (b"HygonGenuine", Vendor::Amd),
+            (b"  Shanghai  ", Vendor::Other),
+            (b"CentaurHauls", Vendor::Other),
+        ] {
+            assert_eq!(Vendor::from_cpuid(vendor_id(name)), vendor);
+            let target = TargetCpu::from_cpuid(&HostCpuid {
+                vendor: vendor_id(name),
+                ..RICH
+            });
+            assert_eq!(
+                target.supports(TargetCpu::LineAtomic),
+                vendor == Vendor::Intel
+            );
+            assert_eq!(
+                target.supports(TargetCpu::AtomicLoad16),
+                vendor != Vendor::Other
+            );
         }
     }
 
@@ -865,7 +941,7 @@ mod tests {
                 (TargetCpu::Cx8, cpuid.leaf1_edx & 1 << 8 != 0),
                 (
                     TargetCpu::LineAtomic,
-                    cpuid.vendor == TargetCpu::INTEL_VENDOR,
+                    Vendor::from_cpuid(cpuid.vendor) == Vendor::Intel,
                 ),
             ] {
                 assert_eq!(target.supports(required), detected, "{required:?}");
