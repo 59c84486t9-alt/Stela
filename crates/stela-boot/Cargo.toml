@@ -19,6 +19,7 @@ native-profile = ["stela-runtime/native-profile"]
 
 [dependencies]
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
+stela-boot-core = { path = "../stela-boot-core" }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi"] }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }

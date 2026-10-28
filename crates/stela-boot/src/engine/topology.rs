@@ -23,12 +23,9 @@ use stela_runtime::machine::{
 
 #[cfg(not(test))]
 use super::bundle::live_tree::LiveTree;
-#[cfg(not(test))]
-use crate::native_smp::{firmware::Capture, topology as native};
 #[cfg(test)]
-use crate::{
-    boot_live_tree::LiveTree, boot_native_capture::Capture, boot_native_topology as native,
-};
+use crate::boot_live_tree::LiveTree;
+use stela_boot_core::{record::Capture, topology as native};
 #[cfg(test)]
 use stela_runtime::machine::soc::assigned::GuestSlotId;
 
@@ -861,7 +858,7 @@ mod tests {
         }
     }
     fn capture() -> alloc::boxed::Box<Capture> {
-        let mut capture = Capture::boxed(2);
+        let mut capture = Capture::boxed(2).unwrap();
         capture.processor_count = 2;
         capture.core_count = 2;
         capture.physical_count = 2;

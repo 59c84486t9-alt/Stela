@@ -10,34 +10,9 @@ pub(crate) mod firmware;
 pub(crate) mod kernel_check;
 pub(crate) mod memory_types;
 pub(crate) mod resources;
-pub(crate) mod topology;
+pub(crate) use stela_boot_core::topology;
 pub(crate) mod transport;
 mod tsc_sync;
-
-pub(crate) const OPTION: &str = "--native-cores";
-
-pub(crate) fn requested(options: &str) -> Result<Option<usize>, &'static str> {
-    let mut words = options.split_ascii_whitespace();
-    let mut result = None;
-    while let Some(word) = words.next() {
-        if word != OPTION {
-            continue;
-        }
-        if result.is_some() {
-            return Err("--native-cores must occur once");
-        }
-        let count = words
-            .next()
-            .ok_or("--native-cores needs a processor count")?
-            .parse::<usize>()
-            .map_err(|_| "--native-cores needs a processor count")?;
-        if !(1..=topology::MAX_CORES).contains(&count) {
-            return Err("--native-cores is outside the supported physical-core capacity");
-        }
-        result = Some(count);
-    }
-    Ok(result)
-}
 
 /// Check the exact loader-owned reservation against the requested, source
 /// identified physical cores before any INIT/SIPI or guest-state loan.

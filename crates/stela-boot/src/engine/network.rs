@@ -339,15 +339,4 @@ impl GuestNetwork {
     }
 }
 
-/// `http://HOST[:PORT]/PATH` as the host and the path.
-pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or("only http:// URLs are supported")?;
-    let at = rest.find('/').ok_or("URL without a path")?;
-    let (host, path) = rest.split_at(at);
-    if host.is_empty() {
-        return Err("URL without a host");
-    }
-    Ok((host, path))
-}
+pub use stela_boot_core::options::split_url;

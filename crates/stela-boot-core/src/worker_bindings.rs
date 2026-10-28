@@ -3,7 +3,7 @@
 //! their publication owners against the retained capture and executor roster.
 use stela_runtime::machine::engine::publication::WorkerBinding;
 
-pub(crate) fn validate(
+pub fn validate(
     cores: usize,
     boot_processor: usize,
     bindings: &[WorkerBinding],

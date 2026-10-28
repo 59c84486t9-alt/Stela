@@ -1,7 +1,6 @@
 //! Copied firmware processor identity and per-processor CPUID observations.
 //! One selected logical processor owns each physical core; SMT siblings never
 //! increase the number of guest PEs admitted by this native executor.
-extern crate alloc;
 
 use alloc::vec::Vec;
 
@@ -12,10 +11,7 @@ pub const MAX_CORES: usize = 64;
 /// Physical cores the executor owns from `available` discovered cores.
 /// Without a request this is `min(available, MAX_CORES)`; an explicit count
 /// narrows it and refuses when it exceeds either bound.
-pub(crate) fn assignment_count(
-    requested: Option<usize>,
-    available: usize,
-) -> Result<usize, &'static str> {
+pub fn assignment_count(requested: Option<usize>, available: usize) -> Result<usize, &'static str> {
     let assignable = available.min(MAX_CORES);
     let count = requested.unwrap_or(assignable);
     if assignable == 0 || count == 0 || count > assignable {
@@ -166,7 +162,7 @@ impl Snapshot {
 /// Conservative compiler policy from the assigned workers' actual installed
 /// observations. This cannot grant execution: registration and each native
 /// entry must still validate the destination's current hardware and controls.
-pub(crate) fn common_native_target(
+pub fn common_native_target(
     observations: &[&Snapshot],
 ) -> Result<stela_compiler::TargetCpu, CapabilityRefusal> {
     use stela_compiler::TargetCpu;
@@ -395,7 +391,7 @@ pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
 /// Unlike admission, this includes enabled unhealthy APs: health does not prove
 /// that their firmware execution has stopped. Disabled processors stay disabled.
 /// No allocation or firmware access is needed at the post-EBS boundary.
-pub(crate) fn enabled_unselected<'a>(
+pub fn enabled_unselected<'a>(
     processors: &'a [Processor],
     selected: &'a [u32],
 ) -> Result<impl Iterator<Item = usize> + Clone + 'a, Refusal> {

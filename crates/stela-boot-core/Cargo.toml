@@ -1,0 +1,22 @@
+[package]
+name = "stela-boot-core"
+version.workspace = true
+edition.workspace = true
+license = "MIT AND GPL-2.0-only"
+publish = false
+description = "The UEFI mount's firmware-independent logic: stela.cfg options, ACPI, topology, paging and console decoders"
+
+# The freestanding crates for stela.efi; on the host, as `stela setup` and
+# the tests build them.
+[target.'cfg(target_os = "uefi")'.dependencies]
+stela-compiler = { path = "../stela-compiler", default-features = false }
+stela-loader = { path = "../stela-loader", default-features = false }
+stela-runtime = { path = "../stela-runtime", default-features = false }
+
+[target.'cfg(not(target_os = "uefi"))'.dependencies]
+stela-compiler = { path = "../stela-compiler" }
+stela-loader = { path = "../stela-loader" }
+stela-runtime = { path = "../stela-runtime" }
+
+[lints]
+workspace = true

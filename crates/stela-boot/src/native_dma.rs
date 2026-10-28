@@ -1,8 +1,8 @@
 //! Native IOMMU backends. Discovery/ownership must supply a qualified unit;
 //! there is no identity-mapping substitute for an unavailable domain.
 pub(crate) mod diagnostic;
-pub mod dmar;
-pub mod firmware_state;
+pub use stela_boot_core::dmar;
+pub use stela_boot_core::firmware_state;
 mod isolation_diagnostic;
 pub mod requester;
 pub mod vtd;

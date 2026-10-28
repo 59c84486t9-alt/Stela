@@ -1,7 +1,7 @@
 //! Cold fixed-physical-core adapter over the boot's existing physical reservations.
 //! Final Apple topology/device/DMA/reset admission belongs to the mount. This
 //! constructs the actual checked Machine; it never certifies legacy raw V1.
-mod bindings;
+use stela_boot_core::worker_bindings as bindings;
 
 use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
 use crate::{apic::Apic, engine::host, handoff::Handoff, layout};

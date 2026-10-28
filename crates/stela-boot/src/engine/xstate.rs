@@ -463,10 +463,7 @@ fn qualify_error_pointers(identity: Registers) -> Result<(), LayoutError> {
 
 #[cfg(target_arch = "x86_64")]
 fn actual_processor() -> Result<u32, LayoutError> {
-    #[cfg(test)]
-    use crate::boot_native_topology as topology;
-    #[cfg(not(test))]
-    use crate::native_smp::topology;
+    use stela_boot_core::topology;
     let maximum = cpuid(0, 0).eax;
     let extended = cpuid(0x8000_0000, 0).eax;
     let mut snapshot = topology::Snapshot::default();

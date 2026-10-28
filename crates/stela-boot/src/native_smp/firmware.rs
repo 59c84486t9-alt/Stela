@@ -1,8 +1,8 @@
 //! Copy processor identity/capabilities while UEFI MP Services still owns APs.
 //! Every callback returns before ExitBootServices; persistent executors use
 //! Stela's own INIT/SIPI entry, stacks and control memory afterward.
-mod record;
 pub(crate) use record::Capture;
+use stela_boot_core::record;
 
 use super::{
     memory_types::amd,

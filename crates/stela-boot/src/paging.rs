@@ -3,7 +3,7 @@
 use crate::cpu::msr;
 use core::arch::{asm, naked_asm};
 
-mod controls;
+use stela_boot_core::paging_controls as controls;
 
 pub const PAGE: usize = 4096;
 const ENTRIES: usize = 512;
