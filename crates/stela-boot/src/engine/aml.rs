@@ -989,7 +989,7 @@ impl HostAcpi {
             }
         } else {
             output::arguments(format_args!(
-                "UNSUPPORTED ACPI hardware activation: SCI resources unavailable\n"
+                "UNSUPPORTED ACPI hardware activation: native firmware services are not qualified\n"
             ));
         }
         Some(host)
