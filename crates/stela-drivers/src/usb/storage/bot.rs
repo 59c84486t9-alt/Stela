@@ -5,7 +5,9 @@
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
 // Block-zero ordering: Linux sd.c, Drew Eckhardt 1992; Eric Youngdale
 // 1993-1995, 1999. Retained lifecycle uses Stela's shared xHCI authority.
-use super::super::xhci::{DEVICE_TO_HOST, Device, Interface, RECIPIENT_INTERFACE, TYPE_CLASS};
+use super::super::xhci::{
+    DEVICE_TO_HOST, Device, Interface, Operation, RECIPIENT_INTERFACE, TYPE_CLASS,
+};
 use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
 mod quirks;
 use crate::{
@@ -58,13 +60,44 @@ pub(super) trait Io {
     /// A submitted transfer's length once complete; never waits. A failed
     /// or timed-out one has had its endpoint's queue cancelled, as a
     /// failed [`Self::bulk`] has.
-    fn reap(&mut self, pending: &Pending) -> Option<Result<usize, BlockError>> {
+    fn reap(&mut self, pending: &mut Pending) -> Option<Result<usize, BlockError>> {
         match pending {
             Pending::Done(result) => Some(result.clone()),
-            Pending::Ticket { .. } => Some(Err(BlockError::Protocol(
+            Pending::Ticket { .. } | Pending::Cancelling(..) => Some(Err(BlockError::Protocol(
                 "a BOT transfer ticket on a transport without tickets",
             ))),
         }
+    }
+    /// Start a control transfer; [`Self::look`] gives its result. By
+    /// default it runs at once.
+    fn begin_control(&mut self, request: [u8; 8]) -> Request {
+        Request::Done(self.control(request))
+    }
+    /// Start clearing a halt; [`Self::look`] gives its result. By default
+    /// it runs at once.
+    fn begin_clear(&mut self, endpoint: Endpoint) -> Request {
+        Request::Done(self.clear(endpoint).map(|()| Vec::new()))
+    }
+    /// A started request's result once it ended; never waits.
+    fn look(&mut self, request: &mut Request) -> Option<Result<Vec<u8>, BlockError>> {
+        match request {
+            Request::Done(result) => Some(result.clone()),
+            Request::Operation(_) => Some(Err(BlockError::Protocol(
+                "an xHCI operation on a transport without them",
+            ))),
+        }
+    }
+}
+
+/// A control transfer or halt clear ([`Io::begin_control`], [`Io::begin_clear`]).
+pub(super) enum Request {
+    Done(Result<Vec<u8>, BlockError>),
+    Operation(Operation),
+}
+
+impl Request {
+    fn started(operation: Result<Operation, BlockError>) -> Self {
+        operation.map_or_else(|error| Self::Done(Err(error)), Self::Operation)
     }
 }
 
@@ -76,6 +109,8 @@ pub(super) enum Pending {
         dci: u8,
         deadline: crate::Deadline,
     },
+    /// The endpoint's cancellation after a failure, which it then reports.
+    Cancelling(Operation, BlockError),
 }
 
 pub(super) struct Native {
@@ -145,41 +180,75 @@ impl Io for Native {
             deadline,
         })
     }
+    fn begin_control(&mut self, request: [u8; 8]) -> Request {
+        let mut controller = self.controller.borrow_mut();
+        Request::started(
+            controller
+                .device(self.id)
+                .and_then(|mut device| device.start_control(request, &[])),
+        )
+    }
+    fn begin_clear(&mut self, endpoint: Endpoint) -> Request {
+        let mut controller = self.controller.borrow_mut();
+        Request::started(
+            controller
+                .device(self.id)
+                .and_then(|mut device| device.start_clear(&endpoint)),
+        )
+    }
+    fn look(&mut self, request: &mut Request) -> Option<Result<Vec<u8>, BlockError>> {
+        let operation = match request {
+            Request::Done(result) => return Some(result.clone()),
+            Request::Operation(operation) => operation,
+        };
+        let mut controller = self.controller.borrow_mut();
+        match controller.device(self.id) {
+            Ok(mut device) => device.poll(operation),
+            Err(error) => Some(Err(error)),
+        }
+    }
     /// As the xHCI's own waited transfer: a failure or a timeout cancels
     /// the endpoint's queue before the buffer returns to the CPU.
-    fn reap(&mut self, pending: &Pending) -> Option<Result<usize, BlockError>> {
-        let Pending::Ticket {
-            ticket,
-            dci,
-            deadline,
-        } = pending
-        else {
-            let Pending::Done(result) = pending else {
-                unreachable!()
-            };
-            return Some(result.clone());
-        };
+    fn reap(&mut self, pending: &mut Pending) -> Option<Result<usize, BlockError>> {
         let mut controller = self.controller.borrow_mut();
         let mut device = match controller.device(self.id) {
             Ok(device) => device,
             Err(error) => return Some(Err(error)),
         };
-        match device.completed_ticket(ticket) {
-            Some(Ok(length)) => Some(Ok(length)),
-            Some(Err(error)) => {
-                let incompatible = matches!(
-                    error,
-                    BlockError::Device {
-                        status: INCOMPATIBLE_DEVICE
+        if let Pending::Ticket {
+            ticket,
+            dci,
+            deadline,
+        } = pending
+        {
+            let error = match device.completed_ticket(ticket) {
+                Some(Ok(length)) => return Some(Ok(length)),
+                Some(Err(error)) => {
+                    let incompatible = matches!(
+                        error,
+                        BlockError::Device {
+                            status: INCOMPATIBLE_DEVICE
+                        }
+                    );
+                    if incompatible {
+                        return Some(Err(error));
                     }
-                );
-                if !incompatible && let Err(cancel) = device.cancel(*dci) {
-                    return Some(Err(cancel));
+                    error
                 }
-                Some(Err(error))
+                None if deadline.passed() => BlockError::Timeout,
+                None => return None,
+            };
+            match device.start_cancel(*dci) {
+                Ok(operation) => *pending = Pending::Cancelling(operation, error),
+                Err(cancel) => return Some(Err(cancel)),
             }
-            None if deadline.passed() => Some(device.cancel(*dci).and(Err(BlockError::Timeout))),
-            None => None,
+        }
+        match pending {
+            Pending::Done(result) => Some(result.clone()),
+            Pending::Cancelling(operation, error) => {
+                Some(device.poll(operation)?.and(Err(error.clone())))
+            }
+            Pending::Ticket { .. } => unreachable!(),
         }
     }
 }
@@ -225,8 +294,8 @@ pub(super) struct Bot<I: Io> {
     initial_read: bool,
     attachment: Option<(Device, Interface)>,
     reset_generation: u64,
-    /// The clock time a reset recovery's settling ends ([`Self::recover`]).
-    settling: Option<u64>,
+    /// A reset recovery under way ([`Self::recover`]).
+    recovery: Option<Recovery>,
     /// The command begun and not yet ended ([`Self::begin`]).
     begun: Option<Begun>,
     /// The data a failed command's data phase moved in, until the next
@@ -252,6 +321,17 @@ struct Begun {
     sensing: Option<Sensing>,
 }
 
+/// A reset recovery's progress, as usb_stor_reset_common, none of it
+/// waited for.
+enum Recovery {
+    /// The class reset request.
+    Resetting(Request),
+    /// The device settles until this clock time.
+    Settling(u64),
+    /// A halt's clear: the input's, or with its result the output's.
+    Clearing(Request, Option<Result<Vec<u8>, BlockError>>),
+}
+
 /// What a REQUEST SENSE answers (Linux `usb_stor_invoke_transport`).
 #[derive(Clone, Copy)]
 enum Sensing {
@@ -267,6 +347,9 @@ enum Stage {
     /// A data transfer of this many bytes.
     Data(Pending, usize),
     Status(Pending),
+    /// A stalled pipe's clear, then the status stage, submitted again when
+    /// it was the status stage that stalled.
+    Clearing(Request, bool),
 }
 
 /// What a step of a begun command left.
@@ -351,7 +434,7 @@ impl<I: Io> Bot<I> {
             initial_read: flags.initial_read(),
             attachment: None,
             reset_generation: 0,
-            settling: None,
+            recovery: None,
             begun: None,
             failed_data: None,
         }
@@ -434,51 +517,77 @@ impl<I: Io> Bot<I> {
     /// Acknowledged class reset is not device-side recovery completion: as
     /// usb_stor_reset_common, the device settles for HZ*6 before either
     /// CLEAR_FEATURE, which controller readiness alone cannot replace. No
-    /// caller waits for it; the transport takes no command until it has
-    /// passed ([`Self::recovering`]).
+    /// caller waits for any of it; the transport takes no command until
+    /// both halts are cleared ([`Self::recovering`]).
     fn recover(&mut self) {
-        let reset = (|| {
-            self.io.ready()?;
-            self.io.control(setup(
-                TYPE_CLASS | RECIPIENT_INTERFACE,
-                RESET,
-                0,
-                u16::from(self.interface),
-                0,
-            ))
-        })();
-        match reset {
-            // The acknowledged reset ends every published unit's media.
-            Ok(_) => {
-                self.settling = Some(self.io.now_us().saturating_add(RESET_RECOVERY_US));
-                self.reset_generation = self.reset_generation.wrapping_add(1);
-            }
-            Err(_) => self.poisoned = true,
+        if self.io.ready().is_err() {
+            self.poisoned = true;
+            return;
         }
+        let request = self.io.begin_control(setup(
+            TYPE_CLASS | RECIPIENT_INTERFACE,
+            RESET,
+            0,
+            u16::from(self.interface),
+            0,
+        ));
+        self.recovery = Some(Recovery::Resetting(request));
+        self.recovering();
     }
 
-    /// Whether a reset recovery still settles. Once it has settled, both
-    /// halts are cleared and the transport takes commands again.
+    /// Whether a reset recovery is under way, moved on as far as it goes.
     fn recovering(&mut self) -> bool {
-        let Some(settled) = self.settling else {
-            return false;
-        };
-        if self.io.now_us() < settled {
-            return true;
+        loop {
+            let Some(recovery) = &mut self.recovery else {
+                return false;
+            };
+            match recovery {
+                Recovery::Resetting(request) => {
+                    let Some(result) = self.io.look(request) else {
+                        return true;
+                    };
+                    if result.is_ok() {
+                        // The acknowledged reset ends every published unit's media.
+                        let settled = self.io.now_us().saturating_add(RESET_RECOVERY_US);
+                        self.recovery = Some(Recovery::Settling(settled));
+                        self.reset_generation = self.reset_generation.wrapping_add(1);
+                    } else {
+                        self.recovery = None;
+                        self.poisoned = true;
+                    }
+                }
+                Recovery::Settling(settled) => {
+                    if self.io.now_us() < *settled {
+                        return true;
+                    }
+                    if self.io.ready().is_err() {
+                        self.recovery = None;
+                        self.poisoned = true;
+                        continue;
+                    }
+                    let request = self.io.begin_clear(self.endpoints[0]);
+                    self.recovery = Some(Recovery::Clearing(request, None));
+                }
+                Recovery::Clearing(request, input) => {
+                    let Some(result) = self.io.look(request) else {
+                        return true;
+                    };
+                    match input.take() {
+                        // Both halts are cleared whatever the first did.
+                        None => {
+                            let request = self.io.begin_clear(self.endpoints[1]);
+                            self.recovery = Some(Recovery::Clearing(request, Some(result)));
+                        }
+                        Some(input) => {
+                            self.recovery = None;
+                            if input.and(result).and_then(|_| self.io.ready()).is_err() {
+                                self.poisoned = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        self.settling = None;
-        let result = (|| {
-            self.io.ready()?;
-            let input = self.io.clear(self.endpoints[0]);
-            let output = self.io.clear(self.endpoints[1]);
-            input?;
-            output?;
-            self.io.ready()
-        })();
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        false
     }
     fn failed<T>(&mut self, error: BlockError) -> Result<T, BlockError> {
         self.recover();
@@ -488,14 +597,21 @@ impl<I: Io> Bot<I> {
     /// Run `cdb` on `lun`, the caller waiting, for a reset recovery's
     /// settling first.
     pub fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
-        if let Some(settled) = self.settling {
-            let now = self.io.now_us();
-            if now < settled {
-                self.io.delay(settled - now);
+        while self.recovering() {
+            if let Some(Recovery::Settling(settled)) = self.recovery {
+                self.io.delay(settled.saturating_sub(self.io.now_us()));
+            } else {
+                crate::waiting();
+                core::hint::spin_loop();
             }
         }
-        self.begin(lun, cdb, data)?;
-        self.wait()
+        let result = self.begin(lun, cdb, data).and_then(|()| self.wait());
+        // The waiting caller sees the generation a failure's reset left.
+        while matches!(self.recovery, Some(Recovery::Resetting(_))) && self.recovering() {
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+        result
     }
 
     /// The begun command's result, the caller waiting for its transfers.
@@ -632,7 +748,7 @@ impl<I: Io> Bot<I> {
 
     /// Move the begun command on as far as its completed transfers allow.
     fn advance(&mut self, begun: &mut Begun) -> Next {
-        match &begun.stage {
+        match &mut begun.stage {
             Stage::Wrapper(pending, cbw_length) => {
                 let cbw_length = *cbw_length;
                 let Some(result) = self.io.reap(pending) else {
@@ -668,12 +784,7 @@ impl<I: Io> Bot<I> {
                     Ok(_) => Next::Done(self.failed(PROTOCOL_ERROR)),
                     Err(BlockError::Device {
                         status: super::STALL,
-                    }) => {
-                        if let Err(error) = self.io.clear(endpoint) {
-                            return Next::Done(self.failed(error));
-                        }
-                        self.status(begun)
-                    }
+                    }) => Next::Stage(Stage::Clearing(self.io.begin_clear(endpoint), false)),
                     Err(error) => Next::Done(self.failed(error)),
                 }
             }
@@ -691,13 +802,20 @@ impl<I: Io> Bot<I> {
                         status: super::STALL,
                     }) if !begun.stalled => {
                         begun.stalled = true;
-                        if let Err(error) = self.io.clear(self.endpoints[0]) {
-                            return Next::Done(self.failed(error));
-                        }
-                        self.submit_status()
+                        let request = self.io.begin_clear(self.endpoints[0]);
+                        Next::Stage(Stage::Clearing(request, true))
                     }
                     Ok(_) => Next::Done(self.failed(PROTOCOL_ERROR)),
                     Err(error) => Next::Done(self.failed(error)),
+                }
+            }
+            Stage::Clearing(request, resubmit) => {
+                let resubmit = *resubmit;
+                match self.io.look(request) {
+                    None => Next::Wait,
+                    Some(Err(error)) => Next::Done(self.failed(error)),
+                    Some(Ok(_)) if resubmit => self.submit_status(),
+                    Some(Ok(_)) => self.status(begun),
                 }
             }
         }
@@ -1996,7 +2114,7 @@ mod tests {
                 initial_read: false,
                 attachment: None,
                 reset_generation: 0,
-                settling: None,
+                recovery: None,
                 begun: None,
                 failed_data: None,
             };
