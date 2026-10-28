@@ -6,11 +6,11 @@ use crate::x86_64::asm::Code;
 pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         // Keep each guest instruction's native source-map interval nonempty.
-        code.push(0x90);
+        code.asm().nop();
         return;
     }
-    code.extend([0x48, 0xb8]); // movabs rax,imm64; leaves guest NZCV untouched
-    code.extend(operand.address.to_le_bytes());
+    // MOVABS leaves guest NZCV untouched.
+    super::immediate(code, operand.address);
     store(code, operand.destination);
 }
 

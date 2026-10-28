@@ -1,6 +1,11 @@
 //! FlagM/FlagM2 on the in-memory guest NZCV.
 use super::load;
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{
+    Alu, Code, Cond,
+    Gpr::{Rax, Rcx, Rdx},
+    Mem, ShiftOp,
+    Size::{self, Dword, Qword},
+};
 use crate::{
     GuestState,
     aarch64::Register,
@@ -39,86 +44,11 @@ const EXTERNAL_TO_ARM_TABLE: u32 = NEGATIVE
     | ((CARRY | OVERFLOW) << (2 * TABLE_ENTRY_BITS))
     | ((ZERO | CARRY) << (3 * TABLE_ENTRY_BITS));
 
-/// Family-local instruction encodings. Immediates/displacements follow separately.
-#[derive(Clone, Copy)]
-enum Opcode {
-    Nop,
-    LoadEaxNzcv,
-    LoadEcxNzcv,
-    StoreEaxNzcv,
-    XorNzcvImmediate,
-    AndNzcvImmediate,
-    MoveEcxEax,
-    MoveEdxEax,
-    MoveEaxEdx,
-    MoveEaxImmediate,
-    RotateRax,
-    ShiftLeftEax,
-    ShiftLeftEcx,
-    ShiftRightEax,
-    ShiftRightEcx,
-    ShiftRightEdx,
-    ShiftRightEaxCl,
-    AndEaxImmediate,
-    AndEcxImmediate,
-    OrEaxImmediate,
-    OrEaxEcx,
-    OrEcxEdx,
-    XorEaxEdx,
-    TestAl,
-    TestAx,
-    SetZeroDl,
-    ZeroExtendEdxDl,
-    ShiftLeftEdx,
-}
-impl Opcode {
-    fn emit(self, code: &mut Code) {
-        code.extend(match self {
-            Self::Nop => &[0x90][..],
-            Self::LoadEaxNzcv => &[0x8b, 0x87][..],
-            Self::LoadEcxNzcv => &[0x8b, 0x8f],
-            Self::StoreEaxNzcv => &[0x89, 0x87],
-            Self::XorNzcvImmediate => &[0x81, 0xb7],
-            Self::AndNzcvImmediate => &[0x81, 0xa7],
-            Self::MoveEcxEax => &[0x89, 0xc1],
-            Self::MoveEdxEax => &[0x89, 0xc2],
-            Self::MoveEaxEdx => &[0x89, 0xd0],
-            Self::MoveEaxImmediate => &[0xb8],
-            Self::RotateRax => &[0x48, 0xc1, 0xc8],
-            Self::ShiftLeftEax => &[0xc1, 0xe0],
-            Self::ShiftLeftEcx => &[0xc1, 0xe1],
-            Self::ShiftRightEax => &[0xc1, 0xe8],
-            Self::ShiftRightEcx => &[0xc1, 0xe9],
-            Self::ShiftRightEdx => &[0xc1, 0xea],
-            Self::ShiftRightEaxCl => &[0xd3, 0xe8],
-            Self::AndEaxImmediate => &[0x25],
-            Self::AndEcxImmediate => &[0x81, 0xe1],
-            Self::OrEaxImmediate => &[0x0d],
-            Self::OrEaxEcx => &[0x09, 0xc8],
-            Self::OrEcxEdx => &[0x09, 0xd1],
-            Self::XorEaxEdx => &[0x31, 0xd0],
-            Self::TestAl => &[0x84, 0xc0],
-            Self::TestAx => &[0x66, 0x85, 0xc0],
-            Self::SetZeroDl => &[0x0f, 0x94, 0xc2],
-            Self::ZeroExtendEdxDl => &[0x0f, 0xb6, 0xd2],
-            Self::ShiftLeftEdx => &[0xc1, 0xe2],
-        });
-    }
-    fn immediate(self, code: &mut Code, value: u32) {
-        self.emit(code);
-        code.extend(value.to_le_bytes());
-    }
-    fn shift(self, code: &mut Code, amount: u8) {
-        self.emit(code);
-        code.push(amount);
-    }
-}
-
 pub(super) fn emit(code: &mut Code, operand: &Operand) {
     match *operand {
         Operand::InvertCarry => {
-            Opcode::XorNzcvImmediate.immediate(code, NZCV_OFFSET);
-            code.extend(CARRY_MASK.to_le_bytes());
+            code.asm()
+                .alu_imm32(Alu::Xor, Dword, nzcv(), CARRY_MASK as i32);
             return;
         }
         Operand::RotateMask {
@@ -128,59 +58,62 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
         } => {
             if mask == 0 {
                 // Every instruction keeps a non-empty source-map range.
-                Opcode::Nop.emit(code);
+                code.asm().nop();
                 return;
             }
+            let keep = !(u32::from(mask) << NZCV_SHIFT) as i32;
             if source == Register::Zero {
-                Opcode::AndNzcvImmediate.immediate(code, NZCV_OFFSET);
-                code.extend((!(u32::from(mask) << NZCV_SHIFT)).to_le_bytes());
+                code.asm().alu_imm32(Alu::And, Dword, nzcv(), keep);
                 return;
             }
             load(code, source);
+            let mut asm = code.asm();
             if rotation != 0 {
-                Opcode::RotateRax.shift(code, rotation);
+                asm.shift_imm(ShiftOp::Ror, Qword, Rax, rotation);
             }
-            Opcode::AndEaxImmediate.immediate(code, u32::from(mask));
-            Opcode::ShiftLeftEax.shift(code, NZCV_SHIFT);
-            Opcode::LoadEcxNzcv.immediate(code, NZCV_OFFSET);
-            Opcode::AndEcxImmediate.immediate(code, !(u32::from(mask) << NZCV_SHIFT));
-            Opcode::OrEaxEcx.emit(code);
+            asm.alu_accumulator_imm32(Alu::And, Dword, i32::from(mask));
+            asm.shift_imm(ShiftOp::Shl, Dword, Rax, NZCV_SHIFT);
+            asm.mov_load(Dword, Rcx, nzcv());
+            asm.alu_imm32(Alu::And, Dword, Rcx, keep);
+            asm.alu(Alu::Or, Dword, Rax, Rcx);
         }
         Operand::Set { source, width } => {
             if source == Register::Zero {
-                Opcode::LoadEaxNzcv.immediate(code, NZCV_OFFSET);
-                Opcode::AndEaxImmediate.immediate(code, CARRY_MASK);
-                Opcode::OrEaxImmediate.immediate(code, ZERO << NZCV_SHIFT);
-                Opcode::StoreEaxNzcv.immediate(code, NZCV_OFFSET);
+                let mut asm = code.asm();
+                asm.mov_load(Dword, Rax, nzcv());
+                asm.alu_accumulator_imm32(Alu::And, Dword, CARRY_MASK as i32);
+                asm.alu_accumulator_imm32(Alu::Or, Dword, (ZERO << NZCV_SHIFT) as i32);
+                asm.mov_store(Dword, nzcv(), Rax);
                 return;
             }
             load(code, source);
+            let mut asm = code.asm();
             // TEST observes only the architectural byte/halfword; SETZ's
             // partial write is zero-extended before the full-register use.
-            Opcode::MoveEcxEax.emit(code);
-            Opcode::ShiftRightEcx.shift(code, width.bits() - 1);
-            Opcode::AndEcxImmediate.immediate(code, 1);
-            Opcode::ShiftLeftEcx.shift(code, NZCV_SHIFT + NEGATIVE_BIT);
-            match width {
-                SetWidth::Byte => Opcode::TestAl,
-                SetWidth::Halfword => Opcode::TestAx,
-            }
-            .emit(code);
-            Opcode::SetZeroDl.emit(code);
-            Opcode::ZeroExtendEdxDl.emit(code);
-            Opcode::ShiftLeftEdx.shift(code, NZCV_SHIFT + ZERO_BIT);
-            Opcode::OrEcxEdx.emit(code);
-            Opcode::MoveEdxEax.emit(code);
-            Opcode::ShiftRightEdx.shift(code, width.bits() - 1);
-            Opcode::MoveEaxEdx.emit(code);
-            Opcode::ShiftRightEax.shift(code, 1);
-            Opcode::XorEaxEdx.emit(code);
-            Opcode::AndEaxImmediate.immediate(code, OVERFLOW);
-            Opcode::ShiftLeftEax.shift(code, NZCV_SHIFT);
-            Opcode::OrEaxEcx.emit(code);
-            Opcode::LoadEcxNzcv.immediate(code, NZCV_OFFSET);
-            Opcode::AndEcxImmediate.immediate(code, CARRY_MASK);
-            Opcode::OrEaxEcx.emit(code);
+            asm.mov(Dword, Rcx, Rax);
+            asm.shift_imm(ShiftOp::Shr, Dword, Rcx, width.bits() - 1);
+            asm.alu_imm32(Alu::And, Dword, Rcx, 1);
+            asm.shift_imm(ShiftOp::Shl, Dword, Rcx, NZCV_SHIFT + NEGATIVE_BIT);
+            let tested = match width {
+                SetWidth::Byte => Size::Byte,
+                SetWidth::Halfword => Size::Word,
+            };
+            asm.test(tested, Rax, Rax);
+            asm.setcc(Cond::E, Rdx);
+            asm.movzx(Dword, Rdx, Size::Byte, Rdx);
+            asm.shift_imm(ShiftOp::Shl, Dword, Rdx, NZCV_SHIFT + ZERO_BIT);
+            asm.alu(Alu::Or, Dword, Rcx, Rdx);
+            asm.mov(Dword, Rdx, Rax);
+            asm.shift_imm(ShiftOp::Shr, Dword, Rdx, width.bits() - 1);
+            asm.mov(Dword, Rax, Rdx);
+            asm.shift_imm(ShiftOp::Shr, Dword, Rax, 1);
+            asm.alu(Alu::Xor, Dword, Rax, Rdx);
+            asm.alu_accumulator_imm32(Alu::And, Dword, OVERFLOW as i32);
+            asm.shift_imm(ShiftOp::Shl, Dword, Rax, NZCV_SHIFT);
+            asm.alu(Alu::Or, Dword, Rax, Rcx);
+            asm.mov_load(Dword, Rcx, nzcv());
+            asm.alu_imm32(Alu::And, Dword, Rcx, CARRY_MASK as i32);
+            asm.alu(Alu::Or, Dword, Rax, Rcx);
         }
         Operand::ArmToExternal => {
             emit_conversion(code, ARM_TO_EXTERNAL_TABLE, ARM_INDEX_SHIFT, ARM_INDEX_MASK);
@@ -194,18 +127,24 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
             );
         }
     }
-    Opcode::StoreEaxNzcv.immediate(code, NZCV_OFFSET);
+    code.asm().mov_store(Dword, nzcv(), Rax);
+}
+
+/// The guest NZCV word.
+fn nzcv() -> Mem {
+    super::frame(NZCV_OFFSET)
 }
 
 fn emit_conversion(code: &mut Code, table: u32, index_shift: u8, index_mask: u32) {
-    Opcode::LoadEcxNzcv.immediate(code, NZCV_OFFSET);
+    let mut asm = code.asm();
+    asm.mov_load(Dword, Rcx, nzcv());
     // Each architectural flag result occupies one nibble of the immediate.
-    Opcode::ShiftRightEcx.shift(code, index_shift);
-    Opcode::AndEcxImmediate.immediate(code, index_mask);
-    Opcode::MoveEaxImmediate.immediate(code, table);
-    Opcode::ShiftRightEaxCl.emit(code);
-    Opcode::AndEaxImmediate.immediate(code, u32::from(NZCV_NIBBLE));
-    Opcode::ShiftLeftEax.shift(code, NZCV_SHIFT);
+    asm.shift_imm(ShiftOp::Shr, Dword, Rcx, index_shift);
+    asm.alu_imm32(Alu::And, Dword, Rcx, index_mask as i32);
+    asm.mov_imm32(Rax, table);
+    asm.shift_cl(ShiftOp::Shr, Dword, Rax);
+    asm.alu_accumulator_imm32(Alu::And, Dword, i32::from(NZCV_NIBBLE));
+    asm.shift_imm(ShiftOp::Shl, Dword, Rax, NZCV_SHIFT);
 }
 
 #[cfg(test)]

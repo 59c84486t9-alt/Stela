@@ -451,25 +451,21 @@ impl CrcOpcode {
 }
 
 /// Register recipe for the table-driven CRC: RAX is the W accumulator, RCX the
-/// data, RDX the table index and R8 the RIP-relative table base. RDI holds
-/// GuestState.
+/// data, RDX the table index and R8 the RIP-relative table base, which the
+/// caller loads. RDI holds GuestState.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CrcTableInstruction {
     TruncateByteData,
     TruncateHalfwordData,
-    TableBaseRip,
     MergeWordData,
     SelectHighDataWord,
     IndexLowByte,
     ShiftAccumulatorByte,
     XorTableEntry,
-    JumpOverTable,
     Discard,
 }
 impl CrcTableInstruction {
-    /// Emit this step. [`Self::TableBaseRip`] (`lea r8, [rip+disp32]`) and
-    /// [`Self::JumpOverTable`] (`jmp rel32`) end before their 32-bit field,
-    /// which the caller writes once the table is placed.
+    /// Emit this step.
     pub(crate) fn emit(self, code: &mut Code) {
         use crate::x86_64::asm::{Alu, ShiftOp};
         use Gpr::{R8, Rax, Rcx, Rdx};
@@ -477,22 +473,12 @@ impl CrcTableInstruction {
         match self {
             Self::TruncateByteData => asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx),
             Self::TruncateHalfwordData => asm.movzx(Size::Dword, Rcx, Size::Word, Rcx),
-            Self::TableBaseRip => {
-                asm.lea(Size::Qword, R8, Mem::rip(0));
-                let end = code.len() - size_of::<i32>();
-                code.truncate(end);
-            }
             Self::MergeWordData => asm.alu(Alu::Xor, Size::Dword, Rax, Rcx),
             Self::SelectHighDataWord => asm.shift_imm(ShiftOp::Shr, Size::Qword, Rcx, 32),
             Self::IndexLowByte => asm.movzx(Size::Dword, Rdx, Size::Byte, Rax),
             Self::ShiftAccumulatorByte => asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, 8),
             Self::XorTableEntry => {
                 asm.alu_load(Alu::Xor, Size::Dword, Rax, Mem::indexed(R8, Rdx, 4, 0));
-            }
-            Self::JumpOverTable => {
-                let _ = asm.jmp();
-                let end = code.len() - size_of::<i32>();
-                code.truncate(end);
             }
             // A nonempty source-map interval.
             Self::Discard => asm.nop(),
