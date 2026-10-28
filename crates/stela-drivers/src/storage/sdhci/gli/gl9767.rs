@@ -36,12 +36,7 @@ fn unlocked<T>(
     c: &mut dyn ConfigSpace,
     operation: impl FnOnce(&mut dyn ConfigSpace) -> Result<T, BlockError>,
 ) -> Result<T, BlockError> {
-    let result = update(c, VHS, 15 << 16, 2 << 16).and_then(|()| operation(c));
-    let close = update(c, VHS, 15 << 16, 0);
-    match result {
-        Ok(value) => close.map(|()| value),
-        Err(error) => Err(error),
-    }
+    super::unlocked_with(c, update, (VHS, 15 << 16, 2 << 16), operation)
 }
 fn mmio(r: &mut dyn Registers, at: usize, mask: u32, bits: u32) -> Result<(), BlockError> {
     let old = r.read32(at);

@@ -65,26 +65,13 @@ impl RegisterIo for NativeRegisters {
         if offset & 3 != 0 {
             return Err(Error::Access);
         }
-        let ptr = self.gpio.address(offset, 4).map_err(|_| Error::Mapping)?;
-        if ptr.as_ptr() as usize & 3 != 0 {
-            return Err(Error::Mapping);
-        }
-        // SAFETY: checked live original UC mapping, aligned bounded word.
-        Ok(u32::from_le(unsafe {
-            ptr.as_ptr().cast::<u32>().read_volatile()
-        }))
+        self.gpio.read32(offset).map_err(|_| Error::Mapping)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
         if offset & 3 != 0 {
             return Err(Error::Access);
         }
-        let ptr = self.gpio.address(offset, 4).map_err(|_| Error::Mapping)?;
-        if ptr.as_ptr() as usize & 3 != 0 {
-            return Err(Error::Mapping);
-        }
-        // SAFETY: checked live original UC mapping; driver serializes writes.
-        unsafe { ptr.as_ptr().cast::<u32>().write_volatile(value.to_le()) };
-        Ok(())
+        self.gpio.write32(offset, value).map_err(|_| Error::Mapping)
     }
     fn read_mux(&mut self, pad: u8) -> Result<u8, Error> {
         let mapping = self.mux.as_ref().ok_or(Error::MissingMux)?;

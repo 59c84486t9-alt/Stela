@@ -324,10 +324,8 @@ impl<R: Registers> Control<R> {
     }
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn request(&self) -> (Address, Option<u32>) {
@@ -391,10 +389,9 @@ impl<R: Registers> Control<R> {
                 return Err(Error::UnexpectedReceipt);
             }
             if self.stage == Stage::Command {
-                self.wait_deadline = now
-                    .checked_add(REQUEST_MS)
-                    .ok_or(Error::ClockOverflow)?
-                    .min(self.job_deadline);
+                self.wait_deadline =
+                    crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+                        .ok_or(Error::ClockOverflow)?;
                 self.enter(Stage::Wait, now)?;
             } else {
                 self.enter(Stage::MetadataVerify, now)?;

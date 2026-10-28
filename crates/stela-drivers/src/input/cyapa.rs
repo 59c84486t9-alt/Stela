@@ -77,12 +77,7 @@ pub enum ErrorKind {
     },
     IdentityChanged,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Recovery {
-    NotAttempted,
-    IrqMasked,
-    MaskFailed,
-}
+pub use super::TouchpadRecovery as Recovery;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,

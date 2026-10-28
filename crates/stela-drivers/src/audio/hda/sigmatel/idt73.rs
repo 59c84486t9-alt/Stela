@@ -4,7 +4,7 @@
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2005 Embedded Alley Solutions, Inc., Matt Porter.
 //! Copyright (c) 2004 Takashi Iwai. See audio/THIRD_PARTY.md.
-use super::super::{CodecGraph, Controller, PinSense, Registers, Verb, WidgetKind};
+use super::super::{CodecGraph, Controller, Registers, Verb, WidgetKind};
 use super::{SigmatelGpio, port_power};
 use crate::{audio::Error, bus::i2c::Timer};
 pub use port_power::IdtPowerMapReport as Idt73PowerReport;
@@ -14,7 +14,7 @@ pub(super) const VOLUME_KNOB: u8 = 0x1f;
 pub(super) const EAPD: u8 = 1;
 #[derive(Clone)]
 pub(super) struct State {
-    ports: port_power::State,
+    pub(super) ports: port_power::State,
     knob_caps: u32,
     gpio_caps: u32,
     gpio: Option<SigmatelGpio>,
@@ -119,24 +119,6 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::InvalidCodecGraph);
         }
         self.validate_idt_ports(graph, group, &state.ports)
-    }
-    pub(super) fn refresh_idt73(
-        &mut self,
-        graph: &CodecGraph,
-        group: u8,
-        state: &mut State,
-    ) -> Result<(), Error> {
-        self.refresh_idt_ports(graph, group, &mut state.ports)
-    }
-    pub(super) fn update_idt73_pin(
-        &mut self,
-        address: u8,
-        group: u8,
-        state: &mut State,
-        pin: u8,
-        sense: PinSense,
-    ) -> Result<(), Error> {
-        self.update_idt_port(address, group, &mut state.ports, pin, sense)
     }
     pub(super) fn quiet_idt73(
         &mut self,

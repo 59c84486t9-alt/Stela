@@ -4,6 +4,7 @@
 // and 1997–1999 Martin Mares. AMD register layouts follow AMD 48882 rev 3.11.
 //! Complete conventional capability framing for one retained remapper function.
 use super::*;
+use crate::bus::pci::{Capability, CapabilityError, capability};
 
 pub(super) struct Capabilities {
     pub(super) entries: [Option<Configuration>; CAP_LIMIT],
@@ -20,39 +21,32 @@ fn config32<C: ConfigSpace>(config: &C, offset: u16) -> Result<u32, Error> {
     }
 }
 
-/// Complete conventional list, not Function::capabilities' partial discovery.
-/// Extents occupy four-byte cells; overlap detection also bounds cycles.
+/// The complete conventional list, validated by the shared walk. Secure
+/// device bodies, which the walk reserves only the header of, are sized here
+/// and checked against every other entry.
 pub(super) fn scan<C: ConfigSpace>(config: &C) -> Result<Capabilities, Error> {
     let mut result = Capabilities {
         entries: [None; CAP_LIMIT],
         count: 0,
         has_msix: false,
     };
-    if config.read16(6) & STATUS_CAPABILITIES == 0 {
-        return Ok(result);
-    }
-    let mut offset = u16::from(config.read8(0x34));
-    let mut occupied = 0u64;
+    let entries = capability::capabilities(config)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| match error {
+            CapabilityError::FailedRead { offset } => Error::ReadFailed(offset),
+            error => Error::Capability(error.offset()),
+        })?;
     let mut singleton = 0u32;
-    while offset != 0 {
-        if !(CAP_FIRST..CONFIG_LIMIT).contains(&offset) || !offset.is_multiple_of(4) {
-            return Err(Error::Capability(offset));
-        }
+    for entry in &entries {
+        let (offset, id) = (entry.offset, entry.id);
         let header = config32(config, offset)?;
-        let id = header as u8;
-        let bytes = capability_bytes(config, offset, header)?;
-        let end = offset
-            .checked_add(bytes)
-            .filter(|end| *end <= CONFIG_LIMIT)
-            .ok_or(Error::Capability(offset))?;
-        let mut cells = 0u64;
-        for cell in (offset / 4)..end.div_ceil(4) {
-            cells |= 1u64 << cell;
-        }
-        if occupied & cells != 0 {
+        let bytes = capability_bytes(entry, header)?;
+        if offset + bytes > CONFIG_LIMIT {
             return Err(Error::Capability(offset));
         }
-        occupied |= cells;
+        if let Some(other) = capability::overlap(entries.iter().map(|e| e.span()), offset, bytes) {
+            return Err(Error::Capability(other));
+        }
         result.has_msix |= id == 0x11;
         if !matches!(id, SECURE_DEVICE | 9) {
             let bit = 1u32 << id;
@@ -84,13 +78,12 @@ pub(super) fn scan<C: ConfigSpace>(config: &C) -> Result<Capabilities, Error> {
             });
             result.count += 1;
         }
-        offset = ((header >> 8) & 0xff) as u16;
     }
     Ok(result)
 }
 
-fn capability_bytes<C: ConfigSpace>(config: &C, offset: u16, header: u32) -> Result<u16, Error> {
-    let id = header as u8;
+fn capability_bytes(entry: &Capability, header: u32) -> Result<u16, Error> {
+    let (offset, id) = (entry.offset, entry.id);
     let flags = (header >> 16) as u16;
     match id {
         SECURE_DEVICE => {
@@ -99,41 +92,24 @@ fn capability_bytes<C: ConfigSpace>(config: &C, offset: u16, header: u32) -> Res
             }
             Ok(if header & CAP_EXTENDED != 0 { 24 } else { 20 })
         }
-        1 if (1..=3).contains(&(flags & 7)) => Ok(8),
+        1 if (1..=3).contains(&(flags & 7)) => Ok(entry.bytes),
         5 => {
             let maximum = (flags >> 1) & 7;
             let enabled = (flags >> 4) & 7;
             if flags & !0x1ff != 0 || maximum > 5 || enabled > maximum {
                 return Err(Error::Capability(offset));
             }
-            Ok(match (flags & 0x80 != 0, flags & 0x100 != 0) {
-                (false, false) => 10,
-                (true, false) => 14,
-                (false, true) => 20,
-                (true, true) => 24,
-            })
+            Ok(entry.bytes)
         }
-        9 => {
-            let bytes = u16::from(config.read8(offset + 2));
-            if bytes < 3 {
-                return Err(Error::Capability(offset));
-            }
-            Ok(bytes)
-        }
+        9 | 0x11 => Ok(entry.bytes),
         0x10 => {
             let version = flags & 15;
             let kind = (flags >> 4) & 15;
             if !matches!(version, 1 | 2) || !matches!(kind, 0 | 1 | 9) || flags & 0x100 != 0 {
                 return Err(Error::UnsupportedLayout(offset));
             }
-            Ok(match (kind == 9, version) {
-                (true, 1) => 12,
-                (true, _) => 44,
-                (false, 1) => 20,
-                (false, _) => 52,
-            })
+            Ok(entry.bytes)
         }
-        0x11 => Ok(12),
         1 => Err(Error::UnsupportedLayout(offset)),
         _ => Err(Error::UnsupportedCapability { offset, id }),
     }

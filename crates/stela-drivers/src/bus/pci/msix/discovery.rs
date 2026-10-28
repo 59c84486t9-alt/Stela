@@ -103,26 +103,15 @@ pub(super) fn discover<C: MsiConfigSpace, B: BarAccess>(
     if word(config, COMMAND)? & 2 == 0 {
         return Err(Error::MemoryDisabled);
     }
-    if word(config, 6)? & 0x10 == 0 {
-        return Err(Error::MissingCapability);
-    }
-    let mut offset = u16::from(config.read8(0x34));
-    let mut occupied = [false; 256];
+    // The walk reads Status; without a capability list nothing is found.
     let mut found = None;
     let mut msi = false;
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset)
-            || !offset.is_multiple_of(4)
-            || occupied[usize::from(offset)..usize::from(offset + 2)]
-                .iter()
-                .any(|b| *b)
-        {
-            return Err(MsiError::MalformedCapability.into());
-        }
-        let header = word(config, offset)?;
-        let bytes = match header as u8 {
+    for entry in config.capabilities() {
+        let entry = entry.map_err(MsiError::from)?;
+        let (offset, header) = (entry.offset, entry.header);
+        match entry.id {
             0x11 => {
-                if found.is_some() || offset + 12 > 256 {
+                if found.is_some() {
                     return Err(MsiError::MalformedCapability.into());
                 }
                 let control = word(config, offset + 2)?;
@@ -179,7 +168,6 @@ pub(super) fn discover<C: MsiConfigSpace, B: BarAccess>(
                     },
                     control,
                 ));
-                12
             }
             5 => {
                 if msi {
@@ -196,26 +184,13 @@ pub(super) fn discover<C: MsiConfigSpace, B: BarAccess>(
                 {
                     return Err(MsiError::Unsupported.into());
                 }
-                match (control & 0x80 != 0, control & 0x100 != 0) {
-                    (false, false) => 10,
-                    (true, false) => 14,
-                    (false, true) => 20,
-                    (true, true) => 24,
-                }
             }
-            0 | 0xff => return Err(MsiError::MalformedCapability.into()),
-            id => super::super::msi::other_capability_bytes(config, offset, id, header_type)?,
-        };
-        let end = offset
-            .checked_add(bytes)
-            .filter(|end| *end <= 256)
-            .ok_or(MsiError::MalformedCapability)?;
-        let extent = &mut occupied[usize::from(offset)..usize::from(end)];
-        if extent.iter().any(|b| *b) {
-            return Err(MsiError::MalformedCapability.into());
+            0 => return Err(MsiError::MalformedCapability.into()),
+            _ if entry.layout == crate::bus::pci::Layout::Unsupported => {
+                return Err(MsiError::Unsupported.into());
+            }
+            _ => {}
         }
-        extent.fill(true);
-        offset = header >> 8;
     }
     found.ok_or(Error::MissingCapability)
 }

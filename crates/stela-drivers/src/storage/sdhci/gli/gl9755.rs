@@ -29,12 +29,7 @@ fn unlocked<T>(
     c: &mut dyn ConfigSpace,
     operation: impl FnOnce(&mut dyn ConfigSpace) -> Result<T, BlockError>,
 ) -> Result<T, BlockError> {
-    let result = update(c, 0x800, 1, 1).and_then(|()| operation(c));
-    let close = update(c, 0x800, 1, 0);
-    match result {
-        Ok(value) => close.map(|()| value),
-        Err(error) => Err(error),
-    }
+    super::unlocked_with(c, update, (0x800, 1, 1), operation)
 }
 
 pub(in crate::storage::sdhci) fn before_reset(

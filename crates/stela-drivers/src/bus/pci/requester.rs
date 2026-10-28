@@ -9,7 +9,7 @@
 //! a remapping-unit takeover. Actual engine/IRQ/work drainage and physical
 //! function identity are unsafe producer obligations, not config-bit inferences.
 use super::{
-    Address, ConfigSpace, Function,
+    Address, CapabilityError, ConfigSpace, Function,
     owned::{ConfigRetention, OwnedConfig},
 };
 use crate::bus::mmio::owned::{Error as MappingError, Mapping};
@@ -187,31 +187,14 @@ fn inactive<C: ConfigSpace>(config: &C, offset: u16, mask: u16) -> Result<u16, C
     Ok(value)
 }
 
-/// Occupancy is in four-byte cells because every capability starts aligned to
-/// four. Rounding a partial final cell cannot hide a legal next capability.
-struct Extents([u64; 16]);
-
-impl Extents {
-    fn reserve(&mut self, offset: u16, bytes: u16, end: u16) -> Result<(), ClaimError> {
-        let invalid = || ClaimError::MalformedCapability { offset };
-        let last = offset
-            .checked_add(bytes)
-            .filter(|last| *last <= end)
-            .ok_or_else(invalid)?;
-        if bytes < 2 || !offset.is_multiple_of(4) {
-            return Err(invalid());
+impl From<CapabilityError> for ClaimError {
+    fn from(error: CapabilityError) -> Self {
+        match error {
+            CapabilityError::FailedRead { offset } => Self::ReadFailed { offset },
+            error => Self::MalformedCapability {
+                offset: error.offset(),
+            },
         }
-        let first = usize::from(offset / 4);
-        let limit = usize::from(last.div_ceil(4));
-        for slot in first..limit {
-            if self.0[slot / 64] & (1 << (slot % 64)) != 0 {
-                return Err(invalid());
-            }
-        }
-        for slot in first..limit {
-            self.0[slot / 64] |= 1 << (slot % 64);
-        }
-        Ok(())
     }
 }
 
@@ -219,29 +202,22 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
     if status & CAP_LIST == 0 {
         return Ok(());
     }
-    let mut offset = u16::from(config.read8(0x34));
-    let mut extents = Extents([0; 16]);
     let mut singleton = 0u32;
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset) || !offset.is_multiple_of(4) {
-            return Err(ClaimError::MalformedCapability { offset });
-        }
-        let header = read16(config, offset)?;
-        let id = header & 255;
-        let bytes = match id {
+    for entry in config.capabilities() {
+        let entry = entry?;
+        let offset = entry.offset;
+        let id = u16::from(entry.id);
+        match id {
             PM => {
                 let version = (read16(config, offset + 2)? & 7) as u8;
                 if !(1..=3).contains(&version) {
                     return Err(ClaimError::UnsupportedVersion { id, version });
                 }
-                8
             }
             PCIX => {
                 let version = ((read16(config, offset + 2)? >> 12) & 3) as u8;
-                match version {
-                    0 => 8,
-                    1 | 2 => 24,
-                    _ => return Err(ClaimError::UnsupportedVersion { id, version }),
+                if !matches!(version, 0..=2) {
+                    return Err(ClaimError::UnsupportedVersion { id, version });
                 }
             }
             MSI => {
@@ -251,16 +227,9 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
                 if flags & !0x1ff != 0 || supported > 5 || selected > supported {
                     return Err(ClaimError::MalformedCapability { offset });
                 }
-                match (flags & 0x80 != 0, flags & 0x100 != 0) {
-                    (false, false) => 10,
-                    (true, false) => 14,
-                    (false, true) => 20,
-                    (true, true) => 24,
-                }
             }
             MSIX => {
                 inactive(config, offset + 2, 1 << 15)?;
-                12
             }
             PCIE => {
                 let flags = read16(config, offset + 2)?;
@@ -272,34 +241,16 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
                 if !matches!(kind, 0 | 1 | 9) || flags & 0x100 != 0 {
                     return Err(ClaimError::UnsupportedPcieType(kind));
                 }
-                let bytes = match (kind == 9, version) {
-                    (true, 1) => 12,
-                    (true, _) => 44,
-                    (false, 1) => 20,
-                    (false, _) => 52,
-                };
-                // Check the complete extent before reading Device Control.
-                if offset.checked_add(bytes).is_none_or(|last| last > 256) {
-                    return Err(ClaimError::MalformedCapability { offset });
-                }
                 inactive(config, offset + 8, 1 << 11)?;
-                bytes
             }
-            VENDOR => {
-                let length = u16::from(config.read8(offset + 2));
-                if length < 3 {
-                    return Err(ClaimError::MalformedCapability { offset });
-                }
-                length
-            }
+            VENDOR => {}
             _ => {
                 return Err(ClaimError::UnsupportedCapability {
                     id,
                     extended: false,
                 });
             }
-        };
-        extents.reserve(offset, bytes, 256)?;
+        }
         if id != VENDOR {
             let bit = 1 << id;
             if singleton & bit != 0 {
@@ -307,38 +258,24 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
             }
             singleton |= bit;
         }
-        offset = header >> 8;
     }
     Ok(())
 }
 
 fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
-    let mut offset = 0x100u16;
-    let mut extents = Extents([0; 16]);
+    if config.read32(0x100) == u32::MAX {
+        return Err(ClaimError::ReadFailed { offset: 0x100 });
+    }
     let mut singleton = 0u32;
-    loop {
-        if !(0x100..=0xffc).contains(&offset) || !offset.is_multiple_of(4) {
-            return Err(ClaimError::MalformedCapability { offset });
+    for entry in config.extended_capabilities() {
+        let entry = entry?;
+        let (offset, id, version) = (entry.offset, entry.id, entry.version);
+        if !matches!(id, ATS | PASID | PRI) {
+            return Err(ClaimError::UnsupportedCapability { id, extended: true });
         }
-        let header = config.read32(offset);
-        if header == u32::MAX {
-            return Err(ClaimError::ReadFailed { offset });
-        }
-        if header == 0 && offset == 0x100 {
-            return Ok(());
-        }
-        let id = header as u16;
-        let version = ((header >> 16) & 15) as u8;
-        let bytes = match id {
-            ATS | PASID => 8,
-            PRI => 16,
-            0 => return Err(ClaimError::MalformedCapability { offset }),
-            _ => return Err(ClaimError::UnsupportedCapability { id, extended: true }),
-        };
         if version != 1 {
             return Err(ClaimError::UnsupportedVersion { id, version });
         }
-        extents.reserve(offset, bytes, 4096)?;
         let bit = 1 << id;
         if singleton & bit != 0 {
             return Err(ClaimError::MalformedCapability { offset });
@@ -351,19 +288,15 @@ fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
             PASID => {
                 inactive(config, offset + 6, 1)?;
             }
-            PRI => {
+            _ => {
                 inactive(config, offset + 4, 3)?;
                 if read16(config, offset + 6)? & 0x100 == 0 {
                     return Err(ClaimError::Active { offset: offset + 6 });
                 }
             }
-            _ => unreachable!("recognized translation capability"),
-        }
-        offset = (header >> 20) as u16;
-        if offset == 0 {
-            return Ok(());
         }
     }
+    Ok(())
 }
 
 fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<(), ClaimError> {

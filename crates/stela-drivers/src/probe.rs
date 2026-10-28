@@ -24,6 +24,9 @@ use crate::{
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
+pub mod services;
+pub use services::{NativeServices, ServiceError};
+
 /// A controller refusal retains its original typed details for boot diagnostics.
 /// In particular, firmware names and integrity/target errors are never replaced
 /// by a generic unsupported-device message.
@@ -242,6 +245,10 @@ pub struct Disks {
     pub usb_unused: Vec<(String, &'static str)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
+    /// Whether the mount supplied [`NativeServices`]. Drivers that attach
+    /// through owned mappings, requester DMA domains or the ACPI namespace
+    /// need them.
+    pub native_services: bool,
     /// Storage, network, audio and USB functions no driver here takes, with
     /// their class and why.
     pub unsupported: Vec<(Address, [u8; 3], &'static str)>,
@@ -283,7 +290,7 @@ impl Disks {
 pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
     let firmware = crate::firmware::HandoffProvider::new(handoff.firmware.as_deref());
     // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, &firmware) }
+    unsafe { probe_with_provider(handoff, dma, &firmware, None) }
 }
 
 /// Enumerate and attach devices using an explicit exact firmware provider.
@@ -291,6 +298,7 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
 /// lookup result, without reconstructing device identities outside drivers.
 /// This performs the same hardware operations and reports the same failures as
 /// [`probe`]; a missing resource still refuses that controller's initialization.
+/// `services` supplies the native owners some drivers attach through.
 ///
 /// # Safety
 /// The machine, mappings, DMA and exclusive post-ExitBootServices ownership
@@ -300,9 +308,11 @@ pub unsafe fn probe_with_provider(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
+    services: Option<&dyn NativeServices>,
 ) -> Disks {
     let mut disks = Disks {
         bluetooth_platform: handoff.bluetooth_platform,
+        native_services: services.is_some(),
         ..Disks::default()
     };
     for window in &handoff.ecam {

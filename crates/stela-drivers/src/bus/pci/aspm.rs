@@ -13,7 +13,7 @@
 //! and validation here are Stela's own implementation.
 pub mod native;
 
-use super::{ConfigSpace, EcamWindow, Function};
+use super::{CapabilityError, ConfigSpace, EcamWindow, Function};
 use crate::{Handoff, block::BlockError};
 use alloc::vec::Vec;
 
@@ -54,62 +54,41 @@ fn l1ss_control<C: ConfigSpace>(function: &Function<C>) -> Result<Option<(u16, u
     // Validate a real conventional PCIe function before accessing its extended
     // configuration space. Keep malformed chains distinct from absent L1SS.
     link_control(function)?;
-    let mut seen = [false; 1024];
-    let mut offset = 0x100u16;
+    let first = function.config.read32(0x100);
+    if first == u32::MAX {
+        return Err(BlockError::Device { status: first });
+    }
     let mut found = None;
-    let mut l1ss_start = None;
-    loop {
-        if !(0x100..=0xffc).contains(&offset) || !offset.is_multiple_of(4) {
+    for entry in function.config.extended_capabilities() {
+        let entry = entry.map_err(|error| match error {
+            CapabilityError::FailedRead { .. } => BlockError::Device { status: u32::MAX },
+            CapabilityError::Cycle { .. } => {
+                BlockError::Unsupported("looping PCI extended capabilities")
+            }
+            CapabilityError::Overlap { .. } => {
+                BlockError::Unsupported("overlapping PCI extended capabilities")
+            }
+            _ => BlockError::Unsupported("invalid PCI extended capability offset"),
+        })?;
+        if entry.id != EXT_CAPABILITY_L1SS {
+            continue;
+        }
+        if found.is_some() || entry.version != 1 {
             return Err(BlockError::Unsupported(
-                "invalid PCI extended capability offset",
+                "invalid or duplicate PCI L1SS capability",
             ));
         }
-        if l1ss_start.is_some_and(|start| offset > start && offset < start + 16) {
+        let capability = function.config.read32(entry.offset + 4);
+        let control = function.config.read32(entry.offset + L1SS_CONTROL1);
+        if capability == u32::MAX || control == u32::MAX {
+            return Err(BlockError::Device { status: u32::MAX });
+        }
+        if capability & (1 << 4) == 0 || (control & ASPM_L1_2 != 0 && capability & ASPM_L1_2 == 0) {
             return Err(BlockError::Unsupported(
-                "PCI capability header overlaps L1SS body",
+                "inconsistent PCI L1SS support/control",
             ));
         }
-        if core::mem::replace(&mut seen[usize::from(offset / 4)], true) {
-            return Err(BlockError::Unsupported("looping PCI extended capabilities"));
-        }
-        let header = function.config.read32(offset);
-        if header == u32::MAX {
-            return Err(BlockError::Device { status: header });
-        }
-        if header == 0 {
-            break;
-        }
-        if header as u16 == EXT_CAPABILITY_L1SS {
-            if found.is_some() || (header >> 16) & 15 != 1 || offset > 0xff0 {
-                return Err(BlockError::Unsupported(
-                    "invalid or duplicate PCI L1SS capability",
-                ));
-            }
-            if (1..4).any(|word| seen[usize::from(offset / 4) + word]) {
-                return Err(BlockError::Unsupported(
-                    "L1SS body overlaps a PCI capability header",
-                ));
-            }
-            l1ss_start = Some(offset);
-            let capability = function.config.read32(offset + 4);
-            let control = function.config.read32(offset + L1SS_CONTROL1);
-            if capability == u32::MAX || control == u32::MAX {
-                return Err(BlockError::Device { status: u32::MAX });
-            }
-            if capability & (1 << 4) == 0
-                || (control & ASPM_L1_2 != 0 && capability & ASPM_L1_2 == 0)
-            {
-                return Err(BlockError::Unsupported(
-                    "inconsistent PCI L1SS support/control",
-                ));
-            }
-            found = Some((offset + L1SS_CONTROL1, control));
-        }
-        let next = (header >> 20) as u16;
-        if next == 0 {
-            break;
-        }
-        offset = next;
+        found = Some((entry.offset + L1SS_CONTROL1, control));
     }
     Ok(found)
 }
@@ -217,12 +196,10 @@ fn segment_windows<C: ConfigSpace>(
 
 fn link_control<C: ConfigSpace>(function: &Function<C>) -> Result<u16, BlockError> {
     let mut express = None;
-    let mut seen = [false; 64];
-    for (offset, id) in function.capabilities() {
-        if core::mem::replace(&mut seen[usize::from(offset / 4)], true) {
-            return Err(BlockError::Unsupported("looping PCI capabilities for ASPM"));
-        }
-        if id == CAPABILITY_PCIE && express.replace(u16::from(offset)).is_some() {
+    for entry in function.config.capabilities() {
+        let entry =
+            entry.map_err(|_| BlockError::Unsupported("malformed PCI capabilities for ASPM"))?;
+        if entry.id == CAPABILITY_PCIE && express.replace(entry.offset).is_some() {
             return Err(BlockError::Unsupported("multiple PCIe capabilities"));
         }
     }

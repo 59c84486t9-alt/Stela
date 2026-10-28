@@ -320,36 +320,30 @@ fn validate<C: ConfigSpace>(
             return Err(Error::InvalidBar);
         }
     }
-    if status & 0x10 != 0 {
-        let mut offset = u16::from(config.read8(0x34));
-        let mut seen = [false; 64];
-        let mut pm = false;
-        while offset != 0 {
-            // This profile owns the vendor dwords 44/48. Refuse even an
-            // undecoded capability body before them instead of guessing its
-            // extent and corrupting PM/MSI/PCIe fields through an alias.
-            if !(0x50..=0xfc).contains(&offset) || offset & 3 != 0 || seen[usize::from(offset / 4)]
-            {
-                return Err(Error::Authority);
-            }
-            seen[usize::from(offset / 4)] = true;
-            let control = config.read16(offset + 2);
-            if control == u16::MAX {
-                return Err(Error::Authority);
-            }
-            match config.read8(offset) {
-                1 => {
-                    if pm || offset > 0xf8 || config.read16(offset + 4) & 3 != 0 {
-                        return Err(Error::Authority);
-                    }
-                    pm = true;
+    let mut pm = false;
+    for entry in config.capabilities() {
+        let entry = entry.map_err(|_| Error::Authority)?;
+        let offset = entry.offset;
+        // This profile owns the vendor dwords 44/48. Refuse even an undecoded
+        // capability body before them instead of guessing its extent and
+        // corrupting PM/MSI/PCIe fields through an alias.
+        if offset < 0x50 {
+            return Err(Error::Authority);
+        }
+        let control = config.read16(offset + 2);
+        if control == u16::MAX {
+            return Err(Error::Authority);
+        }
+        match entry.id {
+            1 => {
+                if pm || config.read16(offset + 4) & 3 != 0 {
+                    return Err(Error::Authority);
                 }
-                5 if control & 1 != 0 => return Err(Error::Authority),
-                0x11 if control & 0x8000 != 0 => return Err(Error::Authority),
-                0xff => return Err(Error::Authority),
-                _ => (),
+                pm = true;
             }
-            offset = u16::from(config.read8(offset + 1));
+            5 if control & 1 != 0 => return Err(Error::Authority),
+            0x11 if control & 0x8000 != 0 => return Err(Error::Authority),
+            _ => (),
         }
     }
     Ok(Identity {

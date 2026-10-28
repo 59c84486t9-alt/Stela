@@ -715,6 +715,22 @@ impl Mapping {
         self.lease()?
             .address(offset..offset.checked_add(bytes).ok_or(Error::InvalidRange)?)
     }
+    /// The little-endian 32-bit register at `offset`, by one naturally aligned
+    /// volatile load.
+    pub fn read32(&self, offset: usize) -> Result<u32, Error> {
+        let register = register::<u32>(self.address(offset, 4)?)?;
+        // SAFETY: `address` checked that the live lease covers these bytes and
+        // `register` their alignment; retirement requires `&mut self`.
+        Ok(u32::from_le(unsafe { register.read_volatile() }))
+    }
+    /// Store `value` to the little-endian 32-bit register at `offset`, as one
+    /// naturally aligned volatile store.
+    pub fn write32(&self, offset: usize, value: u32) -> Result<(), Error> {
+        let register = register::<u32>(self.address(offset, 4)?)?;
+        // SAFETY: as for `read32`.
+        unsafe { register.write_volatile(value.to_le()) };
+        Ok(())
+    }
     pub fn view(&self, range: Range<usize>) -> Result<MappingView, Error> {
         self.check_current()?;
         let lease = self.lease()?;
@@ -825,6 +841,15 @@ impl Drop for Mapping {
     }
 }
 
+/// `pointer` as a register of type `T`, if it is naturally aligned.
+fn register<T>(pointer: NonNull<u8>) -> Result<*mut T, Error> {
+    let pointer = pointer.as_ptr();
+    if !(pointer as usize).is_multiple_of(core::mem::align_of::<T>()) {
+        return Err(Error::InvalidRange);
+    }
+    Ok(pointer.cast())
+}
+
 /// Independently retained bounded view of precisely the same installed mapping.
 #[derive(Clone)]
 pub struct MappingView {
@@ -851,6 +876,20 @@ impl MappingView {
             .ok_or(Error::InvalidRange)?;
         self.lease
             .address(self.range.start + offset..self.range.start + end)
+    }
+    /// The 32-bit register at `offset` in this view ([`Mapping::read32`]).
+    pub fn read32(&self, offset: usize) -> Result<u32, Error> {
+        let register = register::<u32>(self.address(offset, 4)?)?;
+        // SAFETY: `address` checked that the live lease covers these bytes and
+        // `register` their alignment; the view retains the lease.
+        Ok(u32::from_le(unsafe { register.read_volatile() }))
+    }
+    /// Store `value` to the 32-bit register at `offset` in this view.
+    pub fn write32(&self, offset: usize, value: u32) -> Result<(), Error> {
+        let register = register::<u32>(self.address(offset, 4)?)?;
+        // SAFETY: as for `read32`.
+        unsafe { register.write_volatile(value.to_le()) };
+        Ok(())
     }
 }
 

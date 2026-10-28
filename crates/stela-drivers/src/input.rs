@@ -13,6 +13,26 @@ pub mod sfh;
 mod timing_tests;
 pub mod virtio;
 
+/// What masking an I2C touchpad's interrupt after a failed operation
+/// achieved, as Cypress and Elan drivers report with their errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchpadRecovery {
+    NotAttempted,
+    IrqMasked,
+    MaskFailed,
+}
+
+impl TouchpadRecovery {
+    /// Mask and drain `interrupt` after a failure.
+    pub fn mask(interrupt: &mut impl hid_i2c::Interrupt) -> Self {
+        if interrupt.mask_and_drain().is_ok() {
+            Self::IrqMasked
+        } else {
+            Self::MaskFailed
+        }
+    }
+}
+
 /// The largest absolute pointer coordinate on either axis.
 pub const POINTER_MAX: u16 = 0x7fff;
 

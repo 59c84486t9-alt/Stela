@@ -448,10 +448,9 @@ impl<R: Registers> Setup<R> {
     }
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
-        self.stage_deadline = now
-            .checked_add(TIMEOUT_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.stage_deadline =
+            crate::bus::thunderbolt::stage_deadline(now, TIMEOUT_MS, self.job_deadline)
+                .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn hotplug_or_done(&mut self, now: u64) -> Result<Option<Event>, Error> {
