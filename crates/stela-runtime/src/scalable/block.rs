@@ -1090,7 +1090,7 @@ mod tests {
             assert_eq!(fixture.snapshot()?, wrong_pc);
             let mut forged_source = prepared.source().to_vec();
             forged_source[size_of::<u32>()..].copy_from_slice(&NOP.to_le_bytes());
-            let accepted = prepared.identity().profile;
+            let accepted = prepared.identity().options;
             assert!(
                 validate_scalable_numerical_exit(
                     BASE,
@@ -1098,7 +1098,7 @@ mod tests {
                     forged_source.len(),
                     BASE.0,
                     &forged_source,
-                    accepted.scalable(),
+                    accepted.scalable().unwrap(),
                     accepted.numerical_features(),
                 )
                 .is_err()
@@ -1107,7 +1107,7 @@ mod tests {
             let wrong_mode = ScalableProfile::new_with_features(
                 length,
                 ScalableMode::new(false, true),
-                accepted.scalable().features(),
+                accepted.scalable().unwrap().features(),
                 ScalableControls::new(length, false),
             )?;
             assert!(
@@ -1129,7 +1129,7 @@ mod tests {
                     prepared.source().len(),
                     BASE.0,
                     prepared.source(),
-                    accepted.scalable(),
+                    accepted.scalable().unwrap(),
                     NumericalFeatures::new(true, false, false),
                 )
                 .is_err()
@@ -1247,15 +1247,23 @@ mod tests {
             assert!(PreparedScalableBlock::prepare(&source(FP8), BASE, &denied).is_err());
             let instruction = decode_scalable_numerical_instruction(NUMERICAL_PC, FP8)?.unwrap();
             assert!(
-                admit_scalable_numerical_instruction(instruction, denied.scalable(), numerical)
-                    .is_err()
+                admit_scalable_numerical_instruction(
+                    instruction,
+                    denied.scalable().unwrap(),
+                    numerical
+                )
+                .is_err()
             );
             let mut forged = instruction;
             forged.word ^= 1;
             let allowed = new19_profile(32, declared, true, mode, numerical)?;
             assert!(
-                admit_scalable_numerical_instruction(forged, allowed.scalable(), numerical)
-                    .is_err()
+                admit_scalable_numerical_instruction(
+                    forged,
+                    allowed.scalable().unwrap(),
+                    numerical
+                )
+                .is_err()
             );
             // An M1-like absent-SME declaration cannot manufacture a scalable profile.
             assert!(
