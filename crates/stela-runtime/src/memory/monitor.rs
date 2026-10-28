@@ -6,17 +6,12 @@
 
 use crate::platform::sync::{Mutex, MutexGuard};
 use crate::system::events::{EventProducer, MonitorBinding};
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "std")]
-use std::collections::HashMap;
-#[cfg(feature = "std")]
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 const MIN_ERG_BYTES: u64 = 16;
 const MAX_ERG_BYTES: u64 = 2048;
@@ -159,7 +154,7 @@ impl<B> WriteRange<B> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Key {
     backing: usize,
     granule: u64,
@@ -206,7 +201,7 @@ struct GlobalMark<B, M, A> {
     mapping: Arc<Mapping<M, A>>,
 }
 
-type Entries<B> = HashMap<Key, Weak<Epoch<B>>>;
+type Entries<B> = BTreeMap<Key, Weak<Epoch<B>>>;
 
 struct Reservation<B, M, A> {
     epoch: Arc<Epoch<B>>,
@@ -229,7 +224,7 @@ impl Drop for FailureBoundary<'_> {
 }
 
 /// Gates serialize bounded callbacks, never a whole
-/// load-exclusive/store-exclusive sequence. Hash collisions share a gate but
+/// load-exclusive/store-exclusive sequence. Keys in one stripe share a gate but
 /// never a reservation. Fairness is whatever std::Mutex provides.
 pub struct MonitorDomain<B, M, A> {
     erg_bytes: u64,
@@ -311,7 +306,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         Ok(Arc::new(Self {
             erg_bytes,
             stripes: (0..stripe_count)
-                .map(|_| Mutex::new(HashMap::new()))
+                .map(|_| Mutex::new(BTreeMap::new()))
                 .collect(),
             failed: AtomicBool::new(false),
             mapping: PhantomData,
@@ -485,14 +480,6 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         }
     }
 
-    #[cfg(feature = "std")]
-    fn stripe(&self, key: Key) -> usize {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.stripes.len()
-    }
-
-    #[cfg(not(feature = "std"))]
     fn stripe(&self, key: Key) -> usize {
         (key.backing.rotate_left(13) ^ key.granule as usize) % self.stripes.len()
     }
