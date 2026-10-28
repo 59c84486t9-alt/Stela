@@ -30,8 +30,8 @@ pub const SUPPORTED: &[Build] = &[Build {
     rtkit_version: 12,
 }];
 
-/// The build setup and `stela install-system` download when none is named:
-/// the newest supported one.
+/// The native firmware build setup selects when none is named:
+/// the newest entry admitted by [`SUPPORTED`].
 pub const DEFAULT: &Build = &SUPPORTED[0];
 
 /// `build`'s entry of `table`.
