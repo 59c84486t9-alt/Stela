@@ -1051,7 +1051,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         output::terminate(0x10);
     }
-    let roster = topology::AssignedRoster::new(
+    let mut roster = topology::AssignedRoster::new(
         native_processors.expect("validated native roster"),
         &executors,
         &host_owner,
@@ -1110,6 +1110,20 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Some(board) => board_profile(board, target, speculation),
         None => test_profile(target, speculation),
     };
+    let active_workers = crate::native_smp::topology::guest_assignment_count(
+        options.native_cores,
+        handoff.native_resources.cores as usize,
+        full_profile.processors.len().max(1),
+    )
+    .unwrap_or_else(|error| output::fatal(error));
+    roster
+        .limit(active_workers)
+        .unwrap_or_else(|error| output::fatal(&error));
+    output::arguments(format_args!(
+        "NATIVE ACTIVE workers={active_workers} parked={} source_PEs={}\n",
+        handoff.native_resources.cores as usize - active_workers,
+        full_profile.processors.len().max(1),
+    ));
     let topology_source = match (loaded_source.as_ref(), loaded_tree.as_ref(), board.as_ref()) {
         (Some(intake), Some(live), Some(source_board)) => {
             let boot = source_board
@@ -1125,14 +1139,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                     live,
                     identity,
                     boot.affinity,
-                    handoff.native_resources.cores as usize,
+                    active_workers,
                 ),
                 0x6000 => topology::Source::t6000_assigned(
                     intake.original(),
                     live,
                     identity,
                     boot.affinity,
-                    handoff.native_resources.cores as usize,
+                    active_workers,
                 ),
                 _ => Err(String::from(
                     "native assigned topology for this source family is not qualified",
@@ -1140,7 +1154,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             };
             Some(prepared.unwrap_or_else(|error| output::fatal(&error)))
         }
-        (None, None, None) if handoff.native_resources.cores == 1 => None,
+        (None, None, None) if active_workers == 1 => None,
         (None, None, None) => {
             output::fatal("an authored multi-PE image requires an explicit qualified topology")
         }

@@ -26,8 +26,19 @@ pub const BSP: u32 = 1;
 pub const ENABLED: u32 = 1 << 1;
 pub const HEALTHY: u32 = 1 << 2;
 
-/// The coordinates are the original UEFI MP Services Location/Location2
-/// fields. Legacy coordinates flatten the core identity within a package.
+/// Number of guest PEs admitted by both the retained host roster and the
+/// source profile. Extra default workers stay parked; an explicit request
+/// must fit both inventories.
+pub fn guest_assignment_count(
+    requested: Option<usize>,
+    available: usize,
+    source_slots: usize,
+) -> Result<usize, &'static str> {
+    assignment_count(requested, available.min(source_slots))
+}
+
+/// Coordinates copied from UEFI MP Services Location/Location2. Legacy
+/// coordinates flatten the core identity within a package.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
@@ -603,6 +614,26 @@ mod tests {
         snapshot.records[2] = class;
         snapshot.count = 3;
         snapshot
+    }
+
+    #[test]
+    fn guest_assignment_fits_source_and_preserves_explicit_requests() {
+        for available in [1, 8, 64, 128] {
+            assert_eq!(
+                guest_assignment_count(None, available, 8),
+                Ok(available.min(8))
+            );
+        }
+        assert_eq!(guest_assignment_count(Some(4), 64, 8), Ok(4));
+        for (request, available, source) in [
+            (Some(9), 64, 8),
+            (Some(4), 2, 8),
+            (Some(0), 64, 8),
+            (None, 64, 0),
+            (None, 0, 8),
+        ] {
+            assert!(guest_assignment_count(request, available, source).is_err());
+        }
     }
 
     #[test]

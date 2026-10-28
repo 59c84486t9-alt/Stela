@@ -257,13 +257,14 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
         assignments,
         processor_power,
     } = preparation;
-    let cores = handoff.native_resources.cores as usize;
+    let reserved = handoff.native_resources.cores as usize;
+    let cores = profile.processors.len().max(1);
     if cores == 0
-        || cores > capture.core_count as usize
-        || executors.processors().len() + 1 != cores
-        || profile.processors.len().max(1) != cores
+        || cores > reserved
+        || reserved > capture.core_count as usize
+        || executors.processors().len() + 1 != reserved
     {
-        return Err("canonical mount requires the same assigned physical and visible PE roster");
+        return Err("canonical active PE roster exceeds the retained physical workers");
     }
     bindings::validate(cores, boot_processor, assignments)?;
     for slot in 1..cores {

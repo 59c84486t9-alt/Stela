@@ -193,6 +193,15 @@ impl<'a> AssignedRoster<'a> {
             cores,
         })
     }
+    /// Narrow the admitted source roster before any Plan borrows it. The
+    /// complete executors/capture remain retained; removed workers stay parked.
+    pub(crate) fn limit(&mut self, count: usize) -> Result<(), String> {
+        if count == 0 || count > self.cores.len() {
+            return Err("active source roster exceeds retained physical workers".into());
+        }
+        self.cores.truncate(count);
+        Ok(())
+    }
 }
 #[cfg(not(test))]
 impl RetainedRoster for AssignedRoster<'_> {
