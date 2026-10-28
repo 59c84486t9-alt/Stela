@@ -212,7 +212,6 @@ macro_rules! features {
     ($($(#[$doc:meta])* $constant:ident, $with:ident, $name:literal, $probe:expr;)*) => {
         /// One optional feature of a [`TargetCpu`], numbered by its bit.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[allow(clippy::upper_case_acronyms)]
         enum Feature {
             $($constant,)*
         }
@@ -222,7 +221,7 @@ macro_rules! features {
             &[$((Feature::$constant, $name, $probe),)*];
 
         // Keep the published feature names and their cache identities.
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, reason = "Target selectors use the same names as the instruction-set variants they replace.")]
         impl TargetCpu {
             $(
                 $(#[$doc])*
@@ -374,7 +373,10 @@ features! {
 const MODES: u64 = 1 << Feature::DataIndependentTiming as u32;
 
 // Keep the published tier names and their cache identities.
-#[allow(non_upper_case_globals)]
+#[allow(
+    non_upper_case_globals,
+    reason = "Tier selectors use the same names as the instruction-set variants they replace."
+)]
 impl TargetCpu {
     pub const Baseline: Self = Self {
         tier: SseTier::Baseline,

@@ -670,6 +670,7 @@ mod tests {
         let incoming_mxcsr = mxcsr();
         // SAFETY: native test entry borrows these disjoint objects until return.
         let (view, request) = unsafe { (&mut *view, &*request) };
+        // SAFETY: view() installs this Harness borrow and NativeCode::run keeps it live until return.
         let harness = unsafe { &mut *view.opaque.cast::<Harness>() };
         harness.incoming_mxcsr.push(incoming_mxcsr);
         harness
@@ -778,6 +779,7 @@ mod tests {
                 )
             };
             assert_ne!(address as usize, usize::MAX);
+            // SAFETY: mmap covers code.len() bytes and is disjoint from the source Vec.
             unsafe {
                 core::ptr::copy_nonoverlapping(code.as_ptr(), address.cast::<u8>(), code.len());
             }
@@ -793,6 +795,7 @@ mod tests {
             let entry: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) -> u32 =
                 unsafe { core::mem::transmute(self.0) };
             let before = mxcsr();
+            // SAFETY: the entry ABI matches; state, context, view and callback Harness remain live.
             let status = unsafe { entry(state, &mut context) };
             assert_eq!(
                 mxcsr(),
@@ -814,6 +817,7 @@ mod tests {
 
     impl Drop for NativeCode {
         fn drop(&mut self) {
+            // SAFETY: this object owns the mapping and all synchronous entry calls have finished.
             unsafe {
                 munmap(self.0, self.1);
             }

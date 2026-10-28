@@ -213,6 +213,7 @@ mod tests {
         let (pc, miss, next) = (PC, MISS, NEXT);
         let mut cell = alloc::boxed::Box::new(Cell::default());
         let address = &mut *cell as *mut Cell;
+        // SAFETY: address points into the live Cell box; the closure runs between thunk calls.
         let set = |value: Cell| unsafe { address.write(value) };
         let mut state = GuestState::default();
         state.x[19] = 7;
@@ -259,14 +260,19 @@ mod tests {
             })
         };
         assert_eq!(run(&read.code, &mut state), NEXT);
+        // SAFETY: count_at points into the live Count box and the preceding thunk has returned.
         assert_eq!((state.x[3], unsafe { (*count_at).last }), (70, 100));
+        // SAFETY: the box remains live and the native thunk is not running during this write.
         unsafe { (*count_at).offset = 80 };
         assert_eq!(run(&read.code, &mut state), NEXT);
+        // SAFETY: count_at points into the live Count box and the preceding thunk has returned.
         assert_eq!((state.x[3], unsafe { (*count_at).last }), (70, 100));
+        // SAFETY: the box remains live and the native thunk is not running during this write.
         unsafe { (*count_at).offset = 500 };
         let before = state.x;
         let discard = count_thunk(PC, 31, cell_at as u64, count_at as u64);
         assert_eq!(run(&discard.code, &mut state), NEXT);
+        // SAFETY: count_at still names the live Count box after the discard thunk returns.
         assert_eq!((state.x, unsafe { (*count_at).last }), (before, 500));
     }
 }
