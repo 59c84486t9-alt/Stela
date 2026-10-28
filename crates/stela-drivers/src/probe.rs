@@ -9,7 +9,7 @@ use crate::{
         pci::{Address, EcamWindow, Function},
     },
     gpu,
-    input::{self, virtio::VirtioInput},
+    input::{self, InputDevice, virtio::VirtioInput},
     net::{
         self, Link, LinkError, Mac,
         e1000e::E1000e,
@@ -19,7 +19,7 @@ use crate::{
         virtio::VirtioNet,
     },
     storage::{ahci, nvme, rtsx, sdhci, virtio},
-    usb::{self, bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
+    usb::{self, bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
@@ -266,12 +266,10 @@ pub struct Devices {
     /// Display controllers, inventoried without changing firmware scanout.
     /// These are not initialized accelerators; each records its missing port.
     pub gpus: Vec<gpu::Adapter>,
-    pub inputs: Vec<VirtioInput>,
-    /// i8042 keyboard and mouse ports the ACPI namespace lists, initialized
-    /// and polled through [`Controller::poll`](input::ps2::Controller::poll).
-    pub ps2: Vec<input::ps2::Controller>,
-    /// USB keyboards and pointers behind xHCI controllers.
-    pub usb_inputs: Vec<UsbInput>,
+    /// Host keyboards and pointers: virtio-input devices, USB HID devices
+    /// behind xHCI controllers, and the i8042 ports the ACPI namespace
+    /// lists, each polled through [`InputDevice::poll`].
+    pub inputs: Vec<InputDevice>,
     /// Complete descriptor inventories, including hubs and unbound devices.
     /// Retention does not grant hardware ownership or guest forwarding.
     pub usb_devices: Vec<xhci::Device>,
@@ -513,7 +511,9 @@ pub unsafe fn probe_with_provider(
                                 .into_iter()
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
-                        devices.usb_inputs.extend(found.inputs);
+                        devices
+                            .inputs
+                            .extend(found.inputs.into_iter().map(InputDevice::Usb));
                         devices.usb_devices.extend(found.devices);
                         devices.usb_hosts.extend(found.hosts);
                         devices.usb_storage.extend(found.storage);
@@ -602,7 +602,7 @@ pub unsafe fn probe_with_provider(
                 continue;
             } else if input::virtio::matches(&function) {
                 match VirtioInput::new(&mut function, handoff, dma) {
-                    Ok(device) => devices.inputs.push(device),
+                    Ok(device) => devices.inputs.push(InputDevice::Virtio(device)),
                     Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;

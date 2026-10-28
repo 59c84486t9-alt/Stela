@@ -51,9 +51,8 @@ use stela_drivers::{
     Handoff,
     block::{BlockDevice, Shared, Transport},
     bus::dma::RegionAllocator,
-    input::Input,
+    input::{Input, InputDevice},
     probe::probe,
-    usb::hid::UsbInput,
 };
 use stela_runtime::pc::{
     self, boot_log,
@@ -474,8 +473,8 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     finish(machine, &mut keyboards)
 }
 
-/// The storage, GPT and log checks; returns the USB keyboards.
-fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
+/// The storage, GPT and log checks; returns the keyboards and pointers.
+fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
     // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: this handoff describes the running machine and its tables.
@@ -507,8 +506,8 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     for (location, why) in &devices.usb_unused {
         output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
     }
-    for device in &devices.usb_inputs {
-        output::arguments(format_args!("USB INPUT {}\n", device.name));
+    for device in &devices.inputs {
+        output::arguments(format_args!("INPUT {}\n", device.name()));
     }
     let failures =
         devices.failures.len() + devices.device_failures.len() + devices.usb_failures.len();
@@ -520,9 +519,9 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
             Verdict::Pass
         },
         format!(
-            "disks={} usb_inputs={} failures={failures}",
+            "disks={} inputs={} failures={failures}",
             devices.disks.len(),
-            devices.usb_inputs.len()
+            devices.inputs.len()
         ),
     );
     let (mut internal, mut tables) = (0, 0);
@@ -582,7 +581,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
         }
         None => machine.record("log", Verdict::Skip, String::from("no --nor-file")),
     }
-    core::mem::take(&mut devices.usb_inputs)
+    core::mem::take(&mut devices.inputs)
 }
 
 /// Keep the output in the file at `path` on USB partition `guid`.
@@ -771,9 +770,12 @@ fn bars(machine: &mut Machine, screen: &Framebuffer, top: usize) {
 
 /// The first non-modifier key pressed on any of `keyboards`, logged with
 /// the raw report it arrived in.
-fn key(keyboards: &mut [UsbInput]) -> Option<u8> {
+fn key(keyboards: &mut [InputDevice]) -> Option<u8> {
     keyboards.iter_mut().find_map(|device| {
-        let usage = device.poll().into_iter().find_map(|input| match input {
+        let mut inputs = Vec::new();
+        // A failed poll still yields what the device decoded before it.
+        let _ = device.poll(&mut inputs);
+        let usage = inputs.into_iter().find_map(|input| match input {
             Input::Key {
                 usage,
                 pressed: true,
@@ -783,26 +785,26 @@ fn key(keyboards: &mut [UsbInput]) -> Option<u8> {
         output::arguments(format_args!(
             "KEY usage={usage:#04x} report={:02x?} from {}\n",
             device.last_report(),
-            device.name
+            device.name()
         ));
         Some(usage)
     })
 }
 
 /// A key within `--key-seconds`, which also says whether the bars show.
-fn keyboard(machine: &mut Machine, keyboards: &mut [UsbInput]) {
+fn keyboard(machine: &mut Machine, keyboards: &mut [InputDevice]) {
     if keyboards.is_empty() {
         machine.record(
             "keyboard",
             Verdict::Fail,
-            String::from("no USB HID device was brought up"),
+            String::from("no keyboard was brought up"),
         );
         machine.record("display-seen", Verdict::Skip, String::from("no keyboard"));
         return;
     }
     let seconds = machine.options.key_seconds;
     output::arguments(format_args!(
-        "\n>>> Press Y on the USB keyboard if the bottom of the screen shows seven colour bars \
+        "\n>>> Press Y on the keyboard if the bottom of the screen shows seven colour bars \
          (white yellow cyan green magenta red blue), N if it does not. Waiting {seconds} s.\n"
     ));
     output::flush_log();
@@ -836,7 +838,7 @@ fn keyboard(machine: &mut Machine, keyboards: &mut [UsbInput]) {
 }
 
 /// The summary, then a restart, a power-off or the deadline.
-fn finish(machine: &mut Machine, keyboards: &mut [UsbInput]) -> ! {
+fn finish(machine: &mut Machine, keyboards: &mut [InputDevice]) -> ! {
     output::arguments(format_args!("\nHOST CHECK SUMMARY\n"));
     for check in &machine.checks {
         output::arguments(format_args!("{check}\n"));

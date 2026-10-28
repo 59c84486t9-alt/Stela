@@ -330,6 +330,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .iter()
             .map(|byte| (byte.port, byte.data, byte.received_us))
     }
+    /// Whether the keyboard port is configured.
+    pub fn has_keyboard(&self) -> bool {
+        self.config.keyboard
+    }
     pub fn has_wheel(&self) -> bool {
         self.synaptics.is_none()
             && self.elantech.is_none()
