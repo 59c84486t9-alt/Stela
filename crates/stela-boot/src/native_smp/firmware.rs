@@ -104,7 +104,16 @@ impl FixedVisibility {
             }
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
             if unsafe { msr::AMD_SYSCFG.read() } != original | amd::FIXED_MODIFY {
-                return Err(Error::AmdMemoryControls);
+                // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem
+                // bits have no effect (AMD APM Vol. 2 7.7.4), so the type
+                // bits read without the modify enable are the whole policy.
+                if original & amd::FIXED_DRAM != 0 {
+                    return Err(Error::AmdMemoryControls);
+                }
+                guard.changed = false;
+                unsafe {
+                    msr::AMD_SYSCFG.write(original);
+                }
             }
         }
         Ok(guard)
