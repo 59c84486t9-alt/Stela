@@ -50,6 +50,28 @@ const TRANSMIT_QUEUE: TransmitQueue = TransmitQueue {
     control: TXDCTL,
 };
 
+/// Interrupt registers igb_configure_msix and igb_irq_enable program.
+const IMS: usize = 0x00d0;
+const EICS: usize = 0x1520;
+const EIMS: usize = 0x1524;
+const EIAC: usize = 0x152c;
+const EIAM: usize = 0x1530;
+const EITR0: usize = 0x1680;
+const IVAR0: usize = 0x1700;
+const IVAR_MISC: usize = 0x1740;
+const GPIE_NSICR: u32 = 1;
+const GPIE_MSIX_MODE: u32 = 1 << 4;
+const GPIE_EIAME: u32 = 1 << 30;
+const GPIE_PBA: u32 = 1 << 31;
+const IVAR_VALID: u32 = 0x80;
+const IMS_LSC: u32 = 1 << 2;
+/// igb.h IGB_START_ITR, with E1000_EITR_CNT_IGNR as igb_write_itr sets it.
+const START_ITR: u32 = 648 | 1 << 31;
+/// The one MSI-X vector: queue 0's receive and the link causes.
+const VECTOR: u32 = 0;
+/// An MSI-X table entry's bytes.
+const MSIX_ENTRY_BYTES: u64 = 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Chip {
     I82575,
@@ -155,6 +177,8 @@ pub struct Igb {
     clock: Clock,
     pub location: String,
     pub warnings: InitializationWarnings,
+    /// Whether MSI-X vector 0 sends the handoff's completion signal.
+    signalled: bool,
 }
 
 impl Igb {
@@ -173,9 +197,35 @@ impl Igb {
         let chip = Chip::device(function.device).unwrap();
         let bytes = if chip.modern() { 0x2_0000 } else { 0x1_0000 };
         function.power_up(&handoff.clock)?;
-        let device = mapped_registers(handoff, function.bars()[0], 0, bytes)?;
+        let bars = function.bars();
+        let device = mapped_registers(handoff, bars[0], 0, bytes)?;
         let capabilities = PciCapabilities::read(function);
         function.enable_polled();
+        // The 82575 maps queues to vectors through MSIXBM, which this
+        // driver leaves alone: it stays polled.
+        let msix = function
+            .interrupts()
+            .msix
+            .filter(|_| !matches!(chip, Chip::I82575));
+        let signalled = match (handoff.completion, msix) {
+            (Some(message), Some(msix)) => {
+                let table = mapped_registers(
+                    handoff,
+                    bars[usize::from(msix.table_bar)],
+                    u64::from(msix.table_offset),
+                    MSIX_ENTRY_BYTES,
+                )?;
+                function.enable_msix(msix, || {
+                    table.write32(0, message.address as u32);
+                    table.write32(4, (message.address >> 32) as u32);
+                    table.write32(8, message.data);
+                    table.write32(12, 0);
+                    Ok(())
+                })?;
+                true
+            }
+            _ => false,
+        };
         let mut hardware = Hardware::new(&device, &handoff.clock, chip);
         let (mac, warnings) = hardware.initialize(function.config(), capabilities)?;
         let mut net = Self {
@@ -188,8 +238,12 @@ impl Igb {
             clock: handoff.clock,
             location: format!("{} Intel {}", function.address, chip.name()),
             warnings,
+            signalled,
         };
         start_queues(&net.device, &net.clock, &mut net.receive, &net.transmit)?;
+        if signalled {
+            arm_interrupts(&net.device);
+        }
         Ok(net)
     }
 
@@ -215,6 +269,20 @@ impl Igb {
             false => Ok(status & STATUS_LU != 0),
         }
     }
+}
+
+/// igb_configure_msix and igb_irq_enable for one vector: queue 0's receive
+/// and the link causes send it, auto-masked until the next empty receive
+/// re-arms it. Queue 0 takes IVAR0's low byte on every chip but the 82575.
+fn arm_interrupts(device: &Mmio) {
+    device.write32(GPIE, GPIE_MSIX_MODE | GPIE_PBA | GPIE_EIAME | GPIE_NSICR);
+    device.write32(IVAR_MISC, (VECTOR | IVAR_VALID) << 8);
+    device.write32(IVAR0, VECTOR | IVAR_VALID);
+    device.write32(EITR0, START_ITR);
+    device.write32(EIAC, device.read32(EIAC) | 1 << VECTOR);
+    device.write32(EIAM, device.read32(EIAM) | 1 << VECTOR);
+    device.write32(EIMS, 1 << VECTOR);
+    device.write32(IMS, IMS_LSC);
 }
 
 fn start_queues(
@@ -277,6 +345,10 @@ impl Link for Igb {
         self.device.write32(TDT, self.transmit.next as u32);
         Ok(())
     }
+    fn signals(&self) -> bool {
+        self.signalled
+    }
+
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         self.watchdog()?;
         for _ in 0..DESCRIPTORS {
@@ -286,6 +358,16 @@ impl Link for Igb {
                 if let Some(tail) = self.receive.idle() {
                     fence(Ordering::SeqCst);
                     self.device.write32(RDT, tail);
+                }
+                if self.signalled {
+                    // igb_msix_other reads the link cause, clearing it so
+                    // the next change sends the vector; igb_ring_irq_enable
+                    // unmasks the vector, auto-masked when it fired.
+                    let link = self.device.read32(ICR) & IMS_LSC != 0;
+                    self.device.write32(EIMS, 1 << VECTOR);
+                    if link {
+                        self.watchdog()?;
+                    }
                 }
                 return Ok(None);
             }
@@ -315,6 +397,12 @@ impl Link for Igb {
         if let Some(tail) = self.receive.idle() {
             fence(Ordering::SeqCst);
             self.device.write32(RDT, tail);
+        }
+        if self.signalled {
+            // Frames stopped at the bound wait with the vector masked; a
+            // software cause sends it again, as igb_watchdog_task does.
+            self.device.write32(EICS, 1 << VECTOR);
+            self.device.write32(EIMS, 1 << VECTOR);
         }
         Ok(None)
     }
@@ -985,6 +1073,16 @@ mod tests {
         }
     }
 
+    /// An empty receive unmasks the vector, auto-masked when it fired.
+    #[test]
+    fn empty_receive_unmasks_the_signal_vector() {
+        let mut fixture = DmaFixture::new();
+        fixture.net.signalled = true;
+        assert!(fixture.net.signals());
+        assert_eq!(fixture.net.receive(), Ok(None));
+        assert_eq!(fixture.registers[EIMS / 4], 1 << VECTOR);
+    }
+
     struct DmaFixture {
         net: Igb,
         registers: Vec<u32>,
@@ -1011,6 +1109,7 @@ mod tests {
                 },
                 location: String::from("DMA peer"),
                 warnings: InitializationWarnings::default(),
+                signalled: false,
             };
             start_queues(&net.device, &net.clock, &mut net.receive, &net.transmit).unwrap();
             registers[STATUS / 4] = STATUS_LU;
