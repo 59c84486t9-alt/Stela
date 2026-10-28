@@ -49,7 +49,7 @@
 //! recovery remains a separate topology operation.
 use super::{audio, bluetooth, cdc, ethernet, hid, storage};
 use crate::{
-    Clock, Handoff,
+    Clock, Deadline, Handoff,
     block::BlockError,
     bus::{
         dma::{DmaAllocator, DmaBuffer},
@@ -65,6 +65,7 @@ use core::{
 };
 
 mod bind;
+mod command;
 mod configuration;
 mod configure;
 mod descriptor;
@@ -100,7 +101,7 @@ pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
 pub use streams::StreamTransfer;
-pub use transfer::{TransferCancellation, TransferTicket};
+pub use transfer::{Operation, TransferCancellation, TransferTicket};
 
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 
@@ -471,16 +472,15 @@ pub struct Controller {
     unpublished: usize,
     /// Drains since USBSTS was last read.
     quiet_drains: u8,
+    /// The command on the ring and its timer.
+    outstanding: Option<command::Outstanding>,
+    /// Commands another owner's command settled, for their starter.
+    finished: Vec<(u64, Result<Event, BlockError>)>,
     pub location: String,
 }
 
-/// What a command timeout left: its own completion, a restarted ring to wait
-/// on, or a No Op standing in for the aborted command.
-enum Timeout {
-    Completed(Event),
-    Waiting,
-    Retired,
-}
+/// A TT hub and the CLEAR_TT_BUFFER requests it takes, in order.
+type TtRequests = Option<(u8, Vec<[u8; 8]>)>;
 
 /// A controller shared by the class drivers of its devices.
 pub type Shared = Rc<RefCell<Controller>>;
@@ -722,6 +722,8 @@ impl Controller {
             command_ring_stopped: false,
             unpublished: 0,
             quiet_drains: 0,
+            outstanding: None,
+            finished: Vec::new(),
             location,
         })
     }
@@ -882,39 +884,44 @@ impl Controller {
         Some(self.pending.remove(index))
     }
 
-    /// Waits up to `microseconds` for an event `wanted` accepts.
-    fn wait_event(
-        &mut self,
-        microseconds: u64,
-        wanted: impl Fn(&Event) -> bool,
-    ) -> Result<Event, BlockError> {
-        let deadline = self.clock.try_deadline(microseconds).map_err(|_| {
+    fn event_deadline(&self, microseconds: u64) -> Result<Deadline, BlockError> {
+        self.clock.try_deadline(microseconds).map_err(|_| {
             BlockError::Unsupported("xHCI event timeout clock unavailable or duration out of range")
-        })?;
-        loop {
-            self.drain();
-            if let Some(memory) = &self.native_memory {
-                memory.ready()?;
-            }
-            self.hardware.ready()?;
-            if let Some(event) = self.take(&wanted) {
-                return Ok(event);
-            }
-            if let Some(status) = self.error {
-                return Err(BlockError::Device { status });
-            }
-            if deadline.passed() {
-                // Quiet drains read no USBSTS: a controller that died
-                // without an event is reported as such.
-                self.check_status();
-                if let Some(status) = self.error {
-                    return Err(BlockError::Device { status });
-                }
-                return Err(BlockError::Timeout);
-            }
-            crate::waiting();
-            core::hint::spin_loop();
+        })
+    }
+
+    /// One look for an event `wanted` accepts before `deadline`: `None`
+    /// while none has arrived and time remains.
+    fn poll_event(
+        &mut self,
+        deadline: Deadline,
+        wanted: impl Fn(&Event) -> bool,
+    ) -> Option<Result<Event, BlockError>> {
+        self.drain();
+        if let Some(memory) = &self.native_memory
+            && let Err(error) = memory.ready()
+        {
+            return Some(Err(error));
         }
+        if let Err(error) = self.hardware.ready() {
+            return Some(Err(error));
+        }
+        if let Some(event) = self.take(&wanted) {
+            return Some(Ok(event));
+        }
+        if let Some(status) = self.error {
+            return Some(Err(BlockError::Device { status }));
+        }
+        if !deadline.passed() {
+            return None;
+        }
+        // Quiet drains read no USBSTS: a controller that died without an
+        // event is reported as such.
+        self.check_status();
+        Some(Err(match self.error {
+            Some(status) => BlockError::Device { status },
+            None => BlockError::Timeout,
+        }))
     }
 
     /// Before any new command-dependent DMA mutation or doorbell. A late
@@ -937,113 +944,6 @@ impl Controller {
             ));
         }
         Ok(())
-    }
-
-    fn command(&mut self, parameter: u64, status: u32, control: u32) -> Result<Event, BlockError> {
-        self.ready()?;
-        self.sync_command_buffers()?;
-        let address = self.commands.push(&[(parameter, status, control)])?[0];
-        // Linux xhci_ring_cmd_db rings only a running command ring.
-        if !self.command_ring_stopped {
-            self.doorbell(0, 0);
-        }
-        let mut retired = false;
-        let event = loop {
-            match self.wait_event(COMMAND_US, |e| {
-                e.kind() == COMMAND_COMPLETION && e.parameter == address
-            }) {
-                Ok(event) => break event,
-                Err(BlockError::Timeout) => match self.command_timeout(address, control)? {
-                    Timeout::Completed(event) => break event,
-                    Timeout::Waiting => {}
-                    Timeout::Retired => retired = true,
-                },
-                Err(error) => {
-                    self.command_poisoned = true;
-                    return Err(error);
-                }
-            }
-        };
-        // wait_event may have observed both a completion and fatal USBSTS.
-        // Neither permits new commands until the controller is reset.
-        if let Some(status) = self.error {
-            self.command_poisoned = true;
-            return Err(BlockError::Device { status });
-        }
-        // An aborted command turned No Op reports Command Ring Stopped.
-        if retired {
-            return Err(BlockError::Timeout);
-        }
-        match event.code() {
-            SUCCESS => Ok(event),
-            status => Err(BlockError::Device { status }),
-        }
-    }
-
-    /// Linux xhci_handle_command_timeout for the one outstanding command.
-    fn command_timeout(&mut self, address: u64, control: u32) -> Result<Timeout, BlockError> {
-        // A Stop Endpoint the controller never answers means the host died.
-        if control >> 10 & 0x3f == STOP_ENDPOINT {
-            self.died();
-            return Err(BlockError::Timeout);
-        }
-        let at = self.operational + CRCR;
-        let low = self.registers.read32(at);
-        if u64::from(low) | u64::from(self.registers.read32(at + 4)) << 32 == u64::MAX {
-            self.died();
-            return Err(BlockError::Timeout);
-        }
-        if self.command_ring_stopped || low & CRCR_RUNNING == 0 {
-            // xhci_handle_stopped_cmd_ring: restart the ring and wait again.
-            self.command_ring_stopped = false;
-            self.doorbell(0, 0);
-            return Ok(Timeout::Waiting);
-        }
-        // xhci_abort_cmd_ring. The upper half names the next command, so a
-        // ring that stops before it is written keeps a valid pointer.
-        self.registers
-            .write64(at, self.commands.address() | u64::from(CRCR_ABORT));
-        if hardware::handshake(
-            &mut *self.registers,
-            self.clock,
-            self.operational,
-            CRCR,
-            CRCR_RUNNING,
-            0,
-            ABORT_US,
-        )
-        .is_err()
-        {
-            self.died();
-            return Err(BlockError::Timeout);
-        }
-        match self.wait_event(RING_STOP_US, |e| {
-            e.kind() == COMMAND_COMPLETION && e.code() == COMMAND_RING_STOPPED
-        }) {
-            Ok(_) => {}
-            // xhci_cleanup_command_queue: the command is reported aborted.
-            Err(BlockError::Timeout) => {
-                self.command_ring_stopped = true;
-                return Err(BlockError::Timeout);
-            }
-            Err(error) => {
-                self.command_poisoned = true;
-                return Err(error);
-            }
-        }
-        // Its completion precedes Command Ring Stopped unless the controller
-        // had not fetched it; a completion that raced the abort stands.
-        match self.take(|e| e.kind() == COMMAND_COMPLETION && e.parameter == address) {
-            Some(event) if event.code() == COMMAND_ABORTED => Err(BlockError::Timeout),
-            Some(event) => Ok(Timeout::Completed(event)),
-            None => {
-                // xhci_handle_stopped_cmd_ring: it becomes a No Op, which the
-                // restarted ring retires.
-                self.commands.no_op(address)?;
-                self.doorbell(0, 0);
-                Ok(Timeout::Retired)
-            }
-        }
     }
 
     /// Linux xhci_halt and xhci_hc_died: no further command or transfer.

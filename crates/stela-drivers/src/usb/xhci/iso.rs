@@ -1140,6 +1140,8 @@ pub(super) mod tests {
                 command_ring_stopped: false,
                 unpublished: 0,
                 quiet_drains: 0,
+                outstanding: None,
+                finished: Vec::new(),
                 location: String::from("native iso model"),
             },
             model,

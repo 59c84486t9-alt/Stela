@@ -299,6 +299,8 @@ fn address_controller_with_capabilities(
         command_ring_stopped: false,
         unpublished: 0,
         quiet_drains: 0,
+        outstanding: None,
+        finished: Vec::new(),
         location: String::from("test xhci"),
     };
     model.borrow_mut().dcbaa = controller.dcbaa.physical();

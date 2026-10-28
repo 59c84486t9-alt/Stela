@@ -554,6 +554,44 @@ impl DeviceAccess<'_> {
         self.controller.clear_owned(slot, endpoint)
     }
 
+    /// Start [`Self::control`]; [`Self::poll`] gives its result.
+    pub fn start_control(&mut self, request: [u8; 8], out: &[u8]) -> Result<Operation, BlockError> {
+        let slot = self.slot()?;
+        let control = self.controller.start_control_owned(slot, request, out)?;
+        Ok(self.operation(transfer::Kind::Control(control)))
+    }
+
+    /// Start [`Self::cancel`]; [`Self::poll`] gives its result.
+    pub fn start_cancel(&mut self, dci: u8) -> Result<Operation, BlockError> {
+        let slot = self.slot()?;
+        self.controller.live_slot(slot)?;
+        let cancel = self.controller.start_cancel(slot, dci)?;
+        Ok(self.operation(transfer::Kind::Cancel(cancel)))
+    }
+
+    /// Start [`Self::clear`]; [`Self::poll`] gives its result.
+    pub fn start_clear(&mut self, endpoint: &Endpoint) -> Result<Operation, BlockError> {
+        let slot = self.slot()?;
+        let (cancel, request) = self.controller.start_clear_owned(slot, endpoint)?;
+        Ok(self.operation(transfer::Kind::Clear(cancel, request)))
+    }
+
+    fn operation(&self, kind: transfer::Kind) -> Operation {
+        Operation { id: self.id, kind }
+    }
+
+    /// A started operation's result once it ended, a control transfer's IN
+    /// data or else empty; never waits.
+    pub fn poll(&mut self, operation: &mut Operation) -> Option<Result<Vec<u8>, BlockError>> {
+        if operation.id != self.id {
+            return Some(Err(BlockError::Unsupported("foreign USB device operation")));
+        }
+        if let Err(error) = self.slot() {
+            return Some(Err(error));
+        }
+        self.controller.poll_operation(operation)
+    }
+
     /// Quarantine this generation without asserting that DMA has stopped.
     pub(crate) fn quarantine(&mut self) {
         if let Ok(slot) = self.slot() {

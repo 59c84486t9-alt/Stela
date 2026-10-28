@@ -225,6 +225,7 @@ impl Controller {
     /// USB bus suspend and retains endpoint DMA before calling this boundary.
     /// It cannot authorize suspend by supplying an asserted boolean.
     pub(super) fn suspend_controller(&mut self) -> Result<(), BlockError> {
+        self.settle_command();
         self.ready()?;
         if self.quirks.reset_on_resume {
             return Err(BlockError::Unsupported(
@@ -257,7 +258,7 @@ impl Controller {
             self.operational,
             HALT_US * if self.quirks.slow_suspend { 20 } else { 2 },
         )?;
-        // Commands are synchronous, ready() rejected any unresolved command.
+        // The command settled above; ready() rejected any unresolved one.
         // CRCR only accepts a 64-byte-aligned pointer, so restart this empty
         // ring at its base; transfer and event rings keep their exact cursors.
         self.commands.buffer.bytes_mut()[..RING_TRBS * TRB].fill(0);

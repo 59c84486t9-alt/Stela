@@ -18,7 +18,24 @@ impl Controller {
     /// The transfer owner selects actual split errors, excluding EP0 protocol
     /// STALL, then calls this after Stop/Reset/Set Dequeue and before unpoison.
     /// A failed clear preserves that owner's poison and retained DMA.
+    #[cfg(test)]
     pub(in super::super) fn clear_hub_tt(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        let Some((hub, requests)) = self.hub_tt_requests(slot, dci)? else {
+            return Ok(());
+        };
+        for request in requests {
+            self.control_owned(hub, request, &[])?;
+        }
+        Ok(())
+    }
+
+    /// The TT hub and the CLEAR_TT_BUFFER requests, in order, that
+    /// [`Self::clear_hub_tt`] sends; `None` when the endpoint needs none.
+    pub(in super::super) fn hub_tt_requests(
+        &mut self,
+        slot: u8,
+        dci: u8,
+    ) -> Result<TtRequests, BlockError> {
         self.validate_owned_slot_ancestry(slot)?;
         self.ready()?;
         if self.slot_ownership.get(usize::from(slot)) != Some(&reset::Ownership::Enabled) {
@@ -31,7 +48,7 @@ impl Controller {
         // the TT hub itself must still be live for its actual EP0 request.
         let attachment = self.slot(slot)?.attachment;
         let Some((hub, port)) = attachment.translator else {
-            return Ok(());
+            return Ok(None);
         };
         if !matches!(attachment.speed, LOW_SPEED | FULL_SPEED) || !(1..32).contains(&dci) {
             return Err(BlockError::Unsupported("invalid USB2 split endpoint owner"));
@@ -55,7 +72,7 @@ impl Controller {
         let kind = word1 >> ENDPOINT_TYPE_SHIFT & ENDPOINT_TYPE_MASK;
         // TT buffer recovery is for control/bulk, never interrupt/isochronous.
         if matches!(kind, 1 | 3 | 5 | 7) {
-            return Ok(());
+            return Ok(None);
         }
         if !matches!(kind, CONTROL_TYPE | BULK_OUT_TYPE | BULK_IN_TYPE)
             || (kind == CONTROL_TYPE) != (dci == 1)
@@ -107,16 +124,13 @@ impl Controller {
                 DEVINFO_BULK
             }
             | if dci & 1 != 0 { DEVINFO_IN } else { 0 };
+        let mut requests = Vec::new();
         if kind == CONTROL_TYPE {
             // Donor clears the opposite direction first, then the requested one.
-            self.control_owned(
-                hub,
-                setup(0x23, CLEAR_TT_BUFFER, devinfo ^ DEVINFO_IN, tt, 0),
-                &[],
-            )?;
+            requests.push(setup(0x23, CLEAR_TT_BUFFER, devinfo ^ DEVINFO_IN, tt, 0));
         }
-        self.control_owned(hub, setup(0x23, CLEAR_TT_BUFFER, devinfo, tt, 0), &[])?;
-        Ok(())
+        requests.push(setup(0x23, CLEAR_TT_BUFFER, devinfo, tt, 0));
+        Ok(Some((hub, requests)))
     }
 }
 

@@ -1,8 +1,11 @@
 //! Control, bulk and interrupt transfers on retained rings, and the
 //! cancellation that must be acknowledged before a buffer is reused.
 use super::*;
+mod operation;
 mod ordinary;
 mod queue;
+pub use operation::Operation;
+pub(super) use operation::{Cancel, Control, Kind};
 pub use ordinary::{TransferCancellation, TransferTicket};
 const BABBLE_DETECTED: u32 = 3;
 pub(super) const USB_TRANSACTION_ERROR: u32 = 4;
@@ -166,6 +169,16 @@ impl Controller {
         request: [u8; 8],
         out: &[u8],
     ) -> Result<Vec<u8>, BlockError> {
+        let control = self.start_control_owned(slot, request, out)?;
+        self.run_control(control)
+    }
+
+    pub(super) fn start_control_owned(
+        &mut self,
+        slot: u8,
+        request: [u8; 8],
+        out: &[u8],
+    ) -> Result<Control, BlockError> {
         self.live_slot(slot)?;
         // Any raw class requester must acquire the same physical-port current
         // reservation as enumeration before publishing a PORT_POWER request.
@@ -198,20 +211,14 @@ impl Controller {
         // A timeout may occur after the device accepted the request; do not
         // preserve the old value or infer success from cancellation of EP0.
         self.endpoint_ready_owned(slot, 1)?;
-        let current_demand = if configuration {
-            Some(self.prepare_current_configuration(slot, request[2])?)
+        let configuration = if configuration {
+            let demand = self.prepare_current_configuration(slot, request[2])?;
+            self.slot(slot)?.current_configuration = None;
+            Some((request[2], demand))
         } else {
             None
         };
-        if configuration {
-            self.slot(slot)?.current_configuration = None;
-        }
-        let result = self.control_transfer(slot, request, out);
-        if configuration && result.is_ok() {
-            self.slot(slot)?.current_configuration = Some(request[2]);
-            self.ack_current_configuration(slot, current_demand.unwrap())?;
-        }
-        result
+        self.start_control(slot, request, out, configuration)
     }
 
     /// Only the topology owner can mint this capability, after every old alias
@@ -255,132 +262,8 @@ impl Controller {
             // physical port may be repowered before the upstream reset ACK.
             self.power.recovery_power(slot, port)?;
         }
-        self.control_transfer(slot, request, &[])
-    }
-
-    fn control_transfer(
-        &mut self,
-        slot: u8,
-        request: [u8; 8],
-        out: &[u8],
-    ) -> Result<Vec<u8>, BlockError> {
-        self.endpoint_ready_inner(slot, 1)?;
-        let length = usize::from(u16::from_le_bytes([request[6], request[7]]));
-        let is_in = request[0] & 0x80 != 0;
-        if length > CONTROL_BYTES || (!is_in && out.len() != length) {
-            return Err(BlockError::Unsupported("control transfer length"));
-        }
-        let buffer = {
-            let state = self.slot(slot)?;
-            if state.endpoints[1]
-                .as_ref()
-                .is_some_and(|endpoint| endpoint.poisoned)
-            {
-                return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
-            }
-            if !is_in {
-                state.control.bytes_mut()[..length].copy_from_slice(out);
-            }
-            state.control.sync_dirty()?;
-            state.control.device_address()
-        };
-        let transfer_type = match (length, is_in) {
-            (0, _) => 0,
-            (_, false) => 2,
-            (_, true) => 3,
-        };
-        let mut trbs = vec![(
-            u64::from_le_bytes(request),
-            8,
-            SETUP << 10 | IDT | transfer_type << 16,
-        )];
-        let direction = if is_in { DIRECTION_IN } else { 0 };
-        if length > 0 {
-            trbs.push((buffer, length as u32, DATA << 10 | ISP | direction));
-        }
-        let status_direction = if length > 0 && is_in { 0 } else { DIRECTION_IN };
-        trbs.push((0, 0, STATUS << 10 | IOC | status_direction));
-        let addresses = {
-            let state = self.slot(slot)?;
-            let ring = &mut state.endpoints[1]
-                .as_mut()
-                .ok_or(BlockError::Unsupported("xHCI control endpoint"))?
-                .ring;
-            ring.push(&trbs)?
-        };
-        self.doorbell(slot, 1);
-        let status_address = *addresses.last().unwrap();
-        let mut received = length;
-        let mut short_seen = false;
-        loop {
-            let event = self.wait_event(CONTROL_US, |e| {
-                e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == 1
-            });
-            let event = match event {
-                Ok(event) => event,
-                Err(error) => {
-                    // A missing transfer completion leaves EP0 Running, not
-                    // Halted. Only acknowledged Stop/Set Dequeue permits reuse;
-                    // failed cancellation is reported and retains poison.
-                    self.cancel_inner(slot, 1)?;
-                    return Err(error);
-                }
-            };
-            // An event must name this TD's actual Setup/Data/Status TRB.
-            // Event Data is never submitted by this control path. Only Data
-            // short packets may precede the final zero-length Status ACK.
-            let data_address = (length > 0).then(|| addresses[1]);
-            let valid = event.control & EVENT_DATA == 0
-                && addresses.contains(&event.parameter)
-                && match event.code() {
-                    SUCCESS => event.parameter == status_address && event.residual() == 0,
-                    SHORT_PACKET => {
-                        data_address == Some(event.parameter)
-                            && event.residual() <= length
-                            && !short_seen
-                    }
-                    _ => true,
-                };
-            if !valid {
-                self.cancel_inner(slot, 1)?;
-                return Err(BlockError::Unsupported(
-                    "invalid xHCI control transfer event",
-                ));
-            }
-            match event.code() {
-                SUCCESS => break,
-                SHORT_PACKET => {
-                    short_seen = true;
-                    received = length - event.residual();
-                }
-                status => {
-                    if status == INCOMPATIBLE_DEVICE {
-                        self.slot(slot)?.endpoints[1].as_mut().unwrap().poisoned = true;
-                    } else {
-                        self.slot(slot)?.endpoints[1]
-                            .as_mut()
-                            .unwrap()
-                            .ring
-                            .normal
-                            .control_failure(status);
-                        self.cancel_inner(slot, 1)?;
-                    }
-                    return Err(BlockError::Device { status });
-                }
-            }
-        }
-        if !is_in {
-            if received != length {
-                return Err(BlockError::Unsupported("short USB control OUT transfer"));
-            }
-            return Ok(Vec::new());
-        }
-        let state = self.slot(slot)?;
-        // SAFETY: the actual Status completion retired this EP0 TD's Data stage.
-        unsafe {
-            state.control.sync_cpu(0..received)?;
-        }
-        Ok(state.control.bytes()[..received].to_vec())
+        let control = self.start_control(slot, request, &[], None)?;
+        self.run_control(control)
     }
 
     pub(super) fn descriptor(
@@ -480,125 +363,8 @@ impl Controller {
     }
 
     fn cancel_observed(&mut self, slot: u8, dci: u8) -> Result<Vec<Event>, BlockError> {
-        if !(1..32).contains(&dci) {
-            return Err(BlockError::Unsupported("cancel requires a valid endpoint"));
-        }
-        let context = self.context();
-        let endpoint = self.slot(slot)?.endpoints[usize::from(dci)]
-            .as_mut()
-            .ok_or(BlockError::Unsupported("xHCI endpoint not configured"))?;
-        if endpoint.poisoned {
-            return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
-        }
-        // Set before issuing any command, so every error path retains poison.
-        endpoint.poisoned = true;
-        let pointers = endpoint.streams.as_ref().map_or_else(
-            || vec![(0u16, endpoint.ring.dequeue_pointer())],
-            |streams| streams.dequeue_pointers(),
-        );
-        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
-        let state = |controller: &mut Self| -> Result<u32, BlockError> {
-            fence(Ordering::Acquire);
-            Ok(controller
-                .slot(slot)?
-                ._output
-                .coherent_u32(usize::from(dci) * context)?
-                & 7)
-        };
-        let mut current = state(self)?;
-        let mut clear_tt = self.slot(slot)?.endpoints[usize::from(dci)]
-            .as_ref()
-            .unwrap()
-            .ring
-            .normal
-            .needs_tt_clear()
-            || (current == ENDPOINT_HALTED && dci != 1);
-        if current == ENDPOINT_RUNNING {
-            // Running, including a ring whose TD just completed.
-            match self.command(0, 0, STOP_ENDPOINT << 10 | target) {
-                Ok(_) => {}
-                // A STALL can race Stop Endpoint. Recheck the hardware state;
-                // never treat an arbitrary Context State Error as acknowledgment.
-                Err(BlockError::Device {
-                    status: CONTEXT_STATE_ERROR,
-                }) => {}
-                Err(error) => return Err(error),
-            }
-            current = state(self)?;
-        }
-        if current == ENDPOINT_HALTED {
-            clear_tt |= dci != 1;
-            // Halted.
-            self.command(0, 0, RESET_ENDPOINT << 10 | target)?;
-            current = state(self)?;
-        }
-        if current != ENDPOINT_STOPPED {
-            // Stopped is the only state in which dequeue is legal.
-            return Err(BlockError::Unsupported("xHCI endpoint did not stop"));
-        }
-        for (stream_id, pointer) in pointers {
-            self.command(
-                pointer,
-                streams::dequeue_status(stream_id),
-                SET_DEQUEUE << 10 | target,
-            )?;
-            if let Some(streams) = &mut self.slot(slot)?.endpoints[usize::from(dci)]
-                .as_mut()
-                .unwrap()
-                .streams
-            {
-                streams.dequeue_acknowledged(stream_id);
-            }
-        }
-        // Stop/Set Dequeue completion acknowledges abandonment. Drain also takes
-        // stale transfer events posted while those commands were executing.
-        self.drain();
-        if self.pending.iter().any(|event| {
-            event.kind() == TRANSFER_EVENT
-                && event.slot() == slot
-                && event.endpoint() == dci
-                && event.code() == INCOMPATIBLE_DEVICE
-        }) {
-            // Stop/SetDequeue is not the required Disable Slot recovery.
-            // Preserve poison and all records even if those commands ACKed.
-            return Err(BlockError::Device {
-                status: INCOMPATIBLE_DEVICE,
-            });
-        }
-        let mut observed = Vec::new();
-        self.pending.retain(|event| {
-            if event.kind() == TRANSFER_EVENT && event.slot() == slot && event.endpoint() == dci {
-                observed.push(*event);
-                false
-            } else {
-                true
-            }
-        });
-        clear_tt |= observed.iter().any(|event| {
-            matches!(
-                event.code(),
-                BABBLE_DETECTED | USB_TRANSACTION_ERROR | SPLIT_TRANSACTION_ERROR
-            ) || event.code() == STALL && dci != 1
-        });
-        // A failed split control/bulk transaction may leave the external
-        // high-speed hub's TT occupied even after xHC DMA has retired. Only
-        // the actual hub request ACK permits this endpoint to resume.
-        if clear_tt {
-            self.clear_hub_tt(slot, dci)?;
-        }
-        let endpoint = self.slot(slot)?.endpoints[usize::from(dci)]
-            .as_mut()
-            .unwrap();
-        if let Some(streams) = &mut endpoint.streams {
-            streams.cancelled();
-        }
-        if let Some(iso) = &mut endpoint.iso {
-            iso.cancelled();
-        }
-        endpoint.ring.normal.cancelled();
-        endpoint.poisoned = false;
-        endpoint.in_flight = 0;
-        Ok(observed)
+        let cancel = self.start_cancel(slot, dci)?;
+        self.run_cancel(cancel)
     }
 
     /// Resets the host side of an endpoint a transaction error halted; the
@@ -623,12 +389,26 @@ impl Controller {
     }
 
     pub(super) fn clear_owned(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
+        let (cancel, request) = self.start_clear_owned(slot, endpoint)?;
+        self.run_cancel(cancel)?;
+        self.control_owned(slot, request, &[])?;
+        Ok(())
+    }
+
+    /// The host side's cancellation, begun, and the CLEAR_FEATURE that
+    /// follows it.
+    pub(super) fn start_clear_owned(
+        &mut self,
+        slot: u8,
+        endpoint: &Endpoint,
+    ) -> Result<(Cancel, [u8; 8]), BlockError> {
         if endpoint.kind() == 1 {
             return Err(BlockError::Unsupported(
                 "isochronous endpoints have no USB halt feature",
             ));
         }
-        self.recover(slot, endpoint.dci())?;
+        self.live_slot(slot)?;
+        let cancel = self.start_cancel(slot, endpoint.dci())?;
         let request = setup(
             RECIPIENT_ENDPOINT,
             CLEAR_FEATURE,
@@ -636,8 +416,7 @@ impl Controller {
             u16::from(endpoint.address),
             0,
         );
-        self.control_owned(slot, request, &[])?;
-        Ok(())
+        Ok((cancel, request))
     }
 }
 
