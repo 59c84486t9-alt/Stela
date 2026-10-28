@@ -228,6 +228,23 @@ impl Scsi for uas::Host {
     fn poisoned(&self) -> bool {
         self.requires_rebind()
     }
+    fn queued(&self) -> bool {
+        true
+    }
+    fn begin(
+        &mut self,
+        lun: uas::Lun,
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Option<Result<(), BlockError>> {
+        Some(uas::Host::begin(self, lun.bytes(), cdb, data))
+    }
+    fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        uas::Host::end(self)
+    }
+    fn busy(&mut self) -> bool {
+        uas::Host::busy(self)
+    }
     fn write_protect_page(&self) -> Option<u8> {
         uas::Host::write_protect_page(self)
     }
