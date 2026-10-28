@@ -38,12 +38,26 @@ struct stela_linux_services {
 	 * with that service's documented degraded result. An owner without this
 	 * service traps instead. Called for every occurrence. */
 	void (*unsupported)(void *context, const char *operation);
+	/* Infallible bytes from an already seeded, retained CSPRNG. Kernel
+	 * registration must obtain that real capability before admitting callers;
+	 * a non-NULL callback alone is not seed/readiness evidence. It neither
+	 * allocates, waits, switches owner/task nor changes the incoming atomic/IRQ
+	 * state. The caller retains actual IRQ-safe non-migrating serialization;
+	 * this table is not a native execution/interrupt grant. */
+	void (*random_bytes)(void *context, void *bytes, size_t size);
 };
 
 struct stela_linux_owner {
 	const struct stela_linux_services *services;
 	void *context;
 };
+
+/* Private x86-64 C ABI. All producers and consumers rebuild from this header;
+ * Rust currently passes owners opaquely rather than mirroring this table. */
+_Static_assert(sizeof(struct stela_linux_services) == 56, "Linux services ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
+	       "Linux random callback ABI");
+_Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");
 
 /* An owner for Linux code that needs none of these services. */
 extern const struct stela_linux_owner stela_linux_bare;

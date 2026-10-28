@@ -282,6 +282,7 @@ impl Linux {
             &archives,
         );
         for (name, source) in [
+            ("linux_random", "random_test.c"),
             ("linux_seq_output", "seq_output_test.c"),
             ("linux_drm_mm", "drm_mm_test.c"),
             ("linux_drm_vma", "drm_vma_test.c"),
