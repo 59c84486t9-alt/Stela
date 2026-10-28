@@ -336,6 +336,11 @@ pub(crate) struct Setup {
         requires = "host_firmware_requirements"
     )]
     host_firmware_cache: Option<PathBuf>,
+    /// The model or size, as setup shows it, of the whole disk `--usb`
+    /// names, which erasing a removable disk other than a USB (an SD card,
+    /// a FireWire or Thunderbolt disk) needs typed back.
+    #[arg(long, value_name = "MODEL|SIZE")]
+    confirm_disk: Option<String>,
 }
 
 /// A partition's name, given as is or by its device path (`/dev/disk1s2`,
@@ -1512,7 +1517,7 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
         .and_then(|id| disks.into_iter().find(|d| d.identifier == id))
     {
         ensure!(
-            !disk.system && !disk.internal,
+            disk.erasable(),
             "{} is on {} ({}), an internal disk{}. Setup changes only a removable USB; use \
              `stela efi install` to install Stela on another EFI partition by hand.",
             esp.display(),
@@ -2262,9 +2267,20 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
         let found = host.disks()?.into_iter().find(|d| d.identifier == disk);
         let found = found.with_context(|| format!("this computer lists no disk {disk}"))?;
         ensure!(
-            !found.system && !found.internal,
+            found.erasable(),
             "{disk} ({}) is an internal disk; setup erases only a removable USB",
             found.name
+        );
+        ensure!(
+            found.removal == host::Removal::Usb
+                || command
+                    .confirm_disk
+                    .as_deref()
+                    .is_some_and(|typed| found.confirmed_by(typed)),
+            "{disk} ({}, {}) is not a USB disk; pass --confirm-disk with its model or size to \
+             erase it",
+            found.name,
+            host::size_text(found.bytes)
         );
         if command.dry_run {
             return Ok(format!(
@@ -2706,7 +2722,11 @@ mod tests {
             identifier: id.into(),
             name: format!("Disk {id}"),
             bytes: 128 * GIB,
-            internal: id != "disk5",
+            removal: match id {
+                "disk5" => host::Removal::Usb,
+                "disk6" => host::Removal::Typed,
+                _ => host::Removal::Fixed,
+            },
             system: id == "disk0",
             partitions: contents
                 .iter()
@@ -2827,6 +2847,7 @@ mod tests {
             host_firmware: None,
             host_firmware_requirements: None,
             host_firmware_cache: None,
+            confirm_disk: None,
         }
     }
 
@@ -3519,6 +3540,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("internal disk"), "{error}");
+        // An SD card is erased only with its model or size typed back.
+        let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
+        host.disks.push(disk("disk6", &[]));
+        let mut card = command(&f, Path::new("disk6"));
+        card.dry_run = true;
+        let error = setup(&environment(&host), card).unwrap_err().to_string();
+        assert!(error.contains("--confirm-disk"), "{error}");
+        for typed in ["Disk disk6", "137.4 GB"] {
+            let mut card = command(&f, Path::new("disk6"));
+            card.dry_run = true;
+            card.confirm_disk = Some(typed.into());
+            let report = setup(&environment(&host), card).unwrap();
+            assert!(report.contains("would erase disk6"), "{report}");
+        }
         // Without an image, the USB is left as it was: no erase is tried.
         let mut no_image = command(&f, Path::new("disk5"));
         no_image.ipsw = None;

@@ -1,7 +1,7 @@
 //! A small Clack-style front end to the same setup command used by scripts.
 use super::{
     InstallImage, Setup,
-    host::{Disk, Host},
+    host::{self, Disk, Host, Removal},
 };
 use crate::{progress::Phase, restore};
 use anyhow::{Context, Result, ensure};
@@ -24,6 +24,7 @@ pub(super) struct Usb {
     id: String,
     name: String,
     bytes: u64,
+    removal: Removal,
     serial: Option<String>,
 }
 
@@ -33,6 +34,7 @@ impl Usb {
             id: disk.identifier.clone(),
             name: disk.name.clone(),
             bytes: disk.bytes,
+            removal: disk.removal,
             serial: host.serial(&disk.identifier).ok().flatten(),
         }
     }
@@ -44,7 +46,7 @@ impl Usb {
             .find(|d| d.identifier == self.id)
             .context("the selected USB was disconnected; run setup again")?;
         ensure!(
-            !disk.internal && !disk.system && *self == Self::from_disk(&disk, host),
+            disk.erasable() && *self == Self::from_disk(&disk, host),
             "the selected USB changed; run setup again and choose it again"
         );
         Ok(())
@@ -55,15 +57,33 @@ impl Usb {
     }
 
     fn size(&self) -> String {
-        if self.bytes == 0 {
-            "size unavailable".into()
-        } else {
-            format!("{:.1} GB", self.bytes as f64 / 1e9)
-        }
+        host::size_text(self.bytes)
     }
 
     fn description(&self) -> String {
         format!("{} · {} · {}", self.name, self.size(), self.id)
+    }
+
+    /// Its model or size, typed back to erase a disk other than a USB.
+    fn typed_back(&self) -> Result<String> {
+        cliclack::log::warning(format!(
+            "{} ({}, {}) is not a USB disk.",
+            self.name,
+            self.size(),
+            self.id
+        ))?;
+        let (name, bytes) = (self.name.clone(), self.bytes);
+        let expected = format!("Type {} or {}", self.name, self.size());
+        Ok(cliclack::input("Type its model or size to erase it")
+            .placeholder(&format!("{} or {}", self.name, self.size()))
+            .validate(move |typed: &String| {
+                if host::names_disk(&name, bytes, typed) {
+                    Ok(())
+                } else {
+                    Err(expected.clone())
+                }
+            })
+            .interact()?)
     }
 
     /// The name and size people recognize, for the erase warning.
@@ -140,7 +160,7 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     let disks = host.disks()?;
     let choices: Vec<_> = disks
         .iter()
-        .filter(|d| !d.internal && !d.system)
+        .filter(|d| d.erasable())
         .map(|d| Usb::from_disk(d, host))
         .collect();
     ensure!(
@@ -338,6 +358,9 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
             .interact()?
         {
             0 => {
+                if usb.removal == Removal::Typed {
+                    command.confirm_disk = Some(usb.typed_back()?);
+                }
                 usb.verify(host)?;
                 return Ok(true);
             }
