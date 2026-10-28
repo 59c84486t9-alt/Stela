@@ -10,10 +10,11 @@ use super::numerical::{
     test_control, vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, fused::FusedOperation},
+        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format},
         simd::{arithmetic::Shape, fused::Operand},
     },
     block::ExitKind,
@@ -27,33 +28,18 @@ const RIGHT: u8 = 1;
 const SIGN_MASK: u8 = 2;
 const ADDEND: u8 = 6;
 const ORIGINAL_ADDEND: u8 = 7;
-const SSE_ESCAPE: u8 = 0x0f;
-const MOV_SCALAR: u8 = 0x10;
-const SINGLE_PREFIX: u8 = 0xf3;
-const DOUBLE_PREFIX: u8 = 0xf2;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 
-fn fused_opcode(operation: FusedOperation) -> FusedOpcode {
-    match operation {
-        FusedOperation::Add => FusedOpcode::MultiplyAdd,
-        FusedOperation::Subtract => FusedOpcode::NegativeMultiplyAdd,
-        FusedOperation::NegatedAdd => FusedOpcode::NegativeMultiplySubtract,
-        FusedOperation::NegatedSubtract => FusedOpcode::MultiplySubtract,
-    }
-}
-
-fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
         code,
         operand.format,
         operand.shape,
-        fused_opcode(operand.operation),
+        FusedOpcode::from(operand.operation),
         target,
     );
 }
 
-fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_right(code: &mut Code, operand: &Operand) {
     read_numerical_right(
         code,
         operand.format,
@@ -63,7 +49,7 @@ fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
     );
 }
 
-fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {
+fn prepare_negation(code: &mut Code, operand: &Operand) -> u8 {
     let merge = if operand.shape == Shape::Scalar && operand.operation.negate_addend() {
         packed(code, Host::MoveAligned, ORIGINAL_ADDEND, ADDEND);
         ORIGINAL_ADDEND
@@ -90,7 +76,7 @@ fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {
 
 /// With FMA3, S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
@@ -179,16 +165,12 @@ pub(in crate::x86_64) fn emit(
     commit_inexact(code);
     if operand.shape == Shape::Scalar {
         // Register MOVSS/MOVSD replaces only the result lane of A.
-        code.extend([
-            if operand.format == Format::Single {
-                SINGLE_PREFIX
-            } else {
-                DOUBLE_PREFIX
-            },
-            SSE_ESCAPE,
-            MOV_SCALAR,
-            REGISTER_DIRECT | (merge << MODRM_REGISTER_SHIFT) | LEFT,
-        ]);
+        if operand.format == Format::Single {
+            Host::MoveScalarSingle
+        } else {
+            Host::MoveScalarDouble
+        }
+        .register(code, merge, LEFT, crate::TargetCpu::Baseline);
         test_control(code, FPCR_NEP);
         let merging = branch(code, Condition::NotZero);
         clear_scalar(code, operand.format, merge);
@@ -222,7 +204,7 @@ pub(in crate::x86_64) fn emit(
 /// and past the full path, and those between the sticky path and the rest
 /// ([`ColdSplit`]).
 fn sticky_path(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: TargetCpu,
     entry: Entry,

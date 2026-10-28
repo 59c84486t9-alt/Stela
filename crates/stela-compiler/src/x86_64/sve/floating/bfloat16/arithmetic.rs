@@ -1,5 +1,5 @@
 //! Non-widening BF16 arithmetic.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod binary;
 mod fused;
 mod selection;
@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

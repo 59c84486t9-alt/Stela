@@ -1,6 +1,8 @@
 //! Fixed-width AdvSIMD structures through exact element memory-service requests.
 //! The typed schedule owns access order and partial load commits. Guest addresses
 //! are never host pointers; only private State and stack staging are dereferenced.
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
+use crate::x86_64::simd::encode::guest;
 
 use super::{commit, vector_offset};
 use crate::{
@@ -35,25 +37,6 @@ const BASE_OFFSET: u8 = QWORD_BYTES;
 const WRITEBACK_OFFSET: u8 = BASE_OFFSET + QWORD_BYTES;
 const REQUEST_OFFSET: u32 = 2 * VECTOR_BYTES as u32;
 const SCRATCH_BYTES: u8 = REQUEST_OFFSET as u8 + MEMORY_REQUEST_BYTES as u8;
-
-const SUB_RSP: &[u8] = &[0x48, 0x83, 0xec];
-const ADD_RSP: &[u8] = &[0x48, 0x83, 0xc4];
-const MOV_RSP_RAX: &[u8] = &[0x48, 0x89, 0x44, 0x24];
-const MOV_RSP_RDX: &[u8] = &[0x48, 0x89, 0x54, 0x24];
-const MOV_RSP_RCX: &[u8] = &[0x48, 0x89, 0x4c, 0x24];
-const MOV_RAX_RSP: &[u8] = &[0x48, 0x8b, 0x44, 0x24];
-const LEA_RAX_RAX_DISP8: &[u8] = &[0x48, 0x8d, 0x40];
-const MOVZX_ECX_BYTE: &[u8] = &[0x0f, 0xb6];
-const MOVZX_ECX_HALFWORD: &[u8] = &[0x0f, 0xb7];
-const MOV_LOAD: u8 = 0x8b;
-const MOV_STORE: u8 = 0x89;
-const MOV_BYTE_STORE: u8 = 0x88;
-const OPERAND_SIZE_PREFIX: u8 = 0x66;
-const REX_W: u8 = 0x48;
-const RCX_STATE_DISP32: u8 = 0x8f;
-const RCX_STACK_DISP8: &[u8] = &[0x4c, 0x24];
-const MOV_ZERO_QWORD_STATE: &[u8] = &[0x48, 0xc7, 0x87];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 
 #[derive(Clone, Copy)]
 pub(crate) struct CheckedOperand {
@@ -164,10 +147,10 @@ impl CheckedOperand {
         }
     }
 
-    pub(crate) fn emit_context(self, code: &mut Vec<u8>, pc: u64, target: TargetCpu) {
+    pub(crate) fn emit_context(self, code: &mut Code, pc: u64, target: TargetCpu) {
         let operand = self.operand;
-        code.extend(SUB_RSP);
-        code.push(SCRATCH_BYTES);
+        code.asm()
+            .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
         service::begin(code);
         let mut failures = Vec::new();
         if self.profile.sp_requirement() == SpAlignmentRequirement::Enabled
@@ -176,7 +159,7 @@ impl CheckedOperand {
             failures.push(failure);
         }
         crate::x86_64::load(code, operand.base);
-        stack(code, MOV_RSP_RAX, BASE_OFFSET);
+        save(code, Gpr::Rax, BASE_OFFSET);
         // Save original Rn and Xm-derived writeback before any callback. CPA2
         // result marking has no fault or guest effect and can be computed early.
         match operand.post_index {
@@ -189,7 +172,7 @@ impl CheckedOperand {
                     AddressMode::PostIndex,
                     self.profile.address_checks(false),
                 );
-                stack(code, MOV_RSP_RDX, WRITEBACK_OFFSET);
+                save(code, Gpr::Rdx, WRITEBACK_OFFSET);
             }
             PostIndex::Register(index) => {
                 service::address::register_offset_with_checks(
@@ -200,7 +183,7 @@ impl CheckedOperand {
                     0,
                     self.profile.address_checks(false),
                 );
-                stack(code, MOV_RSP_RAX, WRITEBACK_OFFSET);
+                save(code, Gpr::Rax, WRITEBACK_OFFSET);
             }
         }
         for access in operand.accesses() {
@@ -208,20 +191,23 @@ impl CheckedOperand {
                 let LoadCommit::Lane { index, .. } = access.commit else {
                     unreachable!("validated stores have lane sources")
                 };
-                scalar_state(
+                scalar(
                     code,
                     false,
                     operand.element_bytes,
-                    vector_offset(access.vector) + u32::from(index * operand.element_bytes),
+                    guest(vector_offset(access.vector) + u32::from(index * operand.element_bytes)),
                 );
                 // A full private staging store is safe; the request retains the
                 // exact element width and does not expose unused staging bytes.
-                stack(code, MOV_RSP_RCX, DATA_OFFSET);
+                save(code, Gpr::Rcx, DATA_OFFSET);
             }
-            stack(code, MOV_RAX_RSP, BASE_OFFSET);
+            restore(code, BASE_OFFSET);
             if access.byte_offset != 0 {
-                code.extend(LEA_RAX_RAX_DISP8);
-                code.push(access.byte_offset);
+                code.asm().lea(
+                    Size::Qword,
+                    Gpr::Rax,
+                    Mem::base_disp8(Gpr::Rax, access.byte_offset as i8),
+                );
             }
             service::request(
                 code,
@@ -234,16 +220,17 @@ impl CheckedOperand {
             service::call(code, REQUEST_OFFSET);
             failures.push(service::branch_failed(code));
             if operand.direction == Direction::Load {
-                scalar_opcode(code, false, operand.element_bytes);
-                code.extend(RCX_STACK_DISP8);
-                code.push(DATA_OFFSET);
+                scalar(code, false, operand.element_bytes, slot(DATA_OFFSET));
                 match access.commit {
                     LoadCommit::Lane { index, clear_upper } => {
-                        scalar_state(
+                        scalar(
                             code,
                             true,
                             operand.element_bytes,
-                            vector_offset(access.vector) + u32::from(index * operand.element_bytes),
+                            guest(
+                                vector_offset(access.vector)
+                                    + u32::from(index * operand.element_bytes),
+                            ),
                         );
                         if clear_upper {
                             clear_upper_half(code, access.vector);
@@ -257,65 +244,66 @@ impl CheckedOperand {
             }
         }
         if operand.post_index != PostIndex::None {
-            stack(code, MOV_RAX_RSP, WRITEBACK_OFFSET);
+            restore(code, WRITEBACK_OFFSET);
             store(code, operand.base);
         }
-        code.extend(XOR_EAX_EAX);
+        code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
         let cleanup = code.len();
         for failure in failures {
             service::patch_branch(code, failure, cleanup);
         }
-        code.extend(ADD_RSP);
-        code.push(SCRATCH_BYTES);
+        code.asm()
+            .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
         service::address::return_if_failed(code);
     }
 }
 
-fn stack(code: &mut Vec<u8>, opcode: &[u8], displacement: u8) {
-    code.extend(opcode);
-    code.push(displacement);
+/// `[rsp + offset]` in the scratch frame, with an 8-bit displacement.
+fn slot(offset: u8) -> Mem {
+    Mem::base_disp8(Gpr::Rsp, offset as i8)
 }
 
-/// Exact-width state/staging reads zero-extend narrow elements into RCX.
-fn scalar_opcode(code: &mut Vec<u8>, write: bool, bytes: u8) {
-    if !write && bytes <= HALFWORD_BYTES {
-        code.extend(if bytes == BYTE_BYTES {
-            MOVZX_ECX_BYTE
-        } else {
-            MOVZX_ECX_HALFWORD
-        });
+/// Save `register` in the scratch slot at `offset`.
+fn save(code: &mut Code, register: Gpr, offset: u8) {
+    code.asm().mov_store(Size::Qword, slot(offset), register);
+}
+
+/// Reload RAX from the scratch slot at `offset`.
+fn restore(code: &mut Code, offset: u8) {
+    code.asm().mov_load(Size::Qword, Gpr::Rax, slot(offset));
+}
+
+/// Exact-width state/staging reads zero-extend narrow elements into RCX;
+/// writes store RCX's low `bytes`.
+fn scalar(code: &mut Code, write: bool, bytes: u8, memory: Mem) {
+    let size = match bytes {
+        BYTE_BYTES => Size::Byte,
+        HALFWORD_BYTES => Size::Word,
+        DWORD_BYTES => Size::Dword,
+        QWORD_BYTES => Size::Qword,
+        _ => unreachable!("validated structure element width"),
+    };
+    let mut asm = code.asm();
+    if write {
+        asm.mov_store(size, memory, Gpr::Rcx);
+    } else if bytes <= HALFWORD_BYTES {
+        asm.movzx(Size::Dword, Gpr::Rcx, size, memory);
     } else {
-        if bytes == HALFWORD_BYTES {
-            code.push(OPERAND_SIZE_PREFIX);
-        }
-        if bytes == QWORD_BYTES {
-            code.push(REX_W);
-        }
-        code.push(if !write {
-            MOV_LOAD
-        } else if bytes == BYTE_BYTES {
-            MOV_BYTE_STORE
-        } else {
-            MOV_STORE
-        });
+        asm.mov_load(size, Gpr::Rcx, memory);
     }
 }
 
-fn scalar_state(code: &mut Vec<u8>, write: bool, bytes: u8, displacement: u32) {
-    scalar_opcode(code, write, bytes);
-    code.push(RCX_STATE_DISP32);
-    code.extend(displacement.to_le_bytes());
-}
-
-fn clear_upper_half(code: &mut Vec<u8>, vector: u8) {
-    code.extend(MOV_ZERO_QWORD_STATE);
-    code.extend((vector_offset(vector) + u32::from(QWORD_BYTES)).to_le_bytes());
-    code.extend(0_i32.to_le_bytes());
+fn clear_upper_half(code: &mut Code, vector: u8) {
+    code.asm().mov_rm_imm32(
+        Size::Qword,
+        guest(vector_offset(vector) + u32::from(QWORD_BYTES)),
+        0,
+    );
 }
 
 /// RCX contains one zero-extended, successfully read element. Rebuild an
 /// optional shuffle mask after each callback; no host vector survives it.
-fn replicate(code: &mut Vec<u8>, bytes: u8, vector_bytes: u8, target: TargetCpu) {
+fn replicate(code: &mut Code, bytes: u8, vector_bytes: u8, target: TargetCpu) {
     Host::MoveGprQword.register(code, 0, 1, TargetCpu::Baseline); // XMM0 <- RCX
     if bytes == BYTE_BYTES && vector_bytes == VECTOR_BYTES && target.supports(TargetCpu::Ssse3) {
         Host::Xor.register(code, 1, 1, TargetCpu::Baseline);
@@ -327,17 +315,14 @@ fn replicate(code: &mut Vec<u8>, bytes: u8, vector_bytes: u8, target: TargetCpu)
     }
     match bytes {
         BYTE_BYTES | HALFWORD_BYTES if vector_bytes == QWORD_BYTES => {
-            Host::ShuffleLowWord.register(code, 0, 0, TargetCpu::Baseline);
-            code.push(0); // repeat low word, retaining the zero upper64
+            Host::ShuffleLowWord.register_imm(code, 0, 0, 0, TargetCpu::Baseline); // repeat low word, retaining the zero upper64
         }
         BYTE_BYTES | HALFWORD_BYTES => {
             Host::UnpackLowWord.register(code, 0, 0, TargetCpu::Baseline);
-            Host::ShuffleDword.register(code, 0, 0, TargetCpu::Baseline);
-            code.push(0); // repeat low dword
+            Host::ShuffleDword.register_imm(code, 0, 0, 0, TargetCpu::Baseline); // repeat low dword
         }
         DWORD_BYTES if vector_bytes == VECTOR_BYTES => {
-            Host::ShuffleDword.register(code, 0, 0, TargetCpu::Baseline);
-            code.push(0);
+            Host::ShuffleDword.register_imm(code, 0, 0, 0, TargetCpu::Baseline);
         }
         DWORD_BYTES => Host::UnpackLowDword.register(code, 0, 0, TargetCpu::Baseline),
         QWORD_BYTES if vector_bytes == VECTOR_BYTES => {
@@ -840,7 +825,7 @@ mod tests {
                 profile: CheckedMemoryProfile,
                 target: TargetCpu,
             ) -> Self {
-                let mut code = crate::extended::context_wrapper();
+                let mut code = crate::scalable_context::context_wrapper();
                 checked(operand, profile).emit_context(&mut code, GUEST_PC, target);
                 code.push(0xc3);
                 Self::new(&code)
@@ -1176,20 +1161,21 @@ mod tests {
 
         #[test]
         fn original_ld4_word_uses_checked_block_routing_and_real_source_intervals() {
-            use crate::block::{BlockProfile, CompilationPlan};
+            use crate::block::{BlockProfile, CompilationPlan, Features};
             let source: Vec<_> = [0x4c40_0044, RET]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
             for profile in [
-                BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentDisabled),
-                BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled),
+                BlockProfile::ORDINARY
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
+                BlockProfile::new(Features::SYSTEM_MODE)
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
             ] {
                 let plan = CompilationPlan::new(
                     &source,
                     GuestAddress(GUEST_PC),
-                    profile,
-                    TargetCpu::X86_64_V2,
+                    &crate::Options::new(profile, TargetCpu::X86_64_V2),
                 )
                 .unwrap();
                 let required = plan.memory_requirements().unwrap();

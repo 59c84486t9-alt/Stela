@@ -1,4 +1,5 @@
 //! Integer magnitude selection for FAMIN/FAMAX, exact under any host MXCSR.
+use crate::x86_64::asm::{Code, Cond, Gpr, Size};
 use crate::{
     TargetCpu,
     aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation},
@@ -6,30 +7,22 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const RCX: u8 = 1;
 const RAX: u8 = 0;
 const HIGH_DWORDS: u8 = 0xf5;
 const LOW_DWORDS: u8 = 0xa0;
 const REPEAT_LOW_DWORD: u8 = 0;
-const TEST_EAX: &[u8] = &[0x85, 0xc0];
-const JNZ: &[u8] = &[0x0f, 0x85];
 
-fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, register, register, target);
-    code.push(order);
+fn shuffle(code: &mut Code, register: u8, order: u8, target: TargetCpu) {
+    Host::ShuffleDword.register_imm(code, register, register, order, target);
 }
 
-fn infinity(code: &mut Vec<u8>, format: Format, register: u8, target: TargetCpu) {
-    code.extend([0x48, 0xb9]); // mov rcx, imm64
+fn infinity(code: &mut Code, format: Format, register: u8, target: TargetCpu) {
     let bits = match format {
         Format::Half => format.exponent_mask() | format.exponent_mask() << Format::Half.bits(),
         _ => format.exponent_mask(),
     };
-    code.extend(bits.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(REGISTER_DIRECT | register << REGISTER_SHIFT | RCX);
+    code.asm().mov_imm64(Gpr::Rcx, bits);
+    Host::MoveGprQword.emit(code, register, Gpr::Rcx, target);
     if format == Format::Double {
         Host::UnpackLowQword.register(code, register, register, target);
     } else {
@@ -37,7 +30,7 @@ fn infinity(code: &mut Vec<u8>, format: Format, register: u8, target: TargetCpu)
     }
 }
 
-fn magnitude(code: &mut Vec<u8>, format: Format, register: u8) {
+fn magnitude(code: &mut Code, format: Format, register: u8) {
     let (left, right) = match format {
         Format::Half => (ShiftOpcode::LeftWord, ShiftOpcode::RightWord),
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
@@ -51,7 +44,7 @@ fn magnitude(code: &mut Vec<u8>, format: Format, register: u8) {
 /// scratch registers must be distinct from each other and the two inputs. NaN
 /// edges are rel32 displacements for the owner's transactional completion exit.
 pub(in crate::x86_64) fn guard_and_magnitudes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     left: u8,
     right: u8,
@@ -86,17 +79,16 @@ pub(in crate::x86_64) fn guard_and_magnitudes(
             }
         }
         Host::ByteSignMask.register(code, RAX, greater, target);
-        code.extend(TEST_EAX);
-        code.extend(JNZ);
-        failures.push(code.len());
-        code.extend(0_i32.to_le_bytes());
+        let mut asm = code.asm();
+        asm.test(Size::Dword, Gpr::Rax, Gpr::Rax);
+        failures.push(asm.jcc(Cond::Ne).offset());
     }
 }
 
 /// Inputs must be sign-cleared, non-NaN magnitudes. Produces the result in left,
 /// preserves right, and clobbers four scratch XMMs. No guest or host FP effects.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     operation: AbsoluteMinMaxOperation,
     left: u8,

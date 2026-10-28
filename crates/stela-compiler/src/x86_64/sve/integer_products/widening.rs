@@ -3,8 +3,8 @@ use super::packed;
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::{Accumulate, Selection};
+use crate::x86_64::asm::{Code, Rm};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -18,7 +18,7 @@ const WORD_SIGN_SHIFT: u8 = WORD_BITS - 1;
 const SELECT_EVEN_DWORDS: u8 = 0x88;
 const SELECT_ODD_DWORDS: u8 = 0xdd;
 
-fn select_bytes(code: &mut Vec<u8>, signed: bool, top: bool) {
+fn select_bytes(code: &mut Code, signed: bool, top: bool) {
     let right = if signed {
         Shift::ArithmeticWord
     } else {
@@ -33,7 +33,7 @@ fn select_bytes(code: &mut Vec<u8>, signed: bool, top: bool) {
     packed(code, Host::MultiplyLowWord, RESULT, RIGHT);
 }
 
-fn select_halfwords(code: &mut Vec<u8>, top: bool) {
+fn select_halfwords(code: &mut Code, top: bool) {
     // Leave the selected halfword in each dword's low half, with zero above
     // it. Signed PMADDWD adds a zero product; checked PMULLD sees zero extension.
     for register in [RESULT, RIGHT] {
@@ -44,12 +44,12 @@ fn select_halfwords(code: &mut Vec<u8>, top: bool) {
     }
 }
 
-fn signed_halfwords(code: &mut Vec<u8>, top: bool) {
+fn signed_halfwords(code: &mut Code, top: bool) {
     select_halfwords(code, top);
     packed(code, Host::MultiplyAddWords, RESULT, RIGHT);
 }
 
-fn unsigned_halfwords(code: &mut Vec<u8>, top: bool, target: TargetCpu) {
+fn unsigned_halfwords(code: &mut Code, top: bool, target: TargetCpu) {
     if target.supports(TargetCpu::Sse41) {
         select_halfwords(code, top);
         Host::MultiplyLowDword.register(code, RESULT, RIGHT, target);
@@ -68,13 +68,18 @@ fn unsigned_halfwords(code: &mut Vec<u8>, top: bool, target: TargetCpu) {
         SELECT_EVEN_DWORDS
     };
     for register in [RESULT, SECOND_PARTIAL] {
-        packed(code, Host::ShuffleDword, register, register);
-        code.push(control);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            register,
+            Rm::Xmm(register),
+            control,
+            TargetCpu::Baseline,
+        );
     }
     packed(code, Host::UnpackLowQword, RESULT, SECOND_PARTIAL);
 }
 
-fn words(code: &mut Vec<u8>, signed: bool, top: bool, target: TargetCpu) {
+fn words(code: &mut Code, signed: bool, top: bool, target: TargetCpu) {
     if top {
         Shift::RightQword.emit(code, RESULT, WORD_BITS);
         Shift::RightQword.emit(code, RIGHT, WORD_BITS);
@@ -106,7 +111,7 @@ fn words(code: &mut Vec<u8>, signed: bool, top: bool, target: TargetCpu) {
 /// narrow source width. XMM4 holds the old wide accumulator. Returns XMM0,
 /// consumes XMM0..4 and preserves XMM5..7, guest status, RAM and host MXCSR.
 pub(super) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     signed: bool,
     accumulate: Accumulate,

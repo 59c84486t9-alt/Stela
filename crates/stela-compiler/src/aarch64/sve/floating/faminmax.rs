@@ -1,4 +1,5 @@
 //! SVE predicated FAMIN and FAMAX.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation};
 
 const FORM_MASK: u32 = 0xff3f_e000;
@@ -22,8 +23,7 @@ pub struct Operand {
 }
 
 /// Size 00 is reserved.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let operation = match word & FORM_MASK {
         FAMAX => AbsoluteMinMaxOperation::Maximum,
         FAMIN => AbsoluteMinMaxOperation::Minimum,
@@ -33,7 +33,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         1 => Format::Half,
         2 => Format::Single,
         3 => Format::Double,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         operation,
@@ -54,7 +54,7 @@ mod tests {
             (FAMAX, AbsoluteMinMaxOperation::Maximum),
             (FAMIN, AbsoluteMinMaxOperation::Minimum),
         ] {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
             for (size, format) in [(1, Format::Half), (2, Format::Single), (3, Format::Double)] {
                 for governing in 0..=GOVERNING_MASK {
                     for destination in 0..=REGISTER_MASK {

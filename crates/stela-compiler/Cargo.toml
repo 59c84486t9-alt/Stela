@@ -16,4 +16,4 @@ serde.workspace = true
 rustc_apfloat.workspace = true
 
 [build-dependencies]
-sha2.workspace = true
+stela-fingerprint.workspace = true

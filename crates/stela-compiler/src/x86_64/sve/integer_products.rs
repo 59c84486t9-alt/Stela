@@ -1,11 +1,13 @@
 //! SVE integer multiplies with SSE2. Indexed multipliers select within the same
 //! 128-bit chunk, so aliases never read an already written chunk.
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_products::{Kind, Multiplier, Operand, Selection};
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Code, Rm, Size, Unary};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
-use alloc::vec::Vec;
 
 mod complex;
 mod complex_wrapping;
@@ -23,9 +25,6 @@ const ACCUMULATOR_OR_CONSTANT: u8 = 4;
 const PREDICATE: u8 = 5;
 const PREDICATE_SCRATCH: u8 = 6;
 const PREVIOUS: u8 = 7;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const Z_REGISTERS: u8 = 32;
 const GOVERNING_PREDICATES: u8 = 8;
 const CHUNK_BYTES: usize = 16;
@@ -40,20 +39,19 @@ const SELECT_LOW_PRODUCT_DWORDS: u8 = 0x88;
 const WORDS_PER_HALF_CHUNK: u8 = 4;
 const BYTE_BITS: u8 = 8;
 const DWORD_SIGN_SHIFT: u8 = DWORD_BITS - 1;
-const MOVQ_XMM_TO_GPR: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
-const MUL_RCX: [u8; 3] = [0x48, 0xf7, 0xe1];
-const IMUL_RCX: [u8; 3] = [0x48, 0xf7, 0xe9];
-const RAX: u8 = 0;
-const RCX: u8 = 1;
-const RDX: u8 = 2;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, register: u8, control: u8) {
-    packed(code, opcode, register, register);
-    code.push(control);
+fn shuffle(code: &mut Code, opcode: Host, register: u8, control: u8) {
+    code.asm().simd_imm(
+        opcode,
+        register,
+        Rm::Xmm(register),
+        control,
+        TargetCpu::Baseline,
+    );
 }
 
 fn multiplier_element(operand: Operand) -> ElementSize {
@@ -183,7 +181,7 @@ fn supported(operand: Operand) -> bool {
     }
 }
 
-fn immediate(code: &mut Vec<u8>, value: i8, element: ElementSize) {
+fn immediate(code: &mut Code, value: i8, element: ElementSize) {
     let bits = element.bits();
     let value = value as i64 as u64;
     let repeated = if element == ElementSize::Doubleword {
@@ -193,10 +191,14 @@ fn immediate(code: &mut Vec<u8>, value: i8, element: ElementSize) {
         (0..QWORD_BYTES / element.bytes())
             .fold(0, |result, index| result | (lane << (index * bits)))
     };
-    code.extend(MOVABS_RAX);
-    code.extend(repeated.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (ACCUMULATOR_OR_CONSTANT << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, repeated);
+    asm.simd(
+        Host::MoveGprQword,
+        ACCUMULATOR_OR_CONSTANT,
+        Rax,
+        TargetCpu::Baseline,
+    );
     packed(
         code,
         Host::UnpackLowQword,
@@ -205,7 +207,7 @@ fn immediate(code: &mut Vec<u8>, value: i8, element: ElementSize) {
     );
 }
 
-fn broadcast_lane(code: &mut Vec<u8>, element: ElementSize, lane: u8) {
+fn broadcast_lane(code: &mut Code, element: ElementSize, lane: u8) {
     match element {
         ElementSize::Byte => {
             // Move the containing word to every word, then select its byte.
@@ -270,7 +272,7 @@ fn broadcast_lane(code: &mut Vec<u8>, element: ElementSize, lane: u8) {
 /// Low products are identical for signed and unsigned interpretations. SSE2
 /// PMULUDQ multiplies even dwords; shifted odd lanes or cross terms supply the
 /// remaining low bits without widening guest results or touching host MXCSR.
-fn multiply_low(code: &mut Vec<u8>, element: ElementSize) {
+fn multiply_low(code: &mut Code, element: ElementSize) {
     match element {
         ElementSize::Byte => multiply_low_bytes(code),
         ElementSize::Halfword => packed(code, Host::MultiplyLowWord, RESULT, RIGHT),
@@ -313,7 +315,7 @@ fn multiply_low(code: &mut Vec<u8>, element: ElementSize) {
 
 /// The checked dword multiply replaces the complete two-part SSE2 low-product
 /// recipe. Keep the baseline kernel shared with callers lacking SSE4.1.
-fn multiply_low_for_target(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn multiply_low_for_target(code: &mut Code, element: ElementSize, target: TargetCpu) {
     if element == ElementSize::Word && target.supports(TargetCpu::Sse41) {
         Host::MultiplyLowDword.register(code, RESULT, RIGHT, target);
     } else {
@@ -321,7 +323,7 @@ fn multiply_low_for_target(code: &mut Vec<u8>, element: ElementSize, target: Tar
     }
 }
 
-fn multiply_low_bytes(code: &mut Vec<u8>) {
+fn multiply_low_bytes(code: &mut Code) {
     // Whole-word multiplication already has the correct low byte. Compute the
     // product of the two high bytes separately and replace the contaminated
     // high byte of each whole-word result.
@@ -338,7 +340,7 @@ fn multiply_low_bytes(code: &mut Vec<u8>) {
     packed(code, Host::Or, RESULT, FIRST_PARTIAL);
 }
 
-fn multiply_high_bytes(code: &mut Vec<u8>, signed: bool) {
+fn multiply_high_bytes(code: &mut Code, signed: bool) {
     packed(code, Host::MoveAligned, FIRST_PARTIAL, RESULT);
     packed(code, Host::MoveAligned, SECOND_PARTIAL, RIGHT);
     packed(code, Host::Xor, PREDICATE, PREDICATE);
@@ -371,7 +373,7 @@ fn multiply_high_bytes(code: &mut Vec<u8>, signed: bool) {
     packed(code, Host::PackUnsignedWordToByte, RESULT, FIRST_PARTIAL);
 }
 
-fn multiply_high_words(code: &mut Vec<u8>, signed: bool) {
+fn multiply_high_words(code: &mut Code, signed: bool) {
     if signed {
         packed(code, Host::MoveAligned, FIRST_PARTIAL, RESULT);
         packed(code, Host::MoveAligned, SECOND_PARTIAL, RIGHT);
@@ -410,34 +412,27 @@ fn multiply_high_words(code: &mut Vec<u8>, signed: bool) {
     }
 }
 
-fn extract_low_qword(code: &mut Vec<u8>, xmm: u8, gpr: u8) {
-    code.extend(MOVQ_XMM_TO_GPR);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
-}
-
-fn insert_low_qword(code: &mut Vec<u8>, xmm: u8, gpr: u8) {
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
-}
-
-fn multiply_high_doublewords(code: &mut Vec<u8>, signed: bool) {
+fn multiply_high_doublewords(code: &mut Code, signed: bool) {
     packed(code, Host::MoveAligned, SECOND_PARTIAL, RESULT);
     packed(code, Host::MoveAligned, PREDICATE, RIGHT);
     ShiftOpcode::RightBytes.emit(code, SECOND_PARTIAL, QWORD_BYTES as u8);
     ShiftOpcode::RightBytes.emit(code, PREDICATE, QWORD_BYTES as u8);
-    extract_low_qword(code, RESULT, RAX);
-    extract_low_qword(code, RIGHT, RCX);
-    code.extend(if signed { IMUL_RCX } else { MUL_RCX });
-    insert_low_qword(code, FIRST_PARTIAL, RDX);
-    extract_low_qword(code, SECOND_PARTIAL, RAX);
-    extract_low_qword(code, PREDICATE, RCX);
-    code.extend(if signed { IMUL_RCX } else { MUL_RCX });
-    insert_low_qword(code, RESULT, RDX);
+    let multiply = if signed { Unary::Imul } else { Unary::Mul };
+    let mut asm = code.asm();
+    for (left, right, high) in [
+        (RESULT, RIGHT, FIRST_PARTIAL),
+        (SECOND_PARTIAL, PREDICATE, RESULT),
+    ] {
+        asm.movq_from_xmm(Rax, left);
+        asm.movq_from_xmm(Rcx, right);
+        asm.unary(multiply, Size::Qword, Rcx);
+        asm.simd(Host::MoveGprQword, high, Rdx, TargetCpu::Baseline);
+    }
     packed(code, Host::UnpackLowQword, FIRST_PARTIAL, RESULT);
     packed(code, Host::MoveAligned, RESULT, FIRST_PARTIAL);
 }
 
-fn multiply_high(code: &mut Vec<u8>, element: ElementSize, signed: bool) {
+fn multiply_high(code: &mut Code, element: ElementSize, signed: bool) {
     match element {
         ElementSize::Byte => multiply_high_bytes(code, signed),
         ElementSize::Halfword => {
@@ -454,7 +449,7 @@ fn multiply_high(code: &mut Vec<u8>, element: ElementSize, signed: bool) {
     }
 }
 
-fn accumulate(code: &mut Vec<u8>, element: ElementSize, subtract: bool) {
+fn accumulate(code: &mut Code, element: ElementSize, subtract: bool) {
     let opcode = match (element, subtract) {
         (ElementSize::Byte, false) => Host::AddByte,
         (ElementSize::Halfword, false) => Host::AddWord,
@@ -475,8 +470,12 @@ fn accumulate(code: &mut Vec<u8>, element: ElementSize, subtract: bool) {
 }
 
 /// Validate emitter operand shape before the caller appends instruction bytes.
-pub fn validate(operand: Operand) -> Result<(), ()> {
-    if supported(operand) { Ok(()) } else { Err(()) }
+pub fn validate(operand: Operand) -> Result<(), Unsupported> {
+    if supported(operand) {
+        Ok(())
+    } else {
+        Err(Unsupported)
+    }
 }
 
 /// Emit ordinary vector effects for an operand accepted by `validate`.
@@ -484,7 +483,7 @@ pub fn validate(operand: Operand) -> Result<(), ()> {
 /// This mapping preserves guest NZCV, FPSR.QC, FPCR and RAM; all arithmetic is
 /// integer host instructions and leaves host MXCSR untouched. Optional faster
 /// kernels are gated by their exact host capabilities.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     assert!(supported(operand), "validated integer product operand");
     if let Multiplier::Immediate(value) = operand.multiplier {
         immediate(code, value, operand.element_size);

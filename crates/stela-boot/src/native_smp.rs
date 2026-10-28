@@ -1,7 +1,7 @@
 //! Native host processors for system execution. Firmware identity/capability
 //! observations are copied before EBS; persistent APs use owned Stela startup
 //! and processor-local resources afterward. Production shared-memory admission
-//! is distinct from SystemModeV1's single-agent translation contract.
+//! is distinct from the direct `SYSTEM_MODE` profile's single-agent translation contract.
 pub(crate) mod bootstrap;
 pub(crate) mod canonical;
 mod context_check;

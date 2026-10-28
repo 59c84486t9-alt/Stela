@@ -1,4 +1,6 @@
 //! SVE FRINT*.
+use crate::x86_64::asm::Gpr::{R10, Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, ShiftOp, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -29,12 +31,6 @@ const ACTIVE: u8 = 2;
 const PREDICATE_SCRATCH: u8 = 3;
 const OLD_DESTINATION: u8 = 4;
 const OUTPUT_SLOT: usize = 0;
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const MOV_EAX_R10D: &[u8] = &[0x44, 0x89, 0xd0];
-const SHL_EAX_IMM8: &[u8] = &[0xc1, 0xe0];
-const TEST_ECX_ECX: &[u8] = &[0x85, 0xc9];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const REL32_BYTES: usize = size_of::<i32>();
 const INEXACT_SHIFT: u8 = INEXACT.trailing_zeros() as u8;
 
 /// Handle the seven FRINT forms for active single/double lanes that are normal
@@ -42,7 +38,7 @@ const INEXACT_SHIFT: u8 = INEXACT.trailing_zeros() as u8;
 /// rejection discards the staged result and restores the caller's MXCSR at the
 /// instruction.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -80,7 +76,7 @@ pub(crate) fn emit(
     } else {
         // The kernels use explicit direction immediates; the ties-away residual
         // arithmetic uses round-to-nearest.
-        code.extend(XOR_EAX_EAX);
+        code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     }
     numerical::install_mxcsr(code, &frame);
     let mut failures = Vec::new();
@@ -116,9 +112,9 @@ pub(crate) fn emit(
             );
         }
         if operand.operation.exact() {
-            code.extend(MOV_EAX_R10D);
-            code.extend(SHL_EAX_IMM8);
-            code.push(INEXACT_SHIFT);
+            let mut asm = code.asm();
+            asm.mov(Size::Dword, Rax, R10);
+            asm.shift_imm(ShiftOp::Shl, Size::Dword, Rax, INEXACT_SHIFT);
             numerical::add_fpsr(code, &frame);
         }
         // Both recipes may destroy the active mask; P and the destination stay
@@ -150,10 +146,8 @@ pub(crate) fn emit(
     // precision (ROUND suppresses it; ties-away residual arithmetic is exact).
     // A fresh private status value detects any unexpected effect before commit.
     numerical::capture_status(code, &frame);
-    code.extend(TEST_ECX_ECX);
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend([0; REL32_BYTES]);
+    code.asm().test(Size::Dword, Rcx, Rcx);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
     numerical::finish(code, &frame, &failures, pc, target);
     Ok(true)
 }

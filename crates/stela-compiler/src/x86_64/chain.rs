@@ -29,6 +29,12 @@
 //! keeps live. The thunk of an exit that sets a nonzero BTYPE (BR or BLR)
 //! also requires the entry to accept that BTYPE (`LookupEntry::targets`),
 //! as a Branch Target check of the entered block's first instruction would.
+use crate::x86_64::asm::{
+    Alu, BitTest, Code, Cond,
+    Gpr::{R8, Rax, Rcx, Rdx},
+    Mem, ShiftOp,
+    Size::{self, Dword, Qword},
+};
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
 
@@ -112,28 +118,24 @@ pub const fn lookup_slot(pc: u64) -> usize {
 
 // `sub qword [rcx],1` addresses the budget at offset 0.
 const _: () = assert!(core::mem::offset_of!(ChainControl, budget) == 0);
-const RETIRED: u8 = core::mem::offset_of!(ChainControl, retired) as u8;
-const BLOCK: u8 = core::mem::offset_of!(ChainControl, block) as u8;
-const CONTEXTS: u8 = core::mem::offset_of!(ChainControl, contexts) as u8;
-const TABLE: u8 = core::mem::offset_of!(ChainControl, table) as u8;
-const HITS: u8 = core::mem::offset_of!(ChainControl, hits) as u8;
-const LINKED: u8 = core::mem::offset_of!(ChainControl, linked) as u8;
+const RETIRED: i32 = core::mem::offset_of!(ChainControl, retired) as i32;
+const BLOCK: i32 = core::mem::offset_of!(ChainControl, block) as i32;
+const CONTEXTS: i32 = core::mem::offset_of!(ChainControl, contexts) as i32;
+const TABLE: i32 = core::mem::offset_of!(ChainControl, table) as i32;
+const HITS: i32 = core::mem::offset_of!(ChainControl, hits) as i32;
+const LINKED: i32 = core::mem::offset_of!(ChainControl, linked) as i32;
 const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
 const _: () = assert!(core::mem::offset_of!(LookupEntry, pc) == 0);
-const ENTRY_CONTEXT: u8 = core::mem::offset_of!(LookupEntry, context) as u8;
-const ENTRY_CODE: u8 = core::mem::offset_of!(LookupEntry, entry) as u8;
-const ENTRY_BLOCK: u8 = core::mem::offset_of!(LookupEntry, block) as u8;
-const ENTRY_TARGETS: u8 = core::mem::offset_of!(LookupEntry, targets) as u8;
+const ENTRY_CONTEXT: i32 = core::mem::offset_of!(LookupEntry, context) as i32;
+const ENTRY_CODE: i32 = core::mem::offset_of!(LookupEntry, entry) as i32;
+const ENTRY_BLOCK: i32 = core::mem::offset_of!(LookupEntry, block) as i32;
+const ENTRY_TARGETS: i32 = core::mem::offset_of!(LookupEntry, targets) as i32;
 
 /// A direct exit to `target` with `kind`, as every block emits it.
 pub fn direct_exit(target: GuestAddress, kind: ExitKind) -> [u8; DIRECT_EXIT_BYTES] {
-    let mut code = [0; DIRECT_EXIT_BYTES];
-    code[..2].copy_from_slice(&[0x48, 0xb8]); // movabs rax,target
-    code[2..10].copy_from_slice(&target.0.to_le_bytes());
-    code[10] = 0xba; // mov edx,kind: zero-extends to the ABI's u64
-    code[11..15].copy_from_slice(&(kind as u32).to_le_bytes());
-    code[15] = 0xc3; // ret
-    code
+    let mut code = Code::new();
+    super::block::direct_exit_with(&mut code.asm(), target, kind);
+    code.try_into().expect("a direct exit's length")
 }
 
 /// A thunk at host address `at` that chains a block of `retired`
@@ -152,22 +154,22 @@ pub fn thunk(
 ) -> Option<Vec<u8>> {
     let retired = i32::try_from(retired).ok()?;
     let block = i32::try_from(block).ok()?;
-    let mut code = Vec::with_capacity(64);
-    code.extend([0x48, 0xb9]); // movabs rcx,control
-    code.extend(control.to_le_bytes());
-    code.extend([0x48, 0x83, 0x29, 0x01]); // sub qword [rcx],1
-    code.extend([0x72, 0]); // jb exit
-    let skip = code.len();
-    code.extend([0x48, 0x81, 0x41, RETIRED]); // add qword [rcx+retired],imm32
-    code.extend(retired.to_le_bytes());
-    code.extend([0x48, 0x83, 0x41, LINKED, 0x01]); // add qword [rcx+linked],1
-    code.extend([0x48, 0xc7, 0x41, BLOCK]); // mov qword [rcx+block],imm32
-    code.extend(block.to_le_bytes());
-    code.extend(jump(at + code.len() as u64, entry)?);
-    code[skip - 1] = (code.len() - skip) as u8;
-    code.extend(direct_exit(target, kind));
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    asm.mov_imm64(Rcx, control);
+    // Take one transfer from the budget.
+    asm.alu_imm8(Alu::Sub, Qword, Mem::base(Rcx, 0), 1);
+    let exhausted = asm.jcc8(Cond::B);
+    asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
+    asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, LINKED), 1);
+    asm.mov_rm_imm32(Qword, Mem::base(Rcx, BLOCK), block);
+    let transfer = asm.jmp();
+    let relative = relative(at + transfer.end() as u64, entry)?;
+    asm.bind(exhausted);
+    super::block::direct_exit_with(&mut asm, target, kind);
+    code[transfer.offset()..transfer.end()].copy_from_slice(&relative.to_le_bytes());
     debug_assert_eq!(code.len(), THUNK_BYTES);
-    Some(code)
+    Some(code.into_bytes())
 }
 
 /// A lookup thunk for an exit of `kind` from a block of `retired`
@@ -185,56 +187,49 @@ pub fn lookup_thunk(
     if btype > 3 {
         return None;
     }
-    let mut code = Vec::with_capacity(STATIC_LOOKUP_THUNK_BYTES);
+    let mut code = Code::new();
+    let mut asm = code.asm();
     if let Some(target) = target {
-        code.extend([0x48, 0xb8]); // movabs rax,target
-        code.extend(target.0.to_le_bytes());
+        asm.mov_imm64(Rax, target.0);
     }
-    code.extend([0x48, 0xb9]); // movabs rcx,control
-    code.extend(control.to_le_bytes());
-    code.extend([0x89, 0xc2]); // mov edx,eax
-    code.extend([0xc1, 0xea, 0x02]); // shr edx,2
-    code.extend([0x81, 0xe2]); // and edx,LOOKUP_ENTRIES-1
-    code.extend((LOOKUP_ENTRIES as u32 - 1).to_le_bytes());
-    code.extend([0xc1, 0xe2, 0x05]); // shl edx,5
-    code.extend([0x48, 0x03, 0x51, TABLE]); // add rdx,[rcx+table]
+    asm.mov_imm64(Rcx, control);
+    // RDX = the target's entry in the table.
+    asm.mov(Dword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, 2);
+    asm.alu_imm32(Alu::And, Dword, Rdx, LOOKUP_ENTRIES as i32 - 1);
+    asm.shift_imm(ShiftOp::Shl, Dword, Rdx, 5);
+    asm.alu_load(Alu::Add, Qword, Rdx, Mem::base(Rcx, TABLE));
     let mut misses = Vec::new();
-    code.extend([0x48, 0x3b, 0x02]); // cmp rax,[rdx]
-    code.extend([0x75, 0]); // jne miss
-    misses.push(code.len());
-    code.extend([0x49, 0x89, 0xc0]); // mov r8,rax
-    code.extend([0x49, 0xc1, 0xe8, 55]); // shr r8,55
-    code.extend([0x41, 0x83, 0xe0, 0x01]); // and r8d,1: the target's half
-    code.extend([0x4e, 0x8b, 0x44, 0xc1, CONTEXTS]); // mov r8,[rcx+r8*8+contexts]
-    code.extend([0x4c, 0x3b, 0x42, ENTRY_CONTEXT]); // cmp r8,[rdx+context]
-    code.extend([0x75, 0]); // jne miss
-    misses.push(code.len());
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
+    misses.push(asm.jcc8(Cond::Ne));
+    // R8 = the context of the target's half.
+    asm.mov(Qword, R8, Rax);
+    asm.shift_imm(ShiftOp::Shr, Qword, R8, 55);
+    asm.alu_imm8(Alu::And, Dword, R8, 1);
+    asm.mov_load(Qword, R8, Mem::indexed(Rcx, R8, 8, CONTEXTS));
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rdx, ENTRY_CONTEXT));
+    misses.push(asm.jcc8(Cond::Ne));
     if btype != 0 {
-        code.extend([0xf6, 0x42, ENTRY_TARGETS, 1 << btype]); // test byte [rdx+targets],1<<btype
-        code.extend([0x74, 0]); // jz miss
-        misses.push(code.len());
+        asm.test_imm(Size::Byte, Mem::base(Rdx, ENTRY_TARGETS), 1 << btype);
+        misses.push(asm.jcc8(Cond::E));
     }
-    code.extend([0x48, 0x83, 0x29, 0x01]); // sub qword [rcx],1
-    code.extend([0x72, 0]); // jb miss
-    misses.push(code.len());
-    code.extend([0x48, 0x81, 0x41, RETIRED]); // add qword [rcx+retired],imm32
-    code.extend(retired.to_le_bytes());
-    code.extend([0x48, 0x83, 0x41, HITS, 0x01]); // add qword [rcx+hits],1
-    code.extend([0x44, 0x8b, 0x42, ENTRY_BLOCK]); // mov r8d,[rdx+block]
+    asm.alu_imm8(Alu::Sub, Qword, Mem::base(Rcx, 0), 1);
+    misses.push(asm.jcc8(Cond::B));
+    asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
+    asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, HITS), 1);
+    asm.mov_load(Dword, R8, Mem::base(Rdx, ENTRY_BLOCK));
     for bit in 0..2 {
         if btype & 1 << bit != 0 {
-            // bts r8,BLOCK_BTYPE_SHIFT+bit
-            code.extend([0x49, 0x0f, 0xba, 0xe8, BLOCK_BTYPE_SHIFT as u8 + bit]);
+            asm.bit_imm(BitTest::Bts, Qword, R8, BLOCK_BTYPE_SHIFT as u8 + bit);
         }
     }
-    code.extend([0x4c, 0x89, 0x41, BLOCK]); // mov [rcx+block],r8
-    code.extend([0xff, 0x62, ENTRY_CODE]); // jmp qword [rdx+entry]
-    for site in misses {
-        code[site - 1] = (code.len() - site) as u8;
+    asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
+    asm.jmp_rm(Mem::base(Rdx, ENTRY_CODE));
+    for miss in misses {
+        asm.bind(miss);
     }
-    code.push(0xba); // miss: mov edx,kind
-    code.extend((kind as u32).to_le_bytes());
-    code.push(0xc3); // ret
+    super::block::exit_kind_with(&mut asm, kind);
+    let code = code.into_bytes();
     debug_assert!(
         btype != 0
             || code.len()
@@ -249,27 +244,35 @@ pub fn lookup_thunk(
 
 /// The exit to a dynamic target in RAX that blocks end with.
 pub fn dynamic_exit(kind: ExitKind) -> [u8; DYNAMIC_EXIT_BYTES] {
-    let mut code = [0xba, 0, 0, 0, 0, 0xc3]; // mov edx,kind; ret
-    code[1..5].copy_from_slice(&(kind as u32).to_le_bytes());
-    code
+    let mut code = Code::new();
+    super::block::exit_kind_with(&mut code.asm(), kind);
+    code.try_into().expect("a dynamic exit's length")
 }
 
 /// `jmp rel32` at host address `at` to `to`, or `None` out of reach.
 pub fn jump(at: u64, to: u64) -> Option<[u8; JUMP_BYTES]> {
-    let relative = i32::try_from(to.wrapping_sub(at + JUMP_BYTES as u64) as i64).ok()?;
-    let mut code = [0xe9, 0, 0, 0, 0];
-    code[1..].copy_from_slice(&relative.to_le_bytes());
-    Some(code)
+    let relative = relative(at + JUMP_BYTES as u64, to)?;
+    let mut code = Code::new();
+    let field = code.asm().jmp();
+    code[field.offset()..field.end()].copy_from_slice(&relative.to_le_bytes());
+    code.try_into().ok()
+}
+
+/// The rel32 displacement of a branch ending at host address `end` to
+/// `to`, or `None` out of reach.
+fn relative(end: u64, to: u64) -> Option<i32> {
+    i32::try_from(to.wrapping_sub(end) as i64).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::x86_64::asm::Code;
     use alloc::vec;
 
     #[test]
     fn direct_exits_match_the_block_emitter() {
-        let mut emitted = Vec::new();
+        let mut emitted = Code::new();
         super::super::block::direct_exit(&mut emitted, GuestAddress(0x1234), ExitKind::Direct);
         assert_eq!(emitted, direct_exit(GuestAddress(0x1234), ExitKind::Direct));
     }
@@ -308,7 +311,7 @@ mod tests {
 
     #[test]
     fn dynamic_exits_match_the_block_emitter() {
-        let mut emitted = Vec::new();
+        let mut emitted = Code::new();
         super::super::block::exit_kind(&mut emitted, ExitKind::Return);
         assert_eq!(emitted, dynamic_exit(ExitKind::Return));
         let span = 4 * LOOKUP_ENTRIES as u64;

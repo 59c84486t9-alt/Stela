@@ -1,4 +1,5 @@
 //! Overflow-safe halving arithmetic and narrowing/widening helpers.
+use super::rearrange::{add_or_subtract, lane_constant};
 use super::{
     Host, commit, packed,
     products::extend,
@@ -6,35 +7,14 @@ use super::{
     rearrange::constant,
     shifts::{pack_truncated, right_shift, rounded_right},
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::halving::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
-fn arithmetic(lane: u8, subtract: bool) -> Host {
-    match (subtract, lane) {
-        (false, 1) => Host::AddByte,
-        (false, 2) => Host::AddWord,
-        (false, 4) => Host::AddDword,
-        (false, 8) => Host::AddQword,
-        (true, 1) => Host::SubByte,
-        (true, 2) => Host::SubWord,
-        (true, 4) => Host::SubDword,
-        (true, 8) => Host::SubQword,
-        _ => unreachable!(),
-    }
-}
-fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
-    let bytes = value.to_le_bytes();
-    constant(
-        code,
-        xmm,
-        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
-    );
-}
-fn half(code: &mut Vec<u8>, lane: u8, signed: bool, subtract: bool, round: bool) {
+fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool) {
     if round && lane <= 2 {
         if signed {
             lane_constant(code, 2, lane, 1u64 << (lane * 8 - 1));
@@ -62,8 +42,8 @@ fn half(code: &mut Vec<u8>, lane: u8, signed: bool, subtract: bool, round: bool)
         packed(code, Host::And, 2, 3);
         right_shift(code, 0, lane, 1, signed);
         right_shift(code, 1, lane, 1, signed);
-        packed(code, arithmetic(lane, true), 0, 1);
-        packed(code, arithmetic(lane, true), 0, 2);
+        packed(code, add_or_subtract(lane, true), 0, 1);
+        packed(code, add_or_subtract(lane, true), 0, 2);
     } else {
         // floor average: (a&b)+((a^b)>>1). Ceil average: (a|b)-((a^b)>>1).
         packed(code, Host::MoveAligned, 2, 0);
@@ -71,14 +51,14 @@ fn half(code: &mut Vec<u8>, lane: u8, signed: bool, subtract: bool, round: bool)
         packed(code, Host::Xor, 0, 1);
         right_shift(code, 0, lane, 1, signed);
         if round {
-            packed(code, arithmetic(lane, true), 2, 0);
+            packed(code, add_or_subtract(lane, true), 2, 0);
             packed(code, Host::MoveAligned, 0, 2);
         } else {
-            packed(code, arithmetic(lane, false), 0, 2);
+            packed(code, add_or_subtract(lane, false), 0, 2);
         }
     }
 }
-fn pair_long(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
+fn pair_long(code: &mut Code, lane: u8, signed: bool, target: TargetCpu) {
     if lane == 1 && !signed && target >= TargetCpu::Ssse3 {
         constant(code, 1, [1; 16]);
         Host::MultiplyAddUnsignedBytes.register(code, 0, 1, target);
@@ -130,10 +110,10 @@ fn pair_long(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
             .emit(code, 1, lane * 8);
         }
     }
-    packed(code, arithmetic(lane * 2, false), 0, 1);
+    packed(code, add_or_subtract(lane * 2, false), 0, 1);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,
@@ -158,7 +138,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             upper,
         } => {
             read_vector(code, right, 1);
-            packed(code, arithmetic(lane * 2, subtract), 0, 1);
+            packed(code, add_or_subtract(lane * 2, subtract), 0, 1);
             rounded_right(code, lane * 2, lane * 8, false, round);
             pack_truncated(code, lane, upper, destination);
             return;
@@ -181,7 +161,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             pair_long(code, lane, signed, target);
             if accumulate {
                 read_vector(code, destination, 1);
-                packed(code, arithmetic(lane * 2, false), 0, 1);
+                packed(code, add_or_subtract(lane * 2, false), 0, 1);
             }
         }
     }

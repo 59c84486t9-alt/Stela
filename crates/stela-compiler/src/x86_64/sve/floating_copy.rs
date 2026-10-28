@@ -1,4 +1,6 @@
 //! SVE FCPY and FDUP.
+use crate::x86_64::asm::Gpr::Rcx;
+use crate::x86_64::asm::{Code, Rm};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,18 +12,12 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 
 const IMMEDIATE: u8 = 0;
 const ACTIVE: u8 = 1;
 const PREDICATE_SCRATCH: u8 = 2;
 const OLD_DESTINATION: u8 = 3;
 const SELECTED: u8 = 4;
-const RCX_REGISTER: u8 = 1;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_FIELD_SHIFT: u8 = 3;
-const MOV_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const MOV_ECX_IMM32: &[u8] = &[0xb9];
 const REPEAT_LOW_DWORD: u8 = 0;
 // Only this H/S vector shape has a measured ComplementXor win. Other lengths
 // and Double retain AndSelect; this is an empirical shape, not a threshold.
@@ -30,7 +26,7 @@ const COMPLEMENT_XOR_MEASURED_VECTOR_BYTES: usize = 64;
 /// Fill active SVE lanes with the already expanded VFP immediate. All inactive
 /// lanes preserve their old destination; FDUP supplies no governing predicate.
 /// Full SVE writes cover current VL and do not clear any other Z register tail.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let bits = operand.format.bits();
     let complement_xor =
         bits != u64::BITS && length.bytes() == COMPLEMENT_XOR_MEASURED_VECTOR_BYTES;
@@ -41,19 +37,22 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, t
         qword |= operand.value << shift;
     }
     if bits == u64::BITS {
-        code.extend(MOV_RCX_IMM64);
-        code.extend(qword.to_le_bytes());
+        code.asm().mov_imm64(Rcx, qword);
     } else {
-        code.extend(MOV_ECX_IMM32);
-        code.extend((qword as u32).to_le_bytes());
+        code.asm().mov_imm32(Rcx, qword as u32);
     }
-    SimdOpcode::MoveGprQword.append(code, target);
-    code.push(REGISTER_DIRECT | (IMMEDIATE << REGISTER_FIELD_SHIFT) | RCX_REGISTER);
+    code.asm()
+        .simd(SimdOpcode::MoveGprQword, IMMEDIATE, Rcx, target);
     if bits == u64::BITS {
         SimdOpcode::UnpackLowQword.register(code, IMMEDIATE, IMMEDIATE, target);
     } else {
-        SimdOpcode::ShuffleDword.register(code, IMMEDIATE, IMMEDIATE, target);
-        code.push(REPEAT_LOW_DWORD);
+        code.asm().simd_imm(
+            SimdOpcode::ShuffleDword,
+            IMMEDIATE,
+            Rm::Xmm(IMMEDIATE),
+            REPEAT_LOW_DWORD,
+            target,
+        );
     }
     for chunk in 0..length.chunks() {
         let output = if let Some(governing) = operand.governing {

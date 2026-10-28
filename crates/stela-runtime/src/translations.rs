@@ -11,6 +11,7 @@ pub mod pack;
 
 use alloc::{string::String, vec::Vec};
 use sha2::{Digest as _, Sha256};
+use stela_compiler::block::Features;
 use stela_compiler::{
     GuestAddress, NativeBlock,
     block::{CompiledBlock, ExitKind, FaultRecovery},
@@ -53,8 +54,9 @@ pub fn translator_id() -> Digest {
     let mut hasher = Sha256::new();
     hasher.update(RECORD_MAGIC);
     hasher.update(SCHEMA.to_le_bytes());
+    let abi = stela_compiler::block::BlockProfile::new(Features::SYSTEM_MODE).abi();
     for part in [
-        stela_compiler::block::SYSTEM_MODE_BLOCK_ABI,
+        abi.as_str(),
         stela_compiler::SOURCE_SHA256,
         ENGINE_SOURCE_SHA256,
     ] {
@@ -64,7 +66,7 @@ pub fn translator_id() -> Digest {
     Digest(hasher.finalize().into())
 }
 
-/// The engine's compile-driver sources (`build.rs`).
+/// The runtime crate's sources (`build.rs`).
 pub const ENGINE_SOURCE_SHA256: &str = env!("STELA_ENGINE_SOURCE_SHA256");
 
 /// The address class of a page: bits 47..63 of its address.
@@ -559,11 +561,7 @@ pub fn prove(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_compiler::{
-        TargetCpu,
-        block::{BlockProfile, CompilationPlan},
-        x86_64::MemoryChecks,
-    };
+    use stela_compiler::{TargetCpu, block::BlockProfile, x86_64::MemoryChecks};
 
     const PAGE: u64 = 0x1_0000_4000;
 
@@ -572,15 +570,12 @@ mod tests {
     }
 
     fn compile(source: &[u8], pc: u64) -> CompiledBlock {
-        CompilationPlan::new(
-            source,
-            GuestAddress(pc),
-            BlockProfile::SystemModeV1,
+        let options = stela_compiler::Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
             TargetCpu::Baseline,
         )
-        .and_then(|plan| plan.with_memory_checks(MemoryChecks::system(true, false, true, true)))
-        .and_then(CompilationPlan::compile)
-        .unwrap()
+        .with_memory_checks(MemoryChecks::system(true, false, true, true));
+        stela_compiler::compile(source, GuestAddress(pc), &options).unwrap()
     }
 
     fn proved(source: &[u8], offset: u64) -> Option<Entry> {

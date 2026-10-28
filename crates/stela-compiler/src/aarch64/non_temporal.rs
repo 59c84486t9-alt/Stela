@@ -1,5 +1,6 @@
 //! LDNP and STNP, integer and SIMD.
 use super::{Register, register};
+use crate::aarch64::Unsupported;
 
 const CLASS_MASK: u32 = 0x3b800000;
 const NON_TEMPORAL_PAIR_CLASS: u32 = 0x28000000;
@@ -42,8 +43,7 @@ pub struct Operand {
 
 /// Only signed-offset forms match (there is no writeback). Reserved sizes and
 /// duplicate LDNP destinations are errors; STNP may repeat a source.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & CLASS_MASK != NON_TEMPORAL_PAIR_CLASS {
         return None;
     }
@@ -58,14 +58,14 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         LDNP_D => (true, QWORD_BYTES, true),
         STNP_Q => (false, VECTOR_BYTES, true),
         LDNP_Q => (true, VECTOR_BYTES, true),
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     let first = word & REGISTER_MASK;
     let second = (word >> SECOND_DATA_SHIFT) & REGISTER_MASK;
     // LDPOVERLAP allows UNKNOWN/UNDEF/NOP, rather than two ordinary writes.
     // Decline even two ZRs or two V31s, matching the shared LDP boundary.
     if load && first == second {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let immediate = ((word >> IMMEDIATE_SHIFT) & IMMEDIATE_MASK) as i32;
     let signed = (immediate << IMMEDIATE_SIGN_SHIFT) >> IMMEDIATE_SIGN_SHIFT;
@@ -114,7 +114,7 @@ mod tests {
                     for base in 0..=REGISTER_MASK {
                         let result = decode(word(form, 0, [first, second], base)).unwrap();
                         if load && first == second {
-                            assert_eq!(result, Err(()));
+                            assert_eq!(result, Err(Unsupported));
                             continue;
                         }
                         assert_eq!(
@@ -153,7 +153,10 @@ mod tests {
         for form in [
             0x68000000, 0x68400000, 0xe8000000, 0xe8400000, 0xec000000, 0xec400000,
         ] {
-            assert_eq!(decode(form | (1 << SECOND_DATA_SHIFT)), Some(Err(())));
+            assert_eq!(
+                decode(form | (1 << SECOND_DATA_SHIFT)),
+                Some(Err(Unsupported))
+            );
         }
         for (form, _, _, _) in FORMS {
             for fixed_bit in [23, 24, 25, 27, 28, 29] {

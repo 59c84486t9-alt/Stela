@@ -1,4 +1,5 @@
 //! EOR3, BCAX, RAX1 and XAR.
+use crate::aarch64::Unsupported;
 const REGISTER_MASK: u32 = 31;
 const DESTINATION_SHIFT: u32 = 0;
 const LEFT_SHIFT: u32 = 5;
@@ -58,8 +59,7 @@ impl Encoding {
 
 /// Every register and immediate within the four exact fixed-bit masks is valid.
 /// Same-named SVE forms remain another encoding class and receive no support here.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = Encoding::ALL.iter().copied().find(|encoding| {
         let (mask, value) = encoding.facts();
         word & mask == value

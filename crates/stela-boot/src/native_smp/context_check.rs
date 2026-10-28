@@ -62,8 +62,10 @@ fn compile(words: &[u32]) -> Result<stela_compiler::block::CompiledBlock, &'stat
     let plan = CompilationPlan::new(
         &source,
         GuestAddress(BASE),
-        BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentDisabled),
-        TargetCpu::Baseline,
+        &stela_compiler::Options::new(
+            BlockProfile::ORDINARY.with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
+            TargetCpu::Baseline,
+        ),
     )
     .map_err(|_| "native context fixture source refused")?;
     if plan.source_bytes() != source.len() {

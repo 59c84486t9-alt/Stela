@@ -9,10 +9,10 @@ use core::marker::PhantomData;
 use crate::sha256;
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
-    GuestAddress, TargetCpu,
-    block::{BlockExit, BlockProfile, ExitKind, MAX_BLOCK_INSTRUCTIONS},
-    context::{CONTEXT_BLOCK_ABI, ExecutionContext},
-    extended::{CONTEXT_WRAPPER_BYTES, block::ExtendedBlockProfile},
+    GuestAddress, Options, TargetCpu,
+    block::{BlockExit, BlockProfile, ExitKind, Features, MAX_BLOCK_INSTRUCTIONS},
+    context::ExecutionContext,
+    scalable_context::CONTEXT_WRAPPER_BYTES,
 };
 
 pub use crate::floating::scalable::CompletionError;
@@ -34,9 +34,9 @@ pub struct ScalableBlockIdentity {
     pub native_sha256: String,
     pub compiler_source_sha256: String,
     pub guest_base: GuestAddress,
-    pub abi: &'static str,
+    pub abi: String,
     pub target_cpu: String,
-    pub profile: ExtendedBlockProfile,
+    pub options: Options,
 }
 
 /// Owns the exact consumed source and its immutable RX translation. The caller
@@ -53,16 +53,14 @@ pub struct PreparedScalableBlock {
 }
 
 impl PreparedScalableBlock {
-    pub fn prepare(
-        source: &[u8],
-        base: GuestAddress,
-        profile: ExtendedBlockProfile,
-        target: TargetCpu,
-    ) -> Result<Self> {
+    /// Prepare the block at `base` for `options`, whose profile must be the
+    /// context block's.
+    pub fn prepare(source: &[u8], base: GuestAddress, options: &Options) -> Result<Self> {
         ensure!(
-            profile.services() == BlockProfile::Ordinary,
+            options.profile() == BlockProfile::new(Features::CONTEXT),
             "context block services are not integrated"
         );
+        let target = options.target();
         ensure!(
             source.len() <= MAX_BLOCK_INSTRUCTIONS * INSTRUCTION_BYTES,
             "context block exceeds the compiler instruction bound"
@@ -72,8 +70,7 @@ impl PreparedScalableBlock {
             crate::platform::cpu::admitted(target),
             "host lacks context-block requirements"
         );
-        let compiled =
-            stela_compiler::extended::block::compile_for_profile(source, base, profile, target)?;
+        let compiled = stela_compiler::compile(source, base, options)?;
         ensure!(
             compiled.source_bytes > 0
                 && compiled.source_bytes.is_multiple_of(INSTRUCTION_BYTES)
@@ -110,9 +107,9 @@ impl PreparedScalableBlock {
             native_sha256: sha256(&native.x86_64_code),
             compiler_source_sha256: stela_compiler::SOURCE_SHA256.into(),
             guest_base: base,
-            abi: CONTEXT_BLOCK_ABI,
+            abi: options.profile().abi(),
             target_cpu: target.id(),
-            profile,
+            options: *options,
         };
         let mapping = platform::Mapping::new(&native.x86_64_code)?;
         Ok(Self {
@@ -128,6 +125,13 @@ impl PreparedScalableBlock {
 
     pub fn identity(&self) -> &ScalableBlockIdentity {
         &self.identity
+    }
+
+    fn scalable(&self) -> Result<stela_compiler::scalable_context::ScalableProfile> {
+        self.identity
+            .options
+            .scalable()
+            .context("context block options lack a scalable specialization")
     }
 
     pub fn source(&self) -> &[u8] {
@@ -173,7 +177,7 @@ impl PreparedScalableBlock {
             state.pc == self.identity.guest_base,
             "context block invocation PC differs from prepared entry"
         );
-        let profile = self.identity.profile.scalable();
+        let profile = self.scalable()?;
         ensure!(
             scalable.vector_length() == profile.vector_length()
                 && scalable.mode() == profile.mode(),
@@ -244,8 +248,8 @@ impl PreparedScalableBlock {
             self.source.len(),
             self.identity.guest_base.0,
             &self.source,
-            self.identity.profile.scalable(),
-            self.identity.profile.numerical_features(),
+            self.scalable()?,
+            self.identity.options.numerical_features(),
         )
     }
 }
@@ -253,6 +257,15 @@ impl PreparedScalableBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context_options(
+        scalable: stela_compiler::scalable_context::ScalableProfile,
+        numerical: stela_compiler::aarch64::floating::features::NumericalFeatures,
+    ) -> Options {
+        Options::new(BlockProfile::new(Features::CONTEXT), TargetCpu::Baseline)
+            .with_scalable(scalable)
+            .with_numerical_features(numerical)
+    }
 
     mod fp8 {
         //! Fixed-width FP8 completion, access and failure.
@@ -270,7 +283,7 @@ mod tests {
                 },
             },
             context::ScalableStateView,
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x8000);
@@ -282,13 +295,7 @@ mod tests {
         const NUMERICAL_PC: GuestAddress = GuestAddress(BASE.0 + 4);
         const NEXT_PC: GuestAddress = GuestAddress(BASE.0 + 8);
 
-        fn profile(
-            bytes: usize,
-            streaming: bool,
-            enabled: bool,
-            fp8: bool,
-            fpmr: bool,
-        ) -> ExtendedBlockProfile {
+        fn profile(bytes: usize, streaming: bool, enabled: bool, fp8: bool, fpmr: bool) -> Options {
             let length = VectorLength::from_bytes(bytes).unwrap();
             let mut features = ScalableFeatures::of(Feature::Sme);
             if fp8 {
@@ -300,7 +307,7 @@ mod tests {
             if streaming {
                 features = features.with(Feature::SmeFa64);
             }
-            ExtendedBlockProfile::new(
+            context_options(
                 ScalableProfile::new_with_features(
                     length,
                     ScalableMode::new(streaming, false),
@@ -308,7 +315,6 @@ mod tests {
                     ScalableControls::new(length, false).with_fpmr_enabled(enabled),
                 )
                 .unwrap(),
-                BlockProfile::Ordinary,
                 NumericalFeatures::new(streaming, false, false),
             )
         }
@@ -321,8 +327,7 @@ mod tests {
             PreparedScalableBlock::prepare(
                 &source,
                 BASE,
-                profile(bytes, streaming, true, true, true),
-                TargetCpu::Baseline,
+                &profile(bytes, streaming, true, true, true),
             )
         }
 
@@ -516,14 +521,13 @@ mod tests {
                     PreparedScalableBlock::prepare(
                         &source,
                         BASE,
-                        profile(16, false, enabled, fp8, fpmr),
-                        TargetCpu::Baseline
+                        &profile(16, false, enabled, fp8, fpmr)
                     )
                     .is_err()
                 );
             }
             let length = VectorLength::from_bytes(16).unwrap();
-            let streaming_without_fa64 = ExtendedBlockProfile::new(
+            let streaming_without_fa64 = context_options(
                 ScalableProfile::new_with_features(
                     length,
                     ScalableMode::new(true, false),
@@ -533,17 +537,10 @@ mod tests {
                     ScalableControls::new(length, false).with_fpmr_enabled(true),
                 )
                 .unwrap(),
-                BlockProfile::Ordinary,
                 NumericalFeatures::default(),
             );
             assert!(
-                PreparedScalableBlock::prepare(
-                    &source,
-                    BASE,
-                    streaming_without_fa64,
-                    TargetCpu::Baseline
-                )
-                .is_err()
+                PreparedScalableBlock::prepare(&source, BASE, &streaming_without_fa64).is_err()
             );
         }
     }
@@ -567,7 +564,7 @@ mod tests {
                 ScalableNumericalOperation, admit_scalable_numerical_instruction,
                 decode_scalable_numerical_instruction,
             },
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x1000);
@@ -602,12 +599,7 @@ mod tests {
                 let prepared = PreparedScalableBlock::prepare(
                     &source,
                     BASE,
-                    ExtendedBlockProfile::new(
-                        profile,
-                        BlockProfile::Ordinary,
-                        NumericalFeatures::default(),
-                    ),
-                    TargetCpu::Baseline,
+                    &context_options(profile, NumericalFeatures::default()),
                 )?;
                 assert_eq!(prepared.source(), &source[..2 * size_of::<u32>()]);
                 assert_eq!(prepared.source_map().len(), 2);
@@ -640,17 +632,15 @@ mod tests {
                     let compiled = PreparedScalableBlock::prepare(
                         &word.to_le_bytes(),
                         BASE,
-                        ExtendedBlockProfile::new(
-                            profile(bytes),
-                            BlockProfile::Ordinary,
-                            NumericalFeatures::default(),
-                        ),
-                        TargetCpu::Baseline,
+                        &context_options(profile(bytes), NumericalFeatures::default()),
                     )?;
                     assert_eq!(compiled.source(), word.to_le_bytes());
                     assert_eq!(
                         compiled.source_map(),
-                        &[(BASE, stela_compiler::extended::CONTEXT_WRAPPER_BYTES)]
+                        &[(
+                            BASE,
+                            stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES
+                        )]
                     );
                 }
             }
@@ -675,7 +665,7 @@ mod tests {
                 },
             },
             context::ScalableStateView,
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x1000);
@@ -857,14 +847,14 @@ mod tests {
             }
         }
 
-        fn profile(bytes: usize, features: NumericalFeatures) -> ExtendedBlockProfile {
+        fn profile(bytes: usize, features: NumericalFeatures) -> Options {
             let length = VectorLength::from_bytes(bytes).unwrap();
             let mut declared =
                 ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2);
             if features.full_a64() {
                 declared = declared.with(ScalableFeature::SmeFa64);
             }
-            ExtendedBlockProfile::new(
+            context_options(
                 ScalableProfile::new_with_features(
                     length,
                     ScalableMode::new(true, true),
@@ -872,7 +862,6 @@ mod tests {
                     ScalableControls::new(length, false),
                 )
                 .unwrap(),
-                BlockProfile::Ordinary,
                 features,
             )
         }
@@ -889,12 +878,7 @@ mod tests {
             word: u32,
             features: NumericalFeatures,
         ) -> Result<PreparedScalableBlock> {
-            PreparedScalableBlock::prepare(
-                &source(word),
-                BASE,
-                profile(bytes, features),
-                TargetCpu::Baseline,
-            )
+            PreparedScalableBlock::prepare(&source(word), BASE, &profile(bytes, features))
         }
 
         fn context() -> ExecutionContext {
@@ -997,8 +981,7 @@ mod tests {
                 let prepared = PreparedScalableBlock::prepare(
                     &caller_source,
                     BASE,
-                    profile(bytes, NumericalFeatures::default()),
-                    TargetCpu::Baseline,
+                    &profile(bytes, NumericalFeatures::default()),
                 )?;
                 caller_source.fill(0); // Owned source recovery must ignore this changed caller buffer.
                 let mut fixture = Fixture::new(bytes, true)?;
@@ -1235,8 +1218,8 @@ mod tests {
             access: bool,
             mode: ScalableMode,
             numerical: NumericalFeatures,
-        ) -> Result<ExtendedBlockProfile> {
-            Ok(ExtendedBlockProfile::new(
+        ) -> Result<Options> {
+            Ok(context_options(
                 ScalableProfile::new_with_features(
                     VectorLength::from_bytes(bytes).unwrap(),
                     mode,
@@ -1244,7 +1227,6 @@ mod tests {
                     ScalableControls::new(VectorLength::from_bytes(256).unwrap(), false)
                         .with_fpmr_enabled(access),
                 )?,
-                BlockProfile::Ordinary,
                 numerical,
             ))
         }
@@ -1262,10 +1244,7 @@ mod tests {
             let numerical = NumericalFeatures::default();
             // Missing EnFPM permission is refused after exact source re-decoding.
             let denied = new19_profile(32, declared, false, mode, numerical)?;
-            assert!(
-                PreparedScalableBlock::prepare(&source(FP8), BASE, denied, TargetCpu::Baseline)
-                    .is_err()
-            );
+            assert!(PreparedScalableBlock::prepare(&source(FP8), BASE, &denied).is_err());
             let instruction = decode_scalable_numerical_instruction(NUMERICAL_PC, FP8)?.unwrap();
             assert!(
                 admit_scalable_numerical_instruction(instruction, denied.scalable(), numerical)
@@ -1307,15 +1286,7 @@ mod tests {
                     mode,
                     numerical,
                 )?;
-                assert!(
-                    PreparedScalableBlock::prepare(
-                        &source(word),
-                        BASE,
-                        only_sme,
-                        TargetCpu::Baseline
-                    )
-                    .is_err()
-                );
+                assert!(PreparedScalableBlock::prepare(&source(word), BASE, &only_sme).is_err());
                 let nonstreaming = new19_profile(
                     32,
                     declared,
@@ -1324,22 +1295,12 @@ mod tests {
                     numerical,
                 )?;
                 assert!(
-                    PreparedScalableBlock::prepare(
-                        &source(word),
-                        BASE,
-                        nonstreaming,
-                        TargetCpu::Baseline
-                    )
-                    .is_err()
+                    PreparedScalableBlock::prepare(&source(word), BASE, &nonstreaming).is_err()
                 );
             }
             let short = new19_profile(16, declared, true, mode, numerical)?;
-            assert!(
-                PreparedScalableBlock::prepare(&source(LUT), BASE, short, TargetCpu::Baseline)
-                    .is_err()
-            );
-            let entry =
-                PreparedScalableBlock::prepare(&source(FP8), BASE, allowed, TargetCpu::Baseline)?;
+            assert!(PreparedScalableBlock::prepare(&source(LUT), BASE, &short).is_err());
+            let entry = PreparedScalableBlock::prepare(&source(FP8), BASE, &allowed)?;
             let mut fixture = Fixture::new(32, false)?;
             fixture.scalable.set_fpmr(0);
             let mut context = context();
@@ -1395,12 +1356,7 @@ mod tests {
                 NumericalFeatures::new(true, false, false),
             )?;
             for active in [false, true] {
-                let entry = PreparedScalableBlock::prepare(
-                    &source(ABSOLUTE),
-                    BASE,
-                    fa64,
-                    TargetCpu::Baseline,
-                )?;
+                let entry = PreparedScalableBlock::prepare(&source(ABSOLUTE), BASE, &fa64)?;
                 let mut fixture = Fixture::new(32, false)?;
                 fixture.thread.registers.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
                 fixture
@@ -1441,8 +1397,7 @@ mod tests {
                 }
             }
             // Retained enables under effective FullA64 must refuse without partial commit.
-            let entry =
-                PreparedScalableBlock::prepare(&source(FP8), BASE, fa64, TargetCpu::Baseline)?;
+            let entry = PreparedScalableBlock::prepare(&source(FP8), BASE, &fa64)?;
             fixture.thread.pc = BASE;
             fixture.thread.registers.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
             // SAFETY: the declared FA64 and control profile is bound.
@@ -1474,7 +1429,7 @@ mod tests {
                     profile::ScalableControls,
                 },
             },
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const BASE: GuestAddress = GuestAddress(0x1000);
@@ -1544,7 +1499,7 @@ mod tests {
         }
         const LENGTHS: [usize; 5] = [16, 32, 64, 128, 256];
 
-        fn profile(bytes: usize, za: bool) -> ExtendedBlockProfile {
+        fn profile(bytes: usize, za: bool) -> Options {
             let scalable = ScalableProfile::new_with_features(
                 VectorLength::from_bytes(bytes).unwrap(),
                 ScalableMode::new(true, za),
@@ -1552,11 +1507,7 @@ mod tests {
                 ScalableControls::new(VectorLength::from_bytes(256).unwrap(), false),
             )
             .unwrap();
-            ExtendedBlockProfile::new(
-                scalable,
-                BlockProfile::Ordinary,
-                NumericalFeatures::default(),
-            )
+            context_options(scalable, NumericalFeatures::default())
         }
 
         fn owner(bytes: usize, za: bool) -> (ThreadState, ScalableState) {
@@ -1607,13 +1558,8 @@ mod tests {
                         .iter()
                         .flat_map(|word| word.to_le_bytes())
                         .collect();
-                    let block = PreparedScalableBlock::prepare(
-                        &source,
-                        BASE,
-                        profile(bytes, za),
-                        TargetCpu::Baseline,
-                    )
-                    .unwrap();
+                    let block =
+                        PreparedScalableBlock::prepare(&source, BASE, &profile(bytes, za)).unwrap();
                     assert_eq!(block.source(), &source[..2 * size_of::<u32>()]);
                     assert_eq!(block.source_map()[1].0, GuestAddress(BASE.0 + WORD_BYTES));
                     let (mut thread, mut scalable) = owner(bytes, za);
@@ -1656,13 +1602,9 @@ mod tests {
         #[test]
         fn sme_owned_completion_declines_forged_exit_pc_and_current_owner_without_mutation() {
             for (word, za) in [(FRINTN_PAIR, false), (FADD_ZA_SINGLE, true)] {
-                let block = PreparedScalableBlock::prepare(
-                    &word.to_le_bytes(),
-                    BASE,
-                    profile(16, za),
-                    TargetCpu::Baseline,
-                )
-                .unwrap();
+                let block =
+                    PreparedScalableBlock::prepare(&word.to_le_bytes(), BASE, &profile(16, za))
+                        .unwrap();
                 let (mut thread, mut scalable) = owner(16, za);
                 let valid = BlockExit {
                     next_pc: BASE.0,

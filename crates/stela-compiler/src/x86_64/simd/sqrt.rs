@@ -1,21 +1,23 @@
 //! FSQRT: SSE2 for positive normals, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, VZEROUPPER, branch,
-    clear_scalar, commit_inexact, environment_round, positive_exponent_range,
-    prepare_vector_input_range, read_inputs, read_numerical_vector, reject_other_status, resolve,
-    restore_environment, sticky_inexact, sticky_result_check, test_control,
-    vector_positive_exponent_range,
+    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, branch, clear_scalar,
+    commit_inexact, environment_round, positive_exponent_range, prepare_vector_input_range,
+    read_inputs, read_numerical_vector, reject_other_status, resolve, restore_environment,
+    sticky_inexact, sticky_result_check, test_control, vector_positive_exponent_range,
 };
+use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
         floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format},
         simd::{arithmetic::Shape, sqrt::Operand},
     },
-    block::ExitKind,
 };
+use Gpr::Rax;
 use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
@@ -27,19 +29,6 @@ const ROUNDING_BIAS: u8 = 5;
 const SAVED_HALF: u8 = 6;
 const ROUNDING_PARITY: u8 = 7;
 const FIRST_LANE: u8 = 0;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const JMP_REL32: u8 = 0xe9;
-const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
-const MOVD_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0x6e];
-const PINSRW_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0xc4];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const SHL_EAX_IMM8: &[u8] = &[0xc1, 0xe0];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const BT_EAX_IMM8: &[u8] = &[0x0f, 0xba, 0xe0];
-const ADD_EAX_IMM32: u8 = 0x05;
-const ADC_EAX_IMM32: u8 = 0x15;
-const SUB_EAX_IMM32: u8 = 0x2d;
 const CONVERT_USING_MXCSR: u8 = 1 << 2;
 const FPCR_LOW_ROUNDING_BIT: u32 = 1 << FPCR_ROUNDING_SHIFT;
 const FPCR_HIGH_ROUNDING_BIT: u32 = 1 << (FPCR_ROUNDING_SHIFT + 1);
@@ -52,14 +41,7 @@ const HALF_BIAS_POSITION: u8 = HALF_TO_SINGLE_BIAS.trailing_zeros() as u8;
 const HALF_BIAS_DIGITS: u8 = (HALF_TO_SINGLE_BIAS >> HALF_BIAS_POSITION).ilog2() as u8 + 1;
 const UPPER_HALF_BYTES: u8 = (u64::BITS / u8::BITS) as u8;
 
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
-}
-
-fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     read_numerical_vector(code, operand.shape, operand.source, SOURCE);
@@ -73,20 +55,7 @@ fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
     }
 }
 
-/// Every branch enters with the caller's complete MXCSR and stack restored.
-/// Guest status and destination commits follow this common cold helper section.
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    let completed = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success_start);
-}
-
-fn square_root(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
+fn square_root(code: &mut Code, format: Format, shape: Shape, source: u8) {
     let opcode = match (format, shape) {
         (Format::Single, Shape::Scalar) => Host::SquareRootScalarSingle,
         (Format::Double, Shape::Scalar) => Host::SquareRootScalarDouble,
@@ -100,7 +69,7 @@ fn square_root(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
 /// Select positive-result narrowing bias once for both four-lane H groups.
 /// Nearest-even adds half-minus-one plus retained parity. Positive rounding
 /// adds the entire discarded mask; negative/zero rounding simply truncates.
-fn half_constants(code: &mut Vec<u8>) {
+fn half_constants(code: &mut Code) {
     packed(code, Host::Xor, ZERO, ZERO);
     packed(code, Host::EqualDword, HALF_BIAS, HALF_BIAS);
     ShiftOpcode::RightDword.emit(code, HALF_BIAS, u32::BITS as u8 - HALF_BIAS_DIGITS);
@@ -123,7 +92,7 @@ fn half_constants(code: &mut Vec<u8>) {
 }
 
 /// All active inputs were positive normal H. Integer field construction is exact.
-fn widen_half(code: &mut Vec<u8>, upper: bool) {
+fn widen_half(code: &mut Code, upper: bool) {
     packed(code, Host::MoveAligned, RESULT, SOURCE);
     if upper {
         ShiftOpcode::RightBytes.emit(code, RESULT, UPPER_HALF_BYTES);
@@ -137,7 +106,7 @@ fn widen_half(code: &mut Vec<u8>, upper: bool) {
 /// result as direct half-precision sqrt, with single PE exactly matching half
 /// inexact. Results are positive normal halves of at most 256, so signed dword
 /// packing is exact.
-fn half_fields(code: &mut Vec<u8>) {
+fn half_fields(code: &mut Code) {
     packed(code, Host::SubDword, RESULT, HALF_BIAS);
     packed(code, Host::MoveAligned, TEMP, RESULT);
     ShiftOpcode::RightDword.emit(code, TEMP, HALF_FRACTION_SHIFT);
@@ -149,45 +118,39 @@ fn half_fields(code: &mut Vec<u8>) {
 
 /// The scalar integer recipe avoids vector constant preparation and packing.
 /// BT captures retained parity before ADC adds half-minus-one plus that bit.
-fn scalar_half_root(code: &mut Vec<u8>) {
-    code.extend(MOVD_EAX_XMM_PREFIX);
-    code.push(REGISTER_DIRECT | (SOURCE << MODRM_REGISTER_SHIFT));
-    code.extend(MOVZX_EAX_AX);
-    code.extend(SHL_EAX_IMM8);
-    code.push(HALF_FRACTION_SHIFT);
-    code.push(ADD_EAX_IMM32);
-    code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
-    code.extend(MOVD_XMM_EAX_PREFIX);
-    code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
+fn scalar_half_root(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, SOURCE);
+    asm.movzx(Size::Dword, Rax, Size::Word, Rax);
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rax, HALF_FRACTION_SHIFT);
+    asm.alu_accumulator_imm32(Alu::Add, Size::Dword, HALF_TO_SINGLE_BIAS as i32);
+    asm.movd_to_xmm(RESULT, Rax);
     square_root(code, Format::Single, Shape::Scalar, RESULT);
-    code.extend(MOVD_EAX_XMM_PREFIX);
-    code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
-    code.push(SUB_EAX_IMM32);
-    code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, RESULT);
+    asm.alu_accumulator_imm32(Alu::Sub, Size::Dword, HALF_TO_SINGLE_BIAS as i32);
     test_control(code, FPCR_HIGH_ROUNDING_BIT);
     let truncating = branch(code, Condition::NotZero);
     test_control(code, FPCR_LOW_ROUNDING_BIT);
     let positive = branch(code, Condition::NotZero);
-    code.extend(BT_EAX_IMM8);
-    code.push(HALF_FRACTION_SHIFT);
-    code.push(ADC_EAX_IMM32);
-    code.extend((HALF_DISCARDED_MASK >> 1).to_le_bytes());
+    let mut asm = code.asm();
+    asm.bit_imm(BitTest::Bt, Size::Dword, Rax, HALF_FRACTION_SHIFT);
+    asm.alu_accumulator_imm32(Alu::Adc, Size::Dword, (HALF_DISCARDED_MASK >> 1) as i32);
     let nearest_done = jump(code);
     let positive_start = code.len();
     resolve(code, positive, positive_start);
-    code.push(ADD_EAX_IMM32);
-    code.extend(HALF_DISCARDED_MASK.to_le_bytes());
+    code.asm()
+        .alu_accumulator_imm32(Alu::Add, Size::Dword, HALF_DISCARDED_MASK as i32);
     let shift_start = code.len();
     for patch in [truncating, nearest_done] {
         resolve(code, patch, shift_start);
     }
-    code.extend(SHR_EAX_IMM8);
-    code.push(HALF_FRACTION_SHIFT);
-    code.extend(MOVD_XMM_EAX_PREFIX);
-    code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, HALF_FRACTION_SHIFT);
+    asm.movd_to_xmm(RESULT, Rax);
 }
 
-fn vector_half_root(code: &mut Vec<u8>, shape: Shape) {
+fn vector_half_root(code: &mut Code, shape: Shape) {
     half_constants(code);
     widen_half(code, false);
     square_root(code, Format::Single, shape, RESULT);
@@ -204,14 +167,13 @@ fn vector_half_root(code: &mut Vec<u8>, shape: Shape) {
     }
 }
 
-fn narrow_half(code: &mut Vec<u8>, destination: u8, source: u8, target: TargetCpu) {
+fn narrow_half(code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
     // VCVTPS2PH encodes source in ModRM.reg and destination in ModRM.r/m,
     // reversing the register field roles of ordinary two-operand SIMD ops.
-    Host::ConvertSingleToHalf.register(code, source, destination, target);
-    code.push(CONVERT_USING_MXCSR);
+    Host::ConvertSingleToHalf.register_imm(code, source, destination, CONVERT_USING_MXCSR, target);
 }
 
-fn checked_half_root(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
+fn checked_half_root(code: &mut Code, shape: Shape, target: TargetCpu) {
     if shape == Shape::Scalar {
         clear_scalar(code, Format::Half, SOURCE);
     }
@@ -232,17 +194,14 @@ fn checked_half_root(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
     }
 }
 
-fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
+fn commit_result(code: &mut Code, operand: &Operand) {
     if operand.shape == Shape::Scalar {
         if operand.format == Format::Half {
             // Rebuild the half-precision scalar result in Vd after the
             // arithmetic and packing, which handles source aliases and V31.
-            code.extend(MOVD_EAX_XMM_PREFIX);
-            code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
+            code.asm().movd_from_xmm(Rax, RESULT);
             read_vector(code, operand.destination, RESULT);
-            code.extend(PINSRW_XMM_EAX_PREFIX);
-            code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
-            code.push(FIRST_LANE);
+            code.asm().pinsrw(RESULT, Rax, FIRST_LANE);
         }
         test_control(code, FPCR_NEP);
         let merging = branch(code, Condition::NotZero);
@@ -257,7 +216,7 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
 
 /// S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
@@ -267,7 +226,7 @@ pub(in crate::x86_64) fn emit(
     if checked_half {
         // F16C requires usable AVX. Pay this prefix per body before legacy
         // guards, avoiding a transition from arbitrary caller upper YMM state.
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     // The sticky-inexact path (`numerical::sticky_inexact`) for S and D: the

@@ -1,12 +1,12 @@
 //! SVE integer dot products, one 128-bit segment at a time. All sources are
 //! staged before each destination chunk is written.
+use crate::x86_64::asm::{Code, Rm};
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength, is_z_register};
 use crate::aarch64::sve::dot::{Kind, Operand, Products, RightOperand, Signedness};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, store_z_chunk};
-use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -28,16 +28,21 @@ const BROADCAST_DWORD: u8 = 0x55;
 const INDEXED_WORD_REGISTERS: u8 = 8;
 const INDEXED_DOUBLEWORD_REGISTERS: u8 = 16;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8) {
-    packed(code, Host::ShuffleDword, destination, source);
-    code.push(control);
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8) {
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        control,
+        TargetCpu::Baseline,
+    );
 }
 
-fn index_right(code: &mut Vec<u8>, operand: &Operand) {
+fn index_right(code: &mut Code, operand: &Operand) {
     if let RightOperand::Indexed { index, .. } = operand.right {
         let control = if operand.element_size == ElementSize::Word {
             index * BROADCAST_DWORD
@@ -52,7 +57,7 @@ fn index_right(code: &mut Vec<u8>, operand: &Operand) {
 
 /// Split byte pairs into signed or unsigned word lanes. XMM0/2 receive the
 /// even/odd left bytes, XMM1/3 the even/odd right bytes.
-fn byte_components(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
+fn byte_components(code: &mut Code, left_signed: bool, right_signed: bool) {
     packed(code, Host::MoveAligned, LEFT_HIGH, LEFT);
     packed(code, Host::MoveAligned, RIGHT_HIGH, RIGHT);
     for (low, high, signed) in [
@@ -70,7 +75,7 @@ fn byte_components(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
     }
 }
 
-fn byte_dot(code: &mut Vec<u8>, signedness: Signedness) {
+fn byte_dot(code: &mut Code, signedness: Signedness) {
     let left_signed = matches!(signedness, Signedness::Signed | Signedness::SignedUnsigned);
     let right_signed = matches!(signedness, Signedness::Signed | Signedness::UnsignedSigned);
     byte_components(code, left_signed, right_signed);
@@ -82,7 +87,7 @@ fn byte_dot(code: &mut Vec<u8>, signedness: Signedness) {
 /// Reconstruct each individual 32-bit product before any horizontal sum.
 /// The low/high four products finish in XMM0/XMM3. Unsigned halfword products
 /// must be zero-extended later; signed pair overflow must never be widened.
-fn halfword_products(code: &mut Vec<u8>, signed: bool) {
+fn halfword_products(code: &mut Code, signed: bool) {
     packed(code, Host::MoveAligned, LEFT_HIGH, LEFT);
     packed(code, Host::MultiplyLowWord, LEFT, RIGHT);
     packed(
@@ -100,7 +105,7 @@ fn halfword_products(code: &mut Vec<u8>, signed: bool) {
     packed(code, Host::UnpackHighWord, RIGHT_HIGH, LEFT_HIGH);
 }
 
-fn sum_halfword_pairs(code: &mut Vec<u8>, target: TargetCpu) {
+fn sum_halfword_pairs(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         Host::HorizontalAddDword.register(code, LEFT, RIGHT_HIGH, target);
     } else {
@@ -117,7 +122,7 @@ fn sum_halfword_pairs(code: &mut Vec<u8>, target: TargetCpu) {
 /// Four 32-bit products become one exact 64-bit sum, replicated. For complex
 /// subtraction the even and odd products are summed separately first; each
 /// signed product fits in 32 bits, but pair sums may not.
-fn sum_four_wide(code: &mut Vec<u8>, source: u8, signed: bool, subtract_odd: bool) {
+fn sum_four_wide(code: &mut Code, source: u8, signed: bool, subtract_odd: bool) {
     packed(code, Host::MoveAligned, WIDE_HIGH, source);
     if signed {
         packed(code, Host::MoveAligned, SIGNS, source);
@@ -141,7 +146,7 @@ fn sum_four_wide(code: &mut Vec<u8>, source: u8, signed: bool, subtract_odd: boo
     );
 }
 
-fn halfword_dot(code: &mut Vec<u8>, signed: bool, wide: bool, target: TargetCpu) {
+fn halfword_dot(code: &mut Code, signed: bool, wide: bool, target: TargetCpu) {
     if signed && !wide {
         // The PMADDWD overflow case is exactly the required modulo32 result.
         packed(code, Host::MultiplyAddWords, LEFT, RIGHT);
@@ -157,7 +162,7 @@ fn halfword_dot(code: &mut Vec<u8>, signed: bool, wide: bool, target: TargetCpu)
     }
 }
 
-fn complex_byte_dot(code: &mut Vec<u8>, select_imaginary: bool, subtract: bool) {
+fn complex_byte_dot(code: &mut Code, select_imaginary: bool, subtract: bool) {
     byte_components(code, true, true);
     let (real, imaginary) = if select_imaginary {
         (RIGHT_HIGH, RIGHT)
@@ -178,11 +183,16 @@ fn complex_byte_dot(code: &mut Vec<u8>, select_imaginary: bool, subtract: bool) 
     );
 }
 
-fn complex_halfword_dot(code: &mut Vec<u8>, select_imaginary: bool, subtract: bool) {
+fn complex_halfword_dot(code: &mut Code, select_imaginary: bool, subtract: bool) {
     if select_imaginary {
         for opcode in [Host::ShuffleLowWord, Host::ShuffleHighWord] {
-            packed(code, opcode, RIGHT, RIGHT);
-            code.push(SWAP_ADJACENT_DWORDS);
+            code.asm().simd_imm(
+                opcode,
+                RIGHT,
+                Rm::Xmm(RIGHT),
+                SWAP_ADJACENT_DWORDS,
+                TargetCpu::Baseline,
+            );
         }
     }
     halfword_products(code, true);
@@ -194,7 +204,7 @@ fn complex_halfword_dot(code: &mut Vec<u8>, select_imaginary: bool, subtract: bo
 /// Emit the integer dot forms only. Any other operand returns false before
 /// appending bytes.
 pub(crate) fn emit_integer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -285,7 +295,6 @@ pub(crate) fn emit_integer(
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn floating_and_unallocated_operands_decline_without_partial_output() {
@@ -319,7 +328,7 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = vec![0xcc];
+            let mut code = Code::from(vec![0xcc]);
             assert!(!emit_integer(
                 &mut code,
                 &operand,
@@ -332,14 +341,14 @@ mod tests {
 
     #[test]
     fn horizontal_unsigned_pair_recipe_requires_ssse3() {
-        let mut baseline = Vec::new();
+        let mut baseline = Code::new();
         sum_halfword_pairs(&mut baseline, TargetCpu::Baseline);
         assert!(
             !baseline
                 .windows(Host::HorizontalAddDword.encoding().len())
                 .any(|bytes| bytes == Host::HorizontalAddDword.encoding())
         );
-        let mut checked = Vec::new();
+        let mut checked = Code::new();
         sum_halfword_pairs(&mut checked, TargetCpu::Ssse3);
         assert!(checked.starts_with(Host::HorizontalAddDword.encoding()));
         assert!(checked.len() < baseline.len());

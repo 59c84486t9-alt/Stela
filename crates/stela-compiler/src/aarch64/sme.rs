@@ -1,4 +1,5 @@
 //! SME operands. Callers check streaming mode, ZA state and features.
+use crate::aarch64::Unsupported;
 
 pub mod extrema_scale;
 pub mod fp8_conversion;
@@ -26,8 +27,7 @@ pub enum Operand {
     LutV2(lut_v2::Operand),
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if let Some(operand) = lut_v2::decode(word) {
         return Some(Ok(Operand::LutV2(operand)));
     }

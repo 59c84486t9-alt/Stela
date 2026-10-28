@@ -1,4 +1,5 @@
 //! FRECPE, FRSQRTE and FRECPX.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::Format;
 
 use super::arithmetic::Shape;
@@ -67,8 +68,7 @@ fn vector_shape(word: u32) -> Shape {
 
 /// None denotes another family; Err denotes floating vector1D or unsigned sz1.
 /// FRECPX is scalar only. All registers, including V31, are ordinary vector data.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let unsigned = match word & VECTOR_MASK {
         URECPE => Some(Kind::UnsignedReciprocal),
         URSQRTE => Some(Kind::UnsignedReciprocalSquareRoot),
@@ -76,7 +76,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     };
     if let Some(kind) = unsigned {
         if word & DOUBLE_SIZE != 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(operand(word, kind, Format::Single, vector_shape(word))));
     }
@@ -110,7 +110,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             vector_shape(word)
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(operand(word, kind, format, shape)));
     }
@@ -176,7 +176,7 @@ mod tests {
                         continue;
                     }
                     if format == Format::Double && shape == Shape::Vector64 {
-                        assert_eq!(decode(word), Some(Err(())));
+                        assert_eq!(decode(word), Some(Err(Unsupported)));
                         continue;
                     }
                     check_registers(word, kind, format, shape);
@@ -202,7 +202,7 @@ mod tests {
                             decode(
                                 opcode | q | DOUBLE_SIZE | destination | (source << SOURCE_SHIFT)
                             ),
-                            Some(Err(()))
+                            Some(Err(Unsupported))
                         );
                     }
                 }
@@ -222,7 +222,7 @@ mod tests {
                 for source in 0..=REGISTER_MASK {
                     assert_eq!(
                         decode(opcode | DOUBLE_SIZE | destination | (source << SOURCE_SHIFT)),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
             }

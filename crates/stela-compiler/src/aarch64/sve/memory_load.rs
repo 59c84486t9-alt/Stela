@@ -2,6 +2,7 @@
 //! staged in full, so a fault leaves it unchanged.
 use super::super::register;
 use super::memory::{Address, Extension, Offset, Scale};
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 
 const REGISTER_MASK: u32 = 31;
@@ -60,7 +61,7 @@ pub struct Operand {
     pub tag_checked: bool,
 }
 
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & WHOLE_VECTOR_MASK == WHOLE_VECTOR {
         return Some(Ok(whole(word, Kind::WholeVector)));
     }
@@ -94,7 +95,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         } else {
             let index = (word >> INDEX_SHIFT) & REGISTER_MASK;
             if index == REGISTER_MASK {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             Offset::Register {
                 index: register(index, false),
@@ -222,7 +223,7 @@ const LD1RSW_S64: u32 = 0x84c08000;
 const LD1RW_U32: u32 = 0x8540c000;
 const LD1RW_U64: u32 = 0x8540e000;
 
-fn decode_replicate(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_replicate(word: u32) -> Option<Result<Operand, Unsupported>> {
     let quad_immediate = word & QUAD_IMMEDIATE_MASK == QUAD_IMMEDIATE;
     let quad_register = word & QUAD_REGISTER_MASK == QUAD_REGISTER;
     let (kind, memory_bytes, element_bytes, extension) = if quad_immediate || quad_register {
@@ -258,7 +259,7 @@ fn decode_replicate(word: u32) -> Option<Result<Operand, ()>> {
     let offset = if quad_register {
         let index = (word >> INDEX_SHIFT) & REGISTER_MASK;
         if index == REGISTER_MASK {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         Offset::Register {
             index: register(index, false),
@@ -866,7 +867,10 @@ mod tests {
                         ..
                     }
                 ));
-                assert_eq!(decode(word | (REGISTER_MASK << INDEX_SHIFT)), Some(Err(())));
+                assert_eq!(
+                    decode(word | (REGISTER_MASK << INDEX_SHIFT)),
+                    Some(Err(Unsupported))
+                );
             }
         }
     }

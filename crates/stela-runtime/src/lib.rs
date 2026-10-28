@@ -70,7 +70,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use stela_compiler::GuestAddress;
 #[cfg(feature = "std")]
-use stela_compiler::{NATIVE_ABI, NativeBlock};
+use stela_compiler::NativeBlock;
 
 fn compiler_source_sha256() -> &'static str {
     stela_compiler::SOURCE_SHA256
@@ -158,22 +158,21 @@ pub fn prepare_leaf_for_target(
     root: &Path,
     target: stela_compiler::TargetCpu,
 ) -> Result<Prepared> {
+    use stela_compiler::block::{BlockProfile, Features};
+    let profile = BlockProfile::new(Features::LEAF);
     let identity = Identity {
         schema_version: 1,
         source_sha256: sha256(source),
         compiler_source_sha256: compiler_source_sha256().to_owned(),
         guest_base: base.0,
-        abi: NATIVE_ABI.into(),
+        abi: profile.abi(),
         target_cpu: target.id(),
         memory_specialization_sha256: None,
     };
-    prepare(
-        identity,
-        root,
-        None,
-        stela_compiler::block::BlockProfile::Ordinary,
-        || stela_compiler::compile_for_target(source, base, target),
-    )
+    prepare(identity, root, None, profile, || {
+        stela_compiler::compile(source, base, &stela_compiler::Options::new(profile, target))
+            .map(|block| block.native)
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -190,7 +189,7 @@ pub fn prepare_block(source: &[u8], base: GuestAddress, root: &Path) -> Result<P
         source,
         base,
         root,
-        stela_compiler::block::BlockProfile::Ordinary,
+        stela_compiler::block::BlockProfile::ORDINARY,
     )
 }
 
@@ -219,7 +218,11 @@ pub fn prepare_block_for_target(
     profile: stela_compiler::block::BlockProfile,
     target: stela_compiler::TargetCpu,
 ) -> Result<PreparedBlock> {
-    let plan = stela_compiler::block::CompilationPlan::new(source, base, profile, target)?;
+    let plan = stela_compiler::block::CompilationPlan::new(
+        source,
+        base,
+        &stela_compiler::Options::new(profile, target),
+    )?;
     prepare_block_plan(source, base, root, target, plan)
 }
 
@@ -233,8 +236,12 @@ pub(crate) fn prepare_runtime_block_for_target(
     profile: stela_compiler::block::BlockProfile,
     target: stela_compiler::TargetCpu,
 ) -> Result<(PreparedBlock, stela_compiler::block::BlockProfile)> {
-    let plan = stela_compiler::block::CompilationPlan::new(source, base, profile, target)?
-        .with_resident_loops();
+    let plan = stela_compiler::block::CompilationPlan::new(
+        source,
+        base,
+        &stela_compiler::Options::new(profile, target),
+    )?
+    .with_resident_loops();
     let artifact_profile = plan.profile();
     Ok((
         prepare_block_plan(source, base, root, target, plan)?,
@@ -278,7 +285,7 @@ fn block_plan_identity(
         source_sha256: sha256(prefix),
         compiler_source_sha256: compiler_source_sha256().to_owned(),
         guest_base: base.0,
-        abi: profile.abi().into(),
+        abi: profile.abi(),
         target_cpu: target.id(),
         memory_specialization_sha256: memory_specialization_sha256(
             profile,
@@ -378,7 +385,7 @@ mod tests {
                 &input,
                 GuestAddress(0x1000),
                 root.path(),
-                BlockProfile::Ordinary,
+                BlockProfile::ORDINARY,
                 target,
             )?
             .prepared;
@@ -438,15 +445,15 @@ mod tests {
     }
     #[test]
     fn clock_profile_cache_isolated_from_both_previous_profiles_and_exact_operands() -> Result<()> {
-        use stela_compiler::block::BlockProfile;
+        use stela_compiler::block::{BlockProfile, Features};
         let root = tempfile::tempdir()?;
         let base = GuestAddress(0x1000);
-        let profile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        let profile = BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK));
         let ordinary_source = source(42);
         let mut keys = std::collections::BTreeSet::new();
         for selected in [
-            BlockProfile::Ordinary,
-            BlockProfile::AppleArm64eSoftwarePauthV1,
+            BlockProfile::ORDINARY,
+            BlockProfile::new(Features::POINTER_AUTHENTICATION),
             profile,
         ] {
             let block = prepare_block_with_profile(&ordinary_source, base, root.path(), selected)?;
@@ -458,8 +465,8 @@ mod tests {
             .flat_map(|w| w.to_le_bytes())
             .collect();
         for previous in [
-            BlockProfile::Ordinary,
-            BlockProfile::AppleArm64eSoftwarePauthV1,
+            BlockProfile::ORDINARY,
+            BlockProfile::new(Features::POINTER_AUTHENTICATION),
         ] {
             assert!(prepare_block_with_profile(&input, base, root.path(), previous).is_err());
         }
@@ -491,17 +498,17 @@ mod tests {
     }
     #[test]
     fn pac_profile_cache_identity_is_explicit_and_reuses_only_consumed_prefix() -> Result<()> {
-        use stela_compiler::block::BlockProfile;
+        use stela_compiler::block::{BlockProfile, Features};
         let root = tempfile::tempdir()?;
         let base = GuestAddress(0x1000);
-        let profile = BlockProfile::AppleArm64eSoftwarePauthV1;
+        let profile = BlockProfile::new(Features::POINTER_AUTHENTICATION);
         let ordinary_source = source(42);
         let ordinary = prepare_block(&ordinary_source, base, root.path())?;
         let opted_in = prepare_block_with_profile(&ordinary_source, base, root.path(), profile)?;
         assert_ne!(ordinary.prepared.key, opted_in.prepared.key);
         assert_eq!(
             ordinary.prepared.manifest.identity.abi,
-            BlockProfile::Ordinary.abi()
+            BlockProfile::ORDINARY.abi()
         );
         assert_eq!(opted_in.prepared.manifest.identity.abi, profile.abi());
         assert_eq!(
@@ -538,7 +545,7 @@ mod tests {
         // Preparation never maps or invokes the artifact; an intact checksum
         // cannot make metadata from another profile acceptable under this key.
         let mut manifest = first.prepared.manifest;
-        manifest.identity.abi = BlockProfile::Ordinary.abi().into();
+        manifest.identity.abi = BlockProfile::ORDINARY.abi();
         write_json(&first.prepared.directory.join("manifest.json"), &manifest)?;
         let hash = sha256(&std::fs::read(
             first.prepared.directory.join("manifest.json"),
@@ -640,11 +647,12 @@ mod tests {
             source[..size_of::<u32>()].copy_from_slice(&stack_word.to_le_bytes());
             for el0 in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
                 for el1 in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
-                    let profile = BlockProfile::CheckedMemory(stack.with_address_checks(
-                        AccessEl::El1,
-                        AccessEl::El0,
-                        EffectiveAddressChecks::new(el0, el1),
-                    ));
+                    let profile =
+                        BlockProfile::ORDINARY.with_checked_memory(stack.with_address_checks(
+                            AccessEl::El1,
+                            AccessEl::El0,
+                            EffectiveAddressChecks::new(el0, el1),
+                        ));
                     let first = prepare_block_for_target(
                         &source,
                         GuestAddress(0x1000),
@@ -698,7 +706,7 @@ mod tests {
         let effects =
             EffectiveAddressChecks::new(AddressAddChecks::Disabled, AddressAddChecks::Enabled);
         let profile = |normal, unprivileged| {
-            BlockProfile::CheckedMemory(
+            BlockProfile::ORDINARY.with_checked_memory(
                 CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
                     normal,
                     unprivileged,
@@ -711,14 +719,12 @@ mod tests {
         let first_plan = CompilationPlan::new(
             &source,
             GuestAddress(0x1000),
-            first_profile,
-            TargetCpu::Baseline,
+            &stela_compiler::Options::new(first_profile, TargetCpu::Baseline),
         )?;
         let second_plan = CompilationPlan::new(
             &source,
             GuestAddress(0x1000),
-            second_profile,
-            TargetCpu::Baseline,
+            &stela_compiler::Options::new(second_profile, TargetCpu::Baseline),
         )?;
         assert_eq!(
             first_plan.memory_requirements(),
@@ -788,7 +794,7 @@ mod tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let profile = BlockProfile::CheckedMemory(
+        let profile = BlockProfile::ORDINARY.with_checked_memory(
             CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
                 AccessEl::El0,
                 AccessEl::El0,
@@ -834,7 +840,7 @@ mod tests {
             AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,
         };
         use stela_compiler::context::memory::{MemoryRequirements, flags};
-        let profile = stela_compiler::block::BlockProfile::CheckedMemory(
+        let profile = stela_compiler::block::BlockProfile::ORDINARY.with_checked_memory(
             stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
                 AccessEl::El0,
                 AccessEl::El0,
@@ -878,7 +884,7 @@ mod tests {
         );
         assert!(
             memory_specialization_sha256(
-                stela_compiler::block::BlockProfile::Ordinary,
+                stela_compiler::block::BlockProfile::ORDINARY,
                 Some(MemoryRequirements::default())
             )?
             .is_none()
@@ -932,7 +938,8 @@ mod tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let profile = BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentDisabled);
+        let profile =
+            BlockProfile::ORDINARY.with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled);
         for version in [None, Some(0), Some(1), Some(3)] {
             let root = tempfile::tempdir()?;
             let prepared = prepare_block_for_target(

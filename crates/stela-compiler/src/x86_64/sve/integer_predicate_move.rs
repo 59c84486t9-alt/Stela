@@ -1,12 +1,13 @@
 //! PMOV between predicates and vector bitmaps.
 use crate::aarch64::sve::integer_predicate_move::Operand;
+use crate::x86_64::asm::Gpr::{R8, R9, Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, ShiftOp, Size};
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_chunk, store_z_chunk};
 use crate::{
     TargetCpu,
     aarch64::scalable::{BITS_PER_BYTE, ElementSize, VECTOR_CHUNK_BYTES, VectorLength},
 };
-use alloc::vec::Vec;
 
 const QWORD_BITS: usize = u64::BITS as usize;
 const QWORD_BYTES: usize = core::mem::size_of::<u64>();
@@ -15,40 +16,22 @@ const RESULT: u8 = 0;
 const HIGH: u8 = 1;
 const MASK: u8 = 2;
 const PREVIOUS: u8 = 3;
-const XOR_R8D_R8D: &[u8] = &[0x45, 0x31, 0xc0];
-const XOR_R9D_R9D: &[u8] = &[0x45, 0x31, 0xc9];
-const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
-const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
-const MOVABS_RCX: &[u8] = &[0x48, 0xb9];
-const AND_RAX_RCX: &[u8] = &[0x48, 0x21, 0xc8];
-const AND_EAX_IMM32: &[u8] = &[0x25];
-const OR_RAX_RCX: &[u8] = &[0x48, 0x09, 0xc8];
-const SHR_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe9];
-const SHR_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe8];
-const SHL_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe0];
-const OR_R8_RAX: &[u8] = &[0x49, 0x09, 0xc0];
-const OR_R9_RAX: &[u8] = &[0x49, 0x09, 0xc1];
-const MOVQ_XMM0_R8: &[u8] = &[0x66, 0x49, 0x0f, 0x6e, 0xc0];
-const MOVQ_XMM1_R9: &[u8] = &[0x66, 0x49, 0x0f, 0x6e, 0xc9];
-const IMUL_RAX_RCX: &[u8] = &[0x48, 0x0f, 0xaf, 0xc1];
 const BYTE_LOW_BITS: u64 = 0x0101_0101_0101_0101;
 const BYTE_GATHER_MULTIPLIER: u64 = 0x0102_0408_1020_4080;
 const BYTE_GATHER_SHIFT: usize = QWORD_BITS - BITS_PER_BYTE;
-const MODRM_REGISTER: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn mask_rax(code: &mut Vec<u8>, mask: u64) {
+fn mask_rax(code: &mut Code, mask: u64) {
     if mask <= u64::from(u32::MAX) {
-        code.extend(AND_EAX_IMM32);
-        code.extend((mask as u32).to_le_bytes());
+        code.asm()
+            .alu_accumulator_imm32(Alu::And, Size::Dword, mask as i32);
     } else {
-        code.extend(MOVABS_RCX);
-        code.extend(mask.to_le_bytes());
-        code.extend(AND_RAX_RCX);
+        let mut asm = code.asm();
+        asm.mov_imm64(Rcx, mask);
+        asm.alu(Alu::And, Size::Qword, Rax, Rcx);
     }
 }
 
@@ -61,43 +44,41 @@ fn compact_mask(stride: usize, group: usize) -> u64 {
 }
 
 /// Compress each element-leading P bit in RAX to consecutive low bits.
-fn compact(code: &mut Vec<u8>, element: ElementSize, input_bits: usize) {
+fn compact(code: &mut Code, element: ElementSize, input_bits: usize) {
     let stride = element.bytes();
     if stride == 1 {
         return;
     }
     if element == ElementSize::Doubleword {
         mask_rax(code, BYTE_LOW_BITS);
-        code.extend(MOVABS_RCX);
-        code.extend(BYTE_GATHER_MULTIPLIER.to_le_bytes());
-        code.extend(IMUL_RAX_RCX);
-        code.extend(SHR_RAX_IMM8);
-        code.push(BYTE_GATHER_SHIFT as u8);
+        let mut asm = code.asm();
+        asm.mov_imm64(Rcx, BYTE_GATHER_MULTIPLIER);
+        asm.imul(Size::Qword, Rax, Rcx);
+        asm.shift_imm(ShiftOp::Shr, Size::Qword, Rax, BYTE_GATHER_SHIFT as u8);
         return;
     }
     let input_mask = u64::MAX >> (QWORD_BITS - input_bits);
     mask_rax(code, compact_mask(stride, 1) & input_mask);
     let mut group = 1;
     while group < input_bits / stride {
-        code.extend(MOV_RCX_RAX);
-        code.extend(SHR_RCX_IMM8);
-        code.push(((stride - 1) * group) as u8);
-        code.extend(OR_RAX_RCX);
+        let mut asm = code.asm();
+        asm.mov(Size::Qword, Rcx, Rax);
+        asm.shift_imm(ShiftOp::Shr, Size::Qword, Rcx, ((stride - 1) * group) as u8);
+        asm.alu(Alu::Or, Size::Qword, Rax, Rcx);
         group *= 2;
         mask_rax(code, compact_mask(stride, group) & input_mask);
     }
 }
 
-fn constant_half(code: &mut Vec<u8>, value: u64, destination: u8) {
-    code.extend(MOVABS_RAX);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (destination << REGISTER_SHIFT));
+fn constant_half(code: &mut Code, value: u64, destination: u8) {
+    code.asm().mov_imm64(Rax, value);
+    code.asm()
+        .simd(Host::MoveGprQword, destination, Rax, TargetCpu::Baseline);
 }
 
 /// No guest RAM, flags or other register-bank effects. P/Z are separate banks,
 /// so each P chunk may be read immediately before its Z chunk is committed.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let stride = operand.element_size.bytes();
     assert!(stride <= QWORD_BYTES);
     assert!(usize::from(operand.portion) < stride);
@@ -114,8 +95,9 @@ pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: 
         if chunk_start >= end || chunk_start + CHUNK_BITS <= start {
             continue;
         }
-        code.extend(XOR_R8D_R8D);
-        code.extend(XOR_R9D_R9D);
+        let mut asm = code.asm();
+        asm.alu(Alu::Xor, Size::Dword, R8, R8);
+        asm.alu(Alu::Xor, Size::Dword, R9, R9);
         for source_chunk in 0..length.predicate_bytes().div_ceil(QWORD_BYTES) {
             let bit_position = start + source_chunk * (QWORD_BITS / stride);
             if bit_position / CHUNK_BITS != destination_chunk {
@@ -126,17 +108,19 @@ pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: 
             compact(code, operand.element_size, input_bits);
             let shift = bit_position % QWORD_BITS;
             if shift != 0 {
-                code.extend(SHL_RAX_IMM8);
-                code.push(shift as u8);
+                code.asm()
+                    .shift_imm(ShiftOp::Shl, Size::Qword, Rax, shift as u8);
             }
-            code.extend(if bit_position % CHUNK_BITS < QWORD_BITS {
-                OR_R8_RAX
+            let destination = if bit_position % CHUNK_BITS < QWORD_BITS {
+                R8
             } else {
-                OR_R9_RAX
-            });
+                R9
+            };
+            code.asm().alu(Alu::Or, Size::Qword, destination, Rax);
         }
-        code.extend(MOVQ_XMM0_R8);
-        code.extend(MOVQ_XMM1_R9);
+        let mut asm = code.asm();
+        asm.movq_to_xmm(0, R8);
+        asm.movq_to_xmm(1, R9);
         packed(code, Host::UnpackLowQword, RESULT, HIGH);
         if operand.portion != 0 {
             let mut mask = 0u128;

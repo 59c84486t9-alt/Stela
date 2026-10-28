@@ -1,35 +1,16 @@
 //! Saturating arithmetic. XMM4 accumulates the per-lane FPSR.QC mask; overflow is
 //! detected before clamping.
+use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestState, TargetCpu,
     aarch64::simd::saturating::{FPSR_QC, Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
-fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
-    let bytes = value.to_le_bytes();
-    constant(
-        code,
-        xmm,
-        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
-    );
-}
-fn arithmetic(lane: u8, sub: bool) -> Host {
-    match (sub, lane) {
-        (false, 1) => Host::AddByte,
-        (false, 2) => Host::AddWord,
-        (false, 4) => Host::AddDword,
-        (false, 8) => Host::AddQword,
-        (true, 1) => Host::SubByte,
-        (true, 2) => Host::SubWord,
-        (true, 4) => Host::SubDword,
-        (true, 8) => Host::SubQword,
-        _ => unreachable!("reviewed lane width"),
-    }
-}
-pub(super) fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, lane: u8) {
+pub(super) fn sign_mask(code: &mut Code, destination: u8, source: u8, lane: u8) {
     if lane == 1 {
         packed(code, Host::Xor, destination, destination);
         packed(code, Host::GreaterByte, destination, source);
@@ -46,7 +27,7 @@ pub(super) fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, lane: u
     }
 }
 /// XMM0=a, XMM1=b, XMM2=wrapped a+b; produce the unsigned carry mask in XMM4.
-fn unsigned_carry(code: &mut Vec<u8>, lane: u8) {
+fn unsigned_carry(code: &mut Code, lane: u8) {
     packed(code, Host::MoveAligned, 3, 0);
     packed(code, Host::And, 3, 1);
     packed(code, Host::MoveAligned, 4, 0);
@@ -57,15 +38,15 @@ fn unsigned_carry(code: &mut Vec<u8>, lane: u8) {
     sign_mask(code, 4, 3, lane);
 }
 /// Merge wrapped XMM2 and clamping bound XMM5 using saturation mask XMM4.
-fn clamp_result(code: &mut Vec<u8>) {
+fn clamp_result(code: &mut Code) {
     packed(code, Host::Xor, 5, 2);
     packed(code, Host::And, 5, 4);
     packed(code, Host::Xor, 2, 5);
     packed(code, Host::MoveAligned, 0, 2);
 }
-pub(super) fn add_sub(code: &mut Vec<u8>, lane: u8, signed: bool, sub: bool) {
+pub(super) fn add_sub(code: &mut Code, lane: u8, signed: bool, sub: bool) {
     packed(code, Host::MoveAligned, 2, 0);
-    packed(code, arithmetic(lane, sub), 2, 1);
+    packed(code, add_or_subtract(lane, sub), 2, 1);
     if lane <= 2 {
         let opcode = match (signed, sub, lane) {
             (true, false, 1) => Host::AddSignedSaturatingByte,
@@ -117,7 +98,7 @@ pub(super) fn add_sub(code: &mut Vec<u8>, lane: u8, signed: bool, sub: bool) {
         packed(code, Host::MoveAligned, 0, 5);
     }
 }
-fn absolute_or_negate(code: &mut Vec<u8>, lane: u8, negate: bool, target: TargetCpu) {
+fn absolute_or_negate(code: &mut Code, lane: u8, negate: bool, target: TargetCpu) {
     lane_constant(code, 4, lane, 1u64 << (lane * 8 - 1));
     packed(
         code,
@@ -136,7 +117,7 @@ fn absolute_or_negate(code: &mut Vec<u8>, lane: u8, negate: bool, target: Target
     }
     if negate {
         packed(code, Host::Xor, 1, 1);
-        packed(code, arithmetic(lane, true), 1, 0);
+        packed(code, add_or_subtract(lane, true), 1, 0);
         packed(code, Host::MoveAligned, 0, 1);
     } else if lane <= 4 && target >= TargetCpu::Ssse3 {
         match lane {
@@ -149,12 +130,12 @@ fn absolute_or_negate(code: &mut Vec<u8>, lane: u8, negate: bool, target: Target
     } else {
         sign_mask(code, 1, 0, lane);
         packed(code, Host::Xor, 0, 1);
-        packed(code, arithmetic(lane, true), 0, 1);
+        packed(code, add_or_subtract(lane, true), 0, 1);
     }
     // Wrapped -MIN/ABS(MIN) is MIN: adding the all-one mask produces MAX.
-    packed(code, arithmetic(lane, false), 0, 4);
+    packed(code, add_or_subtract(lane, false), 0, 4);
 }
-fn mixed_add(code: &mut Vec<u8>, lane: u8, unsigned_result: bool) {
+fn mixed_add(code: &mut Code, lane: u8, unsigned_result: bool) {
     if !unsigned_result {
         lane_constant(code, 5, lane, 1u64 << (lane * 8 - 1));
         packed(code, Host::Xor, 0, 5);
@@ -164,7 +145,7 @@ fn mixed_add(code: &mut Vec<u8>, lane: u8, unsigned_result: bool) {
     } else {
         sign_mask(code, 6, 1, lane);
         packed(code, Host::MoveAligned, 2, 0);
-        packed(code, arithmetic(lane, false), 2, 1);
+        packed(code, add_or_subtract(lane, false), 2, 1);
         unsigned_carry(code, lane);
         packed(code, Host::Xor, 4, 6);
         packed(code, Host::EqualDword, 5, 5);
@@ -176,7 +157,7 @@ fn mixed_add(code: &mut Vec<u8>, lane: u8, unsigned_result: bool) {
 /// Clamp the wide source lanes. XMM6 holds the upper-bound mask across the
 /// second comparison; the compare recipe uses only XMM0-4 and XMM7.
 fn narrow(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     unsigned_source: bool,
     unsigned_result: bool,
@@ -231,26 +212,35 @@ fn narrow(
         _ => unreachable!("allocated narrowing width"),
     }
 }
-pub(super) fn publish_qc(code: &mut Vec<u8>, active_bytes: u8) {
+pub(super) fn publish_qc(code: &mut Code, active_bytes: u8) {
     Host::ByteSignMask.register(code, 1, 4, TargetCpu::Baseline); // pmovmskb ecx,xmm4
-    code.extend([0x81, 0xe1]); // AND ECX, active byte mask: inactive lanes cannot set QC
-    code.extend(((1u32 << active_bytes) - 1).to_le_bytes());
-    code.extend([
-        0x0f,
-        0x95,
-        0xc1,
-        0x0f,
-        0xb6,
-        0xc9,
-        0xc1,
-        0xe1,
+    use Gpr::Rcx;
+    let mut asm = code.asm();
+    // The active byte mask: inactive lanes cannot set QC.
+    asm.alu_imm32(
+        Alu::And,
+        Size::Dword,
+        Rcx,
+        ((1u32 << active_bytes) - 1) as i32,
+    );
+    asm.setcc(Cond::Ne, Rcx);
+    asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Dword,
+        Rcx,
         FPSR_QC.trailing_zeros() as u8,
-    ]); // setne cl; movzx ecx,cl; shl ecx,QC
-    code.extend([0x09, 0x8f]); // or [rdi+FPSR],ecx: sticky QC, preserve every other bit
-    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    );
+    // Sticky QC, preserving every other bit.
+    asm.alu(
+        Alu::Or,
+        Size::Dword,
+        guest(core::mem::offset_of!(GuestState, fpsr) as u32),
+        Rcx,
+    );
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,

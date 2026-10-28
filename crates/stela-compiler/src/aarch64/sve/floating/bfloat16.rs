@@ -1,5 +1,6 @@
 //! SVE BF16 arithmetic, dot products and widening multiply-add. Non-widening
 //! arithmetic rounds to BF16 and reports exceptions. Predicated forms merge.
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::sve::dot::{RightOperand, VectorPart};
 
@@ -266,8 +267,7 @@ const ENCODINGS: &[Encoding] = &[
 
 /// Exact fixed-bit forms contain no additional reserved register/index values.
 /// The enclosing decoder validates guest feature availability and streaming mode.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = ENCODINGS
         .iter()
         .find(|encoding| word & encoding.mask == encoding.value)?;

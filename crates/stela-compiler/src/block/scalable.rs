@@ -1,4 +1,5 @@
 //! Scalable numerical instructions that exit to a runtime service.
+use crate::aarch64::Unsupported;
 
 use crate::{
     CompileError, GuestAddress,
@@ -9,7 +10,7 @@ use crate::{
         sme::{extrema_scale, fp_matrix, fp_vector, fp8_conversion, fp8_matrix},
         sve::floating,
     },
-    extended::ScalableProfile,
+    scalable_context::ScalableProfile,
 };
 use alloc::format;
 
@@ -215,8 +216,8 @@ pub fn decode_scalable_numerical_instruction(
     } else if let Some(operand) = extrema_scale::decode(word) {
         ScalableNumericalOperation::SmeExtremaScale(operand)
     } else if let Some(result) = floating::Operation::decode(word) {
-        let operand =
-            result.map_err(|()| CompileError("reserved scalable numerical encoding".into()))?;
+        let operand = result
+            .map_err(|Unsupported| CompileError("reserved scalable numerical encoding".into()))?;
         if !operand.requires_numerical_completion() {
             return Ok(None);
         }
@@ -250,8 +251,6 @@ mod tests {
         use crate::{
             TargetCpu,
             aarch64::scalable::{ScalableMode, VectorLength, profile::ScalableControls},
-            block::BlockProfile,
-            extended::block::{ExtendedBlockProfile, compile_for_profile},
         };
 
         const PC: GuestAddress = GuestAddress(0x1000);
@@ -342,10 +341,11 @@ mod tests {
                         admit_scalable_numerical_instruction(decoded, profile, numerical).unwrap();
                     assert_eq!(admitted.word(), word);
                     assert_eq!(admitted.next_pc(), GuestAddress(0x1004));
-                    let compiled = compile_for_profile(
+                    let compiled = crate::testing::context_block(
                         &word.to_le_bytes(),
                         PC,
-                        ExtendedBlockProfile::new(profile, BlockProfile::Ordinary, numerical),
+                        profile,
+                        numerical,
                         TargetCpu::Baseline,
                     )
                     .unwrap();
@@ -378,14 +378,11 @@ mod tests {
                         .unwrap();
                         assert_eq!(admitted.word(), word, "{id}");
                         assert_eq!(admitted.next_pc(), GuestAddress(0x1004), "{id}");
-                        let compiled = compile_for_profile(
+                        let compiled = crate::testing::context_block(
                             &word.to_le_bytes(),
                             PC,
-                            ExtendedBlockProfile::new(
-                                profile,
-                                BlockProfile::Ordinary,
-                                NumericalFeatures::default(),
-                            ),
+                            profile,
+                            NumericalFeatures::default(),
                             TargetCpu::Baseline,
                         )
                         .unwrap();

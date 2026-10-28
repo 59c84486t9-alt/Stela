@@ -1,6 +1,8 @@
 //! Typed checked LSE, acquire/release and DMB requests. No guest RAM pointer
 //! is embedded in native code; the shared writer/monitor owner performs effects.
 use super::{load, memory_context as memory, store};
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size};
+use crate::x86_64::isa::SimdOpcode;
 use crate::{
     CompileError,
     aarch64::{AddressMode, Operation, Register, Width, atomic, ordered},
@@ -11,30 +13,14 @@ use crate::{
         profile_requirements,
     },
 };
-use alloc::vec::Vec;
 
 const DATA_OFFSET: u32 = MEMORY_REQUEST_BYTES as u32;
 const STACK_ALIGNMENT: u32 = 16;
-const SUB_RSP: &[u8] = &[0x48, 0x83, 0xec];
-const ADD_RSP: &[u8] = &[0x48, 0x83, 0xc4];
-const ZERO_EAX: &[u8] = &[0x31, 0xc0];
-const ZERO_XMM0: &[u8] = &[0x66, 0x0f, 0xef, 0xc0];
-const STORE_VECTOR: &[u8] = &[0xf3, 0x0f, 0x7f, 0x44, 0x24];
-const STORE_FIELD: &[u8] = &[0xc7, 0x44, 0x24];
 
-const STORE_BYTE: &[u8] = &[0x88, 0x44, 0x24];
-const STORE_HALF: &[u8] = &[0x66, 0x89, 0x44, 0x24];
-const STORE_WORD: &[u8] = &[0x89, 0x44, 0x24];
-const STORE_DOUBLE: &[u8] = &[0x48, 0x89, 0x44, 0x24];
-const LOAD_BYTE: &[u8] = &[0x0f, 0xb6, 0x44, 0x24];
-const LOAD_HALF: &[u8] = &[0x0f, 0xb7, 0x44, 0x24];
-const LOAD_WORD: &[u8] = &[0x8b, 0x44, 0x24];
-const LOAD_DOUBLE: &[u8] = &[0x48, 0x8b, 0x44, 0x24];
-const SIGN_BYTE_TO_X: &[u8] = &[0x48, 0x0f, 0xbe, 0x44, 0x24];
-const SIGN_HALF_TO_X: &[u8] = &[0x48, 0x0f, 0xbf, 0x44, 0x24];
-const SIGN_WORD_TO_X: &[u8] = &[0x48, 0x63, 0x44, 0x24];
-const SIGN_BYTE_TO_W: &[u8] = &[0x0f, 0xbe, 0x44, 0x24];
-const SIGN_HALF_TO_W: &[u8] = &[0x0f, 0xbf, 0x44, 0x24];
+/// The scratch payload field at `offset`.
+fn payload(offset: u32) -> Mem {
+    Mem::base_disp8(Gpr::Rsp, (DATA_OFFSET + offset) as i8)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operand {
@@ -248,15 +234,15 @@ impl CheckedOperand {
             ..MemoryRequirements::default()
         }
     }
-    pub(crate) fn emit(&self, code: &mut Vec<u8>, pc: u64) {
+    pub(crate) fn emit(&self, code: &mut Code, pc: u64) {
         let data_bytes = match self.operand {
             Operand::Atomic(_) => wire_atomic::DATA_BYTES,
             Operand::Ordered(_) => wire_ordered::DATA_BYTES,
         } as u32;
         let scratch = (DATA_OFFSET + data_bytes).div_ceil(STACK_ALIGNMENT) * STACK_ALIGNMENT;
         assert!(scratch <= i8::MAX as u32);
-        code.extend(SUB_RSP);
-        code.push(scratch as u8);
+        code.asm()
+            .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, scratch as i8);
         memory::begin(code);
         let sp_failure = if self.profile.sp_requirement() == SpAlignmentRequirement::Enabled {
             self.base()
@@ -271,13 +257,13 @@ impl CheckedOperand {
             };
             memory::address::immediate(code, base, displacement, AddressMode::Offset);
         } else {
-            code.extend(ZERO_EAX);
+            code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
         }
         memory::request(code, 0, DATA_OFFSET, self.bytes(), self.descriptor(), pc);
-        code.extend(ZERO_XMM0);
+        let mut asm = code.asm();
+        asm.simd(SimdOpcode::Xor, 0, Rm::Xmm(0), crate::TargetCpu::Baseline);
         for offset in (0..data_bytes).step_by(STACK_ALIGNMENT as usize) {
-            code.extend(STORE_VECTOR);
-            code.push((DATA_OFFSET + offset) as u8);
+            asm.movdqu_store(payload(offset), 0);
         }
         match self.operand {
             Operand::Atomic(operand) => stage_atomic(code, operand),
@@ -298,40 +284,32 @@ impl CheckedOperand {
             }
             Operand::Ordered(_) => {}
         }
-        code.extend(ZERO_EAX);
+        code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
         let cleanup = code.len();
         memory::patch_branch(code, failure, cleanup);
         if let Some(failure) = sp_failure {
             memory::patch_branch(code, failure, cleanup);
         }
-        code.extend(ADD_RSP);
-        code.push(scratch as u8);
+        code.asm()
+            .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, scratch as i8);
         memory::address::return_if_failed(code);
     }
 }
-fn field(code: &mut Vec<u8>, offset: u32, value: u32) {
+fn field(code: &mut Code, offset: u32, value: u32) {
     if value != 0 {
-        code.extend(STORE_FIELD);
-        code.push((DATA_OFFSET + offset) as u8);
-        code.extend(value.to_le_bytes());
+        code.asm()
+            .mov_rm_imm32(Size::Dword, payload(offset), value as i32);
     }
 }
-fn stage(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
+fn stage(code: &mut Code, register: Register, bytes: u8, offset: u32) {
     if register == Register::Zero {
         return;
     }
     load(code, register);
-    code.extend(match bytes {
-        1 => STORE_BYTE,
-        2 => STORE_HALF,
-        4 => STORE_WORD,
-        8 => STORE_DOUBLE,
-        _ => unreachable!("validated width"),
-    });
-    code.push((DATA_OFFSET + offset) as u8);
+    code.asm().mov_store(size(bytes), payload(offset), Gpr::Rax);
 }
 fn commit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: Register,
     bytes: u8,
     offset: u32,
@@ -340,21 +318,28 @@ fn commit(
     if register == Register::Zero {
         return;
     }
-    let prefix: &[u8] = match (bytes, extension) {
-        (1, ordered::LoadExtension::Sign(Width::X64)) => SIGN_BYTE_TO_X,
-        (2, ordered::LoadExtension::Sign(Width::X64)) => SIGN_HALF_TO_X,
-        (4, ordered::LoadExtension::Sign(Width::X64)) => SIGN_WORD_TO_X,
-        (1, ordered::LoadExtension::Sign(Width::W32)) => SIGN_BYTE_TO_W,
-        (2, ordered::LoadExtension::Sign(Width::W32)) => SIGN_HALF_TO_W,
-        (1, _) => LOAD_BYTE,
-        (2, _) => LOAD_HALF,
-        (4, _) => LOAD_WORD,
-        (8, _) => LOAD_DOUBLE,
+    let field = payload(offset);
+    let mut asm = code.asm();
+    match (bytes, extension) {
+        (4, ordered::LoadExtension::Sign(Width::X64)) => asm.movsxd(Gpr::Rax, field),
+        (1 | 2, ordered::LoadExtension::Sign(width)) => {
+            asm.movsx(Size::of(width == Width::X64), Gpr::Rax, size(bytes), field);
+        }
+        (1 | 2, _) => asm.movzx(Size::Dword, Gpr::Rax, size(bytes), field),
+        (4 | 8, _) => asm.mov_load(size(bytes), Gpr::Rax, field),
         _ => unreachable!("validated result width"),
-    };
-    code.extend(prefix);
-    code.push((DATA_OFFSET + offset) as u8);
+    }
     store(code, register);
+}
+/// The operand size of a `bytes`-wide field.
+fn size(bytes: u8) -> Size {
+    match bytes {
+        1 => Size::Byte,
+        2 => Size::Word,
+        4 => Size::Dword,
+        8 => Size::Qword,
+        _ => unreachable!("validated width"),
+    }
 }
 fn atomic_operation(kind: atomic::Kind) -> wire_atomic::AtomicOperation {
     use atomic::{Kind, Rmw};
@@ -375,7 +360,7 @@ fn atomic_operation(kind: atomic::Kind) -> wire_atomic::AtomicOperation {
         },
     }
 }
-fn stage_atomic(code: &mut Vec<u8>, operand: atomic::Operand) {
+fn stage_atomic(code: &mut Code, operand: atomic::Operand) {
     use atomic::{Kind, Order};
     let acquire = match operand.kind {
         Kind::CompareExchange { compare, .. } => operand.order.acquires(compare),
@@ -424,7 +409,7 @@ fn stage_atomic(code: &mut Vec<u8>, operand: atomic::Operand) {
         }
     }
 }
-fn commit_atomic(code: &mut Vec<u8>, operand: atomic::Operand) {
+fn commit_atomic(code: &mut Code, operand: atomic::Operand) {
     use atomic::Kind;
     let extension = ordered::LoadExtension::Zero;
     match operand.kind {
@@ -464,7 +449,7 @@ fn wire_feature(feature: ordered::Feature) -> wire_ordered::OrderedFeature {
         ordered::Feature::Lor => wire_ordered::OrderedFeature::Lor,
     }
 }
-fn stage_ordered(code: &mut Vec<u8>, operand: ordered::Operand) {
+fn stage_ordered(code: &mut Code, operand: ordered::Operand) {
     use wire_ordered::{
         BARRIER_OFFSET, FEATURE_OFFSET, OPERATION_OFFSET, ORDER_OFFSET, OrderedOperation,
         VALUE_OFFSET,

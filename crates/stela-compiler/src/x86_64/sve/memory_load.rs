@@ -1,6 +1,9 @@
 //! SVE loads through the memory service into a private staging buffer, so a
 //! fault leaves the destination unchanged.
 use super::super::{isa::SimdOpcode as Host, scalable};
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Mem, Patch, Rm, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -21,34 +24,7 @@ use alloc::vec::Vec;
 const STACK_ALIGNMENT: u32 = 16;
 const QWORD_BYTES: u32 = size_of::<u64>() as u32;
 const PREDICATE_WORD_BITS: usize = u64::BITS as usize;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
-const MOV_RAX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const MOV_EAX_RSP_DISP32: &[u8] = &[0x8b, 0x84, 0x24];
-const MOVZX_EAX_BYTE_RSP_DISP32: &[u8] = &[0x0f, 0xb6, 0x84, 0x24];
-const MOVZX_EAX_WORD_RSP_DISP32: &[u8] = &[0x0f, 0xb7, 0x84, 0x24];
-const MOVSX_RAX_BYTE_RSP_DISP32: &[u8] = &[0x48, 0x0f, 0xbe, 0x84, 0x24];
-const MOVSX_RAX_WORD_RSP_DISP32: &[u8] = &[0x48, 0x0f, 0xbf, 0x84, 0x24];
-const MOVSXD_RAX_RSP_DISP32: &[u8] = &[0x48, 0x63, 0x84, 0x24];
-const MOV_RSP_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const MOV_RSP_DISP32_EAX: &[u8] = &[0x89, 0x84, 0x24];
-const MOV_RSP_DISP32_AX: &[u8] = &[0x66, 0x89, 0x84, 0x24];
-const MOV_RSP_DISP32_AL: &[u8] = &[0x88, 0x84, 0x24];
-const MOVDQU_RSP_DISP32_XMM0: &[u8] = &[0xf3, 0x0f, 0x7f, 0x84, 0x24];
-const MOVDQU_RSP_DISP32_XMM3: &[u8] = &[0xf3, 0x0f, 0x7f, 0x9c, 0x24];
-const SIMD_MODRM_REGISTER: u8 = 0xc0;
 const REPEAT_LOW_DWORD: u8 = 0;
-const MOVDQU_XMM0_RSP_DISP32: &[u8] = &[0xf3, 0x0f, 0x6f, 0x84, 0x24];
-const PXOR_XMM0_XMM0: &[u8] = &[0x66, 0x0f, 0xef, 0xc0];
-const BT_RAX_IMM8: &[u8] = &[0x48, 0x0f, 0xba, 0xe0];
-const TEST_RAX_RAX: &[u8] = &[0x48, 0x85, 0xc0];
-const MOVABS_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const AND_RAX_RCX: &[u8] = &[0x48, 0x21, 0xc8];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const JNC_REL32: &[u8] = &[0x0f, 0x83];
-const JMP_REL32: &[u8] = &[0xe9];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 
 #[derive(Clone, Copy)]
 struct Scratch {
@@ -77,48 +53,45 @@ impl Scratch {
     }
 }
 
-fn displacement(code: &mut Vec<u8>, opcode: &[u8], offset: u32) {
-    code.extend(opcode);
-    code.extend(offset.to_le_bytes());
+fn stack(offset: u32) -> Mem {
+    Mem::base_disp32(Rsp, offset as i32)
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let position = code.len();
-    code.extend(0_i32.to_le_bytes());
-    position
-}
-
-fn add_immediate(code: &mut Vec<u8>, value: i32) {
+fn add_immediate(code: &mut Code, value: i32) {
     if value != 0 {
-        code.extend(ADD_RAX_IMM32);
-        code.extend(value.to_le_bytes());
+        code.asm()
+            .alu_accumulator_imm32(Alu::Add, Size::Qword, value);
     }
 }
 
-fn predicate(code: &mut Vec<u8>, operand: Operand, length: VectorLength, scratch: Scratch) {
+fn predicate(code: &mut Code, operand: Operand, length: VectorLength, scratch: Scratch) {
     if let Some(predicate) = operand.predicate {
         for word in 0..length.predicate_bytes().div_ceil(QWORD_BYTES as usize) {
             scalable::read_predicate_chunk(code, predicate, word, length);
-            displacement(
-                code,
-                MOV_RSP_DISP32_RAX,
-                scratch.predicate + word as u32 * QWORD_BYTES,
+            code.asm().mov_store(
+                Size::Qword,
+                stack(scratch.predicate + word as u32 * QWORD_BYTES),
+                Rax,
             );
         }
     }
 }
 
-fn inactive_branch(code: &mut Vec<u8>, bit: usize, scratch: Scratch) -> usize {
+fn inactive_branch(code: &mut Code, bit: usize, scratch: Scratch) -> Patch {
     let word = bit / PREDICATE_WORD_BITS;
-    displacement(
-        code,
-        MOV_RAX_RSP_DISP32,
-        scratch.predicate + word as u32 * QWORD_BYTES,
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Qword,
+        Rax,
+        stack(scratch.predicate + word as u32 * QWORD_BYTES),
     );
-    code.extend(BT_RAX_IMM8);
-    code.push((bit % PREDICATE_WORD_BITS) as u8);
-    branch(code, JNC_REL32)
+    asm.bit_imm(
+        BitTest::Bt,
+        Size::Qword,
+        Rax,
+        (bit % PREDICATE_WORD_BITS) as u8,
+    );
+    asm.jcc(Cond::Ae)
 }
 
 fn access_flags(operand: Operand) -> u32 {
@@ -168,7 +141,7 @@ pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
 }
 
 fn request(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     scratch: Scratch,
     source_offset: usize,
@@ -176,7 +149,8 @@ fn request(
     pc: u64,
     failed: &mut Vec<usize>,
 ) {
-    displacement(code, MOV_RAX_RSP_DISP32, scratch.address);
+    code.asm()
+        .mov_load(Size::Qword, Rax, stack(scratch.address));
     add_immediate(code, source_offset as i32);
     scalable::memory::request(
         code,
@@ -190,33 +164,34 @@ fn request(
     failed.push(scalable::memory::branch_failed(code));
 }
 
-fn read_value(code: &mut Vec<u8>, source: u32, element: ElementSize, extension: Extension) {
-    let opcode = match (element, extension) {
-        (ElementSize::Byte, Extension::Zero) => MOVZX_EAX_BYTE_RSP_DISP32,
-        (ElementSize::Halfword, Extension::Zero) => MOVZX_EAX_WORD_RSP_DISP32,
-        (ElementSize::Word, Extension::Zero) => MOV_EAX_RSP_DISP32,
-        (ElementSize::Byte, Extension::Sign) => MOVSX_RAX_BYTE_RSP_DISP32,
-        (ElementSize::Halfword, Extension::Sign) => MOVSX_RAX_WORD_RSP_DISP32,
-        (ElementSize::Word, Extension::Sign) => MOVSXD_RAX_RSP_DISP32,
-        (ElementSize::Doubleword, _) => MOV_RAX_RSP_DISP32,
+fn read_value(code: &mut Code, source: u32, element: ElementSize, extension: Extension) {
+    let source = stack(source);
+    let mut asm = code.asm();
+    match (element, extension) {
+        (ElementSize::Byte, Extension::Zero) => asm.movzx(Size::Dword, Rax, Size::Byte, source),
+        (ElementSize::Halfword, Extension::Zero) => asm.movzx(Size::Dword, Rax, Size::Word, source),
+        (ElementSize::Word, Extension::Zero) => asm.mov_load(Size::Dword, Rax, source),
+        (ElementSize::Byte, Extension::Sign) => asm.movsx(Size::Qword, Rax, Size::Byte, source),
+        (ElementSize::Halfword, Extension::Sign) => asm.movsx(Size::Qword, Rax, Size::Word, source),
+        (ElementSize::Word, Extension::Sign) => asm.movsxd(Rax, source),
+        (ElementSize::Doubleword, _) => asm.mov_load(Size::Qword, Rax, source),
         (ElementSize::Quadword, _) => unreachable!("SVE load scalar element is at most64 bits"),
-    };
-    displacement(code, opcode, source);
+    }
 }
 
-fn write_value(code: &mut Vec<u8>, destination: u32, element: ElementSize) {
-    let opcode = match element {
-        ElementSize::Byte => MOV_RSP_DISP32_AL,
-        ElementSize::Halfword => MOV_RSP_DISP32_AX,
-        ElementSize::Word => MOV_RSP_DISP32_EAX,
-        ElementSize::Doubleword => MOV_RSP_DISP32_RAX,
+fn write_value(code: &mut Code, destination: u32, element: ElementSize) {
+    let size = match element {
+        ElementSize::Byte => Size::Byte,
+        ElementSize::Halfword => Size::Word,
+        ElementSize::Word => Size::Dword,
+        ElementSize::Doubleword => Size::Qword,
         ElementSize::Quadword => unreachable!("SVE load scalar element is at most64 bits"),
     };
-    displacement(code, opcode, destination);
+    code.asm().mov_store(size, stack(destination), Rax);
 }
 
 fn lanes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     scratch: Scratch,
@@ -244,13 +219,12 @@ fn lanes(
             read_value(code, destination, operand.memory_element, operand.extension);
             write_value(code, destination, operand.element);
         }
-        let end = code.len();
-        scalable::memory::patch_branch(code, inactive, end);
+        code.asm().bind(inactive);
     }
 }
 
 fn scalar_replicate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     scratch: Scratch,
@@ -260,10 +234,10 @@ fn scalar_replicate(
 ) {
     let mut active = Vec::new();
     for word in 0..length.predicate_bytes().div_ceil(QWORD_BYTES as usize) {
-        displacement(
-            code,
-            MOV_RAX_RSP_DISP32,
-            scratch.predicate + word as u32 * QWORD_BYTES,
+        code.asm().mov_load(
+            Size::Qword,
+            Rax,
+            stack(scratch.predicate + word as u32 * QWORD_BYTES),
         );
         let first_bit = word * PREDICATE_WORD_BITS;
         let valid_bits = (length.bytes() - first_bit).min(PREDICATE_WORD_BITS);
@@ -271,17 +245,18 @@ fn scalar_replicate(
             .step_by(operand.element.bytes())
             .fold(0_u64, |mask, bit| mask | 1_u64 << bit);
         if mask != u64::MAX {
-            code.extend(MOVABS_RCX_IMM64);
-            code.extend(mask.to_le_bytes());
-            code.extend(AND_RAX_RCX);
+            let mut asm = code.asm();
+            asm.mov_imm64(Rcx, mask);
+            asm.alu(Alu::And, Size::Qword, Rax, Rcx);
         }
-        code.extend(TEST_RAX_RAX);
-        active.push(branch(code, JNZ_REL32));
+        let mut asm = code.asm();
+        asm.test(Size::Qword, Rax, Rax);
+        active.push(asm.jcc(Cond::Ne));
     }
-    let empty = branch(code, JMP_REL32);
-    let start = code.len();
+    let mut asm = code.asm();
+    let empty = asm.jmp();
     for active in active {
-        scalable::memory::patch_branch(code, active, start);
+        asm.bind(active);
     }
     request(code, operand, scratch, 0, scratch.scalar, pc, failed);
     read_value(
@@ -290,23 +265,22 @@ fn scalar_replicate(
         operand.memory_element,
         operand.extension,
     );
-    Host::MoveGprQword.append(code, target);
-    code.push(SIMD_MODRM_REGISTER);
+    code.asm().simd(Host::MoveGprQword, 0, Rax, target);
     match operand.element {
         ElementSize::Byte => {
             Host::UnpackLowByte.register(code, 0, 0, target);
             Host::UnpackLowWord.register(code, 0, 0, target);
-            Host::ShuffleDword.register(code, 0, 0, target);
-            code.push(REPEAT_LOW_DWORD);
+            code.asm()
+                .simd_imm(Host::ShuffleDword, 0, Rm::Xmm(0), REPEAT_LOW_DWORD, target);
         }
         ElementSize::Halfword => {
             Host::UnpackLowWord.register(code, 0, 0, target);
-            Host::ShuffleDword.register(code, 0, 0, target);
-            code.push(REPEAT_LOW_DWORD);
+            code.asm()
+                .simd_imm(Host::ShuffleDword, 0, Rm::Xmm(0), REPEAT_LOW_DWORD, target);
         }
         ElementSize::Word => {
-            Host::ShuffleDword.register(code, 0, 0, target);
-            code.push(REPEAT_LOW_DWORD);
+            code.asm()
+                .simd_imm(Host::ShuffleDword, 0, Rm::Xmm(0), REPEAT_LOW_DWORD, target);
         }
         ElementSize::Doubleword => Host::UnpackLowQword.register(code, 0, 0, target),
         ElementSize::Quadword => unreachable!("scalar replicate element is at most64 bits"),
@@ -324,33 +298,27 @@ fn scalar_replicate(
         );
         Host::MoveAligned.register(code, 3, 0, target);
         Host::And.register(code, 3, 1, target);
-        displacement(
-            code,
-            MOVDQU_RSP_DISP32_XMM3,
-            (chunk * VECTOR_CHUNK_BYTES) as u32,
-        );
+        code.asm()
+            .movdqu_store(stack((chunk * VECTOR_CHUNK_BYTES) as u32), 3);
     }
-    let end = code.len();
-    scalable::memory::patch_branch(code, empty, end);
+    code.asm().bind(empty);
 }
 
-fn commit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+fn commit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     if operand.kind == Kind::WholePredicate {
         for word in 0..length.predicate_bytes().div_ceil(QWORD_BYTES as usize) {
-            displacement(code, MOV_RAX_RSP_DISP32, word as u32 * QWORD_BYTES);
+            code.asm()
+                .mov_load(Size::Qword, Rax, stack(word as u32 * QWORD_BYTES));
             scalable::write_predicate_chunk(code, operand.data, word, length);
         }
     } else {
         if operand.kind == Kind::ReplicateQuad {
-            displacement(code, MOVDQU_XMM0_RSP_DISP32, 0);
+            code.asm().movdqu_load(0, stack(0));
         }
         for chunk in 0..length.chunks() {
             if operand.kind != Kind::ReplicateQuad {
-                displacement(
-                    code,
-                    MOVDQU_XMM0_RSP_DISP32,
-                    (chunk * VECTOR_CHUNK_BYTES) as u32,
-                );
+                code.asm()
+                    .movdqu_load(0, stack((chunk * VECTOR_CHUNK_BYTES) as u32));
             }
             scalable::store_z_chunk(code, operand.data, chunk, 0, length, target);
         }
@@ -361,29 +329,27 @@ fn commit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: Ta
 /// and returns through the shared epilogue; success falls through. Both restore
 /// the private stack allocation. SCTLR.A is 0; SP alignment is still checked.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     target: TargetCpu,
     pc: u64,
 ) {
     let scratch = Scratch::new(length);
-    displacement(code, SUB_RSP_IMM32, scratch.bytes);
+    code.asm()
+        .alu_imm32(Alu::Sub, Size::Qword, Rsp, scratch.bytes as i32);
     scalable::memory::begin(code);
     let zero_chunks = match operand.kind {
         Kind::WholeVector | Kind::WholePredicate => 0,
         Kind::ReplicateQuad => 1,
         Kind::Contiguous | Kind::ReplicateScalar => length.chunks(),
     };
+    let mut asm = code.asm();
     if zero_chunks != 0 {
-        code.extend(PXOR_XMM0_XMM0);
+        asm.simd(Host::Xor, 0, Rm::Xmm(0), TargetCpu::Baseline);
     }
     for chunk in 0..zero_chunks {
-        displacement(
-            code,
-            MOVDQU_RSP_DISP32_XMM0,
-            (chunk * VECTOR_CHUNK_BYTES) as u32,
-        );
+        asm.movdqu_store(stack((chunk * VECTOR_CHUNK_BYTES) as u32), 0);
     }
     predicate(code, operand, length, scratch);
     let mut failed = Vec::new();
@@ -391,7 +357,8 @@ pub(crate) fn emit(
         failed.push(fault);
     }
     super::memory::address(code, operand.address, length);
-    displacement(code, MOV_RSP_DISP32_RAX, scratch.address);
+    code.asm()
+        .mov_store(Size::Qword, stack(scratch.address), Rax);
     match operand.kind {
         Kind::Contiguous | Kind::ReplicateQuad => {
             lanes(code, operand, length, scratch, pc, &mut failed)
@@ -411,12 +378,13 @@ pub(crate) fn emit(
         }
     }
     commit(code, operand, length, target);
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     for failed in failed {
         scalable::memory::patch_branch(code, failed, cleanup);
     }
-    displacement(code, ADD_RSP_IMM32, scratch.bytes);
+    code.asm()
+        .alu_imm32(Alu::Add, Size::Qword, Rsp, scratch.bytes as i32);
     super::memory::return_if_failed(code);
 }
 

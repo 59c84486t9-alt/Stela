@@ -1,5 +1,6 @@
 //! SIMD/FP register-offset loads and stores.
 use super::super::{Register, register, register_offset::IndexExtend};
+use crate::aarch64::Unsupported;
 
 const REGISTER_OFFSET_MASK: u32 = 0x3f20_0c00;
 const REGISTER_OFFSET_CLASS: u32 = 0x3c20_0800;
@@ -28,8 +29,7 @@ pub struct Operand {
 }
 
 /// None is a different class; Err is an undefined size or index extension.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & REGISTER_OFFSET_MASK != REGISTER_OFFSET_CLASS {
         return None;
     }
@@ -37,14 +37,14 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let opcode = (word >> OPCODE_SHIFT) & OPCODE_MASK;
     let scale = if opcode & Q_OPCODE_BIT != 0 {
         if size != 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         Q_SCALE
     } else {
         size
     };
     let Some(extend) = IndexExtend::decode((word >> EXTENSION_SHIFT) & EXTENSION_MASK) else {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     };
     Some(Ok(Operand {
         load: opcode & LOAD_OPCODE_BIT != 0,

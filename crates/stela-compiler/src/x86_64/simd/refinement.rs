@@ -1,14 +1,16 @@
 //! FRECPS/FRSQRTS: exact-product SSE2, FMA3, or widened arithmetic for half.
 use super::super::isa::ShiftOpcode;
+use super::numerical::jump;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
-    RESULT_MINIMUM_EXPONENT, VZEROUPPER, branch, clear_scalar, commit_ah0_inexact, emit_fma,
-    emit_opcode_to, environment_alternative_nearest, exponent_range, guard_ah0_exceptions,
+    RESULT_MINIMUM_EXPONENT, branch, clear_scalar, commit_ah0_inexact, emit_fma, emit_opcode_to,
+    environment_alternative_nearest, exponent_range, guard_ah0_exceptions,
     prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
     reject_other_status, reject_product_status, resolve, restore_environment,
     restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
 use super::{Host, commit, half, packed};
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -20,6 +22,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use Gpr::{R9, R10, Rax, Rcx, Rsp};
 use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
@@ -32,55 +35,22 @@ const SPLIT_SINGLE_LEFT: u8 = 7;
 const HALF_CONSTANT: u8 = 5;
 const CONSTANT: u8 = 6;
 const ORIGINAL_LEFT: u8 = 7;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const SINGLE_PREFIX: u8 = 0xf3;
-const DOUBLE_PREFIX: u8 = 0xf2;
-const MOV_SCALAR: u8 = 0x10;
-const JMP_REL32: u8 = 0xe9;
 const SIGN_BITS: u32 = 1;
-const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
-const MOVD_XMM0_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc0];
-const SUB_EAX_IMM32: u8 = 0x2d;
 
 // Fixed registers for the cold Single-to-Double refinement path. The private
 // environment uses the same four-slot scratch layout as numerical.rs.
-const CVTSS2SD_XMM0_XMM0: &[u8] = &[0xf3, 0x0f, 0x5a, 0xc0];
-const CVTSS2SD_XMM1_XMM1: &[u8] = &[0xf3, 0x0f, 0x5a, 0xc9];
-const CVTSD2SS_XMM6_XMM6: &[u8] = &[0xf2, 0x0f, 0x5a, 0xf6];
-const CVTPS2PD_XMM0_XMM0: &[u8] = &[0x0f, 0x5a, 0xc0];
-const CVTPS2PD_XMM1_XMM1: &[u8] = &[0x0f, 0x5a, 0xc9];
-const CVTPS2PD_XMM0_XMM7: &[u8] = &[0x0f, 0x5a, 0xc7];
-const CVTPS2PD_XMM1_XMM5: &[u8] = &[0x0f, 0x5a, 0xcd];
-const CVTPD2PS_XMM6_XMM6: &[u8] = &[0x66, 0x0f, 0x5a, 0xf6];
-const MOVHLPS_XMM0_XMM7: &[u8] = &[0x0f, 0x12, 0xc7];
-const MOVHLPS_XMM1_XMM5: &[u8] = &[0x0f, 0x12, 0xcd];
-const MOVLHPS_XMM3_XMM6: &[u8] = &[0x0f, 0x16, 0xde];
+const MXCSR_SAVED_SLOT: u8 = 0;
 const MXCSR_CONTROL_SLOT: u8 = 4;
 const MXCSR_STATUS_SLOT: u8 = 8;
 const MXCSR_PRODUCT_SLOT: u8 = 12;
 const MXCSR_STACK_BYTES: u8 = 16;
-const STMXCSR_STATUS: &[u8] = &[0x0f, 0xae, 0x5c, 0x24, MXCSR_STATUS_SLOT];
-const LDMXCSR_SAVED: &[u8] = &[0x0f, 0xae, 0x14, 0x24];
-const LDMXCSR_CONTROL: &[u8] = &[0x0f, 0xae, 0x54, 0x24, MXCSR_CONTROL_SLOT];
-const MOV_R9D_PRODUCT: &[u8] = &[0x44, 0x8b, 0x4c, 0x24, MXCSR_PRODUCT_SLOT];
-const MOV_R10D_STATUS: &[u8] = &[0x44, 0x8b, 0x54, 0x24, MXCSR_STATUS_SLOT];
-const MOV_EAX_PRODUCT: &[u8] = &[0x8b, 0x44, 0x24, MXCSR_PRODUCT_SLOT];
-const MOV_ECX_STATUS: &[u8] = &[0x8b, 0x4c, 0x24, MXCSR_STATUS_SLOT];
-const MOV_PRODUCT_EAX: &[u8] = &[0x89, 0x44, 0x24, MXCSR_PRODUCT_SLOT];
-const OR_EAX_R9D: &[u8] = &[0x44, 0x09, 0xc8];
-const OR_ECX_R10D: &[u8] = &[0x44, 0x09, 0xd1];
-const ADD_RSP_MXCSR: &[u8] = &[0x48, 0x83, 0xc4, MXCSR_STACK_BYTES];
 
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
+/// `[rsp + offset]` in the private environment frame.
+fn slot(offset: u8) -> Mem {
+    Mem::base(Rsp, offset.into())
 }
 
-fn constant(code: &mut Vec<u8>, format: Format, kind: Kind, destination: u8) {
+fn constant(code: &mut Code, format: Format, kind: Kind, destination: u8) {
     packed(code, Host::EqualDword, destination, destination);
     let (right, left) = if format == Format::Single {
         (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
@@ -98,7 +68,7 @@ fn constant(code: &mut Vec<u8>, format: Format, kind: Kind, destination: u8) {
     left.emit(code, destination, left_bits as u8);
 }
 
-fn normal_sources(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn normal_sources(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let minimum = if operand.kind == Kind::ReciprocalSquareRoot {
         RESULT_MINIMUM_EXPONENT
     } else {
@@ -121,12 +91,16 @@ fn normal_sources(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>
     }
 }
 
-fn prehalve(code: &mut Vec<u8>, operand: &Operand) {
+fn prehalve(code: &mut Code, operand: &Operand) {
     if operand.format == Format::Single && operand.shape == Shape::Scalar {
-        code.extend(MOVD_EAX_XMM0);
-        code.push(SUB_EAX_IMM32);
-        code.extend((1u32 << operand.format.fraction_bits()).to_le_bytes());
-        code.extend(MOVD_XMM0_EAX);
+        let mut asm = code.asm();
+        asm.movd_from_xmm(Rax, LEFT);
+        asm.alu_accumulator_imm32(
+            Alu::Sub,
+            Size::Dword,
+            (1u32 << operand.format.fraction_bits()) as i32,
+        );
+        asm.movd_to_xmm(LEFT, Rax);
         return;
     }
     if operand.shape == Shape::Scalar {
@@ -150,24 +124,27 @@ fn prehalve(code: &mut Vec<u8>, operand: &Operand) {
 
 /// The first pair's target PE must not contaminate the second pair's exact
 /// Double-affine status. R9D/R10D retain wide/target flags across the reset.
-fn widen_single_pairs(code: &mut Vec<u8>) {
+fn widen_single_pairs(code: &mut Code) {
     packed(code, Host::MoveAligned, SPLIT_SINGLE_LEFT, LEFT);
     packed(code, Host::MoveAligned, SAVED_SINGLE_RIGHT, RIGHT);
     packed(code, Host::MoveAligned, SAVED_SINGLE_CONSTANT, CONSTANT);
-    code.extend(CVTPS2PD_XMM0_XMM7);
-    code.extend(CVTPS2PD_XMM1_XMM5);
+    let mut asm = code.asm();
+    asm.cvtps2pd(LEFT, Rm::Xmm(SPLIT_SINGLE_LEFT));
+    asm.cvtps2pd(RIGHT, Rm::Xmm(SAVED_SINGLE_RIGHT));
     widened_product(code, Shape::Vector128);
     save_product_status(code);
-    code.extend(MOV_R9D_PRODUCT);
-    code.extend(CVTPD2PS_XMM6_XMM6);
-    code.extend(STMXCSR_STATUS);
-    code.extend(MOV_R10D_STATUS);
-    code.extend(LDMXCSR_CONTROL);
+    let mut asm = code.asm();
+    asm.mov_load(Size::Dword, R9, slot(MXCSR_PRODUCT_SLOT));
+    asm.cvtpd2ps(CONSTANT, Rm::Xmm(CONSTANT));
+    asm.stmxcsr(slot(MXCSR_STATUS_SLOT));
+    asm.mov_load(Size::Dword, R10, slot(MXCSR_STATUS_SLOT));
+    asm.ldmxcsr(slot(MXCSR_CONTROL_SLOT));
     packed(code, Host::MoveAligned, FIRST_SINGLE_PAIR, CONSTANT);
-    code.extend(MOVHLPS_XMM0_XMM7);
-    code.extend(MOVHLPS_XMM1_XMM5);
-    code.extend(CVTPS2PD_XMM0_XMM0);
-    code.extend(CVTPS2PD_XMM1_XMM1);
+    let mut asm = code.asm();
+    asm.movhlps(LEFT, Rm::Xmm(SPLIT_SINGLE_LEFT));
+    asm.movhlps(RIGHT, Rm::Xmm(SAVED_SINGLE_RIGHT));
+    asm.cvtps2pd(LEFT, Rm::Xmm(LEFT));
+    asm.cvtps2pd(RIGHT, Rm::Xmm(RIGHT));
     emit_opcode_to(
         code,
         Format::Double,
@@ -186,21 +163,22 @@ fn widen_single_pairs(code: &mut Vec<u8>) {
         LEFT,
     );
     save_product_status(code);
-    code.extend(MOV_EAX_PRODUCT);
-    code.extend(OR_EAX_R9D);
-    code.extend(MOV_PRODUCT_EAX);
-    code.extend(CVTPD2PS_XMM6_XMM6);
-    code.extend(STMXCSR_STATUS);
-    code.extend(LDMXCSR_SAVED);
-    code.extend(MOV_EAX_PRODUCT);
-    code.extend(MOV_ECX_STATUS);
-    code.extend(OR_ECX_R10D);
-    code.extend(ADD_RSP_MXCSR);
-    code.extend(MOVLHPS_XMM3_XMM6);
+    let mut asm = code.asm();
+    asm.mov_load(Size::Dword, Rax, slot(MXCSR_PRODUCT_SLOT));
+    asm.alu(Alu::Or, Size::Dword, Rax, R9);
+    asm.mov_store(Size::Dword, slot(MXCSR_PRODUCT_SLOT), Rax);
+    asm.cvtpd2ps(CONSTANT, Rm::Xmm(CONSTANT));
+    asm.stmxcsr(slot(MXCSR_STATUS_SLOT));
+    asm.ldmxcsr(slot(MXCSR_SAVED_SLOT));
+    asm.mov_load(Size::Dword, Rax, slot(MXCSR_PRODUCT_SLOT));
+    asm.mov_load(Size::Dword, Rcx, slot(MXCSR_STATUS_SLOT));
+    asm.alu(Alu::Or, Size::Dword, Rcx, R10);
+    asm.alu_imm8(Alu::Add, Size::Qword, Rsp, MXCSR_STACK_BYTES as i8);
+    asm.movlhps(FIRST_SINGLE_PAIR, Rm::Xmm(CONSTANT));
     packed(code, Host::MoveAligned, CONSTANT, FIRST_SINGLE_PAIR);
 }
 
-fn widened_product(code: &mut Vec<u8>, shape: Shape) {
+fn widened_product(code: &mut Code, shape: Shape) {
     emit_opcode_to(
         code,
         Format::Double,
@@ -223,25 +201,27 @@ fn widened_product(code: &mut Vec<u8>, shape: Shape) {
 /// environment. The double product of widened singles is exact (at most 48
 /// bits), and the affine step must also be exact before the single final
 /// rounding.
-fn widened_single_fallback(code: &mut Vec<u8>, operand: &Operand, helper_start: usize) {
+fn widened_single_fallback(code: &mut Code, operand: &Operand, helper_start: usize) {
     packed(code, Host::MoveAligned, LEFT, SAVED_SINGLE_LEFT);
     constant(code, Format::Double, operand.kind, CONSTANT);
     environment_alternative_nearest(code);
     match operand.shape {
         Shape::Scalar => {
-            code.extend(CVTSS2SD_XMM0_XMM0);
-            code.extend(CVTSS2SD_XMM1_XMM1);
+            let mut asm = code.asm();
+            asm.cvtss2sd(LEFT, Rm::Xmm(LEFT));
+            asm.cvtss2sd(RIGHT, Rm::Xmm(RIGHT));
             widened_product(code, Shape::Scalar);
             save_product_status(code);
-            code.extend(CVTSD2SS_XMM6_XMM6);
+            code.asm().cvtsd2ss(CONSTANT, Rm::Xmm(CONSTANT));
             restore_environment_with_product(code);
         }
         Shape::Vector64 => {
-            code.extend(CVTPS2PD_XMM0_XMM0);
-            code.extend(CVTPS2PD_XMM1_XMM1);
+            let mut asm = code.asm();
+            asm.cvtps2pd(LEFT, Rm::Xmm(LEFT));
+            asm.cvtps2pd(RIGHT, Rm::Xmm(RIGHT));
             widened_product(code, Shape::Vector128);
             save_product_status(code);
-            code.extend(CVTPD2PS_XMM6_XMM6);
+            code.asm().cvtpd2ps(CONSTANT, Rm::Xmm(CONSTANT));
             restore_environment_with_product(code);
         }
         Shape::Vector128 => widen_single_pairs(code),
@@ -252,10 +232,10 @@ fn widened_single_fallback(code: &mut Vec<u8>, operand: &Operand, helper_start: 
     resolve(code, invalid_target, helper_start);
 }
 
-fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let native_fma = target.supports(TargetCpu::Fma);
     if native_fma {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     guard_ah0_exceptions(code, &mut helper);
@@ -338,16 +318,12 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
     commit_ah0_inexact(code);
     if operand.shape == Shape::Scalar {
         if merge != result {
-            code.extend([
-                if operand.format == Format::Single {
-                    SINGLE_PREFIX
-                } else {
-                    DOUBLE_PREFIX
-                },
-                SSE_ESCAPE,
-                MOV_SCALAR,
-                REGISTER_DIRECT | merge << MODRM_REGISTER_SHIFT | result,
-            ]);
+            if operand.format == Format::Single {
+                Host::MoveScalarSingle
+            } else {
+                Host::MoveScalarDouble
+            }
+            .register(code, merge, result, TargetCpu::Baseline);
         }
         test_control(code, FPCR_NEP);
         let merging = branch(code, Condition::NotZero);
@@ -363,7 +339,7 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
     }
 }
 
-fn emit_half(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+fn emit_half(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     let mut helper = Vec::new();
     let mut rollback = Vec::new();
     guard_ah0_exceptions(code, &mut helper);
@@ -434,7 +410,7 @@ fn emit_half(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

@@ -25,6 +25,7 @@
 //! clobbers RAX, RCX, RDX, R8, R9 and flags; a service call every register
 //! the SysV ABI lets a call clobber, which no block keeps live across its
 //! exit. The call aligns the stack to 16 bytes itself.
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size, resolve};
 use crate::{
     GuestAddress,
     block::{
@@ -103,9 +104,9 @@ pub struct MemoEntry {
 }
 
 const _: () = assert!(core::mem::size_of::<MemoEntry>() == 32);
-const MODIFIER: u8 = core::mem::offset_of!(MemoEntry, modifier) as u8;
-const TAG: u8 = core::mem::offset_of!(MemoEntry, tag) as u8;
-const VALUE: u8 = core::mem::offset_of!(MemoEntry, value) as u8;
+const MODIFIER: i32 = core::mem::offset_of!(MemoEntry, modifier) as i32;
+const TAG: i32 = core::mem::offset_of!(MemoEntry, tag) as i32;
+const VALUE: i32 = core::mem::offset_of!(MemoEntry, value) as i32;
 /// The multiplier and shift of [`slot`]: the top 14 bits index the memo.
 const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
 const SLOT_SHIFT: u8 = 50;
@@ -230,143 +231,114 @@ pub struct Thunk {
 /// at `memo` under the tag words at `tags`, or through `service`, else
 /// exiting at `pc` for the engine.
 pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Service) -> Thunk {
-    let mut code = Vec::with_capacity(256);
+    use Gpr::{R8, R9, R11, Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
+    use Size::{Dword, Qword};
+    let mut code = Code::new();
+    let mut asm = code.asm();
     let mut exits = Vec::new();
-    let pointer = u32::from(form.pointer) * 8;
-    code.extend([0x48, 0x8b, 0x87]); // mov rax,[rdi+pointer]
-    code.extend(pointer.to_le_bytes());
+    let pointer = frame(u32::from(form.pointer) * 8);
+    asm.mov_load(Qword, Rax, pointer);
     match form.modifier {
         Modifier::Register(register) => {
-            code.extend([0x48, 0x8b, 0x97]); // mov rdx,[rdi+modifier]
-            code.extend((u32::from(register) * 8).to_le_bytes());
+            asm.mov_load(Qword, Rdx, frame(u32::from(register) * 8));
         }
-        Modifier::StackPointer => {
-            code.extend([0x48, 0x8b, 0x97]);
-            code.extend(STACK_POINTER.to_le_bytes());
-        }
-        Modifier::Zero => code.extend([0x31, 0xd2]), // xor edx,edx
+        Modifier::StackPointer => asm.mov_load(Qword, Rdx, frame(STACK_POINTER)),
+        Modifier::Zero => asm.alu(Alu::Xor, Dword, Rdx, Rdx),
     }
-    code.extend([0x49, 0xb8]); // movabs r8,&tags[key]
-    code.extend((tags + u64::from(key_index(form.key)) * 8).to_le_bytes());
-    code.extend([0x4d, 0x8b, 0x00]); // mov r8,[r8]
-    code.extend([0x4d, 0x85, 0xc0]); // test r8,r8
-    jump(&mut code, &mut exits, JZ); // jz: the key is not open
-    let mut identities = Vec::new();
-    code.extend([0x49, 0x83, 0xf8, DISABLED as u8]); // cmp r8,DISABLED
-    jump(&mut code, &mut identities, JZ); // je: the result is the pointer in RAX
-    code.extend([0x48, 0x89, 0xd1]); // mov rcx,rdx
-    code.extend([0x48, 0xc1, 0xc1, 29]); // rol rcx,29
-    code.extend([0x48, 0x31, 0xc1]); // xor rcx,rax
-    code.extend([0x49, 0xb9]); // movabs r9,MIX
-    code.extend(MIX.to_le_bytes());
-    code.extend([0x49, 0x0f, 0xaf, 0xc9]); // imul rcx,r9
-    code.extend([0x48, 0xc1, 0xe9, SLOT_SHIFT]); // shr rcx,50
-    code.extend([0x48, 0xc1, 0xe1, 5]); // shl rcx,5: 32-byte entries
-    code.extend([0x49, 0xb9]); // movabs r9,memo
-    code.extend(memo.to_le_bytes());
-    code.extend([0x4c, 0x01, 0xc9]); // add rcx,r9
+    asm.mov_imm64(R8, tags + u64::from(key_index(form.key)) * 8);
+    asm.mov_load(Qword, R8, Mem::base(R8, 0));
+    asm.test(Qword, R8, R8);
+    // The key is not open.
+    exits.push(asm.jcc(Cond::E));
+    // The result is the pointer in RAX.
+    asm.alu_imm8(Alu::Cmp, Qword, R8, DISABLED as i8);
+    let identity = asm.jcc(Cond::E);
+    asm.mov(Qword, Rcx, Rdx);
+    asm.shift_imm(ShiftOp::Rol, Qword, Rcx, 29);
+    asm.alu(Alu::Xor, Qword, Rcx, Rax);
+    asm.mov_imm64(R9, MIX);
+    asm.imul(Qword, Rcx, R9);
+    asm.shift_imm(ShiftOp::Shr, Qword, Rcx, SLOT_SHIFT);
+    // 32-byte entries.
+    asm.shift_imm(ShiftOp::Shl, Qword, Rcx, 5);
+    asm.mov_imm64(R9, memo);
+    asm.alu(Alu::Add, Qword, Rcx, R9);
     let mut misses = Vec::new();
-    code.extend([0x48, 0x3b, 0x01]); // cmp rax,[rcx]
-    jump(&mut code, &mut misses, JNZ);
-    code.extend([0x48, 0x3b, 0x51, MODIFIER]); // cmp rdx,[rcx+modifier]
-    jump(&mut code, &mut misses, JNZ);
-    code.extend([0x49, 0x83, 0xc8, form.kind as u8]); // or r8,kind
-    code.extend([0x4c, 0x3b, 0x41, TAG]); // cmp r8,[rcx+tag]
-    jump(&mut code, &mut misses, JNZ);
-    code.extend([0x48, 0x8b, 0x41, VALUE]); // mov rax,[rcx+value]
-    land(&mut code, &identities);
-    let complete = code.len();
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rcx, 0));
+    misses.push(asm.jcc(Cond::Ne));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, Mem::base(Rcx, MODIFIER));
+    misses.push(asm.jcc(Cond::Ne));
+    asm.alu_imm8(Alu::Or, Qword, R8, form.kind as i8);
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rcx, TAG));
+    misses.push(asm.jcc(Cond::Ne));
+    asm.mov_load(Qword, Rax, Mem::base(Rcx, VALUE));
+    asm.bind(identity);
+    let complete = asm.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
     let mut next = None;
     let mut dynamic = None;
     match form.completion {
         Finish::Register => {
-            code.extend([0x48, 0x89, 0x87]); // mov [rdi+pointer],rax
-            code.extend(pointer.to_le_bytes());
-            next = Some(code.len());
-            code.extend(super::chain::direct_exit(next_pc, ExitKind::Fallthrough));
+            asm.mov_store(Qword, pointer, Rax);
+            next = Some(asm.len());
+            super::block::direct_exit_with(&mut asm, next_pc, ExitKind::Fallthrough);
         }
         Finish::Return => {
-            dynamic = Some(code.len());
-            exit_kind(&mut code, ExitKind::Return);
+            dynamic = Some(asm.len());
+            super::block::exit_kind_with(&mut asm, ExitKind::Return);
         }
         Finish::Branch { link } => {
             if link {
-                code.extend([0x48, 0xb9]); // movabs rcx,next_pc
-                code.extend(next_pc.0.to_le_bytes());
-                code.extend([0x48, 0x89, 0x8f]); // mov [rdi+x30],rcx
-                code.extend((30u32 * 8).to_le_bytes());
+                asm.mov_imm64(Rcx, next_pc.0);
+                asm.mov_store(Qword, frame(30 * 8), Rcx);
             }
-            dynamic = Some(code.len());
-            exit_kind(
-                &mut code,
-                if link {
-                    ExitKind::Call
-                } else {
-                    ExitKind::Indirect
-                },
-            );
+            dynamic = Some(asm.len());
+            let kind = if link {
+                ExitKind::Call
+            } else {
+                ExitKind::Indirect
+            };
+            super::block::exit_kind_with(&mut asm, kind);
         }
     }
-    land(&mut code, &misses);
+    for miss in misses {
+        asm.bind(miss);
+    }
     // service(state, request, pointer, modifier) on a 16-byte aligned stack.
-    code.extend([0x49, 0x89, 0xe3]); // mov r11,rsp
-    code.extend([0x48, 0x83, 0xe4, 0xf0]); // and rsp,-16
-    code.extend([0x41, 0x53, 0x57]); // push r11; push rdi
-    code.extend([0x48, 0x89, 0xd1]); // mov rcx,rdx
-    code.extend([0x48, 0x89, 0xc2]); // mov rdx,rax
-    code.push(0xbe); // mov esi,request
-    code.extend(form.request().to_le_bytes());
-    code.extend([0x48, 0xbf]); // movabs rdi,state
-    code.extend(service.state.to_le_bytes());
-    code.extend([0x48, 0xb8]); // movabs rax,routine
-    code.extend(service.routine.to_le_bytes());
-    code.extend([0xff, 0xd0]); // call rax
-    code.extend([0x5f, 0x5c]); // pop rdi; pop rsp
-    code.extend([0x48, 0x85, 0xc0]); // test rax,rax
-    jump(&mut code, &mut exits, JZ); // jz: not completed
-    code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx
-    code.push(0xe9); // jmp complete
-    let back = complete as i64 - (code.len() + 4) as i64;
-    code.extend((back as i32).to_le_bytes());
-    land(&mut code, &exits);
-    code.extend(super::chain::direct_exit(
-        pc,
-        ExitKind::PointerAuthentication,
-    ));
+    asm.mov(Qword, R11, Rsp);
+    asm.alu_imm8(Alu::And, Qword, Rsp, -16);
+    asm.push(R11);
+    asm.push(Rdi);
+    asm.mov(Qword, Rcx, Rdx);
+    asm.mov(Qword, Rdx, Rax);
+    asm.mov_imm32(Rsi, form.request());
+    asm.mov_imm64(Rdi, service.state);
+    asm.mov_imm64(Rax, service.routine);
+    asm.call_rm(Rax);
+    asm.pop(Rdi);
+    asm.pop(Rsp);
+    asm.test(Qword, Rax, Rax);
+    // Not completed.
+    exits.push(asm.jcc(Cond::E));
+    asm.mov(Qword, Rax, Rdx);
+    let back = asm.jmp();
+    for exit in exits {
+        asm.bind(exit);
+    }
+    super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
+    resolve(&mut code, back, complete);
     Thunk {
-        code,
+        code: code.into_bytes(),
         next,
         dynamic,
     }
 }
 
-/// The second opcode bytes of `jz` and `jnz` with a 32-bit displacement.
-const JZ: u8 = 0x84;
-const JNZ: u8 = 0x85;
-
 const STACK_POINTER: u32 = core::mem::offset_of!(crate::GuestState, sp) as u32;
 
-/// A `jcc` (`opcode` after 0x0f) whose displacement [`land`] fixes up.
-fn jump(code: &mut Vec<u8>, fixups: &mut Vec<usize>, opcode: u8) {
-    code.extend([0x0f, opcode]);
-    fixups.push(code.len());
-    code.extend([0; 4]);
-}
-
-/// Point the jumps at `fixups` here.
-fn land(code: &mut [u8], fixups: &[usize]) {
-    let here = code.len();
-    for &fixup in fixups {
-        let relative = (here - fixup - 4) as i32;
-        code[fixup..fixup + 4].copy_from_slice(&relative.to_le_bytes());
-    }
-}
-
-fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
-    code.push(0xba); // mov edx,kind
-    code.extend((kind as u32).to_le_bytes());
-    code.push(0xc3); // ret
+/// `[rdi+offset]` with a 32-bit displacement: a field of the guest frame.
+fn frame(offset: u32) -> Mem {
+    Mem::base_disp32(Gpr::Rdi, offset as i32)
 }
 
 #[cfg(test)]
@@ -655,6 +627,9 @@ mod tests {
 
     /// `mov [rdi+disp32],rax`.
     const REGISTER_WRITE_BYTES: usize = 7;
+    /// The second opcode bytes of `jz` and `jnz` with a 32-bit displacement.
+    const JZ: u8 = 0x84;
+    const JNZ: u8 = 0x85;
 
     #[test]
     fn register_completions_chain_onward_and_misses_exit_unchanged() {

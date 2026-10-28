@@ -1,4 +1,5 @@
 //! SVE single-to-double widening.
+use crate::x86_64::asm::{Code, Rm};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -32,7 +33,6 @@ const DWORD_SELECTOR_BITS: u8 = 2;
 const LOW_SINGLE: u8 = 0;
 const HIGH_SINGLE: u8 = 1;
 const NEXT_QWORD_SINGLE: u8 = 2;
-const CVTPS2PD_XMM0_XMM0: &[u8] = &[0x0f, 0x5a, 0xc0];
 
 /// Compact the selected Single from each qword into the low two dwords.
 /// Duplicating them above those dwords lets the shared classifier check all
@@ -54,7 +54,7 @@ const fn source_shuffle(placement: Placement) -> u8 {
 /// untouched for their normal numerical completion path. The caller owns
 /// instruction availability and the streaming-mode entry guard.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -95,8 +95,13 @@ pub(crate) fn emit(
         // Replace every inactive input with +0 before any host FP operation.
         // The shuffle also discards the unselected half of each source slot.
         SimdOpcode::And.register(code, RESULT, ACTIVE, target);
-        SimdOpcode::ShuffleDword.register(code, RESULT, RESULT, target);
-        code.push(source_shuffle(placement));
+        code.asm().simd_imm(
+            SimdOpcode::ShuffleDword,
+            RESULT,
+            Rm::Xmm(RESULT),
+            source_shuffle(placement),
+            target,
+        );
         guard_normal_zero_or_infinity(
             code,
             classification,
@@ -107,7 +112,7 @@ pub(crate) fn emit(
         );
         // Normals, signed zeros and infinities widen exactly under every
         // caller RC/DAZ/FTZ/mask setting, without changing MXCSR or FPSR.
-        code.extend(CVTPS2PD_XMM0_XMM0);
+        code.asm().cvtps2pd(0, Rm::Xmm(0));
         load_z_chunk(
             code,
             operand.destination,

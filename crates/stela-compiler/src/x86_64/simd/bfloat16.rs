@@ -1,5 +1,5 @@
 //! AdvSIMD BF16 instructions.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod conversion;
 mod dot;
 mod multiply;
@@ -7,7 +7,7 @@ mod multiply;
 use crate::{GuestAddress, TargetCpu, aarch64::simd::bfloat16::Operand};
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

@@ -1,4 +1,5 @@
 //! Scalar and AdvSIMD FSQRT.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::Format;
 
 use super::arithmetic::Shape;
@@ -29,14 +30,13 @@ pub struct Operand {
 
 /// None denotes another family; Err denotes reserved scalar ftype or vector1D.
 /// Every register field denotes ordinary V data, including V31.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (format, shape) = if word & SCALAR_MASK == SCALAR_FSQRT {
         let format = match (word >> FORMAT_SHIFT) & FORMAT_MASK {
             FORMAT_SINGLE => Format::Single,
             FORMAT_DOUBLE => Format::Double,
             FORMAT_HALF => Format::Half,
-            _ => return Some(Err(())),
+            _ => return Some(Err(Unsupported)),
         };
         (format, Shape::Scalar)
     } else {
@@ -57,7 +57,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             Shape::Vector128
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         (format, shape)
     };
@@ -124,11 +124,11 @@ mod tests {
                 let registers = destination | (source << SOURCE_SHIFT);
                 assert_eq!(
                     decode(SCALAR_FSQRT | (FORMAT_RESERVED << FORMAT_SHIFT) | registers),
-                    Some(Err(()))
+                    Some(Err(Unsupported))
                 );
                 assert_eq!(
                     decode(VECTOR_FSQRT | VECTOR_DOUBLE | registers),
-                    Some(Err(()))
+                    Some(Err(Unsupported))
                 );
             }
         }

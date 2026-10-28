@@ -1,5 +1,6 @@
 //! SVE LD2, LD3 and LD4, including 128-bit elements.
 use super::memory::{Address, Offset, Scale};
+use crate::aarch64::Unsupported;
 use crate::aarch64::{
     register,
     scalable::{
@@ -58,7 +59,7 @@ impl Operand {
 /// Predicates select bit `element_index * element_bytes`; inactive lanes zero.
 /// Base31 denotes SP. Register-offset forms always enable architectural tag
 /// checks, whereas immediate-offset forms enable them only for a GPR base.
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (immediate, quadword) = match word {
         _ if word & IMMEDIATE_MASK == IMMEDIATE_CLASS => (true, false),
         _ if word & REGISTER_MASK == REGISTER_CLASS => (false, false),
@@ -94,7 +95,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     } else {
         let index = (word >> OFFSET_SHIFT) & REGISTER_FIELD_MASK;
         if index == REGISTER_FIELD_MASK {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         Offset::Register {
             index: register(index, false),
@@ -218,7 +219,7 @@ mod tests {
             } else {
                 assert_eq!(
                     decode(class | REGISTER_FIELD_MASK << OFFSET_SHIFT),
-                    Some(Err(()))
+                    Some(Err(Unsupported))
                 );
             }
         }

@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use crate::{
         GuestAddress, TargetCpu,
-        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
+        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan, Features},
     };
     use alloc::vec;
 
@@ -156,10 +156,14 @@ mod tests {
             CheckedMemoryProfile::SpAlignmentEnabled,
             CheckedMemoryProfile::SpAlignmentDisabled,
         ] {
-            let profile = BlockProfile::SystemModeSharedV1(memory);
+            let profile = BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(memory);
             let plan = || {
-                CompilationPlan::new(&source, GuestAddress(0x4000), profile, TargetCpu::Baseline)
-                    .unwrap()
+                CompilationPlan::new(
+                    &source,
+                    GuestAddress(0x4000),
+                    &crate::Options::new(profile, TargetCpu::Baseline),
+                )
+                .unwrap()
             };
             let baseline = plan().compile().unwrap();
             let (actual, metadata) = plan().compile_profiled().unwrap();
@@ -224,8 +228,11 @@ mod tests {
         let (_, metadata) = CompilationPlan::new(
             &source,
             GuestAddress(0x4000),
-            BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentEnabled),
-            TargetCpu::Baseline,
+            &crate::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE)
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentEnabled),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap()
         .compile_profiled()

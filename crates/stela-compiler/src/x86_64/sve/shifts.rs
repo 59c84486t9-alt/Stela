@@ -1,4 +1,6 @@
 //! SVE shifts. Scalar recipes use host flags only as scratch.
+use crate::x86_64::asm::Gpr::{Rax, Rsp};
+use crate::x86_64::asm::{Alu, Code, Mem, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -11,20 +13,38 @@ use crate::{
         simd::shifts::{logical_shift, right_shift, rounded_right},
     },
 };
-use alloc::vec::Vec;
 
 mod saturating;
 mod scalar;
 mod variable;
 pub(crate) use scalar::rounding_variable_chunk;
 
-const SUB_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xc4];
 const BITS_PER_BYTE: u8 = 8;
 const PACKED_SATURATION_VECTOR_BYTES: usize = 256;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
     opcode.register(code, destination, source, target);
+}
+
+/// Load `value` repeated in each `element` lane of `xmm`, through RAX.
+pub(super) fn repeated_constant(code: &mut Code, xmm: u8, element: ElementSize, value: u64) {
+    let limbs = value.to_le_bytes();
+    let repeated: [u8; core::mem::size_of::<u64>()] =
+        core::array::from_fn(|i| limbs[i % element.bytes()]);
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, u64::from_le_bytes(repeated));
+    asm.simd(Host::MoveGprQword, xmm, Rax, TargetCpu::Baseline);
+    packed(code, Host::UnpackLowQword, xmm, xmm, TargetCpu::Baseline);
+}
+
+/// Store `xmm` to, or load it from, the stack slot at RSP + `slot`.
+pub(super) fn stack_vector(code: &mut Code, xmm: u8, slot: u8, store: bool) {
+    let slot = Mem::base_disp8(Rsp, slot as i8);
+    if store {
+        code.asm().movdqu_store(slot, xmm);
+    } else {
+        code.asm().movdqu_load(xmm, slot);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -73,14 +93,14 @@ pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength)
         && matches!(mapping(operand, length), Mapping::Scalar)
 }
 
-fn adjust_stack(code: &mut Vec<u8>, bytes: u8, allocate: bool) {
+fn adjust_stack(code: &mut Code, bytes: u8, allocate: bool) {
     if bytes != 0 {
-        code.extend(if allocate { SUB_RSP_IMM8 } else { ADD_RSP_IMM8 });
-        code.push(bytes);
+        let op = if allocate { Alu::Sub } else { Alu::Add };
+        code.asm().alu_imm8(op, Size::Qword, Rsp, bytes as i8);
     }
 }
 
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let mapping = mapping(operand, length);
     let avx2 = variable::avx2_opcode(operand.kind, operand.element_size, operand.count, target);
     let scratch = match (avx2, mapping) {
@@ -141,7 +161,7 @@ pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: 
     adjust_stack(code, scratch, false);
 }
 
-fn immediate_chunk(code: &mut Vec<u8>, operand: Operand, target: TargetCpu) {
+fn immediate_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
     let Count::Immediate(amount) = operand.count else {
         unreachable!()
     };
@@ -214,7 +234,6 @@ fn immediate_chunk(code: &mut Vec<u8>, operand: Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     fn variable_operand(element_size: ElementSize, kind: Kind) -> Operand {
         Operand {
@@ -233,8 +252,8 @@ mod tests {
     fn avx2_variable_shift_body_replaces_scalar_scratch_without_widening_state_access() {
         let length = VectorLength::from_bytes(64).unwrap();
         let operand = variable_operand(ElementSize::Word, Kind::LogicalLeft);
-        let mut baseline = Vec::new();
-        let mut avx2 = Vec::new();
+        let mut baseline = Code::new();
+        let mut avx2 = Code::new();
         emit(&mut baseline, operand, length, TargetCpu::Baseline);
         emit(&mut avx2, operand, length, TargetCpu::Avx2);
         assert!(baseline.starts_with(&[0x48, 0x83, 0xec, scalar::STACK_BYTES]));
@@ -251,8 +270,8 @@ mod tests {
         assert!(requires_declared_dit_zero(operand, length));
 
         let excluded = variable_operand(ElementSize::Doubleword, Kind::ArithmeticRight);
-        baseline.clear();
-        avx2.clear();
+        baseline = Code::new();
+        avx2 = Code::new();
         emit(&mut baseline, excluded, length, TargetCpu::Baseline);
         emit(&mut avx2, excluded, length, TargetCpu::Avx2);
         assert_eq!(baseline, avx2);

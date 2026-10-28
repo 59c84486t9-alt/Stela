@@ -1,6 +1,7 @@
 //! PRFM and PRFUM.
 use super::{Register, register, register_offset::IndexExtend};
 use crate::GuestAddress;
+use crate::aarch64::Unsupported;
 
 const HINT_MASK: u32 = 31;
 const REGISTER_SHIFT: u32 = 5;
@@ -62,8 +63,7 @@ pub struct Operand {
 /// No prefetch form checks SP alignment or updates registers. AddressAdd is
 /// modulo 64 bits in the ordinary-RAM profile with checked arithmetic disabled.
 /// Register Rt=11xxx belongs to RPRFM, whose metadata semantics stay unsupported.
-#[allow(clippy::result_unit_err)]
-pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, Unsupported>> {
     let base = register((word >> REGISTER_SHIFT) & HINT_MASK, true);
     let address = if word & UNSIGNED_MASK == UNSIGNED_FORM {
         Address::Immediate {
@@ -84,7 +84,7 @@ pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, ()>> {
             return None;
         }
         let Some(extend) = IndexExtend::decode((word >> EXTEND_SHIFT) & EXTEND_MASK) else {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         };
         Address::Register {
             base,
@@ -176,7 +176,7 @@ mod tests {
                         if hint >= 24 {
                             assert_eq!(decoded, None);
                         } else if option & 2 == 0 {
-                            assert_eq!(decoded, Some(Err(())));
+                            assert_eq!(decoded, Some(Err(Unsupported)));
                         } else {
                             let operand = decoded.unwrap().unwrap();
                             assert_eq!(operand.hint.encoding(), hint as u8);

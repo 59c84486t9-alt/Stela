@@ -1,4 +1,5 @@
 //! FAMIN/FAMAX and FSCALE. FSCALE on normal values changes only exponent bits.
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -14,7 +15,9 @@ use alloc::vec::Vec;
 
 use super::{
     commit,
-    numerical::{Condition, MOVQ_XMM0_XMM0, branch, read_numerical_vector, resolve, test_control},
+    numerical::{
+        Condition, branch, clear_high_qword, jump, read_numerical_vector, resolve, test_control,
+    },
 };
 
 const LEFT: u8 = 0;
@@ -26,7 +29,7 @@ pub(super) fn always_exits(_operand: &Operand) -> bool {
 }
 
 fn absolute(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     operation: AbsoluteMinMaxOperation,
     failures: &mut Vec<usize>,
@@ -52,7 +55,7 @@ fn absolute(
     );
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let mut failures = Vec::new();
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     failures.push(branch(code, Condition::NotZero));
@@ -65,12 +68,11 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, targ
         }
     }
     if operand.shape == Shape::Vector64 {
-        code.extend(MOVQ_XMM0_XMM0);
+        clear_high_qword(code, 0);
     }
     commit(code, operand.destination, LEFT);
-    code.push(0xe9); // JMP rel32 skips the cold numerical exit.
-    let success = code.len();
-    code.extend([0; size_of::<i32>()]);
+    // Skip the cold numerical exit.
+    let success = jump(code);
     let fallback = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let end = code.len();

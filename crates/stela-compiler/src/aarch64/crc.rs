@@ -1,5 +1,6 @@
 //! CRC32 and CRC32C.
 use super::{Register, register};
+use crate::aarch64::Unsupported;
 
 const CLASS_MASK: u32 = 0x7fe0e000;
 const CLASS_VALUE: u32 = 0x1ac04000;
@@ -53,8 +54,7 @@ pub struct Operand {
 }
 
 /// Register 31 is ZR in every role; sf is set exactly for doubleword data.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & CLASS_MASK != CLASS_VALUE {
         return None;
     }
@@ -65,7 +65,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         _ => DataSize::Doubleword,
     };
     if (word & DOUBLEWORD_BIT != 0) != (size == DataSize::Doubleword) {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         size,
@@ -128,7 +128,7 @@ mod tests {
                         }
                     }
                 }
-                assert_eq!(decode(base ^ DOUBLEWORD_BIT), Some(Err(())));
+                assert_eq!(decode(base ^ DOUBLEWORD_BIT), Some(Err(Unsupported)));
                 for bit in 0..32 {
                     if CLASS_MASK & (1 << bit) != 0 {
                         assert!(decode(base ^ (1 << bit)).is_none());

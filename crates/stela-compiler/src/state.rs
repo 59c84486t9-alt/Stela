@@ -1,11 +1,9 @@
 //! Guest register state, shared by hosted and freestanding execution.
 
-/// Native code requires the direct ordinary-RAM profile documented in compiler.md.
-pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v3-direct-ram";
-
-/// Native ABI v3: System V x86-64 `void function(GuestState *state)`. Registers
-/// enter and leave native code in this layout. Only NZCV bits 31:28 of PSTATE
-/// are held here. V registers are little-endian pairs of 64-bit halves.
+/// The register state every compiled function takes in RDI
+/// ([`crate::block::BlockProfile::abi`] names the ABI). Registers enter and
+/// leave native code in this layout. Only NZCV bits 31:28 of PSTATE are held
+/// here. V registers are little-endian pairs of 64-bit halves.
 /// Arithmetic preserves unrelated FPCR/FPSR bits, and register accesses apply
 /// the declared field masks; saturating integer SIMD sets QC and floating-point
 /// arithmetic accumulates exception flags.
@@ -23,12 +21,15 @@ pub struct GuestState {
 
 #[cfg(test)]
 mod tests {
-    use super::{GuestState, NATIVE_ABI};
+    use super::GuestState;
+    use crate::block::{BlockProfile, Features};
     use core::mem::{align_of, offset_of, size_of};
 
     #[test]
     fn layout_matches_native_abi() {
-        assert_eq!(NATIVE_ABI, "x86_64-sysv-guest-state-v3-direct-ram");
+        for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v4-"));
+        }
         assert_eq!(size_of::<GuestState>(), 784);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);

@@ -1932,7 +1932,7 @@ version = "0.1.0"
 dependencies = [
  "rustc_apfloat",
  "serde",
- "sha2",
+ "stela-fingerprint",
 ]
 
 [[package]]
@@ -1967,6 +1967,13 @@ dependencies = [
  "subtle",
  "triomphe",
  "zeroize",
+]
+
+[[package]]
+name = "stela-fingerprint"
+version = "0.1.0"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]
@@ -2014,6 +2021,7 @@ dependencies = [
  "smoltcp",
  "stela-compiler",
  "stela-drivers",
+ "stela-fingerprint",
  "tempfile",
  "zeroize",
 ]

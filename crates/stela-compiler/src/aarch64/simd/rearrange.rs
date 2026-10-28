@@ -1,6 +1,7 @@
 //! Lane movement and permutes: DUP, INS, SMOV, UMOV, EXT, REV16/32/64,
 //! ZIP/UZP/TRN, TBL and TBX.
 use super::super::{Register, register};
+use crate::aarch64::Unsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneSource {
@@ -77,8 +78,7 @@ encodings! {
     Table => (0xbfe08c00, 0x0e000000),
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     use Encoding::*;
     let d = (word & 31) as u8;
     let n = ((word >> 5) & 31) as u8;
@@ -99,7 +99,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     {
         let imm5 = ((word >> 16) & 31) as u8;
         if imm5 & 15 == 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let size = (imm5 & 15).trailing_zeros();
         let lane_bytes = 1 << size;
@@ -107,7 +107,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         if SignedMove.matches(word) || UnsignedMove.matches(word) {
             let signed = SignedMove.matches(word);
             if (signed && lane_bytes >= (4 << q)) || (!signed && ((q == 1) != (lane_bytes == 8))) {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             return Some(Ok(Operand::Extract {
                 destination: register(u32::from(d), false),
@@ -141,7 +141,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         }
         let scalar = DupScalar.matches(word);
         if !scalar && q == 0 && lane_bytes == 8 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Duplicate {
             destination: d,
@@ -164,7 +164,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if ExtractBytes.matches(word) {
         let offset = ((word >> 11) & 15) as u8;
         if offset >= bytes {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         for i in 0..bytes {
             let source = i + offset;
@@ -187,7 +187,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         };
         let lane = 1 << ((word >> 22) & 3);
         if lane >= container {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         for i in 0..bytes {
             selection[usize::from(i)] =
@@ -200,7 +200,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     {
         let lane = 1 << ((word >> 22) & 3);
         if lane == 8 && q == 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let elements = bytes / lane;
         let part = ((word >> 14) & 1) as u8;
@@ -258,8 +258,8 @@ mod tests {
         }
         // INS ignores low imm4 bits below the selected element size.
         assert_eq!(decode(0x6e080400), decode(0x6e083c00));
-        assert_eq!(decode(0x2e004000), Some(Err(()))); // EXT 8B offset 8
-        assert_eq!(decode(0x0e601800), Some(Err(()))); // REV16 halfword
+        assert_eq!(decode(0x2e004000), Some(Err(Unsupported))); // EXT 8B offset 8
+        assert_eq!(decode(0x0e601800), Some(Err(Unsupported))); // REV16 halfword
         assert!(decode(0x0e800000).is_none()); // adjacent table fixed bit
     }
 }

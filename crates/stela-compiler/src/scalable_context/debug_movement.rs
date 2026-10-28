@@ -1,5 +1,6 @@
 //! MOVT (vector to ZT0) prepared for execution from the halted-debug ITR.
-use super::{MOV_R15_RSI, POP_R15, PUSH_R15, RET, ScalableProfile};
+use super::ScalableProfile;
+use crate::x86_64::asm::{Code, Gpr, Size};
 use crate::{
     CompileError, GuestAddress,
     aarch64::{
@@ -12,9 +13,10 @@ use crate::{
         },
         sme::movement::{self, Direction, Kind, Operand},
     },
-    context::CONTEXT_LEAF_ABI,
+    block::{BlockProfile, Features},
     x86_64,
 };
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -54,8 +56,9 @@ impl PreparedDebugMovement {
     pub const fn recipe(&self) -> Recipe {
         self.recipe
     }
-    pub const fn abi(&self) -> &'static str {
-        CONTEXT_LEAF_ABI
+    /// The context leaf ABI the code is called with.
+    pub fn abi(&self) -> String {
+        BlockProfile::new(Features::LEAF | Features::CONTEXT).abi()
     }
     pub fn code(&self) -> &[u8] {
         &self.code
@@ -108,25 +111,27 @@ pub fn prepare(
             ),
             GuestMemoryQuantity::None,
         )]);
-    let mut code = Vec::new();
+    let mut code = Code::new();
     let discarded = direction == Direction::FromZa && register == ZERO_REGISTER;
     if !discarded {
-        code.extend(PUSH_R15);
-        code.extend(MOV_R15_RSI);
+        let mut asm = code.asm();
+        asm.push(Gpr::R15);
+        asm.mov(Size::Qword, Gpr::R15, Gpr::Rsi);
     }
     let native_offset = code.len();
     x86_64::sme::movement::emit_debug_table_gpr(&mut code, &operand, recipe)
         .map_err(|error| CompileError(error.into()))?;
+    let mut asm = code.asm();
     if !discarded {
-        code.extend(POP_R15);
+        asm.pop(Gpr::R15);
     }
-    code.push(RET);
+    asm.ret();
     Ok(PreparedDebugMovement {
         word,
         operand,
         profile,
         recipe,
-        code,
+        code: code.into_bytes(),
         word_to_native: [(EXTERNAL_WORD_ORDINAL, native_offset)],
         requirements,
     })
@@ -178,7 +183,7 @@ mod tests {
     fn discarded_read_emits_only_transport_return_after_runtime_checks() {
         for recipe in [Recipe::Scalar, Recipe::Sse2Comparison] {
             let output = prepare(FROM_ZT0 | 31, profile(false), recipe).unwrap();
-            assert_eq!(output.code(), &[RET]);
+            assert_eq!(output.code(), &[0xc3]);
         }
     }
     #[test]

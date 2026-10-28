@@ -167,7 +167,7 @@ mod tests {
                 AdmittedScalableNumericalInstruction, ScalableNumericalOperation,
                 admit_scalable_numerical_instruction, decode_scalable_numerical_instruction,
             },
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         const PC: GuestAddress = GuestAddress(0x1008);

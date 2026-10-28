@@ -11,7 +11,7 @@ use stela_compiler::{
     aarch64::{Decoder, Operation},
     block::{
         BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, CompilationPlan, DynamicEdgeKind,
-        ExitKind, PointerAuthentication, SynchronousTrap, ThreadRegisterInstruction,
+        ExitKind, Features, PointerAuthentication, SynchronousTrap, ThreadRegisterInstruction,
         analyze_with_profile,
     },
     context::memory::{MemoryRequirements, MemoryStatus},
@@ -203,17 +203,22 @@ impl<'code> BoundSource<'code> {
         );
         validate_source_map(&block.prepared.manifest, pc, block.source_bytes)?;
         // Re-parse without emitting, and compare that plan with the loaded one.
-        let plan = CompilationPlan::new(source, pc, runtime.profile, runtime.target_cpu())?;
+        let plan = CompilationPlan::new(
+            source,
+            pc,
+            &stela_compiler::Options::new(runtime.profile, runtime.target_cpu()),
+        )?;
         let requirements = plan.memory_requirements();
-        match runtime.profile {
-            BlockProfile::SystemV1 => anyhow::ensure!(
+        if runtime.profile == BlockProfile::new(Features::SYSTEM) {
+            anyhow::ensure!(
                 requirements.is_none() && source.len() == size_of::<u32>(),
-                "SystemV1 requires one original no-context source word"
-            ),
-            _ => anyhow::ensure!(
+                "a System block requires one original no-context source word"
+            );
+        } else {
+            anyhow::ensure!(
                 runtime.profile.checked_memory().is_some() && requirements.is_some(),
                 "checked plan requirements absent"
-            ),
+            );
         }
         anyhow::ensure!(
             plan.source_bytes() == block.source_bytes
@@ -502,7 +507,8 @@ mod tests {
     #[test]
     fn checked_memory_bound_source_keeps_plan_requirements() {
         let cache = tempfile::tempdir().unwrap();
-        let profile = BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentEnabled);
+        let profile =
+            BlockProfile::ORDINARY.with_checked_memory(CheckedMemoryProfile::SpAlignmentEnabled);
         let mut runtime = runtime(cache.path(), profile);
         let mut accounting = super::super::empty_accounting();
         runtime.load(BASE, &mut accounting).unwrap();
