@@ -1,26 +1,34 @@
 //! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB authority is
 //! manufactured here and no engine mount is enabled by constructing this object.
+use crate::machine::soc::DirectMemoryCache;
+use crate::machine::soc::MemoryController;
+use crate::platform::apple::amcc::Amcc;
+use crate::platform::apple::amcc::Layout;
+use crate::platform::apple::amcc::Register;
+use crate::platform::apple::mcc::Configuration;
+use crate::platform::apple::mcc::Controller;
+use crate::platform::apple::ptd::Ptd;
+use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use alloc::vec::Vec;
-use {
-    crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
-    crate::platform::apple::amcc::Amcc, crate::platform::apple::amcc::Layout,
-    crate::platform::apple::amcc::Register, crate::platform::apple::mcc::Configuration,
-    crate::platform::apple::mcc::Controller, crate::platform::apple::ptd::Ptd,
-    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
-    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
-    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
-    stela_contracts::bus::refuse, stela_contracts::interrupt::Wire,
-};
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Direction;
+use stela_contracts::bus::Lifecycle;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_contracts::bus::refuse;
+use stela_contracts::interrupt::Wire;
 
 // The mount configures these actual resources; it must be able to name their
 // typed configuration, lifecycle and original register/publication geometry.
-pub use {
-    crate::platform::apple::amcc, crate::platform::apple::mcc, crate::platform::apple::ptd,
-    stela_contracts::bus::LifecycleState,
-};
+pub use crate::platform::apple::amcc;
+pub use crate::platform::apple::mcc;
+pub use crate::platform::apple::ptd;
+pub use stela_contracts::bus::LifecycleState;
 
 mod canonical;
 pub mod dcs;
+mod publication;
 mod resource;
 pub(super) use resource::resource_for;
 pub mod t6000_cold;
@@ -149,11 +157,7 @@ impl Prepared {
         bindings
     }
     pub(super) fn publication_binding(&self) -> (u64, u64, u64) {
-        (
-            self.descriptor.ptd.physical,
-            crate::platform::apple::ptd::PTD_BYTES,
-            self.ptd_offset(),
-        )
+        self.publication_layout().binding()
     }
     /// A declared physical display view may cover the PTD update alias and its
     /// unimplemented tail. It must start at the actual update bank, cover every
@@ -165,28 +169,7 @@ impl Prepared {
         physical: u64,
         bytes: u64,
     ) -> Result<(u64, u64, u64), &'static str> {
-        let end = physical
-            .checked_add(bytes)
-            .ok_or("display PTD view overflows")?;
-        let bank_end = self
-            .descriptor
-            .ptd
-            .physical
-            .checked_add(crate::platform::apple::ptd::PTD_BYTES)
-            .ok_or("prepared PTD bank overflows")?;
-        if physical != self.descriptor.ptd_updates.0
-            || bytes < self.descriptor.ptd_updates.1
-            || end > bank_end
-        {
-            return Err(
-                "display PTD view must cover the actual complete update alias within its bank",
-            );
-        }
-        Ok((
-            physical,
-            bytes,
-            self.ptd_offset() + crate::platform::apple::ptd::UPDATE_OFFSET,
-        ))
+        self.publication_layout().display_view(physical, bytes)
     }
     fn ptd_offset(&self) -> u64 {
         self.descriptor.apertures.len() as u64 * mcc::APERTURE_BYTES
@@ -194,11 +177,7 @@ impl Prepared {
     /// A pair is consuming only at a complete publication entry. The update
     /// alias, scalar halves and unknown tail retain their own MMIO semantics.
     pub(super) fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
-        let offset = offset.checked_sub(self.ptd_offset())?;
-        (bytes == 8 && offset.is_multiple_of(16))
-            .then_some(offset / 16)
-            .filter(|&entry| entry < self.descriptor.ptd_entries as u64)
-            .and_then(|entry| u32::try_from(entry).ok())
+        self.publication_layout().entry(offset, bytes)
     }
     pub(super) fn consume_entry(
         &self,
@@ -213,22 +192,18 @@ impl Prepared {
         offset: u64,
         bytes: u8,
     ) -> Option<(u64, crate::platform::apple::ptd::transport::status::Width)> {
-        use crate::platform::apple::ptd::transport::{IRQ_STATUS, status};
-        let offset = offset.checked_sub(self.ptd_offset())?;
-        let width = match bytes {
-            4 => status::Width::Double,
-            8 => status::Width::Quad,
-            _ => return None,
-        };
-        let words = self.descriptor.ptd_entries.div_ceil(32) as u64;
-        let end = IRQ_STATUS.checked_add(words.checked_mul(4)?)?;
-        (offset >= IRQ_STATUS
-            && offset.checked_add(width.bytes())? <= end
-            && offset.is_multiple_of(width.bytes()))
-        .then_some((offset, width))
+        self.publication_layout().status_pair(offset, bytes)
     }
     pub(super) fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
-        self.paired_entry(offset, bytes).is_some() || self.status_pair(offset, bytes).is_some()
+        self.publication_layout().supports_pair(offset, bytes)
+    }
+    fn publication_layout(&self) -> publication::Layout {
+        publication::Layout {
+            physical: self.descriptor.ptd.physical,
+            updates: self.descriptor.ptd_updates,
+            device_offset: self.ptd_offset(),
+            entries: self.descriptor.ptd_entries,
+        }
     }
     pub(super) fn read_pair_values(
         &self,
@@ -469,12 +444,13 @@ impl MmioDevice for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::soc::PtdBank;
+    use crate::platform::apple::amcc::LockGroup;
+    use crate::platform::apple::mcc::RequestKind;
+    use crate::platform::apple::ptd;
     use alloc::{boxed::Box, vec};
-    use {
-        crate::machine::soc::PtdBank, crate::platform::apple::amcc::LockGroup,
-        crate::platform::apple::mcc::RequestKind, crate::platform::apple::ptd,
-        stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::bus::Bus;
+    use stela_contracts::interrupt::InterruptLatch;
 
     pub(super) fn prepared() -> Prepared {
         let reg = |offset, mask, value| Register {
@@ -827,10 +803,9 @@ mod tests {
 
     #[test]
     fn paired_read_keeps_data_and_pending_service_after_wire_forwarding_refusal() {
-        use {
-            crate::machine::Devices, stela_contracts::interrupt::AicInput,
-            stela_contracts::interrupt::InterruptSink,
-        };
+        use crate::machine::Devices;
+        use stela_contracts::interrupt::AicInput;
+        use stela_contracts::interrupt::InterruptSink;
         let owner = prepared();
         let publication = owner.publication_bank().clone();
         let bindings = owner.bindings();
