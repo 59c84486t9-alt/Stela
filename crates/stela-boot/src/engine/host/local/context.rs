@@ -111,6 +111,17 @@ impl RootIdentity {
     pub(crate) fn in_interrupt(&self) -> bool {
         self.affinity().is_err() || irq_active()
     }
+    /// Immutable-root identity admission for process work, without a RAM grant.
+    /// A native/helper frame cannot suspend its independent guest-state/code
+    /// loan by starting a separate work executor underneath it.
+    pub(crate) fn check_dispatch(&self) -> Result<(), WorkError> {
+        self.check_irq_cpu()?;
+        if irq_active() || !native_frames_idle() {
+            return Err(WorkError::Busy);
+        }
+        Ok(())
+    }
+
     pub(crate) fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_current()?;
         Ok(disable())

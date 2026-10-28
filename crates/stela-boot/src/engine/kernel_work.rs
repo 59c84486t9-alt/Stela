@@ -12,9 +12,10 @@ use crate::{
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     arch::asm,
+    cell::{Cell, UnsafeCell},
     ffi::c_void,
     ops::Range,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 use stela_boot_core::guarded_stacks::mappings;
 use stela_drivers::{
@@ -135,37 +136,30 @@ pub(super) struct KernelWork {
     _cpu: Arc<NativeCpu>,
     foreground: Range<usize>,
     root: u64,
+    busy: Cell<bool>,
 }
-struct Probe {
-    runtime: usize,
-    bounds: Range<usize>,
-    root: u64,
-    observed: AtomicUsize,
-    task: AtomicU64,
-    valid: AtomicBool,
+/// Owned closure/result storage. It is never made Send/Sync or exposed to an
+/// AP; the real queue checks its BSP before the callback can touch these cells.
+struct OwnedCall<F, T> {
+    input: UnsafeCell<Option<F>>,
+    output: UnsafeCell<Option<T>>,
+    complete: AtomicBool,
 }
-unsafe extern "C" fn probe(context: *mut c_void) {
-    // SAFETY: prepare retains this boxed owned probe through completion; on any
-    // uncertain completion it remains leaked with the quarantined real Runtime.
-    let probe = unsafe { &*context.cast::<Probe>() };
-    let (rsp, root): (usize, u64);
-    // SAFETY: pure observations on this actual runtime continuation.
-    unsafe {
-        asm!("mov {}, rsp",out(reg)rsp,options(nomem,nostack,preserves_flags));
-        asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
-    }
-    // SAFETY: pointer came from this actual pinned Runtime; its executor remains
-    // alive through completion/quarantine and cannot migrate.
-    let runtime = unsafe { &*(probe.runtime as *const work::Runtime<SLOTS>) };
-    if let Ok(id) = runtime.current_id() {
-        probe.task.store(id.get(), Ordering::Relaxed);
-        probe.valid.store(
-            probe.bounds.contains(&rsp) && root & ADDRESS == probe.root,
-            Ordering::Release,
-        );
-    }
-    probe.observed.store(rsp, Ordering::Release);
+unsafe extern "C" fn owned_call<F: FnOnce() -> T, T>(context: *mut c_void) {
+    // SAFETY: call_owned admitted this exact owned box once on the real affine
+    // runtime. It remains retained through completion or permanent quarantine.
+    let call = unsafe { &*context.cast::<OwnedCall<F, T>>() };
+    // SAFETY: only this one callback takes the closure; the dispatcher waits
+    // for its actual ticket completion before reading or freeing output.
+    let Some(function) = (unsafe { &mut *call.input.get() }).take() else {
+        return;
+    };
+    let output = function();
+    // SAFETY: the same unique callback initializes output before publication.
+    unsafe { *call.output.get() = Some(output) };
+    call.complete.store(true, Ordering::Release);
 }
+
 impl KernelWork {
     /// # Safety
     /// Actual post-EBS BSP owns this immutable validated handoff and all loader
@@ -288,29 +282,87 @@ impl KernelWork {
             _cpu: cpu,
             foreground,
             root: handoff.root,
+            busy: Cell::new(false),
         };
-        result.qualify_foreground(clock)?;
+        result.qualify_foreground()?;
         Ok(result)
     }
-    fn qualify_foreground(&self, clock: Clock) -> Result<(), Error> {
-        let runtime = self.executor.runtime();
-        let state = Box::leak(Box::new(Probe {
-            runtime: runtime.get_ref() as *const _ as usize,
-            bounds: self.foreground.clone(),
-            root: self.root,
-            observed: AtomicUsize::new(0),
-            task: AtomicU64::new(0),
-            valid: AtomicBool::new(false),
-        }));
-        let deadline = clock.now_us().checked_add(1_000_000).ok_or(Error::Clock)?;
-        // SAFETY: owned leaked probe, actual pinned runtime, genuine static
-        // callback code; uncertain completion retains both through quarantine.
-        unsafe { runtime.call_foreground(probe, (state as *mut Probe).cast(), deadline) }
+    /// Execute owned boot preparation in a real foreground continuation.
+    /// Neither closure nor result may borrow the caller's stack. This is not
+    /// asynchronous producer admission or a fixed-rate deadline-clock grant.
+    /// An uncertain call retains its whole job/runtime and closes this sync
+    /// entry, so repeated callers cannot leak another job on every poll.
+    pub(super) fn call_owned<F: FnOnce() -> T + 'static, T: 'static>(
+        &self,
+        timeout_us: u64,
+        function: F,
+    ) -> Result<T, Error> {
+        self._cpu
+            .reservation
+            .identity
+            .check_dispatch()
             .map_err(Error::Work)?;
-        if state.observed.load(Ordering::Acquire) == 0
-            || state.task.load(Ordering::Acquire) == 0
-            || !state.valid.load(Ordering::Acquire)
-        {
+        // SAFETY: genuine retained loader root on this physical BSP, no native
+        // or IRQ frame; every continuation was qualified in this same domain.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        let runtime = self.executor.runtime();
+        match runtime.current_id() {
+            Ok(_) => return Err(Error::Work(WorkError::WouldDeadlock)),
+            Err(WorkError::Unavailable) => {}
+            Err(error) => return Err(Error::Work(error)),
+        }
+        let deadline = self
+            ._cpu
+            .ticks()
+            .checked_add(timeout_us)
+            .ok_or(Error::Clock)?;
+        if self.busy.replace(true) {
+            return Err(Error::Work(WorkError::Busy));
+        }
+        let call = Box::into_raw(Box::new(OwnedCall {
+            input: UnsafeCell::new(Some(function)),
+            output: UnsafeCell::new(None),
+            complete: AtomicBool::new(false),
+        }));
+        // SAFETY: owned 'static closure/result, genuine pinned runtime and
+        // static monomorphized callback code. On error the owned box stays
+        // retained; Executor also quarantines uncertain continuation frames.
+        unsafe { runtime.call_foreground(owned_call::<F, T>, call.cast(), deadline) }
+            .map_err(Error::Work)?;
+        // SAFETY: allocation remains owned; the actual callback ticket completed.
+        if !unsafe { &*call }.complete.load(Ordering::Acquire) {
+            return Err(Error::Qualification);
+        }
+        // SAFETY: actual completed ticket excludes every callback borrower; this
+        // function is the only owner allowed to reclaim this exact Rust box.
+        let call = unsafe { Box::from_raw(call) };
+        // SAFETY: completed callback published output and cannot run again.
+        let result = unsafe { &mut *call.output.get() }
+            .take()
+            .ok_or(Error::Qualification)?;
+        drop(call);
+        self.busy.set(false);
+        Ok(result)
+    }
+    fn qualify_foreground(&self) -> Result<(), Error> {
+        let pointer = self.executor.runtime().get_ref() as *const _ as usize;
+        let bounds = self.foreground.clone();
+        let expected_root = self.root;
+        let valid = self.call_owned(1_000_000, move || {
+            let (rsp, root): (usize, u64);
+            // SAFETY: pure observations from this genuine foreground callback.
+            unsafe {
+                asm!("mov {}, rsp",out(reg)rsp,options(nomem,nostack,preserves_flags));
+                asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
+            }
+            // SAFETY: pointer is this actual pinned Runtime. An uncertain call
+            // retains its owned closure and complete runtime through quarantine.
+            let runtime = unsafe { &*(pointer as *const work::Runtime<SLOTS>) };
+            runtime.current_id().is_ok_and(|id| id.get() != 0)
+                && bounds.contains(&rsp)
+                && root & ADDRESS == expected_root
+        })?;
+        if !valid {
             return Err(Error::Qualification);
         }
         Ok(())
