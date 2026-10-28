@@ -485,7 +485,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
     }
 }
 
-fn build(release: bool) -> Result<PathBuf> {
+pub fn build(release: bool) -> Result<PathBuf> {
     let mut command = cargo();
     command.args(["build", "--locked", "--manifest-path", BOOT_MANIFEST]);
     command.args(["--target", BOOT_TARGET, "--target-dir", BOOT_TARGET_DIR]);

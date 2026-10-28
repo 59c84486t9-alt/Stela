@@ -76,7 +76,7 @@ mod boot_xstate;
 #[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
 #[allow(dead_code)]
 mod boot_ioapic;
-#[cfg(test)]
+#[cfg(all(test, feature = "native-acpi"))]
 #[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
 mod boot_irq_crs;
 #[cfg(test)]
@@ -97,6 +97,7 @@ mod bench;
 mod boot;
 mod check;
 mod darwin_catalogs;
+mod dist;
 mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_platform;
@@ -120,6 +121,8 @@ enum Task {
         #[arg(long)]
         fix: bool,
     },
+    /// Build the release `stela` with its matching `stela.efi` embedded.
+    Dist,
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
@@ -147,6 +150,7 @@ enum Task {
 fn main() -> ExitCode {
     let result = match Cli::parse().task {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
+        Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
