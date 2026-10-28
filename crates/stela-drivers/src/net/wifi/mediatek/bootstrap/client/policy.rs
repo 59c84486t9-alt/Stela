@@ -8,6 +8,7 @@
 //! real cancel/remove/disable work and retains all resources through drain.
 
 use super::*;
+use core::sync::atomic::{AtomicBool, Ordering};
 use reg::database::Country;
 use station::phy::{Mode, Width};
 use triomphe::Arc as Shared;
@@ -73,11 +74,32 @@ struct Snapshot {
     powers: Vec<(Channel, i8)>,
 }
 struct Hardware(Shared<Snapshot>, Environment);
+/// The OS's protection of the current association: it joined a PMF network
+/// (`selected`), then installed the pairwise key its 4-way handshake
+/// derived (`authenticated`), as wpa_supplicant does through NL80211_CMD_NEW_KEY.
+#[derive(Default)]
+struct Protection {
+    selected: AtomicBool,
+    authenticated: AtomicBool,
+}
+impl Protection {
+    fn set(&self, selected: bool, authenticated: bool) {
+        self.selected.store(selected, Ordering::Release);
+        self.authenticated.store(authenticated, Ordering::Release);
+    }
+    fn selected(&self) -> bool {
+        self.selected.load(Ordering::Acquire)
+    }
+    fn authenticated(&self) -> bool {
+        self.selected() && self.authenticated.load(Ordering::Acquire)
+    }
+}
 struct Os {
     country: Shared<Country>,
     snapshot: Shared<Snapshot>,
     environment: Environment,
     context: reg::NativeContext,
+    protection: Shared<Protection>,
 }
 struct HardwareGuard<'a>(&'a Snapshot, Environment);
 struct OsGuard<'a>(&'a Os);
@@ -106,6 +128,7 @@ pub struct ManagedClient<I: BarIo, Q: QueueIo, C: 'static> {
     qos_map: Option<station::data::QosMap>,
     /// The OS's power save setting, `ifmgd->powersave`.
     power_save: bool,
+    protection: Shared<Protection>,
 }
 fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
     fn copy(v: &[u8]) -> Result<Vec<u8>, PolicyError> {
@@ -379,6 +402,12 @@ impl reg::HardwareLease for HardwareGuard<'_> {
             }
         }
     }
+    fn allows_pmf_authentication(&mut self, op: &reg::PmfAuthenticationOperation<'_>) -> bool {
+        self.0.get(op.join().channel).is_some_and(|c| {
+            c.flags & ((1 << 11) | 1) == 0
+                && (c.flags & (1 << 9) == 0 || self.1 == Environment::Indoor)
+        })
+    }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         self.0.association(op, self.1)
     }
@@ -481,8 +510,28 @@ impl reg::OsLease for OsGuard<'_> {
             }
         }
     }
+    fn allows_pmf_authentication(&mut self, op: &reg::PmfAuthenticationOperation<'_>) -> bool {
+        self.0.protection.selected()
+            && op.join().request.pmf().is_some()
+            && self.0.tx(op.join().channel, false)
+    }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         self.0.association(op)
+    }
+    /// Until the OS installs the handshake's pairwise key, a PMF association
+    /// carries only its configuration, reception and EAPOL.
+    fn allows_protected_management(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
+        match op.purpose() {
+            reg::AssociationUse::Configure
+            | reg::AssociationUse::Receive
+            | reg::AssociationUse::Authentication => self.0.protection.selected(),
+            reg::AssociationUse::Management
+            | reg::AssociationUse::Data
+            | reg::AssociationUse::ChannelSwitch => self.0.protection.authenticated(),
+        }
+    }
+    fn allows_protected_port(&mut self, _: &reg::AssociationOperation<'_>) -> bool {
+        self.0.protection.authenticated()
     }
     fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
         let channel = op.association().channel();
@@ -583,14 +632,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(AttachError { error, client }),
         };
-        let country = match Shared::try_new(country) {
-            Ok(country) => country,
-            Err(_) => {
-                return Err(AttachError {
-                    error: PolicyError::NoMemory,
-                    client,
-                });
-            }
+        let (Ok(country), Ok(protection)) = (
+            Shared::try_new(country),
+            Shared::try_new(Protection::default()),
+        ) else {
+            return Err(AttachError {
+                error: PolicyError::NoMemory,
+                client,
+            });
         };
         let authority = match reg::Owner::new(
             Hardware(snapshot.clone(), environment),
@@ -599,6 +648,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 snapshot: snapshot.clone(),
                 environment,
                 context: snapshot.context,
+                protection: protection.clone(),
             },
         ) {
             Ok(authority) => authority,
@@ -621,6 +671,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             qos_map: None,
             // CONFIG_CFG80211_DEFAULT_PS
             power_save: true,
+            protection,
         })
     }
     fn live(&self) -> Result<(), PolicyError> {
@@ -663,6 +714,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         self.observed.clear();
         Ok(ticket)
     }
+    /// Whether the current association protects its management frames.
+    pub fn protected(&self) -> bool {
+        self.client.station().requires_protected_management()
+    }
+    /// Whether the association may change its management state: always
+    /// without PMF, and with it once the OS has installed its pairwise key.
+    pub fn management_ready(&self) -> bool {
+        !self.protected() || self.protection.authenticated()
+    }
     pub fn poll(&mut self, now: u64, source: &dyn PageSource) -> Result<Vec<Event>, PolicyError> {
         let mut check = Check {
             snapshot: &self.snapshot,
@@ -671,10 +731,40 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             revoked: self.revoked,
             peer: self.peer,
         };
-        let events = self
-            .client
-            .poll(now, source, &mut check)
-            .map_err(PolicyError::Client)?;
+        let events = match self.client.phase() {
+            Phase::Joining if self.protected() => {
+                // SAFETY: authority and client are private disjoint fields of
+                // this same exclusive owning attachment.
+                unsafe {
+                    self.client.poll_pmf_authentication(
+                        &mut self.authority,
+                        now,
+                        source,
+                        &mut check,
+                    )
+                }
+            }
+            // The OS configures the association before it is polled.
+            Phase::AwaitingModernAdmission if self.protected() => Ok(Vec::new()),
+            Phase::Associated if self.protected() => {
+                let context = self
+                    .client
+                    .modern_context()
+                    .ok_or(PolicyError::Bss)?
+                    .clone();
+                let admission = self
+                    .authority
+                    .admit_association(self.client.station(), context, reg::AssociationUse::Receive)
+                    .map_err(PolicyError::Regulatory)?;
+                // SAFETY: as for poll_pmf_authentication.
+                unsafe {
+                    self.client
+                        .poll_pmf(&mut self.authority, admission, now, source, &mut check)
+                }
+            }
+            _ => self.client.poll(now, source, &mut check),
+        }
+        .map_err(PolicyError::Client)?;
         self.observed
             .try_reserve(events.len())
             .map_err(|_| PolicyError::NoMemory)?;
@@ -741,11 +831,44 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         {
             return Err(PolicyError::RestrictionMismatch);
         }
-        let beacon = copy_bss(&observed.bss)?;
+        if join.request.pmf().is_none() {
+            let beacon = copy_bss(&observed.bss)?;
+            self.peer = Some(join.channel);
+            self.protection.set(false, false);
+            return self
+                .client
+                .join_modern(join, beacon, profile, now, source, &mut check)
+                .map_err(PolicyError::Client);
+        }
+        // The client's own record of the beacon the OS chose.
+        let beacon = self
+            .client
+            .pmf_bss_observations()
+            .filter(|o| {
+                let bss = o.bss();
+                bss.bssid == observed.bss.bssid
+                    && bss.channel == observed.bss.channel
+                    && bss.elements == observed.bss.elements
+            })
+            .last()
+            .ok_or(PolicyError::Bss)?
+            .clone();
         self.peer = Some(join.channel);
-        self.client
-            .join_modern(join, beacon, profile, now, source, &mut check)
-            .map_err(PolicyError::Client)
+        self.protection.set(true, false);
+        // SAFETY: authority and client are private disjoint fields of this
+        // same exclusive owning attachment, and the OS selected this network.
+        unsafe {
+            self.client.join_modern_pmf(
+                &mut self.authority,
+                join,
+                &beacon,
+                profile,
+                now,
+                source,
+                &mut check,
+            )
+        }
+        .map_err(PolicyError::Client)
     }
     pub fn configure_modern(&mut self, now: u64) -> Result<(), PolicyError> {
         self.live()?;
@@ -982,6 +1105,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         seed: ReplaySeed,
     ) -> Result<KeyIdentity, PolicyError> {
         self.live()?;
+        if pairwise && self.protected() {
+            self.protection.set(true, true);
+        }
         let context = self
             .client
             .modern_context()
@@ -1010,9 +1136,43 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     }
     pub fn authorize_port(&mut self, epoch: u64) -> Result<(), PolicyError> {
         self.live()?;
-        self.client
-            .authorize_port(epoch)
-            .map_err(PolicyError::Client)
+        if !self.protected() {
+            return self
+                .client
+                .authorize_port(epoch)
+                .map_err(PolicyError::Client);
+        }
+        if self.client.station().association_epoch() != Some(epoch) {
+            return Err(PolicyError::Client(Error::Station(station::Error::Stale)));
+        }
+        // A PMF port also needs the IGTK's management session.
+        let session = self
+            .client
+            .state()
+            .management
+            .as_ref()
+            .ok_or(PolicyError::Client(Error::NoKey))?
+            .clone();
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: same exclusive privately retained controller and authority;
+        // the OS installed this association's keys after its handshake.
+        unsafe {
+            self.client
+                .authorize_port_pmf(&mut self.authority, admission, &session)
+        }
+        .map_err(PolicyError::Client)
     }
     /// The QoS TID of a data frame on the current association, as
     /// `ieee80211_select_queue` chooses it; `None` for non-QoS data.
@@ -1053,9 +1213,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .modern_context()
             .ok_or(PolicyError::Bss)?
             .clone();
+        // A PMF association's EAPOL, keyed or not, uses its Authentication grant.
+        let purpose = if self.protected() && !matches!(class, TxClass::Data) {
+            reg::AssociationUse::Authentication
+        } else {
+            reg::AssociationUse::Data
+        };
         let admission = self
             .authority
-            .admit_association(self.client.station(), context, reg::AssociationUse::Data)
+            .admit_association(self.client.station(), context, purpose)
             .map_err(PolicyError::Regulatory)?;
         let mut check = Check {
             snapshot: &self.snapshot,
@@ -1080,6 +1246,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
     pub fn poll_station(&mut self, now: u64, source: &dyn PageSource) -> Result<(), PolicyError> {
+        if self.protected() {
+            return Ok(());
+        }
         let mut check = Check {
             snapshot: &self.snapshot,
             country: &self.country,
@@ -1098,6 +1267,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         self.client.cancel_scan().map_err(PolicyError::Client)
     }
     pub fn disconnect(&mut self) -> Result<(), PolicyError> {
+        self.protection
+            .authenticated
+            .store(false, Ordering::Release);
         self.client.disconnect().map_err(PolicyError::Client)
     }
     /// Deny new work before initiating actual cancel/remove/disable commands.

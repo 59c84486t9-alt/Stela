@@ -271,7 +271,9 @@ fn replace_rsn(elements: &[u8], rsn: &[u8]) -> Vec<u8> {
     }
     out
 }
-fn inputs(driver: &Native) -> (Join, scan::result::Bss) {
+pub(in crate::net::wifi::mediatek::bootstrap::client) fn inputs(
+    driver: &Native,
+) -> (Join, scan::result::Bss) {
     let (mut join, mut bss) = modern_inputs(driver);
     let local = driver.local_advertisement(Band::Ghz5).unwrap();
     join.request = AssociationRequest::new_modern_with_local_pmf(

@@ -1659,5 +1659,5 @@ pub(super) mod tests {
 
     mod edca_controls;
     mod management_controls;
-    mod pmf_controls;
+    pub(in super::super) mod pmf_controls;
 }

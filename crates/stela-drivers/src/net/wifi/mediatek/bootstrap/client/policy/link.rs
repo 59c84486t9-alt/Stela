@@ -201,6 +201,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             && c.profile
                 .is_some_and(|p| matches!(p.channel.band, Band::Ghz2 | Band::Ghz5))
     }
+    /// An association whose management state may change: a PMF one once
+    /// the OS has installed its handshake's pairwise key.
+    fn ready(s: &State<I, Q, C, S>) -> bool {
+        Self::active(s) && s.client.management_ready()
+    }
     fn up(s: &State<I, Q, C, S>) -> bool {
         let c = s.client.client.state();
         Self::active(s)
@@ -430,7 +435,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         }
         // mac80211 hands a beacon's new WMM parameters and slot time
         // straight to the driver.
-        if Self::active(s) && s.client.pending_edca() {
+        if Self::ready(s) && s.client.pending_edca() {
             match s.client.update_edca() {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
@@ -439,7 +444,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
-        if Self::active(s) {
+        if Self::ready(s) {
             match s.client.channel_switch(timer_now) {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
@@ -448,7 +453,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
-        if Self::active(s) && s.client.client.pending_channel().is_some() {
+        if Self::ready(s) && s.client.client.pending_channel().is_some() {
             match s.client.update_channel() {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
@@ -457,7 +462,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
-        if Self::active(s) && s.client.client.pending_slot_time() {
+        if Self::ready(s) && s.client.client.pending_slot_time() {
             match s.client.update_slot_time() {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
@@ -468,7 +473,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         }
         // ieee80211_recalc_ps_vif: power save while the authorized port is
         // up and the OS allows it.
-        if Self::active(s) {
+        if Self::ready(s) {
             let enable = Self::up(s) && s.client.power_save_allowed();
             if enable != s.client.client.power_save() {
                 match s.client.update_power_save(enable) {
@@ -521,7 +526,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     /// expired session timers, then release frames held for a TID whose
     /// session has started or fallen back (`ieee80211_agg_splice_finish`).
     fn block_ack(s: &mut State<I, Q, C, S>, now: u64) -> Result<(), PolicyError> {
-        if !Self::active(s) {
+        if !Self::ready(s) {
             return Ok(());
         }
         if s.client
@@ -1709,4 +1714,5 @@ mod tests {
 
     mod edca_controls;
     mod management_controls;
+    mod pmf_controls;
 }
