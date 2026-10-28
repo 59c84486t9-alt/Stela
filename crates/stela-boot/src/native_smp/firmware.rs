@@ -8,7 +8,7 @@ use super::{
     memory_types::amd,
     topology::{self, Cpuid, Location, Msr, Processor, Snapshot},
 };
-use crate::{handoff::Region, tables::PAGE};
+use crate::{cpu::msr, handoff::Region, tables::PAGE};
 use alloc::vec::Vec;
 use core::{
     arch::{
@@ -27,13 +27,6 @@ use uefi::{
 
 const MAGIC: u64 = 0x5354_4c53_4d50_3031;
 const VERSION: u32 = 3;
-pub(super) const EFER: u32 = 0xc000_0080;
-const PAT: u32 = 0x277;
-const APIC_BASE: u32 = 0x1b;
-const MTRR_CAP: u32 = 0xfe;
-const MTRR_DEFAULT: u32 = 0x2ff;
-const MTRR_VARIABLE_BASE: u32 = 0x200;
-const TSC_ADJUST: u32 = 0x3b;
 const MAX_VARIABLE_MTRRS: usize = 16;
 const CR4_OSXSAVE: u64 = 1 << 18;
 
@@ -78,23 +71,6 @@ impl Error {
     }
 }
 
-pub(super) unsafe fn read_msr(index: u32) -> u64 {
-    let (low, high): (u32, u32);
-    // SAFETY: caller checks that this known architectural MSR is implemented.
-    unsafe {
-        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
-    };
-    (u64::from(high) << 32) | u64::from(low)
-}
-
-pub(super) unsafe fn write_msr(index: u32, value: u64) {
-    // SAFETY: caller has qualified this actual processor/MSR and value.
-    unsafe {
-        asm!("wrmsr", in("ecx") index, in("eax") value as u32,
-        in("edx") (value >> 32) as u32, options(nostack, preserves_flags));
-    }
-}
-
 /// Opens only fixed-attribute read/write visibility, without changing routing,
 /// type, encryption or latent attributes. The original control/IF is restored
 /// before the joined firmware callback returns, including early errors.
@@ -112,7 +88,7 @@ impl FixedVisibility {
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
-        let original = unsafe { read_msr(amd::SYSCFG) };
+        let original = unsafe { msr::AMD_SYSCFG.read() };
         let mut guard = Self {
             syscfg: original,
             interrupts: flags & (1 << 9) != 0,
@@ -124,10 +100,10 @@ impl FixedVisibility {
         if fixed && original & amd::FIXED_MODIFY == 0 {
             guard.changed = true;
             unsafe {
-                write_msr(amd::SYSCFG, original | amd::FIXED_MODIFY);
+                msr::AMD_SYSCFG.write(original | amd::FIXED_MODIFY);
             }
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
-            if unsafe { read_msr(amd::SYSCFG) } != original | amd::FIXED_MODIFY {
+            if unsafe { msr::AMD_SYSCFG.read() } != original | amd::FIXED_MODIFY {
                 return Err(Error::AmdMemoryControls);
             }
         }
@@ -141,7 +117,7 @@ impl Drop for FixedVisibility {
         unsafe {
             if self.changed {
                 core::sync::atomic::compiler_fence(Ordering::SeqCst);
-                write_msr(amd::SYSCFG, self.syscfg);
+                msr::AMD_SYSCFG.write(self.syscfg);
             }
             if self.interrupts {
                 asm!("sti", options(nomem, nostack));
@@ -251,22 +227,26 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
         asm!("mov {}, cr0",out(reg) snapshot.cr0,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr3",out(reg) snapshot.cr3,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr4",out(reg) snapshot.cr4,options(nomem,nostack,preserves_flags));
-        snapshot.efer = read_msr(EFER);
+        snapshot.efer = msr::EFER.read();
         if basic.edx & (1 << 9) != 0 {
-            snapshot.apic_base = read_msr(APIC_BASE);
+            snapshot.apic_base = msr::APIC_BASE.read();
         }
         if basic.edx & (1 << 16) != 0 {
-            snapshot.pat = read_msr(PAT);
+            snapshot.pat = msr::PAT.read();
             snapshot.pat_valid = true;
         }
         if basic.edx & (1 << 12) != 0 {
-            let cap = read_msr(MTRR_CAP);
+            let cap = msr::MTRR_CAP.read();
             let variables = (cap & 0xff) as usize;
             if variables > MAX_VARIABLE_MTRRS {
                 return Err(Error::SnapshotCapacity);
             }
-            push_msr(&mut snapshot, MTRR_CAP, cap)?;
-            push_msr(&mut snapshot, MTRR_DEFAULT, read_msr(MTRR_DEFAULT))?;
+            push_msr(&mut snapshot, msr::MTRR_CAP.index, cap)?;
+            push_msr(
+                &mut snapshot,
+                msr::MTRR_DEFAULT.index,
+                msr::MTRR_DEFAULT.read(),
+            )?;
             let amd_controls = amd::architectural(&snapshot);
             let visibility = if amd_controls {
                 Some(FixedVisibility::open(cap & (1 << 8) != 0)?)
@@ -277,32 +257,32 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
                 for index in [
                     0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
                 ] {
-                    push_msr(&mut snapshot, index, read_msr(index))?;
+                    push_msr(&mut snapshot, index, msr::rdmsr(index))?;
                 }
             }
             if let Some(visibility) = visibility {
                 let original = visibility.syscfg;
                 drop(visibility);
-                if read_msr(amd::SYSCFG) != original {
+                if msr::AMD_SYSCFG.read() != original {
                     return Err(Error::AmdMemoryControls);
                 }
                 // Do not report masked fixed zeros as physical source state.
                 snapshot.amd_fixed_raw = true;
                 push_msr(&mut snapshot, amd::SYSCFG, original)?;
                 for index in amd::REGISTERS.into_iter().skip(1) {
-                    push_msr(&mut snapshot, index, read_msr(index))?;
+                    push_msr(&mut snapshot, index, msr::rdmsr(index))?;
                 }
             }
             for offset in 0..variables as u32 * 2 {
-                let index = MTRR_VARIABLE_BASE + offset;
-                push_msr(&mut snapshot, index, read_msr(index))?;
+                let index = msr::MTRR_PHYS_BASE.at(offset).index;
+                push_msr(&mut snapshot, index, msr::rdmsr(index))?;
             }
         }
         if snapshot
             .get(7, 0)
             .is_some_and(|record| record.ebx & (1 << 1) != 0)
         {
-            push_msr(&mut snapshot, TSC_ADJUST, read_msr(TSC_ADJUST))?;
+            push_msr(&mut snapshot, msr::TSC_ADJUST.index, msr::TSC_ADJUST.read())?;
         }
         if basic.ecx & ((1 << 26) | (1 << 27)) == (1 << 26) | (1 << 27)
             && snapshot.cr4 & CR4_OSXSAVE != 0

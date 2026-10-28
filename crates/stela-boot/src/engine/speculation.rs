@@ -29,8 +29,7 @@ use stela_runtime::machine::identification::Speculation;
 /// it are not controlled by code before it (Intel, "Speculative Execution
 /// Side Channel Mitigations"; AMD, "Software Techniques for Managing
 /// Speculation on AMD Processors").
-const IA32_PRED_CMD: u32 = 0x49;
-const PRED_CMD_IBPB: u32 = 1;
+const PRED_CMD_IBPB: u64 = 1;
 /// CPUID.(EAX=07H,ECX=0):EDX bit 26: IBRS and IBPB (Intel).
 const CPUID_7_EDX_SPEC_CTRL: u32 = 1 << 26;
 /// CPUID.80000008H:EBX bit 12: IBPB (AMD).
@@ -50,13 +49,12 @@ const RETURN_STACK_ENTRIES: usize = 32;
 const CPUID_7_EDX_ARCH_CAPABILITIES: u32 = 1 << 29;
 /// CPUID.(EAX=07H,ECX=0):EBX bit 11: RTM, Intel TSX.
 const CPUID_7_EBX_RTM: u32 = 1 << 11;
-/// IA32_ARCH_CAPABILITIES (MSR 10AH) and the bits that each rule out one
-/// way a load forwards data to speculation (Intel, "Affected Processors:
+/// IA32_ARCH_CAPABILITIES (MSR 10AH) bits that each rule out one way a
+/// load forwards data to speculation (Intel, "Affected Processors:
 /// Transient Execution Attacks"): RDCL_NO (rogue data cache load and L1
 /// terminal fault), MDS_NO (microarchitectural data sampling), TAA_NO
 /// (TSX asynchronous abort, which needs RTM), GDS_NO (gather data
 /// sampling) and RFDS_NO (register file data sampling).
-const IA32_ARCH_CAPABILITIES: u32 = 0x10a;
 const ARCH_CAP_RDCL_NO: u64 = 1 << 0;
 const ARCH_CAP_MDS_NO: u64 = 1 << 5;
 const ARCH_CAP_TAA_NO: u64 = 1 << 8;
@@ -149,7 +147,7 @@ fn forwards_no_faulting_data(vendor: Vendor) -> bool {
                 return false;
             }
             // SAFETY: CPUID enumerates the MSR; ring 0.
-            let capabilities = unsafe { super::read_msr(IA32_ARCH_CAPABILITIES) };
+            let capabilities = unsafe { crate::cpu::msr::ARCH_CAPABILITIES.read() };
             let tsx = leaf.ebx & CPUID_7_EBX_RTM != 0;
             let all = |bits: u64| capabilities & bits == bits;
             all(ARCH_CAP_RDCL_NO | ARCH_CAP_MDS_NO | ARCH_CAP_GDS_NO | ARCH_CAP_RFDS_NO)
@@ -186,13 +184,7 @@ pub fn isolate() {
     // pushes its return address, which the final addition pops; nothing
     // executes the INT3s but speculation.
     unsafe {
-        asm!(
-            "wrmsr",
-            in("ecx") IA32_PRED_CMD,
-            in("eax") PRED_CMD_IBPB,
-            in("edx") 0,
-            options(nostack, preserves_flags),
-        );
+        crate::cpu::msr::PRED_CMD.write(PRED_CMD_IBPB);
         asm!(
             ".rept {entries}",
             "call 2f",

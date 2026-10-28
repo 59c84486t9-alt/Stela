@@ -59,13 +59,8 @@ fn processor_id() -> u32 {
 }
 
 fn gs_base() -> u64 {
-    let (low, high): (u32, u32);
     // SAFETY: read-only architectural CPL0 GS context, not device MMIO.
-    unsafe {
-        asm!("rdmsr", in("ecx") 0xc000_0101u32, out("eax") low, out("edx") high,
-            options(nomem, nostack, preserves_flags));
-    }
-    (u64::from(high) << 32) | u64::from(low)
+    unsafe { crate::cpu::msr::GS_BASE.read() }
 }
 
 fn registration_cpu() -> bool {

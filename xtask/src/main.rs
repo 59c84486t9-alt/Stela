@@ -29,6 +29,10 @@ mod boot_live_tree;
 #[path = "../../crates/stela-boot/src/firmware/pe.rs"]
 mod boot_loaded_image;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/cpu/msr.rs"]
+#[allow(dead_code)] // Hosted tests run only the CPUID gates; RDMSR/WRMSR need CPL0.
+mod boot_msr;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/apic.rs"]
 #[allow(dead_code)] // Only pure directed-INIT admission tests execute hosted.
 mod boot_native_apic;
