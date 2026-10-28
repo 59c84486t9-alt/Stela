@@ -3,7 +3,7 @@
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::client::tests::*;
 use crate::net::wifi::mediatek::bootstrap::tests::{Bar, NativeGuard, Q};
-use crate::net::wifi::mediatek::ring::tests::Source;
+use crate::net::wifi::mediatek::ring::{rx::tests::device_receive, tests::Source};
 use core::sync::atomic::Ordering;
 
 fn finish(mut client: Client<Bar, Q, NativeGuard>, model: Model, now: u64) {
@@ -168,6 +168,79 @@ fn actual_sae_commit_token_retry_confirm_transport_never_grants_association() {
     );
     drop(released);
     finish(client, model, 9);
+}
+
+#[test]
+fn sae_frames_go_again_by_tx_status_until_ieee80211_auth_max_tries() {
+    let (mut client, model) = setup();
+    let session = client
+        .begin_external_authentication(profile(), vec![b'x'], 0, 3_000_000, &mut Policy(true))
+        .unwrap();
+    client
+        .transmit_external_authentication(&session, 1, 0, &[19, 0], 1, &Source, &mut Policy(true))
+        .unwrap();
+    // The frame's TXS, as mt7925_mac_add_txs reads it.
+    let txs = |pid: u8, acked: bool| {
+        let mut txs = vec![0; 40];
+        txs[..4].copy_from_slice(&40_u32.to_le_bytes());
+        txs[8..12].copy_from_slice(&(u32::from(!acked) << 16).to_le_bytes());
+        txs[16..20].copy_from_slice(&(u32::from(profile().wcid) << 16).to_le_bytes());
+        txs[20..24].copy_from_slice(&(u32::from(pid) << 24).to_le_bytes());
+        device_receive(&model.queues[&0xd4520], &txs, true, 0);
+    };
+    let pid = next_txwi(&model)[20];
+    let first = finish_tx(&model).remove(0);
+    client.poll(2, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(client.poll_released().unwrap().len(), 1);
+    // An acknowledged frame gives the AP IEEE80211_AUTH_TIMEOUT_SAE.
+    txs(pid, true);
+    client.poll(3, &Source, &mut Policy(true)).unwrap();
+    let queue = |client: &Client<Bar, Q, NativeGuard>| {
+        client
+            .state()
+            .controller
+            .state()
+            .data_tx
+            .as_ref()
+            .unwrap()
+            .outstanding_tokens()
+    };
+    client
+        .poll_station(2_000_002, &Source, &mut Policy(true))
+        .unwrap();
+    assert_eq!(queue(&client), 0);
+    // The AP's wait ends the first try; the second goes on a new sequence
+    // number.
+    client.poll(2_000_003, &Source, &mut Policy(true)).unwrap();
+    let pid = next_txwi(&model)[20];
+    let second = finish_tx(&model).remove(0);
+    assert_eq!(second[24..], first[24..]);
+    assert_ne!(second[22..24], first[22..24]);
+    client.poll(2_000_004, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(client.poll_released().unwrap().len(), 1);
+    // A lost frame goes again at once; frontend time alone cannot time out
+    // its physical status.
+    client.poll(2_300_000, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(queue(&client), 0);
+    txs(pid, false);
+    client.poll(2_300_000, &Source, &mut Policy(true)).unwrap();
+    client
+        .poll_station(2_300_000, &Source, &mut Policy(true))
+        .unwrap();
+    assert_eq!(finish_tx(&model).remove(0)[24..], first[24..]);
+    client.poll(2_300_001, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(client.poll_released().unwrap().len(), 1);
+    // After IEEE80211_AUTH_MAX_TRIES the last wait ends the exchange.
+    let events = client.poll(2_800_001, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(queue(&client), 0);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ExternalAuthenticationEnded {
+            failure: Some(station::Failure::Timeout),
+            ..
+        }
+    )));
+    finish(client, model, 2_800_002);
 }
 
 #[test]

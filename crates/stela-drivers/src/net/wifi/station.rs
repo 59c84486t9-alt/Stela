@@ -36,6 +36,8 @@ static NEXT_ASSOCIATION: super::Identities = super::Identities::new();
 // Linux no-ACK-status auth/assoc response timing and retry count.
 const MANAGEMENT_RESPONSE_TIMEOUT_US: u64 = 500_000;
 const MANAGEMENT_ATTEMPTS: u8 = 3;
+/// IEEE80211_AUTH_TIMEOUT_SHORT and IEEE80211_ASSOC_TIMEOUT_SHORT.
+const MANAGEMENT_ACKED_TIMEOUT_US: u64 = 100_000;
 const CONFIGURATION_TIMEOUT_US: u64 = 500_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -745,7 +747,7 @@ impl Station {
             if let Some(status) = self.sae.denied() {
                 return self.remove(Some(Failure::PeerRejected(status))).map(Some);
             }
-            if self.now >= self.sae.deadline() {
+            if self.now >= self.sae.deadline() || self.sae.exhausted(self.now) {
                 return self.remove(Some(Failure::Timeout)).map(Some);
             }
         }
@@ -767,6 +769,30 @@ impl Station {
         }
         self.transmit(self.phase, pending.attempts + 1, policy)
             .map(Some)
+    }
+
+    /// `ieee80211_sta_work` on the TX status of the latest authentication or
+    /// association request: an acknowledged one waits
+    /// IEEE80211_AUTH_TIMEOUT_SHORT or IEEE80211_ASSOC_TIMEOUT_SHORT for the
+    /// response, and a lost one is retried at once.
+    pub fn management_status(&mut self, acked: bool, now_us: u64) -> Result<(), Error> {
+        self.clock(now_us)?;
+        match self.phase {
+            Phase::Authenticating | Phase::Associating => {
+                if let Some(pending) = self.pending.as_mut().filter(|pending| pending.queued) {
+                    pending.deadline = if acked {
+                        self.now
+                            .checked_add(MANAGEMENT_ACKED_TIMEOUT_US)
+                            .ok_or(Error::Overflow)?
+                    } else {
+                        self.now
+                    };
+                }
+                Ok(())
+            }
+            Phase::ExternalAuthenticating => self.sae.transmit_status(acked, self.now),
+            _ => Ok(()),
+        }
     }
 
     pub fn complete_configuration(
@@ -1392,6 +1418,25 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(station.phase(), Phase::Quarantined);
         assert!(!station.port_open(None, None));
+    }
+
+    #[test]
+    fn tx_status_paces_management_retries_like_ieee80211_sta_work() {
+        let mut station = Station::new(LOCAL).unwrap();
+        let first = station
+            .begin(join(PortPolicy::Open), 0, &mut Policy(true))
+            .unwrap();
+        station.submitted(ticket(&first)).unwrap();
+        // An acknowledged request waits IEEE80211_AUTH_TIMEOUT_SHORT; a lost
+        // one goes again at once.
+        station.management_status(true, 10).unwrap();
+        assert!(station.poll(100_009, &mut Policy(true)).unwrap().is_none());
+        let next = station.poll(100_010, &mut Policy(true)).unwrap().unwrap();
+        assert!(matches!(next, Action::Transmit { .. }));
+        station.submitted(ticket(&next)).unwrap();
+        station.management_status(false, 100_020).unwrap();
+        let next = station.poll(100_020, &mut Policy(true)).unwrap().unwrap();
+        assert!(matches!(next, Action::Transmit { .. }));
     }
 
     #[test]

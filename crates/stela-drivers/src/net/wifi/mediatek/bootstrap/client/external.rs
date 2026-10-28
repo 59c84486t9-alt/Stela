@@ -145,7 +145,37 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if !policy.allow_management_tx(session.channel()) {
             return Err(Error::Station(station::Error::Regulatory));
         }
-        Self::submit(s, &bytes, None, true, true, source)
+        let receipt = Self::submit(s, &bytes, None, true, true, source)?;
+        s.mlme_receipt = Some(receipt);
+        Ok(receipt)
+    }
+
+    /// `ieee80211_auth` sending the OS's last SAE frame again once its wait
+    /// passed, on a freshly reserved channel as `drv_mgd_prepare_tx` reserves
+    /// one. A 6 GHz exchange keeps its single guarded try.
+    pub(super) fn retransmit_external(
+        s: &mut Owned<I, Q, C>,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut impl station::RegulatoryPolicy,
+    ) -> Result<(), Error> {
+        let queue = s.controller.state().data_tx.as_ref().unwrap();
+        if s.six_ghz.is_some()
+            || queue.outstanding_tokens() != 0
+            || queue.pending_descriptors() != 0
+        {
+            return Ok(());
+        }
+        let Some(bytes) = s
+            .station
+            .external_retransmission(now, policy)
+            .map_err(Error::Station)?
+        else {
+            return Ok(());
+        };
+        Self::reserve_channel(s)?;
+        s.mlme_receipt = Some(Self::submit(s, &bytes, None, true, true, source)?);
+        Ok(())
     }
 
     /// Move the native deadline as far as the station's moved: an

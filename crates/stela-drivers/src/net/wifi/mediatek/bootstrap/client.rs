@@ -246,6 +246,9 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     channel_change: Option<Option<ChannelDefinition>>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
+    /// The latest authentication or association frame, whose TX status
+    /// paces the exchange (`ifmgd->status_received`).
+    mlme_receipt: Option<Receipt>,
     /// The bound 6 GHz transport until its peer retires after drain.
     six_ghz: Option<six_ghz::Bound>,
 }
@@ -337,6 +340,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 channel_change: None,
                 authentication_deadline: None,
                 authentication_end: None,
+                mlme_receipt: None,
                 six_ghz: None,
             })),
         })
@@ -624,7 +628,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 {
                     return Err(Error::GrantTimeout);
                 }
-                Self::submit(s, &bytes, None, true, true, source)?;
+                s.mlme_receipt = Some(Self::submit(s, &bytes, None, true, true, source)?);
                 s.station.submitted(ticket).map_err(Error::Station)?;
             }
             Action::Configure {
@@ -730,6 +734,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         };
         if let Some(a) = s.station.poll(now, policy).map_err(Error::Station)? {
             Self::action(s, a, now, source, policy)?;
+        }
+        if s.phase == Phase::Joining && s.station.phase() == station::Phase::ExternalAuthenticating
+        {
+            Self::retransmit_external(s, now, source, policy)?;
         }
         Ok(())
     }
@@ -855,7 +863,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 });
             }
         }
-        s.txs.expire(now);
+        // TX-free stamps each release on the controller's clock, as mt76
+        // times status out in jiffies.
+        s.txs.expire(s.controller.state().control.clock.now_us());
         let mut events: Vec<_> = s.txs.ready.drain(..).map(Event::TxStatus).collect();
         events.append(&mut s.cqm.ready);
         while let Some(received) = s.pending_rx.pop_front() {
@@ -1133,6 +1143,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         );
         if let Some((session, failure)) = s.authentication_end.take() {
             events.push(Event::ExternalAuthenticationEnded { session, failure });
+        }
+        for event in &events {
+            if let Event::TxStatus(status) = event
+                && Some(status.receipt) == s.mlme_receipt
+            {
+                s.mlme_receipt = None;
+                s.station
+                    .management_status(status.acked, now)
+                    .map_err(Error::Station)?;
+            }
         }
         Ok(events)
     }

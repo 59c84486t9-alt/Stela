@@ -11,20 +11,29 @@
 use super::*;
 
 const SAE: u16 = 3;
-const MAX_EXCHANGE_US: u64 = 2_000_000;
+/// The longest exchange an OS may reserve: room for each frame of a commit,
+/// token retry and confirm to take IEEE80211_AUTH_MAX_TRIES tries of
+/// IEEE80211_AUTH_TIMEOUT_SAE, which mac80211 bounds only per frame.
+const MAX_EXCHANGE_US: u64 = 30_000_000;
 /// IEEE80211_AUTH_WAIT_ASSOC: an authenticated exchange waits this long for
 /// its association.
 const WAIT_ASSOCIATION_US: u64 = 5_000_000;
 /// IEEE80211_AUTH_WAIT_SAE_RETRY: a status asking for another commit waits
 /// this long for the OS's retry.
 const WAIT_RETRY_US: u64 = 2_000_000;
+/// IEEE80211_AUTH_TIMEOUT_LONG: a sent frame waits this long for its TX
+/// status, IEEE80211_AUTH_TIMEOUT_SAE this long for the AP once acked.
+const WAIT_STATUS_US: u64 = 500_000;
+const WAIT_PEER_US: u64 = 2_000_000;
+/// IEEE80211_AUTH_MAX_TRIES.
+const MAX_TRIES: u8 = 3;
 /// WLAN_STATUS_ANTI_CLOG_REQUIRED, _SAE_HASH_TO_ELEMENT and _SAE_PK.
 const ANTI_CLOGGING: u16 = 76;
 const HASH_TO_ELEMENT: u16 = 126;
 const SAE_PK: u16 = 127;
 
 /// The SAE progress `ieee80211_mgd_auth_data` keeps.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Progress {
     /// `expected_transaction`: the transaction of the station's last frame.
     expected: u16,
@@ -33,6 +42,11 @@ pub(super) struct Progress {
     done: bool,
     denied: Option<u16>,
     deadline: u64,
+    /// The OS's last frame (`trans`, `status`, `data`) and its `tries`.
+    last: Option<(u16, u16, Vec<u8>)>,
+    tries: u8,
+    /// When that frame is sent again; `None` while `waiting` for the OS.
+    retry: Option<u64>,
 }
 impl Progress {
     fn new(deadline: u64) -> Self {
@@ -47,6 +61,22 @@ impl Progress {
     }
     pub(super) const fn deadline(&self) -> u64 {
         self.deadline
+    }
+    /// `ieee80211_sta_work` on the last frame's TX status: the AP gets
+    /// IEEE80211_AUTH_TIMEOUT_SAE to answer, and a lost frame goes again.
+    pub(super) fn transmit_status(&mut self, acked: bool, now: u64) -> Result<(), Error> {
+        if self.retry.is_some() && !self.done {
+            self.retry = Some(if acked {
+                now.checked_add(WAIT_PEER_US).ok_or(Error::Overflow)?
+            } else {
+                now
+            });
+        }
+        Ok(())
+    }
+    /// Whether the last frame's tries ran out while it is due again.
+    pub(super) fn exhausted(&self, now: u64) -> bool {
+        !self.done && self.tries >= MAX_TRIES && self.retry.is_some_and(|retry| now >= retry)
     }
     /// `ieee80211_mark_sta_auth`.
     fn authenticated(&mut self, now: u64) -> Result<(), Error> {
@@ -141,7 +171,8 @@ impl Station {
     /// Reserve an exchange for an actual OS-selected BSS. Native publication
     /// must additionally bind this to actual hardware/source/regulatory owners.
     /// The deadline covers OS computation as well as transport; repeated commits
-    /// do not extend it. There is no implicit retry of credential-bearing bytes.
+    /// do not extend it. Only the OS's last frame is sent again, as
+    /// `ieee80211_auth` retries it.
     #[allow(clippy::too_many_arguments)]
     pub fn begin_external_authentication(
         &mut self,
@@ -322,19 +353,65 @@ impl Station {
         if !policy.allow_management_tx(session.channel) {
             return Err(Error::Regulatory);
         }
-        let mut bytes = wire::authentication(self.local, session.peer, self.sequence)?;
-        bytes[24..26].copy_from_slice(&SAE.to_le_bytes());
-        bytes[26..28].copy_from_slice(&transaction.to_le_bytes());
-        bytes[28..30].copy_from_slice(&status.to_le_bytes());
-        bytes.extend_from_slice(data);
-        self.sequence = next_sequence(self.sequence);
+        let last = data.to_vec();
+        let bytes = self.external_frame(session, transaction, status, data)?;
         self.sae.expected = transaction;
+        // ieee80211_mgd_auth starts each frame's tries afresh.
+        self.sae.last = Some((transaction, status, last));
+        self.sae.tries = 1;
+        self.sae.retry = Some(now.checked_add(WAIT_STATUS_US).ok_or(Error::Overflow)?);
         // ieee80211_mgd_auth: confirming a peer that already confirmed
         // completes the exchange.
         if transaction == 2 && self.sae.peer_confirmed {
             self.sae.authenticated(now)?;
         }
         Ok(bytes)
+    }
+
+    fn external_frame(
+        &mut self,
+        session: &Session,
+        transaction: u16,
+        status: u16,
+        data: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let mut bytes = wire::authentication(self.local, session.peer, self.sequence)?;
+        bytes[24..26].copy_from_slice(&SAE.to_le_bytes());
+        bytes[26..28].copy_from_slice(&transaction.to_le_bytes());
+        bytes[28..30].copy_from_slice(&status.to_le_bytes());
+        bytes.extend_from_slice(data);
+        self.sequence = next_sequence(self.sequence);
+        Ok(bytes)
+    }
+
+    /// `ieee80211_auth` sending the OS's last frame again once its wait
+    /// passed, until IEEE80211_AUTH_MAX_TRIES; `poll` ends the exchange
+    /// after the last try.
+    pub fn external_retransmission(
+        &mut self,
+        now: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if self.phase != Phase::ExternalAuthenticating
+            || self.sae.done
+            || self.sae.denied.is_some()
+            || self.sae.tries >= MAX_TRIES
+            || self.sae.retry.is_none_or(|retry| now < retry)
+        {
+            return Ok(None);
+        }
+        self.clock(now)?;
+        let session = self.external.clone().ok_or(Error::Stale)?;
+        if !policy.allow_management_tx(session.channel) {
+            return Err(Error::Regulatory);
+        }
+        let (transaction, status, data) = self.sae.last.take().ok_or(Error::Stale)?;
+        let bytes = self.external_frame(&session, transaction, status, &data);
+        self.sae.last = Some((transaction, status, data));
+        let bytes = bytes?;
+        self.sae.tries += 1;
+        self.sae.retry = Some(now.checked_add(WAIT_STATUS_US).ok_or(Error::Overflow)?);
+        Ok(Some(bytes))
     }
 
     /// `ieee80211_rx_mgmt_auth` for the OS's exchange: `None` for a frame
@@ -394,6 +471,7 @@ impl Station {
             {
                 // Waiting for the OS's next commit.
                 self.sae.deadline = now.checked_add(WAIT_RETRY_US).ok_or(Error::Overflow)?;
+                self.sae.retry = None;
             } else {
                 self.sae.denied = Some(status);
             }
