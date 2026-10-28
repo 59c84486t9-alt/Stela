@@ -157,11 +157,13 @@ pub(super) fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result
             bundle.generation
         );
         let destination = bundle::directory_of(
-            bundle.kind,
             &record.volume,
-            &bundle.build,
-            bundle.ecid,
-            generation,
+            bundle::Identity {
+                kind: bundle.kind,
+                build: &bundle.build,
+                ecid: bundle.ecid,
+                generation,
+            },
         );
         fs::create_dir_all(destination.parent().unwrap())?;
         let digest = bundle::install(&bundle.path(), &destination)?;
@@ -172,9 +174,14 @@ pub(super) fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result
             "the copied bundle does not read back as written: {}",
             problems.join("; ")
         );
-        record
-            .bundles
-            .retain(|b| !b.same_kind(bundle.kind, &bundle.build, bundle.ecid, generation));
+        record.bundles.retain(|b| {
+            !b.same_kind(bundle::Identity {
+                kind: bundle.kind,
+                build: &bundle.build,
+                ecid: bundle.ecid,
+                generation,
+            })
+        });
         record.bundles.push(bundle::Bundle {
             build: bundle.build.clone(),
             ecid: bundle.ecid,

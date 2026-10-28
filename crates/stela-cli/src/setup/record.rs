@@ -216,7 +216,12 @@ impl Record {
     /// counts as missing, so the next setup run prepares it again.
     pub(super) fn restore_bundle(&self, kind: Kind, ecid: Option<Ecid>) -> Option<&bundle::Bundle> {
         self.bundles.iter().find(|b| {
-            b.same_kind(kind, &self.build, ecid, self.generation()) && b.personalized == self.tss
+            b.same_kind(bundle::Identity {
+                kind,
+                build: &self.build,
+                ecid,
+                generation: self.generation(),
+            }) && b.personalized == self.tss
         })
     }
 
@@ -263,7 +268,12 @@ impl Record {
         if self.restore_bundle(kind, install.ecid).is_none() || !self.tss {
             return Ok(None);
         }
-        let restore = bundle::firmware_path_of(kind, &self.build, install.ecid, self.generation());
+        let restore = bundle::firmware_path_of(bundle::Identity {
+            kind,
+            build: &self.build,
+            ecid: install.ecid,
+            generation: self.generation(),
+        });
         let mut system = install.disk.bundle_options(&restore, install.ecid)?;
         medium.restore_from(&mut system)?;
         system.update_restore = kind == Kind::Update;

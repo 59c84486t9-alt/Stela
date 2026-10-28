@@ -198,11 +198,13 @@ pub(super) fn describe_install(
             "  {:<14} {} ({:.1} GB)",
             bundle.kind.label(),
             bundle::directory_of(
-                bundle.kind,
                 &record.volume,
-                &bundle.build,
-                bundle.ecid,
-                record.generation()
+                bundle::Identity {
+                    kind: bundle.kind,
+                    build: &bundle.build,
+                    ecid: bundle.ecid,
+                    generation: record.generation()
+                }
             )
             .display(),
             bundle.bytes as f64 / 1e9
@@ -566,11 +568,13 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
             "  {:<14} {} ({:.1} GB)",
             prepared.kind.label(),
             bundle::directory_of(
-                prepared.kind,
                 &record.volume,
-                &prepared.build,
-                prepared.ecid,
-                record.generation()
+                bundle::Identity {
+                    kind: prepared.kind,
+                    build: &prepared.build,
+                    ecid: prepared.ecid,
+                    generation: record.generation()
+                }
             )
             .display(),
             prepared.bytes as f64 / 1e9

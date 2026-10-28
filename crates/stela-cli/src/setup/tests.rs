@@ -432,11 +432,13 @@ fn record(f: &Fixture) -> Record {
 fn bundle_of(f: &Fixture, ecid: Option<Ecid>) -> PathBuf {
     let record = record(f);
     bundle::directory_of(
-        Kind::Restore,
         &record.volume,
-        &record.build,
-        ecid,
-        record.generation(),
+        bundle::Identity {
+            kind: Kind::Restore,
+            build: &record.build,
+            ecid,
+            generation: record.generation(),
+        },
     )
 }
 
@@ -1676,11 +1678,13 @@ fn additional_disk_gets_separate_machine_identity() {
     );
     // Each install restores with its own machine's restore bundle.
     let restore2 = bundle::directory_of(
-        Kind::Restore,
         &record2.volume,
-        &record2.build,
-        Some(second),
-        record2.generation(),
+        bundle::Identity {
+            kind: Kind::Restore,
+            build: &record2.build,
+            ecid: Some(second),
+            generation: record2.generation(),
+        },
     );
     assert!(choices().entries[3].options.contains(&format!(
         "--bundle \\stela\\boot\\{}\\restore-{}",
@@ -2049,11 +2053,13 @@ fn revision_update_rebuilds_bundles_and_rolls_back() {
             ..current()
         };
         vec![bundle::directory_of(
-            Kind::Restore,
             &first.volume,
-            &first.build,
-            ecid,
-            generation,
+            bundle::Identity {
+                kind: Kind::Restore,
+                build: &first.build,
+                ecid,
+                generation,
+            },
         )]
     };
     // A later stela prepares revision 1, with the same stela.efi.
@@ -2190,11 +2196,13 @@ fn stela_updates_remove_bundles_no_kept_version_boots() {
             ..current()
         };
         bundle::directory_of(
-            Kind::Restore,
             &record.volume,
-            &record.build,
-            ecid,
-            generation,
+            bundle::Identity {
+                kind: Kind::Restore,
+                build: &record.build,
+                ecid,
+                generation,
+            },
         )
     };
     for revision in 1..4 {
@@ -2251,11 +2259,13 @@ fn interrupted_os_update_resumes_or_rolls_back() {
     );
     // The old build stays for rollback.
     let old = bundle::directory_of(
-        Kind::Restore,
         &stela_volume(&f),
-        restore::payload::SYNTHETIC_BUILD,
-        ecid,
-        current(),
+        bundle::Identity {
+            kind: Kind::Restore,
+            build: restore::payload::SYNTHETIC_BUILD,
+            ecid,
+            generation: current(),
+        },
     );
     assert!(old.join("bundle.json").is_file());
     rerun(&f, |c| c.action = Action::Rollback).unwrap();

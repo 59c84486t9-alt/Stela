@@ -365,11 +365,13 @@ pub(super) fn update_stela(
              rollback",
             bundle.kind.label(),
             bundle::directory_of(
-                bundle.kind,
                 &record.volume,
-                &bundle.build,
-                bundle.ecid,
-                to_generation
+                bundle::Identity {
+                    kind: bundle.kind,
+                    build: &bundle.build,
+                    ecid: bundle.ecid,
+                    generation: to_generation
+                }
             )
             .display(),
             bundle.bytes as f64 / 1e9

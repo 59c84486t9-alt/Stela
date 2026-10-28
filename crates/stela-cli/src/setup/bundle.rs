@@ -125,6 +125,15 @@ pub(super) struct Bundle {
     pub(super) personalized: bool,
 }
 
+/// Fields selecting one bundle within a setup's build/machine generations.
+#[derive(Clone, Copy)]
+pub(super) struct Identity<'a> {
+    pub(super) kind: Kind,
+    pub(super) build: &'a str,
+    pub(super) ecid: Option<Ecid>,
+    pub(super) generation: Generation,
+}
+
 impl Bundle {
     pub(super) fn generation(&self) -> Generation {
         Generation {
@@ -133,13 +142,13 @@ impl Bundle {
         }
     }
 
-    pub(super) fn same_kind(
-        &self,
-        kind: Kind,
-        build: &str,
-        ecid: Option<Ecid>,
-        generation: Generation,
-    ) -> bool {
+    pub(super) fn same_kind(&self, identity: Identity<'_>) -> bool {
+        let Identity {
+            kind,
+            build,
+            ecid,
+            generation,
+        } = identity;
         self.kind == kind
             && self.build == build
             && self.ecid == ecid
@@ -148,7 +157,15 @@ impl Bundle {
 
     /// Its directory on `volume`.
     pub(super) fn directory(&self, volume: &Path) -> PathBuf {
-        directory_of(self.kind, volume, &self.build, self.ecid, self.generation())
+        directory_of(
+            volume,
+            Identity {
+                kind: self.kind,
+                build: &self.build,
+                ecid: self.ecid,
+                generation: self.generation(),
+            },
+        )
     }
 }
 
@@ -175,22 +192,23 @@ pub(super) fn build_directory(volume: &Path, build: &str) -> PathBuf {
     volume.join(BOOT_DIRECTORY).join(build)
 }
 
-pub(super) fn directory_of(
-    kind: Kind,
-    volume: &Path,
-    build: &str,
-    ecid: Option<Ecid>,
-    generation: Generation,
-) -> PathBuf {
+pub(super) fn directory_of(volume: &Path, identity: Identity<'_>) -> PathBuf {
+    let Identity {
+        kind,
+        build,
+        ecid,
+        generation,
+    } = identity;
     build_directory(volume, build).join(leaf_of(kind, ecid, generation))
 }
 
-pub(super) fn firmware_path_of(
-    kind: Kind,
-    build: &str,
-    ecid: Option<Ecid>,
-    generation: Generation,
-) -> String {
+pub(super) fn firmware_path_of(identity: Identity<'_>) -> String {
+    let Identity {
+        kind,
+        build,
+        ecid,
+        generation,
+    } = identity;
     format!(
         "\\stela\\boot\\{build}\\{}",
         leaf_of(kind, ecid, generation)
@@ -473,11 +491,21 @@ pub(super) mod tests {
             "restore-00000000000000AB-s2"
         );
         assert_eq!(
-            firmware_path_of(Kind::Restore, "26A434", Some(Ecid(1)), Generation::FIRST),
+            firmware_path_of(Identity {
+                kind: Kind::Restore,
+                build: "26A434",
+                ecid: Some(Ecid(1)),
+                generation: Generation::FIRST
+            }),
             "\\stela\\boot\\26A434\\restore-0000000000000001"
         );
         assert_eq!(
-            firmware_path_of(Kind::Update, "26A434", Some(Ecid(1)), of(1, 2)),
+            firmware_path_of(Identity {
+                kind: Kind::Update,
+                build: "26A434",
+                ecid: Some(Ecid(1)),
+                generation: of(1, 2)
+            }),
             "\\stela\\boot\\26A434\\update-0000000000000001-r2"
         );
     }
