@@ -282,7 +282,7 @@ unsafe impl NativeServices for Services<'_> {
         Ok(Arc::new(Passthrough::retaining(self.heap.clone(), binding)))
     }
 
-    fn pages(&self) -> &dyn PageSource {
+    fn pages(&self) -> &'static dyn PageSource {
         &native_memory::SOURCE
     }
 
