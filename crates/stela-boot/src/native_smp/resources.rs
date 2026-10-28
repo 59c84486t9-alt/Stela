@@ -6,6 +6,19 @@ use crate::{handoff::Region, tables::PAGE};
 
 pub(crate) const STACK_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const STACK_STRIDE: u64 = STACK_BYTES + PAGE;
+pub(crate) const INVOCATION_STACK_BYTES: u64 = 128 * 1024;
+pub(crate) const TASK_STACK_BYTES: u64 = 128 * 1024;
+pub(crate) const TASK_STACKS: usize = 16;
+
+pub(crate) fn invocation_stacks(
+    cores: usize,
+) -> Result<stela_boot_core::guarded_stacks::Layout, stela_boot_core::guarded_stacks::Error> {
+    stela_boot_core::guarded_stacks::Layout::new(INVOCATION_STACK_BYTES, cores)
+}
+pub(crate) fn task_stacks() -> stela_boot_core::guarded_stacks::Layout {
+    stela_boot_core::guarded_stacks::Layout::new(TASK_STACK_BYTES, TASK_STACKS)
+        .expect("constant guarded task-stack geometry")
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -15,6 +28,10 @@ pub(crate) struct Resources {
     pub sipi: u64,
     /// Fixed physical stack ranges; virtual guards are not mapped.
     pub stacks: Region,
+    /// Separate native invocation frames; never an executor's Rust stack.
+    pub invocations: Region,
+    /// One actual BSP work runtime's fixed pool; task roles are admitted later.
+    pub tasks: Region,
     /// Private bounce leaf physical addresses, indexed by fixed worker slot.
     pub bounce: [[u64; 2]; MAX_CORES],
 }
@@ -25,6 +42,8 @@ impl Default for Resources {
             cores: 1,
             sipi: 0,
             stacks: Region::default(),
+            invocations: Region::default(),
+            tasks: Region::default(),
             bounce: [[0; 2]; MAX_CORES],
         }
     }

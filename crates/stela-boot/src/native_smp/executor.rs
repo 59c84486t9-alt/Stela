@@ -414,6 +414,8 @@ pub(crate) unsafe fn start(
             handoff.code,
             handoff.pool,
             handoff.native_resources.stacks,
+            handoff.native_resources.invocations,
+            handoff.native_resources.tasks,
         ] {
             memory_types
                 .writeback_ram(region.physical, region.bytes)

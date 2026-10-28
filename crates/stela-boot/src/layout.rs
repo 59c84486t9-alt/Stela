@@ -33,6 +33,9 @@ const STACK: u64 = 0x2_0000_0000;
 const CODE: u64 = 0x3_0000_0000;
 /// The translation helper's two-page bounce slot.
 const BOUNCE: u64 = 0x4_0000_0000;
+// 0x5/0x6 windows belong to MMIO and scoped RAM-publication diagnostics.
+const INVOCATION_STACKS: u64 = 0x7_0000_0000;
+const TASK_STACKS: u64 = 0x8_0000_0000;
 
 /// The four-level slices below `U`, or zero under LA57.
 static SLICES: AtomicU8 = AtomicU8::new(0);
@@ -96,6 +99,13 @@ pub fn image() -> u64 {
 
 pub fn stack() -> u64 {
     window() + STACK
+}
+
+pub fn invocation_stacks() -> u64 {
+    window() + INVOCATION_STACKS
+}
+pub fn task_stacks() -> u64 {
+    window() + TASK_STACKS
 }
 
 pub fn code() -> u64 {

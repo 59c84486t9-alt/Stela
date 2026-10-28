@@ -37,6 +37,54 @@ pub(crate) unsafe fn validate(
     {
         return Err("native executor reservations differ from requested cores");
     }
+    let invocations = resources::invocation_stacks(cores)
+        .map_err(|_| "native invocation-stack geometry exceeds capacity")?;
+    for (region, bytes) in [
+        (resources.invocations, invocations.physical_bytes()),
+        (resources.tasks, resources::task_stacks().physical_bytes()),
+    ] {
+        let end = region
+            .physical
+            .checked_add(region.bytes)
+            .ok_or("native guarded stack physical range wraps")?;
+        if region.physical == 0
+            || !region.physical.is_multiple_of(crate::tables::PAGE)
+            || region.bytes != bytes
+        {
+            return Err("native guarded stack reservation differs from loader geometry");
+        }
+        for other in [
+            handoff.heap,
+            handoff.code,
+            handoff.pool,
+            resources.stacks,
+            if region.physical == resources.invocations.physical {
+                resources.tasks
+            } else {
+                resources.invocations
+            },
+        ] {
+            let other_end = other
+                .physical
+                .checked_add(other.bytes)
+                .ok_or("native retained reservation physical range wraps")?;
+            if region.physical < other_end && other.physical < end {
+                return Err("native guarded stacks alias another retained reservation");
+            }
+        }
+        if handoff.guest_count > handoff.guest.len() {
+            return Err("native guest inventory exceeds handoff capacity");
+        }
+        for guest in &handoff.guest[..handoff.guest_count] {
+            let guest_end = guest
+                .physical
+                .checked_add(guest.bytes)
+                .ok_or("native guest backing range wraps")?;
+            if region.physical < guest_end && guest.physical < end {
+                return Err("native guarded stacks alias guest backing");
+            }
+        }
+    }
     resources::partition(
         cores,
         cores - 1,

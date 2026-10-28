@@ -96,6 +96,12 @@ pub(super) fn reserve(
     let mut native_resources = NativeResources {
         cores: cores as u32,
         stacks: allocate(STACK_BYTES * cores as u64)?,
+        invocations: allocate(
+            crate::native_smp::resources::invocation_stacks(cores)
+                .map_err(|_| "invalid native invocation-stack geometry")?
+                .physical_bytes(),
+        )?,
+        tasks: allocate(crate::native_smp::resources::task_stacks().physical_bytes())?,
         ..NativeResources::default()
     };
     if cores > 1 {
@@ -223,6 +229,39 @@ pub(super) fn map(
             STACK_BYTES,
             data,
         )?;
+    }
+    // These real LoaderData allocations outlive every root and continuation.
+    // Map usable pages only; both guard pages of each slot remain absent.
+    // This happens before AP/root clones and grants no execution capability.
+    for (base, region, geometry) in [
+        (
+            layout::invocation_stacks(),
+            native_resources.invocations,
+            crate::native_smp::resources::invocation_stacks(cores)
+                .map_err(|_| "invalid native invocation-stack geometry")?,
+        ),
+        (
+            layout::task_stacks(),
+            native_resources.tasks,
+            crate::native_smp::resources::task_stacks(),
+        ),
+    ] {
+        for index in 0..geometry.count() {
+            let slot = geometry
+                .slot(base, index)
+                .map_err(|_| "guarded stack virtual range overflow")?;
+            tables::map_range(
+                &mut frames,
+                root,
+                slot.usable.start,
+                region.physical
+                    + geometry
+                        .physical_offset(index)
+                        .map_err(|_| "guarded stack physical offset overflow")?,
+                slot.usable.end - slot.usable.start,
+                data,
+            )?;
+        }
     }
     tables::map_range(
         &mut frames,
