@@ -62,14 +62,24 @@ fn number(v: Option<&plist::Value>) -> Option<u64> {
     }
 }
 
+/// Restore image, inventory and selected identity for a request study.
+pub struct OpenOptions {
+    pub ipsw: PathBuf,
+    pub inventory: PayloadManifest,
+    pub index: usize,
+    pub ecid: u64,
+    pub full: bool,
+}
+
 impl Ctx {
-    pub fn open(
-        ipsw: PathBuf,
-        inventory: PayloadManifest,
-        index: usize,
-        ecid: u64,
-        full: bool,
-    ) -> Result<Self> {
+    pub fn open(options: OpenOptions) -> Result<Self> {
+        let OpenOptions {
+            ipsw,
+            inventory,
+            index,
+            ecid,
+            full,
+        } = options;
         let bytes = archive::read_member(&ipsw, "BuildManifest.plist", 64 << 20)?;
         let manifest = plist::Value::from_reader(Cursor::new(bytes))
             .context("BuildManifest.plist (plist crate)")?;

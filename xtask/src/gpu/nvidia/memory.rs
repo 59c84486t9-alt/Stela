@@ -44,12 +44,12 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
     fs::create_dir_all(output)?;
     let flags = lut::flags(clang, source, output)?;
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-    let cpu = Some(lut::cpu_model(
+    let cpu = Some(lut::cpu_model(lut::CpuModelOptions {
         clang,
         source,
         output,
-        &flags,
-        &[
+        flags: &flags,
+        sources: &[
             ("port/tests/nvkms_memory.c", &[]),
             (
                 "port/stela_nvkms_memory.c",
@@ -61,7 +61,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
             ),
             ("port/stela_nvkms_primitives.c", &[]),
         ],
-    )?);
+    })?);
     #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
     let cpu: Option<serde_json::Value> = None;
     fs::write(

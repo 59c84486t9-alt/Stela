@@ -102,17 +102,17 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
         }
     }
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-    let cpu = Some(cpu_model(
+    let cpu = Some(cpu_model(CpuModelOptions {
         clang,
         source,
         output,
-        &flags,
-        &[
+        flags: &flags,
+        sources: &[
             ("port/tests/lut_access.c", &[]),
             ("src/nvidia-modeset/src/nvkms-lut.c", &[]),
             ("port/stela_nvkms_primitives.c", &[]),
         ],
-    )?);
+    })?);
     #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
     let cpu: Option<serde_json::Value> = None;
     fs::write(
@@ -130,13 +130,23 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
 }
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-pub(super) fn cpu_model(
-    clang: &Path,
-    source: &Sources,
-    output: &Path,
-    flags: &Flags,
-    sources: &[(&str, &[&str])],
-) -> Result<serde_json::Value> {
+/// Vendor CPU fixture sources, compiler flags and output location.
+pub(super) struct CpuModelOptions<'a> {
+    pub(super) clang: &'a Path,
+    pub(super) source: &'a Sources,
+    pub(super) output: &'a Path,
+    pub(super) flags: &'a Flags,
+    pub(super) sources: &'a [(&'a str, &'a [&'a str])],
+}
+
+pub(super) fn cpu_model(options: CpuModelOptions<'_>) -> Result<serde_json::Value> {
+    let CpuModelOptions {
+        clang,
+        source,
+        output,
+        flags,
+        sources,
+    } = options;
     // This executable models ordinary host OS-hook calls. These full-core
     // options belong to the separately built kernel archives, not this process.
     let excluded = [

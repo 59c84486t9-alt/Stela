@@ -6,13 +6,23 @@ use object::{Object, ObjectKind, ObjectSymbol};
 use serde_json::json;
 use std::{collections::BTreeSet, ffi::OsString, fs, path::Path};
 
-pub(super) fn build(
-    gpu: &Path,
-    sdk_root: &Path,
-    sdk_version: &str,
-    compiler: &str,
-    evidence: &Path,
-) -> Result<()> {
+/// Source, SDK, compiler and evidence paths for a Metal library build.
+pub(super) struct BuildOptions<'a> {
+    pub(super) gpu: &'a Path,
+    pub(super) sdk_root: &'a Path,
+    pub(super) sdk_version: &'a str,
+    pub(super) compiler: &'a str,
+    pub(super) evidence: &'a Path,
+}
+
+pub(super) fn build(options: BuildOptions<'_>) -> Result<()> {
+    let BuildOptions {
+        gpu,
+        sdk_root,
+        sdk_version,
+        compiler,
+        evidence,
+    } = options;
     let source = gpu.join("metal/macos");
     let mut artifacts = Vec::new();
     let mut inputs = BTreeSet::new();

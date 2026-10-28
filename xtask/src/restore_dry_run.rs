@@ -586,7 +586,13 @@ impl RestoreDryRun {
             },
         );
         let t = Instant::now();
-        let mut ctx = Ctx::open(ipsw.clone(), inventory.clone(), index, ECID, self.full)?;
+        let mut ctx = Ctx::open(context::OpenOptions {
+            ipsw: ipsw.clone(),
+            inventory: inventory.clone(),
+            index,
+            ecid: ECID,
+            full: self.full,
+        })?;
         let file = File::open(&ipsw)?;
         let size = file.metadata()?.len();
         let reader = Extent::new(ArchiveFile(file, size), inventory.source.bytes)

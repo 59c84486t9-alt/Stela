@@ -342,7 +342,13 @@ pub fn build() -> Result<()> {
         "macOS GPU memory components built for three ABIs: {}",
         receipt.display()
     );
-    library::build(&gpu, &sdk_root, sdk_version.trim(), &compiler, &evidence)
+    library::build(library::BuildOptions {
+        gpu: &gpu,
+        sdk_root: &sdk_root,
+        sdk_version: sdk_version.trim(),
+        compiler: &compiler,
+        evidence: &evidence,
+    })
 }
 
 #[cfg(all(test, target_os = "macos"))]
