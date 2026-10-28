@@ -5,12 +5,8 @@
 //! native blocks before returning.
 
 mod aot;
-#[cfg(feature = "std")]
-mod checked_memory;
 mod discovery;
 mod outcome;
-#[cfg(feature = "std")]
-pub(crate) mod retirement;
 pub(crate) mod scalable;
 pub(crate) mod services;
 mod validate;
@@ -23,7 +19,7 @@ pub use outcome::{
     ThreadState,
 };
 
-use crate::{amx, clock, execution::platform, floating, memory, pauth, system, thread};
+use crate::{execution::platform, floating, memory, pauth, system};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 use alloc::{collections::BTreeMap, rc::Rc};
@@ -31,8 +27,8 @@ use anyhow::{Context, Result, ensure};
 use aot::ArtifactPreparation;
 use core::marker::PhantomData;
 use services::{
-    AuthenticatedLoadError, RuntimeServices, complete_clock, complete_pauth_with_memory,
-    runtime_pauth_key, serialize_instruction_execution,
+    AuthenticatedLoadError, RuntimeServices, complete_pauth_with_memory, runtime_pauth_key,
+    serialize_instruction_execution,
 };
 #[cfg(feature = "std")]
 use std::{io::Read, path::PathBuf};
@@ -70,9 +66,6 @@ struct LoadedBlock {
     source_bytes: usize,
     prepared: crate::artifact::LoadedArtifact,
     mapping: platform::Mapping,
-    /// Checked-retirement plan facts, derived on first checked dispatch.
-    #[cfg(feature = "std")]
-    checked: core::cell::OnceCell<retirement::checked::CheckedFacts>,
 }
 
 /// Source registration, resolution and execution are serialized through &mut.
@@ -86,8 +79,6 @@ pub struct BlockRuntime {
     next_generation: u64,
     regions: BTreeMap<u64, CodeRegion>,
     loaded: BTreeMap<u64, LoadedBlock>,
-    /// Mapped on the first AMX exit; `Some(None)` when no tier is admitted.
-    amx_kernels: Option<Option<amx::Kernels>>,
     _serialized: PhantomData<Rc<()>>,
 }
 
@@ -123,7 +114,7 @@ impl BlockRuntime {
             address_space,
             profile,
             target,
-            ArtifactPreparation::HostedCache(cache_root),
+            ArtifactPreparation::FileCache(cache_root),
         )
     }
 
@@ -293,14 +284,7 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
     ) -> Result<RunOutcome> {
-        unsafe {
-            self.run_inner(
-                state,
-                stop_pc,
-                block_budget,
-                RuntimeServices::legacy(None, None, None),
-            )
-        }
+        unsafe { self.run_inner(state, stop_pc, block_budget, RuntimeServices::direct(None)) }
     }
 
     /// Run with software PAuth, using the process's keys. Keys are borrowed;
@@ -329,7 +313,7 @@ impl BlockRuntime {
                 state,
                 stop_pc,
                 block_budget,
-                RuntimeServices::legacy(Some(context), None, None),
+                RuntimeServices::direct(Some(context)),
             )
         }
     }
@@ -380,95 +364,6 @@ impl BlockRuntime {
         }
     }
 
-    /// Run PAC and clock helpers with caller-owned services. The clock owns its
-    /// read-only commpage and publishes only at helper boundaries.
-    ///
-    /// # Safety
-    /// As for [`Self::run`]. No other translated code may access the clock page
-    /// while it is published. ISB is modeled as host instruction serialization
-    /// for unchanging guest code.
-    pub unsafe fn run_with_clock(
-        &mut self,
-        state: &mut ThreadState,
-        stop_pc: Option<GuestAddress>,
-        block_budget: usize,
-        pauth: &pauth::Context,
-        clock: &mut clock::Context,
-    ) -> Result<RunOutcome> {
-        ensure!(
-            self.profile.has(Features::CLOCK),
-            "clock execution requires the explicit software clock block profile"
-        );
-        ensure!(
-            pauth.address_space() == self.address_space,
-            "PAuth context belongs to another guest address space"
-        );
-        ensure!(
-            clock.address_space() == self.address_space,
-            "clock context belongs to another guest address space"
-        );
-        unsafe {
-            self.run_inner(
-                state,
-                stop_pc,
-                block_budget,
-                RuntimeServices::legacy(Some(pauth), Some(clock), None),
-            )
-        }
-    }
-
-    /// Run thread-register helpers with the context used by the Darwin thread
-    /// services. Cached code never embeds the current TSD value.
-    ///
-    /// # Safety
-    /// As for [`Self::run`]. The context must stay on its owning host thread.
-    pub unsafe fn run_with_thread(
-        &mut self,
-        state: &mut ThreadState,
-        stop_pc: Option<GuestAddress>,
-        block_budget: usize,
-        thread: &thread::Context,
-        pauth: Option<&pauth::Context>,
-        clock: Option<&mut clock::Context>,
-    ) -> Result<RunOutcome> {
-        ensure!(
-            self.profile.has(Features::THREAD_REGISTERS),
-            "thread-register execution requires the explicit thread block profile"
-        );
-        ensure!(
-            thread.address_space() == self.address_space,
-            "thread context belongs to another guest address space"
-        );
-        if let Some(pauth) = pauth {
-            ensure!(
-                self.profile.has(Features::POINTER_AUTHENTICATION),
-                "PAuth execution requires the explicit software PAuth block profile"
-            );
-            ensure!(
-                pauth.address_space() == self.address_space,
-                "PAuth context belongs to another guest address space"
-            );
-        }
-        if let Some(clock) = clock.as_ref() {
-            ensure!(
-                self.profile.has(Features::CLOCK) && pauth.is_some(),
-                "clock execution requires the explicit software clock profile and PAC context"
-            );
-            ensure!(
-                clock.address_space() == self.address_space,
-                "clock context belongs to another guest address space"
-            );
-        }
-        unsafe {
-            self.run_inner(
-                state,
-                stop_pc,
-                block_budget,
-                RuntimeServices::legacy(pauth, clock, Some(thread)),
-            )
-        }
-    }
-
     /// Run with the system-instruction service. Registered prefixes have no
     /// direct-RAM effects; memory services use their shared domain. A failure
     /// keeps its PC and completed prefix.
@@ -510,8 +405,6 @@ impl BlockRuntime {
     ) -> Result<RunOutcome> {
         let RuntimeServices {
             pointer_authentication: mut pauth_execution,
-            clock: mut clock_context,
-            thread: thread_context,
             system: mut system_dispatcher,
         } = services;
         platform::ensure_supported()?;
@@ -788,77 +681,16 @@ impl BlockRuntime {
                 outcome.floating_point_helpers += 1;
             }
             if let Some(instruction) = thread_register_instruction {
-                let Some(thread) = thread_context else {
-                    outcome.reason = StopReason::ThreadRegisterRequired { instruction };
-                    break;
-                };
-                let value = thread.thread_specific_data();
-                // The immutable decoder guarantees 0..=31. XZR discards only
-                // after ownership and the required context have been validated.
-                if instruction.destination != ZERO_REGISTER_INDEX {
-                    state.registers.x[usize::from(instruction.destination)] = value;
-                }
-                state.pc = instruction.next_pc;
-                outcome.thread_register_events.push(ThreadRegisterEvent {
-                    instruction,
-                    next_pc: instruction.next_pc,
-                    value,
-                });
+                outcome.reason = StopReason::ThreadRegisterRequired { instruction };
+                break;
             }
             if let Some(instruction) = amx_instruction {
-                let Some(thread) = thread_context else {
-                    outcome.reason = StopReason::AmxRequired { instruction };
-                    break;
-                };
-                if self.amx_kernels.is_none() {
-                    self.amx_kernels = Some(amx::Kernels::new(self.target)?);
-                }
-                let kernels = self.amx_kernels.as_ref().and_then(Option::as_ref);
-                // SAFETY: this runtime executes the direct-RAM thread profile,
-                // whose guest addresses are host addresses of this process.
-                let completed = unsafe {
-                    thread
-                        .amx()
-                        .complete(&instruction, &state.registers, kernels)
-                };
-                match completed {
-                    Ok(completion) => {
-                        state.pc = instruction.next_pc;
-                        outcome.amx_operations += 1;
-                        if matches!(completion, amx::Completion::Native(_)) {
-                            outcome.amx_native_operations += 1;
-                        }
-                    }
-                    Err(failure) => {
-                        outcome.reason = StopReason::AmxFailure {
-                            instruction,
-                            failure,
-                        };
-                        break;
-                    }
-                }
+                outcome.reason = StopReason::AmxRequired { instruction };
+                break;
             }
             if let Some(instruction) = clock_instruction {
-                let Some(clock) = clock_context.as_deref_mut() else {
-                    outcome.reason = StopReason::ClockRequired { instruction };
-                    break;
-                };
-                let counter = match complete_clock(clock, &instruction, &mut state.registers) {
-                    Ok(counter) => counter,
-                    Err(error) => {
-                        outcome.reason = StopReason::ClockUnavailable {
-                            instruction,
-                            detail: error.to_string(),
-                        };
-                        break;
-                    }
-                };
-                state.pc = instruction.next_pc;
-                outcome.clock_events.push(ClockEvent {
-                    instruction,
-                    next_pc: instruction.next_pc,
-                    counter,
-                });
+                outcome.reason = StopReason::ClockRequired { instruction };
+                break;
             }
             if let Some(instruction) = pointer_authentication {
                 // The implementation's permitted UNDEF constraint precedes key
@@ -984,9 +816,8 @@ mod tests {
     use stela_compiler::{
         GuestState,
         block::{
-            ClockOperation, PointerAuthentication, PointerAuthenticationKey,
-            PointerAuthenticationModifier, decode_clock_instruction, decode_pointer_authentication,
-            decode_trap,
+            PointerAuthentication, PointerAuthenticationKey, PointerAuthenticationModifier,
+            decode_clock_instruction, decode_pointer_authentication, decode_trap,
         },
     };
 
@@ -1363,212 +1194,6 @@ mod tests {
             assert!(
                 matches!(outcome.reason, StopReason::PointerAuthenticationPoisonedReturn { poisoned_target, .. } if poisoned_target == state.pc)
             );
-            Ok(())
-        }
-    }
-    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-    mod clock_dispatch {
-        use super::*;
-        use crate::clock::{ReplaySource, Snapshot};
-
-        const BASE: GuestAddress = GuestAddress(0x1000);
-        const STOP: GuestAddress = GuestAddress(0x1400);
-        const PROFILE: BlockProfile =
-            BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK));
-
-        fn runtime(path: &std::path::Path, words: &[u32]) -> Result<BlockRuntime> {
-            let mut runtime = BlockRuntime::new_with_profile(1, path.to_path_buf(), PROFILE);
-            runtime.register_code(
-                BASE,
-                words.iter().flat_map(|word| word.to_le_bytes()).collect(),
-            )?;
-            Ok(runtime)
-        }
-        fn keys(address_space: u64) -> pauth::Context {
-            pauth::Context::new(address_space, pauth::Keys::from_ib_words(1, 2))
-        }
-        fn initial_thread(flags: u32) -> ThreadState {
-            let mut registers = GuestState {
-                x: core::array::from_fn(|i| 0x0123456789abcdefu64.rotate_left(i as u32)),
-                sp: 0x2000,
-                nzcv: flags << 28,
-                reserved: 0xa5c39e71,
-                v: core::array::from_fn(|i| {
-                    [
-                        0x123456789abcdef0u64.rotate_left(i as u32),
-                        0xfedcba9876543210u64.rotate_right(i as u32),
-                    ]
-                }),
-                fpcr: 0x03c00000,
-                fpsr: 0x0800001f,
-            };
-            registers.x[30] = STOP.0;
-            ThreadState {
-                registers,
-                pc: BASE,
-            }
-        }
-
-        #[test]
-        fn all_counter_destinations_preserve_full_state_and_share_preparation_cache() -> Result<()>
-        {
-            let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
-            let samples = (0..=512)
-                .map(|i| Snapshot {
-                    counter: 1000 + i,
-                    sleep_ticks: 100,
-                })
-                .collect();
-            let mut clock = clock::Context::new(1, Box::new(ReplaySource::new(samples)?))?;
-            let keys = keys(1);
-            let cache = tempfile::tempdir()?;
-            for destination in 0..32 {
-                let mut vm = runtime(cache.path(), &[0xd2800547, 0xd53be040 | destination])?;
-                let prepared = vm.prepare(BASE)?;
-                assert!(!prepared.prepared.cache_hit);
-                for flags in 0..16 {
-                    let mut state = initial_thread(flags);
-                    let mut expected = state.registers.clone();
-                    expected.x[7] = 42;
-                    let counter = 1001 + u64::from(destination * 16 + flags);
-                    if destination != 31 {
-                        expected.x[destination as usize] = counter;
-                    }
-                    // SAFETY: register prefix and checked service only, no guest RAM accesses.
-                    let result = unsafe {
-                        vm.run_with_clock(
-                            &mut state,
-                            Some(GuestAddress(BASE.0 + 8)),
-                            1,
-                            &keys,
-                            &mut clock,
-                        )?
-                    };
-                    assert_eq!(state.registers, expected);
-                    assert_eq!(state.pc, GuestAddress(BASE.0 + 8));
-                    assert_eq!(result.reason, StopReason::StopAddress);
-                    assert_eq!(result.blocks_executed, 1);
-                    assert_eq!(result.compiled_blocks, 0);
-                    assert_eq!(result.disk_cache_hits, usize::from(flags == 0));
-                    assert_eq!(result.clock_events.len(), 1);
-                    assert_eq!(result.clock_events[0].counter, Some(counter));
-                    assert_eq!(
-                        result.clock_events[0].instruction.operation,
-                        ClockOperation::ReadVirtualCounter {
-                            destination: destination as u8
-                        }
-                    );
-                }
-            }
-            assert_eq!(clock.events().len(), 513);
-            Ok(())
-        }
-
-        #[test]
-        fn isb_serializes_without_sampling_and_counter_xzr_discards_only_destination() -> Result<()>
-        {
-            let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
-            let mut clock = clock::Context::new(
-                1,
-                Box::new(ReplaySource::new(vec![
-                    Snapshot {
-                        counter: 100,
-                        sleep_ticks: 10,
-                    },
-                    Snapshot {
-                        counter: 150,
-                        sleep_ticks: 20,
-                    },
-                ])?),
-            )?;
-            let cache = tempfile::tempdir()?;
-            let mut vm = runtime(cache.path(), &[0xd5033fdf, 0xd53be05f, 0xd65f03c0])?;
-            let mut state = initial_thread(15);
-            let before = state.registers.clone();
-            let result =
-                unsafe { vm.run_with_clock(&mut state, Some(STOP), 3, &keys(1), &mut clock)? };
-            assert_eq!(result.reason, StopReason::StopAddress);
-            assert_eq!(result.blocks_executed, 3);
-            assert_eq!(state.registers, before);
-            assert_eq!(result.clock_events.len(), 2);
-            assert_eq!(result.clock_events[0].counter, None);
-            assert_eq!(result.clock_events[1].counter, Some(150));
-            assert_eq!(clock.events().len(), 2);
-            Ok(())
-        }
-
-        #[test]
-        fn unavailable_clock_preserves_destination_page_and_exact_resume_after_prefix() -> Result<()>
-        {
-            let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
-            let mut clock = clock::Context::new(
-                1,
-                Box::new(ReplaySource::new(vec![Snapshot {
-                    counter: 100,
-                    sleep_ticks: 10,
-                }])?),
-            )?;
-            let page = clock.snapshot_bytes(0, clock::GUEST_BYTES)?;
-            let cache = tempfile::tempdir()?;
-            let mut vm = runtime(cache.path(), &[0x91000400, 0xd53be048])?;
-            let mut state = initial_thread(5);
-            let mut expected = state.registers.clone();
-            expected.x[0] = expected.x[0].wrapping_add(1);
-            for _ in 0..2 {
-                let result = unsafe {
-                    vm.run_with_clock(
-                        &mut state,
-                        Some(GuestAddress(BASE.0 + 8)),
-                        1,
-                        &keys(1),
-                        &mut clock,
-                    )?
-                };
-                assert!(matches!(result.reason, StopReason::ClockUnavailable { .. }));
-                assert_eq!(state.registers, expected);
-                assert_eq!(state.pc, GuestAddress(BASE.0 + 4));
-                assert_eq!(result.last_exit, Some((BASE.0 + 4, ExitKind::Clock as u64)));
-                assert!(result.clock_events.is_empty());
-                assert_eq!(clock.snapshot_bytes(0, clock::GUEST_BYTES)?, page);
-                assert_eq!(clock.events().len(), 1);
-            }
-            Ok(())
-        }
-
-        #[test]
-        fn missing_clock_and_foreign_services_decline_without_helper_effects() -> Result<()> {
-            let cache = tempfile::tempdir()?;
-            let mut vm = runtime(cache.path(), &[0x91000400, 0xd5033fdf])?;
-            let mut state = initial_thread(7);
-            let mut expected = state.registers.clone();
-            expected.x[0] = expected.x[0].wrapping_add(1);
-            let result = unsafe { vm.run_with_pauth(&mut state, None, 1, &keys(1))? };
-            assert!(matches!(result.reason, StopReason::ClockRequired { .. }));
-            assert_eq!(state.registers, expected);
-            assert_eq!(state.pc, GuestAddress(BASE.0 + 4));
-            assert!(result.clock_events.is_empty());
-            let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
-            for address_space in [1, 2] {
-                let mut clock = clock::Context::new(
-                    address_space,
-                    Box::new(ReplaySource::new(vec![Snapshot {
-                        counter: 100,
-                        sleep_ticks: 10,
-                    }])?),
-                )?;
-                let empty = tempfile::tempdir()?;
-                let mut vm = runtime(empty.path(), &[0xd53be048])?;
-                let mut state = initial_thread(0);
-                let before = state.registers.clone();
-                let pauth = keys(if address_space == 1 { 2 } else { 1 });
-                assert!(
-                    unsafe { vm.run_with_clock(&mut state, None, 1, &pauth, &mut clock) }.is_err()
-                );
-                assert_eq!(state.pc, BASE);
-                assert_eq!(state.registers, before);
-                assert_eq!(clock.events().len(), 1);
-                assert_eq!(std::fs::read_dir(empty.path())?.count(), 0);
-            }
             Ok(())
         }
     }

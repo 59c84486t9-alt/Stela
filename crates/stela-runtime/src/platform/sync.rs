@@ -1,4 +1,4 @@
-//! Locks: std mutexes when hosted.
+//! Locks: std mutexes in host-side tools.
 #[cfg(feature = "std")]
 pub(crate) use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 

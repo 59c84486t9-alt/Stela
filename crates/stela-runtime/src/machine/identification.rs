@@ -63,8 +63,7 @@ pub struct Speculation {
     /// issues an indirect branch prediction barrier and refills the return
     /// stack buffer at every guest context change
     /// (`engine::PredictionContext`, `Host::isolate_predictions`), where the
-    /// CPU enumerates IBPB. A hosted process is one guest context, and the
-    /// host OS's process isolation separates it from other processes'.
+    /// CPU enumerates IBPB.
     pub contexts: bool,
     /// FEAT_CSV3: data loaded under speculation by an access with a
     /// permission or domain fault, or read from a System register the
@@ -77,8 +76,6 @@ pub struct Speculation {
     /// on a mispredicted range check (`x86_64::RangeCheck`, checked
     /// at every access), the engine fences each guest RAM read behind its
     /// translation, and closed native System register cells hold no value.
-    /// A hosted process cannot read the host's capabilities and discloses
-    /// nothing.
     pub faulting_data: bool,
 }
 
@@ -86,12 +83,6 @@ impl Speculation {
     /// A host that establishes no guarantee.
     pub const NONE: Self = Self {
         contexts: false,
-        faulting_data: false,
-    };
-    /// A hosted process: one guest context per host process, whose
-    /// predictions the host OS's process isolation separates.
-    pub const HOSTED: Self = Self {
-        contexts: true,
         faulting_data: false,
     };
 }
@@ -187,8 +178,7 @@ const ACTIVITY_MONITORS: &str = "machine::amu counts the four architected group 
 const VIRTUAL_OFFSETS: &str = "HCR_EL2.AMVOFFEN applies AMEVCNTVOFF0<n>_EL2 and CNTVOFF_EL2 \
      to EL0 and EL1 counter reads";
 const PREDICTION_ISOLATION: &str = "the host isolates branch predictions at every guest \
-     context change (IBPB and a return stack refill), or the host OS does between hosted \
-     processes; SCXTNUM_ELx is held and distinguishes no context";
+     context change (IBPB and a return stack refill); SCXTNUM_ELx is held and distinguishes no context";
 const FAULTING_DATA: &str = "the host's loads forward no data from a faulting access, every \
      native access masks its address on a mispredicted guest range check, the engine fences \
      guest RAM reads behind their translation, and closed native System register cells are \
@@ -1387,8 +1377,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
 
 /// The level [`derive`] presents in `register`'s field at `shift` on `chip`,
 /// for a field whose rows are all engine properties: the same on every host
-/// target and kernel level. The hosted machine description
-/// (`hosted::hardware`) reports such fields from here.
+/// target and kernel level.
 fn engine_field(chip: Chip, register: Encoding, shift: u8) -> u64 {
     let rows = || {
         TABLE
@@ -1410,7 +1399,7 @@ fn engine_field(chip: Chip, register: Encoding, shift: u8) -> u64 {
 /// feature's lowest level there, among the rows whose containing feature
 /// the PE presents. A streaming-only field does not constrain the ordinary
 /// AdvSIMD feature when streaming is absent. A profile can withhold a feature
-/// by masking its field (the hosted machine's memory tagging), or because
+/// by masking its field (a validation machine's memory tagging), or because
 /// the field's basis fails on this host. The PE treats it as absent, as a chip
 /// without it. A register `fixed` has no value for withholds nothing.
 pub fn withheld(chip: Chip, fixed: &[(Encoding, u64)]) -> u64 {
@@ -1765,8 +1754,7 @@ mod tests {
         assert_eq!(value(AMCG1IDR_EL0), 0);
         // CSV2 and CSV3 (PFR0 56, 60) and CSV2_frac (PFR1 32) read 0 on a
         // host that gives no speculation guarantee. DIT (PFR0 48) needs a
-        // host that declares DOIT, which a hosted process's detected target
-        // never does.
+        // host that explicitly declares DOIT; ordinary target detection does not.
         for shift in [48, 56, 60] {
             assert_eq!(field(ID_AA64PFR0_EL1, shift), 0, "PFR0 {shift}");
         }
@@ -1815,7 +1803,16 @@ mod tests {
         let chip = crate::machine::test_chip();
         assert!(has(chip, "FEAT_CSV2_2"));
         assert_eq!(fields(chip, Speculation::NONE), (0, 0, 0));
-        assert_eq!(fields(chip, Speculation::HOSTED), (2, 0, 0));
+        assert_eq!(
+            fields(
+                chip,
+                Speculation {
+                    contexts: true,
+                    faulting_data: false
+                }
+            ),
+            (2, 0, 0)
+        );
         let faulting_data = |contexts| Speculation {
             contexts,
             faulting_data: true,
@@ -1950,13 +1947,13 @@ mod tests {
             1 << 60 | 1 << 48 | 1
         );
         // With EL2: AArch64 EL2 and VHE.
-        let hosted = derive(
+        let system = derive(
             crate::machine::test_chip(),
             TargetCpu::detect(),
             true,
             Speculation::NONE,
         );
-        let host = |register| hosted.iter().find(|(r, _)| *r == register).unwrap().1;
+        let host = |register| system.iter().find(|(r, _)| *r == register).unwrap().1;
         assert_eq!(host(ID_AA64PFR0_EL1), value(ID_AA64PFR0_EL1) | 0x100);
         // With EL2, stage 2 adds 4 KiB and 16 KiB stage-2 granules, XNX and
         // FWB.

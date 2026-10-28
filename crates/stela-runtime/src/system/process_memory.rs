@@ -43,14 +43,6 @@ mod low128;
 pub(crate) use low128::Low128ProcessMemoryAuthorization;
 mod scalable;
 
-#[cfg(feature = "std")]
-pub(crate) const SCTLR_ENIA: u64 = 1 << 31;
-#[cfg(feature = "std")]
-pub(crate) const SCTLR_ENIB: u64 = 1 << 30;
-#[cfg(feature = "std")]
-pub(crate) const SCTLR_ENDA: u64 = 1 << 27;
-#[cfg(feature = "std")]
-pub(crate) const SCTLR_ENDB: u64 = 1 << 13;
 const SCTLR_MMU_ENABLE: u64 = 1;
 const SCTLR_DATA_CACHE_ENABLE: u64 = 1 << 2;
 const SCTLR_NATIVE_NORMAL_WB: u64 = SCTLR_MMU_ENABLE | SCTLR_DATA_CACHE_ENABLE;
@@ -339,9 +331,7 @@ impl FixedProcessMemoryControls {
         Ok(controls)
     }
 
-    /// The source used at construction, if any; raw-ID construction supplies
-    /// none.
-    #[cfg(feature = "std")]
+    #[cfg(test)]
     pub(crate) fn identification_snapshot_owner(&self) -> Option<&Arc<Snapshot>> {
         self.identification.as_ref()
     }

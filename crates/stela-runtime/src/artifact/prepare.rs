@@ -1,11 +1,11 @@
-//! Byte and metadata validation shared by the hosted cache and boot artifacts.
+//! Byte and metadata validation shared by the file cache and boot artifacts.
 use super::{ArtifactError, Identity, Manifest, validate_native_snapshot};
 use stela_compiler::context::memory::MemoryRequirements;
 
 pub(crate) const MAX_CACHE_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_CACHE_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 
-/// The one path that generates native code and its manifest, for hosted cache
+/// The one path that generates native code and its manifest, for file cache
 /// misses and freestanding preparation alike. Unsupported source is reported
 /// before anything is cached or mapped.
 pub(crate) fn generate(
@@ -47,7 +47,7 @@ pub(crate) fn validate_manifest_bytes(
 }
 
 /// Validate decoded metadata before reading the native bytes, keeping the
-/// hosted path's error and I/O order.
+/// file path's error and I/O order.
 pub(crate) fn validate_preparation_metadata(
     manifest: &Manifest,
     identity: &Identity,

@@ -1,7 +1,5 @@
 //! Instruction PAuth features, read from the PE's identification registers.
 
-#[cfg(feature = "std")]
-use super::Version;
 use crate::system::{identification::Register, identification_snapshot::Snapshot};
 
 const ID_FIELD_MASK: u64 = 0xf;
@@ -24,10 +22,8 @@ pub enum UnsupportedInstructionProfile {
 
 /// Exact QARMA5 PAuth_LR feature fact borrowed from the same CPU snapshot.
 /// This capability does not authorize controls, PACM, source, BTI or GCS effects.
-// Only the hosted PAuth_LR owner reads the snapshot back.
-#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) struct LinkRegisterPauthCapability<'profile> {
-    source: &'profile Snapshot,
+    _source: &'profile Snapshot,
 }
 
 impl<'profile> LinkRegisterPauthCapability<'profile> {
@@ -44,17 +40,7 @@ impl<'profile> LinkRegisterPauthCapability<'profile> {
                 pacm as u8,
             ));
         }
-        Ok(Self { source })
-    }
-
-    #[cfg(feature = "std")]
-    pub(crate) const fn snapshot(&self) -> &Snapshot {
-        self.source
-    }
-
-    #[cfg(feature = "std")]
-    pub(crate) const fn version(&self) -> Version {
-        Version::FaultingCombined
+        Ok(Self { _source: source })
     }
 }
 
@@ -145,8 +131,7 @@ mod tests {
         }
         let source = Snapshot::declared("lr-capability-declared-profile", &values).unwrap();
         let capability = LinkRegisterPauthCapability::from_profile(&source).unwrap();
-        assert!(std::ptr::eq(capability.snapshot(), &source));
-        assert_eq!(capability.version(), Version::FaultingCombined);
+        assert!(std::ptr::eq(capability._source, &source));
     }
 
     #[test]

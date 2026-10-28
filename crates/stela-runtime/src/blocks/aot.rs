@@ -11,7 +11,7 @@ const MAX_MANIFEST_CHECKSUM_BYTES: usize = 1024;
 #[derive(Debug)]
 pub(super) enum ArtifactPreparation {
     #[cfg(feature = "std")]
-    HostedCache(PathBuf),
+    FileCache(PathBuf),
     AheadOfTime,
     #[cfg(not(feature = "std"))]
     InMemory,
@@ -21,7 +21,7 @@ impl ArtifactPreparation {
     #[cfg(feature = "std")]
     pub(super) fn cache_root(&self, pc: GuestAddress) -> Result<&Path> {
         match self {
-            Self::HostedCache(root) => Ok(root),
+            Self::FileCache(root) => Ok(root),
             Self::AheadOfTime => anyhow::bail!(
                 "AOT block unavailable at {:#x}; runtime compilation is unsupported",
                 pc.0
@@ -56,8 +56,6 @@ impl LoadedBlock {
             source_bytes,
             prepared,
             mapping,
-            #[cfg(feature = "std")]
-            checked: core::cell::OnceCell::new(),
         })
     }
 }
@@ -77,7 +75,6 @@ impl BlockRuntime {
             next_generation: 0,
             regions: BTreeMap::new(),
             loaded: BTreeMap::new(),
-            amx_kernels: None,
             _serialized: PhantomData,
         }
     }
@@ -151,7 +148,7 @@ impl BlockRuntime {
         );
         let expected_identity = crate::block_plan_identity(window, pc, self.target, &plan)?;
 
-        // Preserve the hosted byte/provider rejection order, including checksum
+        // Preserve the file byte/provider rejection order, including checksum
         // codec before digest, then CPA specialization before fresh metadata.
         ensure!(
             manifest_bytes.len() <= prepare::MAX_CACHE_MANIFEST_BYTES,

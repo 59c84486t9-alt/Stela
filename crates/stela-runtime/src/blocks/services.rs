@@ -1,12 +1,12 @@
 //! Services borrowed for one run and the completion of the instructions that use them.
 use super::{REGISTER_COUNT, ZERO_REGISTER_INDEX};
-use crate::{clock, memory, pauth, system, thread};
+use crate::{memory, pauth, system};
 use anyhow::{Result, ensure};
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{
-        ClockInstruction, ClockOperation, PointerAuthentication, PointerAuthenticationKey,
-        PointerAuthenticationModifier, PointerAuthenticationOperation,
+        PointerAuthentication, PointerAuthenticationKey, PointerAuthenticationModifier,
+        PointerAuthenticationOperation,
     },
 };
 
@@ -33,21 +33,13 @@ impl<'a> PauthExecution<'a> {
 
 pub(super) struct RuntimeServices<'a> {
     pub(super) pointer_authentication: Option<PauthExecution<'a>>,
-    pub(super) clock: Option<&'a mut clock::Context>,
-    pub(super) thread: Option<&'a thread::Context>,
     pub(super) system: Option<&'a mut dyn system::execution::Dispatcher>,
 }
 
 impl<'a> RuntimeServices<'a> {
-    pub(super) fn legacy(
-        pointer_authentication: Option<&'a pauth::Context>,
-        clock: Option<&'a mut clock::Context>,
-        thread: Option<&'a thread::Context>,
-    ) -> Self {
+    pub(super) fn direct(pointer_authentication: Option<&'a pauth::Context>) -> Self {
         Self {
             pointer_authentication: pointer_authentication.map(PauthExecution::keys_only),
-            clock,
-            thread,
             system: None,
         }
     }
@@ -62,8 +54,6 @@ impl<'a> RuntimeServices<'a> {
                 context,
                 memory: Some(AuthenticatedMemory { reader, controls }),
             }),
-            clock: None,
-            thread: None,
             system: None,
         }
     }
@@ -71,35 +61,7 @@ impl<'a> RuntimeServices<'a> {
     pub(super) fn system(dispatcher: &'a mut dyn system::execution::Dispatcher) -> Self {
         Self {
             pointer_authentication: None,
-            clock: None,
-            thread: None,
             system: Some(dispatcher),
-        }
-    }
-}
-
-pub(super) fn complete_clock(
-    context: &mut clock::Context,
-    instruction: &ClockInstruction,
-    registers: &mut GuestState,
-) -> Result<Option<u64>> {
-    match instruction.operation {
-        ClockOperation::ReadVirtualCounter { destination } => {
-            ensure!(
-                destination < REGISTER_COUNT,
-                "invalid clock destination register"
-            );
-            // Sampling and complete commpage publication must succeed before
-            // committing the destination. X31 discards the result, not the read.
-            let counter = context.read_counter()?;
-            if destination != ZERO_REGISTER_INDEX {
-                registers.x[usize::from(destination)] = counter;
-            }
-            Ok(Some(counter))
-        }
-        ClockOperation::InstructionSynchronization => {
-            serialize_instruction_execution()?;
-            Ok(None)
         }
     }
 }

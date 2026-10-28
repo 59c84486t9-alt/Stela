@@ -447,7 +447,7 @@ mod tests {
         machine.profile_missing = missing;
         (machine, ram, EventDomain::new())
     }
-    /// Actual hosted byte/native-scalar service fixture. Its prepared legacy
+    /// Actual POSIX byte/native-scalar service fixture. Its prepared legacy
     /// entry is not a production CPL0 proof and cannot enter NativeRun.
     fn transfer(cpu: &mut crate::machine::Cpu, operation: ExclusiveOperation) -> ExclusiveData {
         let memory = cpu.canonical_memory.as_mut().unwrap();
@@ -478,7 +478,7 @@ mod tests {
             .memory
             .prepare(MemoryRequirements::default())
             .unwrap();
-        // SAFETY: the actual admitted hosted fixture owns initialized private
+        // SAFETY: the actual admitted POSIX fixture owns initialized private
         // typed staging and retains its source policy/native byte owner.
         let result = unsafe { entry.with_checked_view(|view| (view.callback)(view, &request)) };
         assert_eq!(result, Ok(MemoryStatus::Success as u32));

@@ -3,7 +3,7 @@ use super::{Devices, Host, Machine, Prepared, Refused, Statistics};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Serialize)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub statistics: Statistics,
     preparation: Option<PreparationMetrics>,
     block_slots: usize,
@@ -75,15 +75,15 @@ impl PreparationMetrics {
 
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Start a new diagnostic epoch, including after a host PID change.
-    pub(crate) fn enable_engine_metrics(&mut self) {
+    pub fn enable_engine_metrics(&mut self) {
         self.preparation_metrics = Some(PreparationMetrics::default());
     }
 
-    pub(crate) fn disable_engine_metrics(&mut self) {
+    pub fn disable_engine_metrics(&mut self) {
         self.preparation_metrics = None;
     }
 
-    pub(crate) fn metrics_snapshot(&self) -> Snapshot {
+    pub fn metrics_snapshot(&self) -> Snapshot {
         Snapshot {
             statistics: self.statistics,
             preparation: self.preparation_metrics,

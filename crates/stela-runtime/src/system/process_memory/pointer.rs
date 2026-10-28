@@ -6,14 +6,13 @@ use super::{ResolvedPointerChecks, SystemState};
 #[cfg(feature = "std")]
 use crate::system::debug::DebugControls;
 
-// Preparation is reached only by the hosted EL0 process owner.
+// Explicit checked-memory validation for caller-owned raw execution.
 #[cfg(feature = "std")]
 use super::pointer_checks::{self};
 #[cfg(feature = "std")]
 use super::{
-    EntryBoundary, EventEndpoint, GuestState, MemoryControls, MemoryExecutionLoan,
-    MemoryRequirements, MemoryThread, PointerChecksError, PreparedProcessMemory,
-    ProcessMemoryError, flags,
+    MemoryControls, MemoryExecutionLoan, MemoryRequirements, MemoryThread, PointerChecksError,
+    ProcessMemoryError,
 };
 #[cfg(feature = "std")]
 use stela_compiler::{
@@ -68,6 +67,12 @@ impl FixedProcessMemoryControls {
         } else {
             None
         };
+        if extended
+            .as_ref()
+            .is_some_and(|loan| Some(loan.address_space()) != thread.address_space())
+        {
+            return Err(fail());
+        }
         let checks = pointer_checks::resolve(snapshot, Some(debug), extended.as_ref())
             .map_err(ProcessMemoryError::PointerChecks)?;
         let base = if self.sctlr_el1 & super::SCTLR_SP_ALIGNMENT_EL0 != 0 {
@@ -114,64 +119,6 @@ impl FixedProcessMemoryControls {
             checks,
         })
     }
-
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "std")]
-    pub(crate) fn prepare_profile<'run>(
-        &'run self,
-        boundary: &EntryBoundary,
-        profile: CheckedMemoryProfile,
-        requirements: MemoryRequirements,
-        system: &'run SystemState,
-        debug: &'run DebugControls,
-        registers: &GuestState,
-        thread: &'run mut MemoryThread<MemoryControls>,
-        endpoint: Option<&'run EventEndpoint>,
-    ) -> Result<PreparedProcessMemory<'run>, ProcessMemoryError> {
-        if matches!(profile, CheckedMemoryProfile::AddressChecks(_)) {
-            self.prepare_pointer(
-                boundary,
-                profile,
-                requirements,
-                system,
-                debug,
-                registers,
-                thread,
-                endpoint,
-            )
-        } else {
-            self.prepare(boundary, requirements, system, registers, thread, endpoint)
-        }
-    }
-
-    /// Private entry for the provider, which holds its debug owner, PE, source,
-    /// outer object and runtime profile.
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "std")]
-    pub(crate) fn prepare_pointer<'run>(
-        &'run self,
-        boundary: &EntryBoundary,
-        profile: CheckedMemoryProfile,
-        requirements: MemoryRequirements,
-        system: &'run SystemState,
-        debug: &'run DebugControls,
-        registers: &GuestState,
-        thread: &'run mut MemoryThread<MemoryControls>,
-        endpoint: Option<&'run EventEndpoint>,
-    ) -> Result<PreparedProcessMemory<'run>, ProcessMemoryError> {
-        let execution = self.acquire_source_loan(boundary, system, registers, thread)?;
-        let pointer =
-            self.qualify_pointer(profile, requirements, system, debug, thread, &execution)?;
-        let unavailable =
-            flags::ATOMIC | flags::ORDERED | flags::ASIMD | flags::SME | flags::SVE_PREDICATED;
-        if requirements.required_flags & unavailable != 0 {
-            return Err(ProcessMemoryError::Memory(super::MemoryStatus::Unsupported));
-        }
-        let mut prepared =
-            self.finish_prepare(requirements, system, thread, endpoint, execution)?;
-        prepared.pointer = Some(pointer);
-        Ok(prepared)
-    }
 }
 
 #[cfg(test)]
@@ -184,6 +131,7 @@ mod tests {
             policy::{LowerAddressProfile, TagCheckFaultMode},
         },
         system::{
+            execution::EntryBoundary,
             identification::Register,
             identification_snapshot::Snapshot,
             state::{El1Registers, PSTATE_EL0T},
@@ -191,7 +139,7 @@ mod tests {
     };
     use std::sync::Arc;
     use stela_compiler::{
-        GuestAddress, TargetCpu,
+        GuestAddress, GuestState, TargetCpu,
         context::{
             memory::{
                 MemoryStatus,

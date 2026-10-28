@@ -1,9 +1,6 @@
-//! The macOS builds Stela supports. The device models speak each build's
-//! AP-to-coprocessor firmware protocols (Stela models the coprocessors
-//! rather than running their firmware), and the hosted kernel's call tables
-//! follow each build's system-call census, so a build is supported only
-//! once both are written for it. Setup, bundle preparation and the hosted
-//! guest-system install refuse every other build with [`Unsupported`].
+//! Firmware builds admitted by the native mount.
+//! Device models implement each admitted build's AP-to-coprocessor protocols.
+//! Setup and boot-bundle preparation reject other builds with [`Unsupported`].
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 

@@ -337,7 +337,7 @@ pub(super) mod tests {
         assert_eq!(second.statistics.compiled, 1);
     }
 
-    /// What the hosted store's workers do with an offer.
+    /// What the directory store's workers do with an offer.
     fn proven(offer: &Offer) -> translations::Entry {
         offer.prove().unwrap()
     }

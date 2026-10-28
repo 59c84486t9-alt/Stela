@@ -280,7 +280,7 @@ mod tests {
     }
     type TestMachine = Machine<ServiceHost<Local, OneWorker>, Device>;
     /// Protocol model only: the real publication loan is actually returned
-    /// after CPL0 refusal on this hosted runner. Its failure diagnostics are
+    /// after CPL0 refusal on this POSIX runner. Its failure diagnostics are
     /// replaced ONLY here to drive continuation adversaries. No native memory
     /// callback/CPL0 execution is claimed by these tests.
     fn pending(word: u32, fail: bool) -> (TestMachine, Arc<RegisteredSystemRam>) {

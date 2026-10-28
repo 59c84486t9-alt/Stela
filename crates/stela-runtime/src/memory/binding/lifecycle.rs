@@ -533,69 +533,6 @@ mod tests {
     }
 
     #[test]
-    fn real_commpage_facades_join_once_and_clock_publication_preserves_static_bytes() {
-        let _lock = crate::clock::TEST_CONTEXT_LOCK.lock().unwrap();
-        let (mut main, _) = owned();
-        let mut modern =
-            crate::commpage::Context::new(42, crate::commpage::KernelPageSize::FourKiB).unwrap();
-        let samples = vec![
-            crate::clock::Snapshot {
-                counter: 10,
-                sleep_ticks: 1,
-            },
-            crate::clock::Snapshot {
-                counter: 20,
-                sleep_ticks: 2,
-            },
-            crate::clock::Snapshot {
-                counter: 30,
-                sleep_ticks: 3,
-            },
-        ];
-        let mut clock = crate::clock::Context::new(
-            42,
-            Box::new(crate::clock::ReplaySource::new(samples).unwrap()),
-        )
-        .unwrap();
-        let original_modern = modern.snapshot_bytes().unwrap();
-        let original_clock = clock.snapshot_bytes(0, crate::clock::GUEST_BYTES).unwrap();
-        let domain = unsafe {
-            main.bind_shared_memory_participants(
-                config(MemorySystem::new(16, 8).unwrap(), 42),
-                &mut [
-                    modern.shared_memory_participant(),
-                    clock.shared_memory_participant(),
-                ],
-            )
-        }
-        .unwrap();
-        assert_eq!(modern.snapshot_bytes().unwrap(), original_modern);
-        assert_eq!(
-            clock.snapshot_bytes(0, crate::clock::GUEST_BYTES).unwrap(),
-            original_clock
-        );
-        assert_eq!(domain.registered_views().len(), 3);
-        assert_eq!(clock.read_counter().unwrap(), 20);
-        assert_eq!(clock.read_counter().unwrap(), 30);
-        assert!(clock.read_counter().is_err());
-        assert_eq!(clock.events().len(), 3);
-        assert_eq!(domain.generation().unwrap(), 0);
-        assert_eq!(modern.snapshot_bytes().unwrap(), original_modern);
-        assert!(
-            unsafe {
-                main.bind_shared_memory_participants(
-                    config(MemorySystem::new(16, 8).unwrap(), 42),
-                    &mut [
-                        modern.shared_memory_participant(),
-                        clock.shared_memory_participant(),
-                    ],
-                )
-            }
-            .is_err()
-        );
-    }
-
-    #[test]
     fn public_retirement_fences_native_loans_and_invalidates_generation() {
         let (mut main, _) = owned();
         let domain = unsafe {

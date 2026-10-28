@@ -32,14 +32,13 @@ const ISAR3_CPA_SHIFT: u32 = 0;
 const CPA_WITH_CHECKING: u8 = 2;
 
 /// Stored once inside FixedProcessMemoryControls; no SCTLR/TCR copies.
-/// Full raw registers are retained. Future EnFPM or mutation belongs to this
-/// same owner; the current constructor rejects unimplemented extended bits.
+/// The constructor rejects nonzero TCR2 and all unimplemented SCTLR2 bits.
+/// Future EnFPM or mutation belongs to this same owner.
 #[derive(Debug)]
-// Only the hosted FEAT_CPA read borrow reads the raw registers back.
+// The checked-memory borrow reads the control bank.
 #[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) struct ExtendedControlBank {
     sctlr2_el1: u64,
-    tcr2_el1: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,10 +160,7 @@ impl FixedProcessMemoryControls {
         .map_err(Error::Process)?;
         // This new value has not escaped yet; there is no setter on an existing
         // bank.
-        bank.extended = Some(ExtendedControlBank {
-            sctlr2_el1,
-            tcr2_el1,
-        });
+        bank.extended = Some(ExtendedControlBank { sctlr2_el1 });
         Ok(bank)
     }
 
@@ -195,7 +191,7 @@ impl FixedProcessMemoryControls {
             .map_err(Error::SourceDomain)?;
         let address_space = thread.address_space().ok_or(Error::MissingAddressSpace)?;
         Ok(ExtendedControlLoan {
-            bank: self,
+            _bank: self,
             extended,
             snapshot,
             _execution: execution,
@@ -208,7 +204,7 @@ impl FixedProcessMemoryControls {
 /// cannot be released.
 #[cfg(feature = "std")]
 pub(crate) struct ExtendedControlLoan<'run> {
-    bank: &'run FixedProcessMemoryControls,
+    _bank: &'run FixedProcessMemoryControls,
     extended: &'run ExtendedControlBank,
     snapshot: &'run Snapshot,
     _execution: &'run MemoryExecutionLoan,
@@ -223,17 +219,8 @@ impl<'run> ExtendedControlLoan<'run> {
     pub(crate) fn address_space(&self) -> u64 {
         self.address_space
     }
-    pub(crate) fn sctlr_el1(&self) -> u64 {
-        self.bank.sctlr_el1()
-    }
-    pub(crate) fn tcr_el1(&self) -> u64 {
-        self.bank.tcr_el1()
-    }
     pub(crate) fn sctlr2_el1(&self) -> u64 {
         self.extended.sctlr2_el1
-    }
-    pub(crate) fn tcr2_el1(&self) -> u64 {
-        self.extended.tcr2_el1
     }
 }
 
@@ -241,21 +228,11 @@ impl<'run> ExtendedControlLoan<'run> {
 mod tests {
     //! SCTLR2 and TCR2 storage.
     use super::*;
-    use crate::{
-        blocks::ThreadState,
-        memory::{
-            domain::{MemoryDomain, MemorySystem},
-            policy::{LowerAddressProfile, TagCheckFaultMode},
-        },
-        pauth::{
-            Context, Keys, Version,
-            lr_context::InstructionKey,
-            lr_instruction::{Instruction, Key},
-            lr_service::{BorrowedLinkRegisterService, KeySelection, PacmControlValue},
-        },
-        system::state::{El1Registers, PSTATE_EL0T, PSTATE_EL1H, PacmStateFeature, SystemState},
+    use crate::memory::{
+        domain::{MemoryDomain, MemorySystem},
+        policy::{LowerAddressProfile, TagCheckFaultMode},
     };
-    use stela_compiler::{GuestAddress, GuestState, TargetCpu};
+    use stela_compiler::TargetCpu;
 
     const ADDRESS_SPACE: u64 = 7;
     const ADDRESS_BITS: u8 = 47;
@@ -361,10 +338,10 @@ mod tests {
             assert_eq!(loan.address_space(), ADDRESS_SPACE);
             assert_eq!(
                 (
-                    loan.sctlr_el1(),
-                    loan.tcr_el1(),
+                    loan._bank.sctlr_el1(),
+                    loan._bank.tcr_el1(),
                     loan.sctlr2_el1(),
-                    loan.tcr2_el1()
+                    0
                 ),
                 (SCTLR, TCR, sctlr2, 0)
             );
@@ -469,75 +446,6 @@ mod tests {
                 ),
                 Err(Error::UnsupportedControl { .. })
             ));
-        }
-    }
-
-    #[test]
-    fn lr_service_consumes_original_bank_loan_and_retains_actual_frame() {
-        let ids = snapshot(0);
-        let domain = new_domain();
-        let bank = bank(Arc::clone(&ids), &domain, SCTLR2_ENPACM0);
-        let memory = memory(&domain);
-        let outer = memory.execution_loan().unwrap();
-        let context = Context::new_with_version(
-            ADDRESS_SPACE,
-            Keys::from_words([1, 2], [3, 4], [5, 6], [7, 8]),
-            Version::FaultingCombined,
-        );
-        let thread = ThreadState {
-            pc: GuestAddress(0x1000),
-            registers: GuestState::default(),
-        };
-        let frame_before = thread.clone();
-        for (mode, expected) in [
-            (PSTATE_EL0T, PacmControlValue::One),
-            (PSTATE_EL1H, PacmControlValue::Zero),
-        ] {
-            let system = SystemState::new_with_pacm(
-                mode,
-                0,
-                El1Registers::new(0, 0, 0, 0, 0),
-                PacmStateFeature::Full,
-            )
-            .unwrap();
-            let before = system.clone();
-            let loan = bank.extended_controls(&ids, &memory, &outer).unwrap();
-            let service = BorrowedLinkRegisterService::new(
-                loan,
-                &context,
-                &thread.registers,
-                thread.pc,
-                &system,
-            )
-            .unwrap();
-            assert_eq!(
-                service.key_selection(InstructionKey::A),
-                KeySelection::UseKey
-            );
-            assert_eq!(
-                service.key_selection(InstructionKey::B),
-                KeySelection::Bypass
-            );
-            assert_eq!(service.pacm_control_value().unwrap(), expected);
-            assert_eq!(service.tcr_controls(), (TCR, 0));
-            assert_eq!(service.pstate(), mode);
-            let staged = service.stage(Instruction::Sign171615(Key::Ia)).unwrap();
-            let crate::pauth::lr_instruction::Staged::Pointer(operands) = staged else {
-                panic!("pointer staging")
-            };
-            service
-                .crypto()
-                .unwrap()
-                .sign(
-                    InstructionKey::A,
-                    operands.pointer,
-                    operands.modifier1,
-                    operands.modifier2,
-                )
-                .unwrap();
-            assert_eq!(system, before);
-            assert_eq!(thread.pc, frame_before.pc);
-            assert_eq!(thread.registers, frame_before.registers);
         }
     }
 

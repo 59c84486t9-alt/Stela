@@ -4,8 +4,8 @@
 //! guest addresses in the native code stored relative to the page, and the
 //! proof that a block's code depends on its address only through them.
 //!
-//! The format is the same in every container: the hosted directory store
-//! (`crate::hosted::translations`) and the pack `stela.efi` keeps
+//! The format is the same in every container: the directory store
+//! and the pack `stela.efi` keeps
 //! ([`pack`]).
 pub mod pack;
 

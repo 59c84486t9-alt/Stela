@@ -78,8 +78,9 @@ const fn pack_modifiers(modifier1: u64, modifier2: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     //! Two-modifier signing and authentication.
+    use super::ConfigurationError as TwoModifierError;
     use super::*;
-    use crate::pauth::{Keys, TwoModifierError};
+    use crate::pauth::Keys;
 
     const ADDRESS_SPACE: u64 = 7;
     const IA_KEY: [u64; 2] = [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210];

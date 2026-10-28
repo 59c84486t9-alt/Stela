@@ -1,21 +1,26 @@
 //! Bounded execution of the unchanged original Stage1 entry, never a firmware
 //! or hardware-state substitute. No unknown memory/system input is answered.
-#![cfg(all(feature = "std", target_os = "macos", target_arch = "x86_64"))]
+#![cfg(all(
+    feature = "test-support",
+    feature = "std",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::VecDeque, io::Write as _, rc::Rc};
 use stela_compiler::{GuestState, TargetCpu, aarch64::system::registers::Encoding};
 use {
-    stela_contracts::Chip, stela_runtime::hosted::host::NativeRunner, stela_runtime::machine::Cpu,
-    stela_runtime::machine::CpuProfile, stela_runtime::machine::DeviceError,
-    stela_runtime::machine::Devices, stela_runtime::machine::FaultCause,
-    stela_runtime::machine::Host, stela_runtime::machine::InstallError,
-    stela_runtime::machine::Lines, stela_runtime::machine::Machine,
-    stela_runtime::machine::NativeCode, stela_runtime::machine::NativeExit,
-    stela_runtime::machine::Regime, stela_runtime::machine::Stop,
-    stela_runtime::machine::exception::Pstate, stela_runtime::machine::identification,
-    stela_runtime::machine::identification::Speculation, stela_runtime::machine::mmu,
-    stela_runtime::machine::registers::encodings::MPIDR_EL1,
+    stela_contracts::Chip, stela_runtime::execution::reference::NativeRunner,
+    stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile,
+    stela_runtime::machine::DeviceError, stela_runtime::machine::Devices,
+    stela_runtime::machine::FaultCause, stela_runtime::machine::Host,
+    stela_runtime::machine::InstallError, stela_runtime::machine::Lines,
+    stela_runtime::machine::Machine, stela_runtime::machine::NativeCode,
+    stela_runtime::machine::NativeExit, stela_runtime::machine::Regime,
+    stela_runtime::machine::Stop, stela_runtime::machine::exception::Pstate,
+    stela_runtime::machine::identification, stela_runtime::machine::identification::Speculation,
+    stela_runtime::machine::mmu, stela_runtime::machine::registers::encodings::MPIDR_EL1,
 };
 
 const BASE: u64 = 0x1fc050000;
@@ -424,7 +429,8 @@ impl ProbeHost {
             arena: arena.cast(),
             used: 0,
             guard,
-            runner: NativeRunner::new(vec![(arena as u64, arena as u64 + ARENA as u64)]),
+            runner: NativeRunner::new(vec![(arena as u64, arena as u64 + ARENA as u64)])
+                .expect("reference fault handlers"),
             regime: None,
         }
     }
@@ -543,13 +549,13 @@ impl mmu::TableMemory for Tables {
 }
 
 #[test]
-#[ignore = "requires original J473 LLB; executes bounded original entry on x86 macOS"]
+#[ignore = "requires original J473 LLB; executes bounded original entry on x86 Linux"]
 fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_write_ledger() {
     execute_original(&M2);
 }
 
 #[test]
-#[ignore = "requires original J314s LLB; executes bounded original entry on x86 macOS"]
+#[ignore = "requires original J314s LLB; executes bounded original entry on x86 Linux"]
 fn original_m1_pro_llb_entry_retains_its_own_link_profile_and_unknown_input() {
     execute_original(&M1_PRO);
 }

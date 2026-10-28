@@ -434,7 +434,7 @@ mod tests {
         assert!(matches!(machine.peers[0], Peer::Off));
 
         // Real source compilation, mutable architectural frame and publication
-        // recovery; never replace the hosted privilege refusal with success.
+        // recovery; never replace the host privilege refusal with success.
         for start_others in [false, true] {
             if start_others {
                 let held = hold_first_p(&mut machine, &[1, 3, 2, 0]);

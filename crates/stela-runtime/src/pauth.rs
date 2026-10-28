@@ -320,23 +320,10 @@ use qarma::compute as qarma5;
 pub(crate) mod features;
 pub use features::UnsupportedInstructionProfile;
 
-#[cfg(feature = "std")]
-pub(crate) mod lr_context;
-
 pub(crate) mod lr_instruction;
-
-#[cfg(feature = "std")]
-pub(crate) mod lr_service;
 
 mod two_modifier;
 
-#[cfg(feature = "std")]
-pub(crate) use two_modifier::ConfigurationError as TwoModifierError;
-
-#[cfg(feature = "std")]
-pub(crate) mod lr_effects;
-
-#[cfg(feature = "std")]
 pub(crate) mod conditional;
 
 impl stela_contracts::pauth::Signer for Context {

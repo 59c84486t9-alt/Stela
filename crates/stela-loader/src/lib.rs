@@ -1,5 +1,5 @@
 //! Mach-O loading: slice selection, load plans, chained fixups, exports,
-//! dependency discovery and image mappings, plus the restore-image formats
+//! plus the restore-image formats
 //! the kernel boot hand-off consumes.
 //!
 //! Without the default `std` feature only the kernel boot-bundle builder and
@@ -22,10 +22,6 @@ pub mod coprocessor;
 #[cfg(feature = "std")]
 pub use stela_formats::code_signature;
 pub mod darts;
-#[cfg(feature = "std")]
-pub mod dependency_graph;
-#[cfg(feature = "std")]
-pub mod dependency_paths;
 pub mod devices;
 pub mod dvfs;
 #[cfg(feature = "std")]
@@ -40,19 +36,13 @@ pub mod installed;
 pub mod kernel_collection;
 pub mod kernel_version;
 #[cfg(feature = "std")]
-pub mod linked_images;
-#[cfg(feature = "std")]
 pub mod load_plan;
 pub mod local_policy;
 pub mod lock_regs;
-#[cfg(feature = "std")]
-pub mod mapped_image;
 pub mod mount_interface;
 pub mod nvram;
 pub mod recovery;
 pub mod root_selection;
-#[cfg(feature = "std")]
-pub mod shared_cache;
 pub mod soc_variant;
 mod thread_state;
 pub mod trust_cache;

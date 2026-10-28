@@ -2,7 +2,7 @@
 use core::{convert::Infallible, ptr::NonNull};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
 
-/// Implemented only by the hosted RX mapping and the boot-frame owner.
+/// Implemented only by the POSIX RX mapping and the boot-frame owner.
 ///
 /// # Safety
 /// While borrowed, the owner keeps the initialized executable bytes, their

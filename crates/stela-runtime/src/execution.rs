@@ -346,3 +346,12 @@ mod tests {
         Ok(())
     }
 }
+
+/// Bounded native fault capture used by hardware-reference validation.
+#[cfg(all(
+    feature = "std",
+    any(test, feature = "test-support"),
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+pub mod reference;

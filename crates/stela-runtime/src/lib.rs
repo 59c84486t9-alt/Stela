@@ -1,5 +1,5 @@
 //! Execution of translated ARM64 code: the native code cache, block dispatch,
-//! guest memory, system state and Darwin services.
+//! guest memory and system state.
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::ToOwned, string::String};
@@ -12,20 +12,12 @@ compile_error!(
 pub mod amx;
 pub mod blocks;
 mod checksum;
-pub mod clock;
-pub mod commpage;
-pub mod darwin;
 #[cfg(feature = "std")]
 pub mod dispatch;
 pub mod execution;
 mod floating;
-#[cfg(all(feature = "std", target_os = "macos", target_arch = "x86_64"))]
-pub mod hosted;
-#[cfg(feature = "std")]
-pub mod hosted_registry;
 #[cfg(feature = "std")]
 mod json;
-pub mod mach;
 pub mod machine;
 pub mod memory;
 pub mod pauth;
@@ -42,10 +34,8 @@ pub mod freestanding {
 }
 /// Destination-local stable CPU declaration ownership for native system Hosts.
 pub use platform::cpu::system::{NativeCpuError, NativeCpuLease, NativeCpuOwner};
-pub mod process;
 pub mod scalable;
 pub mod system;
-pub mod thread;
 pub mod translations;
 #[cfg(feature = "std")]
 use anyhow::ensure;
@@ -260,7 +250,7 @@ fn prepare_block_plan(
     })
 }
 
-// Identity derived from the source plan, shared by hosted preparation and AOT
+// Identity derived from the source plan, shared by native preparation and AOT
 // intake.
 fn block_plan_identity(
     source: &[u8],

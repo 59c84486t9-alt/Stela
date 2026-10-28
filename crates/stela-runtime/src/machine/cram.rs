@@ -697,11 +697,11 @@ mod tests {
         ));
     }
 
-    #[cfg(all(feature = "std", target_os = "macos", target_arch = "x86_64"))]
+    #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
     mod original {
         use super::*;
         use crate::execution::platform::Mapping;
-        use crate::hosted::host::NativeRunner;
+        use crate::execution::reference::NativeRunner;
         use crate::machine::Cpu;
         use crate::machine::CpuProfile;
         use crate::machine::DeviceError;
@@ -1024,7 +1024,8 @@ mod tests {
                     cram.word
                 ),
                 patches: 0,
-                runner: NativeRunner::new(alloc::vec::Vec::new()),
+                runner: NativeRunner::new(alloc::vec::Vec::new())
+                    .expect("reference fault handlers"),
             };
             let mut cpu = Cpu::of(input.chip, BASE + entry, Pstate::reset(2));
             cpu.state.x[30] = input.returned;
@@ -1610,7 +1611,7 @@ mod tests {
                 code: vec![],
                 output_prefix: "j314s-live-entry".into(),
                 patches: 0,
-                runner: NativeRunner::new(vec![]),
+                runner: NativeRunner::new(vec![]).expect("reference fault handlers"),
             };
             let target = TargetCpu::Baseline;
             let mut fixed = crate::machine::identification::derive(

@@ -9,6 +9,8 @@ workspace = true
 
 [features]
 default = ["std"]
+# Host-side native hardware-reference runners; never enables guest OS services.
+test-support = []
 native-profile = ["stela-contracts/native-profile"]
 std = ["anyhow/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
 

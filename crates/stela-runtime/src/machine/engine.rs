@@ -10,26 +10,11 @@ mod device_read;
 mod device_write;
 mod exclusive;
 #[cfg(all(feature = "std", feature = "native-profile"))]
-#[cfg_attr(
-    not(all(target_os = "macos", target_arch = "x86_64")),
-    expect(
-        dead_code,
-        reason = "the hosted runtime, which only an Intel Mac builds, reads the reports"
-    )
-)]
-pub(crate) mod floating_profile;
+pub mod floating_profile;
 mod guarded;
-mod hosted;
 pub mod installed_code;
 #[cfg(all(feature = "std", feature = "native-profile"))]
-#[cfg_attr(
-    not(all(target_os = "macos", target_arch = "x86_64")),
-    expect(
-        dead_code,
-        reason = "the hosted runtime, which only an Intel Mac builds, reads the reports"
-    )
-)]
-pub(crate) mod metrics;
+pub mod metrics;
 mod monitor;
 mod native_timing;
 mod parallel;
@@ -151,7 +136,7 @@ const JUMP_CACHE: usize = 4096;
 /// engine sees a timer or device deadline pass (tens of microseconds of
 /// guest code; every System register write and device access exits
 /// anyway). Each run that reaches it costs an exit to the engine, which
-/// at 256 was half of a hosted process's exits.
+/// at 256 caused frequent exits in measured workloads.
 const CHAIN_LIMIT: u64 = 4096;
 /// Blocks installed between reclaims for low memory: the heap may be low
 /// with another PE's machine's data, which reclaiming code here again at
@@ -2440,14 +2425,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Keep the system counter at the host's: no slow slice holds it back
-    /// (`clock::Clock::follow_host`). For a machine that is one thread of a
-    /// hosted process, whose threads each run their own machine and must
-    /// read one clock.
-    pub fn follow_host_counter(&mut self) {
-        self.clock.follow_host();
-    }
-
     /// The architectural system count and each generic timer's `(CTL, CVAL)`
     /// in [`timer::CHANNELS`] order, sampled at that count, of the bank that
     /// counts it: the Apple generic timer's from the M3 on, where the kernel
@@ -2985,7 +2962,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn lines(&mut self) -> Lines {
         // The count is read only when an answer can change with it alone: a
         // device answer with a deadline, a timer's or a PMI's. Every exit
-        // asks, and a hosted process's PE has none of them.
+        // asks, and a raw validation PE has none of them.
         let timed = !matches!(self.device_lines, Some((_, u64::MAX, _)))
             || self.timer_deadline().is_some()
             || self
@@ -4958,11 +4935,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 _ => refuse(self, "FEAT_PAuth_LR operands".into()),
             };
         }
-        if link_register
-            && self.cpu.pstate.pacm
-            && let Some(operands) = self.pacm_operands(instruction)
-        {
-            return self.two_modifier_authentication(word, instruction, operands);
+        if link_register && self.cpu.pstate.pacm {
+            let operands = self.pacm_operands(instruction).map_err(|error| {
+                self.unsupported(RequirementKind::Instruction {
+                    word,
+                    detail: alloc::format!("invalid PACM operands: {error:?}"),
+                })
+            })?;
+            if let Some(operands) = operands {
+                return self.two_modifier_authentication(word, instruction, operands);
+            }
         }
         let uses_key = match instruction.operation.required_key() {
             Some(key) if !self.key_enabled(key) => {
@@ -5204,64 +5186,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn pacm_operands(
         &self,
         instruction: PointerAuthentication,
-    ) -> Option<pauth::lr_instruction::Operands> {
-        use PointerAuthenticationModifier::StackPointer;
-        use PointerAuthenticationOperation as Operation;
-        use pauth::lr_instruction::{Action, Key};
-        let x = &self.cpu.state.x;
-        let (sp, pc) = (self.cpu.state.sp, instruction.instruction_pc.0);
-        let key = |key| match key {
-            PointerAuthenticationKey::Ia => Some(Key::Ia),
-            PointerAuthenticationKey::Ib => Some(Key::Ib),
-            _ => None,
-        };
-        let register = |index: u8| {
-            if index == 31 {
-                0
-            } else {
-                x[usize::from(index)]
-            }
-        };
-        let (key, action, destination, modifiers) = match instruction.operation {
-            Operation::Sign {
-                key: k,
-                destination,
-                modifier: StackPointer,
-            } => (key(k)?, Action::Sign, Some(destination), (sp, pc)),
-            Operation::SignIbSp => (Key::Ib, Action::Sign, Some(30), (sp, pc)),
-            Operation::Sign1716 { key: k } => (key(k)?, Action::Sign, Some(17), (x[16], x[15])),
-            Operation::Authenticate {
-                key: k,
-                destination,
-                modifier: StackPointer,
-            } => (
-                key(k)?,
-                Action::Authenticate,
-                Some(destination),
-                (sp, x[16]),
-            ),
-            Operation::AuthenticateIbSp => (Key::Ib, Action::Authenticate, Some(30), (sp, x[16])),
-            Operation::Authenticate1716 { key: k } => {
-                (key(k)?, Action::Authenticate, Some(17), (x[16], x[15]))
-            }
-            Operation::ReturnIaSp => (Key::Ia, Action::Return, None, (sp, x[16])),
-            Operation::ReturnIbSp => (Key::Ib, Action::Return, None, (sp, x[16])),
-            _ => return None,
-        };
-        let pointer = match destination {
-            Some(destination) => register(destination),
-            None => x[30],
-        };
-        Some(pauth::lr_instruction::Operands {
-            key,
-            action,
-            pointer,
-            modifier1: modifiers.0,
-            modifier2: modifiers.1,
-            destination,
+    ) -> Result<Option<pauth::lr_instruction::Operands>, pauth::lr_instruction::StageError> {
+        let staged = pauth::conditional::stage(
+            instruction.operation,
+            instruction.instruction_pc.0,
+            self.cpu.state.x[..31]
+                .try_into()
+                .expect("31 architectural registers"),
+            self.cpu.state.sp,
+            crate::system::state::Pacm::One,
+        )?;
+        Ok(staged.map(|operands| pauth::lr_instruction::Operands {
+            key: operands.key,
+            action: operands.action,
+            pointer: operands.pointer,
+            modifier1: operands.first,
+            modifier2: operands
+                .second
+                .expect("PACM one selects the second modifier"),
+            destination: operands.destination,
             implicit_bti: false,
-            instruction_pc: pc,
-        })
+            instruction_pc: instruction.instruction_pc.0,
+        }))
     }
 
     /// Arm AddPACIA2, AddPACIB2, AuthIA2 and AuthIB2 with the guest's keys:

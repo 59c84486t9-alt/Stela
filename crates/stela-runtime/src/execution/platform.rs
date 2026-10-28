@@ -3,7 +3,7 @@
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 mod freestanding;
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-mod hosted;
+mod posix;
 #[cfg(not(any(
     all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")),
     all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
@@ -13,7 +13,7 @@ mod unsupported;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub use freestanding::*;
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-pub use hosted::*;
+pub use posix::*;
 #[cfg(not(any(
     all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")),
     all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))

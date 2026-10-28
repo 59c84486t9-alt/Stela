@@ -1,17 +1,6 @@
-//! Apple AMX state for a hosted guest thread and completion of AMX block exits.
-//!
-//! In hosted execution Stela is the guest's operating system, so each guest
-//! thread owns its AMX registers beside its TSD: `set` allocates a zeroed
-//! register file, `clr` discards it, and every other operation runs against it.
-//! A context switch needs no AMX work because the state never leaves its
-//! thread's [`crate::thread::Context`]. The system-mode ABI, where the guest
-//! kernel saves and restores the registers itself under `AMX_CTL_EL1`, is
-//! documented in `docs/design/runtime.md#apple-amx`.
-//!
-//! `fma32`/`fms32`/`fma64`/`fms64` with every lane enabled run as native
-//! kernels when the target admits a kernel tier; every other operation, and
-//! every target without one, runs the reference model. Memory is direct RAM,
-//! bounded by the profile's user range.
+//! Direct-RAM AMX reference execution and reusable native kernel mappings.
+//! The native system engine separately owns architectural AMX state and
+//! enablement under the guest kernel's AMX_CTL_EL1 controls.
 use crate::{execution::platform::Mapping, memory::DIRECT_RAM_USER_END};
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
@@ -40,7 +29,7 @@ pub enum Failure {
     Unsupported { detail: &'static str },
     /// The transfer touches memory outside the direct-RAM user range.
     Memory { address: u64, write: bool },
-    /// A qualified transfer alignment fault. The current hosted M2 default
+    /// A qualified transfer alignment fault. The M2 model
     /// does not produce this M1-specific diagnostic.
     Alignment {
         address: u64,
@@ -48,7 +37,7 @@ pub enum Failure {
         bytes: u16,
     },
     /// An unallocated operation (23..31), which hardware raises as an
-    /// undefined instruction. Hosted execution has no exception delivery.
+    /// undefined instruction. Exception delivery belongs to the CPU owner.
     Undefined,
 }
 
@@ -188,7 +177,7 @@ impl Kernels {
         unsafe {
             self.mapping
                 .call_amx_kernel(offset, z, x.as_ptr(), y.as_ptr(), row)
-                .expect("hosted AMX kernel storage cannot fail")
+                .expect("POSIX AMX kernel storage cannot fail")
         };
     }
 }

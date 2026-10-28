@@ -2,10 +2,6 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
-#[cfg(feature = "std")]
-pub(crate) mod authority;
-#[cfg(feature = "std")]
-pub(crate) mod owner;
 
 use super::events::DomainError;
 use crate::memory::{tag_execution::RandomTagFault, tag_transfer};

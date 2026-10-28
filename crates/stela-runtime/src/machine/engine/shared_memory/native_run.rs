@@ -1338,7 +1338,7 @@ mod artifact_tests {
         machine: &mut Machine<FakeHost, NoDevices>,
         binding: publication::WorkerBinding,
     ) -> Result<Arc<Artifact>, MemoryStatus> {
-        // Preparation only: no hosted fixture enters a physical native frame.
+        // Preparation only: no POSIX fixture enters a physical native frame.
         let bytes = source_window(machine.cpu.pc, &machine.breakpoints, &machine.traces);
         let run = prepare(
             &mut machine.cpu,

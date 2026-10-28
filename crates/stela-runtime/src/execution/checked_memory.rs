@@ -1,6 +1,6 @@
 //! Immutable checked GPR blocks with a private native mapping per worker.
 //!
-//! This is a bounded execution boundary, not a hosted-process or machine SMP
+//! This is a bounded execution boundary, not a native machine SMP
 //! scheduler. Every memory access uses the retained shared memory service;
 //! direct-RAM blocks and caller-supplied native artifacts are excluded.
 

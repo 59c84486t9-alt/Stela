@@ -2029,7 +2029,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "stela-compiler",
  "stela-contracts",
  "stela-drivers",
  "stela-formats",

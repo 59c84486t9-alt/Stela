@@ -452,7 +452,7 @@ unsafe fn bindings<O: Send + Sync + 'static>(
 }
 
 /// Source-MMU fixtures use real pinned bytes/native scalar transfers but the
-/// legacy hosted domain. This cannot construct production CPL0 entry authority.
+/// legacy validation domain. This cannot construct production CPL0 entry authority.
 #[cfg(test)]
 pub(crate) unsafe fn fixture<O: Send + Sync + 'static>(
     ranges: &[ReservedSystemRamRange],
@@ -504,7 +504,7 @@ mod tests {
         }
     }
 
-    // A RAM ownership/access model using the real hosted platform's target
+    // A RAM ownership/access model using the real POSIX platform's target
     // admission. It does not manufacture a CPL0 native-system proof or assert
     // freestanding/AP execution, which has its own boot qualification.
     unsafe fn model(ranges: &[ReservedSystemRamRange], owner: Arc<Storage>) -> RegisteredSystemRam {
@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn hosted_ram_layout_does_not_mint_a_freestanding_target_proof() {
+    fn posix_ram_layout_does_not_mint_a_freestanding_target_proof() {
         let storage = Storage::new();
         let ranges = [range(&storage, 0x4000, 0, 128)];
         assert!(matches!(

@@ -476,7 +476,7 @@ pub enum RetireReason {
     EventConsumed,
     EventObserved,
     InterruptPending,
-    /// The hosted implementation resumed because an IRQ was presented; the
+    /// The event implementation resumed because an IRQ was presented; the
     /// event register keeps its value.
     PresentedIrqResume,
     DeadlineExpired,

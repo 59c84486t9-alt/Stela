@@ -76,7 +76,7 @@ struct Row {
 /// Cumulative within one engine epoch. FPSR differences reveal newly observable
 /// sticky transitions only; already-set bits hide subsequent fresh exceptions.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     algorithm: &'static str,
     seed: u64,
     stratum_events: u32,
@@ -96,32 +96,7 @@ pub(crate) struct Snapshot {
 }
 
 #[cfg(test)]
-impl Snapshot {
-    pub(crate) fn maximum_test_fixture() -> Self {
-        let mut sampler = Sampler::new(u64::MAX);
-        sampler.scheduled = u64::MAX;
-        sampler.samples = u64::MAX;
-        sampler.families.fill(u64::MAX);
-        sampler.dropped = u64::MAX;
-        sampler.saturated = true;
-        sampler.observations = observations::Observations::maximum_test_fixture();
-        for word in (u32::MAX - ROW_LIMIT as u32)..u32::MAX {
-            sampler.rows.insert(
-                Key {
-                    word,
-                    family: Family::ExtremaScale,
-                    fpcr_before: u32::MAX,
-                    fpcr_after: u32::MAX,
-                    fpsr_before: u32::MAX,
-                    fpsr_after: u32::MAX,
-                    refused_enabled_exceptions: Some(u32::MAX),
-                },
-                u64::MAX,
-            );
-        }
-        sampler.snapshot()
-    }
-}
+impl Snapshot {}
 
 pub(super) struct Sampler {
     seed: u64,
@@ -315,15 +290,15 @@ impl Sampler {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
-    pub(crate) fn enable_floating_profile(&mut self, seed: u64) {
+    pub fn enable_floating_profile(&mut self, seed: u64) {
         self.floating_profile = Some(Box::new(Sampler::new(seed)));
     }
 
-    pub(crate) fn disable_floating_profile(&mut self) {
+    pub fn disable_floating_profile(&mut self) {
         self.floating_profile = None;
     }
 
-    pub(crate) fn floating_profile_snapshot(&self) -> Option<Snapshot> {
+    pub fn floating_profile_snapshot(&self) -> Option<Snapshot> {
         self.floating_profile
             .as_ref()
             .map(|sampler| sampler.snapshot())

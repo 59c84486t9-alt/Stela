@@ -283,7 +283,7 @@ mod tests {
             let original = core::array::from_fn::<_, 64, _>(|i| i as u8 ^ 0xa5);
             unsafe { ram.publish_physical(PA, &original) }.unwrap();
             let memory = machine.cpu.canonical_memory.as_mut().unwrap();
-            // This is the actual hosted model's prepared authority, not a
+            // This is the actual POSIX model's prepared authority, not a
             // forged production CPL0/current-worker proof.
             let entry = memory
                 .memory

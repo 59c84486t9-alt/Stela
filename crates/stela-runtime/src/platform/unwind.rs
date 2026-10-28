@@ -1,4 +1,4 @@
-//! Unwinding when hosted; the freestanding build aborts on panic.
+//! Unwinding in host-side tools; the freestanding build aborts on panic.
 #[cfg(feature = "std")]
 pub(crate) use std::panic::catch_unwind as invoke;
 #[cfg(feature = "std")]

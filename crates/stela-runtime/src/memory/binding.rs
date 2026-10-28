@@ -11,30 +11,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
-/// Opaque participation of a whole facade owner, without exposing mutation APIs.
-pub struct SharedMemoryParticipant<'a> {
-    owner: ParticipantOwner<'a>,
-    address_space: u64,
-}
-enum ParticipantOwner<'a> {
-    Owned(&'a mut OwnedMemory),
-    Published(&'a mut PublishedReadOnlyRegion),
-}
-impl<'a> SharedMemoryParticipant<'a> {
-    pub(crate) fn owned(owner: &'a mut OwnedMemory, address_space: u64) -> Self {
-        Self {
-            owner: ParticipantOwner::Owned(owner),
-            address_space,
-        }
-    }
-    pub(crate) fn published(owner: &'a mut PublishedReadOnlyRegion, address_space: u64) -> Self {
-        Self {
-            owner: ParticipantOwner::Published(owner),
-            address_space,
-        }
-    }
-}
-
 /// Authoritative owner snapshot. Mapping attributes are never inferred from mmap.
 pub struct SharedMemoryConfig {
     pub address_space: u64,
@@ -65,7 +41,7 @@ impl core::fmt::Display for SharedBindingError {
 impl core::error::Error for SharedBindingError {}
 
 /// One group/system, retained by its facades and returned immutable snapshot.
-// Only hosted shared-binding lifecycle reads the attributes back.
+// Only shared-binding lifecycle reads the attributes back.
 #[cfg_attr(not(host_memory), allow(dead_code))]
 pub(super) struct SharedBinding {
     system: Arc<MemorySystem>,
@@ -128,31 +104,6 @@ impl SharedBinding {
 }
 
 impl OwnedMemory {
-    /// Bind whole facade participants without lending their allocators or
-    /// allowing publication outside the facade.
-    ///
-    /// # Safety
-    /// As for `bind_shared_memory`.
-    pub unsafe fn bind_shared_memory_participants(
-        &mut self,
-        config: SharedMemoryConfig,
-        participants: &mut [SharedMemoryParticipant<'_>],
-    ) -> Result<Arc<MemoryDomain>, SharedBindingError> {
-        let mut owners = Vec::new();
-        let mut publishers = Vec::new();
-        for participant in participants {
-            if participant.address_space != config.address_space {
-                return Err(SharedBindingError::WrongAddressSpace);
-            }
-            match &mut participant.owner {
-                ParticipantOwner::Owned(owner) => owners.push(&mut **owner),
-                ParticipantOwner::Published(owner) => publishers.push(&mut **owner),
-            }
-        }
-        // SAFETY: every participant keeps its facade owner.
-        unsafe { self.bind_shared_memory_group(config, &mut owners, &mut publishers) }
-    }
-
     /// Bind this fixed anonymous owner and its optional read-only guest
     /// publisher aliases.
     ///
@@ -448,21 +399,6 @@ impl OwnedMemory {
 
 #[cfg(host_memory)]
 mod lifecycle;
-
-impl PublishedReadOnlyRegion {
-    /// Check that a live helper belongs to this backing and domain.
-    pub(crate) fn check_execution_thread<P: super::domain::DataPolicy>(
-        &self,
-        thread: &super::domain::MemoryThread<P>,
-    ) -> Result<(), MemoryStatus> {
-        let shared = self.shared.as_ref().ok_or(MemoryStatus::Unsupported)?;
-        shared.check()?;
-        if !thread.has_domain(&shared.domain) || self.shared_backing.is_none() {
-            return Err(MemoryStatus::Domain);
-        }
-        Ok(())
-    }
-}
 
 impl OwnedMemory {
     pub(crate) fn check_execution_thread<P: super::domain::DataPolicy>(

@@ -31,7 +31,7 @@ pub use allocation::{
     AllocateDataError, AllocateDataRequest, AllocationOperation, DataAllocation, DataInheritance,
     DataPermissions, DataPlacement, PendingDataAllocation,
 };
-pub use binding::{SharedBindingError, SharedMemoryConfig, SharedMemoryParticipant};
+pub use binding::{SharedBindingError, SharedMemoryConfig};
 #[cfg(host_memory)]
 pub use mapping::FileMemoryRegionSpec;
 pub use protection::{DataProtectionLimit, ProtectionError};

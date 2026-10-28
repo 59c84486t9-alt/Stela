@@ -115,7 +115,7 @@ impl Mapping {
     }
 
     /// Keep the native result alongside the storage check. Err is a refusal
-    /// before the call; hosted storage cannot fail.
+    /// before the call; POSIX storage cannot fail.
     ///
     /// # Safety
     /// The source, native code, ABI, map, requirements and context must be

@@ -34,10 +34,9 @@
 //! with wall time; time of day drifts behind by the accumulated lag, as on
 //! a machine whose counter was paused, and ahead by any idle leaps.
 //!
-//! A machine that is one thread of a hosted process follows the host's
-//! counter instead ([`Clock::follow_host`]): there the guest is an ordinary
-//! process, which no kernel timeout constrains, and its threads, each on its
-//! own machine, must read one clock.
+//! PEs with a retained shared counter follow that counter directly instead
+//! ([`Clock::follow_host`]); per-PE slice lag cannot independently reorder the
+//! reads of concurrently running native PEs.
 
 /// The most counts one block may account for: one count at 24 MHz is
 /// 42 ns, a PE at least ~1/12 the speed of an M2 core. XNU drivers time
@@ -75,11 +74,8 @@ struct Slice {
 }
 
 impl Clock {
-    /// Charge no slice lag, so the count is the host's counter (plus any
-    /// idle leap). A hosted process runs one machine per thread, and its
-    /// threads read one clock, as an OS process's do: a count held back by
-    /// the lag of one thread's slow slices would order another thread's
-    /// reads before it.
+    /// Follow the retained shared counter without adding per-PE slice lag.
+    /// Concurrent native PEs must observe one monotonic clock.
     pub(super) fn follow_host(&mut self) {
         self.follows_host = true;
         self.lag = 0;

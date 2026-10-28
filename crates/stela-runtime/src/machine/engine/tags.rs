@@ -928,7 +928,7 @@ mod tests {
     }
 
     /// An M5 PE whose identification masks ID_AA64PFR1_EL1.MTE and MTE_frac
-    /// (the hosted machine's) lacks memory tagging exactly as the M4 does:
+    /// (the validation machine's) lacks memory tagging exactly as the M4 does:
     /// IRG, ADDG and STG are UNDEFINED, exception entry leaves TCO alone and
     /// no access is Tagged.
     #[test]
