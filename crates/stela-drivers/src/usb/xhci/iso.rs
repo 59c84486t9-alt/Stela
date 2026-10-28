@@ -1130,6 +1130,7 @@ pub(super) mod tests {
                 event_index: 0,
                 event_cycle: true,
                 retry_resources: slot_resources::Cache::new(slots.len()),
+                queued_resets: Vec::new(),
                 slots,
                 slot_ownership: vec![reset::Ownership::Vacant, reset::Ownership::Enabled],
                 test_retired_numbers: vec![false; 2],

@@ -458,6 +458,8 @@ pub struct Controller {
     #[cfg(test)]
     test_retired_numbers: Vec<bool>,
     retry_resources: slot_resources::Cache,
+    /// Class requests to reset and rebind a device, in arrival order.
+    queued_resets: Vec<SlotId>,
     /// Transfer events that arrived while waiting for something else.
     pending: Vec<Event>,
     /// USBSTS once the controller reported a fatal error.
@@ -715,6 +717,7 @@ impl Controller {
             #[cfg(test)]
             test_retired_numbers: vec![false; slots.len()],
             retry_resources: slot_resources::Cache::new(slots.len()),
+            queued_resets: Vec::new(),
             power: power::Ledger::new(slots.len()),
             slots,
             pending: Vec::new(),

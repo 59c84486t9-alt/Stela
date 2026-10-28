@@ -9,6 +9,8 @@ use super::*;
 mod downstream_tests;
 #[cfg(test)]
 mod generation_tests;
+#[cfg(test)]
+mod queued_tests;
 mod recovery;
 mod suspend;
 
@@ -54,7 +56,8 @@ struct Hub {
 /// Automatic reconnection uses fresh hardware IDs and explicitly refuses when
 /// its boot-lifetime slot capacity is exhausted. The separate exclusive root-leaf
 /// class reset service can reuse storage only after its typed retirement and
-/// physical-reset proof; this Host path does not mint that authority.
+/// physical-reset proof; this Host path does not mint that authority. A class
+/// owner's `queue_reset` is serviced here instead, without storage reuse.
 /// The explicit topology suspend/resume service does not enter platform sleep
 /// or authorize a guest-directed controller reset.
 pub struct Host {
@@ -231,6 +234,10 @@ impl Host {
                     .push((format!("{location} hub lifecycle"), error));
             }
         }
+        let queued = self.controller.borrow_mut().take_queued_resets();
+        for id in queued {
+            self.queued_reset(id, dma, &mut changes);
+        }
         let added = changes.added.devices.clone();
         self.register_hubs(&added, dma, &mut changes.added.failures);
         for device in &added {
@@ -244,6 +251,31 @@ impl Host {
         }
         self.devices.extend(added);
         changes
+    }
+
+    /// Service one class's `usb_queue_reset_device`. A device already gone
+    /// needs nothing; otherwise its old owner is reported removed once the
+    /// reset retires it, and a fresh device is bound like a new one.
+    fn queued_reset(&mut self, id: SlotId, dma: &mut dyn DmaAllocator, changes: &mut Changes) {
+        let Some(index) = self.devices.iter().position(|device| device.id == id) else {
+            return;
+        };
+        let old = self.devices[index].clone();
+        let result =
+            self.controller
+                .borrow_mut()
+                .reset_queued(&old, dma, &mut changes.added.failures);
+        if self.controller.borrow().validate_device_id(id).is_err() {
+            self.devices.remove(index);
+            changes.removed.push(old.clone());
+        }
+        match result {
+            Ok(fresh) => changes.added.devices.push(fresh),
+            Err((operation, error)) => changes
+                .added
+                .failures
+                .push((format!("{} queued reset: {operation}", old.location), error)),
+        }
     }
 
     /// A class-owned exclusive reset may replace a leaf between topology
