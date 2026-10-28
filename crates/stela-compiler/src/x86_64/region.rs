@@ -391,7 +391,7 @@ impl Emitter<'_> {
             {
                 self.emit(|code| encoding::copy(code, STAGING[index], host, Width::X64));
             } else {
-                self.emit(|code| code.extend_from_slice(&raw[start..end]));
+                self.emit(|code| code.asm().fixed(&raw[start..end]));
             }
         }
         self.finish_access(access_start, live, &[]);
@@ -513,10 +513,11 @@ impl Emitter<'_> {
         index
     }
 
-    /// Each shared instruction `raw[ends[k - 1]..ends[k]]`.
+    /// Each shared instruction `raw[ends[k - 1]..ends[k]]`, one
+    /// instruction of the shared recipe each.
     fn emit_segments(&mut self, raw: &[u8], ends: &[usize]) {
         for pair in ends.windows(2) {
-            self.emit(|code| code.extend_from_slice(&raw[pair[0]..pair[1]]));
+            self.emit(|code| code.asm().fixed(&raw[pair[0]..pair[1]]));
         }
     }
 

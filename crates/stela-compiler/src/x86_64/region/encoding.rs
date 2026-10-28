@@ -1,7 +1,7 @@
 //! Integer encodings, including flag-preserving variants.
 use super::{BYTE_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{AddressMode, Logical, Shift, Width};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size, Unary, resolve};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -28,6 +28,23 @@ pub enum HostGpr {
 impl HostGpr {
     pub const fn mask(self) -> u16 {
         1u16 << self as u8
+    }
+    /// The encoder's register.
+    const fn gpr(self) -> Gpr {
+        crate::x86_64::simd::encode::gpr(self as u8)
+    }
+}
+
+fn size(width: Width) -> Size {
+    Size::of(width == Width::X64)
+}
+
+/// `[base + displacement]` with an 8-bit displacement field when it fits,
+/// else a 32-bit one.
+fn displaced(base: HostGpr, displacement: i32) -> Mem {
+    match i8::try_from(displacement) {
+        Ok(short) => Mem::base_disp8(base.gpr(), short),
+        Err(_) => Mem::base_disp32(base.gpr(), displacement),
     }
 }
 
@@ -60,132 +77,83 @@ pub fn pool_host(index: usize) -> HostGpr {
         CALLEE_POOL[index - POOL.len()]
     }
 }
-const REX: u8 = 0x40;
-const REX_W: u8 = 8;
-const REX_R: u8 = 4;
-const REX_B: u8 = 1;
-const REGISTER_MODE: u8 = 0xc0;
-const DISP32_MODE: u8 = 0x80;
-const DISP8_MODE: u8 = 0x40;
-const MOV_LOAD: u8 = 0x8b;
-const MOV_STORE: u8 = 0x89;
-const MOV_IMMEDIATE: u8 = 0xb8;
-const IMMEDIATE_GROUP: u8 = 0x81;
-const SHIFT_IMMEDIATE_GROUP: u8 = 0xc1;
-const UNARY_GROUP: u8 = 0xf7;
-const NOP: u8 = 0x90;
-const TWO_BYTE_OPCODE: u8 = 0x0f;
-const IMUL: u8 = 0xaf;
-
 #[derive(Debug, Clone, Copy)]
-#[repr(u8)]
 pub enum ImmediateExtension {
-    Add = 0,
-    And = 4,
-    Subtract = 5,
-    Compare = 7,
+    Add,
+    And,
+    Subtract,
+    Compare,
+}
+
+impl ImmediateExtension {
+    const fn alu(self) -> Alu {
+        match self {
+            Self::Add => Alu::Add,
+            Self::And => Alu::And,
+            Self::Subtract => Alu::Sub,
+            Self::Compare => Alu::Cmp,
+        }
+    }
 }
 
 pub fn nop(code: &mut Code) {
-    code.push(NOP);
-}
-
-fn rex(code: &mut Code, width: Width, reg: HostGpr, rm: HostGpr) {
-    let value = REX
-        | if width == Width::X64 { REX_W } else { 0 }
-        | if reg as u8 >= 8 { REX_R } else { 0 }
-        | if rm as u8 >= 8 { REX_B } else { 0 };
-    if value != REX {
-        code.push(value);
-    }
+    code.asm().nop();
 }
 
 pub fn copy(code: &mut Code, destination: HostGpr, source: HostGpr, width: Width) {
-    rex(code, width, source, destination);
-    code.extend([
-        MOV_STORE,
-        REGISTER_MODE | ((source as u8 & 7) << 3) | (destination as u8 & 7),
-    ]);
+    code.asm().mov(size(width), destination.gpr(), source.gpr());
 }
 
 /// `lea destination, [base + displacement]`, 64-bit, with the shortest
-/// displacement.
+/// displacement field, 8 bits for zero.
 pub fn lea(code: &mut Code, destination: HostGpr, base: HostGpr, displacement: i32) {
-    const SIB_BASE: u8 = 4;
-    debug_assert!(base as u8 & 7 != SIB_BASE, "an RSP or R12 base needs a SIB");
-    rex(code, Width::X64, destination, base);
-    let registers = ((destination as u8 & 7) << 3) | (base as u8 & 7);
-    if let Ok(short) = i8::try_from(displacement) {
-        code.extend([LEA, DISP8_MODE | registers, short as u8]);
-    } else {
-        code.extend([LEA, DISP32_MODE | registers]);
-        code.extend(displacement.to_le_bytes());
-    }
+    code.asm().lea(
+        Size::Qword,
+        destination.gpr(),
+        displaced(base, displacement),
+    );
 }
 
-/// `test register8, immediate`: the low byte of any GPR.
+/// `test register8, immediate`: the low byte of any GPR (SPL, BPL, SIL and
+/// DIL rather than AH, CH, DH and BH).
 pub fn test_low_byte(code: &mut Code, register: HostGpr, immediate: u8) {
-    const TEST_BYTE_IMMEDIATE: u8 = 0xf6;
-    const FIRST_REX_BYTE_REGISTER: u8 = 4;
-    let number = register as u8;
-    if number >= 8 {
-        code.push(REX | REX_B);
-    } else if number >= FIRST_REX_BYTE_REGISTER {
-        // SPL, BPL, SIL and DIL rather than AH, CH, DH and BH.
-        code.push(REX);
-    }
-    code.extend([TEST_BYTE_IMMEDIATE, REGISTER_MODE | (number & 7), immediate]);
+    code.asm()
+        .test_imm(Size::Byte, register.gpr(), i32::from(immediate));
 }
 
-fn frame_access(code: &mut Code, register: HostGpr, slot: usize, opcode: u8) {
-    rex(code, Width::X64, register, FRAME);
-    let offset = (slot * GPR_BYTES) as u32;
-    let mode = if offset <= 127 {
-        DISP8_MODE
-    } else {
-        DISP32_MODE
-    };
-    code.extend([opcode, mode | ((register as u8 & 7) << 3) | FRAME as u8]);
-    if mode == DISP8_MODE {
-        code.push(offset as u8);
-    } else {
-        code.extend(offset.to_le_bytes());
-    }
+/// The frame slot of guest register `slot`.
+fn frame_slot(slot: usize) -> Mem {
+    displaced(FRAME, (slot * GPR_BYTES) as i32)
 }
 
 pub fn load(code: &mut Code, destination: HostGpr, slot: usize) {
-    frame_access(code, destination, slot, MOV_LOAD);
+    code.asm()
+        .mov_load(Size::Qword, destination.gpr(), frame_slot(slot));
 }
 
 pub fn store(code: &mut Code, source: HostGpr, slot: usize) {
-    frame_access(code, source, slot, MOV_STORE);
+    code.asm()
+        .mov_store(Size::Qword, frame_slot(slot), source.gpr());
 }
 
-fn nzcv_access(code: &mut Code, register: HostGpr, opcode: u8) {
-    const NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
-    rex(code, Width::W32, register, FRAME);
-    code.extend([
-        opcode,
-        DISP32_MODE | ((register as u8 & 7) << 3) | FRAME as u8,
-    ]);
-    code.extend(NZCV_OFFSET.to_le_bytes());
+/// The guest NZCV word.
+fn nzcv() -> Mem {
+    const NZCV_OFFSET: i32 = core::mem::offset_of!(crate::GuestState, nzcv) as i32;
+    Mem::base_disp32(FRAME.gpr(), NZCV_OFFSET)
 }
 
 pub fn load_nzcv(code: &mut Code, destination: HostGpr) {
-    nzcv_access(code, destination, MOV_LOAD);
+    code.asm().mov_load(Size::Dword, destination.gpr(), nzcv());
 }
 
 pub fn store_nzcv(code: &mut Code, source: HostGpr) {
-    nzcv_access(code, source, MOV_STORE);
+    code.asm().mov_store(Size::Dword, nzcv(), source.gpr());
 }
 
 pub fn immediate(code: &mut Code, destination: HostGpr, value: u64, width: Width) {
-    rex(code, width, HostGpr::Rax, destination);
-    code.push(MOV_IMMEDIATE | (destination as u8 & 7));
-    if width == Width::X64 {
-        code.extend(value.to_le_bytes());
-    } else {
-        code.extend((value as u32).to_le_bytes());
+    match width {
+        Width::X64 => code.asm().mov_imm64(destination.gpr(), value),
+        Width::W32 => code.asm().mov_imm32(destination.gpr(), value as u32),
     }
 }
 
@@ -196,40 +164,39 @@ pub fn binary(
     opcode: Binary,
     width: Width,
 ) {
-    rex(code, width, source, destination);
-    code.extend([
-        opcode as u8,
-        REGISTER_MODE | ((source as u8 & 7) << 3) | (destination as u8 & 7),
-    ]);
+    code.asm()
+        .alu(opcode.alu(), size(width), destination.gpr(), source.gpr());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum Binary {
-    Add = 0x01,
-    Sub = 0x29,
-    And = 0x21,
-    Or = 0x09,
-    Xor = 0x31,
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+}
+
+impl Binary {
+    const fn alu(self) -> Alu {
+        match self {
+            Self::Add => Alu::Add,
+            Self::Sub => Alu::Sub,
+            Self::And => Alu::And,
+            Self::Or => Alu::Or,
+            Self::Xor => Alu::Xor,
+        }
+    }
 }
 
 /// Low product modulo operand width; only destination and host flags change.
 pub fn multiply(code: &mut Code, destination: HostGpr, source: HostGpr, width: Width) {
-    rex(code, width, destination, source);
-    code.extend([
-        TWO_BYTE_OPCODE,
-        IMUL,
-        REGISTER_MODE | ((destination as u8 & 7) << 3) | (source as u8 & 7),
-    ]);
+    code.asm()
+        .imul(size(width), destination.gpr(), source.gpr());
 }
 
 pub fn negate(code: &mut Code, destination: HostGpr, width: Width) {
-    const NEG_EXTENSION: u8 = 3;
-    rex(code, width, HostGpr::Rax, destination);
-    code.extend([
-        UNARY_GROUP,
-        REGISTER_MODE | (NEG_EXTENSION << 3) | (destination as u8 & 7),
-    ]);
+    code.asm().unary(Unary::Neg, size(width), destination.gpr());
 }
 
 pub fn logical_opcode(kind: Logical) -> Binary {
@@ -260,6 +227,7 @@ pub fn arithmetic_immediate(
     );
 }
 
+/// `op destination, imm32`, in its accumulator form for RAX.
 pub fn integer_immediate(
     code: &mut Code,
     destination: HostGpr,
@@ -268,23 +236,14 @@ pub fn integer_immediate(
     width: Width,
 ) {
     if destination == HostGpr::Rax {
-        const ADD_ACCUMULATOR: u8 = 0x05;
-        const SUBTRACT_ACCUMULATOR: u8 = 0x2d;
-        const AND_ACCUMULATOR: u8 = 0x25;
-        const COMPARE_ACCUMULATOR: u8 = 0x3d;
-        rex(code, width, HostGpr::Rax, destination);
-        code.push(match extension {
-            ImmediateExtension::Add => ADD_ACCUMULATOR,
-            ImmediateExtension::Subtract => SUBTRACT_ACCUMULATOR,
-            ImmediateExtension::And => AND_ACCUMULATOR,
-            ImmediateExtension::Compare => COMPARE_ACCUMULATOR,
-        });
-        code.extend(value.to_le_bytes());
+        code.asm()
+            .alu_accumulator_imm32(extension.alu(), size(width), value as i32);
     } else {
         group_immediate(code, destination, extension, value, width);
     }
 }
 
+/// `op destination, imm32` (81 /digit).
 fn group_immediate(
     code: &mut Code,
     destination: HostGpr,
@@ -292,12 +251,12 @@ fn group_immediate(
     value: u32,
     width: Width,
 ) {
-    rex(code, width, HostGpr::Rax, destination);
-    code.extend([
-        IMMEDIATE_GROUP,
-        REGISTER_MODE | ((extension as u8) << 3) | (destination as u8 & 7),
-    ]);
-    code.extend(value.to_le_bytes());
+    code.asm().alu_imm32(
+        extension.alu(),
+        size(width),
+        destination.gpr(),
+        value as i32,
+    );
 }
 
 pub fn shift(code: &mut Code, kind: Shift, amount: u8, width: Width) {
@@ -311,29 +270,27 @@ pub fn shift_register(
     amount: u8,
     width: Width,
 ) {
-    rex(code, width, HostGpr::Rax, destination);
-    let extension = match kind {
-        Shift::Lsl => 4,
-        Shift::Lsr => 5,
-        Shift::Asr => 7,
-        Shift::Ror => 1,
+    let op = match kind {
+        Shift::Lsl => ShiftOp::Shl,
+        Shift::Lsr => ShiftOp::Shr,
+        Shift::Asr => ShiftOp::Sar,
+        Shift::Ror => ShiftOp::Ror,
     };
-    code.extend([
-        SHIFT_IMMEDIATE_GROUP,
-        REGISTER_MODE | (extension << 3) | (destination as u8 & 7),
-        amount,
-    ]);
+    code.asm()
+        .shift_imm(op, size(width), destination.gpr(), amount);
 }
 
 pub fn invert(code: &mut Code, width: Width) {
-    rex(code, width, HostGpr::Rax, RIGHT);
-    const NOT_EXTENSION: u8 = 2;
-    code.extend([
-        UNARY_GROUP,
-        REGISTER_MODE | (NOT_EXTENSION << 3) | RIGHT as u8,
-    ]);
+    code.asm().unary(Unary::Not, size(width), RIGHT.gpr());
 }
 
+const REX: u8 = 0x40;
+const REX_W: u8 = 8;
+const REX_R: u8 = 4;
+const REX_B: u8 = 1;
+const MOV_LOAD: u8 = 0x8b;
+const MOV_STORE: u8 = 0x89;
+const TWO_BYTE_OPCODE: u8 = 0x0f;
 const FRAME_STORE_BYTES: usize = 7;
 const GPR_BYTES: usize = core::mem::size_of::<u64>();
 const ECX_FROM_RAX_MEMORY: u8 = 0x08;
@@ -597,22 +554,21 @@ pub fn ordinary_pair_store_ends(
 
 /// Native conditions after a full-width ARM subtraction (C is inverted CF).
 #[derive(Debug, Clone, Copy)]
-#[repr(u8)]
 pub enum NativeCondition {
-    Equal = 0x84,
-    NotEqual = 0x85,
-    AboveEqual = 0x83,
-    Below = 0x82,
-    Sign = 0x88,
-    NotSign = 0x89,
-    Overflow = 0x80,
-    NotOverflow = 0x81,
-    Above = 0x87,
-    BelowEqual = 0x86,
-    GreaterEqual = 0x8d,
-    Less = 0x8c,
-    Greater = 0x8f,
-    LessEqual = 0x8e,
+    Equal,
+    NotEqual,
+    AboveEqual,
+    Below,
+    Sign,
+    NotSign,
+    Overflow,
+    NotOverflow,
+    Above,
+    BelowEqual,
+    GreaterEqual,
+    Less,
+    Greater,
+    LessEqual,
 }
 
 pub const SUBTRACTION_CONDITIONS: [NativeCondition; 14] = [
@@ -633,6 +589,26 @@ pub const SUBTRACTION_CONDITIONS: [NativeCondition; 14] = [
 ];
 
 impl NativeCondition {
+    /// The encoder's condition code.
+    const fn cond(self) -> Cond {
+        match self {
+            Self::Equal => Cond::E,
+            Self::NotEqual => Cond::Ne,
+            Self::AboveEqual => Cond::Ae,
+            Self::Below => Cond::B,
+            Self::Sign => Cond::S,
+            Self::NotSign => Cond::Ns,
+            Self::Overflow => Cond::O,
+            Self::NotOverflow => Cond::No,
+            Self::Above => Cond::A,
+            Self::BelowEqual => Cond::Be,
+            Self::GreaterEqual => Cond::Ge,
+            Self::Less => Cond::L,
+            Self::Greater => Cond::G,
+            Self::LessEqual => Cond::Le,
+        }
+    }
+
     pub fn inverse(self) -> Self {
         match self {
             Self::Equal => Self::NotEqual,
@@ -660,46 +636,34 @@ pub fn conditional_copy(
     condition: NativeCondition,
     width: Width,
 ) {
-    const JCC_TO_CMOV: u8 = 0x40;
-    rex(code, width, destination, source);
-    code.extend([
-        TWO_BYTE_OPCODE,
-        condition as u8 - JCC_TO_CMOV,
-        REGISTER_MODE | ((destination as u8 & 7) << 3) | (source as u8 & 7),
-    ]);
+    code.asm().cmov(
+        condition.cond(),
+        size(width),
+        destination.gpr(),
+        source.gpr(),
+    );
 }
 
+/// `lea register, [register + 1]`.
 pub fn increment_preserving_flags(code: &mut Code, register: HostGpr, width: Width) {
-    rex(code, width, register, register);
-    code.extend([
-        LEA,
-        DISP8_MODE | ((register as u8 & 7) << 3) | (register as u8 & 7),
-        1,
-    ]);
+    code.asm().lea(
+        size(width),
+        register.gpr(),
+        Mem::base_disp8(register.gpr(), 1),
+    );
 }
 
-const NEAR_JUMP: u8 = 0xe9;
-const JRCXZ: u8 = 0xe3;
-const PUSH_REGISTER: u8 = 0x50;
-const POP_REGISTER: u8 = 0x58;
-const LEA: u8 = 0x8d;
-const INC_DEC_GROUP: u8 = 0xff;
-const DEC_EXTENSION: u8 = 1;
 const RELATIVE_BYTES: usize = core::mem::size_of::<i32>();
-const NEAR_JUMP_BYTES: u8 = 1 + RELATIVE_BYTES as u8;
 
+/// `jmp rel32`; the offset of its displacement field, which
+/// [`patch_relative`] points.
 pub fn near_jump(code: &mut Code) -> usize {
-    code.push(NEAR_JUMP);
-    let displacement = code.len();
-    code.extend(0i32.to_le_bytes());
-    displacement
+    code.asm().jmp().offset()
 }
 
+/// `jcc rel32`; the offset of its displacement field.
 pub fn conditional_jump(code: &mut Code, condition: NativeCondition) -> usize {
-    code.extend([TWO_BYTE_OPCODE, condition as u8]);
-    let displacement = code.len();
-    code.extend(0i32.to_le_bytes());
-    displacement
+    code.asm().jcc(condition.cond()).offset()
 }
 
 pub fn patch_relative(code: &mut [u8], displacement: usize, target: usize) {
@@ -710,7 +674,9 @@ pub fn patch_relative(code: &mut [u8], displacement: usize, target: usize) {
 
 /// Zero skips exactly the following near jump; no host flags change.
 pub fn skip_jump_if_budget_zero(code: &mut Code) {
-    code.extend([JRCXZ, NEAR_JUMP_BYTES]);
+    const NEAR_JUMP_BYTES: usize = 1 + RELATIVE_BYTES;
+    let skip = code.asm().jrcxz();
+    resolve(code, skip, skip.end() + NEAR_JUMP_BYTES);
 }
 
 pub fn push_budget_pointer(code: &mut Code) {
@@ -722,52 +688,38 @@ pub fn pop_budget_pointer(code: &mut Code) {
 }
 
 pub fn push(code: &mut Code, register: HostGpr) {
-    if register as u8 >= 8 {
-        code.push(REX | REX_B);
-    }
-    code.push(PUSH_REGISTER | (register as u8 & 7));
+    code.asm().push(register.gpr());
 }
 
 pub fn pop(code: &mut Code, register: HostGpr) {
-    if register as u8 >= 8 {
-        code.push(REX | REX_B);
-    }
-    code.push(POP_REGISTER | (register as u8 & 7));
+    code.asm().pop(register.gpr());
+}
+
+/// The budget pointer's remaining count.
+fn budget() -> Mem {
+    const _: () = assert!(crate::block::loop_budget::REMAINING_OFFSET == 0);
+    Mem::base(HostGpr::Rsi.gpr(), 0)
 }
 
 pub fn load_budget(code: &mut Code) {
-    const _: () = assert!(crate::block::loop_budget::REMAINING_OFFSET == 0);
-    code.extend([
-        REX | REX_W,
-        MOV_LOAD,
-        (HostGpr::Rcx as u8) << 3 | HostGpr::Rsi as u8,
-    ]);
+    code.asm()
+        .mov_load(Size::Qword, HostGpr::Rcx.gpr(), budget());
 }
 
 pub fn store_budget(code: &mut Code) {
-    code.extend([
-        REX | REX_W,
-        MOV_STORE,
-        (HostGpr::Rcx as u8) << 3 | HostGpr::Rsi as u8,
-    ]);
+    code.asm()
+        .mov_store(Size::Qword, budget(), HostGpr::Rcx.gpr());
 }
 
+/// `lea rcx, [rcx - 1]`.
 pub fn decrement_budget_preserving_flags(code: &mut Code) {
-    code.extend([
-        REX | REX_W,
-        LEA,
-        DISP8_MODE | ((HostGpr::Rcx as u8) << 3) | HostGpr::Rcx as u8,
-    ]);
-    code.extend((-1i8).to_le_bytes());
+    let rcx = HostGpr::Rcx.gpr();
+    code.asm().lea(Size::Qword, rcx, Mem::base_disp8(rcx, -1));
 }
 
 /// The fallback path counts one block before running its body.
 pub fn decrement_stored_budget(code: &mut Code) {
-    code.extend([
-        REX | REX_W,
-        INC_DEC_GROUP,
-        (DEC_EXTENSION << 3) | HostGpr::Rsi as u8,
-    ]);
+    code.asm().dec(Size::Qword, budget());
 }
 
 #[cfg(test)]

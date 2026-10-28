@@ -1,6 +1,6 @@
 //! Typed control, flag-capture and absolute-address forms (Intel SDM Vol. 2)
 //! beyond the core's branch, move and SETcc forms.
-use super::{Asm, Cond};
+use super::{Asm, Cond, Patch};
 
 /// The legacy high-byte registers AH, CH, DH and BH, which ModRM r/m
 /// values 4 to 7 name in an instruction without a REX prefix.
@@ -34,6 +34,14 @@ impl Asm<'_> {
     /// `pause` (F3 90): a spin-wait hint.
     pub(crate) fn pause(&mut self) {
         self.fixed(&[0xf3, 0x90]);
+    }
+    /// `jrcxz rel8` (E3 cb): branch when RCX is zero, without reading or
+    /// writing flags; resolved later by [`Self::bind`] or [`resolve`].
+    ///
+    /// [`resolve`]: super::resolve
+    pub(crate) fn jrcxz(&mut self) -> Patch {
+        self.code.push(0xe3);
+        self.short_patch()
     }
 }
 
@@ -70,5 +78,15 @@ mod tests {
         ] {
             assert_eq!(code, expected);
         }
+    }
+
+    #[test]
+    fn jrcxz_resolves_relative_to_the_next_instruction() {
+        let mut code = Code::new();
+        let mut asm = code.asm();
+        let skip = asm.jrcxz();
+        asm.nop();
+        asm.bind(skip);
+        assert_eq!((code.instructions(), &code[..]), (2, &[0xe3, 1, 0x90][..]));
     }
 }
