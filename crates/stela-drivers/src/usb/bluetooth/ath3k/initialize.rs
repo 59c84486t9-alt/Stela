@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2008-2009 Atheros Communications Inc.
+//! Atheros AR3011/AR3012 bootloader firmware upload.
 use super::{
     Attempt, Bootloader, Component, Error, Kind, Operation, OwnedReport, Result, State,
     UsbIdentity, Version, identity::target,

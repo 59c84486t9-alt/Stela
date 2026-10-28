@@ -1,3 +1,4 @@
+//! HT, VHT, HE and EHT capability elements as a station advertises and parses them.
 use super::{Error, Role};
 use crate::bytes::le16;
 

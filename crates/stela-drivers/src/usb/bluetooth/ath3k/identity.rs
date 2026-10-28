@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2008-2009 Atheros Communications Inc.
+//! USB identities of the Atheros AR3011 and AR3012 bootloaders.
 use super::{Error, Result};
 use crate::{firmware::Target, usb::xhci::Device};
 use alloc::{format, string::String};

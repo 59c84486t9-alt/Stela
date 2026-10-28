@@ -1,3 +1,4 @@
+//! Negotiating HT, VHT, HE and EHT parameters between the station and its AP.
 use super::{
     AccessCategory, Band, Capabilities, Eht, EhtMcsUnion, Error, He, Ht, LegacyRates, McsMaps,
     Mode, Role, Vht, Width,
