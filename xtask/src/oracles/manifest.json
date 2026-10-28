@@ -1280,7 +1280,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_ax200_mld_default_link1_activation_and_full_unassign_are_selected_commands",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mld_link_tests.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mld_link_tests/cases.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
