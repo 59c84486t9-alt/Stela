@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_prekey_eapol_has_distinct_guarded_transport_and_no_robust_fallback() {
+fn prekey_control_port_transport() {
     let (mut driver, model, mut owner, state, protection) = configured();
     let epoch = driver.station().association_epoch().unwrap();
     let admission = permit(&mut owner, &driver, AssociationUse::Authentication);
@@ -93,7 +93,7 @@ fn actual_prekey_eapol_has_distinct_guarded_transport_and_no_robust_fallback() {
 }
 
 #[test]
-fn actual_pmf_protected_block_ack_uses_current_session_and_real_firmware_ack() {
+fn protected_block_ack_receipts() {
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     let session = attach(&mut driver, &mut owner);

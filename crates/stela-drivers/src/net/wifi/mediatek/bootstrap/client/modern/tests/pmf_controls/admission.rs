@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_pmf_admission_is_explicit_and_legacy_country_authority_fails_closed() {
+fn pmf_admission_and_legacy_denial() {
     let (mut driver, model, before, mut owner, state, protection) = awaiting_pmf();
     let (mut ordinary, _) = authority(&driver, &model);
     assert!(matches!(
@@ -37,7 +37,7 @@ fn actual_pmf_admission_is_explicit_and_legacy_country_authority_fails_closed() 
 }
 
 #[test]
-fn pmf_constructor_is_explicit_and_actual_ap_response_cannot_change_selected_rsn() {
+fn selected_rsn_and_ap_response() {
     let (driver, _) = setup();
     for band in [Band::Ghz2, Band::Ghz5] {
         let local = driver.local_advertisement(band).unwrap();
@@ -102,7 +102,7 @@ fn pmf_constructor_is_explicit_and_actual_ap_response_cannot_change_selected_rsn
 }
 
 #[test]
-fn actual_pmf_foreign_and_old_scan_observations_cannot_mint_authentication_authority() {
+fn scan_observation_provenance() {
     let (mut driver, model, join, old, _, _, _) = preparing();
     let (_, other_model, _, foreign, _, _, _) = preparing();
     let (mut owner, state, _) = authority_pmf(old.clone(), &join, &model);

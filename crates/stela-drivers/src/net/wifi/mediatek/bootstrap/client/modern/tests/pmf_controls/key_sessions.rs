@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_pmf_configuration_and_igtk_failure_never_open_port_or_release_dma() {
+fn configuration_and_igtk_failure() {
     for dropped in [false, true] {
         let (mut driver, model, before, mut owner, state, _) = awaiting_pmf();
         let context = driver.modern_context().unwrap().clone();
@@ -81,7 +81,7 @@ fn actual_pmf_configuration_and_igtk_failure_never_open_port_or_release_dma() {
 }
 
 #[test]
-fn actual_pmf_igtk_rotation_revokes_old_session_and_preserves_current_data_keys() {
+fn igtk_rotation_revokes_old_session() {
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     protection.port.set(true);

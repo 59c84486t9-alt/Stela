@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_pmf_port_requires_current_all_key_acks_and_independent_os_handshake() {
+fn port_requires_key_acks_and_os_handshake() {
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     let session = attach(&mut driver, &mut owner);

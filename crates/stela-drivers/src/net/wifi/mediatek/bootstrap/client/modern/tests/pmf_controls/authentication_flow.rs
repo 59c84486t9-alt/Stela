@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_pmf_preassociation_denial_cancels_only_unpublished_ticket_and_retry_is_guarded() {
+fn preassociation_denial_and_guarded_retry() {
     for hardware in [false, true] {
         let (mut driver, model, join, observed, mut owner, state, protection) = preparing();
         let before = model.bar.0.lock().unwrap().log.len();
@@ -81,7 +81,7 @@ fn actual_pmf_preassociation_denial_cancels_only_unpublished_ticket_and_retry_is
 }
 
 #[test]
-fn actual_pmf_pending_publication_cannot_inherit_revised_or_foreign_authentication_guards() {
+fn pending_publication_guard_revision() {
     for revision in [false, true] {
         let (mut driver, model, join, observed, mut owner, state, protection) = preparing();
         unsafe {
@@ -161,7 +161,7 @@ fn actual_pmf_pending_publication_cannot_inherit_revised_or_foreign_authenticati
 }
 
 #[test]
-fn actual_pmf_timeout_retry_and_auth_response_requalify_each_canonical_ticket() {
+fn authentication_retry_tickets() {
     let (mut driver, model, join, observed, mut owner, state, _) = preparing();
     unsafe {
         driver.join_modern_pmf(
