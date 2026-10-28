@@ -1,5 +1,5 @@
 //! Block control transfers: every branch returns to the dispatcher.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Asm, Code, Gpr};
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
@@ -12,13 +12,24 @@ use crate::{
 };
 
 pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
-    code.push(0xba); // mov edx,kind: zero-extends to the ABI's u64
-    code.extend((kind as u32).to_le_bytes());
-    code.push(0xc3);
+    exit_kind_with(&mut code.asm(), kind);
+}
+
+/// `mov edx,kind; ret`: the exit to the target in RAX.
+pub(super) fn exit_kind_with(asm: &mut Asm, kind: ExitKind) {
+    // MOV EDX zero-extends to the ABI's u64.
+    asm.mov_imm32(Gpr::Rdx, kind as u32);
+    asm.ret();
 }
 
 pub(super) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind) {
-    code.extend(super::chain::direct_exit(target, kind));
+    direct_exit_with(&mut code.asm(), target, kind);
+}
+
+/// `movabs rax,target; mov edx,kind; ret`.
+pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, kind: ExitKind) {
+    asm.mov_imm64(Gpr::Rax, target.0);
+    exit_kind_with(asm, kind);
 }
 
 fn conditional_exit(
