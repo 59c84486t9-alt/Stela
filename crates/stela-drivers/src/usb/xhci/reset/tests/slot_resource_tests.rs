@@ -166,9 +166,11 @@ fn unpublished_retry_reuses_one_resource_set_after_actual_disable_and_physical_r
         );
         // Publishing a consumer removes this generation from the cache domain.
         c.claim_native(old).unwrap();
+        // Its port still holds the device's current grant, so the ID that
+        // comes back stays unaddressed.
         c.disable_slot(slot, Ownership::Retired).unwrap();
         assert!(c.fresh_slot().is_err());
-        assert_eq!(c.slot_ownership[usize::from(slot)], Ownership::Retired);
+        assert_eq!(c.slot_ownership[usize::from(slot)], Ownership::Tombstone);
         assert_eq!(addresses(&mut c, slot), original);
     }
 }
@@ -352,7 +354,7 @@ fn unpublished_post_disable_health_failure_does_not_return_resources() {
         );
         assert_eq!(addresses(&mut c, slot), original);
         assert_eq!(c.dcbaa.read::<u64>(8), original.output);
-        assert!(c.legacy_slot_fenced[usize::from(slot)]);
+        assert!(c.current_slot(id).is_err());
         assert!(c.power.retained(slot));
         let seen = hardware.borrow().commands_seen.clone();
         assert!(c.address(attachment(HIGH_SPEED), &mut dma).is_err());

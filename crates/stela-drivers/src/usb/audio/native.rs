@@ -209,7 +209,7 @@ impl Transport for Native {
         })
     }
 }
-/// Native playback/capture owner published by xHCI and retained in probe::Disks.
+/// Native playback/capture owner published by xHCI and retained in probe::Devices.
 pub type UsbAudio = AudioDevice<Native>;
 impl UsbAudio {
     pub(crate) fn attach(

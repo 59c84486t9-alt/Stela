@@ -3,12 +3,12 @@
 // Copyright 2002-2004 Instant802 Networks, Inc.; 2008 Jouni Malinen;
 // Copyright (C) 2016-2017 Intel Deutschland GmbH;
 // Copyright (C) 2020-2023 Intel Corporation. See THIRD_PARTY.md.
-//! Hardware-verified unicast robust-management CCMP128 receive authentication.
+//! Hardware-verified unicast robust-management CCMP/GCMP receive authentication.
 //! This is a selected-key crypto boundary, not PMF negotiation, software CCMP
 //! decryption or current-station delivery. Vendor status must come from actual
 //! completed RX under its retained peer/key owner, exactly as for data.
 
-use super::{Cipher, Error, KeyIdentity, KeyScope, KeySlot, PacketNumber, management};
+use super::{Error, KeyIdentity, KeyScope, KeySlot, PacketNumber, management};
 use crate::net::{
     Mac,
     wifi::{
@@ -57,10 +57,8 @@ impl KeySlot {
         local: Mac,
     ) -> Result<Authenticated<'a>, Error> {
         let key = self.installed().ok_or(Error::NoInstalledKey)?;
-        if key.cipher() != Cipher::Ccmp128 || !matches!(key.scope(), KeyScope::Pairwise(_)) {
-            return Err(Error::Unsupported(
-                "unicast management requires CCMP128 PTK",
-            ));
+        if !matches!(key.scope(), KeyScope::Pairwise(_)) {
+            return Err(Error::Unsupported("unicast management requires a PTK"));
         }
         let h = mpdu.header();
         if !h.protected() {
@@ -108,7 +106,7 @@ mod tests {
     use super::*;
     use crate::net::wifi::{
         Band, RadioStatus, RawRate,
-        security::{InstallOutcome, Integrity, ReplaySeed, SecurityStatus, TransmitSeed},
+        security::{Cipher, InstallOutcome, Integrity, ReplaySeed, SecurityStatus, TransmitSeed},
     };
     use alloc::{format, vec};
     use sha2::{Digest, Sha256};
@@ -396,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn management_never_promotes_a_group_or_non_ccmp128_key_to_a_ptk() {
+    fn management_takes_every_ptk_suite_and_never_promotes_a_group_key() {
         for (cipher, scope) in [
             (Cipher::Ccmp128, KeyScope::Group(PEER)),
             (Cipher::Ccmp256, KeyScope::Pairwise(PEER)),
@@ -427,11 +425,14 @@ mod tests {
             slot.complete_install(ticket, InstallOutcome::Accepted)
                 .unwrap();
             let frame = packet(slot.installed().unwrap(), 17, 9);
-            assert!(matches!(
-                slot.authorize_unicast_management(&frame, LOCAL),
-                Err(Error::Unsupported(_))
-            ));
-            assert_eq!(slot.rx_pn, [0; 17]);
+            let result = slot.authorize_unicast_management(&frame, LOCAL);
+            if matches!(scope, KeyScope::Group(_)) {
+                assert!(matches!(result, Err(Error::Unsupported(_))));
+                assert_eq!(slot.rx_pn, [0; 17]);
+            } else {
+                assert_eq!(result.unwrap().packet_number().value(), 9);
+                assert_eq!(slot.rx_pn[MANAGEMENT_REPLAY_QUEUE], 9);
+            }
         }
     }
 }

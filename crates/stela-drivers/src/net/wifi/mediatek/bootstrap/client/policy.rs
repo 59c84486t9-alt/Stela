@@ -475,9 +475,7 @@ impl Os {
                 return false;
             }
         }
-        let Some(parameters) = n.wmm.as_ref().map(|w| &w.access_categories) else {
-            return false;
-        };
+        let parameters = n.edca();
         let Some(rule) = self
             .country
             .rule(u32::from(def.control.frequency_mhz) * 1000, 20_000)
@@ -486,7 +484,7 @@ impl Os {
         };
         // ManagedClient installs the exact derived local queues before its
         // private configuration publication. AP observations stay unchanged.
-        reg::wmm::station(parameters, rule.wmm.as_ref()).is_ok()
+        reg::wmm::station(&parameters, rule.wmm.as_ref()).is_ok()
     }
 }
 impl reg::OsLease for OsGuard<'_> {
@@ -889,13 +887,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .country
             .rule(u32::from(context.channel().frequency_mhz) * 1000, 20_000)
             .ok_or(PolicyError::RestrictionMismatch)?;
-        let parameters = &context
-            .negotiated()
-            .wmm
-            .as_ref()
-            .ok_or(PolicyError::RestrictionMismatch)?
-            .access_categories;
-        let effective = reg::wmm::station(parameters, rule.wmm.as_ref())
+        // ieee80211_set_wmm_default limits its defaults as it does WMM's.
+        let parameters = context.negotiated().edca();
+        let effective = reg::wmm::station(&parameters, rule.wmm.as_ref())
             .map_err(|_| PolicyError::RestrictionMismatch)?;
         self.client
             .restrict_prepared_edca(&effective)
@@ -1906,21 +1900,6 @@ mod tests {
             )))
         ));
         assert_eq!(driver.phase(), Phase::Idle);
-        let excessive = (0..11)
-            .map(|i| scan::SixGhz {
-                bssid: crate::net::Mac([2, 0x42, 0, 0, i, 1]),
-                ..target
-            })
-            .collect();
-        let request =
-            scan::Request::with_six_ghz(vec![six], vec![vec![]], vec![], excessive).unwrap();
-        assert!(matches!(
-            driver.begin_scan(request, 0, 1000),
-            Err(PolicyError::Client(Error::Codec(
-                wire::Error::InvalidScanTargets
-            )))
-        ));
-        assert_eq!(driver.phase(), Phase::Idle);
         let request = scan::Request::with_six_ghz(
             vec![six, six5],
             vec![vec![]],
@@ -1940,7 +1919,7 @@ mod tests {
             Err(PolicyError::Client(Error::Scan(scan::Error::Regulatory)))
         ));
         assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
-        // Both codec-capacity and real NO_IR refusals leave the original owner
+        // Both probe-element and real NO_IR refusals leave the original owner
         // available. No copied RNR data can override programmed probe policy.
         let request = scan::Request::with_six_ghz(
             vec![

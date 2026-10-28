@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2019 Intel Corporation
+//! Bringing up the paths and adapters of a Thunderbolt DisplayPort tunnel.
 use super::*;
 use crate::bus::thunderbolt::{
     channel,

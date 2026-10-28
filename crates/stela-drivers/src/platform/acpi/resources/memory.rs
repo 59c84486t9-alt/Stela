@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+//! Memory resources from device `_CRS` templates and their reservations.
 use super::*;
 use crate::bus::mmio::owned::{
     PhysicalSpan, Resource as MmioResource, ResourceBacking, ResourceKind,

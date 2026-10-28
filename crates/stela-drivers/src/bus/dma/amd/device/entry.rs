@@ -5,6 +5,7 @@
 // Host-only device-entry fields and persistent IVHD policy adapted from Linux
 // drivers/iommu/amd/{init.c,iommu.c,amd_iommu.h,amd_iommu_types.h}, commit
 // cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
+//! AMD IOMMU device-table entries and the IVHD settings they carry.
 use super::DeviceTableError;
 use crate::bus::dma::amd::format::{DomainId, PhysicalAddress, TableLevel};
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // GL9750 PCI initialization: Linux sdhci-pci-gli.c, Copyright 2019 Genesys.
+//! PCI configuration of Genesys Logic GL9750, GL9755, GL9767 and GL9763E SD hosts.
 use super::*;
 
 pub(super) struct Native {

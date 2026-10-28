@@ -60,7 +60,9 @@ fn runtime_hub_bitmap_disconnect_reconnect_retires_old_alias_before_fresh_bindin
                 shared.borrow().slot_ownership[usize::from(old)],
                 reset::Ownership::Retired
             );
-            assert!(shared.borrow().power.retained(old));
+            // The empty port's retired owner draws no current, as hub.c's
+            // budget counts only connected children.
+            assert!(!shared.borrow().power.retained(old));
             {
                 let mut m = model.borrow_mut();
                 let port = &mut m.nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[0];
@@ -363,7 +365,7 @@ fn runtime_malformed_bitmap_or_actual_global_power_loss_quarantines_the_hub_tree
 }
 
 #[test]
-fn runtime_repeated_root_attachment_reports_finite_slot_exhaustion_without_reusing_aliases() {
+fn runtime_repeated_root_attachment_reuses_slots_without_reusing_aliases() {
     let nodes = BTreeMap::from([(0, unbound_leaf(SUPER_SPEED))]);
     let mut backing = vec![0u64; 512 * 1024];
     let start = backing.as_mut_ptr() as u64;
@@ -375,30 +377,37 @@ fn runtime_repeated_root_attachment_reports_finite_slot_exhaustion_without_reusi
     c.max_slots = 2;
     c.slots.truncate(3);
     c.slot_ownership.truncate(3);
+    model.borrow_mut().slot_limit = 2;
     let mut failures = Vec::new();
     let devices = c.enumerate(&mut dma, &mut failures);
     assert_eq!(devices.len(), 1);
     let shared = Rc::new(RefCell::new(c));
     let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
-    for round in 0..2 {
+    // Each unplug frees the slot for the next device, as xhci_free_dev
+    // does, well past the two-slot budget; no old identity reaches it.
+    let mut previous = devices[0].id;
+    for _ in 0..3 {
         model.borrow_mut().root_status = Some(PP | CSC);
         let detached = runtime_poll(&mut host, &mut dma);
         assert_eq!(detached.removed.len(), 1);
+        let gone = previous.hardware_slot();
+        assert!(!shared.borrow().power.retained(gone));
+        assert_eq!(
+            shared.borrow().slot_ownership[usize::from(gone)],
+            reset::Ownership::Retired
+        );
         model.borrow_mut().root_status = Some(PP | CCS | PED | CSC | u32::from(SUPER_SPEED) << 10);
         let attached = runtime_poll(&mut host, &mut dma);
-        if round == 0 {
-            assert_eq!(attached.added.devices.len(), 1);
-            assert_eq!(attached.added.devices[0].slot, 2);
-        } else {
-            assert!(attached.added.devices.is_empty());
-            assert!(
-                attached
-                    .added
-                    .failures
-                    .iter()
-                    .any(|(_, e)| *e == BlockError::Unsupported(reset::EXHAUSTED))
-            );
-        }
+        assert_eq!(
+            attached.added.devices.len(),
+            1,
+            "{:?}",
+            attached.added.failures
+        );
+        let fresh = attached.added.devices[0].id;
+        assert_ne!(fresh, previous);
+        assert!(shared.borrow_mut().device(previous).is_err());
+        previous = fresh;
     }
     assert_eq!(
         model
@@ -407,10 +416,9 @@ fn runtime_repeated_root_attachment_reports_finite_slot_exhaustion_without_reusi
             .iter()
             .filter(|(kind, _)| *kind == ADDRESS_DEVICE)
             .count(),
-        2
+        4
     );
-    assert!(shared.borrow_mut().live_slot(1).is_err());
-    assert!(shared.borrow_mut().live_slot(2).is_err());
+    assert!(shared.borrow_mut().device(previous).is_ok());
 }
 
 #[test]

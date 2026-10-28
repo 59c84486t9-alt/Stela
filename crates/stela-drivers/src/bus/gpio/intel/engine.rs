@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2015 Intel Corporation
 // Copyright (c) 2026 Stela contributors
+//! Intel pin-controller pad configuration, ownership and interrupt handling.
 use super::{Community, Error, Group, Profile, RegisterIo};
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;

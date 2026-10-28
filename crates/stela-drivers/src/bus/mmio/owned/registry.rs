@@ -1,3 +1,4 @@
+//! The registry of owned MMIO mappings: installation, leases, quarantine and retirement.
 use super::*;
 use alloc::{sync::Arc, vec::Vec};
 use core::{

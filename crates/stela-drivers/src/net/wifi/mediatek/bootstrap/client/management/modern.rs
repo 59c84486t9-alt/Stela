@@ -156,6 +156,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         &mut s.controller,
                         &mut s.phase,
                         key,
+                        s.management_cipher,
                         index,
                         material,
                         receive,

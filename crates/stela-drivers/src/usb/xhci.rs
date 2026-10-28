@@ -96,7 +96,7 @@ mod transfer;
 pub use bind::Plan;
 use bind::bind_with_provider;
 pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
-pub use identity::{DeviceAccess, SlotId};
+pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
@@ -172,11 +172,6 @@ const PORT_KEEP: u32 = PP | 0x7 << 25;
 
 const LEGACY_SUPPORT: u32 = 1;
 const SUPPORTED_PROTOCOL: u32 = 2;
-const BIOS_OWNED: u32 = 1 << 16;
-const OS_OWNED: u32 = 1 << 24;
-/// USBLEGCTLSTS: the SMI enables, and the RW1C SMI status bits.
-const LEGACY_SMI_ENABLES: u32 = 1 | 1 << 4 | 0x7 << 13;
-const LEGACY_SMI_STATUS: u32 = 0x7 << 29;
 
 pub(crate) const RING_TRBS: usize = 256;
 pub(crate) const TRB: usize = 16;
@@ -280,7 +275,6 @@ const DEBOUNCE_TIMEOUT_US: u64 = 2_000_000;
 /// Linux `PORT_INIT_TRIES`: resets and enumerations a port gets.
 const PORT_INIT_TRIES: usize = 4;
 const ADDRESS_RECOVERY_US: u64 = 2_000;
-const BIOS_HANDOFF_US: u64 = 1_000_000;
 
 // bmRequestType: direction, type and recipient (USB 2.0 Table 9-2).
 pub const DEVICE_TO_HOST: u8 = 0x80;
@@ -454,10 +448,10 @@ pub struct Controller {
     event_cycle: bool,
     slots: Vec<Option<Slot>>,
     slot_ownership: Vec<reset::Ownership>,
+    /// Slot numbers a test may no longer name bare ([`DeviceRef`] for u8).
+    #[cfg(test)]
+    test_retired_numbers: Vec<bool>,
     retry_resources: slot_resources::Cache,
-    /// A raw slot number never regains authority after its first retirement.
-    /// Only the retirement owner can set this monotonic fence.
-    legacy_slot_fenced: Vec<bool>,
     /// Transfer events that arrived while waiting for something else.
     pending: Vec<Event>,
     /// USBSTS once the controller reported a fatal error.
@@ -589,7 +583,9 @@ impl Controller {
                     return Err(outside());
                 }
                 match header & 0xff {
-                    LEGACY_SUPPORT => take_from_firmware(&mut *registers, at, clock),
+                    LEGACY_SUPPORT => {
+                        crate::usb::handoff::xhci_legacy(&mut *registers, at, clock);
+                    }
                     SUPPORTED_PROTOCOL => {
                         let ports = registers.read32(at + 8);
                         let (first, count) =
@@ -712,7 +708,8 @@ impl Controller {
             event_index: 0,
             event_cycle: true,
             slot_ownership: vec![reset::Ownership::Vacant; slots.len()],
-            legacy_slot_fenced: vec![false; slots.len()],
+            #[cfg(test)]
+            test_retired_numbers: vec![false; slots.len()],
             retry_resources: slot_resources::Cache::new(slots.len()),
             power: power::Ledger::new(slots.len()),
             slots,
@@ -1006,20 +1003,15 @@ fn wait(
     clock.wait(microseconds, || ready(registers))
 }
 
-/// The BIOS handoff (7.1.1): the OS Owned semaphore, then the SMIs off.
-/// Firmware that never lets go loses ownership anyway, as other operating
-/// systems do; its SMIs are disabled either way.
-fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
-    let header = registers.read32(at);
-    registers.write32(at, header | OS_OWNED);
-    if !wait(registers, clock, BIOS_HANDOFF_US, |r| {
-        r.read32(at) & BIOS_OWNED == 0
-    }) {
-        let header = registers.read32(at);
-        registers.write32(at, header & !BIOS_OWNED | OS_OWNED);
+// The BIOS handoff (7.1.1) is shared with the early handoff probe runs on
+// every USB host controller.
+impl crate::usb::handoff::Dwords for dyn Registers + '_ {
+    fn read32(&mut self, offset: usize) -> u32 {
+        Registers::read32(self, offset)
     }
-    let control = registers.read32(at + 4);
-    registers.write32(at + 4, control & !LEGACY_SMI_ENABLES | LEGACY_SMI_STATUS);
+    fn write32(&mut self, offset: usize, value: u32) {
+        Registers::write32(self, offset, value)
+    }
 }
 
 /// What the class drivers found on one controller.

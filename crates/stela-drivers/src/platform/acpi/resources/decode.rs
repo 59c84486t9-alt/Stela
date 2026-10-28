@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Wire layouts follow the pinned ACPICA amlresrc.h/rsserial.c/rsirq.c.
+//! Decoding of ACPI resource templates into descriptors.
 use super::*;
 use alloc::string::String;
 

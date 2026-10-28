@@ -421,6 +421,7 @@ impl<B: Io> Engine<'_, B> {
             reset_completion: self.attempt.reset_completion.take().unwrap(),
             local_version: raw,
             address,
+            command_credits: self.credits,
             recovery: RecoveryPolicy::FreshRebindRequired,
             policy,
         })

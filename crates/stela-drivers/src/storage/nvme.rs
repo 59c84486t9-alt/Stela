@@ -131,6 +131,11 @@ const IDENTIFY_NAMESPACE: u32 = 0;
 const IDENTIFY_CONTROLLER: u32 = 1;
 const IDENTIFY_ACTIVE_NAMESPACES: u32 = 2;
 const IDENTIFY_DESCRIPTORS: u32 = 3;
+/// The I/O command set's Identify Controller, here for CSI 0 (NVM).
+const IDENTIFY_COMMAND_SET_CONTROLLER: u32 = 6;
+/// Its WZSL and DMRSL (NVM Command Set 1.1 Figure 112).
+const NVM_WRITE_ZEROES_LIMIT: usize = 1;
+const NVM_DEALLOCATE_RANGE_LIMIT: usize = 4;
 /// The command-set-independent Identify Namespace and its NSTAT.NRDY.
 const IDENTIFY_INDEPENDENT_NAMESPACE: u32 = 8;
 const INDEPENDENT_STATUS: usize = 14;
@@ -429,6 +434,8 @@ enum Tag {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     Identify,
+    /// `nvme_init_non_mdts_limits`'s NVM Identify Controller.
+    Limits,
     HostOptions,
     Apst,
     HostMemory,
@@ -437,8 +444,9 @@ enum Step {
     Events,
 }
 
-const STEPS: [Step; 7] = [
+const STEPS: [Step; 8] = [
     Step::Identify,
+    Step::Limits,
     Step::HostOptions,
     Step::Apst,
     Step::HostMemory,
@@ -592,6 +600,19 @@ struct Controller {
     events: Events,
     /// The Abort commands sent and not yet completed.
     aborts: Vec<u16>,
+    limits: Limits,
+}
+
+/// `nvme_init_non_mdts_limits`: the NVM command set's Write Zeroes and
+/// Deallocate limits, read again after each reset unless the controller
+/// once refused the Identify (`NVME_CTRL_SKIP_ID_CNS_CS`).
+#[derive(Clone, Copy, Debug, Default)]
+struct Limits {
+    /// WZSL: Write Zeroes up to 2^WZSL minimum pages; 0 for MDTS.
+    write_zeroes: u8,
+    /// DMRSL: the most blocks one Deallocate range takes; 0 for none.
+    deallocate: u32,
+    refused: bool,
 }
 
 impl Controller {
@@ -1602,6 +1623,7 @@ impl Controller {
                         identify = self.bounce.bytes()[..PAGE].to_vec();
                         self.identified(&identify);
                     }
+                    (Step::Limits, code) => self.limits_answered(code),
                     (Step::HostMemory, code) => self.host_memory_answered(code == 0),
                     // A refused feature is only logged.
                     (Step::HostOptions | Step::Apst | Step::Events, _) => {}
@@ -1624,6 +1646,7 @@ impl Controller {
         for &step in &STEPS[first..] {
             let command = match step {
                 Step::Identify => Some(self.identify_command(IDENTIFY_CONTROLLER, 0)?),
+                Step::Limits => self.limits_command()?,
                 Step::HostOptions => self.host_options(&identify)?,
                 Step::Apst => match apst_table(&identify) {
                     Some(table) => Some(self.apst_command(&table)?),
@@ -1682,6 +1705,29 @@ impl Controller {
             *delay = u16::from_le_bytes([identify[at], identify[at + 1]]);
         }
         self.events = Events::from_identify(identify);
+    }
+
+    /// The NVM Identify Controller of `nvme_init_non_mdts_limits`, which
+    /// `nvme_id_cns_ok` sends only from NVMe 1.2. WZSL starts over each
+    /// time; a refused command is not sent again.
+    fn limits_command(&mut self) -> Result<Option<[u32; 16]>, BlockError> {
+        self.limits.write_zeroes = 0;
+        if self.version < VERSION_1_2 || self.limits.refused {
+            return Ok(None);
+        }
+        // CDW11's CSI stays 0, the NVM command set.
+        self.identify_command(IDENTIFY_COMMAND_SET_CONTROLLER, 0)
+            .map(Some)
+    }
+
+    fn limits_answered(&mut self, status: u32) {
+        if status != 0 {
+            self.limits.refused = true;
+            return;
+        }
+        let page = self.bounce.bytes();
+        self.limits.write_zeroes = page[NVM_WRITE_ZEROES_LIMIT];
+        self.limits.deallocate = le32(page, NVM_DEALLOCATE_RANGE_LIMIT);
     }
 
     /// Linux `nvme_configure_host_options` from `identify`: a Set Features
@@ -2121,6 +2167,7 @@ pub fn attach(
         host_memory_enabled: false,
         events: Events::default(),
         aborts: Vec::new(),
+        limits: Limits::default(),
     };
     controller.initialize()?;
     discover(controller, format!("{}", function.address), &mut { dma })
@@ -2168,15 +2215,15 @@ fn discover(
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
     controller.identified(&identify);
     controller.allocate_host_memory(request, host_memory);
-    // The rest of the bring-up, as a reset repeats it: host options, APST,
-    // the host memory buffer, the I/O queues and events.
-    controller.bring_up(Step::HostOptions, identify)?;
+    let version = controller.registers.read32(VERSION)?;
+    controller.version = version;
+    // The rest of the bring-up, as a reset repeats it: the NVM limits, host
+    // options, APST, the host memory buffer, the I/O queues and events.
+    controller.bring_up(Step::Limits, identify)?;
     controller.settle()?;
 
     // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
     // when the controller refuses it) every namespace ID in turn.
-    let version = controller.registers.read32(VERSION)?;
-    controller.version = version;
     let listed = if version >= VERSION_1_1 {
         controller
             .identify(IDENTIFY_ACTIVE_NAMESPACES, 0)
@@ -2202,10 +2249,11 @@ fn discover(
         failures: Vec::new(),
     };
     let mut found = Vec::new();
-    let (max_transfer, commands, scans) = (
+    let (max_transfer, commands, scans, limits) = (
         controller.max_transfer,
         controller.commands,
         controller.scans,
+        controller.limits,
     );
     for namespace in candidates {
         let Some((mut ids, independent)) = controller.namespace_ids(namespace)? else {
@@ -2249,7 +2297,7 @@ fn discover(
                 blocks: format.blocks,
                 block_size: format.block_size,
                 read_only: format.read_only,
-                features: features(write_cache, commands, &format, max_transfer),
+                features: features(write_cache, commands, limits, &format, max_transfer),
             },
         })
         .collect();
@@ -2296,21 +2344,44 @@ fn apst_table(identify: &[u8]) -> Option<[u64; 32]> {
     Some(table)
 }
 
-/// A namespace's features, as Linux `nvme_update_disk_info` and
-/// `nvme_config_discard` set them: FUA with a volatile write cache,
-/// Deallocate as discard with Dataset Management, and Write Zeroes, which
-/// may deallocate where the namespace reads deallocated blocks as zeros
-/// and says Write Zeroes deallocates (`NVME_NS_DEAC`), each up to the
-/// largest transfer.
-fn features(write_cache: bool, commands: u16, format: &Format, max_transfer: usize) -> Features {
-    let blocks = (max_transfer / format.block_size as usize) as u64;
+/// A namespace's features, as Linux `nvme_update_disk_info` sets them:
+/// FUA with a volatile write cache; Deallocate as discard with Dataset
+/// Management, one range of up to DMRSL blocks, or else `UINT_MAX` sectors;
+/// and Write Zeroes up to WZSL, or else the largest transfer
+/// (`nvme_init_non_mdts_limits`), which may deallocate where the namespace
+/// reads deallocated blocks as zeros and says Write Zeroes deallocates
+/// (`NVME_NS_DEAC`). A Write Zeroes command takes at most 2^16 blocks.
+fn features(
+    write_cache: bool,
+    commands: u16,
+    limits: Limits,
+    format: &Format,
+    max_transfer: usize,
+) -> Features {
+    let block_shift = format.block_size.trailing_zeros();
+    let sectors = u64::from(u32::MAX) >> (block_shift - 9);
+    let deallocate = u64::from(limits.deallocate);
+    let zeroes = match limits.write_zeroes {
+        0 => max_transfer as u64,
+        // 2^WZSL minimum pages of 4 KiB, saturating as nvme_mps_to_sectors.
+        units => 1u64
+            .checked_shl(u32::from(units) + 12)
+            .filter(|bytes| *bytes >> 9 <= u64::from(u32::MAX))
+            .unwrap_or(u64::from(u32::MAX) << 9),
+    };
     Features {
         write_cache,
         fua: write_cache,
         max_transfer,
-        discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(u64::from(u32::MAX)),
+        discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(
+            if deallocate != 0 && deallocate <= sectors {
+                deallocate
+            } else {
+                sectors
+            },
+        ),
         write_zeroes: (commands & COMMANDS_WRITE_ZEROES != 0).then_some(WriteZeroes {
-            blocks: blocks.min(1 << 16),
+            blocks: (zeroes >> block_shift).min(1 << 16),
             unmap: format.deallocate & 0x7 == 1 && format.deallocate & 1 << 3 != 0,
         }),
     }
@@ -2393,7 +2464,7 @@ impl Namespace {
             return Ok(());
         };
         let (version, max_transfer) = (controller.version, controller.max_transfer);
-        let commands = controller.commands;
+        let (commands, limits) = (controller.commands, controller.limits);
         let data = match controller.identify(IDENTIFY_NAMESPACE, self.namespace) {
             Ok(data) => data,
             Err(BlockError::Device { .. }) => {
@@ -2414,7 +2485,8 @@ impl Namespace {
                 self.identity.block_size = format.block_size;
                 self.identity.read_only = format.read_only;
                 let write_cache = self.identity.features.write_cache;
-                self.identity.features = features(write_cache, commands, &format, max_transfer);
+                self.identity.features =
+                    features(write_cache, commands, limits, &format, max_transfer);
                 Ok(())
             }
             Err(error) if allocated && ids == self.ids => {
@@ -2621,6 +2693,7 @@ mod tests {
                 host_memory_enabled: false,
                 events: Events::default(),
                 aborts: Vec::new(),
+                limits: Limits::default(),
             };
             Self {
                 _registers: registers,

@@ -35,16 +35,17 @@ impl fmt::Display for ServiceError {
 }
 
 /// The mount's native owners: configuration and BAR mappings from its native
-/// MMIO platform, requester DMA domains from its IOMMU (or its passthrough
-/// domain where none exists), retained DMA pages and the ACPI namespace.
+/// MMIO platform, requester DMA domains from its IOMMU or the passthrough
+/// domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)), retained DMA
+/// pages and the ACPI namespace.
 ///
 /// # Safety
 /// Implementations transfer ownership: each claimed requester is the unique
 /// owner of its function's configuration space, with its engines, DMA and
 /// interrupts stopped and drained, as [`StoppedRequester::from_stopped_pci`]
 /// requires. Each mapping covers exactly the requested BAR, uncached and
-/// read/write, with no other accessor. Each domain translates (or passes
-/// through) only that requester's DMA and performs real invalidation. Every
+/// read/write, with no other accessor. Each domain meets the [`DmaDomain`]
+/// contract for its kind. Every
 /// returned owner stays valid in every access context `probe`'s drivers use.
 /// A mount that supplies the ACPI namespace also grants `probe` port I/O to
 /// the i8042 at ports 0x60 and 0x64 when the namespace lists one, with IRQ1
@@ -57,6 +58,14 @@ pub unsafe trait NativeServices {
 
     /// Map memory BAR `bar` of the function at `address` for its driver.
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError>;
+
+    /// The mount's reservation of memory BAR `bar` of the function at
+    /// `address`, for drivers that map parts of it or route child resources
+    /// inside it, as Intel VMD does.
+    fn bar_resource(&self, address: Address, bar: Bar) -> Result<owned::Resource, ServiceError>;
+
+    /// The mapping authority that issues [`Self::map_bar`]'s mappings.
+    fn authority(&self) -> Result<owned::Authority, ServiceError>;
 
     /// The DMA domain for the requester `binding` names. The domain keeps the
     /// binding, and with it the configuration epoch it retains.
@@ -134,6 +143,13 @@ pub(crate) mod tests {
         }
         fn map_bar(&self, address: Address, _: Bar) -> Result<Mapping, ServiceError> {
             self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
+        fn bar_resource(&self, address: Address, _: Bar) -> Result<owned::Resource, ServiceError> {
+            self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
+        fn authority(&self) -> Result<owned::Authority, ServiceError> {
             Err(ServiceError::Unavailable)
         }
         fn domain(&self, _: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2005-2008 Marcel Holtmann <marcel@holtmann.org>
+//! Qualcomm USB Bluetooth initialization: version query, then rampatch and NVM download.
 use super::{
     Attempt, Component, Error, FirmwareEvidence, HostPolicy, Kind, OwnedReport, Profile,
     RampatchVersion, Result, Transfer, TransferKind, UsbIdentity, Version,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Explicitly polled topology ownership, adapting pinned Linux hub_irq,
-//! port_event, hub_port_connect and usb_disconnect. Automatic topology changes
-//! do not recycle published hardware IDs.
+//! port_event, hub_port_connect and usb_disconnect. A disconnected device's
+//! slot goes to a later device once its port's current grant retires; every
+//! identity of the old generation then fails.
 use super::*;
 
 #[cfg(test)]
@@ -348,6 +349,14 @@ impl Host {
         }
         if let Some(owner) = owner {
             self.retire(owner, changes)?;
+            // hub.c's power budget counts only connected children: the
+            // retired owners of an empty port draw no current, so their
+            // grants and slots can go to the next device.
+            if status & CCS == 0 {
+                self.controller
+                    .borrow_mut()
+                    .current_port_reset(None, port)?;
+            }
         }
         if status & (PP | CCS) != PP | CCS || status & OVER_CURRENT != 0 {
             let mut c = self.controller.borrow_mut();
@@ -545,6 +554,9 @@ impl Host {
             self.retire(owner, changes)?;
         }
         let mut c = self.controller.borrow_mut();
+        if owner.is_some() && status & 1 == 0 {
+            c.current_hub_port_reset(id, port, attachment.root_port)?;
+        }
         let selectors: &[(u16, u16)] = if ss {
             &[(1, 16), (8, 19), (16, 20), (32, 29), (64, 25), (128, 26)]
         } else {

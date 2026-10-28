@@ -48,6 +48,8 @@ pub struct Host {
     transmit_pending: bool,
     control_pending: bool,
     closed: bool,
+    /// The last close retired every transfer, so the receives may post again.
+    reopenable: bool,
     media: Option<media::Native>,
     diagnostics: Option<diagnostics::Native>,
 }
@@ -88,6 +90,7 @@ impl Hci<Host> {
             transmit_pending: false,
             control_pending: false,
             closed: false,
+            reopenable: false,
             media: None,
             diagnostics: None,
         };
@@ -291,12 +294,31 @@ impl Io for Host {
                 failure.get_or_insert(error);
             }
         }
-        // The host never reopens or reuses DMA after close, even when just one
+        // The host never reopens or reuses DMA after close when even one
         // endpoint could not stop. DmaBuffer owns boot-lifetime reserved memory.
         match failure {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => {
+                self.reopenable = true;
+                Ok(())
+            }
         }
+    }
+    fn reopen(&mut self) -> Result<(), BlockError> {
+        self.validate()?;
+        if !self.closed || !self.reopenable || self.diagnostics.is_some() {
+            return Err(BlockError::Unsupported(
+                "USB Bluetooth transport did not close cleanly",
+            ));
+        }
+        // Close acknowledged every cancellation, so no TD still names a buffer.
+        self.events.queued = None;
+        self.input.queued = None;
+        self.transmit_pending = false;
+        self.control_pending = false;
+        self.reopenable = false;
+        self.closed = false;
+        self.open()
     }
     fn now_us(&self) -> u64 {
         self.clock
@@ -370,7 +392,32 @@ mod tests {
             assert_eq!(backing, before);
             assert!(hci.close().is_err());
             assert_eq!(hci.state(), super::super::State::Failed);
+            assert!(hci.reopen().is_err());
+            assert!(hci.io.reopen().is_err());
         }
+    }
+    #[test]
+    fn a_cleanly_closed_transport_posts_its_receives_again_like_btusb_open() {
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: retained backing exclusively owns these actual modeled DMA pages.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, _) = xhci::model::cancellation_controller(&mut dma);
+        let controller = Rc::new(RefCell::new(controller));
+        let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
+        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
+        assert_eq!(hci.io.receive(Pipe::Event).unwrap(), None);
+        assert!(hci.io.events.queued.is_some());
+        assert!(hci.reopen().is_err());
+        hci.close().unwrap();
+        hci.reopen().unwrap();
+        assert!(hci.io.events.queued.is_none());
+        assert_eq!(hci.io.receive(Pipe::Event).unwrap(), None);
+        assert!(hci.io.events.queued.is_some());
+        hci.close().unwrap();
     }
     fn firmware_device(id: xhci::SlotId) -> Device {
         let configuration = vec![
