@@ -2,7 +2,7 @@
 //! make the persistent translation store's translator id
 //! (`translations::translator_id`).
 //!
-//! The whole crate is fingerprinted. What the engine gives the compiler for a
+//! The whole engine and its shared contracts/formats are fingerprinted. What the engine gives the compiler for a
 //! block depends on the dispatch loop, guest memory layout, block
 //! translation, PAuth services, the CPU model and the store format, which
 //! span most of the crate; a hand-maintained file list or ABI version
@@ -20,6 +20,14 @@ fn main() {
     }
     stela_fingerprint::emit(
         "STELA_ENGINE_SOURCE_SHA256",
-        &["Cargo.toml", "build.rs", "src"],
+        &[
+            "Cargo.toml",
+            "build.rs",
+            "src",
+            "../stela-contracts/Cargo.toml",
+            "../stela-contracts/src",
+            "../stela-formats/Cargo.toml",
+            "../stela-formats/src",
+        ],
     );
 }

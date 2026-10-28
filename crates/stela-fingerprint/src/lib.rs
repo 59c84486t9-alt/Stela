@@ -141,6 +141,50 @@ mod tests {
     }
 
     #[test]
+    fn sibling_semantic_crates_invalidate_for_nested_source_and_manifest_changes() {
+        let workspace = tree(
+            "semantic-dependencies",
+            &[
+                ("engine/src/lib.rs", b"engine"),
+                ("contracts/Cargo.toml", b"contracts"),
+                ("contracts/src/generated/features.rs", b"feature-a\n"),
+                ("formats/Cargo.toml", b"formats"),
+                ("formats/src/payload/manifest.rs", b"format-a"),
+            ],
+        );
+        let root = workspace.join("engine");
+        let inputs = [
+            "src",
+            "../contracts/Cargo.toml",
+            "../contracts/src",
+            "../formats/Cargo.toml",
+            "../formats/src",
+        ];
+        let mut digest = source_sha256(&root, &inputs);
+        fs::write(
+            workspace.join("contracts/src/generated/features.rs"),
+            b"feature-a\r\n",
+        )
+        .unwrap();
+        assert_eq!(digest, source_sha256(&root, &inputs));
+        for (path, content) in [
+            (
+                "contracts/src/generated/features.rs",
+                b"feature-b".as_slice(),
+            ),
+            ("formats/src/payload/manifest.rs", b"format-b".as_slice()),
+            ("formats/Cargo.toml", b"new dependency".as_slice()),
+            ("contracts/src/new_effect.rs", b"new module".as_slice()),
+        ] {
+            fs::write(workspace.join(path), content).unwrap();
+            let changed = source_sha256(&root, &inputs);
+            assert_ne!(digest, changed, "semantic input {path}");
+            digest = changed;
+        }
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn lone_carriage_returns_are_kept() {
         assert_eq!(normalize(b"a\r\nb\rc\r"), b"a\nb\rc\r");
     }
