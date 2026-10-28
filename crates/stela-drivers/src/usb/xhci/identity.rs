@@ -62,16 +62,47 @@ impl SlotId {
     }
 }
 
-impl Controller {
-    /// Pure permanent legacy boundary. In particular, no readiness read, event
-    /// drain, descriptor access, endpoint index or DMA mutation precedes it.
-    pub(super) fn legacy_slot(&self, slot: u8) -> Result<(), BlockError> {
-        if self.legacy_slot_fenced.get(usize::from(slot)) != Some(&false) {
+/// The device a controller method acts on: its [`SlotId`], which names one
+/// device generation and fails once that device's slot is disabled and handed
+/// to another, as a freed `usb_device` would. Tests may also name a slot's
+/// current device by number.
+pub trait DeviceRef: Copy {
+    #[doc(hidden)]
+    fn current_slot(self, controller: &Controller) -> Result<u8, BlockError>;
+}
+impl DeviceRef for SlotId {
+    fn current_slot(self, controller: &Controller) -> Result<u8, BlockError> {
+        controller.current_slot(self)
+    }
+}
+/// A test's bare number names the slot's first device only: once disabled
+/// it stays refused, so a stale number cannot reach the slot's next device.
+#[cfg(test)]
+impl DeviceRef for u8 {
+    fn current_slot(self, controller: &Controller) -> Result<u8, BlockError> {
+        if controller.test_retired_numbers.get(usize::from(self)) != Some(&false) {
             return Err(BlockError::Unsupported(
                 "raw xHCI slot authority is permanently retired",
             ));
         }
-        self.live_slot(slot)
+        controller.live_slot(self)?;
+        Ok(self)
+    }
+}
+
+impl Controller {
+    /// The slot of `id` while that exact device generation holds it. Pure:
+    /// no readiness read, event drain, descriptor access, endpoint index or
+    /// DMA mutation precedes it, so an identity whose slot was disabled and
+    /// handed to a later device fails here.
+    pub(super) fn current_slot(&self, id: SlotId) -> Result<u8, BlockError> {
+        if !self.known_id(id) {
+            return Err(BlockError::Unsupported(
+                "xHCI device generation is permanently retired",
+            ));
+        }
+        self.live_slot(id.slot)?;
+        Ok(id.slot)
     }
 
     #[cfg(test)]

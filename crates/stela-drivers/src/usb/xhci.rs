@@ -96,7 +96,7 @@ mod transfer;
 pub use bind::Plan;
 use bind::bind_with_provider;
 pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
-pub use identity::{DeviceAccess, SlotId};
+pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
@@ -454,10 +454,10 @@ pub struct Controller {
     event_cycle: bool,
     slots: Vec<Option<Slot>>,
     slot_ownership: Vec<reset::Ownership>,
+    /// Slot numbers a test may no longer name bare ([`DeviceRef`] for u8).
+    #[cfg(test)]
+    test_retired_numbers: Vec<bool>,
     retry_resources: slot_resources::Cache,
-    /// A raw slot number never regains authority after its first retirement.
-    /// Only the retirement owner can set this monotonic fence.
-    legacy_slot_fenced: Vec<bool>,
     /// Transfer events that arrived while waiting for something else.
     pending: Vec<Event>,
     /// USBSTS once the controller reported a fatal error.
@@ -712,7 +712,8 @@ impl Controller {
             event_index: 0,
             event_cycle: true,
             slot_ownership: vec![reset::Ownership::Vacant; slots.len()],
-            legacy_slot_fenced: vec![false; slots.len()],
+            #[cfg(test)]
+            test_retired_numbers: vec![false; slots.len()],
             retry_resources: slot_resources::Cache::new(slots.len()),
             power: power::Ledger::new(slots.len()),
             slots,

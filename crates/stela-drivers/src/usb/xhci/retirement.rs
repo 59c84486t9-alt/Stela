@@ -291,10 +291,10 @@ impl<'a> Quiesced<'a> {
                 BlockError::Unsupported("Disable Slot completion named another slot"),
             ));
         }
-        // The acknowledged Disable can already have ended the first address
-        // lifetime even if the following controller health check fails. Never
-        // permit a retained raw slot number to regain authority.
-        controller.legacy_slot_fenced[usize::from(slot)] = true;
+        #[cfg(test)]
+        {
+            controller.test_retired_numbers[usize::from(slot)] = true;
+        }
         controller
             .ready()
             .map_err(|error| ("post-Disable Slot controller status", error))?;
