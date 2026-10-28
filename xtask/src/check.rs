@@ -98,7 +98,22 @@ pub fn run(fix: bool) -> Result<()> {
             let boot = boot.join().expect("the UEFI lane panicked");
             // The tests run once nothing else does: some time their fixtures
             // against the host's clock.
-            [boot, host.and_then(|()| exec(&mut command(test)))]
+            [
+                boot,
+                host.and_then(|()| {
+                    exec(&mut command(test))?;
+                    // The all-feature suite selects the software crypto backend.
+                    // Check the default selector independently as well.
+                    exec(&mut command([
+                        "test",
+                        "--locked",
+                        "-p",
+                        "stela-crypto",
+                        "--no-default-features",
+                        "--lib",
+                    ]))
+                }),
+            ]
         });
         let mut results: Vec<Result<()>> = formatting
             .into_iter()
