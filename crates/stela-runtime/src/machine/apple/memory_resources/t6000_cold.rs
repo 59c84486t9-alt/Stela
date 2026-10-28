@@ -453,7 +453,7 @@ mod tests {
     use super::*;
     use crate::{
         machine::soc::{ClockRole, PowerResource},
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::{
             bus::Access,
             interrupt::InterruptLatch,

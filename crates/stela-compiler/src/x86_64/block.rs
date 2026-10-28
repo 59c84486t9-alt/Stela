@@ -2,7 +2,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
-pub(crate) mod el1_m0;
 pub(crate) use super::region::ResidentLoopPlan;
 
 use crate::{

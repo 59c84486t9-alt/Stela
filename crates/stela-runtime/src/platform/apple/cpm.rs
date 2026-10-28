@@ -39,6 +39,7 @@ impl Cpm {
         }
         offsets
     }
+    #[cfg(test)]
     pub fn restored(&self) -> bool {
         self.restored
     }

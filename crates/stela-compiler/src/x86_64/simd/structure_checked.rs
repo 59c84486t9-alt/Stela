@@ -107,7 +107,6 @@ impl CheckedOperand {
                 BYTE_BYTES | HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES
             )
             || matches!(operand.post_index, PostIndex::Register(index) if index >= GPR_COUNT)
-            || profile == CheckedMemoryProfile::M0DeviceRamRead64Staged
         {
             return None;
         }
@@ -567,13 +566,6 @@ mod tests {
                 .is_none()
             );
         }
-        assert!(
-            CheckedOperand::from_operation(
-                &Operation::Simd(SimdOperand::StructureMemory(valid)),
-                CheckedMemoryProfile::M0DeviceRamRead64Staged
-            )
-            .is_none()
-        );
     }
 
     #[cfg(all(target_arch = "x86_64", unix))]

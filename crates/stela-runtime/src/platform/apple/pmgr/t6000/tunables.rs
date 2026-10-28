@@ -30,31 +30,15 @@ impl Profile {
     }
 }
 
-/// Original bridge-settings-v1 tuning selection. A set optional-mask bit
-/// skips `_configureBridge`'s call to the native tuning helper. It does not
-/// remove the physical bank, waive consumers or define its current contents.
-pub struct Selection<'a> {
-    profile: Profile,
-    optional_mask: &'a [u8],
-}
-impl<'a> Selection<'a> {
-    pub fn new(profile: Profile, optional_mask: &'a [u8]) -> Result<Self, &'static str> {
-        if optional_mask.len() < super::BRIDGE_COUNT.div_ceil(8) {
-            return Err("T6000 optional bridge mask does not cover every actual bridge");
-        }
-        Ok(Self {
-            profile,
-            optional_mask,
-        })
+/// Checks that bridge-settings-v1's optional mask has a bit for every bridge.
+/// A set bit skips `_configureBridge`'s call to the native tuning helper. It
+/// does not remove the physical bank, waive consumers or define its current
+/// contents.
+pub fn check_optional_mask(optional_mask: &[u8]) -> Result<(), &'static str> {
+    if optional_mask.len() < super::BRIDGE_COUNT.div_ceil(8) {
+        return Err("T6000 optional bridge mask does not cover every actual bridge");
     }
-    pub fn program(&self, bridge: usize) -> Result<&'static [Tuning], &'static str> {
-        let program = self.profile.program(bridge)?;
-        if self.optional_mask[bridge / 8] & (1 << (bridge % 8)) != 0 {
-            Ok(&[])
-        } else {
-            Ok(program)
-        }
-    }
+    Ok(())
 }
 
 /// One actual full32 native RMW. Its input must be a real known register
@@ -2680,13 +2664,9 @@ mod original {
             .0;
         let axi = pmgr.property("axi2af-axi-config").unwrap();
         assert_eq!(pmgr.property("optional-bridge-mask").unwrap().len(), 7 * 4);
-        let selection =
-            Selection::new(profile, pmgr.property("optional-bridge-mask").unwrap()).unwrap();
-        assert!(selection.program(40).unwrap().is_empty());
-        assert!(!profile.program(40).unwrap().is_empty()); // suppression grants no hardware absence
-        assert_eq!(selection.program(0).unwrap(), profile.program(0).unwrap());
-        assert!(Selection::new(profile, &[0; 24]).is_err());
-        assert!(selection.program(193).is_err());
+        check_optional_mask(pmgr.property("optional-bridge-mask").unwrap()).unwrap();
+        assert!(check_optional_mask(&[0; 24]).is_err());
+        assert!(!profile.program(40).unwrap().is_empty());
         for id in 0..193 {
             let header: [u8; 4] = headers[id * 4..id * 4 + 4].try_into().unwrap();
             let selected =

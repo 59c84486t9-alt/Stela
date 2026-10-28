@@ -109,6 +109,7 @@ impl Kind {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotError {
     UnknownOffset(u64),
@@ -180,6 +181,7 @@ impl Power {
             pending_configuration: Vec::new(),
         }
     }
+    #[cfg(test)]
     pub fn from_snapshot(
         kind: Kind,
         words: impl IntoIterator<Item = (u64, u32)>,
@@ -218,15 +220,19 @@ impl Power {
         }
         Ok(model)
     }
+    #[cfg(test)]
     pub fn pending_gpce(&self) -> impl Iterator<Item = GpceRequest> + '_ {
         self.gpce.iter().copied()
     }
+    #[cfg(test)]
     pub fn pending_cio(&self) -> impl Iterator<Item = CioRequest> + '_ {
         self.cio.iter().copied()
     }
+    #[cfg(test)]
     pub fn unresolved_readiness(&self) -> impl Iterator<Item = UnresolvedReadiness> + '_ {
         self.unresolved_readiness.iter().copied()
     }
+    #[cfg(test)]
     pub fn pending_configuration(&self) -> impl Iterator<Item = ConfigurationRequest> + '_ {
         self.pending_configuration.iter().copied()
     }

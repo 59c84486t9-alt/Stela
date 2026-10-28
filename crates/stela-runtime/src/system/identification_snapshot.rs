@@ -3,9 +3,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 mod qualifiers;
-mod xs;
 
-use super::identification::{Readback, Readbacks, Register};
+use super::identification::Register;
 use alloc::sync::Arc;
 use core::fmt;
 
@@ -259,17 +258,6 @@ impl Snapshot {
         core::ptr::eq(self, other)
     }
 }
-impl Readbacks for Snapshot {
-    fn readback(&self, readback: Readback) -> Option<u64> {
-        match readback {
-            Readback::Register(register) => self.read(register).ok(),
-            _ => None,
-        }
-    }
-    fn conditional_tid3(&self, _: Register) -> Option<bool> {
-        None
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -318,19 +306,8 @@ mod tests {
             snapshot.read(Register::IdAa64Isar2El1),
             Err(Unsupported::MissingRegister(Register::IdAa64Isar2El1))
         );
-        assert_eq!(
-            Readbacks::readback(&snapshot, Readback::Register(Register::IdAa64Isar1El1)),
-            Some(u64::MAX)
-        );
-        assert_eq!(
-            Readbacks::readback(&snapshot, Readback::Register(Register::IdAa64Isar2El1)),
-            None
-        );
-        assert_eq!(Readbacks::readback(&snapshot, Readback::DynamicDczid), None);
-        assert_eq!(
-            Readbacks::readback(&snapshot, Readback::SelectedCache(Register::CcsidrEl1)),
-            None
-        );
+        assert_eq!(snapshot.read(Register::IdAa64Isar1El1).ok(), Some(u64::MAX));
+        assert_eq!(snapshot.read(Register::IdAa64Isar2El1).ok(), None);
         assert_eq!(snapshot.provenance().origin(), Origin::DeclaredGuest);
     }
 
@@ -595,10 +572,7 @@ mod tests {
             missing.entry_profile(),
             Err(Unsupported::MissingRegister(Register::IdAa64Pfr1El1))
         );
-        assert_eq!(
-            Readbacks::readback(&missing, Readback::Register(Register::IdAa64Pfr1El1)),
-            None
-        );
+        assert_eq!(missing.read(Register::IdAa64Pfr1El1).ok(), None);
 
         let absent = Snapshot::declared(IDENTITY, &entries()).unwrap();
         let profile = absent.entry_profile().unwrap();
@@ -609,10 +583,7 @@ mod tests {
             replace(&mut raw, Register::IdAa64Pfr1El1, pfr1);
             let snapshot = Snapshot::declared(IDENTITY, &raw).unwrap();
             assert_eq!(snapshot.read(Register::IdAa64Pfr1El1), Ok(pfr1));
-            assert_eq!(
-                Readbacks::readback(&snapshot, Readback::Register(Register::IdAa64Pfr1El1)),
-                Some(pfr1)
-            );
+            assert_eq!(snapshot.read(Register::IdAa64Pfr1El1).ok(), Some(pfr1));
             let expected = Err(Unsupported::Field {
                 register: Register::IdAa64Pfr1El1,
                 field: "PFAR",

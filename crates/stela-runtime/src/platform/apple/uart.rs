@@ -77,6 +77,7 @@ const UCON_SUPPORTED: u32 = 0b1111
 const UFCON_FIFO_ENABLE: u32 = 1;
 const UFCON_RX_RESET: u32 = 1 << 1;
 const UFCON_TX_RESET: u32 = 1 << 2;
+#[cfg(test)]
 const UFCON_RX_TRIGGER_SHIFT: u32 = 4;
 const UFCON_TX_TRIGGER_SHIFT: u32 = 6;
 const UFCON_STORED: u32 = UFCON_FIFO_ENABLE | 0b11_1111 << 4;
@@ -155,11 +156,13 @@ impl<C: ConsoleSink> S5lUart<C> {
             configuration: CONFIGURATION,
         }
     }
+    #[cfg(test)]
     pub fn console(&mut self) -> &mut C {
         &mut self.console
     }
     /// Delivers host input. Returns how many bytes fit in the RX FIFO; the
     /// caller keeps the rest. The end of the call is the end of the burst.
+    #[cfg(test)]
     pub fn receive(&mut self, bytes: &[u8], access: &mut Access<'_>) -> usize {
         if !self.active() || self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
             return 0;

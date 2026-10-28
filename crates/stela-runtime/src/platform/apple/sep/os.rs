@@ -147,7 +147,7 @@ impl SepOs {
         self.services = Some(Services {
             xart: Xart::new(store),
             keystore,
-            boot_policy: BootPolicy::new(None),
+            boot_policy: BootPolicy::default(),
         });
         Ok(self)
     }
@@ -167,11 +167,13 @@ impl SepOs {
     }
 
     /// The xART service state, when installed.
+    #[cfg(test)]
     pub fn xart(&self) -> Option<&Xart> {
         self.services.as_ref().map(|services| &services.xart)
     }
 
     /// The keystore service state, when installed.
+    #[cfg(test)]
     pub fn keystore(&self) -> Option<&KeyStore> {
         self.services.as_ref().map(|services| &services.keystore)
     }
@@ -308,37 +310,43 @@ impl SepOs {
 
     /// Advertise `catalog` once OS active is reported. Its services' frames
     /// still need native handlers; an empty catalog advertises nothing.
+    #[cfg(test)]
     pub fn with_catalog(mut self, catalog: Catalog) -> Self {
         self.catalog = catalog;
         self
     }
 
     /// The shared-memory aggregate the AP mapped for the SEP, once received.
+    #[cfg(test)]
     pub fn region(&self) -> Option<Region> {
         self.region
     }
 
     /// Directory metadata last validated through dart-sep. This makes no
     /// claim about an unrecovered channel's content or authentication.
+    #[cfg(test)]
     pub fn layout(&self) -> Option<&Layout> {
         self.layout.as_ref()
     }
 
     /// Whether the SEP has reported its OS active to the control endpoint.
+    #[cfg(test)]
     pub fn os_active_sent(&self) -> bool {
         self.os_active_sent
     }
-
+    #[cfg(test)]
     pub fn power(&self) -> Power {
         self.power
     }
 
     /// Whether the AP announced it is ready to sleep (`cmsgAP_SLEEP_READY`).
+    #[cfg(test)]
     pub fn ap_sleep_ready(&self) -> bool {
         self.ap_sleep_ready
     }
 
     /// The OOL buffers an application service registered, if any.
+    #[cfg(test)]
     pub fn buffers(&self, service: u8) -> Option<&Buffers> {
         self.buffers.iter().find(|b| b.service() == service)
     }

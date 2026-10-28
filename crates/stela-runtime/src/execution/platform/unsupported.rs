@@ -1,7 +1,6 @@
 //! Hosts without native execution: every mapping operation fails.
 use anyhow::{Result, bail};
 use stela_compiler::GuestState;
-pub(crate) type StorageError = core::convert::Infallible;
 
 pub fn ensure_supported() -> Result<()> {
     #[cfg(feature = "std")]

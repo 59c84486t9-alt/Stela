@@ -2,6 +2,7 @@
 members = [
     "crates/stela-boot-core",
     "crates/stela-cli",
+    "crates/stela-dev",
     "crates/stela-loader",
     "crates/stela-compiler",
     "crates/stela-drivers",
@@ -9,12 +10,14 @@ members = [
     "crates/stela-runtime",
     "xtask",
 ]
-# A plain `cargo build` builds the shipped crates. `cargo xtask` builds the
+# A plain `cargo build` builds the shipped crates and `stela-dev`, the
+# research and development commands. `cargo xtask` builds the
 # development tasks, whose AArch64 fixtures need clang; `--workspace` includes
 # them, as `cargo xtask check` does.
 default-members = [
     "crates/stela-boot-core",
     "crates/stela-cli",
+    "crates/stela-dev",
     "crates/stela-loader",
     "crates/stela-compiler",
     "crates/stela-drivers",
@@ -45,13 +48,18 @@ stela-compiler = { path = "crates/stela-compiler" }
 stela-drivers = { path = "crates/stela-drivers" }
 stela-runtime = { path = "crates/stela-runtime" }
 stela-loader = { path = "crates/stela-loader" }
-stela-cli = { path = "crates/stela-cli", default-features = false }
+stela-cli = { path = "crates/stela-cli" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Backtraces keep their files and lines; full debug information made a
+# test build's target directory 60 % larger and its links slower.
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

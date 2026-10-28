@@ -243,7 +243,7 @@ impl<R: ReadAt> Answers<R> {
             clock: None,
         }
     }
-    /// The personalized AP ticket the restore booted under (`stela boot
+    /// The personalized AP ticket the restore booted under (`stela-dev boot
     /// prepare --tss`): the signer takes the nonces it is bound to, as Stela
     /// plays the boot ROM and the SEP ROM, and it answers `RootTicket`, whose
     /// SHA-384 restored's `update_ticket` requires to be

@@ -3,7 +3,6 @@
 //! whose executable starts as LaunchServices starts it. Files that are not
 //! arm64 programs are explained here rather than failing inside exec.
 use crate::bundle::{self, AppBundle};
-use crate::guest_system::PINNED_VERSION;
 use anyhow::{Result, anyhow, bail};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -121,7 +120,7 @@ pub(crate) fn guest_path(roots: &[PathBuf], path: &Path) -> PathBuf {
 /// Resolve what `stela run PROGRAM` names, with `search` as `PATH`.
 pub(crate) fn resolve(roots: &[PathBuf], program: &Path, search: Option<&OsStr>) -> Result<Target> {
     if AppBundle::is_bundle(program) {
-        return app(program);
+        return app(roots, program);
     }
     let name = program.as_os_str().as_bytes();
     if !name.contains(&b'/') && name != b"." && name != b".." {
@@ -180,14 +179,16 @@ fn search_path(roots: &[PathBuf], name: &Path, search: Option<&OsStr>) -> Result
 
 /// An app bundle's executable, as LaunchServices starts it: argv[0] its
 /// absolute path, the environment with the bundle's `LSEnvironment` and
-/// identifier.
-fn app(path: &Path) -> Result<Target> {
+/// identifier. It must run on the macOS version of the guest system at
+/// `roots`, when their receipt records one.
+fn app(roots: &[PathBuf], path: &Path) -> Result<Target> {
     let bundle = AppBundle::open(path)?;
     if let Some(minimum) = bundle.minimum_system_version()
-        && !bundle::version_at_least(PINNED_VERSION, minimum)
+        && let Some(version) = crate::guest_system::system_version(roots)
+        && !bundle::version_at_least(&version, minimum)
     {
         bail!(
-            "{} needs macOS {minimum} or later, and Stela runs macOS {PINNED_VERSION}",
+            "{} needs macOS {minimum} or later, and Stela runs macOS {version}",
             bundle.name()
         );
     }

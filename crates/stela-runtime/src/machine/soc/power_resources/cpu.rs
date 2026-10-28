@@ -75,9 +75,6 @@ const CORES: usize = 4;
 const OWNERS: usize = PROCESSORS + COMPLEXES;
 const CPU_GROUP: usize = 5;
 const PS_STRIDE: u64 = 8;
-const PS_BUS_BASE: u64 = 0x3b70_0000;
-const PS_BYTES: u64 = 0x000c_c000;
-const PS_PHYSICAL_BASE: u64 = 0x2_3b70_0000;
 const PERF_DOMAIN_BYTES: usize = 28;
 const DEVICE_BYTES: usize = 48;
 const DOMAIN_LIMIT: usize = 48;
@@ -155,19 +152,44 @@ fn geometry(root: &Node<'_>, io: &Node<'_>, pmgr: &Node<'_>) -> Result<(), Error
     {
         return Err(Error::Malformed("PMGR register/group cells"));
     }
-    let first = &registers[..16];
-    let base = u64::from_le_bytes(first[..8].try_into().unwrap());
-    let bytes = u64::from_le_bytes(first[8..].try_into().unwrap());
-    let group = &groups[CPU_GROUP * 12..(CPU_GROUP + 1) * 12];
-    if (base, bytes) != (PS_BUS_BASE, PS_BYTES)
-        || core::array::from_fn::<_, 3, _>(|i| {
-            u32::from_le_bytes(group[i * 4..(i + 1) * 4].try_into().unwrap())
-        }) != [0, 0, 0x3ff]
-        || physical(io, base, OWNERS as u64 * PS_STRIDE)? != PS_PHYSICAL_BASE
-    {
-        return Err(Error::UnqualifiedGeometry("T8112 CPU PS bank"));
-    }
     Ok(())
+}
+
+/// The physical address of PS register `index` in `ps-regs` group `group`:
+/// the group names a `reg` range, an offset in it and a mask of the indices
+/// it holds, and `arm-io` translates the range.
+fn ps_address(io: &Node<'_>, pmgr: &Node<'_>, group: usize, index: u32) -> Result<u64, Error> {
+    let groups = required(pmgr, "ps-regs")?;
+    let registers = required(pmgr, "reg")?;
+    if !groups.len().is_multiple_of(12) || !registers.len().is_multiple_of(16) || index >= 32 {
+        return Err(Error::Malformed("PS location cells"));
+    }
+    let group = groups
+        .as_chunks::<12>()
+        .0
+        .get(group)
+        .ok_or(Error::UnqualifiedGeometry("PS group"))?;
+    let reg = word(&group[..4])? as usize;
+    let offset = u64::from(word(&group[4..8])?) + u64::from(index) * PS_STRIDE;
+    if word(&group[8..])? & (1u32 << index) == 0 {
+        return Err(Error::UnqualifiedGeometry("PS mask"));
+    }
+    let range = registers
+        .as_chunks::<16>()
+        .0
+        .get(reg)
+        .ok_or(Error::UnqualifiedGeometry("PS register"))?;
+    let base = u64::from_le_bytes(range[..8].try_into().unwrap());
+    let bytes = u64::from_le_bytes(range[8..].try_into().unwrap());
+    if offset.checked_add(PS_STRIDE).is_none_or(|end| end > bytes) {
+        return Err(Error::UnqualifiedGeometry("PS extent"));
+    }
+    physical(
+        io,
+        base.checked_add(offset)
+            .ok_or(Error::UnqualifiedGeometry("PS wraps"))?,
+        PS_STRIDE,
+    )
 }
 
 /// Returns [complex][local core] -> scheduler PE after matching the actual
@@ -359,10 +381,10 @@ pub fn resolve_cpu_power(
             }
             PROCESSORS + complex
         };
-        let address = PS_PHYSICAL_BASE + slot as u64 * PS_STRIDE;
+        let address = location.address;
         if location.group != CPU_GROUP
             || location.index as usize != slot
-            || location.address != address
+            || address != ps_address(&io, &pmgr, location.group, location.index)?
         {
             return Err(Error::UnqualifiedGeometry("CPU owner PS placement"));
         }
@@ -406,6 +428,10 @@ mod tests {
     use alloc::{format, vec};
 
     type Properties = Vec<(&'static str, Vec<u8>)>;
+
+    const PS_BUS_BASE: u64 = 0x3b70_0000;
+    const PS_BYTES: u64 = 0x000c_c000;
+    const PS_PHYSICAL_BASE: u64 = 0x2_3b70_0000;
 
     fn encode(properties: &Properties, children: &[Vec<u8>]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -872,7 +898,11 @@ mod tests {
             let mut f = Fixture::new();
             match mutation {
                 0 => set(&mut f.root, "#address-cells", cells32(&[1])),
-                1 => set(&mut f.pmgr, "reg", cells64(&[PS_BUS_BASE, PS_BYTES - 8])),
+                1 => set(
+                    &mut f.pmgr,
+                    "reg",
+                    cells64(&[PS_BUS_BASE, OWNERS as u64 * PS_STRIDE - 8]),
+                ),
                 2 => set(&mut f.pmgr, "ps-groups", vec![]),
                 3 => set(
                     &mut f.io,

@@ -44,8 +44,6 @@ const ROOT_CONSTANTS: (u32, u32) = (0, 1);
 /// Bytes of the configuration copy at +0x30.
 pub const CONFIG_BYTES: usize = 0x68;
 
-/// Bytes of the ring directory.
-pub const RING_DIRECTORY_BYTES: u64 = 0x4c8;
 /// The AP-to-firmware descriptor table's offset in the ring directory.
 const DESCRIPTOR_TABLE: u64 = 0x20;
 /// Bytes of one submission index's group of three work descriptors.

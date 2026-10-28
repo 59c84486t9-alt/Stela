@@ -349,8 +349,9 @@ pub struct Devices {
     /// Network adapters, as raw Ethernet links.
     pub nics: Vec<Adapter>,
     /// The regulatory database, once probe found a Wi-Fi adapter (a PCI
-    /// network controller of class 02/80): `Err` reports once that it is
-    /// missing, and no Wi-Fi adapter then scans or transmits.
+    /// network controller of class 02/80) while a network is configured:
+    /// `Err` reports once that it is missing, and no Wi-Fi adapter then
+    /// scans or transmits.
     pub regulatory: Option<
         Result<
             crate::net::wifi::regulatory::database::Database,
@@ -428,7 +429,7 @@ impl Devices {
 /// controllers afterwards.
 pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
     // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, handoff_provider(handoff), None) }
+    unsafe { probe_with_provider(handoff, dma, handoff_provider(handoff), None, None) }
 }
 
 /// The handoff's firmware catalog as the provider [`probe_with_provider`]
@@ -450,6 +451,9 @@ pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffP
 /// This performs the same hardware operations and reports the same failures as
 /// [`probe`]; a missing resource still refuses that controller's initialization.
 /// `services` supplies the native owners some drivers attach through.
+/// `wifi` is the network the mount's configuration names; without one a
+/// Wi-Fi adapter is unsupported and needs no Wi-Fi firmware or regulatory
+/// data.
 ///
 /// # Safety
 /// The machine, mappings, DMA and exclusive post-ExitBootServices ownership
@@ -462,6 +466,7 @@ pub unsafe fn probe_with_provider(
     dma: &mut dyn DmaAllocator,
     firmware: &'static dyn crate::firmware::Provider,
     services: Option<&dyn NativeServices>,
+    wifi: Option<&WifiConfig>,
 ) -> Devices {
     let mut devices = Devices {
         bluetooth_platform: handoff.bluetooth_platform,
@@ -480,8 +485,16 @@ pub unsafe fn probe_with_provider(
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
             mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
-            if function.class[..2] == [2, 0x80] && devices.regulatory.is_none() {
-                devices.regulatory = Some(crate::net::wifi::regulatory::database::load(firmware));
+            if function.class[..2] == [2, 0x80] {
+                if wifi.is_none() {
+                    devices.device_failures.push((
+                        alloc::format!("{address}"),
+                        BlockError::Unsupported("Wi-Fi adapter without --wifi"),
+                    ));
+                } else if devices.regulatory.is_none() {
+                    devices.regulatory =
+                        Some(crate::net::wifi::regulatory::database::load(firmware));
+                }
             }
             if let Some(adapter) = gpu::Adapter::discover(&function) {
                 devices.gpus.push(adapter);

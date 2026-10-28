@@ -3,8 +3,8 @@ use super::{
     BlockProfile, ClockInstruction, ExitKind, MAX_BLOCK_INSTRUCTIONS, NOP_ENCODING,
     PointerAuthentication, PointerAuthenticationOperation, SynchronousTrap, SystemInstruction,
     Terminator, ThreadRegisterInstruction, decode_clock_instruction, decode_pointer_authentication,
-    decode_system_instruction, decode_terminator, decode_thread_register_instruction, el1_m0,
-    el1_platform, memory, system,
+    decode_system_instruction, decode_terminator, decode_thread_register_instruction, memory,
+    system,
 };
 use crate::{
     CompileError, GuestAddress, Lifter,
@@ -225,25 +225,6 @@ pub(super) fn parse(
             detail: "block input and guest base must be nonempty/aligned to 4 bytes".into(),
         });
     }
-    if profile == BlockProfile::El1DirectBranchV1 {
-        if source.len() != size_of::<u32>() {
-            return Err(BlockAnalysisError {
-                pc: base,
-                detail: "EL1 direct-branch profile requires exactly one complete instruction"
-                    .into(),
-            });
-        }
-        let word = u32::from_le_bytes(source.try_into().expect("exact instruction extent"));
-        let direct = Decoder
-            .lift(base, word)
-            .is_ok_and(|instruction| matches!(instruction.operation, Operation::Branch { .. }));
-        if !direct {
-            return Err(BlockAnalysisError {
-                pc: base,
-                detail: "EL1 direct-branch profile admits only ordinary B immediate".into(),
-            });
-        }
-    }
     if source.len() / 4 > MAX_BLOCK_INSTRUCTIONS {
         return Err(BlockAnalysisError {
             pc: base,
@@ -326,15 +307,11 @@ pub(super) fn parse(
         }
         if profile.supports_system()
             && !profile.supports_full_system()
-            && let Some(decoded) = (if profile == BlockProfile::El1PlatformV1 {
-                system::decode_el1_system_instruction(pc, word)
-            } else {
-                decode_system_instruction(pc, word)
-            })
-            .map_err(|error| BlockAnalysisError {
-                pc,
-                detail: error.0,
-            })?
+            && let Some(decoded) =
+                decode_system_instruction(pc, word).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?
             && (profile.supports_system_registers()
                 || !matches!(
                     decoded.operation,
@@ -342,17 +319,6 @@ pub(super) fn parse(
                         | system::SystemOperation::PstateImmediate(_)
                 ))
         {
-            if profile == BlockProfile::El1PlatformV1 {
-                el1_platform::validate_system(decoded).map_err(|error| BlockAnalysisError {
-                    pc,
-                    detail: error.0,
-                })?;
-                if !instructions.is_empty() {
-                    source_bytes -= size_of::<u32>();
-                    next_pc = pc;
-                    break;
-                }
-            }
             terminal = Some((pc, Terminator::System(decoded)));
             break;
         }
@@ -402,18 +368,6 @@ pub(super) fn parse(
             pc,
             detail: error.0,
         })? {
-            if profile == BlockProfile::El1M0IntegerV1 {
-                el1_m0::validate_terminal(&decoded).map_err(|error| BlockAnalysisError {
-                    pc,
-                    detail: error.0,
-                })?;
-            }
-            if profile == BlockProfile::El1PlatformV1 {
-                el1_platform::validate_terminal(&decoded).map_err(|error| BlockAnalysisError {
-                    pc,
-                    detail: error.0,
-                })?;
-            }
             terminal = Some((pc, decoded));
             break;
         }
@@ -421,48 +375,7 @@ pub(super) fn parse(
             pc,
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
-        if profile == BlockProfile::El1PlatformV1 {
-            el1_platform::validate_operation(&instruction.operation).map_err(|error| {
-                BlockAnalysisError {
-                    pc,
-                    detail: error.0,
-                }
-            })?;
-            if matches!(instruction.operation, Operation::Literal(_))
-                || el1_platform::Write64Pair::from_instruction(&instruction).is_some()
-                || el1_platform::Read64Pair::from_instruction(&instruction).is_some()
-                || el1_platform::ScalarLoad::from_instruction(&instruction).is_some()
-                || el1_platform::ScalarStore::from_instruction(&instruction).is_some()
-            {
-                if !instructions.is_empty() {
-                    source_bytes -= size_of::<u32>();
-                    next_pc = pc;
-                } else {
-                    instructions.push(instruction);
-                }
-                break;
-            }
-        }
-        if profile == BlockProfile::El1M0IntegerV1 {
-            el1_m0::validate_operation(&instruction.operation).map_err(|error| {
-                BlockAnalysisError {
-                    pc,
-                    detail: error.0,
-                }
-            })?;
-            if matches!(instruction.operation, Operation::Literal(_)) {
-                // Retire a real register-only prefix before acquiring a read
-                // session. The literal belongs to the following attempt.
-                if !instructions.is_empty() {
-                    source_bytes -= size_of::<u32>();
-                    next_pc = pc;
-                } else {
-                    instructions.push(instruction);
-                }
-                break;
-            }
-        }
-        if (profile.checked_memory().is_some() || profile == BlockProfile::El1PlatformV1)
+        if profile.checked_memory().is_some()
             && instruction.operation == Operation::Nop
             && word != NOP_ENCODING
         {

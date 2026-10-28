@@ -28,7 +28,7 @@ pub(super) unsafe fn check(ram: &RegisteredSystemRam) -> Result<(), &'static str
     chosen.children.push(map);
     tree.root.children.push(chosen);
     let original = tree.serialize();
-    let args = BootArgs {
+    let args = boot_args::encode(&BootArgs {
         revision: boot_args::REVISION,
         version: boot_args::VERSION,
         virt_base: VIRTUAL,
@@ -42,8 +42,7 @@ pub(super) unsafe fn check(ram: &RegisteredSystemRam) -> Result<(), &'static str
         command_line: "-v".into(),
         boot_flags: 0,
         mem_size_actual: source::BYTES as u64,
-    }
-    .encode()
+    })
     .map_err(|_| "cold boot_args encoding refused")?;
     // SAFETY: caller excludes every other producer until this borrow ends.
     let mut input = unsafe { ColdRam::new(ram) };

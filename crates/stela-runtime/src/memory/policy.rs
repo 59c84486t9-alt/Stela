@@ -67,12 +67,42 @@ pub enum TagCheckFaultMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationScope {
     Unbound,
+    #[cfg(feature = "std")]
     FixedEl0ProcessExclusive,
+    #[cfg(feature = "std")]
     FixedEl0ProcessShared {
         classes: u32,
         instructions: stela_compiler::context::memory::InstructionRequirements,
     },
     FixedEl0ProcessLow128,
+}
+
+impl OperationScope {
+    /// The atomic classes and instructions a shared scope admits.
+    fn shared(
+        self,
+    ) -> Option<(
+        u32,
+        stela_compiler::context::memory::InstructionRequirements,
+    )> {
+        #[cfg(feature = "std")]
+        if let Self::FixedEl0ProcessShared {
+            classes,
+            instructions,
+        } = self
+        {
+            return Some((classes, instructions));
+        }
+        None
+    }
+
+    fn exclusive(self) -> bool {
+        #[cfg(feature = "std")]
+        if self == Self::FixedEl0ProcessExclusive {
+            return true;
+        }
+        false
+    }
 }
 
 /// A per-thread snapshot of effective controls, supplied by the common CPU owner.
@@ -117,6 +147,7 @@ impl MemoryControls {
         }
     }
 
+    #[cfg(feature = "std")]
     /// Build the temporary snapshot from the checked CPU authority. Only the
     /// process owner's same-thread borrow may install it; its native scope
     /// holds the controls, system state and event endpoint and restores the
@@ -129,6 +160,7 @@ impl MemoryControls {
         controls
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn for_shared_authority(
         authority: &crate::system::process_memory::SharedProcessMemoryAuthorization<'_>,
     ) -> Self {
@@ -152,6 +184,7 @@ impl MemoryControls {
         controls
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn with_pointer_authority(
         mut self,
         authority: &crate::system::process_memory::PointerMemoryAuthorization<'_>,
@@ -255,10 +288,10 @@ impl DataPolicy for MemoryControls {
         if !required.valid() {
             return Err(MemoryStatus::InvalidRequest);
         }
-        let available = match self.operation_scope {
-            OperationScope::FixedEl0ProcessShared { instructions, .. } => instructions,
-            _ => stela_compiler::context::memory::InstructionRequirements::NONE,
-        };
+        let available = self.operation_scope.shared().map_or(
+            stela_compiler::context::memory::InstructionRequirements::NONE,
+            |(_, instructions)| instructions,
+        );
         if available.contains(required) {
             Ok(())
         } else {
@@ -270,20 +303,22 @@ impl DataPolicy for MemoryControls {
         &self,
         class: MemoryOperationClass,
     ) -> Result<(), MemoryStatus> {
-        match (class, self.operation_scope) {
-            (MemoryOperationClass::Exclusive, OperationScope::FixedEl0ProcessExclusive) => Ok(()),
-            (class, OperationScope::FixedEl0ProcessShared { classes, .. })
-                if classes
-                    & match class {
-                        MemoryOperationClass::Exclusive => flags::EXCLUSIVE,
-                        MemoryOperationClass::Atomic => flags::ATOMIC,
-                        MemoryOperationClass::Ordered => flags::ORDERED,
-                    }
-                    != 0 =>
-            {
-                Ok(())
-            }
-            _ => Err(MemoryStatus::Unsupported),
+        let flag = match class {
+            MemoryOperationClass::Exclusive => flags::EXCLUSIVE,
+            MemoryOperationClass::Atomic => flags::ATOMIC,
+            MemoryOperationClass::Ordered => flags::ORDERED,
+        };
+        let exclusive =
+            matches!(class, MemoryOperationClass::Exclusive) && self.operation_scope.exclusive();
+        if exclusive
+            || self
+                .operation_scope
+                .shared()
+                .is_some_and(|(classes, _)| classes & flag != 0)
+        {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
         }
     }
 

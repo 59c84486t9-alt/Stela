@@ -24,12 +24,13 @@
 //! (+0x42ee7..+0x4303c) give 0 "success" and 255 "not supported". Bytes
 //! 8..23 are diagnostics it logs. The current OS type (command 0x3e,
 //! `bootpolicy_get_current_os_type`, +0x3670..+0x369c) is a bare header
-//! answered by exactly 36 bytes with the type in byte 32 ([`BootOs`]).
+//! answered by exactly 36 bytes with the type in byte 32, named by
+//! libbootpolicy's type table (+0x404a0..+0x408ad).
 //!
 //! RecoveryOS policy nonce commands have the recovered zero-body request
 //! and digest reply shapes ([`nonces`]). They bind to the same durable store
-//! as xART. The SEP answers the current OS type only when the boot chain
-//! supplies it. LocalPolicy signing, authenticated/owner-bearing bodies,
+//! as xART. The SEP is not given the booted OS, so the current OS type is
+//! not supported. LocalPolicy signing, authenticated/owner-bearing bodies,
 //! macOS/remote nonce transactions and tags remain explicit refusals; a
 //! successful nonce transaction does not establish policy authentication.
 //! A frame or header outside the envelope gets a transport failure.
@@ -52,26 +53,12 @@ pub const REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"hcPB");
 pub const REPLY_MAGIC: u32 = u32::from_le_bytes(*b"hrPB");
 pub const HEADER_BYTES: usize = 32;
 pub const CURRENT_OS_TYPE: u32 = 0x3e;
-const OS_TYPE_REPLY_BYTES: usize = 36;
 /// BootPolicy results.
 const SUCCESS: u32 = 0;
 pub const NOT_SUPPORTED: u32 = 255;
 /// A transport failure's status byte. Any nonzero value fails the command;
 /// this one is Stela's.
 pub const TRANSPORT_FAILURE: u8 = 1;
-
-/// The OS kinds of libbootpolicy's type names (+0x404a0..+0x408ad, table
-/// at `__DATA_CONST` 0x1e1629be8); it reports any other byte as unknown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum BootOs {
-    MacOs = 0,
-    OneTrueRecovery = 1,
-    Recovery = 2,
-    KcOs = 3,
-    Restore = 4,
-    PostUpgrade = 5,
-}
 
 pub fn service() -> Service {
     Service {
@@ -116,21 +103,12 @@ pub(super) fn not_supported(frame: Frame) -> Answer {
     }
 }
 
+#[derive(Default)]
 pub struct BootPolicy {
-    boot_os: Option<BootOs>,
     recovery_nonce: nonces::RecoveryNonce,
 }
 
 impl BootPolicy {
-    /// `boot_os` is the OS the boot chain started, when the machine
-    /// supplies it.
-    pub fn new(boot_os: Option<BootOs>) -> Self {
-        Self {
-            boot_os,
-            recovery_nonce: nonces::RecoveryNonce::default(),
-        }
-    }
-
     /// Read one AP command and write its reply using the same machine store
     /// as xART. A durable or uncertain mutation is never automatically retried
     /// and cannot receive a failure acknowledgement.
@@ -167,17 +145,12 @@ impl BootPolicy {
                 .recovery_nonce
                 .request(word(4), frame, payload, store, entropy);
         }
-        if word(4) != CURRENT_OS_TYPE || length != HEADER_BYTES {
-            return Err(unsupported("SEP BootPolicy command is not implemented"));
+        if word(4) == CURRENT_OS_TYPE && length == HEADER_BYTES {
+            return Err(unsupported(
+                "SEP BootPolicy OS type needs the booted OS, which the SEP is not given",
+            ));
         }
-        let os = self.boot_os.ok_or_else(|| {
-            unsupported("SEP BootPolicy OS type needs the booted OS, which the SEP is not given")
-        })?;
-        let mut reply = [0; OS_TYPE_REPLY_BYTES];
-        reply[..HEADER_BYTES].copy_from_slice(&reply_header(SUCCESS));
-        reply[HEADER_BYTES] = os as u8;
-        payload.output(&reply).map_err(transport)?;
-        Ok(delivered(frame, OS_TYPE_REPLY_BYTES))
+        Err(unsupported("SEP BootPolicy command is not implemented"))
     }
 }
 
@@ -251,19 +224,9 @@ mod tests {
     }
 
     #[test]
-    fn the_os_type_is_answered_only_when_the_boot_supplies_it() {
+    fn the_os_type_is_not_supported() {
         let (reply, output) = ask(
-            &mut BootPolicy::new(Some(BootOs::Restore)),
-            frame(32),
-            command(CURRENT_OS_TYPE, 0),
-        );
-        assert_eq!(reply.unwrap(), frame(36));
-        assert_eq!(output.len(), 36);
-        assert_eq!(output[..4], *b"hrPB");
-        assert_eq!(output[4..32], [0; 28]);
-        assert_eq!(output[32..], [4, 0, 0, 0]);
-        let (reply, output) = ask(
-            &mut BootPolicy::new(None),
+            &mut BootPolicy::default(),
             frame(32),
             command(CURRENT_OS_TYPE, 0),
         );
@@ -275,7 +238,7 @@ mod tests {
 
     #[test]
     fn other_commands_are_not_supported_and_malformed_ones_fail_transport() {
-        let mut policy = BootPolicy::new(Some(BootOs::MacOs));
+        let mut policy = BootPolicy::default();
         // A LocalPolicy-sized command, and the OS type with a body.
         for (length, input) in [
             (0x4130, command(0x35, 0x4110)),

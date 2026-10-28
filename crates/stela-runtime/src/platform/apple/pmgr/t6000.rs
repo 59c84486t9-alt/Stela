@@ -11,7 +11,16 @@
 pub mod reconfiguration;
 pub mod tunables;
 
+#[cfg(test)]
 pub const COMPLEXES: usize = 3;
+/// The PMGR native SRAM window, the native-program table and code in it,
+/// and the pre-activation words.
+pub const SRAM_BASE: u64 = 0x292f00000;
+pub const SRAM_LIMIT: u64 = SRAM_BASE + 0x70000;
+pub const TABLE_BASE: u64 = SRAM_BASE + 0x1000;
+pub const CODE_BASE: u64 = SRAM_BASE + 0x1a00;
+pub const PRE_ACTIVATION_BASE: u64 = 0x2922dc21c;
+
 pub const BRIDGE_COUNT: usize = 193;
 pub const BRIDGE_REG_INDEX: usize = 48;
 

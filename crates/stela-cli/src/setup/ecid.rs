@@ -46,7 +46,7 @@ impl Ecid {
     }
 }
 
-/// As `stela boot prepare --ecid` and the record take it.
+/// As `stela-dev boot prepare --ecid` and the record take it.
 impl std::fmt::Display for Ecid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#018x}", self.0)

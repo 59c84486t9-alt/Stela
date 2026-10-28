@@ -15,8 +15,8 @@ pub mod policy;
 mod protection;
 mod published;
 mod service;
-pub(crate) mod source_ram;
-pub use source_ram::system::{
+pub(crate) mod system_ram;
+pub use system_ram::{
     CanonicalRamService, RegisteredSystemRam, RegistrationError as SystemRamRegistrationError,
     ReservedSystemRamRange,
 };
@@ -102,6 +102,10 @@ struct Allocation {
     maximum_readable: bool,
     maximum_writable: bool,
     maximum_executable: bool,
+    #[cfg_attr(
+        not(host_memory),
+        allow(dead_code, reason = "only host-memory protection reads it")
+    )]
     executable: bool,
     alias_tag: u8,
     inheritance: DataInheritance,
@@ -135,8 +139,7 @@ pub fn host_page_size() -> Result<usize> {
 
 #[cfg(not(feature = "std"))]
 pub fn host_page_size() -> Result<usize> {
-    crate::platform::boot::ensure_live()?;
-    Ok(4096)
+    bail!("UNSUPPORTED guest memory: the freestanding build maps no host pages")
 }
 
 /// Hosts without POSIX mappings back no guest memory.

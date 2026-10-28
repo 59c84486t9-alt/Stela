@@ -1,9 +1,15 @@
 //! The profile's System registers and the accessors of every System
-//! register and System instruction, derived from Arm AARCHMRS 2026-06 (BSD-3-Clause; Copyright (c) 2010-2026 Arm Limited or
-//! its affiliates). Each accessor is its AARCHMRS permission tree folded
-//! against the Apple CPU profiles, a feature only some chips have left to
-//! `Context::implemented`. Reset values come from Arm's
-//! SysReg_xml_A_profile-2026-06 System register XML (SHA-256 4795c769085ff9056d9f18abbd9e23d7b0f0a955214cfb2a2121a9698b50d509). Do not edit.
+//! register and System instruction, from Arm AARCHMRS 2026-06 (BSD-3-Clause;
+//! Copyright (c) 2010-2026 Arm Limited or its affiliates), which Arm
+//! publishes on developer.arm.com as
+//! `AARCHMRS_OPENSOURCE_A_profile_FAT-2026-06.tar.gz`. Each accessor is its
+//! AARCHMRS permission tree folded against the Apple CPU profiles, a feature
+//! only some chips have left to `Context::implemented`; accessors with the
+//! same folded tree share one function. Reset values come from Arm's
+//! `SysReg_xml_A_profile-2026-06.tar.gz` System register XML (SHA-256
+//! 4795c769085ff9056d9f18abbd9e23d7b0f0a955214cfb2a2121a9698b50d509).
+//! Regenerate with `cargo xtask sysregs --aarchmrs DIR`, `DIR` holding both
+//! downloads. Do not edit.
 #![allow(
     clippy::all,
     clippy::pedantic,
@@ -6184,7 +6190,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc081,
         index: &[],
-        run: a6,
+        run: a0,
     },
     Accessor {
         name: "MSRregister ACTLR_EL1",
@@ -6192,7 +6198,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc081,
         index: &[],
-        run: a7,
+        run: a1,
     },
     Accessor {
         name: "MRS AFSR0_EL1",
@@ -6248,7 +6254,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc288,
         index: &[],
-        run: a14,
+        run: a8,
     },
     Accessor {
         name: "MSRregister AFSR0_EL1",
@@ -6256,7 +6262,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc288,
         index: &[],
-        run: a15,
+        run: a9,
     },
     Accessor {
         name: "MRS AFSR1_EL1",
@@ -6312,7 +6318,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc289,
         index: &[],
-        run: a22,
+        run: a16,
     },
     Accessor {
         name: "MSRregister AFSR1_EL1",
@@ -6320,7 +6326,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc289,
         index: &[],
-        run: a23,
+        run: a17,
     },
     Accessor {
         name: "MRS AIDR_EL1",
@@ -6384,7 +6390,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc518,
         index: &[],
-        run: a31,
+        run: a25,
     },
     Accessor {
         name: "MSRregister AMAIR_EL1",
@@ -6392,7 +6398,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc518,
         index: &[],
-        run: a32,
+        run: a26,
     },
     Accessor {
         name: "MRS APDAKeyHi_EL1",
@@ -6664,7 +6670,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x73c1,
         index: &[],
-        run: a66,
+        run: a65,
     },
     Accessor {
         name: "MRS CCSIDR2_EL1",
@@ -6944,7 +6950,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc708,
         index: &[],
-        run: a101,
+        run: a75,
     },
     Accessor {
         name: "MSRregister CNTKCTL_EL1",
@@ -6952,7 +6958,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc708,
         index: &[],
-        run: a102,
+        run: a76,
     },
     Accessor {
         name: "MRS CNTKCTL_EL12",
@@ -6984,7 +6990,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf11,
         index: &[],
-        run: a106,
+        run: a79,
     },
     Accessor {
         name: "MSRregister CNTP_CTL_EL0",
@@ -6992,7 +6998,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf11,
         index: &[],
-        run: a107,
+        run: a80,
     },
     Accessor {
         name: "MRS CNTP_CTL_EL02",
@@ -7024,7 +7030,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf12,
         index: &[],
-        run: a111,
+        run: a83,
     },
     Accessor {
         name: "MSRregister CNTP_CVAL_EL0",
@@ -7032,7 +7038,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf12,
         index: &[],
-        run: a112,
+        run: a84,
     },
     Accessor {
         name: "MRS CNTP_CVAL_EL02",
@@ -7056,7 +7062,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf10,
         index: &[],
-        run: a115,
+        run: a87,
     },
     Accessor {
         name: "MSRregister CNTP_TVAL_EL0",
@@ -7064,7 +7070,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf10,
         index: &[],
-        run: a116,
+        run: a88,
     },
     Accessor {
         name: "MRS CNTP_TVAL_EL02",
@@ -7096,7 +7102,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf19,
         index: &[],
-        run: a120,
+        run: a91,
     },
     Accessor {
         name: "MSRregister CNTV_CTL_EL0",
@@ -7104,7 +7110,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf19,
         index: &[],
-        run: a121,
+        run: a92,
     },
     Accessor {
         name: "MRS CNTV_CTL_EL02",
@@ -7136,7 +7142,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf1a,
         index: &[],
-        run: a125,
+        run: a95,
     },
     Accessor {
         name: "MSRregister CNTV_CVAL_EL0",
@@ -7144,7 +7150,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf1a,
         index: &[],
-        run: a126,
+        run: a96,
     },
     Accessor {
         name: "MRS CNTV_CVAL_EL02",
@@ -7184,7 +7190,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf18,
         index: &[],
-        run: a131,
+        run: a99,
     },
     Accessor {
         name: "MSRregister CNTV_TVAL_EL0",
@@ -7192,7 +7198,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xdf18,
         index: &[],
-        run: a132,
+        run: a100,
     },
     Accessor {
         name: "MRS CNTV_TVAL_EL02",
@@ -7264,7 +7270,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc681,
         index: &[],
-        run: a141,
+        run: a135,
     },
     Accessor {
         name: "MSRregister CONTEXTIDR_EL1",
@@ -7272,7 +7278,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc681,
         index: &[],
-        run: a142,
+        run: a136,
     },
     Accessor {
         name: "COSP RCTX",
@@ -7344,7 +7350,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc082,
         index: &[],
-        run: a151,
+        run: a144,
     },
     Accessor {
         name: "MSRregister CPACR_EL1",
@@ -7352,7 +7358,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc082,
         index: &[],
-        run: a152,
+        run: a145,
     },
     Accessor {
         name: "MRS CSSELR_EL1",
@@ -7672,7 +7678,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xda29,
         index: &[],
-        run: a192,
+        run: a191,
     },
     Accessor {
         name: "MRS DSPSR_EL0",
@@ -7680,7 +7686,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xda28,
         index: &[],
-        run: a193,
+        run: a191,
     },
     Accessor {
         name: "MSRregister DSPSR_EL0",
@@ -7688,7 +7694,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xda28,
         index: &[],
-        run: a194,
+        run: a191,
     },
     Accessor {
         name: "DVP RCTX",
@@ -7752,7 +7758,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe201,
         index: &[],
-        run: a202,
+        run: a200,
     },
     Accessor {
         name: "MSRregister ELR_EL2",
@@ -7760,7 +7766,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe201,
         index: &[],
-        run: a203,
+        run: a201,
     },
     Accessor {
         name: "MRS ELR_EL1",
@@ -7768,7 +7774,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc201,
         index: &[],
-        run: a204,
+        run: a196,
     },
     Accessor {
         name: "MSRregister ELR_EL1",
@@ -7776,7 +7782,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc201,
         index: &[],
-        run: a205,
+        run: a197,
     },
     Accessor {
         name: "MRS ESR_EL1",
@@ -7832,7 +7838,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe290,
         index: &[],
-        run: a212,
+        run: a210,
     },
     Accessor {
         name: "MSRregister ESR_EL2",
@@ -7840,7 +7846,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe290,
         index: &[],
-        run: a213,
+        run: a211,
     },
     Accessor {
         name: "MRS ESR_EL1",
@@ -7848,7 +7854,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc290,
         index: &[],
-        run: a214,
+        run: a206,
     },
     Accessor {
         name: "MSRregister ESR_EL1",
@@ -7856,7 +7862,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc290,
         index: &[],
-        run: a215,
+        run: a207,
     },
     Accessor {
         name: "MRS FAR_EL1",
@@ -7912,7 +7918,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe300,
         index: &[],
-        run: a222,
+        run: a220,
     },
     Accessor {
         name: "MSRregister FAR_EL2",
@@ -7920,7 +7926,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe300,
         index: &[],
-        run: a223,
+        run: a221,
     },
     Accessor {
         name: "MRS FAR_EL1",
@@ -7928,7 +7934,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc300,
         index: &[],
-        run: a224,
+        run: a216,
     },
     Accessor {
         name: "MSRregister FAR_EL1",
@@ -7936,7 +7942,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc300,
         index: &[],
-        run: a225,
+        run: a217,
     },
     Accessor {
         name: "MRS FPCR",
@@ -8248,7 +8254,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a264,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_AP0R<m>_EL1",
@@ -8256,7 +8262,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a265,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_AP1R<m>_EL1",
@@ -8264,7 +8270,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a266,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_AP1R<m>_EL1",
@@ -8272,7 +8278,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a267,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_ASGI1R_EL1",
@@ -8280,7 +8286,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc65e,
         index: &[],
-        run: a268,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_BPR0_EL1",
@@ -8288,7 +8294,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a269,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_BPR0_EL1",
@@ -8296,7 +8302,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a270,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_BPR1_EL1",
@@ -8304,7 +8310,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a271,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_BPR1_EL1",
@@ -8312,7 +8318,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a272,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_CTLR_EL1",
@@ -8320,7 +8326,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a273,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_CTLR_EL1",
@@ -8328,7 +8334,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a274,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_DIR_EL1",
@@ -8336,7 +8342,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc659,
         index: &[],
-        run: a275,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_EOIR0_EL1",
@@ -8344,7 +8350,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc641,
         index: &[],
-        run: a276,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_EOIR1_EL1",
@@ -8352,7 +8358,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc661,
         index: &[],
-        run: a277,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_HPPIR0_EL1",
@@ -8360,7 +8366,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc642,
         index: &[],
-        run: a278,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_HPPIR1_EL1",
@@ -8368,7 +8374,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc662,
         index: &[],
-        run: a279,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IAR0_EL1",
@@ -8376,7 +8382,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc640,
         index: &[],
-        run: a280,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IAR1_EL1",
@@ -8384,7 +8390,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc660,
         index: &[],
-        run: a281,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IGRPEN0_EL1",
@@ -8392,7 +8398,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a282,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN0_EL1",
@@ -8400,7 +8406,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a283,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IGRPEN1_EL1",
@@ -8408,7 +8414,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a284,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN1_EL1",
@@ -8416,7 +8422,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a285,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_NMIAR1_EL1",
@@ -8424,7 +8430,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc64d,
         index: &[],
-        run: a286,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_PMR_EL1",
@@ -8432,7 +8438,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a287,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_PMR_EL1",
@@ -8440,7 +8446,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a288,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_RPR_EL1",
@@ -8448,7 +8454,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc65b,
         index: &[],
-        run: a289,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_SGI0R_EL1",
@@ -8456,7 +8462,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc65f,
         index: &[],
-        run: a290,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_SGI1R_EL1",
@@ -8464,7 +8470,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc65d,
         index: &[],
-        run: a291,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_SRE_EL1",
@@ -8472,7 +8478,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc665,
         index: &[],
-        run: a292,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_SRE_EL1",
@@ -8480,7 +8486,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc665,
         index: &[],
-        run: a293,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_SRE_EL2",
@@ -8488,7 +8494,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe64d,
         index: &[],
-        run: a294,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_SRE_EL2",
@@ -8496,7 +8502,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe64d,
         index: &[],
-        run: a295,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_AP0R<m>_EL2",
@@ -8504,7 +8510,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xe640,
         index: &[(1, 1), (0, 0)],
-        run: a296,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICH_AP0R<m>_EL2",
@@ -8512,7 +8518,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xe640,
         index: &[(1, 1), (0, 0)],
-        run: a297,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_AP1R<m>_EL2",
@@ -8520,7 +8526,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xe648,
         index: &[(1, 1), (0, 0)],
-        run: a298,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICH_AP1R<m>_EL2",
@@ -8528,7 +8534,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xe648,
         index: &[(1, 1), (0, 0)],
-        run: a299,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_EISR_EL2",
@@ -8536,7 +8542,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe65b,
         index: &[],
-        run: a300,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_ELRSR_EL2",
@@ -8544,7 +8550,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe65d,
         index: &[],
-        run: a301,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_HCR_EL2",
@@ -8552,7 +8558,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe658,
         index: &[],
-        run: a302,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICH_HCR_EL2",
@@ -8560,7 +8566,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe658,
         index: &[],
-        run: a303,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_LR<m>_EL2",
@@ -8568,7 +8574,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfff0,
         value: 0xe660,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a304,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICH_LR<m>_EL2",
@@ -8576,7 +8582,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfff0,
         value: 0xe660,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a305,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_MISR_EL2",
@@ -8584,7 +8590,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe65a,
         index: &[],
-        run: a306,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_VMCR_EL2",
@@ -8592,7 +8598,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe65f,
         index: &[],
-        run: a307,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICH_VMCR_EL2",
@@ -8600,7 +8606,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe65f,
         index: &[],
-        run: a308,
+        run: a191,
     },
     Accessor {
         name: "MRS ICH_VTR_EL2",
@@ -8608,7 +8614,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe659,
         index: &[],
-        run: a309,
+        run: a191,
     },
     Accessor {
         name: "IC IALLUIS",
@@ -8640,7 +8646,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a313,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_AP0R<m>_EL1",
@@ -8648,7 +8654,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a314,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_AP1R<m>_EL1",
@@ -8656,7 +8662,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a315,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_AP1R<m>_EL1",
@@ -8664,7 +8670,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a316,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_BPR0_EL1",
@@ -8672,7 +8678,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a317,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_BPR0_EL1",
@@ -8680,7 +8686,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a318,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_BPR1_EL1",
@@ -8688,7 +8694,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a319,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_BPR1_EL1",
@@ -8696,7 +8702,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a320,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_CTLR_EL1",
@@ -8704,7 +8710,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a321,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_CTLR_EL1",
@@ -8712,7 +8718,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a322,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_DIR_EL1",
@@ -8720,7 +8726,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc659,
         index: &[],
-        run: a323,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_EOIR0_EL1",
@@ -8728,7 +8734,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc641,
         index: &[],
-        run: a324,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_EOIR1_EL1",
@@ -8736,7 +8742,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc661,
         index: &[],
-        run: a325,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_HPPIR0_EL1",
@@ -8744,7 +8750,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc642,
         index: &[],
-        run: a326,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_HPPIR1_EL1",
@@ -8752,7 +8758,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc662,
         index: &[],
-        run: a327,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IAR0_EL1",
@@ -8760,7 +8766,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc640,
         index: &[],
-        run: a328,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IAR1_EL1",
@@ -8768,7 +8774,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc660,
         index: &[],
-        run: a329,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IGRPEN0_EL1",
@@ -8776,7 +8782,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a330,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN0_EL1",
@@ -8784,7 +8790,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a331,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_IGRPEN1_EL1",
@@ -8792,7 +8798,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a332,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN1_EL1",
@@ -8800,7 +8806,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a333,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_NMIAR1_EL1",
@@ -8808,7 +8814,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc64d,
         index: &[],
-        run: a334,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_PMR_EL1",
@@ -8816,7 +8822,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a335,
+        run: a191,
     },
     Accessor {
         name: "MSRregister ICC_PMR_EL1",
@@ -8824,7 +8830,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a336,
+        run: a191,
     },
     Accessor {
         name: "MRS ICC_RPR_EL1",
@@ -8832,7 +8838,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc65b,
         index: &[],
-        run: a337,
+        run: a191,
     },
     Accessor {
         name: "MRS ID_AA64AFR0_EL1",
@@ -9264,7 +9270,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc510,
         index: &[],
-        run: a391,
+        run: a385,
     },
     Accessor {
         name: "MSRregister MAIR_EL1",
@@ -9272,7 +9278,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc510,
         index: &[],
-        run: a392,
+        run: a386,
     },
     Accessor {
         name: "MRS MDCCINT_EL1",
@@ -9592,7 +9598,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc083,
         index: &[],
-        run: a432,
+        run: a426,
     },
     Accessor {
         name: "MSRregister SCTLR2_EL1",
@@ -9600,7 +9606,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc083,
         index: &[],
-        run: a433,
+        run: a427,
     },
     Accessor {
         name: "MRS SCTLR2_EL3",
@@ -9616,7 +9622,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xf083,
         index: &[],
-        run: a435,
+        run: a434,
     },
     Accessor {
         name: "MRS SCTLR_EL1",
@@ -9672,7 +9678,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc080,
         index: &[],
-        run: a442,
+        run: a436,
     },
     Accessor {
         name: "MSRregister SCTLR_EL1",
@@ -9680,7 +9686,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc080,
         index: &[],
-        run: a443,
+        run: a437,
     },
     Accessor {
         name: "MRS SCXTNUM_EL0",
@@ -9752,7 +9758,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc687,
         index: &[],
-        run: a452,
+        run: a446,
     },
     Accessor {
         name: "MSRregister SCXTNUM_EL1",
@@ -9760,7 +9766,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc687,
         index: &[],
-        run: a453,
+        run: a447,
     },
     Accessor {
         name: "MRS SMIDR_EL1",
@@ -9840,7 +9846,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xf208,
         index: &[],
-        run: a463,
+        run: a65,
     },
     Accessor {
         name: "MSRregister SP_EL2",
@@ -9848,7 +9854,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xf208,
         index: &[],
-        run: a464,
+        run: a65,
     },
     Accessor {
         name: "MRS SPSel",
@@ -9936,7 +9942,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe200,
         index: &[],
-        run: a475,
+        run: a473,
     },
     Accessor {
         name: "MSRregister SPSR_EL2",
@@ -9944,7 +9950,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe200,
         index: &[],
-        run: a476,
+        run: a474,
     },
     Accessor {
         name: "MRS SPSR_EL1",
@@ -9952,7 +9958,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc200,
         index: &[],
-        run: a477,
+        run: a469,
     },
     Accessor {
         name: "MSRregister SPSR_EL1",
@@ -9960,7 +9966,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc200,
         index: &[],
-        run: a478,
+        run: a470,
     },
     Accessor {
         name: "MRS SPSR_fiq",
@@ -10096,7 +10102,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc102,
         index: &[],
-        run: a495,
+        run: a489,
     },
     Accessor {
         name: "MSRregister TCR_EL1",
@@ -10104,7 +10110,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc102,
         index: &[],
-        run: a496,
+        run: a490,
     },
     Accessor {
         name: "TLBI ALLE1IS",
@@ -10208,7 +10214,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7418,
         index: &[],
-        run: a509,
+        run: a65,
     },
     Accessor {
         name: "TLBI ALLE3ISNXS",
@@ -10224,7 +10230,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7438,
         index: &[],
-        run: a511,
+        run: a65,
     },
     Accessor {
         name: "TLBI ALLE3NXS",
@@ -10232,7 +10238,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74b8,
         index: &[],
-        run: a512,
+        run: a510,
     },
     Accessor {
         name: "TLBI ALLE3OS",
@@ -10240,7 +10246,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7408,
         index: &[],
-        run: a513,
+        run: a65,
     },
     Accessor {
         name: "TLBI ALLE3OSNXS",
@@ -10248,7 +10254,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7488,
         index: &[],
-        run: a514,
+        run: a510,
     },
     Accessor {
         name: "TLBI ASIDE1IS",
@@ -10688,7 +10694,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7411,
         index: &[],
-        run: a569,
+        run: a65,
     },
     Accessor {
         name: "TLBI RVAE3ISNXS",
@@ -10696,7 +10702,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7491,
         index: &[],
-        run: a570,
+        run: a510,
     },
     Accessor {
         name: "TLBI RVAE3",
@@ -10704,7 +10710,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7431,
         index: &[],
-        run: a571,
+        run: a65,
     },
     Accessor {
         name: "TLBI RVAE3NXS",
@@ -10712,7 +10718,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74b1,
         index: &[],
-        run: a572,
+        run: a510,
     },
     Accessor {
         name: "TLBI RVAE3OS",
@@ -10720,7 +10726,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7429,
         index: &[],
-        run: a573,
+        run: a65,
     },
     Accessor {
         name: "TLBI RVAE3OSNXS",
@@ -10728,7 +10734,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74a9,
         index: &[],
-        run: a574,
+        run: a510,
     },
     Accessor {
         name: "TLBI RVALE1IS",
@@ -10832,7 +10838,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7415,
         index: &[],
-        run: a587,
+        run: a65,
     },
     Accessor {
         name: "TLBI RVALE3ISNXS",
@@ -10840,7 +10846,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7495,
         index: &[],
-        run: a588,
+        run: a510,
     },
     Accessor {
         name: "TLBI RVALE3",
@@ -10848,7 +10854,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7435,
         index: &[],
-        run: a589,
+        run: a65,
     },
     Accessor {
         name: "TLBI RVALE3NXS",
@@ -10856,7 +10862,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74b5,
         index: &[],
-        run: a590,
+        run: a510,
     },
     Accessor {
         name: "TLBI RVALE3OS",
@@ -10864,7 +10870,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x742d,
         index: &[],
-        run: a591,
+        run: a65,
     },
     Accessor {
         name: "TLBI RVALE3OSNXS",
@@ -10872,7 +10878,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74ad,
         index: &[],
-        run: a592,
+        run: a510,
     },
     Accessor {
         name: "TLBI VAAE1IS",
@@ -11072,7 +11078,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7419,
         index: &[],
-        run: a617,
+        run: a65,
     },
     Accessor {
         name: "TLBI VAE3ISNXS",
@@ -11080,7 +11086,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7499,
         index: &[],
-        run: a618,
+        run: a510,
     },
     Accessor {
         name: "TLBI VAE3",
@@ -11088,7 +11094,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7439,
         index: &[],
-        run: a619,
+        run: a65,
     },
     Accessor {
         name: "TLBI VAE3NXS",
@@ -11096,7 +11102,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74b9,
         index: &[],
-        run: a620,
+        run: a510,
     },
     Accessor {
         name: "TLBI VAE3OS",
@@ -11104,7 +11110,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7409,
         index: &[],
-        run: a621,
+        run: a65,
     },
     Accessor {
         name: "TLBI VAE3OSNXS",
@@ -11112,7 +11118,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x7489,
         index: &[],
-        run: a622,
+        run: a510,
     },
     Accessor {
         name: "TLBI VALE1IS",
@@ -11216,7 +11222,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x741d,
         index: &[],
-        run: a635,
+        run: a65,
     },
     Accessor {
         name: "TLBI VALE3ISNXS",
@@ -11224,7 +11230,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x749d,
         index: &[],
-        run: a636,
+        run: a510,
     },
     Accessor {
         name: "TLBI VALE3",
@@ -11232,7 +11238,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x743d,
         index: &[],
-        run: a637,
+        run: a65,
     },
     Accessor {
         name: "TLBI VALE3NXS",
@@ -11240,7 +11246,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x74bd,
         index: &[],
-        run: a638,
+        run: a510,
     },
     Accessor {
         name: "TLBI VALE3OS",
@@ -11248,7 +11254,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x740d,
         index: &[],
-        run: a639,
+        run: a65,
     },
     Accessor {
         name: "TLBI VALE3OSNXS",
@@ -11256,7 +11262,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0x748d,
         index: &[],
-        run: a640,
+        run: a510,
     },
     Accessor {
         name: "TLBI VMALLE1IS",
@@ -11488,7 +11494,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc100,
         index: &[],
-        run: a669,
+        run: a663,
     },
     Accessor {
         name: "MSRregister TTBR0_EL1",
@@ -11496,7 +11502,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc100,
         index: &[],
-        run: a670,
+        run: a664,
     },
     Accessor {
         name: "MRS TTBR1_EL1",
@@ -11552,7 +11558,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc101,
         index: &[],
-        run: a677,
+        run: a671,
     },
     Accessor {
         name: "MSRregister TTBR1_EL1",
@@ -11560,7 +11566,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc101,
         index: &[],
-        run: a678,
+        run: a672,
     },
     Accessor {
         name: "MRS UAO",
@@ -11632,7 +11638,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc600,
         index: &[],
-        run: a687,
+        run: a681,
     },
     Accessor {
         name: "MSRregister VBAR_EL1",
@@ -11640,7 +11646,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc600,
         index: &[],
-        run: a688,
+        run: a682,
     },
     Accessor {
         name: "MRS VMPIDR_EL2",
@@ -11664,7 +11670,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc005,
         index: &[],
-        run: a691,
+        run: a402,
     },
     Accessor {
         name: "MRS VNCR_EL2",
@@ -11704,7 +11710,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc000,
         index: &[],
-        run: a696,
+        run: a401,
     },
     Accessor {
         name: "MRS VTCR_EL2",
@@ -12016,7 +12022,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc528,
         index: &[],
-        run: a735,
+        run: a729,
     },
     Accessor {
         name: "MSRregister MPAM1_EL1",
@@ -12024,7 +12030,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc528,
         index: &[],
-        run: a736,
+        run: a730,
     },
     Accessor {
         name: "MRS MPAM3_EL3",
@@ -12032,7 +12038,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xf528,
         index: &[],
-        run: a737,
+        run: a65,
     },
     Accessor {
         name: "MSRregister MPAM3_EL3",
@@ -12040,7 +12046,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xf528,
         index: &[],
-        run: a738,
+        run: a65,
     },
     Accessor {
         name: "MRS MPAMHCR_EL2",
@@ -12496,7 +12502,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe2b0,
         index: &[],
-        run: a795,
+        run: a793,
     },
     Accessor {
         name: "MSRregister TFSR_EL2",
@@ -12504,7 +12510,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xe2b0,
         index: &[],
-        run: a796,
+        run: a794,
     },
     Accessor {
         name: "MRS TFSR_EL1",
@@ -12512,7 +12518,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc2b0,
         index: &[],
-        run: a797,
+        run: a789,
     },
     Accessor {
         name: "MSRregister TFSR_EL1",
@@ -12520,7 +12526,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc2b0,
         index: &[],
-        run: a798,
+        run: a790,
     },
     Accessor {
         name: "MRS TFSR_EL3",
@@ -12536,7 +12542,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xf2b0,
         index: &[],
-        run: a800,
+        run: a799,
     },
     Accessor {
         name: "MRS DISR_EL1",
@@ -12768,7 +12774,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc609,
         index: &[],
-        run: a829,
+        run: a801,
     },
     Accessor {
         name: "MSRregister DISR_EL1",
@@ -12776,7 +12782,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc609,
         index: &[],
-        run: a830,
+        run: a802,
     },
     Accessor {
         name: "MRS VSESR_EL2",
@@ -12856,7 +12862,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc096,
         index: &[],
-        run: a840,
+        run: a834,
     },
     Accessor {
         name: "MSRregister SMCR_EL1",
@@ -12864,7 +12870,7 @@ pub static ACCESSORS: [Accessor; 843] = [
         mask: 0xffff,
         value: 0xc096,
         index: &[],
-        run: a841,
+        run: a835,
     },
     Accessor {
         name: "MRS ID_AA64ZFR0_EL1",
@@ -13114,112 +13120,6 @@ fn a5(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS ACTLR_EL1 (ACTLR_EL2)
-fn a6(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 21, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT2)?) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ({
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        }) && (((hcr_nvx(c)?) & 0x7) == 0x7)
-        {
-            {
-                let value = c.nv_mem(280u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::ACTLR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::ACTLR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::ACTLR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister ACTLR_EL1 (ACTLR_EL2)
-fn a7(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 21, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT2)?) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ({
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        }) && (((hcr_nvx(c)?) & 0x7) == 0x7)
-        {
-            {
-                let value = c.x();
-                c.set_nv_mem(280u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::ACTLR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::ACTLR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::ACTLR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS AFSR0_EL1 (AFSR0_EL1)
 fn a8(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -13460,114 +13360,6 @@ fn a13(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS AFSR0_EL1 (AFSR0_EL2)
-fn a14(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 0, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(296u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::AFSR0_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::AFSR0_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::AFSR0_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister AFSR0_EL1 (AFSR0_EL2)
-fn a15(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 0, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(296u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::AFSR0_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::AFSR0_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::AFSR0_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS AFSR1_EL1 (AFSR1_EL1)
 fn a16(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -13802,114 +13594,6 @@ fn a21(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::AFSR1_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS AFSR1_EL1 (AFSR1_EL2)
-fn a22(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 1, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(304u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::AFSR1_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::AFSR1_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::AFSR1_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister AFSR1_EL1 (AFSR1_EL2)
-fn a23(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 1, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(304u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::AFSR1_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::AFSR1_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::AFSR1_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -14187,114 +13871,6 @@ fn a30(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::AMAIR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS AMAIR_EL1 (AMAIR_EL2)
-fn a31(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 3, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(328u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::AMAIR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::AMAIR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::AMAIR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister AMAIR_EL1 (AMAIR_EL2)
-fn a32(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 3, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(328u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::AMAIR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::AMAIR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::AMAIR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -15603,21 +15179,6 @@ fn a64(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 
 /// AT S1E3R (AT S1E3R)
 fn a65(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// AT S1E3W (AT S1E3W)
-fn a66(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17433,66 +16994,6 @@ fn a100(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS CNTKCTL_EL1 (CNTKCTL_EL1)
-fn a101(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        {
-            let value = c.read(Register::CNTKCTL_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CNTHCTL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTKCTL_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTKCTL_EL1 (CNTKCTL_EL1)
-fn a102(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        {
-            let value = c.x();
-            c.write(Register::CNTKCTL_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHCTL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTKCTL_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS CNTKCTL_EL12 (CNTKCTL_EL1)
 fn a103(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -17608,182 +17109,6 @@ fn a105(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.physical_count();
             c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CNTP_CTL_EL0 (CNTP_CTL_EL0)
-fn a106(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        if (at_el0_not_in_host(c))
-            && (((bits(c.read(Register::CNTKCTL_EL1, 0), 9, 1)) & 0x1) == 0x0)
-        {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((is_in_host(c, 2)) && (((tge_for_el0_traps(c)) & 0x1) == 0x0))
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (at_el0_in_host(c)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 9, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if at_el0_in_host(c) {
-            {
-                let value = c.read(Register::CNTHP_CTL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTP_CTL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (is_in_host(c, 2)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(384u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTP_CTL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CNTHP_CTL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTP_CTL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTP_CTL_EL0 (CNTP_CTL_EL0)
-fn a107(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        if (at_el0_not_in_host(c))
-            && (((bits(c.read(Register::CNTKCTL_EL1, 0), 9, 1)) & 0x1) == 0x0)
-        {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((is_in_host(c, 2)) && (((tge_for_el0_traps(c)) & 0x1) == 0x0))
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (at_el0_in_host(c)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 9, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if at_el0_in_host(c) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHP_CTL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTP_CTL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (is_in_host(c, 2)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(384u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTP_CTL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHP_CTL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTP_CTL_EL0, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -17944,182 +17269,6 @@ fn a110(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS CNTP_CVAL_EL0 (CNTP_CVAL_EL0)
-fn a111(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        if (at_el0_not_in_host(c))
-            && (((bits(c.read(Register::CNTKCTL_EL1, 0), 9, 1)) & 0x1) == 0x0)
-        {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((is_in_host(c, 2)) && (((tge_for_el0_traps(c)) & 0x1) == 0x0))
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (at_el0_in_host(c)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 9, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if at_el0_in_host(c) {
-            {
-                let value = c.read(Register::CNTHP_CVAL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTP_CVAL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (is_in_host(c, 2)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(376u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTP_CVAL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CNTHP_CVAL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTP_CVAL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTP_CVAL_EL0 (CNTP_CVAL_EL0)
-fn a112(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        if (at_el0_not_in_host(c))
-            && (((bits(c.read(Register::CNTKCTL_EL1, 0), 9, 1)) & 0x1) == 0x0)
-        {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((is_in_host(c, 2)) && (((tge_for_el0_traps(c)) & 0x1) == 0x0))
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (at_el0_in_host(c)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 9, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if at_el0_in_host(c) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHP_CVAL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTP_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (is_in_host(c, 2)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(376u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTP_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHP_CVAL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTP_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS CNTP_CVAL_EL02 (CNTP_CVAL_EL0)
 fn a113(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -18208,217 +17357,6 @@ fn a114(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             return Ok(Effect::Done);
         }
         return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CNTP_TVAL_EL0 (CNTP_TVAL_EL0)
-fn a115(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        if (at_el0_not_in_host(c))
-            && (((bits(c.read(Register::CNTKCTL_EL1, 0), 9, 1)) & 0x1) == 0x0)
-        {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((is_in_host(c, 2)) && (((tge_for_el0_traps(c)) & 0x1) == 0x0))
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (at_el0_in_host(c)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 9, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if at_el0_in_host(c) {
-            if ((bits(c.read(Register::CNTHP_CTL_EL2, 0), 0, 1)) & 0x1) == 0x0 {
-                {
-                    let value = c.arbitrary();
-                    c.set_x(value);
-                }
-                return Ok(Effect::Done);
-            }
-            {
-                let value = bits(
-                    (c.read(Register::CNTHP_CVAL_EL2, 0)).wrapping_sub(c.physical_count()),
-                    0,
-                    32,
-                );
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if ((bits(c.read(Register::CNTP_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTP_CVAL_EL0, 0)).wrapping_sub(c.physical_count()),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (is_in_host(c, 2)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((bits(c.read(Register::CNTP_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTP_CVAL_EL0, 0)).wrapping_sub(c.physical_count()),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            if ((bits(c.read(Register::CNTHP_CTL_EL2, 0), 0, 1)) & 0x1) == 0x0 {
-                {
-                    let value = c.arbitrary();
-                    c.set_x(value);
-                }
-                return Ok(Effect::Done);
-            }
-            {
-                let value = bits(
-                    (c.read(Register::CNTHP_CVAL_EL2, 0)).wrapping_sub(c.physical_count()),
-                    0,
-                    32,
-                );
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if ((bits(c.read(Register::CNTP_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTP_CVAL_EL0, 0)).wrapping_sub(c.physical_count()),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTP_TVAL_EL0 (CNTP_TVAL_EL0)
-fn a116(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        if (at_el0_not_in_host(c))
-            && (((bits(c.read(Register::CNTKCTL_EL1, 0), 9, 1)) & 0x1) == 0x0)
-        {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((is_in_host(c, 2)) && (((tge_for_el0_traps(c)) & 0x1) == 0x0))
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (at_el0_in_host(c)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 9, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if at_el0_in_host(c) {
-            {
-                let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-                c.write(Register::CNTHP_CVAL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-            c.write(Register::CNTP_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (is_in_host(c, 2)) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 11, 1)) & 0x1) == 0x0) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-            c.write(Register::CNTP_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-                c.write(Register::CNTHP_CVAL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-            c.write(Register::CNTP_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
     }
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
@@ -18556,158 +17494,6 @@ fn a119(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.physical_count();
             c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CNTV_CTL_EL0 (CNTV_CTL_EL0)
-fn a120(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if at_el0_not_in_host(c) {
-        if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.read(Register::CNTV_CTL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if at_el0_in_host(c) {
-        if ((bits(c.read(Register::CNTHCTL_EL2, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.read(Register::CNTHV_CTL_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(368u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTV_CTL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CNTHV_CTL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTV_CTL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTV_CTL_EL0 (CNTV_CTL_EL0)
-fn a121(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if at_el0_not_in_host(c) {
-        if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTV_CTL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if at_el0_in_host(c) {
-        if ((bits(c.read(Register::CNTHCTL_EL2, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTHV_CTL_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(368u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTV_CTL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHV_CTL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTV_CTL_EL0, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -18869,158 +17655,6 @@ fn a124(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.physical_count();
             c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CNTV_CVAL_EL0 (CNTV_CVAL_EL0)
-fn a125(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if at_el0_not_in_host(c) {
-        if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.read(Register::CNTV_CVAL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if at_el0_in_host(c) {
-        if ((bits(c.read(Register::CNTHCTL_EL2, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.read(Register::CNTHV_CVAL_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(360u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTV_CVAL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CNTHV_CVAL_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CNTV_CVAL_EL0, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTV_CVAL_EL0 (CNTV_CVAL_EL0)
-fn a126(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if at_el0_not_in_host(c) {
-        if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTV_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if at_el0_in_host(c) {
-        if ((bits(c.read(Register::CNTHCTL_EL2, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTHV_CVAL_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(360u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTV_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CNTHV_CVAL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CNTV_CVAL_EL0, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -19189,228 +17823,6 @@ fn a130(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::CNTVOFF_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CNTV_TVAL_EL0 (CNTV_TVAL_EL0)
-fn a131(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if at_el0_not_in_host(c) {
-        if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((bits(c.read(Register::CNTV_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTV_CVAL_EL0, 0)).wrapping_sub(
-                    (c.physical_count()).wrapping_sub(c.read(Register::CNTVOFF_EL2, 0)),
-                ),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if at_el0_in_host(c) {
-        if ((bits(c.read(Register::CNTHCTL_EL2, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((bits(c.read(Register::CNTHV_CTL_EL2, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTHV_CVAL_EL2, 0)).wrapping_sub(c.physical_count()),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((bits(c.read(Register::CNTV_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTV_CVAL_EL0, 0)).wrapping_sub(
-                    (c.physical_count()).wrapping_sub(c.read(Register::CNTVOFF_EL2, 0)),
-                ),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            if ((bits(c.read(Register::CNTHV_CTL_EL2, 0), 0, 1)) & 0x1) == 0x0 {
-                {
-                    let value = c.arbitrary();
-                    c.set_x(value);
-                }
-                return Ok(Effect::Done);
-            }
-            {
-                let value = bits(
-                    (c.read(Register::CNTHV_CVAL_EL2, 0)).wrapping_sub(c.physical_count()),
-                    0,
-                    32,
-                );
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if !(is_in_host(c, 2)) {
-            if ((bits(c.read(Register::CNTV_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-                {
-                    let value = c.arbitrary();
-                    c.set_x(value);
-                }
-                return Ok(Effect::Done);
-            }
-            {
-                let value = bits(
-                    (c.read(Register::CNTV_CVAL_EL0, 0)).wrapping_sub(
-                        (c.physical_count()).wrapping_sub(c.read(Register::CNTVOFF_EL2, 0)),
-                    ),
-                    0,
-                    32,
-                );
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if ((bits(c.read(Register::CNTV_CTL_EL0, 0), 0, 1)) & 0x1) == 0x0 {
-            {
-                let value = c.arbitrary();
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(
-                (c.read(Register::CNTV_CVAL_EL0, 0)).wrapping_sub(c.physical_count()),
-                0,
-                32,
-            );
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CNTV_TVAL_EL0 (CNTV_TVAL_EL0)
-fn a132(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if at_el0_not_in_host(c) {
-        if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(trap_el1_or_el2(c, 24u64));
-        }
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = ((sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count()))
-                .wrapping_sub(c.read(Register::CNTVOFF_EL2, 0));
-            c.write(Register::CNTV_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if at_el0_in_host(c) {
-        if ((bits(c.read(Register::CNTHCTL_EL2, 0), 8, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-            c.write(Register::CNTHV_CVAL_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_ECV)?)
-            && (((bits(c.read(Register::CNTHCTL_EL2, 0), 13, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = ((sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count()))
-                .wrapping_sub(c.read(Register::CNTVOFF_EL2, 0));
-            c.write(Register::CNTV_CVAL_EL0, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-                c.write(Register::CNTHV_CVAL_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        if !(is_in_host(c, 2)) {
-            {
-                let value = ((sign_extend(bits(c.x(), 0, 32), 32))
-                    .wrapping_add(c.physical_count()))
-                .wrapping_sub(c.read(Register::CNTVOFF_EL2, 0));
-                c.write(Register::CNTV_CVAL_EL0, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = (sign_extend(bits(c.x(), 0, 32), 32)).wrapping_add(c.physical_count());
-            c.write(Register::CNTV_CVAL_EL0, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -19728,114 +18140,6 @@ fn a140(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::CONTEXTIDR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CONTEXTIDR_EL1 (CONTEXTIDR_EL2)
-fn a141(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 11, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(264u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CONTEXTIDR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CONTEXTIDR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CONTEXTIDR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CONTEXTIDR_EL1 (CONTEXTIDR_EL2)
-fn a142(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 11, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(264u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CONTEXTIDR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CONTEXTIDR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CONTEXTIDR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -20239,114 +18543,6 @@ fn a150(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::CPTR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS CPACR_EL1 (CPTR_EL2)
-fn a151(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::CPTR_EL2, 0), 31, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 12, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(256u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CPACR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::CPTR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::CPACR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister CPACR_EL1 (CPTR_EL2)
-fn a152(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::CPTR_EL2, 0), 31, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 12, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(256u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CPACR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::CPTR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::CPACR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -22563,24 +20759,6 @@ fn a191(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister DLR_EL0 (DLR_EL0)
-fn a192(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS DSPSR_EL0 (DSPSR_EL0)
-fn a193(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister DSPSR_EL0 (DSPSR_EL0)
-fn a194(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
 /// DVP RCTX (DVP RCTX)
 fn a195(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -22905,174 +21083,6 @@ fn a201(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS ELR_EL2 (ELR_EL2)
-fn a202(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.read(Register::ELR_EL1, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::ELR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister ELR_EL2 (ELR_EL2)
-fn a203(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.x();
-                c.write(Register::ELR_EL1, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::ELR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS ELR_EL1 (ELR_EL2)
-fn a204(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(560u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::ELR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::ELR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::ELR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister ELR_EL1 (ELR_EL2)
-fn a205(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(560u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::ELR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::ELR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::ELR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS ESR_EL1 (ESR_EL1)
 fn a206(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -23333,190 +21343,6 @@ fn a211(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS ESR_EL2 (ESR_EL2)
-fn a212(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.read(Register::ESR_EL1, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::ESR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister ESR_EL2 (ESR_EL2)
-fn a213(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.x();
-                c.write(Register::ESR_EL1, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::ESR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS ESR_EL1 (ESR_EL2)
-fn a214(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 16, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(312u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::ESR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::ESR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::ESR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister ESR_EL1 (ESR_EL2)
-fn a215(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 16, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(312u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::ESR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::ESR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::ESR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS FAR_EL1 (FAR_EL1)
 fn a216(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -23771,190 +21597,6 @@ fn a221(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::FAR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS FAR_EL2 (FAR_EL2)
-fn a222(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.read(Register::FAR_EL1, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::FAR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister FAR_EL2 (FAR_EL2)
-fn a223(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.x();
-                c.write(Register::FAR_EL1, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::FAR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS FAR_EL1 (FAR_EL2)
-fn a224(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 17, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(544u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::FAR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::FAR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::FAR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister FAR_EL1 (FAR_EL2)
-fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 17, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(544u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::FAR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::FAR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::FAR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -25913,282 +23555,6 @@ fn a263(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS ICC_AP0R<m>_EL1 (ICC_AP0R<n>_EL1)
-fn a264(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_AP0R<m>_EL1 (ICC_AP0R<n>_EL1)
-fn a265(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_AP1R<m>_EL1 (ICC_AP1R<n>_EL1)
-fn a266(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_AP1R<m>_EL1 (ICC_AP1R<n>_EL1)
-fn a267(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_ASGI1R_EL1 (ICC_ASGI1R_EL1)
-fn a268(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_BPR0_EL1 (ICC_BPR0_EL1)
-fn a269(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_BPR0_EL1 (ICC_BPR0_EL1)
-fn a270(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_BPR1_EL1 (ICC_BPR1_EL1)
-fn a271(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_BPR1_EL1 (ICC_BPR1_EL1)
-fn a272(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_CTLR_EL1 (ICC_CTLR_EL1)
-fn a273(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_CTLR_EL1 (ICC_CTLR_EL1)
-fn a274(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_DIR_EL1 (ICC_DIR_EL1)
-fn a275(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_EOIR0_EL1 (ICC_EOIR0_EL1)
-fn a276(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_EOIR1_EL1 (ICC_EOIR1_EL1)
-fn a277(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_HPPIR0_EL1 (ICC_HPPIR0_EL1)
-fn a278(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_HPPIR1_EL1 (ICC_HPPIR1_EL1)
-fn a279(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IAR0_EL1 (ICC_IAR0_EL1)
-fn a280(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IAR1_EL1 (ICC_IAR1_EL1)
-fn a281(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IGRPEN0_EL1 (ICC_IGRPEN0_EL1)
-fn a282(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_IGRPEN0_EL1 (ICC_IGRPEN0_EL1)
-fn a283(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IGRPEN1_EL1 (ICC_IGRPEN1_EL1)
-fn a284(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_IGRPEN1_EL1 (ICC_IGRPEN1_EL1)
-fn a285(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_NMIAR1_EL1 (ICC_NMIAR1_EL1)
-fn a286(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_PMR_EL1 (ICC_PMR_EL1)
-fn a287(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_PMR_EL1 (ICC_PMR_EL1)
-fn a288(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_RPR_EL1 (ICC_RPR_EL1)
-fn a289(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_SGI0R_EL1 (ICC_SGI0R_EL1)
-fn a290(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_SGI1R_EL1 (ICC_SGI1R_EL1)
-fn a291(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_SRE_EL1 (ICC_SRE_EL1)
-fn a292(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_SRE_EL1 (ICC_SRE_EL1)
-fn a293(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_SRE_EL2 (ICC_SRE_EL2)
-fn a294(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_SRE_EL2 (ICC_SRE_EL2)
-fn a295(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_AP0R<m>_EL2 (ICH_AP0R<n>_EL2)
-fn a296(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICH_AP0R<m>_EL2 (ICH_AP0R<n>_EL2)
-fn a297(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_AP1R<m>_EL2 (ICH_AP1R<n>_EL2)
-fn a298(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICH_AP1R<m>_EL2 (ICH_AP1R<n>_EL2)
-fn a299(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_EISR_EL2 (ICH_EISR_EL2)
-fn a300(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_ELRSR_EL2 (ICH_ELRSR_EL2)
-fn a301(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_HCR_EL2 (ICH_HCR_EL2)
-fn a302(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICH_HCR_EL2 (ICH_HCR_EL2)
-fn a303(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_LR<m>_EL2 (ICH_LR<n>_EL2)
-fn a304(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICH_LR<m>_EL2 (ICH_LR<n>_EL2)
-fn a305(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_MISR_EL2 (ICH_MISR_EL2)
-fn a306(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_VMCR_EL2 (ICH_VMCR_EL2)
-fn a307(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICH_VMCR_EL2 (ICH_VMCR_EL2)
-fn a308(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICH_VTR_EL2 (ICH_VTR_EL2)
-fn a309(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
 /// IC IALLUIS (IC IALLUIS)
 fn a310(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -26508,156 +23874,6 @@ fn a312(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS ICC_AP0R<m>_EL1 (ICV_AP0R<n>_EL1)
-fn a313(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_AP0R<m>_EL1 (ICV_AP0R<n>_EL1)
-fn a314(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_AP1R<m>_EL1 (ICV_AP1R<n>_EL1)
-fn a315(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_AP1R<m>_EL1 (ICV_AP1R<n>_EL1)
-fn a316(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_BPR0_EL1 (ICV_BPR0_EL1)
-fn a317(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_BPR0_EL1 (ICV_BPR0_EL1)
-fn a318(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_BPR1_EL1 (ICV_BPR1_EL1)
-fn a319(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_BPR1_EL1 (ICV_BPR1_EL1)
-fn a320(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_CTLR_EL1 (ICV_CTLR_EL1)
-fn a321(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_CTLR_EL1 (ICV_CTLR_EL1)
-fn a322(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_DIR_EL1 (ICV_DIR_EL1)
-fn a323(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_EOIR0_EL1 (ICV_EOIR0_EL1)
-fn a324(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_EOIR1_EL1 (ICV_EOIR1_EL1)
-fn a325(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_HPPIR0_EL1 (ICV_HPPIR0_EL1)
-fn a326(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_HPPIR1_EL1 (ICV_HPPIR1_EL1)
-fn a327(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IAR0_EL1 (ICV_IAR0_EL1)
-fn a328(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IAR1_EL1 (ICV_IAR1_EL1)
-fn a329(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IGRPEN0_EL1 (ICV_IGRPEN0_EL1)
-fn a330(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_IGRPEN0_EL1 (ICV_IGRPEN0_EL1)
-fn a331(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_IGRPEN1_EL1 (ICV_IGRPEN1_EL1)
-fn a332(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_IGRPEN1_EL1 (ICV_IGRPEN1_EL1)
-fn a333(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_NMIAR1_EL1 (ICV_NMIAR1_EL1)
-fn a334(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_PMR_EL1 (ICV_PMR_EL1)
-fn a335(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_PMR_EL1 (ICV_PMR_EL1)
-fn a336(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MRS ICC_RPR_EL1 (ICV_RPR_EL1)
-fn a337(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
 }
 
 /// MRS ID_AA64AFR0_EL1 (ID_AA64AFR0_EL1)
@@ -28337,114 +25553,6 @@ fn a390(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS MAIR_EL1 (MAIR_EL2)
-fn a391(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 24, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(320u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::MAIR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::MAIR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::MAIR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister MAIR_EL1 (MAIR_EL2)
-fn a392(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 24, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(320u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::MAIR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::MAIR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::MAIR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS MDCCINT_EL1 (MDCCINT_EL1)
 fn a393(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -29935,156 +27043,8 @@ fn a431(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS SCTLR2_EL1 (SCTLR2_EL2)
-fn a432(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_SCTLR2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 29, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (!(c.implemented(Feature::FEAT_HCX)?))
-            || (((bits(c.read(Register::HCRX_EL2, 0), 15, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(632u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SCTLR2_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::SCTLR2_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SCTLR2_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SCTLR2_EL1 (SCTLR2_EL2)
-fn a433(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_SCTLR2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 29, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (!(c.implemented(Feature::FEAT_HCX)?))
-            || (((bits(c.read(Register::HCRX_EL2, 0), 15, 1)) & 0x1) == 0x0)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(632u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SCTLR2_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::SCTLR2_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SCTLR2_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS SCTLR2_EL3 (SCTLR2_EL3)
 fn a434(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_SCTLR2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SCTLR2_EL3 (SCTLR2_EL3)
-fn a435(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(c.implemented(Feature::FEAT_SCTLR2)?) {
         return Ok(Effect::Undefined);
@@ -30335,114 +27295,6 @@ fn a441(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::SCTLR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS SCTLR_EL1 (SCTLR_EL2)
-fn a442(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 29, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(272u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SCTLR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::SCTLR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SCTLR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SCTLR_EL1 (SCTLR_EL2)
-fn a443(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 29, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(272u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SCTLR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::SCTLR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SCTLR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -30831,126 +27683,6 @@ fn a451(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS SCXTNUM_EL1 (SCXTNUM_EL2)
-fn a452(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((bits(c.read(Register::HCR_EL2, 0), 53, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 30, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(392u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SCXTNUM_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::SCXTNUM_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SCXTNUM_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SCXTNUM_EL1 (SCXTNUM_EL2)
-fn a453(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if ((bits(c.read(Register::HCR_EL2, 0), 53, 1)) & 0x1) == 0x0 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 30, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(392u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SCXTNUM_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::SCXTNUM_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SCXTNUM_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS SMIDR_EL1 (SMIDR_EL1)
 fn a454(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -31263,36 +27995,6 @@ fn a462(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             c.write(Register::SP_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS SP_EL2 (SP_EL2)
-fn a463(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SP_EL2 (SP_EL2)
-fn a464(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
     }
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
@@ -31637,174 +28339,6 @@ fn a474(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::SPSR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS SPSR_EL2 (SPSR_EL2)
-fn a475(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.read(Register::SPSR_EL1, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::SPSR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SPSR_EL2 (SPSR_EL2)
-fn a476(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            {
-                let value = c.x();
-                c.write(Register::SPSR_EL1, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::SPSR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS SPSR_EL1 (SPSR_EL2)
-fn a477(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(352u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SPSR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::SPSR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SPSR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SPSR_EL1 (SPSR_EL2)
-fn a478(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(352u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SPSR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::SPSR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SPSR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -32481,114 +29015,6 @@ fn a494(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS TCR_EL1 (TCR_EL2)
-fn a495(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 32, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(288u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::TCR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::TCR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::TCR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister TCR_EL1 (TCR_EL2)
-fn a496(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 32, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(288u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TCR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::TCR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TCR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// TLBI ALLE1IS (TLBI ALLE1IS)
 fn a497(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -33039,89 +29465,8 @@ fn a508(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI ALLE3IS (TLBI ALLE3IS)
-fn a509(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// TLBI ALLE3ISNXS (TLBI ALLE3IS)
 fn a510(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI ALLE3 (TLBI ALLE3)
-fn a511(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI ALLE3NXS (TLBI ALLE3)
-fn a512(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI ALLE3OS (TLBI ALLE3OS)
-fn a513(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI ALLE3OSNXS (TLBI ALLE3OS)
-fn a514(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(c.implemented(Feature::FEAT_XS)?) {
         return Ok(Effect::Undefined);
@@ -35627,105 +31972,6 @@ fn a568(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI RVAE3IS (TLBI RVAE3IS)
-fn a569(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3ISNXS (TLBI RVAE3IS)
-fn a570(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3 (TLBI RVAE3)
-fn a571(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3NXS (TLBI RVAE3)
-fn a572(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3OS (TLBI RVAE3OS)
-fn a573(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3OSNXS (TLBI RVAE3OS)
-fn a574(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// TLBI RVALE1IS (TLBI RVALE1IS)
 fn a575(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -36288,105 +32534,6 @@ fn a586(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             c.operation(operation)?;
         }
         return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3IS (TLBI RVALE3IS)
-fn a587(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3ISNXS (TLBI RVALE3IS)
-fn a588(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3 (TLBI RVALE3)
-fn a589(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3NXS (TLBI RVALE3)
-fn a590(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3OS (TLBI RVALE3OS)
-fn a591(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3OSNXS (TLBI RVALE3OS)
-fn a592(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
     }
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
@@ -37639,105 +33786,6 @@ fn a616(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI VAE3IS (TLBI VAE3IS)
-fn a617(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3ISNXS (TLBI VAE3IS)
-fn a618(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3 (TLBI VAE3)
-fn a619(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3NXS (TLBI VAE3)
-fn a620(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3OS (TLBI VAE3OS)
-fn a621(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3OSNXS (TLBI VAE3OS)
-fn a622(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// TLBI VALE1IS (TLBI VALE1IS)
 fn a623(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -38300,105 +34348,6 @@ fn a634(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             c.operation(operation)?;
         }
         return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3IS (TLBI VALE3IS)
-fn a635(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3ISNXS (TLBI VALE3IS)
-fn a636(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3 (TLBI VALE3)
-fn a637(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3NXS (TLBI VALE3)
-fn a638(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3OS (TLBI VALE3OS)
-fn a639(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3OSNXS (TLBI VALE3OS)
-fn a640(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_XS)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
     }
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
@@ -39626,114 +35575,6 @@ fn a668(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS TTBR0_EL1 (TTBR0_EL2)
-fn a669(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 36, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(512u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(c.read(Register::TTBR0_EL1, 0), 0, 64);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = bits(c.read(Register::TTBR0_EL2, 0), 0, 64);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(c.read(Register::TTBR0_EL1, 0), 0, 64);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister TTBR0_EL1 (TTBR0_EL2)
-fn a670(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 36, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(512u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TTBR0_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::TTBR0_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TTBR0_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS TTBR1_EL1 (TTBR1_EL1)
 fn a671(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -39968,114 +35809,6 @@ fn a676(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::TTBR1_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS TTBR1_EL1 (TTBR1_EL2)
-fn a677(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 37, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(528u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(c.read(Register::TTBR1_EL1, 0), 0, 64);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = bits(c.read(Register::TTBR1_EL2, 0), 0, 64);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = bits(c.read(Register::TTBR1_EL1, 0), 0, 64);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister TTBR1_EL1 (TTBR1_EL2)
-fn a678(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 26, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 37, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(528u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TTBR1_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::TTBR1_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TTBR1_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -40368,114 +36101,6 @@ fn a686(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS VBAR_EL1 (VBAR_EL2)
-fn a687(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 38, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(592u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::VBAR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::VBAR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::VBAR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister VBAR_EL1 (VBAR_EL2)
-fn a688(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGWTR_EL2, 0), 38, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(592u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::VBAR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::VBAR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::VBAR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS VMPIDR_EL2 (VMPIDR_EL2)
 fn a689(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -40546,37 +36171,6 @@ fn a690(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::VMPIDR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS MPIDR_EL1 (VMPIDR_EL2)
-fn a691(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(trap_el1_or_el2(c, 24u64));
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 26, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.read(Register::VMPIDR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::MPIDR_EL1, 0);
-            c.set_x(value);
         }
         return Ok(Effect::Done);
     }
@@ -40735,37 +36329,6 @@ fn a695(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::VPIDR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS MIDR_EL1 (VPIDR_EL2)
-fn a696(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(trap_el1_or_el2(c, 24u64));
-    }
-    if (c.el()) == (1) {
-        if (c.implemented(Feature::FEAT_FGT)?)
-            && (((bits(c.read(Register::HFGRTR_EL2, 0), 25, 1)) & 0x1) == 0x1)
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        {
-            let value = c.read(Register::VPIDR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::MIDR_EL1, 0);
-            c.set_x(value);
         }
         return Ok(Effect::Done);
     }
@@ -42348,128 +37911,6 @@ fn a734(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             c.write(Register::MPAM2_EL2, 0, value)?;
         }
         return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS MPAM1_EL1 (MPAM2_EL2)
-fn a735(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::MPAM2_EL2, 0), 48, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(2304u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::MPAM1_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::MPAM2_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::MPAM1_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister MPAM1_EL1 (MPAM2_EL2)
-fn a736(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::MPAM2_EL2, 0), 48, 1)) & 0x1) == 0x1 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(2304u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::MPAM1_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::MPAM2_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::MPAM1_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS MPAM3_EL3 (MPAM3_EL3)
-fn a737(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister MPAM3_EL3 (MPAM3_EL3)
-fn a738(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
     }
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
@@ -45635,254 +41076,8 @@ fn a794(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS TFSR_EL2 (TFSR_EL2)
-fn a795(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_MTE2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            if (!(is_in_host(c, 0)))
-                && (!((c.implemented(Feature::FEAT_MTE2)?)
-                    && (((bits(c.read(Register::HCR_EL2, 0), 56, 1)) & 0x1) == 0x1)))
-            {
-                return Ok(Effect::Trap {
-                    el: 2 as u8,
-                    ec: 24u64,
-                });
-            }
-            {
-                let value = c.read(Register::TFSR_EL1, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::TFSR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister TFSR_EL2 (TFSR_EL2)
-fn a796(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_MTE2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x5) == 0x5
-        } {
-            if (!(is_in_host(c, 0)))
-                && (!((c.implemented(Feature::FEAT_MTE2)?)
-                    && (((bits(c.read(Register::HCR_EL2, 0), 56, 1)) & 0x1) == 0x1)))
-            {
-                return Ok(Effect::Trap {
-                    el: 2 as u8,
-                    ec: 24u64,
-                });
-            }
-            {
-                let value = c.x();
-                c.write(Register::TFSR_EL1, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x1) == 0x1
-        } {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::TFSR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS TFSR_EL1 (TFSR_EL2)
-fn a797(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_MTE2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (!(is_in_host(c, 0)))
-            && (!((c.implemented(Feature::FEAT_MTE2)?)
-                && (((bits(c.read(Register::HCR_EL2, 0), 56, 1)) & 0x1) == 0x1)))
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT2)?) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(400u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::TFSR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::TFSR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::TFSR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister TFSR_EL1 (TFSR_EL2)
-fn a798(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_MTE2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((hcr_nvx(c)?) & 0x7) == 0x3 {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (!(is_in_host(c, 0)))
-            && (!((c.implemented(Feature::FEAT_MTE2)?)
-                && (((bits(c.read(Register::HCR_EL2, 0), 56, 1)) & 0x1) == 0x1)))
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if (c.implemented(Feature::FEAT_FGT2)?) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 24u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(400u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TFSR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::TFSR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::TFSR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS TFSR_EL3 (TFSR_EL3)
 fn a799(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_MTE2)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister TFSR_EL3 (TFSR_EL3)
-fn a800(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(c.implemented(Feature::FEAT_MTE2)?) {
         return Ok(Effect::Undefined);
@@ -47070,66 +42265,6 @@ fn a828(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS DISR_EL1 (VDISR_EL2)
-fn a829(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 5, 1)) & 0x1) == 0x1 {
-            {
-                let value = c.read(Register::VDISR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::DISR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::DISR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister DISR_EL1 (VDISR_EL2)
-fn a830(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if ((bits(c.read(Register::HCR_EL2, 0), 5, 1)) & 0x1) == 0x1 {
-            {
-                let value = c.x();
-                c.write(Register::VDISR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::DISR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::DISR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
 /// MRS VSESR_EL2 (VSESR_EL2)
 fn a831(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
@@ -47597,178 +42732,6 @@ fn a839(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             let value = c.x();
             c.write(Register::SMCR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS SMCR_EL1 (SMCR_EL2)
-fn a840(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_SME)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = bits(c.read(Register::CPACR_EL1, 0), 24, 2);
-            (v & 0x1) == 0x0
-        } {
-            return Ok(Effect::Trap {
-                el: 1 as u8,
-                ec: 29u64,
-            });
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if (is_in_host(c, 2))
-            && ({
-                let v = bits(c.read(Register::CPTR_EL2, 0), 24, 2);
-                (v & 0x1) == 0x0
-            })
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.nv_mem(496u64)?;
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SMCR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if (is_in_host(c, 2))
-            && ({
-                let v = bits(c.read(Register::CPTR_EL2, 0), 24, 2);
-                (v & 0x1) == 0x0
-            })
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if is_in_host(c, 2) {
-            {
-                let value = c.read(Register::SMCR_EL2, 0);
-                c.set_x(value);
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.read(Register::SMCR_EL1, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SMCR_EL1 (SMCR_EL2)
-fn a841(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if !(c.implemented(Feature::FEAT_SME)?) {
-        return Ok(Effect::Undefined);
-    }
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        if {
-            let v = bits(c.read(Register::CPACR_EL1, 0), 24, 2);
-            (v & 0x1) == 0x0
-        } {
-            return Ok(Effect::Trap {
-                el: 1 as u8,
-                ec: 29u64,
-            });
-        }
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if (is_in_host(c, 2))
-            && ({
-                let v = bits(c.read(Register::CPTR_EL2, 0), 24, 2);
-                (v & 0x1) == 0x0
-            })
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if {
-            let v = hcr_nvx(c)?;
-            (v & 0x7) == 0x7
-        } {
-            {
-                let value = c.x();
-                c.set_nv_mem(496u64, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SMCR_EL1, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    if (c.el()) == (2) {
-        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if (is_in_host(c, 2))
-            && ({
-                let v = bits(c.read(Register::CPTR_EL2, 0), 24, 2);
-                (v & 0x1) == 0x0
-            })
-        {
-            return Ok(Effect::Trap {
-                el: 2 as u8,
-                ec: 29u64,
-            });
-        }
-        if is_in_host(c, 2) {
-            {
-                let value = c.x();
-                c.write(Register::SMCR_EL2, 0, value)?;
-            }
-            return Ok(Effect::Done);
-        }
-        {
-            let value = c.x();
-            c.write(Register::SMCR_EL1, 0, value)?;
         }
         return Ok(Effect::Done);
     }

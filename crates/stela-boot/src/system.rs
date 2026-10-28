@@ -392,7 +392,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
     match &translations {
         Some((store, true)) => crate::status::done(&format!("{} MB", store.bytes >> 20)),
         Some((store, false)) => crate::status::warn(&format!(
-            "{} MB; new translations stay in memory this boot: `stela setup --repair` prepares \
+            "{} MB; new translations stay in memory this boot: `stela setup repair` prepares \
              the file",
             store.bytes >> 20
         )),

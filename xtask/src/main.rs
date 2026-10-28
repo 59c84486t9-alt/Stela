@@ -47,7 +47,7 @@ mod boot_xstate;
 #[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
 #[allow(dead_code)]
 mod boot_ioapic;
-#[cfg(test)]
+#[cfg(all(test, feature = "fetched-sources"))]
 #[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
 mod boot_irq_crs;
 #[cfg(test)]
@@ -59,22 +59,24 @@ mod boot_madt;
 #[allow(dead_code)] // Only pure FADT/counter tests run hosted; port I/O is UEFI-only.
 mod boot_native_clock_pm;
 
-mod agx_isa;
 mod amx;
 // The bench runs the hosted engine, which only an Intel Mac has
 // (`stela_runtime::hosted`).
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod bench;
 mod boot;
+mod census;
 mod check;
 mod darwin_catalogs;
+mod dist;
 mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_platform;
+mod links;
 mod pages;
 mod restore_dry_run;
+mod sysregs;
 mod tools;
-mod xml;
 
 #[derive(Parser)]
 #[command(about = "Stela development tasks")]
@@ -91,6 +93,11 @@ enum Task {
         #[arg(long)]
         fix: bool,
     },
+    /// Build the release `stela` with its matching `stela.efi` embedded.
+    Dist,
+    /// Check the Markdown files' links and paths and the `cargo xtask` tasks
+    /// the tree names.
+    Links,
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
@@ -108,16 +115,20 @@ enum Task {
     AmxKernels(amx::kernels::AmxKernels),
     /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
     DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
-    /// Generate the AGX2 shader ISA tables from Mesa's AGX2.xml.
-    AgxIsa(agx_isa::AgxIsa),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
+    /// Generate the System register accessors from Arm's AARCHMRS.
+    Sysregs(sysregs::Sysregs),
+    /// Generate the hosted call-site census from a macOS restore image.
+    Census(census::Census),
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().task {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
+        Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
+        Task::Links => links::run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -125,8 +136,9 @@ fn main() -> ExitCode {
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
+        Task::Sysregs(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::Census(task) => task.run().map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");

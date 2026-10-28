@@ -196,9 +196,7 @@ pub(super) fn validate_source_map(
     base: GuestAddress,
     source_bytes: usize,
 ) -> Result<()> {
-    let first_native_offset = if manifest.memory_requirements.is_some()
-        || manifest.identity.abi == stela_compiler::block::EL1_M0_INTEGER_BLOCK_ABI
-    {
+    let first_native_offset = if manifest.memory_requirements.is_some() {
         stela_compiler::extended::CONTEXT_WRAPPER_BYTES
     } else {
         0

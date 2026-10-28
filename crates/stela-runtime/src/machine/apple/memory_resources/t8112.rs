@@ -352,7 +352,7 @@ mod tests {
     use super::*;
     use crate::{
         machine::{Devices, apple::AppleDevices, soc::PtdBank},
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::{amcc, interrupt::InterruptLatch},
     };
     use alloc::{boxed::Box, vec};

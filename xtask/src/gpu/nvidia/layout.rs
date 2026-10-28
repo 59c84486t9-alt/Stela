@@ -141,6 +141,10 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg_attr(
+        not(feature = "fetched-sources"),
+        ignore = "reads the sources `cargo xtask gpu fetch` checks out"
+    )]
     #[test]
     fn actual_core_and_os_hook_records_match_on_all_build_abis() {
         let compiler = tools::which("clang").unwrap();

@@ -8,10 +8,7 @@
 pub(crate) mod registered;
 
 use alloc::{format, string::String, vec::Vec};
-use stela_loader::{
-    apple_device_tree::DeviceTree,
-    boot_args::{self, BootArgs},
-};
+use stela_loader::{apple_device_tree::DeviceTree, boot_args};
 use stela_runtime::{boot_bundle::LoadedRegion, machine::Host};
 
 pub(crate) trait Ram {
@@ -98,7 +95,7 @@ impl LiveTree {
         if !ram.read(x0, &mut args) {
             return Err("loaded boot_args could not be read from guest RAM".into());
         }
-        let decoded = BootArgs::decode(&args).map_err(|e| format!("live boot_args: {e}"))?;
+        let decoded = boot_args::decode(&args).map_err(|e| format!("live boot_args: {e}"))?;
         let physical = decoded
             .device_tree
             .checked_sub(decoded.virt_base)
@@ -136,7 +133,7 @@ impl LiveTree {
     /// command line. The source factory separately checks all DT providers.
     /// Even an explicit zero requires a separately qualified override path.
     pub(crate) fn require_no_harvesting_override(&self) -> Result<(), String> {
-        let args = BootArgs::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
+        let args = boot_args::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
         if args.command_line.split_ascii_whitespace().any(|word| {
             word.split('=').next().unwrap_or("").trim_start_matches('-') == "acc-harvesting"
         }) {
@@ -190,7 +187,7 @@ impl LiveTree {
             .copy_from_slice(&length.to_le_bytes());
         if cacheless {
             let decoded =
-                BootArgs::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
+                boot_args::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
             let line = stela_loader::boot_policy::mcc::cacheless_arguments(&decoded.command_line)
                 .map_err(|e| format!("cacheless original boot arguments: {e}"))?;
             let at = boot_args::offset::COMMAND_LINE;
@@ -244,7 +241,7 @@ mod tests {
     use alloc::vec;
     use stela_loader::{
         apple_device_tree::{Node, Property},
-        boot_args::Video,
+        boot_args::{BootArgs, Video},
     };
     const BASE: u64 = 0x10000;
     const ARGS: u64 = BASE + 0x1000;
@@ -306,7 +303,7 @@ mod tests {
         allocation.extend(4096u64.to_le_bytes());
         map.set_property("DeviceTree", allocation).unwrap();
         let bytes = tree.serialize();
-        let args = BootArgs {
+        let args = boot_args::encode(&BootArgs {
             revision: boot_args::REVISION,
             version: boot_args::VERSION,
             virt_base: 0xfffffe0000000000,
@@ -320,8 +317,7 @@ mod tests {
             command_line: "-v".into(),
             boot_flags: 0,
             mem_size_actual: 0x5000,
-        }
-        .encode()
+        })
         .unwrap();
         let mut memory = Memory {
             bytes: vec![0; 0x5000],
@@ -372,9 +368,9 @@ mod tests {
             "-v\tacc-harvesting=1",
         ] {
             let (mut ram, regions, _) = fixture();
-            let mut args = BootArgs::decode(&ram.bytes[0x1000..]).unwrap();
+            let mut args = boot_args::decode(&ram.bytes[0x1000..]).unwrap();
             args.command_line = command.into();
-            let encoded = args.encode().unwrap();
+            let encoded = boot_args::encode(&args).unwrap();
             ram.bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
             let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
             assert!(live.require_no_harvesting_override().is_err(), "{command}");
@@ -382,9 +378,9 @@ mod tests {
         }
         for command in ["-v", "", "other-acc-harvesting=2", "acc-harvesting-other=2"] {
             let (mut ram, regions, _) = fixture();
-            let mut args = BootArgs::decode(&ram.bytes[0x1000..]).unwrap();
+            let mut args = boot_args::decode(&ram.bytes[0x1000..]).unwrap();
             args.command_line = command.into();
-            let encoded = args.encode().unwrap();
+            let encoded = boot_args::encode(&args).unwrap();
             ram.bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
             LiveTree::capture(&mut ram, &regions, ARGS)
                 .unwrap()
@@ -481,11 +477,11 @@ mod tests {
         let published = live.publish_cacheless(&mut ram, &tree).unwrap();
         let args = &ram.bytes[0x1000..0x1000 + boot_args::BYTES];
         assert_eq!(
-            BootArgs::decode(args).unwrap().command_line,
+            boot_args::decode(args).unwrap().command_line,
             "-v -disable_mcc"
         );
         assert_eq!(
-            BootArgs::decode(args).unwrap().device_tree_length as usize,
+            boot_args::decode(args).unwrap().device_tree_length as usize,
             published.bytes().len()
         );
         let mut expected = before;
@@ -503,9 +499,9 @@ mod tests {
     #[test]
     fn conflicting_cacheless_argument_refuses_before_tree_publication() {
         let (mut ram, regions, tree) = fixture();
-        let mut args = BootArgs::decode(&ram.bytes[0x1000..]).unwrap();
+        let mut args = boot_args::decode(&ram.bytes[0x1000..]).unwrap();
         args.command_line = "-v -disable_mcc=0".into();
-        let encoded = args.encode().unwrap();
+        let encoded = boot_args::encode(&args).unwrap();
         ram.bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
         let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
         assert!(live.publish_cacheless(&mut ram, &tree).is_err());

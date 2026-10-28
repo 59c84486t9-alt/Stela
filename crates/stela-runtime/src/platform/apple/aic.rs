@@ -344,6 +344,7 @@ enum Register {
 }
 
 impl Aic2 {
+    #[cfg(test)]
     pub fn new(config: Aic2Config) -> Result<Self, Aic2Error> {
         Self::stacked(config, 1)
     }
@@ -455,6 +456,7 @@ impl Aic2 {
     }
     /// Applies the ADT `aic-ext-intr-cfg` property as iBoot does: triples of
     /// IRQ [7:0], die [7:4] with IRQ [11:8], and TARGET (m1n1 `aic23_init`).
+    #[cfg(test)]
     pub fn apply_ext_intr_cfg(&mut self, property: &[u8]) -> Result<(), Aic2Error> {
         if !property.len().is_multiple_of(3) {
             return Err(Aic2Error::InvalidConfig(
@@ -479,6 +481,7 @@ impl Aic2 {
         Ok(())
     }
 
+    #[cfg(test)]
     fn ext_input(entry: &[u8; 3]) -> AicInput {
         AicInput::new(
             entry[1] >> 4,

@@ -1125,7 +1125,7 @@ mod tests {
         )
         .unwrap();
         let bytes = tree.serialize();
-        let args = BootArgs {
+        let args = boot_args::encode(&BootArgs {
             revision: boot_args::REVISION,
             version: boot_args::VERSION,
             virt_base: 0xfffffe0000000000,
@@ -1139,8 +1139,7 @@ mod tests {
             command_line: command.into(),
             boot_flags: 0,
             mem_size_actual: BYTES as u64,
-        }
-        .encode()
+        })
         .unwrap();
         let mut input = Input(vec![0; BYTES]);
         input.0[ARGS as usize..ARGS as usize + args.len()].copy_from_slice(&args);

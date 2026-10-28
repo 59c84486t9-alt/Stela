@@ -1,10 +1,10 @@
 //! The 26A434 call-site census: every `SVC #0x80` in the guest shared
 //! cache and in dyld, with the call number its stub loads into X16 and
-//! the stub's symbol. Generated from the original images (the
-//! `__text` of all 4,088 cached images and of `/usr/lib/dyld`); each X16
-//! is a `MOVZ`/`MOVN` immediate within the stub, and no site sets it from
-//! a register. 698 sites name 530 distinct calls. Numbers and symbol names
-//! only; no Apple bytes.
+//! the stub's symbol, from the IPSW's images (the `__text` of all
+//! 4,088 cached images and of `/usr/lib/dyld`); each X16 is a
+//! `MOVZ`/`MOVN` immediate within the stub, and no site sets it from a
+//! register. 698 sites name 530 distinct calls. Numbers and symbol names
+//! only; no Apple bytes. Regenerate with `cargo xtask census --ipsw PATH`.
 use super::{DYLD, IOKIT, LIBSYSTEM_KERNEL, Site};
 
 /// BSD system calls (X16 >= 0), by number.

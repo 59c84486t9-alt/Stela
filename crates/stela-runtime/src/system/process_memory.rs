@@ -2,45 +2,46 @@
 
 use super::{
     access::ExceptionLevel,
-    events::EventEndpoint,
-    execution::EntryBoundary,
     identification::Register,
     identification_snapshot::{Snapshot, Unsupported as IdentificationUnsupported},
     profile::BaseSpeAbsence,
     pstate::{DAIF_MASK, NZCV_MASK},
     state::{PSTATE_EL0T, PSTATE_IL_MASK, PSTATE_MODE_MASK, SystemState},
 };
+#[cfg(feature = "std")]
+use super::{events::EventEndpoint, execution::EntryBoundary};
+#[cfg(feature = "std")]
+use crate::memory::domain::MemoryExecutionLoan;
 use crate::memory::{
-    domain::{DataPolicy, MemoryExecutionLoan, MemoryThread},
+    domain::{DataPolicy, MemoryThread},
     policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
 };
 use alloc::sync::Arc;
+use stela_compiler::{GuestState, context::memory::MemoryStatus};
+#[cfg(feature = "std")]
 use stela_compiler::{
-    GuestState,
     block::ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
-    context::memory::{
-        MemoryContextView, MemoryRequirements, MemoryStatus, flags, profile_requirements,
-    },
+    context::memory::{MemoryContextView, MemoryRequirements, flags, profile_requirements},
 };
 
 pub mod extended_controls;
 mod pointer;
 mod pointer_checks;
+#[cfg(feature = "std")]
 mod shared;
 mod source;
+#[cfg(feature = "std")]
 pub(crate) use pointer::PointerMemoryAuthorization;
 pub use pointer_checks::Error as PointerChecksError;
 pub(crate) use pointer_checks::ResolvedPointerChecks;
+#[cfg(feature = "std")]
 pub(crate) use shared::SharedProcessMemoryAuthorization;
 pub use source::SourceNormalWbDomain;
 #[cfg(feature = "std")]
 mod low128;
 #[cfg(feature = "std")]
 pub(crate) use low128::Low128ProcessMemoryAuthorization;
-#[cfg(feature = "std")]
-pub use low128::PreparedLow128ProcessMemory;
 mod scalable;
-pub use scalable::ScalableExecutionError;
 
 #[cfg(feature = "std")]
 pub(crate) const SCTLR_ENIA: u64 = 1 << 31;
@@ -109,6 +110,7 @@ pub enum ProcessMemoryError {
     WrongMemoryDomain,
     MissingEventEndpoint,
     Memory(MemoryStatus),
+    #[cfg(feature = "std")]
     Low128(super::fp_access::Error),
     PointerChecks(PointerChecksError),
 }
@@ -374,6 +376,7 @@ impl FixedProcessMemoryControls {
         Ok(())
     }
 
+    #[cfg(feature = "std")]
     /// Existing entry validation separately binds exact source, execution/debug
     /// state and compiler-derived requirements. This does not prewalk accesses.
     /// The backend supplies its live endpoint; an ASID is not PE identity.
@@ -402,6 +405,7 @@ impl FixedProcessMemoryControls {
         self.finish_prepare(requirements, system, thread, endpoint, execution_loan)
     }
 
+    #[cfg(feature = "std")]
     fn acquire_source_loan(
         &self,
         boundary: &EntryBoundary,
@@ -425,6 +429,7 @@ impl FixedProcessMemoryControls {
         Ok(execution_loan)
     }
 
+    #[cfg(feature = "std")]
     fn finish_prepare<'run>(
         &'run self,
         requirements: MemoryRequirements,
@@ -523,11 +528,13 @@ impl FixedProcessMemoryControls {
     }
 }
 
+#[cfg(feature = "std")]
 const fn requires_event_endpoint(requirements: MemoryRequirements) -> bool {
     requirements.required_flags & (flags::EXCLUSIVE | flags::ATOMIC | flags::ORDERED) != 0
         && requirements.required_profile & profile_requirements::NATIVE_ACCESS != 0
 }
 
+#[cfg(feature = "std")]
 /// Checked CPU facts for the fixed EL0/LE/LSE2/A0/CPA-absent/MTE-absent
 /// Normal-WB/SCA16 data contract. Source Normal-WB attributes come only from
 /// the retained same-domain witness. Native backing, geometry and host capability
@@ -540,6 +547,7 @@ pub(crate) struct ExclusiveProcessMemoryAuthorization<'run> {
     controls: &'run FixedProcessMemoryControls,
 }
 
+#[cfg(feature = "std")]
 impl ExclusiveProcessMemoryAuthorization<'_> {
     /// Baseline exact control snapshot: this accessor does not enable a class.
     pub(crate) fn memory_controls(&self) -> MemoryControls {
@@ -547,6 +555,7 @@ impl ExclusiveProcessMemoryAuthorization<'_> {
     }
 }
 
+#[cfg(feature = "std")]
 enum ProcessMemoryAuthorization<'run> {
     Ordinary {
         system: &'run SystemState,
@@ -556,6 +565,7 @@ enum ProcessMemoryAuthorization<'run> {
     Shared(SharedProcessMemoryAuthorization<'run>),
 }
 
+#[cfg(feature = "std")]
 impl ProcessMemoryAuthorization<'_> {
     fn temporary_policy(&self) -> MemoryControls {
         match self {
@@ -566,6 +576,7 @@ impl ProcessMemoryAuthorization<'_> {
     }
 }
 
+#[cfg(feature = "std")]
 /// One synchronous checked scope. No GuestState borrow, Clone, thread accessor,
 /// policy accessor or caller-selected replacement escapes this token.
 pub struct PreparedProcessMemory<'run> {
@@ -577,6 +588,7 @@ pub struct PreparedProcessMemory<'run> {
     pointer: Option<PointerMemoryAuthorization<'run>>,
 }
 
+#[cfg(feature = "std")]
 impl PreparedProcessMemory<'_> {
     pub const fn profile_id(&self) -> &'static str {
         if self.pointer.is_some() {

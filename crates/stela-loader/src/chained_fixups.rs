@@ -2,7 +2,7 @@
 //!
 //! Layouts follow `mach-o/fixup-chains.h`; validation follows dyld's
 //! `MachOAnalyzer.cpp`, `ChainedFixups.cpp` and `MachOLoaded.cpp`.
-use super::load_plan::LoadPlan;
+use super::load_plan::{LoadPlan, SegmentPlan};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -520,16 +520,94 @@ fn decode_impl(
         "chained-fixup planning requires one preferred __TEXT base"
     );
     let preferred_base = text[0].guest.address;
-    let mut result = DecodedFixups {
+    let mut walk = Walk {
+        data,
         preferred_base,
         load_base,
-        pointer_formats: vec![],
-        rebases: vec![],
-        imports: vec![],
-        binds: vec![],
-        authenticated_rebases: vec![],
-        authenticated_binds: vec![],
+        slide: i128::from(load_base) - i128::from(preferred_base),
+        allow_authentication,
+        imports_count: 0,
+        slots: BTreeMap::new(),
+        guest_slots: BTreeMap::new(),
+        result: DecodedFixups {
+            preferred_base,
+            load_base,
+            pointer_formats: vec![],
+            rebases: vec![],
+            imports: vec![],
+            binds: vec![],
+            authenticated_rebases: vec![],
+            authenticated_binds: vec![],
+        },
     };
+    let Some(payload) = payload(data, image)? else {
+        return Ok(walk.result);
+    };
+    let header = Header::read(payload)?;
+    walk.imports_count = header.imports_count;
+    walk.result.imports = decode_imports(
+        payload,
+        header.imports,
+        header.symbols,
+        header.imports_count,
+        header.imports_format,
+        image.dependencies.len(),
+    )?;
+    let segment_count = u32_at(payload, header.starts)? as usize;
+    ensure!(
+        segment_count == image.segments.len(),
+        "unsupported chained-fixup segment count mismatch"
+    );
+    let table_size = segment_count
+        .checked_mul(4)
+        .and_then(|value| value.checked_add(4))
+        .context("chained-fixup segment table overflow")?;
+    let table_end = header
+        .starts
+        .checked_add(table_size)
+        .context("chained-fixup starts extent overflow")?;
+    ensure!(
+        table_end <= header.imports,
+        "chained-fixup segment table overlaps imports"
+    );
+    check_segments(data, image)?;
+    let mut records = Records {
+        payload,
+        starts: header.starts,
+        table_end,
+        imports: header.imports,
+        imports_count: header.imports_count,
+        preferred_base,
+        metadata: BTreeMap::new(),
+        formats: BTreeSet::new(),
+    };
+    for (segment_index, segment) in image.segments.iter().enumerate() {
+        let Some(record) = records.read(segment_index, segment)? else {
+            continue;
+        };
+        for page_index in 0..record.pages {
+            let start = u16_at(record.data, 22 + page_index * 2)?;
+            if start == 0xffff {
+                continue;
+            }
+            ensure!(
+                start & 0x8000 == 0,
+                "unsupported multi-start chain in 64-bit image"
+            );
+            ensure!(
+                u64::from(start).is_multiple_of(record.stride()),
+                "misaligned chained-fixup page start"
+            );
+            walk.page(segment_index, segment, &record, page_index, start)?;
+        }
+    }
+    walk.result.pointer_formats = records.formats.into_iter().collect();
+    Ok(walk.result)
+}
+
+/// The image's chained-fixup payload, checked against its load plan; `None`
+/// when the image has none.
+fn payload<'a>(data: &'a [u8], image: &LoadPlan) -> Result<Option<&'a [u8]>> {
     let payloads: Vec<_> = image
         .payloads
         .iter()
@@ -537,7 +615,7 @@ fn decode_impl(
         .collect();
     ensure!(payloads.len() <= 1, "duplicate chained-fixup payloads");
     let Some(source) = payloads.first() else {
-        return Ok(result);
+        return Ok(None);
     };
     ensure!(
         source.command == COMMAND && source.role == "chained_fixups",
@@ -556,52 +634,49 @@ fn decode_impl(
         source.sha256 == stela_runtime::sha256(payload),
         "chained-fixup payload differs from load plan"
     );
-    ensure!(
-        u32_at(payload, 0)? == 0,
-        "unsupported chained-fixup header version"
-    );
-    let starts = u32_at(payload, 4)? as usize;
-    let imports = u32_at(payload, 8)? as usize;
-    let symbols = u32_at(payload, 12)? as usize;
-    let imports_count = u32_at(payload, 16)?;
-    let imports_format = u32_at(payload, 20)?;
-    ensure!(
-        u32_at(payload, 24)? == 0,
-        "unsupported chained-fixup compressed/unknown symbols format"
-    );
-    ensure!(
-        starts >= 28 && starts < imports && imports <= symbols && symbols <= payload.len(),
-        "invalid chained-fixup header table offsets"
-    );
-    result.imports = decode_imports(
-        payload,
-        imports,
-        symbols,
-        imports_count,
-        imports_format,
-        image.dependencies.len(),
-    )?;
-    let segment_count = u32_at(payload, starts)? as usize;
-    ensure!(
-        segment_count == image.segments.len(),
-        "unsupported chained-fixup segment count mismatch"
-    );
-    let table_size = segment_count
-        .checked_mul(4)
-        .and_then(|value| value.checked_add(4))
-        .context("chained-fixup segment table overflow")?;
-    let table_end = starts
-        .checked_add(table_size)
-        .context("chained-fixup starts extent overflow")?;
-    ensure!(
-        table_end <= imports,
-        "chained-fixup segment table overlaps imports"
-    );
-    let slide = i128::from(load_base) - i128::from(preferred_base);
-    let mut metadata = BTreeMap::new();
-    let mut slots = BTreeMap::new();
-    let mut guest_slots = BTreeMap::new();
-    let mut formats = BTreeSet::new();
+    Ok(Some(payload))
+}
+
+/// `dyld_chained_fixups_header`: the table offsets and the import format.
+struct Header {
+    starts: usize,
+    imports: usize,
+    symbols: usize,
+    imports_count: u32,
+    imports_format: u32,
+}
+
+impl Header {
+    fn read(payload: &[u8]) -> Result<Self> {
+        ensure!(
+            u32_at(payload, 0)? == 0,
+            "unsupported chained-fixup header version"
+        );
+        let header = Self {
+            starts: u32_at(payload, 4)? as usize,
+            imports: u32_at(payload, 8)? as usize,
+            symbols: u32_at(payload, 12)? as usize,
+            imports_count: u32_at(payload, 16)?,
+            imports_format: u32_at(payload, 20)?,
+        };
+        ensure!(
+            u32_at(payload, 24)? == 0,
+            "unsupported chained-fixup compressed/unknown symbols format"
+        );
+        ensure!(
+            header.starts >= 28
+                && header.starts < header.imports
+                && header.imports <= header.symbols
+                && header.symbols <= payload.len(),
+            "invalid chained-fixup header table offsets"
+        );
+        Ok(header)
+    }
+}
+
+/// Every segment's file extent lies within its memory and the file, and no
+/// two segments share file bytes or memory.
+fn check_segments(data: &[u8], image: &LoadPlan) -> Result<()> {
     let mut segment_files = BTreeMap::new();
     let mut segment_memory = BTreeMap::new();
     for segment in &image.segments {
@@ -631,16 +706,55 @@ fn decode_impl(
             )?;
         }
     }
-    for (segment_index, segment) in image.segments.iter().enumerate() {
-        let relative = u32_at(payload, starts + 4 + segment_index * 4)? as usize;
-        if relative == 0 {
-            continue;
+    Ok(())
+}
+
+/// The `dyld_chained_starts_in_segment` records of one payload, which must
+/// not overlap and must share one pointer format.
+struct Records<'a> {
+    payload: &'a [u8],
+    starts: usize,
+    table_end: usize,
+    imports: usize,
+    imports_count: u32,
+    preferred_base: u64,
+    metadata: BTreeMap<u64, u64>,
+    formats: BTreeSet<u16>,
+}
+
+/// One segment's starts record.
+struct Record<'a> {
+    data: &'a [u8],
+    page_size: u64,
+    format: u16,
+    pages: usize,
+}
+
+impl Record<'_> {
+    /// The alignment of a chain's slots.
+    fn stride(&self) -> u64 {
+        if matches!(self.format, 1 | 9 | 12) {
+            8
+        } else {
+            4
         }
-        let record = starts
+    }
+}
+
+impl<'a> Records<'a> {
+    /// Segment `segment_index`'s record; `None` when it has no chains.
+    fn read(&mut self, segment_index: usize, segment: &SegmentPlan) -> Result<Option<Record<'a>>> {
+        let payload = self.payload;
+        let relative = u32_at(payload, self.starts + 4 + segment_index * 4)? as usize;
+        if relative == 0 {
+            return Ok(None);
+        }
+        let record = self
+            .starts
             .checked_add(relative)
             .context("chained-fixup segment record overflow")?;
         ensure!(
-            record >= table_end && record < imports,
+            record >= self.table_end && record < self.imports,
             "chained-fixup segment record overlaps table or imports"
         );
         let size = u32_at(payload, record)? as usize;
@@ -652,41 +766,41 @@ fn decode_impl(
             .checked_add(size)
             .context("chained-fixup record extent overflow")?;
         ensure!(
-            record_end <= imports,
+            record_end <= self.imports,
             "chained-fixup segment record exceeds starts region"
         );
         insert_range(
-            &mut metadata,
+            &mut self.metadata,
             record as u64,
             size as u64,
             "chained-fixup segment records",
         )?;
-        let record_data = bytes(payload, record, size)?;
-        let page_size = u64::from(u16_at(record_data, 4)?);
+        let data = bytes(payload, record, size)?;
+        let page_size = u64::from(u16_at(data, 4)?);
         ensure!(
             matches!(page_size, 4096 | 16384),
             "unsupported chained-fixup page size {page_size}"
         );
-        let format = u16_at(record_data, 6)?;
+        let format = u16_at(data, 6)?;
         ensure!(
             matches!(format, 1 | 2 | 6 | 9 | 12),
             "unsupported chained-fixup pointer format {format}"
         );
-        formats.insert(format);
+        self.formats.insert(format);
         ensure!(
-            formats.len() == 1,
+            self.formats.len() == 1,
             "chained-fixup pointer formats differ across segments"
         );
-        let offset = u64_at(record_data, 8)?;
+        let offset = u64_at(data, 8)?;
         ensure!(
-            segment.guest.address.checked_sub(preferred_base) == Some(offset),
+            segment.guest.address.checked_sub(self.preferred_base) == Some(offset),
             "chained-fixup segment offset disagrees with load command"
         );
         ensure!(
-            u32_at(record_data, 16)? == 0,
+            u32_at(data, 16)? == 0,
             "unsupported nonzero max_valid_pointer in 64-bit chained fixups"
         );
-        let pages = usize::from(u16_at(record_data, 20)?);
+        let pages = usize::from(u16_at(data, 20)?);
         ensure!(
             22 + pages * 2 <= size,
             "chained-fixup page-start table exceeds record"
@@ -701,144 +815,197 @@ fn decode_impl(
             0xffffff
         };
         ensure!(
-            imports_count == 0 || imports_count < ordinal_limit,
+            self.imports_count == 0 || self.imports_count < ordinal_limit,
             "chained-fixup imports count exceeds pointer format limit"
         );
-        let stride = if matches!(format, 1 | 9 | 12) {
-            8u64
-        } else {
-            4u64
-        };
-        for page_index in 0..pages {
-            let start = u16_at(record_data, 22 + page_index * 2)?;
-            if start == 0xffff {
-                continue;
-            }
+        Ok(Some(Record {
+            data,
+            page_size,
+            format,
+            pages,
+        }))
+    }
+}
+
+/// The chain walk over one image: the slots seen so far and the fixups
+/// decoded from them.
+struct Walk<'a> {
+    data: &'a [u8],
+    preferred_base: u64,
+    load_base: u64,
+    slide: i128,
+    allow_authentication: bool,
+    imports_count: u32,
+    slots: BTreeMap<u64, u64>,
+    guest_slots: BTreeMap<u64, u64>,
+    result: DecodedFixups,
+}
+
+impl Walk<'_> {
+    /// Decodes the chain that starts `start` bytes into page `page_index`.
+    fn page(
+        &mut self,
+        segment_index: usize,
+        segment: &SegmentPlan,
+        record: &Record<'_>,
+        page_index: usize,
+        start: u16,
+    ) -> Result<()> {
+        let page_size = record.page_size;
+        let format = record.format;
+        let page_offset = page_index as u64 * page_size;
+        let mut position = u64::from(start);
+        let mut steps = 0usize;
+        loop {
+            steps += 1;
             ensure!(
-                start & 0x8000 == 0,
-                "unsupported multi-start chain in 64-bit image"
+                steps <= (page_size / 8) as usize,
+                "chained-fixup page walk exceeds disjoint-slot bound"
             );
             ensure!(
-                u64::from(start).is_multiple_of(stride),
-                "misaligned chained-fixup page start"
+                position.checked_add(8).is_some_and(|end| end <= page_size),
+                "chained-fixup slot escapes page"
             );
-            let page_offset = page_index as u64 * page_size;
-            let mut position = u64::from(start);
-            let mut steps = 0usize;
-            loop {
-                steps += 1;
-                ensure!(
-                    steps <= (page_size / 8) as usize,
-                    "chained-fixup page walk exceeds disjoint-slot bound"
-                );
-                ensure!(
-                    position.checked_add(8).is_some_and(|end| end <= page_size),
-                    "chained-fixup slot escapes page"
-                );
-                let within = page_offset
-                    .checked_add(position)
-                    .context("chained-fixup segment position overflow")?;
-                ensure!(
-                    within
-                        .checked_add(8)
-                        .is_some_and(|end| end <= segment.file.bytes && end <= segment.guest.bytes),
-                    "chained-fixup slot is not fully file-backed in segment"
-                );
-                let file_offset = segment
-                    .file
-                    .offset
+            let within = page_offset
+                .checked_add(position)
+                .context("chained-fixup segment position overflow")?;
+            ensure!(
+                within
+                    .checked_add(8)
+                    .is_some_and(|end| end <= segment.file.bytes && end <= segment.guest.bytes),
+                "chained-fixup slot is not fully file-backed in segment"
+            );
+            let file_offset = segment
+                .file
+                .offset
+                .checked_add(within)
+                .context("chained-fixup file offset overflow")?;
+            let guest_address = moved(
+                segment
+                    .guest
+                    .address
                     .checked_add(within)
-                    .context("chained-fixup file offset overflow")?;
-                let guest_address = moved(
-                    segment
-                        .guest
-                        .address
-                        .checked_add(within)
-                        .context("chained-fixup guest slot overflow")?,
-                    slide,
-                    "slot",
-                )?;
-                insert_range(&mut slots, file_offset, 8, "chained-fixup file slots")?;
-                insert_range(
-                    &mut guest_slots,
-                    guest_address,
-                    8,
-                    "chained-fixup guest slots",
-                )?;
-                ensure!(
-                    result.rebases.len()
-                        + result.binds.len()
-                        + result.authenticated_rebases.len()
-                        + result.authenticated_binds.len()
-                        < MAX_FIXUPS,
-                    "chained-fixup pointer count exceeds planner limit"
-                );
-                let raw = u64_at(data, usize::try_from(file_offset)?)?;
-                let (pointer, next) = decode_pointer(raw, format, imports_count, preferred_base, load_base, allow_authentication)
-                    .with_context(|| format!("chained-fixup segment {segment_index} page {page_index} slot {guest_address:#x}"))?;
-                match pointer {
-                    Pointer::Rebase(value) => result.rebases.push(RebaseFixup {
-                        segment_index,
-                        file_offset,
-                        guest_address,
-                        raw,
-                        value,
-                        pointer_format: format,
-                    }),
-                    Pointer::AuthenticatedRebase {
-                        target,
-                        authentication,
-                    } => result.authenticated_rebases.push(AuthenticatedRebaseFixup {
-                        segment_index,
-                        file_offset,
-                        guest_address,
-                        raw,
-                        target,
-                        pointer_format: format,
-                        authentication,
-                    }),
-                    Pointer::AuthenticatedBind {
-                        import_index,
-                        authentication,
-                    } => result.authenticated_binds.push(AuthenticatedBindFixup {
-                        segment_index,
-                        file_offset,
-                        guest_address,
-                        raw,
-                        pointer_format: format,
-                        import_index,
-                        addend: result.imports[import_index as usize].addend,
-                        authentication,
-                    }),
-                    Pointer::Bind {
-                        import_index,
-                        inline_addend,
-                    } => {
-                        let addend = result.imports[import_index as usize].addend.checked_add(inline_addend)
-                            .with_context(|| format!("chained-fixup bind addend overflows i64 at slot {guest_address:#x}"))?;
-                        result.binds.push(BindFixup {
-                            segment_index,
-                            file_offset,
-                            guest_address,
-                            raw,
-                            pointer_format: format,
-                            import_index,
-                            inline_addend,
-                            addend,
-                        });
-                    }
-                }
-                if next == 0 {
-                    break;
-                }
-                position = position
-                    .checked_add(next)
-                    .context("chained-fixup next offset overflow")?;
+                    .context("chained-fixup guest slot overflow")?,
+                self.slide,
+                "slot",
+            )?;
+            insert_range(&mut self.slots, file_offset, 8, "chained-fixup file slots")?;
+            insert_range(
+                &mut self.guest_slots,
+                guest_address,
+                8,
+                "chained-fixup guest slots",
+            )?;
+            let result = &self.result;
+            ensure!(
+                result.rebases.len()
+                    + result.binds.len()
+                    + result.authenticated_rebases.len()
+                    + result.authenticated_binds.len()
+                    < MAX_FIXUPS,
+                "chained-fixup pointer count exceeds planner limit"
+            );
+            let raw = u64_at(self.data, usize::try_from(file_offset)?)?;
+            let (pointer, next) = decode_pointer(
+                raw,
+                format,
+                self.imports_count,
+                self.preferred_base,
+                self.load_base,
+                self.allow_authentication,
+            )
+            .with_context(|| {
+                format!(
+                    "chained-fixup segment {segment_index} page {page_index} slot {guest_address:#x}"
+                )
+            })?;
+            self.push(
+                pointer,
+                segment_index,
+                file_offset,
+                guest_address,
+                raw,
+                format,
+            )?;
+            if next == 0 {
+                return Ok(());
             }
+            position = position
+                .checked_add(next)
+                .context("chained-fixup next offset overflow")?;
         }
     }
-    result.pointer_formats = formats.into_iter().collect();
-    Ok(result)
+
+    fn push(
+        &mut self,
+        pointer: Pointer,
+        segment_index: usize,
+        file_offset: u64,
+        guest_address: u64,
+        raw: u64,
+        pointer_format: u16,
+    ) -> Result<()> {
+        let result = &mut self.result;
+        match pointer {
+            Pointer::Rebase(value) => result.rebases.push(RebaseFixup {
+                segment_index,
+                file_offset,
+                guest_address,
+                raw,
+                value,
+                pointer_format,
+            }),
+            Pointer::AuthenticatedRebase {
+                target,
+                authentication,
+            } => result.authenticated_rebases.push(AuthenticatedRebaseFixup {
+                segment_index,
+                file_offset,
+                guest_address,
+                raw,
+                target,
+                pointer_format,
+                authentication,
+            }),
+            Pointer::AuthenticatedBind {
+                import_index,
+                authentication,
+            } => result.authenticated_binds.push(AuthenticatedBindFixup {
+                segment_index,
+                file_offset,
+                guest_address,
+                raw,
+                pointer_format,
+                import_index,
+                addend: result.imports[import_index as usize].addend,
+                authentication,
+            }),
+            Pointer::Bind {
+                import_index,
+                inline_addend,
+            } => {
+                let addend = result.imports[import_index as usize]
+                    .addend
+                    .checked_add(inline_addend)
+                    .with_context(|| {
+                        format!(
+                            "chained-fixup bind addend overflows i64 at slot {guest_address:#x}"
+                        )
+                    })?;
+                result.binds.push(BindFixup {
+                    segment_index,
+                    file_offset,
+                    guest_address,
+                    raw,
+                    pointer_format,
+                    import_index,
+                    inline_addend,
+                    addend,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -27,6 +27,7 @@ use super::message::{self, Frame};
 
 pub const NOP: u8 = 0;
 pub const SET_OOL_IN_ADDRESS: u8 = 2;
+#[cfg(test)]
 pub const SET_OOL_OUT_ADDRESS: u8 = 3;
 pub const SET_OOL_IN_LENGTH: u8 = 4;
 pub const SET_OOL_OUT_LENGTH: u8 = 5;
@@ -54,7 +55,6 @@ pub const ENTROPY: u8 = 54;
 /// 0x2d681cc..0x2d681f8 consumes opcode 15 (or 21) as the acknowledgement
 /// that `_wakeSEPFromNap` waits for.
 pub const NAP_AWAKE: u8 = 15;
-pub const NAP_REQUEST: u8 = 17;
 pub const OS_ACTIVE: u8 = 21;
 
 /// The reply's status byte. `_cmsgSend` 0x2d8568c..0x2d856b8 maps 1 and 2
@@ -66,8 +66,6 @@ pub const OS_ACTIVE: u8 = 21;
 #[repr(u8)]
 pub enum Status {
     Success = 0,
-    BadArgument = 1,
-    Aborted = 2,
     DeviceError = 3,
 }
 
@@ -221,7 +219,6 @@ mod tests {
         let request = frame(9, ENTROPY, 0);
         let answer = reply(request, Status::Success, 0x1234_5678);
         assert_eq!(answer.mailbox().payload, 0x1234_5678_0036_0900);
-        assert_eq!(reply(request, Status::Aborted, 0).parameter, 2);
         assert_eq!(notification(OS_ACTIVE, 0).mailbox().payload, 0x0015_0000);
     }
 }

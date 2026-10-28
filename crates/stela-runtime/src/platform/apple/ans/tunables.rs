@@ -61,7 +61,7 @@ impl Tables {
             None => self.0.push(entry),
         }
     }
-
+    #[cfg(test)]
     pub fn recorded(&self) -> &[(u32, Identity)] {
         &self.0
     }

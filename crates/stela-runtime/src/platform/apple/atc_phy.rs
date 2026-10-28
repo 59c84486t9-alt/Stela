@@ -221,6 +221,7 @@ impl AtcPhy {
     }
     /// Electrical USB2 readiness only. A controller must separately check its
     /// reset/clamp release and the shared Type-C port generation/role/VBUS.
+    #[cfg(test)]
     pub fn usb2_ready(&self) -> bool {
         self.active() && self.electrical_usb2_ready()
     }
@@ -233,6 +234,7 @@ impl AtcPhy {
         self.word(AON) & (RESET_N | FORCE_CLAMP) == RESET_N
     }
     /// No active SuperSpeed/DP/USB4 receiver exists in this digital profile.
+    #[cfg(test)]
     pub fn superspeed_link(&self) -> bool {
         false
     }

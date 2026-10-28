@@ -1,5 +1,5 @@
 //! What Stela takes from the firmware before leaving boot services: its
-//! options and ARM image from the boot volume, RAM for the heap, stack and
+//! options and guest image from the boot volume, RAM for the heap, stack and
 //! frame arenas, the framebuffer, and the memory map its page tables cover.
 use crate::console::Framebuffer;
 use crate::paging::{LARGE_PAGE, NX, PAGE, PRESENT, Tables, WRITABLE};
@@ -23,27 +23,22 @@ use uefi::{
     },
 };
 
-/// Mount options, in the format [`crate::Options::parse`] reads.
+/// Mount options.
 const OPTIONS: &CStr16 = cstr16!("\\EFI\\stela\\stela.cfg");
-/// The original ARM bytes, loaded unchanged.
+/// A system-mode guest image without a bundle, loaded unchanged.
 const SOURCE: &CStr16 = cstr16!("\\EFI\\stela\\source.bin");
 pub(crate) const STACK_PAGES: usize = 256;
-pub const NATIVE_ARENAS: usize = 2;
-pub const RAM_ARENAS: usize = 8;
 
 pub(crate) mod entries;
 pub(crate) use pe::loaded_extent;
 use stela_boot_core::pe;
 
+/// What the host storage check runs with after boot services end.
 pub struct Handoff {
-    pub options: Vec<u8>,
-    pub source: Vec<u8>,
     pub stack_top: usize,
-    pub native: [BootArena; NATIVE_ARENAS],
-    pub ram: [BootArena; RAM_ARENAS],
     /// The firmware's framebuffer, mapped RW+NX, when it has a usable one.
     pub screen: Option<Framebuffer>,
-    /// Host storage state, when `stela.cfg` names a disk.
+    /// The disks `stela.cfg` names, until the check takes them.
     pub storage: Option<crate::storage::Prepared>,
 }
 
@@ -51,16 +46,6 @@ pub(crate) fn pages(count: usize) -> Result<usize, &'static str> {
     boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, count)
         .map(|page| page.as_ptr() as usize)
         .map_err(|_| "firmware has no memory for Stela")
-}
-
-/// Reserve `count` 2 MiB-aligned arenas, each later reached through its own
-/// empty page table.
-fn arenas<const N: usize>() -> Result<[BootArena; N], &'static str> {
-    let base = pages((N + 1) * LARGE_PAGE / PAGE)?.next_multiple_of(LARGE_PAGE);
-    Ok(core::array::from_fn(|i| BootArena {
-        base: NonNull::new((base + i * LARGE_PAGE) as *mut u8).unwrap(),
-        pages: LARGE_PAGE / PAGE,
-    }))
 }
 
 fn configured(volume: &mut FileSystem) -> bool {
@@ -134,7 +119,7 @@ pub(crate) fn options(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> 
     }
 }
 
-/// `\EFI\stela\source.bin`, the unchanged ARM bytes.
+/// `\EFI\stela\source.bin`, the unchanged guest image.
 pub(crate) fn source(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> {
     volume
         .read(SOURCE)
@@ -283,48 +268,40 @@ pub(crate) fn tables(
     Ok(tables)
 }
 
-/// Collect everything the mount needs, then leave boot services. The
-/// returned tables are not active yet.
+/// Run install mode, or collect what the host storage check needs and leave
+/// boot services. The returned tables are not active yet.
 pub fn take_over(
     options: Vec<u8>,
-    source: Option<Vec<u8>>,
     host_firmware: crate::host_firmware::Resources,
 ) -> Result<(Handoff, Tables), &'static str> {
     // Install mode stages a payload and stops here; otherwise nothing changes.
     let options = crate::payload::run(options)?;
-    let source = source.ok_or("cannot read \\EFI\\stela\\source.bin")?;
+    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+    if !crate::storage::split(text)?.2.is_empty() {
+        return Err("stela.cfg names options that need --system");
+    }
     // SAFETY: standalone mount retains identity mappings and this allocator.
     let wifi_platform = host_firmware.wifi_observations();
     let host_firmware = unsafe { host_firmware.identity_catalog() }?;
-    let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?;
-    let native = arenas::<NATIVE_ARENAS>()?;
-    let ram = arenas::<RAM_ARENAS>()?;
+    let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(
+        "stela.cfg starts with neither --system nor --host-check and names no install or \
+         storage check",
+    )?;
     let guard = pages(STACK_PAGES + 1)?;
     let image = Image::loaded()?;
     let screen = Framebuffer::from_firmware();
-    let mut tables = tables(
-        &image,
-        [0, guard],
-        &[&native[..], &ram[..]].concat(),
-        screen.as_ref(),
-    )?;
-    if let Some(storage) = &storage {
-        storage.map(&mut tables)?;
-    }
+    let mut tables = tables(&image, [0, guard], &[], screen.as_ref())?;
+    storage.map(&mut tables)?;
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; the heap,
-    // stack, arenas and tables are LOADER_DATA, which Stela keeps.
+    // stack and tables are LOADER_DATA, which Stela keeps.
     let map = unsafe { boot::exit_boot_services(None) };
     core::mem::forget(map);
     Ok((
         Handoff {
-            options,
-            source,
             stack_top: guard + (STACK_PAGES + 1) * PAGE,
-            native,
-            ram,
             screen,
-            storage,
+            storage: Some(storage),
         },
         tables,
     ))

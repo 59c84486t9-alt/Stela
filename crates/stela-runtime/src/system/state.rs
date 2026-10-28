@@ -7,7 +7,7 @@ use crate::memory::tags::{TagGenerationControls, TagGenerationState, TagRandomiz
 use stela_compiler::GuestState;
 
 mod pacm;
-pub use pacm::{PSTATE_PACM_MASK, PSTATE_PACM_SHIFT, Pacm, PacmStateFeature};
+pub use pacm::{PSTATE_PACM_MASK, Pacm, PacmStateFeature};
 pub mod higher_el;
 mod stacks;
 use super::identification_snapshot::Snapshot;
@@ -59,7 +59,6 @@ pub enum StateError {
     StackOwnership,
     StackSelectionLevel,
     UnavailableExceptionLevel(ExceptionLevel),
-    UnexpectedHigherElStorage,
     HigherEl(higher_el::InitializationError),
 }
 
@@ -266,16 +265,6 @@ impl SystemState {
         Ok(state)
     }
 
-    /// Check storage for a profile that declares EL2 and EL3 absent.
-    /// Zero-valued higher banks still count as present.
-    pub(crate) fn check_lower_el_storage(&self) -> Result<(), StateError> {
-        if self.higher_el.is_some() {
-            Err(StateError::UnexpectedHigherElStorage)
-        } else {
-            Ok(())
-        }
-    }
-
     pub fn higher_el(&self) -> Option<&HigherElState> {
         self.higher_el.as_ref()
     }
@@ -405,12 +394,6 @@ impl SystemState {
             .select(self.active_stack_bank(), stack_bank(misc), registers)?;
         self.pstate_misc = misc;
         Ok(())
-    }
-
-    /// Store an authorized DAIF value. The executing owner keeps asynchronous
-    /// arbitration and PC settlement.
-    pub(crate) fn write_daif(&mut self, value: u64) {
-        self.pstate_misc = (self.pstate_misc & !DAIF_MASK) | (value & DAIF_MASK);
     }
 
     pub const fn el1_registers(&self) -> &El1Registers {

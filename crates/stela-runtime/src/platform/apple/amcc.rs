@@ -278,8 +278,6 @@ impl Clone for Amcc {
     }
 }
 
-pub mod firmware;
-
 impl Amcc {
     /// The controller with `apertures` apertures and each group's region
     /// iBoot programmed, `[base, base + bytes)` in whole pages above the
@@ -1174,82 +1172,6 @@ mod tests {
             ..CACHE
         };
         assert!(Amcc::new(layout(), 1, NONE, Some(overlapping)).is_err());
-    }
-    #[test]
-    fn native_firmware_dsid_commands_share_the_actual_controller_and_veto_late_disabled_planes() {
-        let base = 0x200000000;
-        let mut model = Amcc::new(layout(), 1, NONE, Some(CACHE)).unwrap();
-        let handle = model.firmware_cache(&[base]).unwrap();
-        assert!(
-            handle
-                .command_ranges()
-                .contains(&(base + CACHE.broadcast + 0x13ffc, 0x400))
-        );
-        let mut latch = InterruptLatch::new();
-        let mut access = Access::new(0, 0, &mut latch);
-        let register = 0x13ffc + 255 * 4;
-        handle
-            .invalidate(base + CACHE.broadcast + register)
-            .unwrap();
-        assert!(
-            model
-                .planes
-                .borrow()
-                .iter()
-                .all(|plane| plane.dsid_completions == [(255, 1)])
-        );
-        assert!(
-            model
-                .read(CACHE.broadcast + register, Width::Word, &mut access)
-                .is_err()
-        );
-        for value in [0, 2, u64::MAX] {
-            assert!(
-                model
-                    .write(CACHE.broadcast + register, Width::Word, value, &mut access)
-                    .is_err()
-            );
-        }
-        assert!(handle.check(base + CACHE.broadcast + 0x143fc).is_err());
-        assert!(handle.check(base + CACHE.broadcast + 0x13ffe).is_err());
-        assert!(handle.check(base + CACHE.broadcast + 0x13ff8).is_err());
-        assert!(handle.check(base + layout().aperture_bytes).is_err());
-        assert!(model.firmware_cache(&[]).is_err());
-        assert!(model.firmware_cache(&[u64::MAX - 1]).is_err());
-        model
-            .write(
-                2 * layout().stride + DRAM_ACCESS,
-                Width::Word,
-                0,
-                &mut access,
-            )
-            .unwrap();
-        assert_eq!(
-            handle.check_ram_access(),
-            Err("MCC resource RAM after DRAM access disable")
-        );
-        let before = model.planes.borrow().clone();
-        assert!(
-            handle
-                .invalidate(base + CACHE.broadcast + register)
-                .is_err()
-        );
-        assert!(
-            model
-                .write(CACHE.broadcast + register, Width::Word, 1, &mut access)
-                .is_err()
-        );
-        assert_eq!(*model.planes.borrow(), before);
-        // A targeted plane is independent; cloning a model is a deep snapshot,
-        // while the original handle continues to observe its actual owner.
-        handle.invalidate(base + register).unwrap();
-        assert_eq!(model.planes.borrow()[0].dsid_completions, [(255, 2)]);
-        let clone = model.clone();
-        handle.invalidate(base + register).unwrap();
-        assert_eq!(clone.planes.borrow()[0].dsid_completions, [(255, 2)]);
-        assert_eq!(model.planes.borrow()[0].dsid_completions, [(255, 3)]);
-        let unknown = Amcc::new(layout(), 1, NONE, None).unwrap();
-        assert!(unknown.firmware_cache(&[base]).is_err());
     }
     #[test]
     fn native_cache_geometry_refuses_wrapped_or_zero_plane_spans_before_allocating() {

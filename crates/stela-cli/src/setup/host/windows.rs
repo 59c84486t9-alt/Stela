@@ -5,7 +5,7 @@
 //! are read and written through the physical drive, a sector at a time as
 //! Windows requires, and a USB is erased by writing setup's own layout to
 //! its whole disk, with its volumes locked and dismounted.
-use super::{Cpu, Disk, FileSystem, Host, Partition, PartitionInfo, Volume};
+use super::{Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume};
 use anyhow::{Context, Result, ensure};
 use std::{
     ffi::OsStr,
@@ -27,7 +27,7 @@ use windows_sys::{
             GENERIC_WRITE, INVALID_HANDLE_VALUE,
         },
         Storage::FileSystem::{
-            BusType1394, BusTypeFileBackedVirtual, BusTypeMmc, BusTypeNvme, BusTypeSd, BusTypeUsb,
+            BusType1394, BusTypeFileBackedVirtual, BusTypeNvme, BusTypeUsb,
             DeleteVolumeMountPointW, FILE_SHARE_READ, FILE_SHARE_WRITE, FindFirstVolumeW,
             FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetLogicalDrives,
             GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
@@ -183,6 +183,28 @@ struct Descriptor {
     bus: i32,
     name: String,
     serial: Option<String>,
+}
+
+impl Descriptor {
+    /// What decides whether setup may erase the disk. A virtual disk (VHD)
+    /// stands in for a USB, as a disk image does on a Mac; SD and MMC
+    /// (`BusTypeSd`, `BusTypeMmc`) are other buses, removable by their
+    /// media alone, as eMMC reports the same buses.
+    fn facts(&self) -> DiskFacts {
+        DiskFacts {
+            bus: if self.bus == BusTypeUsb {
+                Bus::Usb
+            } else if self.bus == BusType1394 {
+                Bus::FireWire
+            } else if self.bus == BusTypeFileBackedVirtual {
+                Bus::Image
+            } else {
+                Bus::Other
+            },
+            removable_media: self.removable,
+            external: false,
+        }
+    }
 }
 
 fn descriptor(drive: &File) -> io::Result<Descriptor> {
@@ -558,22 +580,11 @@ impl Host for System {
                 continue;
             };
             let entries = layout(&drive).unwrap_or_default();
-            // A virtual disk (VHD) stands in for a USB, as a disk image does
-            // on a Mac.
-            let removable = descriptor.removable
-                || [
-                    BusTypeUsb,
-                    BusTypeSd,
-                    BusTypeMmc,
-                    BusType1394,
-                    BusTypeFileBackedVirtual,
-                ]
-                .contains(&descriptor.bus);
             disks.push(Disk {
                 identifier: format!("disk{number}"),
-                name: descriptor.name,
                 bytes: geometry(&drive).map_or(0, |(bytes, _)| bytes),
-                internal: !removable,
+                removal: descriptor.facts().removal(),
+                name: descriptor.name,
                 system: system == Some(number),
                 partitions: entries
                     .into_iter()

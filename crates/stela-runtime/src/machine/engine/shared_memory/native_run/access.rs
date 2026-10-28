@@ -364,7 +364,7 @@ mod tests {
                         .unwrap()
                         .bytes()
                 } else {
-                    stela_compiler::block::el1_platform::ScalarLoad::from_instruction(&instruction)
+                    stela_compiler::block::scalar::ScalarLoad::from_instruction(&instruction)
                         .unwrap()
                         .bytes()
                 }),

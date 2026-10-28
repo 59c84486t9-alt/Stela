@@ -114,7 +114,7 @@ enum Role {
     DcsGating(u8),
     Dram(u8),
     Drain,
-    QuotaUse(u8),
+    QuotaUse,
     Persistence(u8),
     PersistenceAuxiliary(u8),
     DsidCommand(u8),
@@ -482,7 +482,7 @@ impl MmioDevice for View {
             Role::Broadcast
             | Role::Status
             | Role::Drain
-            | Role::QuotaUse(_)
+            | Role::QuotaUse
             | Role::Persistence(_)
             | Role::PersistenceAuxiliary(_)
             | Role::DsidCommand(_) => unreachable!(),

@@ -281,6 +281,11 @@ impl Plan {
                     "no pinned recipe for the exact observed host firmware target",
                 ));
             }
+            if target.driver == "wifi-regulatory" && select_regulatory(request).is_none() {
+                return Err(fail(
+                    "--wifi needs wireless-regdb's regulatory.db, and this build pins no release of it",
+                ));
+            }
             let recipe = match target.driver.as_str() {
                 "realtek" => select_realtek(request),
                 "intel-bluetooth-usb-rsa" => select_intel_rsa(request),

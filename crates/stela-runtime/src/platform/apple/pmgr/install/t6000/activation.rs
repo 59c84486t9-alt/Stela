@@ -9,7 +9,7 @@ use super::super::{Error, History, Installation, Step, write};
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
-pub const PRE_ACTIVATION_BASE: u64 = 0x2922dc21c;
+pub use super::super::super::t6000::PRE_ACTIVATION_BASE;
 
 /// T6000 first-die effects only. The caller supplies actual stage/kind inputs
 /// and exclusively owns the controller across this retained transaction.

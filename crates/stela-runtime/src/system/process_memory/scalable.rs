@@ -874,7 +874,7 @@ mod tests {
                 leaf::{PreparedScalableLeaf, ScalableLeafExit},
             },
             system::{
-                process_memory::{FixedProcessMemoryControls, ScalableExecutionError},
+                process_memory::{FixedProcessMemoryControls, scalable::ScalableExecutionError},
                 scalable_controls::ScalableControlOwner,
                 state::SystemState,
             },

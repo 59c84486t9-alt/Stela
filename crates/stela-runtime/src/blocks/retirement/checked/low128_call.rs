@@ -5,7 +5,7 @@ use crate::{
     memory::{domain::MemoryThread, policy::MemoryControls},
     system::{
         events::EventEndpoint,
-        fp_access::{self, NoSme, StreamingState},
+        fp_access::{self, NoSme},
         process_memory::{FixedProcessMemoryControls, ProcessMemoryError},
         scalable_controls::fp::FpControlOwner,
         state::SystemState,
@@ -37,7 +37,7 @@ pub(super) fn qualify(
         ids,
         fp,
         system,
-        StreamingState::Absent(absent),
+        absent,
         registers,
         bound.entry.entry(),
         |mut access| {
@@ -105,7 +105,7 @@ pub(super) fn call(
         ids,
         fp,
         system,
-        StreamingState::Absent(absent),
+        absent,
         registers,
         bound.entry.entry(),
         |mut access| {

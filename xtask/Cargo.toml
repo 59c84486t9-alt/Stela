@@ -21,6 +21,7 @@ stela-runtime.workspace = true
 smoltcp = { version = "0.14", default-features = false, features = ["medium-ethernet", "proto-ipv4"] }
 object = { version = "0.37", features = ["read"] }
 plist = "1"
+quick-xml = "0.42"
 sha1 = "0.10"
 sha2.workspace = true
 zip = { version = "4", default-features = false, features = ["deflate"] }
@@ -29,9 +30,13 @@ xz2 = { version = "0.1.7", features = ["static"] }
 [build-dependencies]
 object = { version = "0.37", features = ["read"] }
 
+[features]
+# The tests that read the sources `cargo xtask gpu fetch` checks out: the
+# boot IRQ resource decoder against the drivers' ACPI types (Linux ACPICA)
+# and the NVIDIA hook layouts; `cargo xtask check` turns it on.
+fetched-sources = ["stela-drivers/native-acpi"]
+
 [dev-dependencies]
-# Hosted tests exercise the boot IRQ resource decoder against the actual ACPI types.
-stela-drivers = { workspace = true, features = ["native-acpi"] }
 # Hosted tests of boot modules that use its topology and capture record.
 stela-boot-core.workspace = true
 

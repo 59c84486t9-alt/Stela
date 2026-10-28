@@ -39,8 +39,9 @@ pub mod rpc;
 pub mod swap;
 
 use super::asc::{Firmware, Message, TransitionRequest};
-use super::rtkit::{Endpoint, Management, RtKit};
-use super::scanout::{Mode, Scanout, Surface};
+use super::rtkit::{Endpoint, RtKit};
+use super::scanout::{Scanout, Surface};
+use crate::builds::Build;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -56,6 +57,8 @@ use core::cell::RefCell;
 pub const SYSTEM_ENDPOINT: u8 = 0x20;
 pub const DPAV_ENDPOINT: u8 = 0x24;
 pub const DPTX_ENDPOINT: u8 = 0x2a;
+#[cfg(test)]
+use super::scanout::Mode;
 pub use link::IOMFB_ENDPOINT;
 
 /// Identity of the one backed external output. The unnumbered DCPEXT and
@@ -310,9 +313,15 @@ impl Coprocessor {
     /// A coprocessor presenting to `scanout`. `window` is `dart-dcpext`'s
     /// `vm-base` when the node is `truncate-dvas`: `AppleA7IOP::_restrictDVA`
     /// (kernel file 0x1bb1424) then hands the coprocessor only a DVA's low
-    /// 32 bits, which lie in that window.
-    pub fn new(scanout: Box<dyn Scanout>, window: Option<u64>) -> Result<Self, &'static str> {
-        Self::for_external(scanout, window, ExternalIdentity::Unnumbered)
+    /// 32 bits, which lie in that window. `build` is the booted macOS build,
+    /// whose link interface version the coprocessor speaks.
+    #[cfg(test)]
+    pub fn new(
+        scanout: Box<dyn Scanout>,
+        window: Option<u64>,
+        build: &Build,
+    ) -> Result<Self, &'static str> {
+        Self::for_external(scanout, window, ExternalIdentity::Unnumbered, build)
     }
 
     /// Bind a real scanout to one external pipe. Placement supplies the
@@ -322,18 +331,24 @@ impl Coprocessor {
         scanout: Box<dyn Scanout>,
         window: Option<u64>,
         identity: ExternalIdentity,
+        build: &Build,
     ) -> Result<Self, &'static str> {
-        Self::with_identity(iomfb::Methods::new(scanout), window, identity)
+        Self::with_identity(iomfb::Methods::new(scanout), window, identity, build)
     }
 
     fn with_identity(
         methods: iomfb::Methods,
         window: Option<u64>,
         identity: ExternalIdentity,
+        build: &Build,
     ) -> Result<Self, &'static str> {
         let descriptor = avipc::descriptor(identity.interface_name()?);
         let display = methods.display_state();
-        let link = Rc::new(RefCell::new(rpc::Link::new(methods, window)));
+        let link = Rc::new(RefCell::new(rpc::Link::new(
+            methods,
+            window,
+            build.dcp_link_version,
+        )));
         let afk: Vec<_> = AFK_ENDPOINTS
             .iter()
             .map(|&(endpoint, name)| Rc::new(RefCell::new(afk::Afk::new(endpoint, name, window))))
@@ -354,7 +369,7 @@ impl Coprocessor {
             })
             .collect();
         endpoints.push((IOMFB_ENDPOINT, Box::new(Iomfb(link.clone()))));
-        let rtkit = RtKit::new(endpoints, Management::Ordinary)?;
+        let rtkit = RtKit::new(endpoints, build.rtkit_version)?;
         Ok(Self { rtkit, link, afk })
     }
 
@@ -365,6 +380,7 @@ impl Coprocessor {
     }
 
     /// The fixed mode the one connected display runs.
+    #[cfg(test)]
     pub fn mode(&self) -> Mode {
         self.link.borrow().service().mode()
     }
@@ -488,6 +504,7 @@ impl Firmware for Coprocessor {
 mod tests {
     use super::super::scanout::PixelFormat;
     use super::*;
+    use crate::builds::DEFAULT;
     use crate::platform::dma::{DmaError, tests::Ram};
 
     const RAM: u64 = 0x8_0000_0000;
@@ -608,7 +625,7 @@ mod tests {
     #[test]
     fn physical_reset_refuses_accepted_work_then_releases_only_an_idle_session() {
         let (scanout, presented) = screen(1920, 1080);
-        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
         let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
         let mut endpoint = up(&mut coprocessor, &mut ram);
         let heap = coprocessor.link.borrow().heap();
@@ -639,7 +656,7 @@ mod tests {
     #[test]
     fn the_link_comes_up_and_answers_through_the_coprocessors_dart() {
         let (scanout, _) = screen(1920, 1080);
-        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
         let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
         let mut endpoint = up(&mut coprocessor, &mut ram);
         let a451 = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
@@ -671,7 +688,7 @@ mod tests {
     fn iop_sleep_to_wake_resumes_the_retained_rpc_region_without_a_hello() {
         for sleep in [0x201, 0x202] {
             let (scanout, _) = screen(1920, 1080);
-            let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+            let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
             let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
             let mut endpoint = up(&mut coprocessor, &mut ram);
             // Bring a separate AFK transport up before the display sleeps.
@@ -772,7 +789,7 @@ mod tests {
         }
 
         let (scanout, _) = screen(1920, 1080);
-        let coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
         let mut asc = Asc::booted(Box::new(coprocessor), Lines::default()).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
@@ -856,7 +873,7 @@ mod tests {
         // coprocessor answers by nesting D120 start_hardware_boot, inside
         // which the AP nests A451; the AP answers D120 so A401 returns.
         let (scanout, _) = screen(1920, 1080);
-        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
         let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
         let mut endpoint = up(&mut coprocessor, &mut ram);
         let a401 = call(&mut endpoint, &mut ram, 0, b"A401", &[], 4, true);
@@ -1026,7 +1043,8 @@ mod tests {
 
     fn check_published_controller(identity: ExternalIdentity, name: &str) {
         let (scanout, _) = screen(4, 2);
-        let mut coprocessor = Coprocessor::for_external(scanout, Some(RAM), identity).unwrap();
+        let mut coprocessor =
+            Coprocessor::for_external(scanout, Some(RAM), identity, DEFAULT).unwrap();
         let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
         let published = controller_start(&mut coprocessor, &mut ram);
         assert_eq!(&published[8..11], &[0x11, 0, 1]);
@@ -1110,14 +1128,15 @@ mod tests {
     fn an_unrepresentable_external_identity_refuses_before_publication() {
         let (scanout, _) = screen(4, 2);
         assert!(matches!(
-            Coprocessor::for_external(scanout, None, ExternalIdentity::Numbered(10)),
+            Coprocessor::for_external(scanout, None, ExternalIdentity::Numbered(10), DEFAULT),
             Err("DCP external pipe ordinal exceeds the native single-character identity")
         ));
     }
 
     fn check_presented_swap(identity: ExternalIdentity) {
         let (scanout, presented) = screen(4, 2);
-        let mut coprocessor = Coprocessor::for_external(scanout, Some(RAM), identity).unwrap();
+        let mut coprocessor =
+            Coprocessor::for_external(scanout, Some(RAM), identity, DEFAULT).unwrap();
         let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
         controller_start(&mut coprocessor, &mut ram);
         let mut endpoint = up(&mut coprocessor, &mut ram);
@@ -1246,7 +1265,7 @@ mod tests {
     #[test]
     fn the_afk_endpoints_come_up_through_the_coprocessors_dart() {
         let (scanout, _) = screen(4, 2);
-        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
         let mut ram = Ram::new(RAM, 0x8000);
         let shared = coprocessor.afk[0].clone();
         let mut endpoint = AfkEndpoint(shared);

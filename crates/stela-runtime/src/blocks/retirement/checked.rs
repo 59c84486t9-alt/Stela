@@ -5,29 +5,16 @@
 use alloc::{string::String, string::ToString, vec::Vec};
 mod call;
 mod darwin_services;
-mod el1_context;
-mod el1_registers;
-pub(crate) mod el1_system;
 mod entry_controls;
-mod halted;
 #[cfg(feature = "std")]
 mod low128_call;
-mod m0;
 #[cfg(feature = "std")]
 mod pauth_lr;
 #[cfg(feature = "std")]
 mod pauth_policy;
-mod privileged;
-mod privileged_debug;
 mod provider;
-pub(crate) mod system_effects;
 pub(crate) use call::CallRecord;
-pub(crate) use halted::{OwnedDebugOutcome, run_halted_owned};
-pub(crate) use privileged::PrivilegedOwner;
-pub(crate) mod software_el1;
-pub(crate) mod software_privileged;
 mod source;
-mod wait;
 
 use super::{ConsumerKey, RetainedResources, SystemExecutionLoan, accept_retained_loan};
 use crate::{
@@ -35,32 +22,24 @@ use crate::{
     memory::domain::MemoryExecutionLoan,
 };
 pub(crate) use entry_controls::ProcessEntryControls;
-pub(crate) use m0::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
 #[cfg(feature = "std")]
 pub(crate) use provider::CheckedProcessOwner;
+pub(crate) use source::CheckedFacts;
 use source::{BoundSource, ReturnedTerminal};
-pub(crate) use source::{CheckedFacts, RetiredInstructionSource};
-use stela_compiler::{
-    GuestAddress,
-    block::{BlockProfile, CheckedMemoryProfile},
-};
+use stela_compiler::GuestAddress;
 
 pub(crate) struct OwnedRunRequest {
     pub stop_pc: Option<GuestAddress>,
     pub block_budget: usize,
 }
 
-// Stop details are read through Debug, in run reports.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "run reports read the stop details through Debug")]
 #[derive(Debug)]
 pub(crate) enum OwnedStop {
     StopAddress,
     BudgetExhausted,
     EntryDeclined(String),
     HelperRefused(String),
-    Halted {
-        instruction_pc: GuestAddress,
-    },
     #[cfg(feature = "std")]
     PointerAuthenticationFault {
         instruction: stela_compiler::block::PointerAuthentication,
@@ -87,14 +66,6 @@ pub(crate) struct OwnedRunOutcome {
     pub accounting: RunOutcome,
     pub actual_pc: GuestAddress,
     pub last_native_observation: Option<NativeObservation>,
-    pub last_m0_observation: Option<m0::M0Observation>,
-    pub last_m0_write_observation: Option<m0::M0WriteObservation>,
-    pub last_m0_pair_read_observation: Option<m0::M0PairReadObservation>,
-    pub last_el1_register_observation: Option<el1_registers::RegisterObservation>,
-    pub last_el1_system_observation: Option<el1_system::SystemObservation>,
-    pub last_system_effect_observation: Option<system_effects::SystemEffectObservation>,
-    pub last_el1_context_observation: Option<el1_context::ContextObservation>,
-    pub last_interrupt_observation: Option<el1_context::interrupt::InterruptObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
     pub service_events: darwin_services::TrapServiceEvents,
 }
@@ -115,8 +86,7 @@ pub(crate) struct SettledPrefix {
 }
 
 #[derive(Clone, Copy, Debug)]
-// The fault address is read through Debug, in run reports.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "run reports read the fault through Debug")]
 pub(crate) struct OwnedMemoryFault {
     pub access: stela_compiler::context::memory::FaultAccess,
     pub status: stela_compiler::context::memory::MemoryStatus,
@@ -157,14 +127,6 @@ impl BlockRuntime {
         let mut pe = accept_retained_loan(loan);
         let mut accounting = empty_accounting();
         let mut last_native_observation = None;
-        let mut last_m0_observation = None;
-        let mut last_m0_write_observation = None;
-        let mut last_m0_pair_read_observation = None;
-        let mut last_el1_register_observation = None;
-        let mut last_el1_system_observation = None;
-        let mut last_system_effect_observation = None;
-        let mut last_el1_context_observation = None;
-        let mut last_interrupt_observation = None;
         let mut settled_prefixes = Vec::new();
         let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
@@ -206,13 +168,9 @@ impl BlockRuntime {
                 Ok(bound) => bound,
                 Err(error) => break OwnedStop::EntryDeclined(error.to_string()),
             };
-            if let Err(error) = pe
-                .backend
-                .qualify_debug_lifecycle(pe.debug.as_ref(), pe.system)
-                .and_then(|()| {
-                    pe.backend
-                        .qualify(&bound, pe.system, &mut pe.thread.registers, &outer)
-                })
+            if let Err(error) =
+                pe.backend
+                    .qualify(&bound, pe.system, &mut pe.thread.registers, &outer)
             {
                 break OwnedStop::EntryDeclined(error.to_string());
             }
@@ -220,221 +178,12 @@ impl BlockRuntime {
                 Ok(attempt) => attempt,
                 Err(()) => break OwnedStop::Indeterminate("begin-native authority failed".into()),
             };
-            let mut active = Active {
+            let active = Active {
                 pe: &mut pe,
                 outer: Some(outer),
-                source_pin: None,
                 attempt,
                 closed: false,
             };
-            if self.profile == BlockProfile::El1PlatformV1
-                && matches!(bound.el1_platform_intent(),
-                    Ok(stela_compiler::block::el1_platform::Intent::System(instruction))
-                        if instruction.is_el1_ram_completion())
-            {
-                match active.execute_system_effects(
-                    &bound,
-                    &mut accounting,
-                    &mut last_system_effect_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(None) => continue,
-                    Ok(Some(stop)) => break stop,
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
-            if self.profile == BlockProfile::El1PlatformV1
-                && matches!(bound.el1_platform_intent(),
-                    Ok(stela_compiler::block::el1_platform::Intent::System(instruction))
-                        if instruction.is_el1_context_operation())
-            {
-                match active.execute_el1_context(
-                    self,
-                    &mut accounting,
-                    &mut last_el1_context_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(el1_system::SystemStep::Retired) => continue,
-                    Ok(el1_system::SystemStep::Refused(stop)) => break stop,
-                    Ok(el1_system::SystemStep::InterruptBoundary(boundary)) => {
-                        match active.execute_interrupt_boundary(
-                            self,
-                            boundary,
-                            &mut accounting,
-                            &mut last_interrupt_observation,
-                        ) {
-                            Ok(()) => continue,
-                            Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                        }
-                    }
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
-            if self.profile == BlockProfile::El1PlatformV1
-                && matches!(
-                    bound.el1_platform_intent(),
-                    Ok(stela_compiler::block::el1_platform::Intent::System(_))
-                )
-            {
-                match active.execute_el1_system(
-                    &bound,
-                    &mut accounting,
-                    &mut last_el1_system_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(el1_system::SystemStep::Retired) => continue,
-                    Ok(el1_system::SystemStep::Refused(stop)) => break stop,
-                    Ok(el1_system::SystemStep::InterruptBoundary(boundary)) => {
-                        // The runtime's physical source pin outlives this borrow, and the next
-                        // instruction is not fetched first.
-                        let boundary = match boundary.bind_retired_source(bound) {
-                            Ok(boundary) => boundary,
-                            Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                        };
-                        match active.execute_interrupt_boundary(
-                            self,
-                            boundary,
-                            &mut accounting,
-                            &mut last_interrupt_observation,
-                        ) {
-                            Ok(()) => continue,
-                            Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                        }
-                    }
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
-            if self.profile == BlockProfile::El1PlatformV1
-                && matches!(
-                    bound.el1_platform_intent(),
-                    Ok(stela_compiler::block::el1_platform::Intent::Write64Pair(_)
-                        | stela_compiler::block::el1_platform::Intent::ScalarStore(_))
-                )
-            {
-                match active.execute_m0_write(
-                    &bound,
-                    &mut accounting,
-                    &mut last_m0_write_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(m0::M0Step::Committed) => {
-                        // The write block has returned and released its
-                        // borrows; now drop only the snapshots made stale by
-                        // its source writes.
-                        if last_m0_write_observation
-                            .as_ref()
-                            .is_some_and(m0::M0WriteObservation::modified_instruction_ram)
-                        {
-                            self.retire_mutated_translation_sources();
-                        }
-                        continue;
-                    }
-                    Ok(m0::M0Step::SourceResourcesBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 write original resources unavailable".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::SourceControlBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 write source/control qualification blocked".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::PreparationBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 write no-effect preparation blocked".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::Indeterminate(detail)) => {
-                        break OwnedStop::Indeterminate(detail);
-                    }
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
-            if self.profile == BlockProfile::El1PlatformV1
-                && matches!(
-                    bound.el1_platform_intent(),
-                    Ok(stela_compiler::block::el1_platform::Intent::Read64Pair(_))
-                )
-            {
-                match active.execute_m0_read64_pair(
-                    &bound,
-                    &mut accounting,
-                    &mut last_m0_pair_read_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(m0::M0Step::Committed) => continue,
-                    Ok(m0::M0Step::SourceResourcesBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 pair read original resources unavailable".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::SourceControlBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 pair read source/control qualification blocked".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::PreparationBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 pair read no-effect preparation blocked".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::Indeterminate(detail)) => {
-                        break OwnedStop::Indeterminate(detail);
-                    }
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
-            if matches!(
-                self.profile,
-                BlockProfile::El1DirectBranchV1
-                    | BlockProfile::El1M0IntegerV1
-                    | BlockProfile::El1PlatformV1
-            ) && bound.el1_register_intent().is_ok()
-            {
-                match active.execute_el1_registers(
-                    &bound,
-                    &mut accounting,
-                    &mut last_el1_register_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(()) => continue,
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
-            // The source profile selects the consumer; the M0 backend still
-            // lends its own resources and checks.
-            if matches!(
-                self.profile,
-                BlockProfile::El1M0IntegerV1 | BlockProfile::El1PlatformV1
-            ) || self.profile
-                == BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
-            {
-                match active.execute_m0_scalar_load(
-                    &bound,
-                    &mut accounting,
-                    &mut last_m0_observation,
-                    &mut settled_prefixes,
-                ) {
-                    Ok(m0::M0Step::Committed) => continue,
-                    Ok(m0::M0Step::SourceResourcesBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 original resource loan unavailable".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::SourceControlBlocked) => {
-                        break OwnedStop::Indeterminate(
-                            "M0 source/control fault remains blocked".into(),
-                        );
-                    }
-                    Ok(m0::M0Step::PreparationBlocked) => {
-                        break OwnedStop::Indeterminate("M0 no-read preparation failed".into());
-                    }
-                    Ok(m0::M0Step::Indeterminate(detail)) => {
-                        break OwnedStop::Indeterminate(detail);
-                    }
-                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
-                }
-            }
             match active.execute(
                 &bound,
                 &mut accounting,
@@ -448,9 +197,6 @@ impl BlockRuntime {
             }
         };
         accounting.reason = match &stop {
-            OwnedStop::Halted { instruction_pc } => StopReason::Halted {
-                instruction_pc: *instruction_pc,
-            },
             OwnedStop::StopAddress => StopReason::StopAddress,
             OwnedStop::BudgetExhausted => StopReason::BudgetExhausted,
             #[cfg(feature = "std")]
@@ -479,14 +225,6 @@ impl BlockRuntime {
             accounting,
             actual_pc: pe.thread.pc,
             last_native_observation,
-            last_m0_observation,
-            last_m0_write_observation,
-            last_m0_pair_read_observation,
-            last_el1_register_observation,
-            last_el1_system_observation,
-            last_system_effect_observation,
-            last_el1_context_observation,
-            last_interrupt_observation,
             settled_prefixes,
             service_events,
         }
@@ -497,8 +235,6 @@ impl BlockRuntime {
 struct Active<'active, 'run, B: provider::Owner> {
     pe: &'active mut RetainedResources<'run, B>,
     outer: Option<MemoryExecutionLoan>,
-    // The native source pin, moved here once; Drop poisons the PE before release.
-    source_pin: Option<crate::memory::domain::physical::BoundPhysicalInstruction>,
     attempt: u64,
     closed: bool,
 }
@@ -594,8 +330,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             .start_native_retirement(&ConsumerKey(()), self.attempt)
                             .map_err(|()| anyhow::anyhow!("native retirement authority failed"))?;
                         self.pe.thread.pc = continuation;
-                        // Actual producer registry/control/domain checks run
-                        // after the store. No no-op callback or saved bool.
+                        // Control and domain checks run after the store.
                         self.pe.backend.post_retirement(
                             bound,
                             self.pe.system,
@@ -754,103 +489,29 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         }
                     }
                     ReturnedTerminal::System(boundary) => {
+                        // No checked backend owns System effects: the
+                        // instruction refuses and leaves PC at its source.
                         self.pe.thread.pc = boundary.instruction().instruction_pc;
                         self.pe
                             .authority
                             .enter_system(&ConsumerKey(()), self.attempt)
                             .map_err(|()| anyhow::anyhow!("System entry authority failed"))?;
-                        let outcome = self.pe.backend.complete_system(
+                        self.pe.backend.qualify(
                             bound,
-                            &boundary,
                             self.pe.system,
                             &mut self.pe.thread.registers,
-                            self.pe.debug.as_mut(),
                             self.outer
                                 .as_ref()
                                 .ok_or_else(|| anyhow::anyhow!("System outer unavailable"))?,
-                        );
-                        match outcome {
-                            privileged::SystemOutcome::NoEffect(error) => {
-                                self.pe.backend.qualify_debug_lifecycle(
-                                    self.pe.debug.as_ref(),
-                                    self.pe.system,
-                                )?;
-                                self.pe.backend.qualify(
-                                    bound,
-                                    self.pe.system,
-                                    &mut self.pe.thread.registers,
-                                    self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("System outer unavailable")
-                                    })?,
-                                )?;
-                                self.pe
-                                    .authority
-                                    .finish_refusal(&ConsumerKey(()), self.attempt)
-                                    .map_err(|()| {
-                                        anyhow::anyhow!("System refusal authority failed")
-                                    })?;
-                                self.closed = true;
-                                Ok(Some(OwnedStop::HelperRefused(error.to_string())))
-                            }
-                            privileged::SystemOutcome::Indeterminate { committed, error } => Err(
-                                anyhow::anyhow!("System effects through {committed:?}: {error}"),
-                            ),
-                            privileged::SystemOutcome::Entry { target } => {
-                                self.pe
-                                    .authority
-                                    .start_retirement(&ConsumerKey(()), self.attempt)
-                                    .map_err(|()| {
-                                        anyhow::anyhow!("System retirement authority failed")
-                                    })?;
-                                self.pe.thread.pc = target;
-                                let target_source = BoundSource::new(bound.runtime, target)?;
-                                self.pe.backend.qualify(
-                                    &target_source,
-                                    self.pe.system,
-                                    &mut self.pe.thread.registers,
-                                    self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("target outer unavailable")
-                                    })?,
-                                )?;
-                                self.pe.backend.post_retirement(
-                                    bound,
-                                    self.pe.system,
-                                    &mut self.pe.thread.registers,
-                                    self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("System outer unavailable")
-                                    })?,
-                                )?;
-                                self.pe.backend.qualify_debug_lifecycle(
-                                    self.pe.debug.as_ref(),
-                                    self.pe.system,
-                                )?;
-                                self.finish_retirement(false)?;
-                                Ok(None)
-                            }
-                            privileged::SystemOutcome::Halted { source_pc } => {
-                                anyhow::ensure!(
-                                    self.pe.thread.pc == source_pc,
-                                    "Halt source PC changed"
-                                );
-                                let debug =
-                                    self.pe.debug.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("Halt lifecycle unavailable")
-                                    })?;
-                                debug
-                                    .qualify_halted_boundary()
-                                    .map_err(|e| anyhow::anyhow!("Halt gate: {e:?}"))?;
-                                // The instruction PC stays the restart point
-                                // and the PE becomes halted.
-                                self.pe
-                                    .authority
-                                    .finish_halt(&ConsumerKey(()), self.attempt)
-                                    .map_err(|()| anyhow::anyhow!("Halt authority failed"))?;
-                                self.closed = true;
-                                Ok(Some(OwnedStop::Halted {
-                                    instruction_pc: source_pc,
-                                }))
-                            }
-                        }
+                        )?;
+                        self.pe
+                            .authority
+                            .finish_refusal(&ConsumerKey(()), self.attempt)
+                            .map_err(|()| anyhow::anyhow!("System refusal authority failed"))?;
+                        self.closed = true;
+                        Ok(Some(OwnedStop::HelperRefused(
+                            "System instruction has no checked owner".into(),
+                        )))
                     }
                     ReturnedTerminal::Trap(trap) => {
                         self.pe.thread.pc = trap.instruction_pc;
@@ -952,7 +613,6 @@ impl<B: provider::Owner> Drop for Active<'_, '_, B> {
     fn drop(&mut self) {
         if !self.closed {
             self.pe.authority.poison();
-            self.pe.backend.abandon_wait();
         }
         // `outer` is dropped only after successful completion or after the PE
         // is marked failed.

@@ -6,7 +6,6 @@ use super::{
     scalable_controls::{AccessTrap, Error as ControlError, fp::FpControlOwner},
     state::{PSTATE_IL_MASK, PSTATE_SS_MASK, SystemState},
 };
-use crate::scalable::ScalableState;
 use stela_compiler::{GuestAddress, GuestState};
 
 const SVE_SHIFT: u32 = 32;
@@ -24,7 +23,6 @@ pub enum Error {
     Control(ControlError),
     IllegalExecutionState,
     SingleStepUnavailable,
-    StreamingStateRequiresScalableWriter,
     SveRequiresScalableWriter,
     ReservedSveField(u8),
     SmeStateRequired,
@@ -56,20 +54,13 @@ impl<'id> NoSme<'id> {
     }
 }
 
-/// The streaming state when SME exists, or proof from the same snapshot that it
-/// does not.
-pub enum StreamingState<'loan> {
-    Actual(&'loan ScalableState),
-    Absent(NoSme<'loan>),
-}
-
 /// Non-Clone, non-Copy and externally unconstructible. The immutable borrows keep
 /// CPACR, EL/PSTATE and SM from changing while the same GuestState is accessed.
 /// No independent permission boolean or writable copy of either bank is kept.
 pub struct Low128FpContext<'loan, 'id> {
     _controls: &'loan FpControlOwner<'id>,
     _system: &'loan SystemState,
-    _streaming: StreamingState<'loan>,
+    _streaming: NoSme<'loan>,
     guest_identity: *const GuestState,
 }
 
@@ -127,7 +118,7 @@ pub fn with_nonstreaming_low128<'id, R>(
     ids: &Snapshot,
     controls: &FpControlOwner<'id>,
     system: &SystemState,
-    streaming: StreamingState<'_>,
+    streaming: NoSme<'_>,
     registers: &mut GuestState,
     pc: GuestAddress,
     operation: impl for<'loan> FnOnce(Low128FpAccess<'loan, 'id>) -> R,
@@ -153,14 +144,8 @@ pub fn with_nonstreaming_low128<'id, R>(
         SVE_PRESENT => return Err(Error::SveRequiresScalableWriter),
         other => return Err(Error::ReservedSveField(other)),
     }
-    match &streaming {
-        StreamingState::Actual(scalable) if scalable.mode().streaming() => {
-            return Err(Error::StreamingStateRequiresScalableWriter);
-        }
-        StreamingState::Absent(absent) if !ids.same_snapshot(absent.ids) => {
-            return Err(Error::DifferentIdentificationSnapshot);
-        }
-        _ => {}
+    if !ids.same_snapshot(streaming.ids) {
+        return Err(Error::DifferentIdentificationSnapshot);
     }
     controls.check_fp_enabled(system, pc).map_err(|error| {
         if let ControlError::Trap(trap) = error {

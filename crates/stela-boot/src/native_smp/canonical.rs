@@ -268,7 +268,7 @@ pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
     assignments: &[WorkerBinding],
     processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
     trace_artifacts: bool,
-    core_locks: Option<stela_runtime::machine::ctrr::Handoff>,
+    core_locks: Option<stela_runtime::machine::ctrr::CoreLocks>,
 ) -> Result<CanonicalMachine<'a, D>, &'static str> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0

@@ -10,8 +10,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use stela_compiler::GuestState;
 use stela_compiler::aarch64::system::synchronization::{self, Operation, WaitKind};
 
-pub(crate) mod hosted;
-
 const INSTRUCTION_BYTES: u64 = 4;
 const ZERO_REGISTER: u8 = 31;
 const ESR_EC_SHIFT: u32 = 26;
@@ -119,38 +117,6 @@ impl Default for EventDomain {
     }
 }
 
-/// A checked, temporary attachment to the existing PE and publication domain.
-/// The exclusive endpoint borrow prevents retirement during completion; no event,
-/// monitor, timeout or control state is copied into the attachment.
-#[derive(Debug)]
-pub struct SendAttachment<'a> {
-    domain: &'a EventDomain,
-    endpoint: &'a mut EventEndpoint,
-}
-
-impl<'a> SendAttachment<'a> {
-    pub fn new(
-        domain: &'a EventDomain,
-        endpoint: &'a mut EventEndpoint,
-    ) -> Result<Self, DomainError> {
-        if !domain.owns(endpoint) {
-            return Err(DomainError::WrongDomain);
-        }
-        Ok(Self { domain, endpoint })
-    }
-
-    /// SEVL publishes one event bit; SEV includes every live registered PE.
-    /// Neither operation is an architectural guest memory barrier.
-    pub fn send(&mut self, local: bool) -> Result<(), DomainError> {
-        if local {
-            self.endpoint.signal_local();
-            Ok(())
-        } else {
-            self.domain.signal_all()
-        }
-    }
-}
-
 /// One authoritative execution handle, deliberately not Clone. Its event bit
 /// can be published concurrently; local timeout mutations require `&mut self`.
 #[derive(Debug)]
@@ -207,27 +173,8 @@ impl EventEndpoint {
         instruction: EventInstruction,
         context: Context,
         pending_interrupt: bool,
-        counter: impl FnMut() -> Result<u64, E>,
-    ) -> Result<Outcome, Error<E>> {
-        Ok(
-            match self.prepare_wait(domain, instruction, context, pending_interrupt, counter)? {
-                WaitPreparation::Ready(outcome) => outcome,
-                WaitPreparation::Pending(wait) => Outcome::Retired {
-                    next_pc: wait.next_pc,
-                    reason: RetireReason::CooperativeResume,
-                },
-            },
-        )
-    }
-
-    pub(crate) fn prepare_wait<E>(
-        &mut self,
-        domain: &EventDomain,
-        instruction: EventInstruction,
-        context: Context,
-        pending_interrupt: bool,
         mut counter: impl FnMut() -> Result<u64, E>,
-    ) -> Result<WaitPreparation, Error<E>> {
+    ) -> Result<Outcome, Error<E>> {
         if !domain.owns(self) {
             return Err(Error::Domain(DomainError::WrongDomain));
         }
@@ -237,9 +184,9 @@ impl EventEndpoint {
             .filter(|_| instruction.pc.is_multiple_of(INSTRUCTION_BYTES))
             .ok_or(Error::InvalidInstructionPc)?;
         if instruction.deadline.is_some() && !context.wfxt {
-            return Ok(WaitPreparation::Ready(Outcome::Undefined { instruction }));
+            return Ok(Outcome::Undefined { instruction });
         }
-        let retire = |reason| WaitPreparation::Ready(Outcome::Retired { next_pc, reason });
+        let retire = |reason| Outcome::Retired { next_pc, reason };
         match instruction.operation {
             Operation::SendEvent { local: true } => {
                 self.signal_local();
@@ -266,11 +213,11 @@ impl EventEndpoint {
             return Ok(retire(RetireReason::DeadlineExpired));
         }
         if context.traps(event_wait) {
-            return Ok(WaitPreparation::Ready(Outcome::Trap(El1Trap {
+            return Ok(Outcome::Trap(El1Trap {
                 instruction,
                 preferred_return_pc: instruction.pc,
                 esr: instruction.trap_esr(),
-            })));
+            }));
         }
         // WaitForEvent observes a newly set bit without consuming it. This
         // short-circuits its second timeout check, exactly as the source helper.
@@ -282,38 +229,7 @@ impl EventEndpoint {
         {
             return Ok(retire(RetireReason::DeadlineExpired));
         }
-        Ok(WaitPreparation::Pending(WaitRequest {
-            endpoint: Arc::downgrade(&self.event),
-            instruction,
-            next_pc,
-        }))
-    }
-
-    /// Re-check the endpoint after suspension. Unlike the initial WFE check,
-    /// an observed event keeps the bit (the declared policy).
-    pub(crate) fn recheck_wait<E>(
-        &mut self,
-        wait: &WaitRequest,
-        interrupt_wake: bool,
-        mut counter: impl FnMut() -> Result<u64, E>,
-    ) -> Result<Option<Outcome>, Error<E>> {
-        if !Weak::ptr_eq(&wait.endpoint, &Arc::downgrade(&self.event)) {
-            return Err(Error::Domain(DomainError::WrongDomain));
-        }
-        let reason = if wait.instruction.is_event_wait() && self.is_set() {
-            Some(RetireReason::EventObserved)
-        } else if !wait.instruction.is_event_wait() && interrupt_wake {
-            Some(RetireReason::InterruptPending)
-        } else if let Some(deadline) = wait.instruction.deadline {
-            self.timeout_expired(deadline.ticks, &mut counter)?
-                .then_some(RetireReason::DeadlineExpired)
-        } else {
-            None
-        };
-        Ok(reason.map(|reason| Outcome::Retired {
-            next_pc: wait.next_pc,
-            reason,
-        }))
+        Ok(retire(RetireReason::CooperativeResume))
     }
 
     fn timeout_expired<E>(
@@ -551,36 +467,6 @@ impl EventInstruction {
             | (ESR_CONDITION_VALID_ALWAYS << ESR_CONDITION_SHIFT)
             | kind
             | timed_register
-    }
-}
-
-/// A prepared wait bound to its source and endpoint; Active owns suspension
-/// and retirement. Callers cannot construct or retarget it.
-#[derive(Debug)]
-pub(crate) enum WaitPreparation {
-    Ready(Outcome),
-    Pending(WaitRequest),
-}
-
-#[derive(Debug)]
-pub(crate) struct WaitRequest {
-    endpoint: Weak<EventRegister>,
-    instruction: EventInstruction,
-    next_pc: u64,
-}
-impl WaitRequest {
-    /// The decoded instruction; it permits nothing.
-    pub(crate) fn kind(&self) -> WaitKind {
-        let Operation::Wait { kind, .. } = self.instruction.operation else {
-            unreachable!("only wait requests are retained")
-        };
-        kind
-    }
-    pub(crate) fn next_pc(&self) -> u64 {
-        self.next_pc
-    }
-    pub(crate) fn deadline(&self) -> Option<u64> {
-        self.instruction.deadline.map(|deadline| deadline.ticks)
     }
 }
 
@@ -1138,66 +1024,5 @@ mod tests {
                 barrier.wait();
             }
         });
-    }
-
-    #[test]
-    fn send_attachment_checks_domain_before_publication_and_preserves_timeout() {
-        const TIMEOUT: u64 = 77;
-        let domain = EventDomain::new();
-        let other = EventDomain::new();
-        let mut endpoint = domain.register(false, Some(TIMEOUT)).unwrap();
-        assert!(matches!(
-            SendAttachment::new(&other, &mut endpoint),
-            Err(DomainError::WrongDomain)
-        ));
-        assert!(!endpoint.is_set());
-        assert_eq!(endpoint.local_timeout(), Some(TIMEOUT));
-    }
-
-    #[test]
-    fn borrowed_sends_use_existing_local_and_global_event_owners() {
-        let domain = EventDomain::new();
-        let mut sender = domain.register(false, None).unwrap();
-        let peer = domain.register(false, None).unwrap();
-        {
-            let mut services = SendAttachment::new(&domain, &mut sender).unwrap();
-            services.send(true).unwrap();
-            services.send(true).unwrap();
-        }
-        assert!(sender.consume_if_set());
-        assert!(!sender.consume_if_set());
-        assert!(!peer.consume_if_set());
-        SendAttachment::new(&domain, &mut sender)
-            .unwrap()
-            .send(false)
-            .unwrap();
-        assert!(sender.consume_if_set());
-        assert!(peer.consume_if_set());
-        assert!(!domain.register(false, None).unwrap().is_set());
-    }
-
-    #[test]
-    fn poisoned_global_registry_declines_before_signal_but_local_send_still_works() {
-        let domain = EventDomain::new();
-        let mut sender = domain.register(false, None).unwrap();
-        let peer = domain.register(false, None).unwrap();
-        let _ = std::panic::catch_unwind(|| {
-            let _registry = domain.identity.endpoints.lock().unwrap();
-            panic!("poison fixture registry");
-        });
-        assert_eq!(
-            SendAttachment::new(&domain, &mut sender)
-                .unwrap()
-                .send(false),
-            Err(DomainError::Poisoned)
-        );
-        assert!(!sender.is_set());
-        assert!(!peer.is_set());
-        SendAttachment::new(&domain, &mut sender)
-            .unwrap()
-            .send(true)
-            .unwrap();
-        assert!(sender.is_set());
-        assert!(!peer.is_set());
     }
 }

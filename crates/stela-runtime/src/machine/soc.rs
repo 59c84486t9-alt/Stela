@@ -2634,7 +2634,7 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        devices.add_smc(&smc).unwrap();
+        devices.add_smc(&smc, crate::builds::DEFAULT).unwrap();
         let epoch = pmu::RtcEpoch {
             counter: 100,
             ticks: 0,
@@ -4135,6 +4135,7 @@ mod tests {
                 (owners[1], dcp.stream as usize),
                 dcp.window,
                 Some((owners[0], dcp.surface.unwrap().1 as usize)),
+                crate::builds::DEFAULT,
             )
             .unwrap();
         let regions = dcp
