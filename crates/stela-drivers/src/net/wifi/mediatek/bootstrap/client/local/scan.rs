@@ -67,12 +67,6 @@ pub(in crate::net::wifi::mediatek::bootstrap::client) fn elements(
     let mut out = Vec::new();
     out.try_reserve_exact(advertisement.elements.len() + 15)
         .map_err(|_| LocalError::NoMemory)?;
-    // mt76_init_sband_6g retains the OFDM rate table, even though the
-    // association advertisement correctly has no legacy 6GHz rate element.
-    if advertisement.capabilities.band() == Band::Ghz6 {
-        ie(&mut out, 1, &[12, 18, 24, 36, 48, 72, 96, 108]);
-    }
-
     let mut rest = advertisement.elements();
     while !rest.is_empty() {
         let id = rest[0];

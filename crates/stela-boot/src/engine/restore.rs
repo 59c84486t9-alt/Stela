@@ -700,7 +700,7 @@ impl Experiment {
             answers.boot_with(booted.to_vec()).map_err(|error| {
                 format!(
                     "--tss needs a bundle whose boot manifest Apple personalized for this machine \
-                     (stela boot prepare --tss): {error}"
+                     (stela-dev boot prepare --tss): {error}"
                 )
             })?;
         }

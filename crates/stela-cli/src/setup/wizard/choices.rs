@@ -15,12 +15,28 @@ fn majors(images: &[Image]) -> Vec<(String, Vec<usize>)> {
     groups
 }
 
-pub(super) fn release(images: &[Image], preferred: &str) -> Result<usize> {
-    let groups = majors(images);
-    let mut initial = groups
+/// Whether Stela supports `image`'s build (`stela_runtime::builds`).
+fn supported(image: &Image) -> bool {
+    stela_runtime::builds::find(&image.build).is_ok()
+}
+
+/// The major-version group the release picker opens on: `preferred`'s, else
+/// the first holding a supported build.
+fn initial_group(groups: &[(String, Vec<usize>)], images: &[Image], preferred: &str) -> usize {
+    groups
         .iter()
         .position(|(_, entries)| entries.iter().any(|&i| images[i].build == preferred))
-        .unwrap_or(0);
+        .or_else(|| {
+            groups
+                .iter()
+                .position(|(_, entries)| entries.iter().any(|&i| supported(&images[i])))
+        })
+        .unwrap_or(0)
+}
+
+pub(super) fn release(images: &[Image], preferred: &str) -> Result<usize> {
+    let groups = majors(images);
+    let mut initial = initial_group(&groups, images, preferred);
     loop {
         let mut picker = cliclack::select("3 / 6  Choose a macOS version").max_rows(8);
         for (index, (major, _)) in groups.iter().enumerate() {
@@ -33,14 +49,19 @@ pub(super) fn release(images: &[Image], preferred: &str) -> Result<usize> {
             .map(|&index| super::menu::Item {
                 value: index,
                 label: images[index].version.clone(),
-                hint: images[index].build.clone(),
-                enabled: true,
+                hint: if supported(&images[index]) {
+                    images[index].build.clone()
+                } else {
+                    format!("{} · unsupported", images[index].build)
+                },
+                enabled: supported(&images[index]),
             })
             .collect();
         let preferred = entries
             .iter()
             .copied()
             .find(|&i| images[i].build == preferred)
+            .or_else(|| entries.iter().copied().find(|&i| supported(&images[i])))
             .unwrap_or(entries[0]);
         if let Some(index) = super::menu::submenu(
             &format!("macOS {major} · Choose a release"),
@@ -219,5 +240,26 @@ mod tests {
             Some(Family::MacBookNeo)
         );
         assert!(chip("Mac Studio (M4 Max)") > chip("Mac Studio (M3 Ultra)"));
+    }
+
+    #[test]
+    fn the_release_picker_opens_on_a_supported_build_not_the_newest() {
+        let image = |version: &str, build: &str| Image {
+            version: version.into(),
+            build: build.into(),
+            models: vec!["MacBookPro18,3".into()],
+            url: String::new(),
+            sha1: None,
+        };
+        let supported = stela_runtime::builds::DEFAULT;
+        let images = [
+            image("28.1", "28B70"),
+            image("27.1", "27B74"),
+            image(supported.version, supported.build),
+        ];
+        let groups = majors(&images);
+        assert_eq!(initial_group(&groups, &images, ""), 1);
+        assert_eq!(initial_group(&groups, &images, "28B70"), 0);
+        assert!(!super::supported(&images[1]) && super::supported(&images[2]));
     }
 }

@@ -2,7 +2,7 @@
 //! (`soc::board`), placed on one [`AppleDevices`] and connected to its PMGR
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
-//! `stela boot check` mount the same machine.
+//! `stela-dev boot check` mount the same machine.
 use super::apple::{
     AicInput, AppleDevices, AscLines, ConsoleSink, Range, RtcEpoch, Scanout, SepEntropy,
     SepProvisioning, UsbCables, UsbId, WallClock,
@@ -167,6 +167,9 @@ pub struct Inputs<'f> {
     pub scanout: Option<Box<dyn Scanout>>,
     /// Board device firmware images by guest file name.
     pub firmware: &'f dyn Fn(&str) -> Option<&'f [u8]>,
+    /// The boot bundle's macOS build, whose firmware protocols the
+    /// coprocessor models speak; `None` without a bundle.
+    pub build: Option<&'static crate::builds::Build>,
 }
 
 /// Place `board`'s devices, writing `DEVICES` summaries to `log`, and return
@@ -221,7 +224,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         mut usb,
         scanout,
         firmware,
+        build,
     } = inputs;
+    let build =
+        build.ok_or("the board's coprocessors need the boot bundle's supported macOS build")?;
     let place = |device: super::soc::Device| {
         (
             Range {
@@ -265,7 +271,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_spi_nor(spi)?;
     }
     match (board.ans.as_ref(), backing) {
-        (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
+        (Some(ans), Some(backing)) => devices.add_ans(ans, backing, build)?,
         (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
         (None, Some(_)) => {
             return Err(
@@ -275,10 +281,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         (None, None) => (),
     }
     if let Some(smc) = board.smc.as_ref() {
-        devices.add_smc(smc)?;
+        devices.add_smc(smc, build)?;
     }
     if let Some(pmp) = board.pmp.as_ref() {
-        devices.add_pmp(pmp)?;
+        devices.add_pmp(pmp, build)?;
     }
     for spmi in &board.spmis {
         // A newly created Stela PMIC starts with its own oscillator origin
@@ -480,6 +486,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                 (None, None, None) => None,
                 _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
             },
+            build,
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions
@@ -715,7 +722,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
     // bridge) and owns only the bytes they leave.
     if let Some(gfx) = board.gfx.as_ref() {
-        devices.add_gfx(gfx)?;
+        devices.add_gfx(gfx, build)?;
     }
     // Finalize only after every native constructor, including SGX's final
     // overlapping-window placement, has registered its actual banks.

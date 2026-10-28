@@ -1,4 +1,4 @@
-//! `bundle.json`, as `stela boot prepare` writes it and the UEFI mount reads
+//! `bundle.json`, as `stela-dev boot prepare` writes it and the UEFI mount reads
 //! it (`docs/design/runtime.md#kernel-boot-bundle`). Fields that only the
 //! preparation report uses default when absent, so hand-authored bundles
 //! need only what the mount reads.
@@ -299,7 +299,7 @@ pub struct Options {
     pub overlay: Vec<OverlayProperty>,
 }
 
-/// The defaults of `stela boot prepare` for an installed system: 8 GiB of
+/// The defaults of `stela-dev boot prepare` for an installed system: 8 GiB of
 /// DRAM at 0x8_0000_0000, verbose boot, the first CPU booting with a 24 MHz
 /// generic timer, and Reduced Security with SIP enabled.
 impl Default for Options {

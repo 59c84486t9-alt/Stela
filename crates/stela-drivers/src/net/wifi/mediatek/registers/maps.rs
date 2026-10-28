@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 // Adapted from the pinned mt7921/pci.c and mt7925/pci.c fixed maps.
+//! MediaTek CONNAC2 and CONNAC3 bus-address to BAR-offset maps from mt7921 and mt7925.
 
 pub(super) const CONNAC2: &[(u32, u32, u32)] = &[
     (0x820d0000, 0x30000, 0x10000),

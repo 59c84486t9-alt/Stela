@@ -61,11 +61,7 @@ impl Request {
         {
             return Err(Error::UnsupportedTransmitState);
         }
-        let length = match key.cipher() {
-            Cipher::Ccmp128 | Cipher::Gcmp128 => 16,
-            Cipher::Ccmp256 | Cipher::Gcmp256 => 32,
-        };
-        if material.len() != length {
+        if material.len() != key.cipher().key_length() {
             return Err(Error::InvalidKeyLength);
         }
         Self::build(chip, context, key, Some(material))
@@ -116,22 +112,28 @@ impl Request {
             bytes[8..10].copy_from_slice(&0x27u16.to_le_bytes()); // STA_REC_KEY_V3
             bytes[10..12].copy_from_slice(&68u16.to_le_bytes());
             bytes[12] = u8::from(material.is_some());
-            bytes[13] = u8::from(pairwise); // tx_key
-            bytes[14] = u8::from(pairwise); // key_type
+            // mt7925_set_link_key installs a static WEP key without a
+            // station, so both of its records take the group form.
+            let station_key = pairwise && !key.cipher().is_wep();
+            bytes[13] = u8::from(station_key); // tx_key
+            bytes[14] = u8::from(station_key); // key_type
             bytes[16..22].copy_from_slice(&key.scope().peer().0);
             bytes[22] = context.bss_index;
             bytes[26] = key.slot() as u8;
             bytes[27] = 1; // source mgmt_prot, only used in MLO mode
             if let Some(material) = material {
                 bytes[23] = match key.cipher() {
+                    Cipher::Wep40 => 1,
+                    Cipher::Tkip => 2,
                     Cipher::Ccmp128 => 4,
                     Cipher::Ccmp256 => 10,
                     Cipher::Gcmp128 => 11,
                     Cipher::Gcmp256 => 12,
+                    Cipher::Wep104 => 5,
                 };
                 bytes[24] = key.index();
                 bytes[25] = material.len() as u8;
-                bytes[28..28 + material.len()].copy_from_slice(material);
+                put_key(&mut bytes[28..28 + material.len()], key.cipher(), material);
             }
             // Source key_rsc[16] stays zero. Authenticated per-TID receive
             // floors remain in the canonical ticket/KeySlot and cannot reset.
@@ -145,6 +147,9 @@ impl Request {
             if let Some(material) = material {
                 bytes[13] = 1;
                 bytes[16] = match key.cipher() {
+                    Cipher::Wep40 => 1,
+                    Cipher::Wep104 => 2,
+                    Cipher::Tkip => 4,
                     Cipher::Ccmp128 => 5,
                     Cipher::Ccmp256 => 6,
                     Cipher::Gcmp128 => 7,
@@ -153,12 +158,23 @@ impl Request {
                 bytes[17] = 36; // actual sec_key structure size
                 bytes[18] = key.index();
                 bytes[19] = material.len() as u8;
-                bytes[20..20 + material.len()].copy_from_slice(material);
+                put_key(&mut bytes[20..20 + material.len()], key.cipher(), material);
             }
             // Source reserves the full two-key structure in skb even though
             // its TLV length is44/8. Preserve the zero tail; do not invent trim.
         }
         Ok(Self { key, bytes })
+    }
+}
+
+/// The key bytes the firmware takes. TKIP's TX and RX Michael keys swap
+/// places, as `mt7925_mcu_sta_key_tlv` and `mt76_connac_mcu_sta_key_tlv` copy
+/// them.
+fn put_key(out: &mut [u8], cipher: Cipher, material: &[u8]) {
+    out.copy_from_slice(material);
+    if cipher == Cipher::Tkip {
+        out[16..24].copy_from_slice(&material[24..32]);
+        out[24..32].copy_from_slice(&material[16..24]);
     }
 }
 
@@ -194,6 +210,69 @@ mod tests {
             )
             .unwrap();
         (key, ticket)
+    }
+    #[test]
+    fn tkip_swaps_its_michael_keys_like_mt76_connac_mcu_sta_key_tlv() {
+        let context = Context {
+            bss_index: 2,
+            omac_index: 3,
+            station_disabled: false,
+        };
+        let material: Vec<u8> = (0..32).collect();
+        let swapped = [&material[..16], &material[24..], &material[16..24]].concat();
+        for (chip, cipher_at, cipher, key_at) in
+            [(Chip::Mt7921, 16, 4, 20), (Chip::Mt7925, 23, 2, 28)]
+        {
+            let scope = KeyScope::Pairwise(Mac([2, 1, 2, 3, 4, 5]));
+            let (_slot, ticket) = ticket(
+                7,
+                scope,
+                Cipher::Tkip,
+                &material,
+                TransmitSeed::FIRMWARE_FRESH,
+            );
+            let request = Request::install(chip, context, ticket, &material).unwrap();
+            assert_eq!(request.bytes()[cipher_at], cipher);
+            assert_eq!(&request.bytes()[key_at..key_at + 32], &swapped[..]);
+        }
+    }
+    #[test]
+    fn wep_keys_take_the_stationless_form_like_mt7925_set_link_key() {
+        let context = Context {
+            bss_index: 2,
+            omac_index: 3,
+            station_disabled: false,
+        };
+        let scope = KeyScope::Pairwise(Mac([2, 1, 2, 3, 4, 5]));
+        for (material, connac3, connac2) in [(&[7u8; 5][..], 1, 1), (&[7; 13], 5, 2)] {
+            let cipher = if material.len() == 5 {
+                Cipher::Wep40
+            } else {
+                Cipher::Wep104
+            };
+            // SAFETY: fresh independent software model of one empty native slot.
+            let mut slot = unsafe { KeySlot::new(7) }.unwrap();
+            let ticket = slot
+                .begin_install(
+                    3,
+                    cipher,
+                    material,
+                    ReplaySeed::ZERO,
+                    scope,
+                    TransmitSeed::FIRMWARE_FRESH,
+                )
+                .unwrap();
+            let v3 = Request::install(Chip::Mt7925, context, ticket, material).unwrap();
+            let b = v3.bytes();
+            assert_eq!((b[5], b[13], b[14]), (3, 0, 0));
+            assert_eq!(
+                (b[23], b[24], usize::from(b[25])),
+                (connac3, 3, material.len())
+            );
+            assert_eq!(&b[28..28 + material.len()], material);
+            let v2 = Request::install(Chip::Mt7921, context, ticket, material).unwrap();
+            assert_eq!((v2.bytes()[16], v2.bytes()[18]), (connac2, 3));
+        }
     }
     #[test]
     fn exact_per_chip_key_fields_keep_canonical_identity_scope_and_receive_floors() {

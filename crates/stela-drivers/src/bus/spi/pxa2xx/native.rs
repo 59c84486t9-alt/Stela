@@ -66,22 +66,9 @@ unsafe impl<P: 'static> Registers for NativeRegisters<P> {
         self.bytes
     }
     fn read32(&mut self, offset: usize) -> Result<u32, IoError> {
-        if offset & 3 != 0 {
-            return Err(IoError);
-        }
-        let pointer = self.mapping.address(offset, 4).map_err(|_| IoError)?;
-        // SAFETY: checked live bounded UC DWORD, claim checked base alignment.
-        Ok(u32::from_le(unsafe {
-            pointer.as_ptr().cast::<u32>().read_volatile()
-        }))
+        self.mapping.read32(offset).map_err(|_| IoError)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError> {
-        if offset & 3 != 0 {
-            return Err(IoError);
-        }
-        let pointer = self.mapping.address(offset, 4).map_err(|_| IoError)?;
-        // SAFETY: same original exclusive, checked aligned UC DWORD.
-        unsafe { pointer.as_ptr().cast::<u32>().write_volatile(value.to_le()) };
-        Ok(())
+        self.mapping.write32(offset, value).map_err(|_| IoError)
     }
 }

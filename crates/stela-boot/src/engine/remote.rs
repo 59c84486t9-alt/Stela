@@ -31,6 +31,8 @@ const KEEP: usize = 8 << 20;
 /// Consecutive failures of one range's progress before a read fails; the
 /// waits between them double from a second, about a minute in all.
 const ATTEMPTS: u32 = 7;
+/// The longest one wait for an open range's next frame lasts.
+const WAIT_US: u64 = 100_000;
 
 pub struct Remote {
     network: Shared,
@@ -134,6 +136,8 @@ impl Remote {
                 }
             } else if self.end() > before {
                 failures = 0;
+            } else if self.range.is_some() {
+                self.network.0.borrow_mut().wait(WAIT_US);
             }
         }
         Ok(())

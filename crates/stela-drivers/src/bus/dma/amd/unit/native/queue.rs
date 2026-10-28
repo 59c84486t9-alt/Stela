@@ -1,3 +1,4 @@
+//! AMD IOMMU register access and command-queue operation.
 use super::*;
 
 impl<P: ColdPlatform> Engine<P> {

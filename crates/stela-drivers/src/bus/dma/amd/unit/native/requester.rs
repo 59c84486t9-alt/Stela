@@ -1,3 +1,4 @@
+//! Requester ownership and DMA bindings behind one AMD IOMMU unit.
 use super::*;
 use crate::bus::pci::{ConfigSpace, Function, owned::OwnedConfig};
 
@@ -59,38 +60,19 @@ fn admit_function(function: &mut Function<OwnedConfig>) -> Result<u16, Error> {
     {
         return Err(Error::Requester);
     }
-    let mut visited = [0u64; 16];
-    let mut offset = 0x100u16;
-    loop {
-        if !(0x100..=0xffc).contains(&offset) || !offset.is_multiple_of(4) {
-            return Err(Error::Profile);
-        }
-        let cell = usize::from(offset / 4);
-        if visited[cell / 64] & (1 << (cell % 64)) != 0 {
-            return Err(Error::Profile);
-        }
-        visited[cell / 64] |= 1 << (cell % 64);
-        let header = config.read32(offset);
-        if header == 0 {
-            break;
-        }
-        if header == u32::MAX || (header >> 16) & 15 == 0 {
-            return Err(Error::Profile);
-        }
+    if config.read32(0x100) == u32::MAX {
+        return Err(Error::Profile);
+    }
+    for entry in config.extended_capabilities() {
+        let entry = entry.map_err(|_| Error::Profile)?;
         // ATS/PRI/PASID/SR-IOV and unknown extended capabilities require wider
         // requester/alias ownership. Do not infer disabled integrated ATS from
         // the absence of its PCI capability; ColdPlatform independently owns it.
-        if !matches!(
-            header as u16,
-            1 | 3 | 0x0d | 0x15 | 0x18 | 0x19 | 0x1e | 0x1f
-        ) {
+        if entry.version == 0
+            || !matches!(entry.id, 1 | 3 | 0x0d | 0x15 | 0x18 | 0x19 | 0x1e | 0x1f)
+        {
             return Err(Error::Profile);
         }
-        let next = (header >> 20) as u16;
-        if next == 0 {
-            break;
-        }
-        offset = next;
     }
     Ok(u16::from(address.bus) << 8 | u16::from(address.device) << 3 | u16::from(address.function))
 }

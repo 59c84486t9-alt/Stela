@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Explicitly polled topology ownership, adapting pinned Linux hub_irq,
-//! port_event, hub_port_connect and usb_disconnect. Automatic topology changes
-//! do not recycle published hardware IDs.
+//! port_event, hub_port_connect and usb_disconnect. A disconnected device's
+//! slot goes to a later device once its port's current grant retires; every
+//! identity of the old generation then fails.
 use super::*;
 
 #[cfg(test)]
 mod downstream_tests;
 #[cfg(test)]
 mod generation_tests;
+#[cfg(test)]
+mod queued_tests;
 mod recovery;
 mod suspend;
 
@@ -50,10 +53,11 @@ struct Hub {
 
 /// Retains the controller even when no leaf class currently owns it. Call
 /// `poll` from the native service loop, and deliver its changes to consumers.
-/// Automatic reconnection uses fresh hardware IDs and explicitly refuses when
-/// its boot-lifetime slot capacity is exhausted. The separate exclusive root-leaf
+/// Automatic reconnection uses fresh generations, reusing a retired slot once
+/// its port's current grant has retired. The separate exclusive root-leaf
 /// class reset service can reuse storage only after its typed retirement and
-/// physical-reset proof; this Host path does not mint that authority.
+/// physical-reset proof; this Host path does not mint that authority. A class
+/// owner's `queue_reset` is serviced here instead, without storage reuse.
 /// The explicit topology suspend/resume service does not enter platform sleep
 /// or authorize a guest-directed controller reset.
 pub struct Host {
@@ -177,6 +181,48 @@ impl Host {
         }
     }
 
+    /// Whether the controller sends the handoff's completion signal as it
+    /// posts an event, so [`Self::due`] can stand in for a timed poll.
+    pub fn signals(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.signals())
+    }
+
+    /// Whether [`Self::poll`] has work, as `xhci_irq` and `hub_irq` find it:
+    /// an event on the ring, a root port's status change or a hub's status
+    /// transfer that completed, a queued reset, a hub to recover, a dead
+    /// controller or a device whose slot changed. A look at memory alone.
+    pub fn due(&self) -> bool {
+        let Ok(c) = self.controller.try_borrow() else {
+            return true;
+        };
+        if !self.sleep.awake() {
+            return false;
+        }
+        let hub = |slot: u8| {
+            self.hubs.iter().any(|hub| {
+                hub.pending.is_some() && !hub.retired && hub.device.id.hardware_slot() == slot
+            })
+        };
+        let changed = c.event_posted()
+            || (matches!(c.hardware, hardware::State::Died) && !self.devices.is_empty())
+            || !c.queued_resets.is_empty()
+            || c.pending.iter().any(|event| {
+                event.kind() == reset::PORT_STATUS_CHANGE
+                    || (event.kind() == super::TRANSFER_EVENT && hub(event.slot()))
+            })
+            || self.hubs.iter().any(|hub| hub.recovery.is_some());
+        drop(c);
+        changed || {
+            let current = self.current();
+            current.len() != self.devices.len()
+                || current
+                    .iter()
+                    .any(|device| !self.devices.iter().any(|old| old.id == device.id))
+        }
+    }
+
     /// Poll actual root notifications/PORTSC and queued hub interrupt bitmaps.
     /// No completion or new identity is inferred from elapsed time. Topology
     /// mutation is serialized through this controller's native Rc owner.
@@ -230,6 +276,10 @@ impl Host {
                     .push((format!("{location} hub lifecycle"), error));
             }
         }
+        let queued = self.controller.borrow_mut().take_queued_resets();
+        for id in queued {
+            self.queued_reset(id, dma, &mut changes);
+        }
         let added = changes.added.devices.clone();
         self.register_hubs(&added, dma, &mut changes.added.failures);
         for device in &added {
@@ -245,27 +295,55 @@ impl Host {
         changes
     }
 
+    /// Service one class's `usb_queue_reset_device`. A device already gone
+    /// needs nothing; otherwise its old owner is reported removed once the
+    /// reset retires it, and a fresh device is bound like a new one.
+    fn queued_reset(&mut self, id: SlotId, dma: &mut dyn DmaAllocator, changes: &mut Changes) {
+        let Some(index) = self.devices.iter().position(|device| device.id == id) else {
+            return;
+        };
+        let old = self.devices[index].clone();
+        let result =
+            self.controller
+                .borrow_mut()
+                .reset_queued(&old, dma, &mut changes.added.failures);
+        if self.controller.borrow().validate_device_id(id).is_err() {
+            self.devices.remove(index);
+            changes.removed.push(old.clone());
+        }
+        match result {
+            Ok(fresh) => changes.added.devices.push(fresh),
+            Err((operation, error)) => changes
+                .added
+                .failures
+                .push((format!("{} queued reset: {operation}", old.location), error)),
+        }
+    }
+
     /// A class-owned exclusive reset may replace a leaf between topology
     /// polls. Follow the controller's actual fresh descriptor inventory without
     /// attempting a second native bind of that already-owned replacement.
+    /// The enabled devices the controller's slots hold now.
+    fn current(&self) -> Vec<Device> {
+        let c = self.controller.borrow();
+        c.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(id, state)| {
+                state
+                    .as_ref()
+                    .filter(|state| {
+                        !state.retiring
+                            && !state.suspended
+                            && c.slot_ownership[id] == reset::Ownership::Enabled
+                    })
+                    .and_then(|state| state.inventory.clone())
+            })
+            .collect()
+    }
+
     fn reconcile(&mut self, changes: &mut Changes) {
-        let current: Vec<_> = {
-            let c = self.controller.borrow();
-            c.slots
-                .iter()
-                .enumerate()
-                .filter_map(|(id, state)| {
-                    state
-                        .as_ref()
-                        .filter(|state| {
-                            !state.retiring
-                                && !state.suspended
-                                && c.slot_ownership[id] == reset::Ownership::Enabled
-                        })
-                        .and_then(|state| state.inventory.clone())
-                })
-                .collect()
-        };
+        let current = self.current();
         self.devices.retain(|old| {
             if current.iter().any(|device| device.id == old.id) {
                 true
@@ -348,6 +426,14 @@ impl Host {
         }
         if let Some(owner) = owner {
             self.retire(owner, changes)?;
+            // hub.c's power budget counts only connected children: the
+            // retired owners of an empty port draw no current, so their
+            // grants and slots can go to the next device.
+            if status & CCS == 0 {
+                self.controller
+                    .borrow_mut()
+                    .current_port_reset(None, port)?;
+            }
         }
         if status & (PP | CCS) != PP | CCS || status & OVER_CURRENT != 0 {
             let mut c = self.controller.borrow_mut();
@@ -545,6 +631,9 @@ impl Host {
             self.retire(owner, changes)?;
         }
         let mut c = self.controller.borrow_mut();
+        if owner.is_some() && status & 1 == 0 {
+            c.current_hub_port_reset(id, port, attachment.root_port)?;
+        }
         let selectors: &[(u16, u16)] = if ss {
             &[(1, 16), (8, 19), (16, 20), (32, 29), (64, 25), (128, 26)]
         } else {

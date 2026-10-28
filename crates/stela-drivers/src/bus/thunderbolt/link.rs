@@ -550,18 +550,14 @@ impl<R: Registers> Activate<R> {
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
         self.next_poll = now;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn enter_width_wait(&mut self, now: u64) -> Result<(), Error> {
         self.enter(Stage::WidthWait, now)?;
-        self.deadline = now
-            .checked_add(100)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, 100, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn next_lane(&mut self, index: usize, was_single: bool, now: u64) -> Result<(), Error> {
@@ -797,11 +793,12 @@ impl<R: Registers> Activate<R> {
                             now,
                         )?;
                         self.next_poll = now.checked_add(100).ok_or(Error::ClockOverflow)?;
-                        self.deadline = self
-                            .next_poll
-                            .checked_add(REQUEST_MS)
-                            .ok_or(Error::ClockOverflow)?
-                            .min(self.job_deadline);
+                        self.deadline = crate::bus::thunderbolt::stage_deadline(
+                            self.next_poll,
+                            REQUEST_MS,
+                            self.job_deadline,
+                        )
+                        .ok_or(Error::ClockOverflow)?;
                     }
                     3..=6 => return self.fail(Error::NotCl0),
                     _ => return self.fail(Error::Unsupported),

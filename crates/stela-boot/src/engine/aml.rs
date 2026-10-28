@@ -32,7 +32,6 @@ use core::{
     arch::asm,
     cell::{Cell, RefCell},
     ffi::{c_char, c_void},
-    mem::ManuallyDrop,
     ptr,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
@@ -664,15 +663,23 @@ unsafe extern "C" fn fatal(_: *mut c_void, status: Status) -> ! {
 }
 
 /// The firmware's ACPI namespace, for the host's power transitions.
+/// One namespace serves the whole program: [`HostAcpi::start`] leaks it, and
+/// the host drivers and power transitions borrow it for `'static`.
 pub struct HostAcpi {
-    session: ManuallyDrop<Session>,
+    session: Session,
     root: u64,
 }
 
 impl HostAcpi {
     /// Load the tables at `rsdp` and their namespace; `None`, reported,
-    /// when ACPICA refuses them. `root` is the loader root.
-    pub fn start(rsdp: u64, root: u64, ecam: Vec<EcamWindow>, tsc_hz: u64) -> Option<Self> {
+    /// when ACPICA refuses them. `root` is the loader root. The namespace
+    /// lives until the host powers off, so it is leaked here, once.
+    pub fn start(
+        rsdp: u64,
+        root: u64,
+        ecam: Vec<EcamWindow>,
+        tsc_hz: u64,
+    ) -> Option<&'static Self> {
         if rsdp == 0 {
             output::arguments(format_args!("ACPI firmware AML unavailable: no RSDP\n"));
             return None;
@@ -764,10 +771,13 @@ impl HostAcpi {
         output::arguments(format_args!(
             "UNSUPPORTED ACPI hardware activation: no SCI, GPE or EC events and no device _INI; firmware AML runs only when the engine calls it\n"
         ));
-        Some(Self {
-            session: ManuallyDrop::new(session),
-            root,
-        })
+        Some(Box::leak(Box::new(Self { session, root })))
+    }
+
+    /// The loaded namespace. Its calls run in the loader root
+    /// ([`RestoreRoot`]), as the host drivers do.
+    pub fn session(&'static self) -> &'static Session {
+        &self.session
     }
 
     /// Linux's `acpi_power_off_prepare`: S5's SLP_TYPa and SLP_TYPb as the
@@ -797,14 +807,5 @@ impl HostAcpi {
             )),
         }
         Some(types)
-    }
-}
-
-impl Drop for HostAcpi {
-    fn drop(&mut self) {
-        // SAFETY: the live loader root, which the session runs under.
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        // SAFETY: dropped once, here.
-        unsafe { ManuallyDrop::drop(&mut self.session) };
     }
 }

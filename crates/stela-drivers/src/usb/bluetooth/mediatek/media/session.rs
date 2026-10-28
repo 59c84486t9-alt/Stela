@@ -6,11 +6,13 @@ use super::{Bindings, Error, Kind, Pair, Result, Voice, framing};
 use crate::usb::bluetooth::mediatek::{
     coredump::Collector,
     packet::DUMP_HANDLE,
+    reset::{self, Reset},
     wmt::{self, WmtEvent},
 };
 use crate::{
     block::BlockError,
     bus::dma::DmaAllocator,
+    firmware::Provider,
     usb::bluetooth::{Hci, InitializationReport, Io, Packet, State},
 };
 use alloc::vec::Vec;
@@ -26,6 +28,20 @@ fn collector<B: Io>(hci: &Hci<B>) -> Option<Collector> {
     }
 }
 
+/// The device ID of a validated MediaTek initialization.
+fn device_id<B: Io>(hci: &Hci<B>) -> Option<u32> {
+    match hci.initialization() {
+        Some(Ok(InitializationReport::MediaTek(report))) => Some(report.identity.device_id),
+        _ => None,
+    }
+}
+
+/// HCI_CMD_TIMEOUT: hci_cmd_timeout calls hdev->reset once a command other
+/// than HCI Reset goes this long without its completion.
+const CMD_TIMEOUT_US: u64 = 2_000_000;
+const RESET_US: u64 = 5_000_000;
+const HCI_RESET: u16 = 0x0c03;
+
 /// HCI_INIT_TIMEOUT, btmtk_usb_hci_wmt_sync's wait for the WMT event.
 const WMT_TIMEOUT_US: u64 = 10_000_000;
 /// btmtk_usb_submit_wmt_recv_urb's vendor EP0 IN for HCI_WMT_MAX_EVENT_SIZE.
@@ -39,6 +55,17 @@ pub struct ShutdownReport {
     /// Interrupt-pipe observations in wire order while it was awaited,
     /// including the 0xfc6f command's own flow-control event.
     pub asynchronous: Vec<Received>,
+}
+
+/// Why `power_on` failed. Either way the owner is terminal.
+#[derive(Debug)]
+pub enum PowerOnError {
+    /// The rerun of vendor setup failed, with its partial attempt.
+    Setup {
+        cause: alloc::boxed::Box<crate::usb::bluetooth::mediatek::Error>,
+        media: Option<BlockError>,
+    },
+    Media(Error),
 }
 
 /// One completed media USB observation. Loss is explicit, never a successful
@@ -101,6 +128,11 @@ pub trait MediaIo: Io {
     fn reset_media_epoch(&mut self) -> core::result::Result<(), BlockError>;
     fn resume_media(&mut self) -> core::result::Result<(), BlockError>;
     fn close_media(&mut self) -> core::result::Result<(), BlockError>;
+    /// Arm a cleanly closed media owner for the next `start_iso`, its
+    /// interfaces back at alternate 0 and no transfer outstanding.
+    fn reopen_media(&mut self) -> core::result::Result<(), BlockError> {
+        Err(BlockError::Unsupported("USB Bluetooth media reopen"))
+    }
 }
 #[derive(Debug, Eq, PartialEq)]
 pub enum Received {
@@ -114,6 +146,8 @@ pub enum Lifecycle {
     Running,
     Quiescent,
     Closed,
+    /// `shutdown` turned the function off; `power_on` sets it up again.
+    Off,
     Failed,
 }
 /// Actual synchronous command completion and returned command allowance. These
@@ -161,6 +195,14 @@ impl<B: MediaIo> Session<B> {
                 lifecycle: Lifecycle::Running,
             }),
             Err(error) => {
+                if matches!(error, Error::CommandTimeout(opcode) if opcode != HCI_RESET)
+                    && let Some(device_id) = device_id(&hci)
+                {
+                    return Err(Error::Reset {
+                        cause: alloc::boxed::Box::new(error),
+                        reset: alloc::boxed::Box::new(Self::hardware_reset(&mut hci, device_id)),
+                    });
+                }
                 let media = hci.io.close_media().err();
                 let base = hci.close().err();
                 Err(Error::Cleanup {
@@ -170,6 +212,22 @@ impl<B: MediaIo> Session<B> {
                 })
             }
         }
+    }
+    /// btusb_mtk_reset: release the media interfaces, reset the subsystem,
+    /// then close the transport with a queued USB reset.
+    fn hardware_reset(hci: &mut Hci<B>, device_id: u32) -> Reset {
+        let media = hci.io.close_media().err();
+        reset::run(hci, device_id, media)
+    }
+    /// `hdev->reset` (btmtk_reset_sync), for the caller's HCI core once a
+    /// command it sent outlives HCI_CMD_TIMEOUT. This session fails, and the
+    /// USB topology owner reports the device removed and binds a fresh one.
+    pub fn reset_controller(&mut self) -> Result<Reset> {
+        self.hci.io.validate()?;
+        let device_id =
+            device_id(&self.hci).ok_or(Error::Unsupported("MediaTek controller reset"))?;
+        self.lifecycle = Lifecycle::Failed;
+        Ok(Self::hardware_reset(&mut self.hci, device_id))
     }
     pub(in crate::usb::bluetooth) fn start_realtek(hci: Hci<B>) -> Result<Self> {
         Self::start_standard(hci, true)
@@ -264,7 +322,12 @@ impl<B: MediaIo> Session<B> {
     ) -> Result<SetupReport> {
         let opcode = u16::from_le_bytes([packet[0], packet[1]]);
         hci.submit_command(packet).map_err(Error::Hci)?;
-        let deadline = hci.io.now_us().saturating_add(5_000_000);
+        let timeout = if opcode == HCI_RESET {
+            RESET_US
+        } else {
+            CMD_TIMEOUT_US
+        };
+        let deadline = hci.io.now_us().saturating_add(timeout);
         let mut bytes: usize = pending
             .iter()
             .map(|p| match p {
@@ -331,7 +394,7 @@ impl<B: MediaIo> Session<B> {
                 }
             }
             if hci.io.now_us() >= deadline {
-                return Err(Error::Transport(BlockError::Timeout));
+                return Err(Error::CommandTimeout(opcode));
             }
             if completion.is_none() {
                 crate::waiting();
@@ -363,6 +426,7 @@ impl<B: MediaIo> Session<B> {
     /// Historical initialization evidence for this retained owner, never proof
     /// that a later physical reset/power loss preserved radio state. Such a
     /// transition invalidates the owner and requires a fresh attachment.
+    /// `power_on` replaces it with its own setup's.
     pub fn initialization(&self) -> &super::super::OwnedReport {
         match self.hci.initialization().unwrap().unwrap() {
             InitializationReport::MediaTek(r) => r,
@@ -565,8 +629,16 @@ impl<B: MediaIo> Session<B> {
                     ended = collector.feed(frame, now);
                 }
             }
+            // btmtk_coredump_notify resets the controller once a dump ends.
             if let Some(dump) = ended {
-                return Err(self.fail(Error::ControllerDump(alloc::boxed::Box::new(dump))));
+                let device_id = device_id(&self.hci).expect("MediaTek dump collector");
+                self.lifecycle = Lifecycle::Failed;
+                return Err(Error::Reset {
+                    cause: alloc::boxed::Box::new(Error::ControllerDump(alloc::boxed::Box::new(
+                        dump,
+                    ))),
+                    reset: alloc::boxed::Box::new(Self::hardware_reset(&mut self.hci, device_id)),
+                });
             }
         }
         for kind in [Kind::Iso, Kind::Sco] {
@@ -637,9 +709,9 @@ impl<B: MediaIo> Session<B> {
         Ok(())
     }
     /// btusb_mtk_shutdown: WMT function control off, then the ISO interface
-    /// and transport retire. `command_credits` is the caller's actual HCI
-    /// allowance; zero refuses without effects. MediaTek only; any failure
-    /// is terminal.
+    /// and transport retire, leaving the owner `Off` for `power_on`.
+    /// `command_credits` is the caller's actual HCI allowance; zero refuses
+    /// without effects. MediaTek only; any failure is terminal.
     pub fn shutdown(&mut self, command_credits: u8) -> Result<ShutdownReport> {
         self.hci.io.validate()?;
         if !matches!(self.lifecycle, Lifecycle::Running | Lifecycle::Quiescent)
@@ -660,7 +732,64 @@ impl<B: MediaIo> Session<B> {
         }
         let report = self.function_off().map_err(|e| self.fail(e))?;
         self.close()?;
+        self.lifecycle = Lifecycle::Off;
         Ok(report)
+    }
+    /// hci_dev_do_open after `shutdown`: btusb_open posts the receives again,
+    /// then btusb_mtk_setup runs again, as HCI_QUIRK_NON_PERSISTENT_SETUP asks
+    /// of every power-on, through btmtk_usb_isointf_init. The new setup's
+    /// report replaces the old. Any failure is terminal.
+    pub fn power_on(
+        &mut self,
+        provider: &dyn Provider,
+        dma: &mut dyn DmaAllocator,
+    ) -> core::result::Result<(), PowerOnError> {
+        self.hci
+            .io
+            .validate()
+            .map_err(|e| PowerOnError::Media(e.into()))?;
+        if self.lifecycle != Lifecycle::Off {
+            return Err(PowerOnError::Media(Error::Unsupported(
+                "media session is not powered off",
+            )));
+        }
+        if let Err(e) = self.hci.reopen() {
+            return Err(PowerOnError::Media(self.fail(Error::Hci(e))));
+        }
+        if let Err(e) = self.hci.io.reopen_media() {
+            return Err(PowerOnError::Media(self.fail(e.into())));
+        }
+        let report = match super::super::initialize(&mut self.hci, provider) {
+            Ok(report) => report,
+            Err(cause) => {
+                // A failed setup already closed the transport itself.
+                self.lifecycle = Lifecycle::Failed;
+                let media = self.hci.io.close_media().err();
+                return Err(PowerOnError::Setup {
+                    cause: alloc::boxed::Box::new(cause),
+                    media,
+                });
+            }
+        };
+        let credits = report.command_credits;
+        self.hci.initialization = Some(alloc::boxed::Box::new(Ok(InitializationReport::MediaTek(
+            report,
+        ))));
+        let (bindings, setup, pending) = match Self::prepare(&mut self.hci, dma, credits) {
+            Ok(prepared) => prepared,
+            Err(e) => return Err(PowerOnError::Media(self.fail(e))),
+        };
+        self.bindings = bindings;
+        self.setup = Some(setup);
+        self.last_reset = None;
+        self.wideband_mtu = None;
+        self.pending = pending;
+        self.sco = None;
+        self.sco_frames = framing::Framer::new(Kind::Sco);
+        self.iso_frames = framing::Framer::new(Kind::Iso);
+        self.coredump = collector(&self.hci);
+        self.lifecycle = Lifecycle::Running;
+        Ok(())
     }
     fn function_off(&mut self) -> Result<ShutdownReport> {
         let command = wmt::command(wmt::FUNCTION, 0, &[0])
@@ -697,7 +826,7 @@ impl<B: MediaIo> Session<B> {
     }
     pub fn close(&mut self) -> Result<()> {
         self.hci.io.validate()?;
-        if self.lifecycle == Lifecycle::Closed {
+        if matches!(self.lifecycle, Lifecycle::Closed | Lifecycle::Off) {
             return Ok(());
         }
         if self.lifecycle == Lifecycle::Failed {

@@ -41,78 +41,14 @@ pub(super) fn admission<C: ConfigSpace>(
     })
 }
 
-// These fixed endpoint layouts are source-qualified, not a tolerant inventory.
 // A header inside an unknown/variable body's payload must never become L1SS
 // authority. Unknown generations/layouts are refused before ownership effects.
 fn extended_capabilities<C: ConfigSpace>(config: &C) -> Result<Option<u16>, BlockError> {
-    let invalid = BlockError::Unsupported("RTSX unqualified extended PCIe capability chain");
-    let mut occupied = [false; 4096];
-    let mut singletons = [false; 32];
-    let mut at = 0x100u16;
-    let mut l1ss = None;
-    loop {
-        let start = usize::from(at);
-        if !(0x100..=0xffc).contains(&at) || at & 3 != 0 || occupied[start] {
-            return Err(invalid);
-        }
-        let header = config.read32(at);
-        // An endpoint with no extended capabilities reads an empty first header.
-        if header == 0 && at == 0x100 {
-            return Ok(None);
-        }
-        let id = header as u16;
-        let version = (header >> 16) & 15;
-        if version != 1 && !(id == 1 && version == 2) {
-            return Err(invalid);
-        }
-        let bytes = match id {
-            // Conventional (non-Flit) endpoint AER through the four DWORD log.
-            // Prefix/timeout logging requires a separately measured layout.
-            1 => {
-                if start + 0x2c > occupied.len()
-                    || config.read32(at + 0x18) & ((1 << 11) | (1 << 12) | (1 << 18)) != 0
-                {
-                    return Err(invalid);
-                }
-                0x2c
-            }
-            4 => 16, // Power Budgeting header/data/select/capability registers.
-            3 => 12, // Device Serial Number: header and two serial DWORDs.
-            0x0b => {
-                if start + 8 > occupied.len() {
-                    return Err(invalid);
-                }
-                let length = (config.read32(at + 4) >> 20) as usize;
-                if length < 8 {
-                    return Err(invalid);
-                }
-                length
-            }
-            0x18 => 8,  // LTR max snoop/no-snoop latency words.
-            L1SS => 16, // Include Control2 even though only Control1 is used.
-            0x1f => 12, // Precision Time Measurement capability/control.
-            _ => return Err(invalid),
-        };
-        if id != 0x0b {
-            if singletons[usize::from(id)] {
-                return Err(invalid);
-            }
-            singletons[usize::from(id)] = true;
-        }
-        let end = start + bytes;
-        if end > occupied.len() || occupied[start..end].iter().any(|used| *used) {
-            return Err(invalid);
-        }
-        occupied[start..end].fill(true);
-        if id == L1SS {
-            l1ss = Some(at);
-        }
-        let next = (header >> 20) as u16;
-        if next == 0 {
-            return Ok(l1ss);
-        }
-        at = next;
-    }
+    super::super::pci::measured_extended(
+        config,
+        L1SS,
+        BlockError::Unsupported("RTSX unqualified extended PCIe capability chain"),
+    )
 }
 
 pub(super) struct Configuration {

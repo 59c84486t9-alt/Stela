@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014,2015 Ken Xue <Ken.Xue@amd.com>, Jeff Wu <Jeff.Wu@amd.com>
 // Copyright (c) 2026 Stela contributors
+//! AMD GPIO pad programming and interrupt status over the controller's register window.
 use super::{Error, Pad, Profile, RegisterIo};
 use core::mem::ManuallyDrop;
 

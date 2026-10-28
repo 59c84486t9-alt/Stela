@@ -10,12 +10,6 @@ extern crate alloc;
 #[path = "../../crates/stela-boot/src/engine/bundle/source.rs"]
 mod boot_bundle_source;
 #[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/console_lines.rs"]
-mod boot_console;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_dma/dmar.rs"]
-mod boot_dmar;
-#[cfg(test)]
 #[path = "../../crates/stela-boot/src/entropy.rs"]
 #[allow(dead_code)] // UEFI-only protocol selection is absent in this hosted harness.
 mod boot_entropy;
@@ -23,18 +17,13 @@ mod boot_entropy;
 #[path = "../../crates/stela-boot/src/engine/bundle/live_tree.rs"]
 mod boot_live_tree;
 #[cfg(test)]
-#[path = "../../crates/stela-boot/src/firmware/pe.rs"]
-mod boot_loaded_image;
+#[path = "../../crates/stela-boot/src/cpu/msr.rs"]
+#[allow(dead_code)] // Hosted tests run only the CPUID gates; RDMSR/WRMSR need CPL0.
+mod boot_msr;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/apic.rs"]
 #[allow(dead_code)] // Only pure directed-INIT admission tests execute hosted.
 mod boot_native_apic;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_smp/canonical/bindings.rs"]
-mod boot_native_bindings;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_smp/firmware/record.rs"]
-mod boot_native_capture;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_smp/bootstrap/early.rs"]
 #[allow(dead_code)] // Record/gate tests run hosted; actual assembly is inspected in UEFI.
@@ -45,16 +34,6 @@ mod boot_native_memory;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/host/profile.rs"]
 mod boot_native_profile;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_smp/topology.rs"]
-#[allow(dead_code)] // Includes UEFI capability checks unused by hosted topology tests.
-mod boot_native_topology;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/paging/controls.rs"]
-mod boot_paging_controls;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/host/ram.rs"]
-mod boot_ram;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_dma/requester.rs"]
 #[allow(dead_code)]
@@ -76,7 +55,7 @@ mod boot_xstate;
 #[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
 #[allow(dead_code)]
 mod boot_ioapic;
-#[cfg(test)]
+#[cfg(all(test, feature = "fetched-sources"))]
 #[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
 mod boot_irq_crs;
 #[cfg(test)]
@@ -97,9 +76,11 @@ mod boot;
 mod census;
 mod check;
 mod darwin_catalogs;
+mod dist;
 mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_platform;
+mod links;
 mod pages;
 mod restore_dry_run;
 mod sysregs;
@@ -120,6 +101,11 @@ enum Task {
         #[arg(long)]
         fix: bool,
     },
+    /// Build the release `stela` with its matching `stela.efi` embedded.
+    Dist,
+    /// Check the Markdown files' links and paths and the `cargo xtask` tasks
+    /// the tree names.
+    Links,
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
@@ -149,6 +135,8 @@ enum Task {
 fn main() -> ExitCode {
     let result = match Cli::parse().task {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
+        Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
+        Task::Links => links::run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]

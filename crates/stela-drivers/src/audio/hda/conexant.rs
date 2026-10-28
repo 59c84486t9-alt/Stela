@@ -83,15 +83,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .any(|state| state.address == address)
     }
     fn conexant_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
-        if graph.token != self.token {
-            return Err(Error::InvalidCodecGraph);
-        }
-        if self.routing_failed || self.lifecycle_failed || self.command_poisoned {
-            return Err(Error::NeedsReset);
-        }
-        if self.stopped {
-            return Err(Error::Shutdown);
-        }
+        self.vendor_codec_guard(graph)?;
         profile(graph.vendor_id)?;
         Ok(())
     }

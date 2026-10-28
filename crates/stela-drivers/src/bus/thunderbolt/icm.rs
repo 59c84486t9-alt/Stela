@@ -617,19 +617,12 @@ impl<R: Registers> Host<R> {
         if self.phase != Phase::Disabled {
             return Err(Error::Busy);
         }
-        if !self.tx_released {
-            // SAFETY: the caller proves actual final TX DMA/IRQ/work drain.
-            unsafe {
-                self.tx.release()?;
-            }
-            self.tx_released = true;
-        }
-        if !self.rx_released {
-            // SAFETY: the caller proves actual final RX DMA/IRQ/work drain.
-            unsafe {
-                self.rx.release()?;
-            }
-            self.rx_released = true;
+        // SAFETY: the caller proves final drain of both rings.
+        unsafe {
+            ring::release_pair(
+                (&mut self.tx, &mut self.tx_released),
+                (&mut self.rx, &mut self.rx_released),
+            )?;
         }
         self.phase = Phase::Released;
         Ok(())

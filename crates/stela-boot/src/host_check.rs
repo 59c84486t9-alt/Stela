@@ -47,13 +47,13 @@ use core::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
+use stela_boot_core::options::HostCheck;
 use stela_drivers::{
     Handoff,
     block::{BlockDevice, Shared, Transport},
     bus::dma::RegionAllocator,
-    input::Input,
+    input::{Input, InputDevice},
     probe::probe,
-    usb::hid::UsbInput,
 };
 use stela_runtime::pc::{
     self, boot_log,
@@ -63,8 +63,7 @@ use stela_runtime::pc::{
 };
 use uefi::boot;
 
-pub const OPTION: &[u8] = b"--host-check";
-const DEFAULT_KEY_SECONDS: u64 = 60;
+pub const OPTION: &[u8] = stela_boot_core::options::HOST_CHECK.as_bytes();
 const BEAT_SECONDS: u64 = 10;
 /// The stop code at `--deadline`.
 const DEADLINE_CODE: u32 = 0x10;
@@ -101,68 +100,6 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 static STRAY: AtomicU64 = AtomicU64::new(0);
 /// IA32_APIC_BASE, for the handler's EOI; the xAPIC page is identity-mapped.
 static APIC_BASE: AtomicU64 = AtomicU64::new(0);
-
-struct Options {
-    native_dma_check: bool,
-    native_work_check: bool,
-    native_irq_work_check: bool,
-    native_dma_isolation_check: bool,
-    nor_file: Option<(Guid, String)>,
-    deadline: Option<u64>,
-    key_seconds: u64,
-}
-
-fn seconds(value: Option<&str>) -> Result<u64, &'static str> {
-    value
-        .and_then(|value| value.parse().ok())
-        .filter(|&seconds| seconds > 0)
-        .ok_or("host check: a time option takes a positive number of seconds")
-}
-
-impl Options {
-    fn parse(text: &str) -> Result<Self, &'static str> {
-        let mut words = text.split_ascii_whitespace();
-        if words.next().map(str::as_bytes) != Some(OPTION) {
-            return Err("host check: stela.cfg must start with --host-check");
-        }
-        let mut options = Self {
-            native_dma_check: false,
-            native_work_check: false,
-            native_irq_work_check: false,
-            native_dma_isolation_check: false,
-            nor_file: None,
-            deadline: None,
-            key_seconds: DEFAULT_KEY_SECONDS,
-        };
-        while let Some(word) = words.next() {
-            match word {
-                "--native-irq-work-check" => options.native_irq_work_check = true,
-                "--native-work-check" => options.native_work_check = true,
-                "--native-dma-check" => options.native_dma_check = true,
-                "--native-dma-isolation-check" => options.native_dma_isolation_check = true,
-                "--nor-file" => {
-                    let (guid, path) = words
-                        .next()
-                        .and_then(|value| value.split_once(':'))
-                        .ok_or("host check: --nor-file takes GUID:/PATH")?;
-                    options.nor_file = Some((guid.parse()?, String::from(path)));
-                }
-                "--deadline" => options.deadline = Some(seconds(words.next())?),
-                "--key-seconds" => options.key_seconds = seconds(words.next())?,
-                _ => return Err("host check: unknown option"),
-            }
-        }
-        if u8::from(options.native_dma_check)
-            + u8::from(options.native_dma_isolation_check)
-            + u8::from(options.native_work_check)
-            + u8::from(options.native_irq_work_check)
-            > 1
-        {
-            return Err("host check: native diagnostic fixture modes are exclusive");
-        }
-        Ok(options)
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verdict {
@@ -230,7 +167,7 @@ impl Timing {
 struct Machine {
     native_dma: Option<crate::native_dma::diagnostic::Prepared>,
     native_work: Option<crate::native_work_check::Prepared>,
-    options: Options,
+    options: HostCheck,
     timing: Timing,
     screen: Option<Framebuffer>,
     storage: Option<Handoff>,
@@ -281,7 +218,7 @@ pub fn boot(options: Vec<u8>) -> ! {
 /// the rest needs from the firmware; then leave boot services.
 fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let options = Options::parse(text)?;
+    let options = HostCheck::parse(text)?;
     let started = rdtsc();
     output::arguments(format_args!("HOST CHECK {}\n", text.trim()));
     for line in cpu::report() {
@@ -474,55 +411,59 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     finish(machine, &mut keyboards)
 }
 
-/// The storage, GPT and log checks; returns the USB keyboards.
-fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
+/// The storage, GPT and log checks; returns the keyboards and pointers.
+fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
     // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: this handoff describes the running machine and its tables.
-    let mut disks = unsafe { probe(handoff, &mut dma) };
-    for window in &disks.unmapped {
+    let mut devices = unsafe { probe(handoff, &mut dma) };
+    for window in &devices.unmapped {
         output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
     }
-    for (address, error) in &disks.failures {
+    for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
-    for (address, class, why) in &disks.unsupported {
+    for (location, error) in &devices.platform_failures {
+        output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
+    }
+    for (address, class, why) in &devices.unsupported {
         output::arguments(format_args!(
             "HOST UNSUPPORTED pci={address} class={:02x}{:02x}{:02x}: {why}\n",
             class[0], class[1], class[2]
         ));
     }
-    for (location, error) in &disks.device_failures {
+    for (location, error) in &devices.device_failures {
         output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
     }
-    for (location, error) in &disks.usb_failures {
+    for (location, error) in &devices.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",
             stela_drivers::usb::xhci::explain(error)
         ));
     }
-    for (location, why) in &disks.usb_unused {
+    for (location, why) in &devices.usb_unused {
         output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
     }
-    for device in &disks.usb_inputs {
-        output::arguments(format_args!("USB INPUT {}\n", device.name));
+    for device in &devices.inputs {
+        output::arguments(format_args!("INPUT {}\n", device.name()));
     }
-    let failures = disks.failures.len() + disks.device_failures.len() + disks.usb_failures.len();
+    let failures =
+        devices.failures.len() + devices.device_failures.len() + devices.usb_failures.len();
     machine.record(
         "storage",
-        if disks.devices.is_empty() || failures > 0 {
+        if devices.disks.is_empty() || failures > 0 {
             Verdict::Fail
         } else {
             Verdict::Pass
         },
         format!(
-            "disks={} usb_inputs={} failures={failures}",
-            disks.devices.len(),
-            disks.usb_inputs.len()
+            "disks={} inputs={} failures={failures}",
+            devices.disks.len(),
+            devices.inputs.len()
         ),
     );
     let (mut internal, mut tables) = (0, 0);
-    for device in &mut disks.devices {
+    for device in &mut devices.disks {
         let id = device.identity().clone();
         output::arguments(format_args!(
             "DISK {:?} at {} serial={:?} model={:?} blocks={} block_size={} bytes={}\n",
@@ -570,7 +511,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     );
     match machine.options.nor_file.clone() {
         Some((guid, path)) => {
-            let (verdict, detail) = match open_log(&mut disks.devices, guid, &path) {
+            let (verdict, detail) = match open_log(&mut devices.disks, guid, &path) {
                 Ok(detail) => (Verdict::Pass, detail),
                 Err(error) => (Verdict::Fail, error),
             };
@@ -578,7 +519,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
         }
         None => machine.record("log", Verdict::Skip, String::from("no --nor-file")),
     }
-    core::mem::take(&mut disks.usb_inputs)
+    core::mem::take(&mut devices.inputs)
 }
 
 /// Keep the output in the file at `path` on USB partition `guid`.
@@ -767,9 +708,12 @@ fn bars(machine: &mut Machine, screen: &Framebuffer, top: usize) {
 
 /// The first non-modifier key pressed on any of `keyboards`, logged with
 /// the raw report it arrived in.
-fn key(keyboards: &mut [UsbInput]) -> Option<u8> {
+fn key(keyboards: &mut [InputDevice]) -> Option<u8> {
     keyboards.iter_mut().find_map(|device| {
-        let usage = device.poll().into_iter().find_map(|input| match input {
+        let mut inputs = Vec::new();
+        // A failed poll still yields what the device decoded before it.
+        let _ = device.poll(&mut inputs);
+        let usage = inputs.into_iter().find_map(|input| match input {
             Input::Key {
                 usage,
                 pressed: true,
@@ -779,26 +723,26 @@ fn key(keyboards: &mut [UsbInput]) -> Option<u8> {
         output::arguments(format_args!(
             "KEY usage={usage:#04x} report={:02x?} from {}\n",
             device.last_report(),
-            device.name
+            device.name()
         ));
         Some(usage)
     })
 }
 
 /// A key within `--key-seconds`, which also says whether the bars show.
-fn keyboard(machine: &mut Machine, keyboards: &mut [UsbInput]) {
+fn keyboard(machine: &mut Machine, keyboards: &mut [InputDevice]) {
     if keyboards.is_empty() {
         machine.record(
             "keyboard",
             Verdict::Fail,
-            String::from("no USB HID device was brought up"),
+            String::from("no keyboard was brought up"),
         );
         machine.record("display-seen", Verdict::Skip, String::from("no keyboard"));
         return;
     }
     let seconds = machine.options.key_seconds;
     output::arguments(format_args!(
-        "\n>>> Press Y on the USB keyboard if the bottom of the screen shows seven colour bars \
+        "\n>>> Press Y on the keyboard if the bottom of the screen shows seven colour bars \
          (white yellow cyan green magenta red blue), N if it does not. Waiting {seconds} s.\n"
     ));
     output::flush_log();
@@ -832,7 +776,7 @@ fn keyboard(machine: &mut Machine, keyboards: &mut [UsbInput]) {
 }
 
 /// The summary, then a restart, a power-off or the deadline.
-fn finish(machine: &mut Machine, keyboards: &mut [UsbInput]) -> ! {
+fn finish(machine: &mut Machine, keyboards: &mut [InputDevice]) -> ! {
     output::arguments(format_args!("\nHOST CHECK SUMMARY\n"));
     for check in &machine.checks {
         output::arguments(format_args!("{check}\n"));

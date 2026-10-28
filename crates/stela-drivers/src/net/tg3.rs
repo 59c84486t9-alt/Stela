@@ -65,6 +65,15 @@ pub enum Error {
     Memory(crate::bus::dma::memory::MemoryError),
 }
 
+impl From<crate::bus::pci::CapabilityError> for Error {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        match error {
+            crate::bus::pci::CapabilityError::FailedRead { .. } => Self::Removed,
+            _ => Self::UnsupportedPcie,
+        }
+    }
+}
+
 /// Actual serialized PCI/MAC/APE register ownership.
 ///
 /// # Safety

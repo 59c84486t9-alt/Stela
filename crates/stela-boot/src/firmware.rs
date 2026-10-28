@@ -30,8 +30,8 @@ const SOURCE: &CStr16 = cstr16!("\\EFI\\stela\\source.bin");
 pub(crate) const STACK_PAGES: usize = 256;
 
 pub(crate) mod entries;
-mod pe;
 pub(crate) use pe::loaded_extent;
+use stela_boot_core::pe;
 
 /// What the host storage check runs with after boot services end.
 pub struct Handoff {

@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 pub const WIFI_BT_GUID: &str = "e65d8884-d4af-4b20-8d03-772ecc3da531";
 pub const WIFI_GUID: &str = "92daaf2f-c02b-455b-b2ec-f5a3594f4aea";
 pub const MAX_VARIABLE_BYTES: usize = 4 * 1024 * 1024 + 14;
-const NOT_FOUND: u64 = (1 << 63) | 14;
+/// EFI_NOT_FOUND, the status of a variable the firmware does not have.
+pub const NOT_FOUND: u64 = (1 << 63) | 14;
 const DATA_LICENSE: &str = "LicenseRef-Local-UEFI-Observation";
 
 /// The initial AX200/AX210 raw capture set. This describes observations only;

@@ -18,10 +18,6 @@
 //! system's APFS Preboot volume; the mount builds the boot bundle from it at
 //! boot and enters it, and the run checks the result against the bundle the
 //! host builds from the same image.
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/storage/options.rs"]
-mod storage_options;
-
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
     tools::{binding, cargo, exec, qemu, root, stop, wait},
@@ -35,7 +31,6 @@ use std::{
     process::{Command as Process, ExitCode, Stdio},
     time::{Duration, Instant},
 };
-use stela_cli::efi;
 use stela_runtime::payload::{
     PayloadError, PayloadSource, ReadAt, copy_verified, gpt, staging::StagedSource,
 };
@@ -45,8 +40,12 @@ mod disks;
 mod fat32;
 mod host_firmware;
 mod lan;
+mod machine;
+mod network;
 mod network_check;
 mod preboot;
+mod report;
+mod storage;
 
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
 const TIMEOUT_EXIT: u8 = 124;
@@ -161,7 +160,7 @@ pub struct Run {
     /// and 12G with a boot bundle.
     #[arg(long)]
     memory: Option<String>,
-    /// A kernel boot bundle directory (`stela boot prepare` output) to start
+    /// A kernel boot bundle directory (`stela-dev boot prepare` output) to start
     /// on the system-mode engine; it is copied to `\EFI\stela\bundle`.
     #[arg(long, conflicts_with = "module")]
     bundle: Option<PathBuf>,
@@ -171,7 +170,7 @@ pub struct Run {
     /// starts it on the system-mode engine.
     #[arg(long, conflicts_with_all = ["module", "bundle", "append", "payload"])]
     preboot_disk: Option<PathBuf>,
-    /// A restore payload inventory (`stela image-manifest
+    /// A restore payload inventory (`stela-dev image-manifest
     /// --payload-manifest`), placed at `\EFI\stela\payload.json` for the
     /// mount's `--restore-manifest`, with the block hash file it names
     /// (`blocks.bin` beside it).
@@ -482,7 +481,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
     }
 }
 
-fn build(release: bool) -> Result<PathBuf> {
+pub fn build(release: bool) -> Result<PathBuf> {
     let mut command = cargo();
     command.args(["build", "--locked", "--manifest-path", BOOT_MANIFEST]);
     command.args(["--target", BOOT_TARGET, "--target-dir", BOOT_TARGET_DIR]);
@@ -643,87 +642,25 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "timeout must be in (0, {limit}] seconds"
     );
     let attached = storage_disks(&arguments.storage_disk, &arguments.storage_serial)?;
-    let image = match arguments.image {
-        Some(image) => image,
+    let image = match &arguments.image {
+        Some(image) => image.clone(),
         None => build(true)?,
     };
-    let output = arguments.output;
-    if output.exists() {
-        bail!("{} already exists", output.display());
+    let paths = storage::Paths::new(arguments.output.clone());
+    if paths.output.exists() {
+        bail!("{} already exists", paths.output.display());
     }
-    let volume = output.join("volume");
-    let source = volume.join("EFI/stela/source.bin");
     let preboot = arguments
         .preboot_disk
         .as_deref()
         .map(preboot::prepare)
         .transpose()?;
-    let host_check = arguments.native_dma_check
-        || arguments.native_dma_isolation_check
-        || arguments.native_work_check
-        || arguments.native_irq_work_check;
-    // Install mode, the storage check and the host checks run no guest.
-    let guestless = host_check || arguments.payload.is_some() || arguments.storage_check;
-    let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
-        _ if arguments.native_mmio_check => (kernel()?, native_mmio_options()),
-        _ if arguments.native_clock_check => (kernel()?, native_clock_options()),
-        _ if preboot.is_some() => (Vec::new(), preboot.as_ref().unwrap().options()),
-        _ if arguments.bundle.is_some() => (
-            Vec::new(),
-            arguments.append.unwrap_or_else(|| BUNDLE_OPTIONS.into()),
-        ),
-        _ if guestless => (Vec::new(), arguments.append.unwrap_or_default()),
-        (Some(module), _) => (
-            fs::read(module)?,
-            arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
-        ),
-        (None, Scenario::SystemKernel) => (
-            kernel()?,
-            arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
-        ),
-    };
-    if host_check {
-        ensure!(
-            matches!(arguments.display, Display::None),
-            "native fixture uses a headless single-BSP topology"
-        );
-        let mode = if arguments.native_irq_work_check {
-            "--native-irq-work-check"
-        } else if arguments.native_work_check {
-            "--native-work-check"
-        } else if arguments.native_dma_isolation_check {
-            "--native-dma-isolation-check"
-        } else {
-            "--native-dma-check"
-        };
-        options = format!("--host-check {mode} --deadline 5 --key-seconds 1");
-    }
-    let disks = match arguments.storage_check {
-        true => {
-            fs::create_dir_all(&output)?;
-            disks::create(&output)?
-        }
-        false => Vec::new(),
-    };
-    options.extend(disks.iter().map(disks::Disk::option));
+    let (bytes, mut options) = guest(&arguments, preboot.as_ref())?;
+    let disks = storage::check_disks(&arguments, &paths, &mut options)?;
     if arguments.input || arguments.usb_input {
         options.push_str(" --input");
     }
-    for path in &arguments.usb_disk {
-        ensure!(path.is_file(), "USB disk is not a file: {}", path.display());
-    }
-    ensure!(
-        arguments.usb_storage_disk.len() <= 6,
-        "the guest's native hub carries at most six USB disks"
-    );
-    for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
-        ensure!(
-            path.is_file(),
-            "USB storage disk is not a file: {}",
-            path.display()
-        );
-        options.push_str(&format!(" --usb-storage {}", usb_serial(index)));
-    }
+    storage::usb_options(&arguments, &mut options)?;
     if arguments.guest_network {
         options.push_str(" --guest-network");
     }
@@ -751,428 +688,38 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if let Some(mode) = arguments.audio_check {
         options.push_str(&format!(" --audio-check {}", mode.option()));
     }
-    let fixture = arguments
-        .network_self_check
-        .then(network_check::Fixture::start)
-        .transpose()?;
-    let network_check_url = arguments
-        .network_check
-        .as_deref()
-        .or_else(|| fixture.as_ref().map(|fixture| fixture.url.as_str()));
-    if let Some(url) = network_check_url {
-        ensure!(
-            url.starts_with("http://") && !url.contains(char::is_whitespace),
-            "the network check is one http:// URL"
-        );
-        options.push_str(&format!(" --network-check {url}"));
-    }
-    let target = output.join("target.img");
-    let options = match arguments.payload {
-        None => options,
-        Some(mode) => {
-            let ipsw = output.join("synthetic.ipsw");
-            fs::create_dir_all(&output)?;
-            efi::synthetic_ipsw(&ipsw)?;
-            efi::write_payload(&efi::PayloadOptions {
-                image: &ipsw,
-                model: efi::SYNTHETIC_MODEL,
-                root: &volume,
-                layout: match mode {
-                    PayloadMode::VerifyArchive => efi::PayloadLayout::Archive,
-                    _ => efi::PayloadLayout::Split,
-                },
-                slice_bytes: SYNTHETIC_SLICE_BYTES,
-                fetch_keys: false,
-            })?;
-            let mut install = format!(
-                "{options} --install-build {} --install-mode ",
-                efi::SYNTHETIC_BUILD
-            );
-            match mode {
-                PayloadMode::Verify | PayloadMode::VerifyArchive => install.push_str("verify"),
-                PayloadMode::Stage | PayloadMode::StagePath => {
-                    fs::File::create_new(&target)?.set_len(TARGET_BYTES)?;
-                    let identity = match mode {
-                        PayloadMode::Stage => format!("--install-target-serial {TARGET_SERIAL}"),
-                        _ => format!(
-                            "--install-target-path PciRoot(0x0)/Pci({TARGET_SLOT:#x},0x0) \
-                             --install-target-bytes {TARGET_BYTES}"
-                        ),
-                    };
-                    // A 4 GiB disk: 1 GiB cache, and an Apple region of at
-                    // least 1 GiB instead of a real restore's 64 GiB.
-                    install.push_str(&format!(
-                        "stage {identity} \
-                         --install-cache-bytes 0x40000000 --install-min-apple-bytes 0x40000000"
-                    ));
-                }
-            }
-            install
-        }
-    };
+    let network = network::Check::start(&arguments, &mut options)?;
+    let options = storage::payload(&arguments, &paths, options)?;
     ensure!(
         arguments.host_firmware.is_none() || system,
         "host firmware qualification requires --scenario system-kernel or another --system boot"
     );
-    if arguments.usb_image.is_some() {
-        fs::create_dir_all(&output)?;
-    } else {
-        fs::create_dir_all(volume.join("EFI/BOOT"))?;
-        fs::create_dir_all(volume.join("EFI/stela"))?;
-        fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
-        if !bytes.is_empty() {
-            fs::write(&source, bytes)?;
-        }
-        fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
-        if let Some(directory) = &arguments.host_firmware {
-            let package = stela_loader::host_firmware::Package::read_for_mount(
-                directory,
-                &fs::read(&image)?,
-            )?;
-            package.publish(&volume.join(stela_loader::host_firmware::DIRECTORY))?;
-        }
-        if let Some(bundle) = &arguments.bundle {
-            copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
-        }
-        if let Some(manifest) = &arguments.restore_manifest {
-            fs::copy(manifest, volume.join("EFI/stela/payload.json"))
-                .with_context(|| format!("restore manifest {}", manifest.display()))?;
-            // The block hashes the manifest names go beside it, so the
-            // restore host needs no scan of the payload.
-            let parsed = stela_runtime::payload::PayloadManifest::parse(&fs::read(manifest)?)
-                .map_err(|error| anyhow::anyhow!("{}: {error}", manifest.display()))?;
-            if let Some(blocks) = &parsed.block_hashes {
-                let from = manifest.with_file_name(&blocks.file);
-                fs::copy(&from, volume.join("EFI/stela").join(&blocks.file))
-                    .with_context(|| format!("block hashes {}", from.display()))?;
-            }
-        }
-    }
+    let fat = storage::write_volume(&arguments, &paths, &image, bytes, &options)?;
 
-    // QEMU's directory volume is FAT16 and holds 516 MB; larger volumes,
-    // such as a restore bundle with its ramdisk, go into a FAT32 image.
-    let fat = match &arguments.usb_image {
-        None if !arguments.directory_volume && directory_bytes(&volume)? > VVFAT_BYTES => {
-            Some(fat_image(&volume, &output)?)
-        }
-        _ => None,
-    };
     let qemu = qemu()?;
     let firmware = firmware(&qemu)?;
-    // A qcow2 stick keeps its variables in a qcow2 of its own, so `savevm`
-    // can checkpoint the whole machine.
-    let checkpointed = arguments
-        .usb_image
-        .as_ref()
-        .is_some_and(|image| image.extension().is_some_and(|e| e == "qcow2"));
-    let (variables, format) = if checkpointed {
-        let variables = arguments
-            .usb_image
-            .as_ref()
-            .unwrap()
-            .with_extension("vars.qcow2");
-        if !variables.exists() {
-            overlay(&qemu, &firmware.join(FIRMWARE_VARIABLES), &variables)?;
-        }
-        (variables, "qcow2")
-    } else {
-        let variables = output.join("variables.fd");
-        fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
-        (variables, "raw")
-    };
-    ensure!(
-        arguments.loadvm.is_none() || checkpointed,
-        "--loadvm needs a .qcow2 --usb-image"
-    );
-    let serial = output.join("serial.txt");
-    let usb = arguments.usb_image.is_some();
-    let mut command = Process::new(&qemu);
-    // A USB's startup choices take a keyboard, and its setup writes the boot
-    // log. System mode places the guest beside the window with LA57, which
-    // the selected CPU exposes unless `--no-la57` hides it.
-    let cpu = qemu_cpu(
-        arguments.cpu.as_deref().or(arguments.kvm.then_some("host")),
-        arguments.no_la57,
-        usb || system
-            || arguments.native_dma_check
-            || arguments.native_dma_isolation_check
-            || arguments.native_work_check
-            || arguments.native_irq_work_check,
-    );
-    let (keyboard, access) = if usb {
-        ("on", "readonly=off,file=fat:rw:")
-    } else {
-        ("off", "readonly=on,file=fat:")
-    };
+    let (variables, format) = machine::variables(&arguments, &qemu, &firmware, &paths.output)?;
     // A USB image carries the boot bundle that `stela setup` wrote.
     let bundle = arguments.bundle.is_some() || preboot.is_some() || arguments.usb_image.is_some();
-    let memory = arguments.memory.clone().unwrap_or_else(|| {
-        match (bundle, system) {
-            (true, _) => "12G",
-            (false, true) => "8G",
-            (false, false) => "1G",
-        }
-        .into()
-    });
-    command
-        .arg("-machine")
-        .arg(qemu_machine(keyboard, arguments.hpet))
-        .args([
-            "-accel",
-            qemu_accelerator(arguments.icount, arguments.kvm),
-            "-cpu",
-            &cpu,
-            "-smp",
-        ])
-        .arg(format!(
-            "cpus={},sockets=1,cores={},threads={}",
-            u32::from(arguments.host_cores) * u32::from(arguments.host_threads),
-            arguments.host_cores,
-            arguments.host_threads
-        ))
-        .args(
-            arguments
-                .icount
-                .map(|shift| ["-icount".into(), format!("shift={shift},sleep=off")])
-                .into_iter()
-                .flatten(),
-        )
-        .args(["-m", &memory, "-nodefaults", "-no-reboot"])
-        .args(
-            arguments
-                .loadvm
-                .iter()
-                .flat_map(|tag| ["-loadvm", tag.as_str()]),
-        )
-        .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,readonly=on,file={}",
-            option_path(&firmware.join(FIRMWARE_CODE))
-        ))
-        .arg("-drive")
-        .arg(format!(
-            "if=pflash,format={format},file={}",
-            option_path(&variables)
-        ))
-        .arg("-drive")
-        .arg(match &arguments.usb_image {
-            Some(usb) => format!(
-                "if=none,id=volume,format={format},snapshot={},file={}",
-                if arguments.usb_writable { "off" } else { "on" },
-                option_path(usb)
-            ),
-            None => match &fat {
-                Some(image) => format!(
-                    "if=none,id=volume,format=raw,readonly=on,file={}",
-                    option_path(image)
-                ),
-                None => format!(
-                    "if=none,id=volume,format=raw,{access}{}",
-                    option_path(&volume)
-                ),
-            },
-        });
-    if !usb {
-        command.args(["-device", "virtio-blk-pci,drive=volume"]);
-    }
-    if let Some(mode) = arguments.audio_check {
-        mode.attach(&mut command, &output);
-        // isa-debug-exit calls exit() before the audio backend finalizes its
-        // WAV. Quit through QMP after the mount stops so cleanup can finish.
-        command.args(["-qmp", "stdio"]);
-    } else {
-        command.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=4"]);
-    }
-    for (index, disk) in disks.iter().enumerate() {
-        disk.attach(index, &mut command);
-    }
-    if let Some(preboot) = &preboot {
-        preboot.attach(&mut command);
-    }
-    if target.exists() {
-        command
-            .arg("-drive")
-            .arg(format!(
-                "if=none,id=target,format=raw,file={}",
-                option_path(&target)
-            ))
-            .arg("-device")
-            .arg(match arguments.payload {
-                Some(PayloadMode::StagePath) => {
-                    format!("virtio-blk-pci,drive=target,addr={TARGET_SLOT:#x}")
-                }
-                _ => format!("nvme,drive=target,serial={TARGET_SERIAL},addr={TARGET_SLOT:#x}"),
-            });
-    }
-    // A bundle's kernel draws on a display through the mount's GOP.
-    if bundle {
-        command.args(["-device", "VGA"]);
-    }
-    if arguments.input {
-        command.args([
-            "-device",
-            "virtio-keyboard-pci",
-            "-device",
-            "virtio-tablet-pci",
-        ]);
-    }
-    if arguments.network {
-        let port = lan::listen(output.join("network.log")).context("start the network peer")?;
-        let model = arguments.network_model.unwrap_or(NetworkModel::Virtio);
-        let bus = match model {
-            NetworkModel::E1000e | NetworkModel::Igb => {
-                // Exercise physical NIC drivers behind a PCIe bridge. For
-                // e1000e this also checks the endpoint/parent ASPM workaround.
-                command.args([
-                    "-device",
-                    "pcie-root-port,id=host-net-port,chassis=1,bus=pcie.0",
-                ]);
-                ",bus=host-net-port"
-            }
-            NetworkModel::Virtio => "",
-        };
-        command
-            .arg("-netdev")
-            .arg(format!(
-                "stream,id=host-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
-            ))
-            .arg("-device")
-            .arg(format!("{},netdev=host-net{bus}", model.device()));
-    }
-    // After the mount's own adapter, so the mount gives the guest the
-    // second one when both are present.
-    if arguments.guest_network {
-        let port = lan::listen(output.join("guest-network.log"))
-            .context("start the guest network peer")?;
-        command
-            .arg("-netdev")
-            .arg(format!(
-                "stream,id=guest-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
-            ))
-            .args(["-device", "virtio-net-pci,netdev=guest-net"]);
-    }
-    let host_usb =
-        usb || arguments.usb_input || arguments.usb_network || !arguments.usb_disk.is_empty();
-    if host_usb {
-        command.args([
-            "-device",
-            if arguments.usb_disk_model == Some(UsbDiskModel::UasUsb2) {
-                "qemu-xhci,id=host-usb,p3=0"
-            } else {
-                "qemu-xhci,id=host-usb"
-            },
-        ]);
-    }
-    if usb {
-        command.arg("-device").arg(format!(
-            "usb-storage,drive=volume,serial={},bus=host-usb.0,bootindex=0",
-            arguments.usb_serial
-        ));
-    }
-    if arguments.usb_input {
-        for device in ["usb-kbd", "usb-tablet", "usb-mouse"] {
-            command
-                .arg("-device")
-                .arg(format!("{device},bus=host-usb.0"));
-        }
-    }
-    if arguments.usb_network {
-        let port =
-            lan::listen(output.join("usb-network.log")).context("start the USB network peer")?;
-        command
-            .arg("-netdev")
-            .arg(format!(
-                "stream,id=usb-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
-            ))
-            .args(["-device", "usb-net,netdev=usb-net,bus=host-usb.0"]);
-    }
-    for (index, path) in arguments.usb_disk.iter().enumerate() {
-        command.arg("-drive").arg(format!(
-            "if=none,id=usbdisk{index},format=raw,file={}",
-            option_path(path)
-        ));
-        match arguments.usb_disk_model.unwrap_or(UsbDiskModel::Bot) {
-            UsbDiskModel::Bot => {
-                command.arg("-device").arg(format!(
-                    "usb-storage,drive=usbdisk{index},serial=STELAUSBDISK{index},bus=host-usb.0"
-                ));
-            }
-            UsbDiskModel::Uas | UsbDiskModel::UasUsb2 => {
-                command.arg("-device").arg(format!(
-                    "usb-uas,id=host-uas{index},serial=STELAUSBDISK{index},bus=host-usb.0"
-                ));
-                command.arg("-device").arg(format!(
-                    "scsi-hd,drive=usbdisk{index},bus=host-uas{index}.0,scsi-id=0,lun=0"
-                ));
-            }
-        }
-    }
-    for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
-        command
-            .arg("-drive")
-            .arg(format!(
-                "if=none,id=usb{index},format=raw,file={}",
-                option_path(path)
-            ))
-            .arg("-device")
-            .arg(format!(
-                "nvme,drive=usb{index},serial={}",
-                usb_serial(index)
-            ));
-    }
-    match arguments.display {
-        Display::None => command
-            .args(["-display", "none"])
-            .arg("-serial")
-            .arg(format!("file:{}", serial.display())),
-        // Cocoa sizes its text console from the chardev; GTK's VTE console
-        // sizes itself and refuses the options.
-        Display::Window if cfg!(target_os = "macos") => command
-            .args(["-display", "cocoa", "-chardev"])
-            .arg(format!(
-                "vc,id=uart,cols=132,rows=50,logfile={}",
-                option_path(&serial)
-            ))
-            .args(["-serial", "chardev:uart"]),
-        Display::Window => command
-            .args(["-display", "gtk", "-chardev"])
-            .arg(format!("vc,id=uart,logfile={}", option_path(&serial)))
-            .args(["-serial", "chardev:uart"]),
-    };
-    match arguments.monitor {
-        Some(port) => command
-            .arg("-monitor")
-            .arg(format!("telnet:127.0.0.1:{port},server=on,wait=off")),
-        None => command.args(["-monitor", "none"]),
-    };
-    for (index, (path, serial)) in attached.iter().enumerate() {
-        command
-            .arg("-drive")
-            .arg(format!(
-                "if=none,id=ans{index},format=raw,file={}",
-                option_path(path)
-            ))
-            .arg("-device")
-            .arg(format!("nvme,drive=ans{index},serial={serial}"));
-    }
-    if arguments.native_dma_check
-        || arguments.native_dma_isolation_check
-        || arguments.native_irq_work_check
-    {
-        command.args(["-device", "intel-iommu,intremap=off,caching-mode=on"]);
-        if arguments.native_dma_isolation_check {
-            command.args(["-device", "edu,addr=2", "-device", "edu,addr=3"]);
-        } else {
-            command.args(["-device", "edu"]);
-        }
-    }
-    if let Some(port) = arguments.gdb {
-        command
-            .arg("-gdb")
-            .arg(format!("tcp:127.0.0.1:{port}"))
-            .arg("-S");
-        eprintln!("paused: gdb -ex 'target remote 127.0.0.1:{port}'");
-    }
+    // QEMU numbers PCI devices in the order they are given, so the parts
+    // attach theirs in a fixed order.
+    let mut command = machine::command(
+        &arguments, &qemu, &firmware, &variables, format, system, bundle,
+    );
+    storage::attach_volume(&arguments, &paths, fat.as_deref(), format, &mut command);
+    machine::attach_exit(&arguments, &paths.output, &mut command);
+    storage::attach_disks(&arguments, &paths, &disks, preboot.as_ref(), &mut command);
+    machine::attach_display(&arguments, bundle, &mut command);
+    network::attach(&arguments, &paths.output, &mut command)?;
+    machine::attach_usb(&arguments, &mut command);
+    storage::attach_usb_boot(&arguments, &mut command);
+    machine::attach_usb_input(&arguments, &mut command);
+    network::attach_usb(&arguments, &paths.output, &mut command)?;
+    storage::attach_usb_disks(&arguments, &mut command);
+    machine::attach_console(&arguments, &paths.serial, &mut command);
+    storage::attach_storage_disks(&attached, &mut command);
+    machine::attach_iommu(&arguments, &mut command);
+    machine::attach_debugger(&arguments, &mut command);
     let command_line: Vec<String> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -1183,12 +730,16 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // the old run to the replacement's bytes.
     let qemu_binding = binding(&qemu)?;
     let image_binding = binding(&image)?;
-    let source_binding = source.exists().then(|| binding(&source)).transpose()?;
+    let source_binding = paths
+        .source
+        .exists()
+        .then(|| binding(&paths.source))
+        .transpose()?;
 
     let started = Instant::now();
     let mut child = command
-        .stdout(fs::File::create(output.join("stdout.txt"))?)
-        .stderr(fs::File::create(output.join("stderr.txt"))?)
+        .stdout(fs::File::create(paths.output.join("stdout.txt"))?)
+        .stderr(fs::File::create(paths.output.join("stderr.txt"))?)
         .stdin(if arguments.audio_check.is_some() {
             Stdio::piped()
         } else {
@@ -1205,7 +756,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         None => Duration::from_secs_f64(arguments.timeout).saturating_sub(started.elapsed()),
     };
     let waited = if arguments.audio_check.is_some() {
-        audio_check::wait_for_stop(&mut child, &serial, limit)
+        audio_check::wait_for_stop(&mut child, &paths.serial, limit)
     } else {
         wait(&mut child, limit)
     };
@@ -1216,289 +767,81 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             return Err(error);
         }
     };
-    let mut code = match status {
-        Some(status) => status.code().map_or(TIMEOUT_EXIT, |code| code as u8),
-        None => TIMEOUT_EXIT,
-    };
-    let qemu_returncode = code;
-    let serial_text = fs::read_to_string(&serial).unwrap_or_default();
-    let mount_exit = arguments
-        .audio_check
-        .map(|_| audio_check::guest_exit(&serial_text));
-    if let Some(result) = &mount_exit {
-        code = result.as_ref().copied().unwrap_or(FAILED_EXIT);
-    }
-    let unsupported = first_unsupported(&serial_text);
-    // The installed-system scenario ends at the bundle's entry: what the
-    // engine meets after it is reported but does not fail the run.
-    let mut entered = false;
-    let verification = if let Some(preboot) = &preboot {
-        let checked = preboot.verify(&serial_text);
-        entered = checked.is_ok();
-        Some(
-            checked
-                .unwrap_or_else(|error| json!({ "passed": false, "reason": format!("{error:#}") })),
-        )
-    } else if arguments.bundle.is_none()
-        && arguments.module.is_none()
-        && !guestless
-        && !arguments.native_mmio_check
-        && !arguments.native_clock_check
-    {
-        let checked = verify_kernel(&serial_text);
-        if checked.is_err() && code == IDLE_EXIT {
-            code = FAILED_EXIT;
-        }
-        Some(checked.map_or_else(
-            |error| json!({ "passed": false, "reason": error }),
-            |()| json!({ "passed": true }),
-        ))
-    } else {
-        None
-    };
+    report::finish(
+        &arguments,
+        report::Outcome {
+            paths,
+            preboot,
+            disks,
+            attached,
+            network,
+            options,
+            strict,
+            command_line,
+            qemu: qemu_binding,
+            qemu_version,
+            qemu_process_image,
+            image: image_binding,
+            source: source_binding,
+            started,
+            status,
+        },
+    )
+}
 
-    let peer_path = output.join(if arguments.usb_network {
-        "usb-network.log"
-    } else {
-        "network.log"
-    });
-    // LAN listeners run independently. Preserve exactly the peer bytes used
-    // for this check rather than hashing a log another thread can append to.
-    let peer_text = fs::read_to_string(peer_path).unwrap_or_default();
-    let peer_snapshot = fixture
-        .as_ref()
-        .map(|_| output.join("network-check-peer.txt"));
-    if let Some(path) = &peer_snapshot {
-        fs::write(path, &peer_text)?;
+impl Run {
+    /// A native host fixture: the mount runs a host check, not a guest.
+    fn host_check(&self) -> bool {
+        self.native_dma_check
+            || self.native_dma_isolation_check
+            || self.native_work_check
+            || self.native_irq_work_check
     }
-    let outputs: Vec<Value> = [
-        "serial.txt",
-        "stdout.txt",
-        "stderr.txt",
-        "network-check-peer.txt",
-        audio_check::WAV,
-    ]
-    .into_iter()
-    .map(|name| output.join(name))
-    .filter(|path| path.exists())
-    .map(|path| binding(&path))
-    .collect::<Result<_>>()?;
-    let storage = match arguments.storage_check {
-        true => Some(disks::verify(&disks, &output.join("serial.txt"))),
-        false => None,
-    };
-    let expected_driver = if arguments.usb_network {
-        "usb-cdc"
-    } else {
-        match arguments.network_model.unwrap_or(NetworkModel::Virtio) {
-            NetworkModel::Virtio => "virtio-net",
-            NetworkModel::E1000e => "e1000e",
-            NetworkModel::Igb => "igb",
+
+    /// Install mode, the storage check and the host checks run no guest.
+    fn guestless(&self) -> bool {
+        self.host_check() || self.payload.is_some() || self.storage_check
+    }
+}
+
+/// What the mount boots and its options: the system-mode guest image
+/// `source.bin` holds (none for a bundle, a Preboot disk or a run without a
+/// guest) and `stela.cfg`'s first options.
+fn guest(arguments: &Run, preboot: Option<&preboot::Preboot>) -> Result<(Vec<u8>, String)> {
+    let append = arguments.append.clone();
+    let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
+        _ if arguments.native_mmio_check => (kernel()?, native_mmio_options()),
+        _ if arguments.native_clock_check => (kernel()?, native_clock_options()),
+        _ if preboot.is_some() => (Vec::new(), preboot.unwrap().options()),
+        _ if arguments.bundle.is_some() => {
+            (Vec::new(), append.unwrap_or_else(|| BUNDLE_OPTIONS.into()))
+        }
+        _ if arguments.guestless() => (Vec::new(), append.unwrap_or_default()),
+        (Some(module), _) => (
+            fs::read(module)?,
+            append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
+        ),
+        (None, Scenario::SystemKernel) => {
+            (kernel()?, append.unwrap_or_else(|| KERNEL_OPTIONS.into()))
         }
     };
-    let network = network_check_url.map(|_| {
-        network_check::verify(&serial_text, fixture.as_ref(), expected_driver, &peer_text)
-    });
-    let host_firmware = arguments
-        .host_firmware
-        .as_ref()
-        .map(|_| host_firmware::report(&volume, &serial_text))
-        .transpose()?;
-    let audio = arguments.audio_check.map(|mode| {
-        if let Some(Err(error)) = &mount_exit {
-            bail!("invalid guest exit status: {error:#}");
-        }
-        audio_check::normal_exit(
-            qemu_returncode,
-            &fs::read_to_string(output.join("stdout.txt"))?,
-        )?;
-        let mut report = audio_check::verify(mode, &serial_text, &output)?;
-        report["qemu_shutdown"] = json!("acknowledged-qmp-quit");
-        report["mount_returncode"] =
-            json!(mount_exit.as_ref().and_then(|result| result.as_ref().ok()));
-        Ok::<_, anyhow::Error>(report)
-    });
-    let native_clock = arguments.native_clock_check.then(|| {
-        let observation = native_clock_proof(&serial_text);
-        json!({ "passed": observation.is_some()
-            && status.is_some() && code == IDLE_EXIT
-            && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
-            && !serial_text.contains("STELA PANIC"),
-            "observation": observation })
-    });
-    let native_mmio = arguments.native_mmio_check.then(|| {
-        json!({ "passed": native_mmio_verified(&serial_text)
-            && status.is_some() && code == IDLE_EXIT
-            && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
-            && !serial_text.contains("STELA PANIC"),
-            "observation": native_mmio_observation(&serial_text),
-            "stack_observation": native_stack_observation(&serial_text) })
-    });
-    let native_irq_work = arguments.native_irq_work_check.then(|| {
-        json!({ "passed": native_irq_work_verified(&serial_text) && status.is_some() && code == IDLE_EXIT
-            && !serial_text.contains("STELA PANIC") && !serial_text.contains("STOP UNSUPPORTED") })
-    });
-    let native_work = arguments.native_work_check.then(|| {
-        json!({
-            "passed":native_work_verified(&serial_text) && status.is_some() && code==IDLE_EXIT
-                && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
-        })
-    });
-    let native_dma = arguments.native_dma_check.then(|| {
-        json!({
-            "passed": serial_text.lines().any(|line| line.starts_with("CHECK native-dma PASS "))
-                && !serial_text.lines().any(|line| line.starts_with("CHECK native-dma FAIL "))
-                && status.is_some() && code == IDLE_EXIT
-                && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
-        })
-    });
-    let native_dma_isolation = arguments.native_dma_isolation_check.then(|| {
-        json!({ "passed": native_isolation_verified(&serial_text)
-            && status.is_some() && code == IDLE_EXIT
-            && unsupported.is_none() && first_guest_panic(&serial_text).is_none() })
-    });
-    let native_irq = arguments.native_dma_check.then(|| {
-        let level_passed = native_level_verified(&serial_text);
-        json!({
-            "level_passed": level_passed,
-            "passed": level_passed && serial_text.lines().any(|line| line.starts_with("CHECK native-irq PASS "))
-                && !serial_text.lines().any(|line| line.starts_with("CHECK native-irq FAIL "))
-                && status.is_some() && code == IDLE_EXIT
-                && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
-        })
-    });
-    // Keep nested report expansion independent of the outer metadata object.
-    let network_report = network.as_ref().map(|result| match result {
-        Ok(()) => json!({
-            "passed": true,
-            "url": network_check_url,
-            "driver": expected_driver,
-            "peer_snapshot": peer_snapshot,
-            "expected_body": fixture.as_ref().map(|fixture| json!({
-                "bytes": network_check::BODY_BYTES,
-                "sha256": fixture.sha256,
-            })),
-            "model": if arguments.usb_network {
-                "usb-net"
-            } else {
-                arguments.network_model.unwrap_or(NetworkModel::Virtio).device()
-            },
-        }),
-        Err(error) => json!({ "passed": false, "reason": error }),
-    });
-    let mut report = json!({
-        "command": command_line,
-        "qemu": qemu_binding,
-        "qemu_version": qemu_version,
-        "host_firmware": host_firmware,
-        "qemu_process_image": qemu_process_image,
-        "image": image_binding,
-        "source": source_binding,
-        "usb_image": arguments.usb_image,
-        "usb_serial": arguments.usb_image.as_ref().map(|_| &arguments.usb_serial),
-        "usb_writable": arguments.usb_writable,
-        "no_la57": arguments.no_la57,
-        "qemu_host_cores": arguments.host_cores,
-        "qemu_host_threads": arguments.host_threads,
-        "qemu_accelerator": qemu_accelerator(arguments.icount, arguments.kvm),
-        "native_dma": native_dma,
-        "native_work": native_work,
-        "native_irq_work": native_irq_work,
-        "native_dma_isolation": native_dma_isolation,
-        "native_irq": native_irq,
-        "options": options,
-        "scenario": verification,
-        "bundle": arguments.bundle,
-        "preboot_disk": arguments.preboot_disk,
-        "directory_volume": arguments.directory_volume,
-        "restore_manifest": arguments.restore_manifest,
-        "verify_on_read": arguments.verify_on_read,
-        "strict": strict,
-        "storage_disks": attached
-            .iter()
-            .map(|(path, serial)| json!({ "path": path, "serial": serial }))
-            .collect::<Vec<_>>(),
-        "first_unsupported": unsupported,
-        "first_guest_panic": first_guest_panic(&serial_text),
-        "returncode": code,
-        "qemu_returncode": qemu_returncode,
-        "payload": arguments.payload.map(|mode| {
-            matches!(mode, PayloadMode::Stage | PayloadMode::StagePath)
-        }),
-        "staging": target.exists().then(|| staged(&target)).transpose()?,
-        "timed_out": status.is_none(),
-        "wall_seconds": started.elapsed().as_secs_f64(),
-        "outputs": outputs,
-        "audio": audio.as_ref().map(|result| match result {
-            Ok(report) => report.clone(),
-            Err(error) => json!({ "passed": false, "reason": format!("{error:#}") }),
-        }),
-        "storage": storage.as_ref().map(|result| match result {
-            Ok(disks) => disks.clone(),
-            Err(error) => json!({ "error": format!("{error:#}") }),
-        }),
-        "network": network_report,
-    });
-    report["native_mmio"] = native_mmio.unwrap_or(Value::Null);
-    report["native_clock"] = native_clock.unwrap_or(Value::Null);
-    report["hpet"] = json!(arguments.hpet);
-    fs::write(output.join("run.json"), format!("{report:#}\n"))?;
-    println!("{report:#}");
-    if let Some(Err(error)) = storage {
-        return Err(error.context("host storage check failed"));
+    if arguments.host_check() {
+        ensure!(
+            matches!(arguments.display, Display::None),
+            "native fixture uses a headless single-BSP topology"
+        );
+        let mode = if arguments.native_irq_work_check {
+            "--native-irq-work-check"
+        } else if arguments.native_work_check {
+            "--native-work-check"
+        } else if arguments.native_dma_isolation_check {
+            "--native-dma-isolation-check"
+        } else {
+            "--native-dma-check"
+        };
+        options = format!("--host-check {mode} --deadline 5 --key-seconds 1");
     }
-    ensure!(
-        report["host_firmware"].is_null() || report["host_firmware"]["passed"] == true,
-        "host firmware did not survive the before/after EBS verification"
-    );
-    if let Some(Err(error)) = network {
-        bail!("host network check failed: {error}");
-    }
-    if let Some(Err(error)) = audio {
-        return Err(error.context("native audio check failed"));
-    }
-    ensure!(
-        !arguments.native_dma_check || report["native_dma"]["passed"] == true,
-        "native DMA fixture did not verify actual device traffic, fault and teardown"
-    );
-    ensure!(
-        !arguments.native_dma_check || report["native_irq"]["passed"] == true,
-        "native IRQ fixture did not verify MSI and shared level delivery, ACK and drained removal"
-    );
-    ensure!(
-        !arguments.native_dma_isolation_check || report["native_dma_isolation"]["passed"] == true,
-        "native DMA isolation fixture did not verify two requesters, matched fault and teardown"
-    );
-    ensure!(
-        !arguments.native_work_check || report["native_work"]["passed"] == true,
-        "native work did not verify actual owned contexts, ABI/control/flags and teardown"
-    );
-    ensure!(
-        !arguments.native_irq_work_check || report["native_irq_work"]["passed"] == true,
-        "native IRQ work did not qualify actual MSI/context/deferred execution and lifecycle"
-    );
-    ensure!(
-        !arguments.native_mmio_check || report["native_mmio"]["passed"] == true,
-        "native MMIO did not verify actual mappings, context refusals, retirement and reuse"
-    );
-    ensure!(
-        !arguments.native_clock_check || report["native_clock"]["passed"] == true,
-        "native clock did not verify IRQ progress, idle waits, guest mux and quiet retirement"
-    );
-    if arguments.native_dma_check
-        || arguments.native_dma_isolation_check
-        || arguments.native_work_check
-        || arguments.native_irq_work_check
-        || arguments.native_mmio_check
-        || arguments.native_clock_check
-    {
-        return Ok(ExitCode::SUCCESS);
-    }
-    Ok(ExitCode::from(match (preboot.is_some(), entered) {
-        (true, true) => 0,
-        (true, false) => FAILED_EXIT,
-        (false, _) => code,
-    }))
+    Ok((bytes, options))
 }
 
 /// Whether `STELA_STRICT=1` asks for strict mode, as it does for `stela run`.

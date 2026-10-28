@@ -73,7 +73,6 @@ impl Ledger {
         core::mem::replace(&mut self.grant_mut(slot).unwrap().parent_id, parent)
     }
 
-    #[cfg(test)]
     pub(super) fn retained(&self, slot: u8) -> bool {
         self.grant(slot).is_ok()
     }

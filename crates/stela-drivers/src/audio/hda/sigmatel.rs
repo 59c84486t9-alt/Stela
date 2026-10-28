@@ -132,15 +132,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .any(|state| state.address == address)
     }
     fn sigmatel_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
-        if graph.token != self.token {
-            return Err(Error::InvalidCodecGraph);
-        }
-        if self.routing_failed || self.lifecycle_failed || self.command_poisoned {
-            return Err(Error::NeedsReset);
-        }
-        if self.stopped {
-            return Err(Error::Shutdown);
-        }
+        self.vendor_codec_guard(graph)?;
         profile(graph.vendor_id)?;
         Ok(())
     }
@@ -629,7 +621,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .poll_pin_sense_policy(graph, pin, false)
             .and_then(|sense| {
                 if let Some(idt83) = &mut state.idt83 {
-                    self.update_idt83_pin(graph.address, state.group, idt83, pin, sense)?;
+                    self.update_idt_port(graph.address, state.group, &mut idt83.ports, pin, sense)?;
                     if let Some(owned) = self
                         .sigmatel_codecs
                         .iter_mut()
@@ -639,7 +631,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     }
                 }
                 if let Some(idt73) = &mut state.idt73 {
-                    self.update_idt73_pin(graph.address, state.group, idt73, pin, sense)?;
+                    self.update_idt_port(graph.address, state.group, &mut idt73.ports, pin, sense)?;
                     if let Some(owned) = self
                         .sigmatel_codecs
                         .iter_mut()
@@ -675,7 +667,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<Idt83PowerReport, Error> {
         let mut state = self.sigmatel_active(graph)?;
         let idt83 = state.idt83.as_mut().ok_or(Error::UnsupportedTopology)?;
-        if let Err(error) = self.refresh_idt83(graph, state.group, idt83) {
+        if let Err(error) = self.refresh_idt_ports(graph, state.group, &mut idt83.ports) {
             self.routing_failed = true;
             return Err(error);
         }
@@ -695,7 +687,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<Idt73PowerReport, Error> {
         let mut state = self.sigmatel_active(graph)?;
         let idt73 = state.idt73.as_mut().ok_or(Error::UnsupportedTopology)?;
-        if let Err(error) = self.refresh_idt73(graph, state.group, idt73) {
+        if let Err(error) = self.refresh_idt_ports(graph, state.group, &mut idt73.ports) {
             self.routing_failed = true;
             return Err(error);
         }

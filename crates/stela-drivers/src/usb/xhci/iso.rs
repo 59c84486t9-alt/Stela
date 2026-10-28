@@ -455,12 +455,12 @@ impl Controller {
     /// native late-TD/MissedService policy independently for every submission.
     pub fn iso_schedule_list(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         requested: IsoSchedule,
         packet_count: usize,
     ) -> Result<Vec<IsoSchedule>, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.iso_schedule_list_owned(slot, dci, requested, packet_count)
     }
 
@@ -540,12 +540,12 @@ impl Controller {
     /// A full queue is refused before publication; hardware reports missed service for late TDs.
     pub fn submit_iso(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         buffer: u64,
         length: usize,
     ) -> Result<IsoTransfer, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.submit_iso_owned(slot, dci, buffer, length)
     }
 
@@ -566,13 +566,13 @@ impl Controller {
     /// counter epoch. DMA ownership and terminal completion follow `submit_iso`.
     pub fn submit_iso_scheduled(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         buffer: u64,
         length: usize,
         requested: IsoSchedule,
     ) -> Result<IsoTransfer, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.submit_iso_scheduled_owned(slot, dci, buffer, length, requested)
     }
 
@@ -1129,16 +1129,18 @@ pub(super) mod tests {
                 _event_table: dma.allocate(16, 64).unwrap().into(),
                 event_index: 0,
                 event_cycle: true,
-                legacy_slot_fenced: vec![false; slots.len()],
                 retry_resources: slot_resources::Cache::new(slots.len()),
+                queued_resets: Vec::new(),
                 slots,
                 slot_ownership: vec![reset::Ownership::Vacant, reset::Ownership::Enabled],
+                test_retired_numbers: vec![false; 2],
                 power: power::Ledger::new(2),
                 pending: Vec::new(),
                 error: None,
                 command_poisoned: false,
                 command_ring_stopped: false,
                 unpublished: 0,
+                signalled: false,
                 quiet_drains: 0,
                 outstanding: None,
                 finished: Vec::new(),

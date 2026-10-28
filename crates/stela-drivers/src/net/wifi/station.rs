@@ -181,6 +181,10 @@ pub struct Station {
     qos_sequence: [u16; QOS_TIDS],
     now: u64,
     pending: Option<Pending>,
+    /// The authentication transaction `ieee80211_rx_mgmt_auth` expects next.
+    auth_transaction: u16,
+    /// The last WEP IV `ieee80211_wep_get_iv` handed out.
+    wep_iv: u32,
     authorization: Option<(KeyIdentity, KeyIdentity)>,
     rx_ba: ba::Sessions,
     tx_ba: ba::tx::Sessions,
@@ -207,6 +211,8 @@ impl Station {
             qos_sequence: [0; 16],
             now: 0,
             pending: None,
+            auth_transaction: 2,
+            wep_iv: 0,
             authorization: None,
             rx_ba: ba::Sessions::new(),
             tx_ba: ba::tx::Sessions::new(),
@@ -252,7 +258,13 @@ impl Station {
             return Err(Error::Regulatory);
         }
         let bytes = match phase {
-            Phase::Authenticating => wire::authentication(self.local, join.bssid, self.sequence),
+            // ieee80211_auth always restarts at transaction 1.
+            Phase::Authenticating => wire::authentication_with(
+                self.local,
+                join.bssid,
+                self.sequence,
+                join.request.algorithm(),
+            ),
             Phase::Associating => join.request.encode(self.local, join.bssid, self.sequence),
             _ => return Err(Error::Busy),
         }?;
@@ -260,6 +272,20 @@ impl Station {
             .now
             .checked_add(MANAGEMENT_RESPONSE_TIMEOUT_US)
             .ok_or(Error::Overflow)?;
+        if phase == Phase::Authenticating {
+            self.auth_transaction = 2;
+        }
+        self.queue(phase, attempts, deadline, channel, bytes)
+    }
+
+    fn queue(
+        &mut self,
+        phase: Phase,
+        attempts: u8,
+        deadline: u64,
+        channel: Channel,
+        bytes: Vec<u8>,
+    ) -> Result<Action, Error> {
         let ticket = self.ticket()?;
         self.sequence = next_sequence(self.sequence);
         self.phase = phase;
@@ -420,6 +446,16 @@ impl Station {
         if join.bssid != session.peer() || join.channel != session.channel() {
             return Err(Error::InvalidAddress);
         }
+        // A 6 GHz exchange associates with the beacon and RSN it authenticated.
+        if let Some(six) = session.six_ghz_observation()
+            && (!Arc::ptr_eq(six, &observed)
+                || session
+                    .six_ghz_selection()
+                    .zip(join.request.pmf())
+                    .is_none_or(|(selected, pmf)| selected.rsn() != pmf.rsn()))
+        {
+            return Err(Error::Unsupported("6GHz association outside its exchange"));
+        }
         let selection = join
             .request
             .modern()
@@ -531,6 +567,11 @@ impl Station {
         self.selected_beacon = beacon;
         self.context = None;
         self.pmf_observation = None;
+        self.wep_iv = self
+            .join
+            .as_ref()
+            .and_then(|join| join.request.wep())
+            .map_or(0, wire::Wep::initial_iv);
         self.phase = Phase::Authenticating;
         match self.transmit(Phase::Authenticating, 1, policy) {
             Ok(action) => Ok(action),
@@ -542,6 +583,37 @@ impl Station {
                 Err(error)
             }
         }
+    }
+
+    /// `ieee80211_auth_challenge`: without a challenge element the frame is
+    /// ignored; otherwise transaction 3 goes out under the running
+    /// authentication timeout, which its TX status re-arms.
+    fn answer_challenge(
+        &mut self,
+        reply: &wire::Authentication<'_>,
+        key: super::security::wep::Key,
+        pending: Pending,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Action, Error> {
+        let challenge = reply
+            .challenge()
+            .ok_or(Error::Wire(wire::Error::Invalid("shared-key challenge")))?;
+        let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let (bssid, channel) = (join.bssid, join.channel);
+        if !policy.allow_management_tx(channel) {
+            return Err(Error::Regulatory);
+        }
+        let iv = super::security::wep::next_iv(&mut self.wep_iv, key.material().len());
+        let bytes =
+            wire::shared_key_response(self.local, bssid, self.sequence, challenge, &key, iv)?;
+        self.auth_transaction = 4;
+        self.queue(
+            Phase::Authenticating,
+            pending.attempts,
+            pending.deadline,
+            channel,
+            bytes,
+        )
     }
 
     pub fn submitted(&mut self, ticket: Ticket) -> Result<(), Error> {
@@ -673,9 +745,27 @@ impl Station {
         }
         match self.phase {
             Phase::Authenticating => {
-                let status = wire::authentication_response(frame)?;
-                if status != 0 {
-                    return self.remove(Some(Failure::PeerRejected(status)));
+                // ieee80211_rx_mgmt_auth ignores another algorithm or
+                // transaction.
+                let reply = wire::authentication_frame(frame)?;
+                if reply.algorithm != join.request.algorithm()
+                    || reply.transaction != self.auth_transaction
+                {
+                    return Err(Error::Wire(wire::Error::Invalid(
+                        "unexpected authentication state",
+                    )));
+                }
+                if reply.status != 0 {
+                    return self.remove(Some(Failure::PeerRejected(reply.status)));
+                }
+                let shared = join
+                    .request
+                    .wep()
+                    .filter(|wep| wep.algorithm() == wire::SHARED_KEY)
+                    .filter(|_| self.auth_transaction == 2)
+                    .map(|wep| wep.key().clone());
+                if let Some(key) = shared {
+                    return self.answer_challenge(&reply, key, pending, policy);
                 }
                 self.transmit(Phase::Associating, 1, policy)
             }
@@ -894,7 +984,8 @@ impl Station {
         if ptk.nonce_owner() == super::security::NonceOwner::ReceiveOnly {
             return Err(Error::WrongKey);
         }
-        if ptk.index() != 0 {
+        // A static WEP transmit key may take any default key index.
+        if ptk.index() != 0 && !ptk.cipher().is_wep() {
             return Err(Error::Unsupported("extended pairwise key ID"));
         }
         if self
@@ -1286,6 +1377,117 @@ pub(crate) mod tests {
             station.complete_configuration(config, Completion::Accepted, 4),
             Err(Error::Stale)
         );
+    }
+
+    #[test]
+    fn shared_key_auth_answers_the_challenge_like_ieee80211_auth_challenge() {
+        use crate::net::wifi::security::wep;
+        let key = wep::Key::new(&[1, 2, 3, 4, 5], 1).unwrap();
+        let mut join = join(PortPolicy::Open);
+        join.policy = PortPolicy::Controlled;
+        join.request = wire::AssociationRequest::new(0x11, 10, join.request.elements().to_vec())
+            .unwrap()
+            .with_wep(key.clone(), wire::SHARED_KEY, 0x03_feff)
+            .unwrap();
+        assert_eq!(
+            join.request.key_ciphers(),
+            Some((Cipher::Wep40, Cipher::Wep40))
+        );
+        let mut station = Station::new(LOCAL).unwrap();
+        let first = station.begin(join, 1, &mut Policy(true)).unwrap();
+        let Action::Transmit { bytes, .. } = &first else {
+            panic!()
+        };
+        assert_eq!(bytes[24..], [1, 0, 1, 0, 0, 0]);
+        let epoch = ticket(&first).epoch();
+        station.submitted(ticket(&first)).unwrap();
+        // Another algorithm, and a reply without its challenge, are ignored.
+        for body in [&[0, 0, 2, 0, 0, 0][..], &[1, 0, 2, 0, 0, 0]] {
+            assert!(
+                station
+                    .receive(epoch, &response(0xb0, body), 2, &mut Policy(true))
+                    .is_err()
+            );
+        }
+        let challenge = [1, 0, 2, 0, 0, 0, 16, 4, 9, 8, 7, 6];
+        let third = station
+            .receive(epoch, &response(0xb0, &challenge), 3, &mut Policy(true))
+            .unwrap();
+        let Action::Transmit { bytes, .. } = &third else {
+            panic!()
+        };
+        // The IV after 0x03feff skips the weak 0x03ff00.
+        let expected = wire::shared_key_response(LOCAL, AP, 0, &[9, 8, 7, 6], &key, [4, 0, 0]);
+        assert_eq!(bytes[..2], [0xb0, 0x40]);
+        assert_eq!(bytes[24..], expected.unwrap()[24..]);
+        assert_eq!(bytes[24..28], [4, 0, 0, 1 << 6]);
+        station.submitted(ticket(&third)).unwrap();
+        // Transaction 2 again is now unexpected; 4 completes authentication.
+        assert!(
+            station
+                .receive(epoch, &response(0xb0, &challenge), 4, &mut Policy(true))
+                .is_err()
+        );
+        let assoc = station
+            .receive(
+                epoch,
+                &response(0xb0, &[1, 0, 4, 0, 0, 0]),
+                5,
+                &mut Policy(true),
+            )
+            .unwrap();
+        let Action::Transmit { bytes, .. } = &assoc else {
+            panic!()
+        };
+        assert_eq!(bytes[0], 0);
+        assert_eq!(station.phase(), Phase::Associating);
+    }
+
+    #[test]
+    fn a_lost_shared_key_exchange_restarts_at_transaction_one_like_ieee80211_auth() {
+        use crate::net::wifi::security::wep;
+        let mut join = join(PortPolicy::Open);
+        join.policy = PortPolicy::Controlled;
+        join.request = wire::AssociationRequest::new(0x11, 10, join.request.elements().to_vec())
+            .unwrap()
+            .with_wep(wep::Key::new(&[7; 13], 0).unwrap(), wire::SHARED_KEY, 0)
+            .unwrap();
+        let mut station = Station::new(LOCAL).unwrap();
+        let first = station.begin(join, 1, &mut Policy(true)).unwrap();
+        let epoch = ticket(&first).epoch();
+        station.submitted(ticket(&first)).unwrap();
+        let third = station
+            .receive(
+                epoch,
+                &response(0xb0, &[1, 0, 2, 0, 0, 0, 16, 1, 5]),
+                2,
+                &mut Policy(true),
+            )
+            .unwrap();
+        station.submitted(ticket(&third)).unwrap();
+        let retry = station
+            .poll(1 + MANAGEMENT_RESPONSE_TIMEOUT_US, &mut Policy(true))
+            .unwrap()
+            .unwrap();
+        let Action::Transmit { bytes, .. } = &retry else {
+            panic!()
+        };
+        assert_eq!(bytes[24..], [1, 0, 1, 0, 0, 0]);
+        // WEP keeps the association legacy, and needs the privacy bit.
+        let elements = vec![0, 1, b'x', 1, 1, 0x8c];
+        let key = wep::Key::new(&[7; 5], 0).unwrap();
+        assert!(
+            wire::AssociationRequest::new(1, 10, elements.clone())
+                .unwrap()
+                .with_wep(key.clone(), wire::OPEN_SYSTEM, 0)
+                .is_err()
+        );
+        let open_wep = wire::AssociationRequest::new(0x11, 10, elements)
+            .unwrap()
+            .with_wep(key, wire::OPEN_SYSTEM, 0)
+            .unwrap();
+        assert!(open_wep.validate_policy(PortPolicy::Controlled).is_ok());
+        assert!(open_wep.validate_policy(PortPolicy::Open).is_err());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The host's keyboards and pointers, read between engine slices and fed to
-//! the native USB peripheral the guest enumerates: virtio-input devices and
-//! USB HID devices behind xHCI controllers.
+//! the native USB peripheral the guest enumerates: every input device probe
+//! found, whatever its transport ([`stela_drivers::input::InputDevice`]).
 //!
 //! Their drivers reach registers and DMA pages through the loader's
 //! identity root, as the storage services do, so each poll runs in that
@@ -9,15 +9,17 @@
 use super::storage::{Inputs, RestoreRoot};
 use crate::output;
 use alloc::vec::Vec;
-use stela_drivers::input::Input;
+use stela_drivers::input::{Input, InputDevice};
 use stela_runtime::machine::apple::AppleDevices;
 
 pub struct HostInput {
     inputs: Inputs,
     /// The first input refusal, reported once.
     refused: bool,
-    /// The first USB polling failure, reported once.
+    /// The first polling failure, reported once.
     failed: bool,
+    /// The first device to stop, reported once.
+    stopped: bool,
     /// The guest's keyboard LEDs as last sent to the host keyboards.
     leds: Option<u8>,
     /// The guest's keyboard LEDs as the last delivery found them.
@@ -29,23 +31,29 @@ pub struct HostInput {
 impl HostInput {
     pub fn new(inputs: Inputs) -> Self {
         for device in &inputs.devices {
-            output::arguments(format_args!("INPUT host device {:?}\n", device.name));
+            output::arguments(format_args!("INPUT host device {}\n", device.name()));
         }
-        for device in &inputs.usb {
-            output::arguments(format_args!("INPUT host USB device {}\n", device.name));
-        }
-        if inputs.devices.is_empty() && inputs.usb.is_empty() {
+        if inputs.devices.is_empty() {
             output::arguments(format_args!(
-                "INPUT no host virtio-input or USB HID device: the peripheral stays idle\n"
+                "INPUT no host keyboard or pointer: the peripheral stays idle\n"
             ));
         }
         Self {
             inputs,
             refused: false,
             failed: false,
+            stopped: false,
             leds: None,
             wanted_leds: None,
             led_failed: false,
+        }
+    }
+
+    /// Read `devices` too from now on: keyboards and pointers that arrived.
+    pub fn add(&mut self, devices: Vec<InputDevice>) {
+        for device in devices {
+            output::arguments(format_args!("INPUT host device {}\n", device.name()));
+            self.inputs.devices.push(device);
         }
     }
 
@@ -66,52 +74,41 @@ impl HostInput {
         self.wanted_leds = devices.keyboard_leds();
     }
 
-    /// Read the host's input devices, without the guest's devices: their
-    /// USB devices' first, then the others'. The guest's lock-key LEDs
-    /// reach each host keyboard first, as Linux `hidinput_led_worker`
-    /// sends an input device's LED changes.
+    /// Read the host's input devices, without the guest's devices, in the
+    /// order probe found them. The guest's lock-key LEDs reach each host
+    /// keyboard first, as Linux `hidinput_led_worker` sends an input
+    /// device's LED changes.
     pub fn read(&mut self) -> Vec<Input> {
         if let Some(leds) = self.wanted_leds
             && self.leds != Some(leds)
         {
             self.leds = Some(leds);
-            for device in &mut self.inputs.usb {
-                // SAFETY: as below, for the device's xHCI controller.
+            for device in &mut self.inputs.devices {
+                // SAFETY: as below, for the device's controller.
                 let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
-                if let Err(error) = device.set_leds(u16::from(leds))
+                if let Err(error) = device.set_leds(leds)
                     && !core::mem::replace(&mut self.led_failed, true)
                 {
-                    output::arguments(format_args!(
-                        "INPUT USB device {} LEDs: {error:?}\n",
-                        device.name
-                    ));
+                    output::arguments(format_args!("INPUT {} LEDs: {error}\n", device.name()));
                 }
             }
         }
-        let mut usb = Vec::new();
-        for device in &mut self.inputs.usb {
-            {
-                // SAFETY: as below, for the device's xHCI controller.
-                let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
-                usb.extend(device.poll());
-            }
-            if device.failed() && !core::mem::replace(&mut self.failed, true) {
-                output::arguments(format_args!("INPUT USB device {} stopped\n", device.name));
-            }
-        }
-        let mut pending = usb;
+        let mut pending = Vec::new();
         for device in &mut self.inputs.devices {
-            let events = {
+            let polled = {
                 // SAFETY: the loader root `storage::open` captured, which
                 // maps this device.
                 let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
-                device.poll()
+                device.poll(&mut pending)
             };
-            let inputs: Vec<Input> = events
-                .into_iter()
-                .filter_map(|event| device.translator.translate(event))
-                .collect();
-            pending.extend(inputs);
+            if let Err(error) = polled
+                && !core::mem::replace(&mut self.failed, true)
+            {
+                output::arguments(format_args!("INPUT {}: {error}\n", device.name()));
+            }
+            if device.stopped() && !core::mem::replace(&mut self.stopped, true) {
+                output::arguments(format_args!("INPUT {} stopped\n", device.name()));
+            }
         }
         pending
     }

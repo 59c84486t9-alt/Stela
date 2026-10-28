@@ -1241,7 +1241,7 @@ mod tests {
                 )
             })
             .collect();
-        let rtkit = RtKit::new(endpoints).unwrap();
+        let rtkit = RtKit::new(endpoints, crate::builds::DEFAULT.rtkit_version).unwrap();
         let mut asc = Asc::booted(Box::new(rtkit), Lines::from_interrupts(LINES)).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);

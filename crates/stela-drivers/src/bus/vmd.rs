@@ -7,6 +7,7 @@
 //! requester aliases and native child-driver attachment require the platform's
 //! independently owned VMD DMA domain; this module never invents an identity
 //! domain or enables a child bus master on the strength of a numeric BDF.
+use crate::bus::pci::{Capabilities, Capability, CapabilityError, capability::Transport};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -28,7 +29,6 @@ const BUS_MASTER: u16 = 4;
 const INTX_DISABLE: u16 = 1 << 10;
 const MSI_BYPASS: u16 = 2;
 const VENDOR_CAPABILITY: u8 = 9;
-const VENDOR_HEADER_BYTES: u16 = 3;
 const SHADOW_SIGNATURE_BYTES: u16 = 8;
 const SHADOW_CAPABILITY_BYTES: u16 = 24;
 const SHADOW_SIGNATURE: u32 = 0x5348_4457;
@@ -51,6 +51,34 @@ pub enum Error {
     Clock,
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::UnsupportedDevice => "not a supported VMD controller",
+            Self::InvalidResource => "a BAR, window or bus range VMD cannot use",
+            Self::Mapping => "a register window its mapping does not cover",
+            Self::ReadFailed => "a configuration read failed",
+            Self::Readback => "a register did not read back as written",
+            Self::Address => "a child address outside the VMD buses",
+            Self::Capability => "a malformed capability list",
+            Self::Exhausted => "no PCI domain number left",
+            Self::Suspended => "the VMD hierarchy is suspended",
+            Self::Quarantined => "the VMD hierarchy is quarantined after a fault",
+            Self::ActiveChild => "a child may not enable DMA behind VMD",
+            Self::Clock => "the clock cannot time the VMD wait",
+        })
+    }
+}
+
+impl From<CapabilityError> for Error {
+    fn from(error: CapabilityError) -> Self {
+        match error {
+            CapabilityError::FailedRead { .. } => Self::ReadFailed,
+            _ => Self::Capability,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Profile {
     shadow: Shadow,
@@ -66,6 +94,16 @@ enum Shadow {
     Bios,
 }
 impl Profile {
+    /// The page-aligned MEMBAR2 window holding the shadow registers this
+    /// profile reads, or none when its shadow comes from vendor capability
+    /// space.
+    pub fn shadow_window(self) -> Option<core::ops::Range<u64>> {
+        match self.shadow {
+            Shadow::Bios | Shadow::Native => Some(0x2000..0x3000),
+            Shadow::Vendor => None,
+        }
+    }
+
     pub fn identify(vendor: u16, device: u16) -> Result<Self, Error> {
         if vendor != 0x8086 {
             return Err(Error::UnsupportedDevice);
@@ -265,6 +303,13 @@ impl<R: Registers> Host<R> {
     fn io(&mut self) -> &mut R {
         self.registers.as_mut().expect("retained VMD hardware")
     }
+    /// The parent's standard capability list, validated end to end.
+    fn parent_capabilities(&mut self) -> Result<Vec<Capability>, Error> {
+        Capabilities::new(Transport(|offset, bytes| {
+            self.io().parent_read(offset, bytes)
+        }))
+        .collect()
+    }
     fn parent_write_checked(&mut self, offset: u16, value: u16) -> Result<(), Error> {
         self.io().parent_write(offset, 2, u32::from(value))?;
         if self.io().parent_read(offset, 2)? != u32::from(value) {
@@ -365,62 +410,23 @@ impl<R: Registers> Host<R> {
         if self.io().parent_read(6, 2)? & 0x10 == 0 {
             return Ok([None; 2]);
         }
-        let mut offset = self.io().parent_read(0x34, 1)? as u16;
-        let mut occupied = [false; 256];
-        let mut first_vendor = true;
-        let mut selected = None;
-        while offset != 0 {
-            if !(0x40..=0xfc).contains(&offset) || offset & 3 != 0 || occupied[usize::from(offset)]
-            {
-                return Err(Error::Capability);
-            }
-            let header = self.io().parent_read(offset, 2)?;
-            if header == u32::from(u16::MAX) {
-                return Err(Error::ReadFailed);
-            }
-            let vendor = header as u8 == VENDOR_CAPABILITY;
-            let bytes = if vendor {
-                let bytes = self.io().parent_read(offset + 2, 1)? as u16;
-                if bytes < VENDOR_HEADER_BYTES {
-                    return Err(Error::Capability);
-                }
-                bytes
-            } else {
-                // Native stopped-requester admission checks the other complete
-                // capability bodies. Retain their headers here so a later
-                // vendor extent cannot hide a previously traversed link.
-                2
-            };
-            let end = offset
-                .checked_add(bytes)
-                .filter(|end| *end <= 256)
-                .ok_or(Error::Capability)?;
-            let span = &mut occupied[usize::from(offset)..usize::from(end)];
-            if span.iter().any(|used| *used) {
-                return Err(Error::Capability);
-            }
-            span.fill(true);
-            let next = (header >> 8) as u16;
-            if next != 0 && (offset..end).contains(&next) {
-                return Err(Error::Capability);
-            }
-            if vendor && first_vendor {
-                first_vendor = false;
-                // Match the donor's first vendor capability, without reading
-                // a signature outside its advertised payload.
-                if bytes >= SHADOW_SIGNATURE_BYTES
-                    && self.io().parent_read(offset + 4, 4)? == SHADOW_SIGNATURE
-                {
-                    if bytes < SHADOW_CAPABILITY_BYTES {
-                        return Err(Error::Capability);
-                    }
-                    selected = Some(offset);
-                }
-            }
-            offset = next;
-        }
         // Follow the complete list before consuming addresses: a later link
         // back into the SHDW body must not turn register bytes into windows.
+        let capabilities = self.parent_capabilities()?;
+        let mut selected = None;
+        // Match the donor's first vendor capability, without reading a
+        // signature outside its advertised payload.
+        if let Some(vendor) = capabilities
+            .iter()
+            .find(|entry| entry.id == VENDOR_CAPABILITY)
+            && vendor.bytes >= SHADOW_SIGNATURE_BYTES
+            && self.io().parent_read(vendor.offset + 4, 4)? == SHADOW_SIGNATURE
+        {
+            if vendor.bytes < SHADOW_CAPABILITY_BYTES {
+                return Err(Error::Capability);
+            }
+            selected = Some(vendor.offset);
+        }
         let Some(offset) = selected else {
             return Ok([None; 2]);
         };

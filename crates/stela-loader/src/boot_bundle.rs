@@ -38,7 +38,7 @@ pub use stela_runtime::boot_bundle::schema::{
 };
 
 /// The revision of the content [`prepare`] writes within its schema; a
-/// bundle of another revision is prepared again (`stela setup --update-stela`).
+/// bundle of another revision is prepared again (`stela setup update stela`).
 pub const REVISION: u32 = 30;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.

@@ -1,13 +1,13 @@
-//! The `stela.efi` this `stela` installs: the boot image Cargo built with it
-//! (see `build.rs`).
+//! The `stela.efi` this `stela` installs: the boot image `cargo xtask dist`
+//! embeds in it (see `build.rs`).
 use anyhow::Result;
 use std::path::PathBuf;
 
-#[cfg(feature = "boot-image")]
+#[cfg(stela_boot_image)]
 const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stela.efi"));
 
 /// The embedded image, written where setup reads its inputs from.
-#[cfg(feature = "boot-image")]
+#[cfg(stela_boot_image)]
 pub(super) fn resolve() -> Result<PathBuf> {
     let directory = std::env::temp_dir().join("Stela");
     std::fs::create_dir_all(&directory)?;
@@ -16,9 +16,10 @@ pub(super) fn resolve() -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(not(feature = "boot-image"))]
+#[cfg(not(stela_boot_image))]
 pub(super) fn resolve() -> Result<PathBuf> {
     anyhow::bail!(
-        "this stela was built without its boot image (feature boot-image); pass --efi FILE"
+        "this stela was built without its boot image (`cargo xtask dist` embeds it); pass --efi \
+         FILE"
     )
 }

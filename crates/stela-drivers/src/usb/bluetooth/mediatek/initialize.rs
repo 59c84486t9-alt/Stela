@@ -4,7 +4,8 @@
 //! synchronization, standard post-enable HCI checks and quarantine are Stela glue.
 use super::{
     Attempt, Error, Hci, HostPolicy, Identity, Io, OwnedReport, Patch, RecoveryPolicy,
-    RegisterObservation, Result, SectionDisposition, SectionReceipt, UsbIdentity, WmtEvent, wmt,
+    RegisterObservation, Result, SectionDisposition, SectionReceipt, UsbIdentity, WmtEvent, reset,
+    wmt,
 };
 use crate::{
     firmware::{Provider, Requirement},
@@ -24,6 +25,9 @@ const RESET: u16 = 0x0c03;
 const READ_VERSION: u16 = 0x1001;
 const READ_ADDRESS: u16 = 0x1009;
 const COMMAND_US: u64 = 5_000_000;
+/// HCI_CMD_TIMEOUT: hci_cmd_timeout calls hdev->reset once a command other
+/// than HCI Reset goes this long without its completion.
+const CMD_TIMEOUT_US: u64 = 2_000_000;
 const ATTEMPT_US: u64 = 180_000_000;
 const MAX_AUXILIARY: usize = 32768;
 
@@ -40,10 +44,20 @@ pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<Ow
         credits: 1,
         pending: VecDeque::new(),
         attempt: Attempt::default(),
+        firmware: false,
+        command_timeout: false,
     };
     match engine.run(usb, provider) {
         Ok(r) => Ok(r),
         Err(cause) => {
+            // btmtk_usb_setup resets after a failed firmware setup, and
+            // hci_cmd_timeout after a command timeout; the rebound device
+            // runs setup again, so each attempt repeats this as in Linux.
+            if (engine.firmware || engine.command_timeout)
+                && let Some(device_id) = engine.attempt.identity.as_ref().map(|i| i.device_id)
+            {
+                engine.attempt.reset = Some(reset::run(engine.hci, device_id, None));
+            }
             let cause = Error::Attempt {
                 cause: Box::new(cause),
                 observation: Box::new(engine.attempt),
@@ -66,6 +80,9 @@ struct Engine<'a, B: Io> {
     credits: u8,
     pending: VecDeque<Vec<u8>>,
     attempt: Attempt,
+    /// Inside btmtk_setup_firmware_79xx, whose failure resets the device.
+    firmware: bool,
+    command_timeout: bool,
 }
 impl<B: Io> Engine<'_, B> {
     fn control_read(&mut self, setup: [u8; 8]) -> Result<Vec<u8>> {
@@ -220,10 +237,12 @@ impl<B: Io> Engine<'_, B> {
         if self.hci.io.now_us() >= self.deadline {
             return Err(Error::Timeout("complete initialization attempt"));
         }
-        let deadline = core::cmp::min(
-            self.deadline,
-            self.hci.io.now_us().saturating_add(COMMAND_US),
-        );
+        let timeout = if opcode == RESET {
+            COMMAND_US
+        } else {
+            CMD_TIMEOUT_US
+        };
+        let deadline = core::cmp::min(self.deadline, self.hci.io.now_us().saturating_add(timeout));
         while self.credits == 0 {
             if self.hci.io.now_us() >= deadline {
                 return Err(Error::Timeout("genuine HCI command credits"));
@@ -283,6 +302,8 @@ impl<B: Io> Engine<'_, B> {
                 }
             }
             if self.hci.io.now_us() >= deadline {
+                // HCI Reset never arms the command timer.
+                self.command_timeout = opcode != RESET;
                 return Err(Error::Timeout("genuine HCI completion"));
             }
             crate::waiting();
@@ -299,6 +320,7 @@ impl<B: Io> Engine<'_, B> {
         let flavor = self.register(FLAVOR)?;
         let identity = Identity::select(usb, legacy, device, version, flavor)?;
         self.attempt.identity = Some(identity.clone());
+        self.firmware = true;
         let hardware = usb.hardware_label();
         let revision = identity.revision_label();
         let image = provider
@@ -362,6 +384,7 @@ impl<B: Io> Engine<'_, B> {
             self.attempt.sections[receipt].disposition = Some(SectionDisposition::Transferred);
         }
         self.wait(100_000)?;
+        self.firmware = false;
         // Options only: this does not assert/reset the shared combo subsystem.
         let request = crate::usb::xhci::setup(
             0x5e,
@@ -421,6 +444,7 @@ impl<B: Io> Engine<'_, B> {
             reset_completion: self.attempt.reset_completion.take().unwrap(),
             local_version: raw,
             address,
+            command_credits: self.credits,
             recovery: RecoveryPolicy::FreshRebindRequired,
             policy,
         })

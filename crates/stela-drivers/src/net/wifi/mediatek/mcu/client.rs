@@ -101,6 +101,8 @@ impl Profile {
             None
         }
     }
+    /// A legacy join's profile: 6 GHz associates only through the modern
+    /// path. The per-BSS TLV builders take every band, as mt7925 builds them.
     pub fn validate(self) -> Result<(), Error> {
         self.validate_inner(false)
     }
@@ -139,7 +141,7 @@ impl Profile {
         {
             return Err(Error::InvalidTiming);
         }
-        if !matches!(self.cipher, 0 | 4 | 10 | 11 | 12) {
+        if !matches!(self.cipher, 0 | 1 | 2 | 4 | 5 | 10 | 11 | 12) {
             return Err(Error::UnsupportedCipher);
         }
         Ok(())
@@ -229,10 +231,7 @@ impl Profile {
     /// Broadcast slot uses the source no-link_sta path: only its own header
     /// translation TLV, distinct from a full peer and from WMWA raw updates.
     pub fn broadcast_request(self) -> Result<Vec<u8>, Error> {
-        self.broadcast_request_validated(false)
-    }
-    fn broadcast_request_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
-        self.validate_inner(allow_six)?;
+        self.validate_inner(true)?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.interface.broadcast_wcid as u8;
@@ -245,7 +244,7 @@ impl Profile {
         Ok(out)
     }
     pub fn beacon_filter(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let t = tlv(&mut b, 22, 12);
         put16(t, 4, self.beacon_interval);
@@ -255,7 +254,7 @@ impl Profile {
     /// Linux `mt7925_mcu_uni_bss_ps`: the BSS in dynamic power save, or
     /// awake.
     pub fn power_save_request(self, enable: bool) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let t = tlv(&mut b, 21, 8);
         t[4] = if enable { 2 } else { 0 };
@@ -264,7 +263,7 @@ impl Profile {
     /// Linux `mt7925_mcu_set_rssimonitor`: firmware RSSI events above
     /// `high` or below `low` dBm while `enable`.
     pub fn rssi_monitor_request(self, enable: bool, high: i8, low: i8) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let t = tlv(&mut b, 0, 8);
         t[4] = u8::from(enable);
@@ -278,7 +277,7 @@ impl Profile {
         definition: &crate::net::wifi::station::operations::ChannelDefinition,
     ) -> Result<Vec<u8>, Error> {
         use crate::net::wifi::station::phy::Width;
-        self.validate()?;
+        self.validate_inner(true)?;
         // ieee80211_frequency_to_channel
         let channel = |mhz: u32| -> u8 {
             (match self.channel.band {
@@ -326,7 +325,7 @@ impl Profile {
     }
     /// Linux `mt7925_mcu_set_timing`: the IFS TLV with only the slot time.
     pub fn timing(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         let ifs = tlv(&mut b, 23, 20);
         ifs[4] = 1;
@@ -335,29 +334,19 @@ impl Profile {
     }
     /// Source explicit always-awake native profile, without runtime/deep sleep.
     pub fn awake(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         tlv(&mut b, 21, 8);
         Ok(b)
     }
     pub fn disable_beacon_pm(self) -> Result<Vec<u8>, Error> {
-        self.disable_beacon_pm_validated(false)
-    }
-    fn disable_beacon_pm_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
-        self.validate_inner(allow_six)?;
+        self.validate_inner(true)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         tlv(&mut b, 27, 4);
         Ok(b)
     }
     pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
-        self.filter_request_validated(enable, false)
-    }
-    fn filter_request_validated(
-        self,
-        enable: bool,
-        allow_six: bool,
-    ) -> Result<super::init::Request, Error> {
-        self.validate_inner(allow_six)?;
+        self.validate_inner(true)?;
         let mut b = vec![0; 72];
         // Actual primary PHY band_idx is 0 for this single-PHY profile,
         // distinct from the non-MLO interface's band selector ff.
@@ -469,6 +458,8 @@ impl Profile {
         // Exact source switch, including its default for CCMP256. These are
         // firmware BSS fields, never evidence of an OS SAE/RSN authentication.
         let (mode, status) = match self.cipher {
+            1 | 5 => (1, 0),
+            2 => (7, 4),
             4 => (7, 6),
             11 | 12 => (11, 8),
             _ => (0, 1),
@@ -547,9 +538,8 @@ pub(in crate::net::wifi::mediatek) fn scan_with_elements(
         }
     }
     Requests::station(context, true).map_err(Error::Context)?;
-    // Source deduplicates by BSSID, preserving the first channel association.
-    // Firmware can consume only ten unique targets. Refuse excess work explicitly
-    // before scan ownership/publication rather than silently dropping a target.
+    // mt76_connac_mcu_build_rnr_scan_param deduplicates by BSSID, keeping the
+    // first channel, and mt7925_mcu_hw_scan sends the first ten.
     let mut targets = [None; RNR_MAX_BSSIDS];
     let mut target_count = 0;
     for target in request.six_ghz() {
@@ -561,7 +551,7 @@ pub(in crate::net::wifi::mediatek) fn scan_with_elements(
             continue;
         }
         if target_count == targets.len() {
-            return Err(Error::InvalidScanTargets);
+            break;
         }
         let channel = request
             .channels()
@@ -833,6 +823,37 @@ mod tests {
             alloc::format!("{:x}", hash.finalize()),
             "68a1c494a1886a2da6e86f7f013f35f70d3990ae076f4bf0f4c71216d722c831"
         );
+    }
+    #[test]
+    fn rnr_targets_past_ten_are_dropped_like_mt7925_mcu_hw_scan() {
+        use crate::net::wifi::scan::{Request, SixGhz};
+        let six = Channel {
+            band: Band::Ghz6,
+            number: 5,
+            frequency_mhz: 5975,
+        };
+        let targets = (0..12)
+            .map(|i| SixGhz {
+                channel_index: 0,
+                bssid: Mac([2, 0x42, 0, 0, i, 1]),
+                short_ssid: None,
+                unsolicited_probe: false,
+                psc_no_listen: false,
+                psd_20: 0,
+            })
+            .collect();
+        let request = Request::with_six_ghz(vec![six], vec![vec![]], vec![], targets).unwrap();
+        let encoded = scan(scan_context(), 1, &request).unwrap();
+        let mut rest = &encoded.body()[4..];
+        let mut bssids = Vec::new();
+        while let [tag, _, length, high, ..] = rest {
+            let length = usize::from(u16::from_le_bytes([*length, *high]));
+            if *tag == 11 {
+                bssids.push(rest[8]);
+            }
+            rest = &rest[length..];
+        }
+        assert_eq!(bssids, (0..10).collect::<Vec<_>>());
     }
     #[test]
     fn native_per_band_probe_budget_refuses_before_losing_a_band() {

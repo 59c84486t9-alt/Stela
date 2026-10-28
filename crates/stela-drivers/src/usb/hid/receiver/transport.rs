@@ -101,7 +101,7 @@ pub(in crate::usb) fn attach_group(
                 "receiver native member identity mismatch",
             ));
         }
-        if input.descriptor.as_ref().is_some_and(profile) {
+        if input.translator.descriptor().is_some_and(profile) {
             if vendor.is_some() {
                 return Err(BlockError::Unsupported("ambiguous native HID++ interfaces"));
             }

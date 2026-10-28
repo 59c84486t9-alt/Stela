@@ -12,6 +12,7 @@ use core::{
 };
 
 mod aspm;
+pub mod capability;
 pub mod msi;
 pub mod msix;
 pub mod native;
@@ -19,14 +20,15 @@ pub mod owned;
 pub mod power;
 pub mod requester;
 pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
+pub use capability::{
+    Capabilities, Capability, CapabilityError, ExtendedCapabilities, ExtendedCapability, Layout,
+};
 
 const VENDOR: u16 = 0x00;
 const COMMAND: u16 = 0x04;
-const STATUS: u16 = 0x06;
 const CLASS: u16 = 0x08;
 const HEADER_TYPE: u16 = 0x0e;
 const BAR0: u16 = 0x10;
-const CAPABILITIES: u16 = 0x34;
 
 const COMMAND_IO: u16 = 1 << 0;
 const COMMAND_MEMORY: u16 = 1 << 1;
@@ -35,16 +37,17 @@ const COMMAND_INTX_DISABLE: u16 = 1 << 10;
 /// MSI-X Message Control: enable, and mask every vector.
 const MSIX_ENABLE: u16 = 1 << 15;
 const MSIX_FUNCTION_MASK: u16 = 1 << 14;
-const STATUS_CAPABILITIES: u16 = 1 << 4;
+/// MSI Message Control: enable, and Multiple Message Enable.
+const MSI_ENABLE: u16 = 1 << 0;
+const MSI_MULTIPLE_ENABLE: u16 = 0b111 << 4;
+/// An MSI-X table entry's bytes.
+const MSIX_ENTRY_BYTES: u64 = 16;
 /// Memory BAR type field: 64-bit (PCI 3.0 §6.2.5.1).
 const BAR_MEMORY_64: u32 = 2 << 1;
 const BAR_MEMORY_TYPE: u32 = 3 << 1;
 const BAR_PREFETCHABLE: u32 = 1 << 3;
 const BAR_IO: u32 = 1;
 const BARS: usize = 6;
-/// Capability IDs after this one are not followed (Linux `__pci_find_next_cap_ttl`).
-const CAPABILITY_LIST_END: u8 = 0xff;
-const CAPABILITY_LIMIT: usize = 48;
 
 /// Power Management Control/Status (PCI PM 1.2 §3.2.4).
 const PM_CONTROL: u16 = 4;
@@ -90,10 +93,8 @@ const EXPRESS_ROOT_PORT: u16 = 4;
 const EXPRESS_DOWNSTREAM: u16 = 6;
 const EXPRESS_DEVICE_CONTROL_2: u16 = 0x28;
 const ARI_FORWARDING: u16 = 1 << 5;
-/// The first extended capability, the ARI capability's ID and its walk's bound.
-const EXTENDED_CAPABILITIES: u16 = 0x100;
+/// The ARI extended capability's ID.
 const EXTENDED_ARI: u16 = 0x0e;
-const EXTENDED_LIMIT: usize = 96;
 /// The Vendor ID a function still initializing answers with Configuration
 /// RRS Software Visibility on.
 const VENDOR_NOT_READY: u16 = 0x0001;
@@ -161,6 +162,22 @@ pub trait ConfigSpace {
         let shift = (offset & 2) * 8;
         let word = self.read32(offset & !3) & !(0xffff << shift) | u32::from(value) << shift;
         self.write32(offset & !3, word);
+    }
+
+    /// The standard capability list ([`capability::capabilities`]).
+    fn capabilities(&self) -> Capabilities<capability::Config<'_, Self>>
+    where
+        Self: Sized,
+    {
+        capability::capabilities(self)
+    }
+
+    /// The extended capability list ([`capability::extended_capabilities`]).
+    fn extended_capabilities(&self) -> ExtendedCapabilities<capability::Config<'_, Self>>
+    where
+        Self: Sized,
+    {
+        capability::extended_capabilities(self)
     }
 }
 
@@ -412,23 +429,13 @@ impl<C: ConfigSpace> Function<C> {
         Ok(())
     }
 
-    /// Offsets and IDs of the capability list, bounded against loops.
+    /// Offsets and IDs of the capability list, up to its first malformed
+    /// entry, as Linux's `__pci_find_next_cap_ttl` stops.
     pub fn capabilities(&self) -> Vec<(u8, u8)> {
-        let mut found = Vec::new();
-        if self.config.read16(STATUS) & STATUS_CAPABILITIES == 0 {
-            return found;
-        }
-        let mut offset = self.config.read8(CAPABILITIES) & !3;
-        while offset >= 0x40 && found.len() < CAPABILITY_LIMIT {
-            let header = self.config.read16(u16::from(offset));
-            let id = header as u8;
-            if id == CAPABILITY_LIST_END {
-                break;
-            }
-            found.push((offset, id));
-            offset = (header >> 8) as u8 & !3;
-        }
-        found
+        capability::capabilities(&self.config)
+            .map_while(Result::ok)
+            .map(|entry| (entry.offset as u8, entry.id))
+            .collect()
     }
 
     pub fn interrupts(&self) -> Interrupts {
@@ -462,6 +469,20 @@ impl<C: ConfigSpace> Function<C> {
         interrupts
     }
 
+    /// Set or clear Bus Master Enable alone, by a native word store that
+    /// leaves the Status register's write-one-to-clear bits alone, and report
+    /// whether the function reads back exactly that Command value.
+    pub fn set_bus_master(&mut self, enabled: bool) -> bool {
+        let previous = self.config.read16(COMMAND);
+        let desired = if enabled {
+            previous | COMMAND_BUS_MASTER
+        } else {
+            previous & !COMMAND_BUS_MASTER
+        };
+        self.config.write16(COMMAND, desired);
+        self.config.read16(COMMAND) == desired
+    }
+
     /// Enable memory decoding and bus mastering without changing interrupt
     /// controls. The driver must first establish its DMA and interrupt policy.
     /// This does not program MSI/MSI-X routes or install interrupt handlers.
@@ -477,7 +498,8 @@ impl<C: ConfigSpace> Function<C> {
         let interrupts = self.interrupts();
         if let Some(msi) = interrupts.msi {
             let control = self.config.read16(u16::from(msi.offset) + 2);
-            self.config.write16(u16::from(msi.offset) + 2, control & !1);
+            self.config
+                .write16(u16::from(msi.offset) + 2, control & !MSI_ENABLE);
         }
         if let Some(msix) = interrupts.msix {
             let control = self.config.read16(u16::from(msix.offset) + 2);
@@ -513,6 +535,64 @@ impl<C: ConfigSpace> Function<C> {
         self.config.write16(control, value);
         programmed
     }
+
+    /// Turn on MSI for a function [`Self::enable_polled`] set up, with one
+    /// vector sending `message`, as Linux's `msi_capability_init` and
+    /// `pci_write_msg_msi` do: the address and data written while MSI is
+    /// off, then MSI enabled with one message.
+    pub fn enable_msi(&mut self, msi: Msi, message: crate::bus::irq::MsiMessage) {
+        let control = u16::from(msi.offset) + 2;
+        let value = self.config.read16(control);
+        self.config
+            .write16(control, value & !(MSI_ENABLE | MSI_MULTIPLE_ENABLE));
+        self.config
+            .write32(u16::from(msi.offset) + 4, message.address as u32);
+        let data = if msi.wide {
+            self.config
+                .write32(u16::from(msi.offset) + 8, (message.address >> 32) as u32);
+            u16::from(msi.offset) + 12
+        } else {
+            u16::from(msi.offset) + 8
+        };
+        self.config.write16(data, message.data as u16);
+        let value = self.config.read16(control);
+        self.config
+            .write16(control, (value & !MSI_MULTIPLE_ENABLE) | MSI_ENABLE);
+    }
+
+    /// Send `message` from the function's first MSI-X entry when its table
+    /// is mapped in `bars`, otherwise from MSI, as Linux's
+    /// `pci_alloc_irq_vectors` tries them for one vector. Whether the
+    /// function offers either.
+    pub fn enable_message(
+        &mut self,
+        handoff: &crate::Handoff,
+        bars: &[Option<Bar>],
+        message: crate::bus::irq::MsiMessage,
+    ) -> Result<bool, BlockError> {
+        let interrupts = self.interrupts();
+        let table = interrupts.msix.and_then(|msix| {
+            let bar = bars.get(usize::from(msix.table_bar)).copied().flatten();
+            crate::registers(handoff, bar, u64::from(msix.table_offset), MSIX_ENTRY_BYTES)
+                .ok()
+                .map(|table| (msix, table))
+        });
+        if let Some((msix, table)) = table {
+            self.enable_msix(msix, || {
+                table.write32(0, message.address as u32);
+                table.write32(4, (message.address >> 32) as u32);
+                table.write32(8, message.data);
+                table.write32(12, 0);
+                Ok(())
+            })?;
+            return Ok(true);
+        }
+        if let Some(msi) = interrupts.msi {
+            self.enable_msi(msi, message);
+            return Ok(true);
+        }
+        Ok(false)
+    }
 }
 
 /// How a bus's functions are found, from the bridge above it.
@@ -531,21 +611,10 @@ enum BusScan {
 impl<C: ConfigSpace> Function<C> {
     /// The offset of the PCI Express extended capability `id`.
     fn extended_capability(&self, id: u16) -> Option<u16> {
-        let mut offset = EXTENDED_CAPABILITIES;
-        for _ in 0..EXTENDED_LIMIT {
-            let header = self.config.read32(offset);
-            if header == 0 || header == u32::MAX {
-                return None;
-            }
-            if header as u16 == id {
-                return Some(offset);
-            }
-            offset = (header >> 20) as u16 & !3;
-            if offset < EXTENDED_CAPABILITIES {
-                return None;
-            }
-        }
-        None
+        capability::extended_capabilities(&self.config)
+            .map_while(Result::ok)
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.offset)
     }
 
     /// The bus below this bridge and how to scan it; None for a function
@@ -863,6 +932,59 @@ mod tests {
         assert_eq!(function.config().words[16] >> 31, 0, "left off");
     }
 
+    /// MSI opens with one message once its address and data are written.
+    #[test]
+    fn msi_opens_one_message_after_its_address_and_data() {
+        let mut config = fake();
+        config.words[20] |= 0b011 << 20;
+        let mut function = Function::new(Address::default_for_tests(), config).unwrap();
+        let msi = function.interrupts().msi.unwrap();
+        function.enable_polled();
+        let message = crate::bus::irq::MsiMessage {
+            address: 0x1_fee0_0000,
+            data: 0x4041,
+        };
+        function.enable_msi(msi, message);
+        let words = &function.config().words;
+        assert_eq!(words[21], 0xfee0_0000);
+        assert_eq!(words[22], 1);
+        assert_eq!(words[23] & 0xffff, 0x4041);
+        assert_eq!(words[20] >> 16 & 1, 1, "enabled");
+        assert_eq!(words[20] >> 20 & 0b111, 0, "one message");
+    }
+
+    /// A function whose MSI-X table is not mapped sends its message from
+    /// MSI, MSI-X left off.
+    #[test]
+    fn an_unmapped_msix_table_falls_back_to_msi() {
+        let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
+        function.enable_polled();
+        let handoff = crate::Handoff {
+            firmware: None,
+            bluetooth_platform: Default::default(),
+            wifi_platform: Default::default(),
+            completion: None,
+            ecam: Vec::new(),
+            mapped: Vec::new(),
+            dma: 0..0,
+            clock: crate::Clock {
+                ticks_per_microsecond: 1,
+            },
+        };
+        let message = crate::bus::irq::MsiMessage {
+            address: 0xfee0_0000,
+            data: 0x41,
+        };
+        assert_eq!(
+            function.enable_message(&handoff, &[None; 6], message),
+            Ok(true)
+        );
+        let words = &function.config().words;
+        assert_eq!(words[16] >> 31, 0, "MSI-X off");
+        assert_eq!(words[20] >> 16 & 1, 1, "MSI on");
+        assert_eq!(words[21], 0xfee0_0000);
+    }
+
     #[test]
     fn memory_enable_does_not_choose_an_interrupt_policy() {
         for intx in [0, COMMAND_INTX_DISABLE] {
@@ -883,11 +1005,11 @@ mod tests {
     }
 
     #[test]
-    fn a_looping_capability_list_is_bounded() {
+    fn a_looping_capability_list_stops_at_the_loop() {
         let mut config = fake();
         config.words[20] = 0x0086_4005; // MSI points back at MSI-X
         let function = Function::new(Address::default_for_tests(), config).unwrap();
-        assert_eq!(function.capabilities().len(), 48);
+        assert_eq!(function.capabilities(), [(0x40, 0x11), (0x50, 0x05)]);
     }
 
     #[test]
@@ -1073,7 +1195,7 @@ mod tests {
         /// A PCI Express port of `kind` on 0:1.0 with bus 1 below it.
         fn port(&mut self, kind: u16, control_2: u16) {
             self.present(0, 1, 0, 1);
-            *self.word(0, 1, 0, 0x04) = u32::from(STATUS_CAPABILITIES) << 16;
+            *self.word(0, 1, 0, 0x04) = 1 << 20; // Status: capabilities list
             *self.word(0, 1, 0, 0x18) = 1 << 8;
             *self.word(0, 1, 0, 0x34) = 0x40;
             *self.word(0, 1, 0, 0x40) =

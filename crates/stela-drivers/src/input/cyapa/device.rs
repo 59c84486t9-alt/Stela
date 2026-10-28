@@ -66,12 +66,10 @@ impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
     fn quarantine<V>(&mut self, result: Result<V, ErrorKind>) -> Result<V, Error> {
         result.map_err(|kind| {
             self.state = State::Uncertain;
-            let recovery = if self.interrupt.mask_and_drain().is_ok() {
-                Recovery::IrqMasked
-            } else {
-                Recovery::MaskFailed
-            };
-            Error { kind, recovery }
+            Error {
+                kind,
+                recovery: Recovery::mask(&mut self.interrupt),
+            }
         })
     }
     fn ready(&self) -> Result<(), Error> {

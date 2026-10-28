@@ -100,6 +100,36 @@ pub struct Config {
     pub gain: u8,
 }
 
+impl Config {
+    /// The direct-PDM claim conditions shared by ACP6.3 and ACP7.x: exclusive
+    /// direct ownership with selector zero and SoundWire quiet, the DMIC child
+    /// (address 2, audio device type 2) and a nonzero evaluated `_WOV`.
+    pub(super) fn direct(&self) -> Result<DmaConfig, Error> {
+        if self.ownership != Ownership::ExclusiveDirect
+            || self.acp_config != Some(0)
+            || self.soundwire == SoundWireOwnership::ActiveOrUnknown
+        {
+            return Err(Error::Ownership);
+        }
+        if self.child
+            != Some(DmicChild {
+                address: 2,
+                audio_device_type: 2,
+            })
+            || matches!(
+                self.wov,
+                WovObservation::Value(0) | WovObservation::Unavailable
+            )
+        {
+            return Err(Error::MicrophoneAbsent);
+        }
+        Ok(DmaConfig {
+            dma_address_bits: self.dma_address_bits,
+            gain: self.gain,
+        })
+    }
+}
+
 pub type Controller<R, T> = acp_pdm::Controller<R, T, PinkSardine>;
 impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, PinkSardine> {
     /// Claim without hardware effects or inferred firmware/platform resources.
@@ -121,33 +151,7 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, PinkSardine> {
         config: Config,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
-        if config.ownership != Ownership::ExclusiveDirect
-            || config.acp_config != Some(0)
-            || config.soundwire == SoundWireOwnership::ActiveOrUnknown
-        {
-            return Err(Error::Ownership);
-        }
-        if config.child
-            != Some(DmicChild {
-                address: 2,
-                audio_device_type: 2,
-            })
-            || matches!(
-                config.wov,
-                WovObservation::Value(0) | WovObservation::Unavailable
-            )
-        {
-            return Err(Error::MicrophoneAbsent);
-        }
-        Self::claim_profile(
-            registers,
-            timer,
-            DmaConfig {
-                dma_address_bits: config.dma_address_bits,
-                gain: config.gain,
-            },
-            domain,
-        )
+        Self::claim_profile(registers, timer, config.direct()?, domain)
     }
     /// Poll actual source period completion and copy one ordered period while
     /// DMA runs. Coalesced events, consumed position and pre/post-copy overwrite

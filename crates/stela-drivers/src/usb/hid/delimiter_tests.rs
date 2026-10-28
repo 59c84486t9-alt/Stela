@@ -442,7 +442,7 @@ fn actual_boot_subclass_retains_existing_fallback_and_original_rejected_bytes() 
     )
     .unwrap()
     .unwrap();
-    assert!(input.descriptor.is_none());
+    assert!(input.descriptor().is_none());
     assert_eq!(input.report_descriptor(), bytes);
     assert!(
         hardware

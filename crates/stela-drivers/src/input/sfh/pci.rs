@@ -3,7 +3,10 @@
 use super::{Error, REGION_BYTES, Registers};
 use crate::bus::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
-    pci::{Address, Bar, ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
+    pci::{
+        Address, Bar, ConfigSpace, Function, capability, owned::OwnedConfig,
+        requester::StoppedRequester,
+    },
 };
 /// Rejected attachment returns the exact original owners, without writes.
 pub struct AttachFailure {
@@ -103,15 +106,6 @@ impl NativeRegisters {
         }
         Ok((self.function, self.mapping))
     }
-    fn pointer(&self, offset: usize) -> Result<core::ptr::NonNull<u32>, Error> {
-        if !offset.is_multiple_of(4) {
-            return Err(Error::RegisterUnavailable(offset));
-        }
-        self.mapping
-            .address(offset, 4)
-            .map(|p| p.cast())
-            .map_err(|_| Error::RegisterUnavailable(offset))
-    }
 }
 impl Registers for NativeRegisters {
     fn check_authority(&mut self) -> Result<(), Error> {
@@ -160,54 +154,29 @@ impl Registers for NativeRegisters {
         if status == u16::MAX {
             return Err(Error::PciAuthority);
         }
-        if status & 0x10 != 0 {
-            let mut offset = u16::from(config.read8(0x34));
-            let mut visited = [false; 64];
-            while offset != 0 {
-                if !(0x40..=0xfc).contains(&offset)
-                    || !offset.is_multiple_of(4)
-                    || visited[usize::from(offset / 4)]
-                {
-                    return Err(Error::PciAuthority);
-                }
-                visited[usize::from(offset / 4)] = true;
-                let control = config.read16(offset + 2);
-                if control == u16::MAX {
-                    return Err(Error::PciAuthority);
-                }
-                match config.read8(offset) {
-                    1 if offset > 0xf8 || config.read16(offset + 4) & 3 != 0 => {
-                        return Err(Error::PciAuthority);
-                    }
-                    5 if control & 1 != 0 => return Err(Error::PciAuthority),
-                    0x11 if control & 0x8000 != 0 => return Err(Error::PciAuthority),
-                    _ => (),
-                }
-                offset = u16::from(config.read8(offset + 1));
-            }
+        if !capability::stopped_in_d0(config) {
+            return Err(Error::PciAuthority);
         }
         Ok(())
     }
     fn read32(&mut self, offset: usize) -> Result<u32, Error> {
-        let pointer = self.pointer(offset)?;
-        // SAFETY: retained exclusive native UC BAR2; checked aligned dword span.
-        Ok(unsafe { pointer.as_ptr().read_volatile() })
+        self.mapping
+            .read32(offset)
+            .map_err(|_| Error::RegisterUnavailable(offset))
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
-        let pointer = self.pointer(offset)?;
+        if !offset.is_multiple_of(4) {
+            return Err(Error::RegisterUnavailable(offset));
+        }
         self.quiescent = false;
-        // SAFETY: same exact exclusive mapping and width, no safe RAM alias.
-        unsafe { pointer.as_ptr().write_volatile(value) };
-        Ok(())
+        self.mapping
+            .write32(offset, value)
+            .map_err(|_| Error::RegisterUnavailable(offset))
     }
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.check_authority()?;
-        let config = self.function.config();
-        let previous = config.read16(4);
-        let desired = if enabled { previous | 4 } else { previous & !4 };
         self.master = None;
-        config.write16(4, desired);
-        if config.read16(4) != desired {
+        if !self.function.set_bus_master(enabled) {
             return Err(Error::PciAuthority);
         }
         self.master = Some(enabled);

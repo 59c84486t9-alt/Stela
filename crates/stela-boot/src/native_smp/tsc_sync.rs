@@ -13,7 +13,7 @@
 //! sync mechanism's own overhead leaves at most a third round needed; an AP
 //! whose counter still differs after [`ROUNDS`], or which has no
 //! `IA32_TSC_ADJUST` to correct it with, is refused.
-use super::firmware::{read_msr, write_msr};
+use crate::cpu::msr::TSC_ADJUST;
 use core::{
     arch::{
         asm,
@@ -23,7 +23,6 @@ use core::{
 };
 
 /// `IA32_TSC_ADJUST`.
-const TSC_ADJUST: u32 = 0x3b;
 /// Linux's `loop_timeout` for cores of different packages or modules.
 const ROUND_MILLIS: u64 = 20;
 const ROUNDS: u32 = 4;
@@ -126,7 +125,7 @@ impl Sync {
         // CPUID.(EAX=7,ECX=0):EBX[1] enumerates IA32_TSC_ADJUST.
         let adjustable = __cpuid_count(0, 0).eax >= 7 && __cpuid_count(7, 0).ebx & 1 << 1 != 0;
         // SAFETY: enumerated above, and read only then.
-        let base = adjustable.then(|| unsafe { read_msr(TSC_ADJUST) });
+        let base = adjustable.then(|| unsafe { TSC_ADJUST.read() });
         let mut adjusted = 0i64;
         let mut point = 0;
         for round in 1..=ROUNDS {
@@ -158,7 +157,7 @@ impl Sync {
                         -(seen_by_bsp as i64)
                     };
                     // SAFETY: enumerated; Linux writes the same register.
-                    unsafe { write_msr(TSC_ADJUST, base.wrapping_add(adjusted as u64)) };
+                    unsafe { TSC_ADJUST.write(base.wrapping_add(adjusted as u64)) };
                     None
                 }
             };

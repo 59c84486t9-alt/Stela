@@ -3,8 +3,9 @@
 //! Firmware-assigned, polled NVMe attachment below an owned VMD hierarchy.
 //!
 //! This consumes the actual host, not an MCFG alias for a synthetic segment.
-//! The platform must already own the real requester-alias IOMMU domain. There
-//! is deliberately no identity-DMA fallback, hotplug or BAR reassignment.
+//! The platform supplies the domain every child requester's DMA goes through,
+//! as VMD forwards it under the parent's requester ID: an IOMMU domain or the
+//! named passthrough domain. There is no hotplug or BAR reassignment.
 use super::*;
 use crate::{
     Clock,
@@ -177,12 +178,12 @@ fn block(error: Error) -> BlockError {
 /// initialization. Uncertain effects retain the original hierarchy/domain.
 ///
 /// # Safety
-/// `domain` is already installed on the actual parent requester and **every**
-/// alias/child requester in this exact original hierarchy, with real isolation,
-/// translated payload drain and qualified coherent completion observation. It
-/// retains the original IOMMU/root/alias and hierarchy reset/assignment owners.
-/// Neither a numeric VMD domain/BDF nor an unrelated DmaDomain establishes this
-/// fact; the shared DmaDomain API has no runtime identity-query operation.
+/// `domain` meets the [`DmaDomain`] contract for its kind for the parent
+/// requester and every alias/child requester in this hierarchy: an isolated
+/// domain is installed on all of them, while the passthrough domain covers
+/// them by leaving their DMA untranslated. Either way it drains translated
+/// payload writes and observes coherent completions, and retains the IOMMU,
+/// alias and hierarchy reset/assignment owners it needs.
 /// All other children and parent engines, IRQs and work are stopped/drained;
 /// no other native source registration or child driver exists. Firmware/foreign
 /// access, reset, removal, sleep and resource reassignment remain excluded for

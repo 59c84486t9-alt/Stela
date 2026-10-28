@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2014-2019 aQuantia Corporation
 // Copyright (C) 2019-2020 Marvell International Ltd.
+//! AQtion descriptor rings and packet buffers in the requester's DMA domain.
 use super::{Error, MAX_FRAME, MIN_FRAME, Result};
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain, DmaMapping},

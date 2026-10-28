@@ -109,15 +109,17 @@ fn unpublished_profile(
         slots: core::iter::repeat_with(|| None)
             .take(max_slots + 1)
             .collect(),
-        legacy_slot_fenced: vec![false; max_slots + 1],
         retry_resources: slot_resources::Cache::new(max_slots + 1),
+        queued_resets: Vec::new(),
         slot_ownership: vec![Ownership::Vacant; max_slots + 1],
+        test_retired_numbers: vec![false; max_slots + 1],
         power: power::Ledger::new(max_slots + 1),
         pending: Vec::new(),
         error: None,
         command_poisoned: false,
         command_ring_stopped: false,
         unpublished: 0,
+        signalled: false,
         quiet_drains: 0,
         outstanding: None,
         finished: Vec::new(),
@@ -166,18 +168,18 @@ fn generations(kind: Kind) {
             let mut backing = vec![0u64; 512 * 1024];
             let (mut c, previous, hardware, mut dma) = unpublished(&mut backing, speed, context, 1);
             let slot = previous.hardware_slot();
-            // First address remains compatible with the public legacy APIs.
-            assert_eq!(c.current_configuration(slot), Ok(Some(0)));
+            // The first address answers through its own identity.
+            assert_eq!(c.current_configuration(previous), Ok(Some(0)));
             assert_eq!(
-                c.control(slot, setup(0x80, GET_DESCRIPTOR, 1 << 8, 0, 18), &[])
+                c.control(previous, setup(0x80, GET_DESCRIPTOR, 1 << 8, 0, 18), &[])
                     .unwrap()[0],
                 18
             );
-            assert!(!c.legacy_slot_fenced[usize::from(slot)]);
+            assert_eq!(c.current_slot(previous), Ok(slot));
             // This is an unpublished generation: the existing production owner
             // may retire it to Vacant. Published generations still tombstone.
             c.disable_slot(slot, Ownership::Vacant).unwrap();
-            assert!(c.legacy_slot_fenced[usize::from(slot)]);
+            assert!(c.current_slot(previous).is_err());
             assert_eq!(
                 hardware.borrow().commands_seen.last(),
                 Some(&(DISABLE_SLOT, slot, 0))
@@ -194,7 +196,7 @@ fn generations(kind: Kind) {
             let current = c.device_id(current_slot).unwrap();
             assert_eq!(current_slot, slot);
             assert_ne!(current, previous);
-            assert!(c.legacy_slot_fenced[usize::from(slot)]);
+            assert!(c.current_slot(previous).is_err());
             assert!(c.device(previous).is_err());
             let header = c
                 .device(current)
@@ -396,11 +398,19 @@ fn generations(kind: Kind) {
                     );
                 }
             }
-            assert!(c.legacy_slot_fenced[usize::from(slot)]);
-            // Prove that actual published-slot recycling is still refused.
+            assert!(c.current_slot(previous).is_err());
+            // A published slot whose current grant retired goes to the next
+            // device, as xhci_free_virt_device frees it; the old identity
+            // then fails before any MMIO.
             c.disable_slot(slot, Ownership::Retired).unwrap();
-            assert!(c.fresh_slot().is_err());
-            assert_eq!(c.slot_ownership[usize::from(slot)], Ownership::Retired);
+            assert!(c.power.retained(slot));
+            c.reset_root_device(attachment(speed)).unwrap();
+            assert_eq!(c.fresh_slot(), Ok(slot));
+            assert_eq!(c.slot_ownership[usize::from(slot)], Ownership::Enabled);
+            let before = hardware.borrow().accesses;
+            assert!(c.device(current).is_err());
+            assert!(c.current_configuration(current).is_err());
+            assert_eq!(hardware.borrow().accesses, before);
         }
     }
 }
@@ -481,7 +491,7 @@ fn matching_disable_ack_permanently_fences_raw_access_before_fatal_health_failur
             hardware.borrow().commands_seen.last(),
             Some(&(DISABLE_SLOT, slot, 0))
         );
-        assert!(c.legacy_slot_fenced[usize::from(slot)]);
+        assert!(c.current_slot(id).is_err());
         assert_eq!(c.slot_ownership[usize::from(slot)], Ownership::Enabled);
         assert!(c.slot(slot).unwrap().retiring);
         assert_ne!(c.dcbaa.read::<u64>(usize::from(slot) * 8), 0);
@@ -520,7 +530,7 @@ fn immutable_uas_planner_retains_current_generation_after_actual_slot_reuse() {
             .unwrap();
         assert_eq!(device.slot, slot);
         assert_ne!(device.id, previous);
-        assert!(c.legacy_slot_fenced[usize::from(slot)]);
+        assert!(c.current_slot(previous).is_err());
         device.configuration = device.configurations[0].clone();
         let all = interfaces(&device.configuration);
         let interface = &all[0];

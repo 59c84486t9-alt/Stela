@@ -1,0 +1,29 @@
+[package]
+name = "stela-dev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The research and development commands; the shipped `stela` is stela-cli's.
+[[bin]]
+name = "stela-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+stela-cli.workspace = true
+stela-compiler.workspace = true
+stela-loader.workspace = true
+stela-runtime.workspace = true
+
+[dev-dependencies]
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true

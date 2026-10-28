@@ -8,7 +8,8 @@ use crate::net::wifi::mediatek::mailbox::clc::remaining::tests::caps;
 use crate::net::wifi::mediatek::ring::rx::tests::device_receive;
 use crate::net::wifi::mediatek::ring::tests::Source;
 use crate::net::wifi::regulatory as reg;
-use crate::net::wifi::station::wire::six_ghz::tests::selected;
+use crate::net::wifi::station::phy::{Mode, Width};
+use crate::net::wifi::station::wire::{AssociationRequest, six_ghz::tests::selected};
 use crate::net::wifi::{Band, Channel};
 use alloc::rc::Rc;
 use core::cell::Cell;
@@ -336,4 +337,173 @@ fn a_bound_six_ghz_session_is_fenced_and_removes_through_its_own_codec() {
         )
     }
     .unwrap();
+}
+
+#[test]
+fn a_six_ghz_sae_frame_goes_again_once_its_wait_passes() {
+    let (mut driver, model) = six_setup();
+    let observed = observe(&mut driver, &model);
+    let permission = Rc::new(Permission::default());
+    permission.hardware.set(true);
+    permission.os.set(true);
+    let mut owner = reg::Owner::new(Hardware(permission.clone()), Os(permission.clone())).unwrap();
+    // SAFETY: the modeled requester owns this controller and both providers.
+    let session = unsafe {
+        driver.begin_six_ghz_external_authentication(
+            &mut owner,
+            &observed,
+            Selection::new(selected()).unwrap(),
+            six_profile(),
+            10,
+            1_000_000,
+        )
+    }
+    .unwrap();
+    // SAFETY: as above.
+    unsafe {
+        driver.transmit_six_ghz_external_authentication(
+            &mut owner,
+            &session,
+            1,
+            0,
+            &[19, 0],
+            25,
+            &Source,
+        )
+    }
+    .unwrap();
+    let first = finish_tx_on(&model, 1).remove(0);
+    for now in [30, 600_000] {
+        // SAFETY: as above.
+        unsafe {
+            driver.poll_six_ghz_external_authentication(
+                &mut owner,
+                &session,
+                now,
+                &Source,
+                &mut Policy,
+            )
+        }
+        .unwrap();
+        if now == 30 {
+            // The first frame's TX-free; no TX status came, so its wait runs.
+            assert!(finish_tx_on(&model, 1).is_empty());
+            assert_eq!(driver.poll_released().unwrap().len(), 1);
+        }
+    }
+    let second = finish_tx_on(&model, 1).remove(0);
+    assert_eq!(second[24..], first[24..]);
+}
+
+#[test]
+fn a_six_ghz_sae_exchange_associates_like_ieee80211_mgd_assoc() {
+    let (mut driver, model) = six_setup();
+    let observed = observe(&mut driver, &model);
+    let permission = Rc::new(Permission::default());
+    permission.hardware.set(true);
+    permission.os.set(true);
+    let mut owner = reg::Owner::new(Hardware(permission.clone()), Os(permission.clone())).unwrap();
+    // SAFETY: the modeled requester owns this controller and both providers.
+    let session = unsafe {
+        driver.begin_six_ghz_external_authentication(
+            &mut owner,
+            &observed,
+            Selection::new(selected()).unwrap(),
+            six_profile(),
+            10,
+            1_000_000,
+        )
+    }
+    .unwrap();
+    let rx = |frame: &[u8]| {
+        let mut raw = incoming_bytes(frame, None, false);
+        raw[12..16].copy_from_slice(&(181u32 << 8).to_le_bytes());
+        device_receive(&model.queues[&0xd4520], &raw, true, 0);
+    };
+    let local = driver.local_advertisement(Band::Ghz6).unwrap();
+    let mut elements = vec![0, 1, b'x'];
+    elements.extend_from_slice(local.elements());
+    elements.extend_from_slice(&selected());
+    let mut join = join();
+    join.bssid = six_profile().peer;
+    join.channel = SIX;
+    join.request = AssociationRequest::new_modern_with_local_pmf(
+        0x11,
+        10,
+        elements,
+        local.capabilities().clone(),
+        Mode::He,
+        Width::Mhz20,
+    )
+    .unwrap();
+    let mut now = 20;
+    let poll = |driver: &mut Client<Bar, Q, NativeGuard>,
+                owner: &mut reg::Owner<Hardware, Os>,
+                now: u64| {
+        // SAFETY: as above.
+        unsafe {
+            driver.poll_six_ghz_external_authentication(owner, &session, now, &Source, &mut Policy)
+        }
+        .unwrap();
+    };
+    for (transaction, status, data) in [(1u8, 126u8, &[19, 0][..]), (2, 0, &[1, 0][..])] {
+        // ieee80211_mgd_assoc refuses until the exchange authenticates.
+        // SAFETY: as above.
+        assert!(
+            unsafe {
+                driver.associate_six_ghz_external(&mut owner, &session, join.clone(), now, &Source)
+            }
+            .is_err()
+        );
+        // SAFETY: as above.
+        unsafe {
+            driver.transmit_six_ghz_external_authentication(
+                &mut owner,
+                &session,
+                u16::from(transaction),
+                0,
+                data,
+                now,
+                &Source,
+            )
+        }
+        .unwrap();
+        finish_tx_on(&model, 1);
+        let mut body = vec![3, 0, transaction, 0, status, 0];
+        body.extend_from_slice(data);
+        rx(&response(0xb0, &body));
+        for _ in 0..2 {
+            now += 1;
+            poll(&mut driver, &mut owner, now);
+        }
+        assert_eq!(driver.poll_released().unwrap().len(), 1);
+    }
+    assert!(driver.station().external_authenticated());
+    // SAFETY: as above.
+    unsafe { driver.associate_six_ghz_external(&mut owner, &session, join, now, &Source) }.unwrap();
+    // The OS's association request goes out on the held 6 GHz channel.
+    let request = finish_tx_on(&model, 1).remove(0);
+    assert_eq!(request[..2], [0, 0]);
+    // ieee80211_assoc_add_rates and the HE elements; no HT or VHT on 6 GHz.
+    let mut ids = Vec::new();
+    let mut rest = &request[28..];
+    while let [id, length, tail @ ..] = rest {
+        ids.push((*id, tail.first().copied().filter(|_| *id == 255)));
+        rest = &tail[usize::from(*length)..];
+    }
+    assert!(ids.contains(&(1, None)));
+    assert!(ids.contains(&(255, Some(35))) && ids.contains(&(255, Some(59))));
+    assert!(!ids.iter().any(|(id, _)| matches!(id, 45 | 61 | 191 | 192)));
+    now += 1;
+    poll(&mut driver, &mut owner, now);
+    assert_eq!(driver.poll_released().unwrap().len(), 1);
+    let mut assoc = vec![0x11, 0, 0, 0, 1, 0xc0];
+    assoc.extend_from_slice(&beacon_elements());
+    rx(&response(0x10, &assoc));
+    now += 1;
+    poll(&mut driver, &mut owner, now);
+    // The answered association waits for admission as any modern one does.
+    assert_eq!(driver.phase(), Phase::AwaitingModernAdmission);
+    assert!(driver.station().external_authentication().is_none());
+    assert_eq!(driver.modern_context().unwrap().channel(), SIX);
 }

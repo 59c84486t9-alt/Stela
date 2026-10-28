@@ -450,13 +450,6 @@ impl Run {
     }
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-impl Run {
-    pub(crate) fn run(self) -> Result<()> {
-        crate::require_hosted("stela run")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

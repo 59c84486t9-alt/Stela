@@ -6,7 +6,10 @@
 use super::{Error, Identity, Profile, Registers, registers::*};
 use crate::bus::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
-    pci::{Address, Bar, ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
+    pci::{
+        Address, Bar, ConfigSpace, Function, capability, owned::OwnedConfig,
+        requester::StoppedRequester,
+    },
 };
 
 /// Failure preserves both original native resource owners for retirement or
@@ -153,38 +156,19 @@ impl<P: Profile> Registers for NativeRegisters<P> {
     }
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.associated()?;
-        let config = self.function.config();
-        let previous = config.read16(4);
-        let desired = if enabled { previous | 4 } else { previous & !4 };
-        // Native word store preserves adjacent PCI W1C status.
         self.master = None;
-        config.write16(4, desired);
-        if config.read16(4) != desired {
+        if !self.function.set_bus_master(enabled) {
             return Err(Error::PciAuthority);
         }
         self.master = Some(enabled);
         Ok(())
     }
+    /// An unmapped or misaligned register reads as all ones and ignores writes.
     fn read32(&mut self, offset: usize) -> u32 {
-        if !offset.is_multiple_of(4) {
-            return u32::MAX;
-        }
-        let Ok(pointer) = self.mapping.address(offset, 4) else {
-            return u32::MAX;
-        };
-        // SAFETY: checked native UC mapping, exclusive retained ACP function,
-        // natural alignment and the device's actual 32-bit register width.
-        unsafe { pointer.as_ptr().cast::<u32>().read_volatile() }
+        self.mapping.read32(offset).unwrap_or(u32::MAX)
     }
     fn write32(&mut self, offset: usize, value: u32) {
-        if !offset.is_multiple_of(4) {
-            return;
-        }
-        let Ok(pointer) = self.mapping.address(offset, 4) else {
-            return;
-        };
-        // SAFETY: same owned native register mapping and access width.
-        unsafe { pointer.as_ptr().cast::<u32>().write_volatile(value) };
+        let _ = self.mapping.write32(offset, value);
     }
 }
 
@@ -239,31 +223,8 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
     if u64::from(low & !15) | (u64::from(high) << 32) != base {
         return Err(Error::InvalidBar);
     }
-    if status & 0x10 != 0 {
-        let mut offset = u16::from(config.read8(0x34));
-        let mut seen = [false; 64];
-        while offset != 0 {
-            if !(0x40..=0xfc).contains(&offset)
-                || !offset.is_multiple_of(4)
-                || seen[usize::from(offset / 4)]
-            {
-                return Err(Error::PciAuthority);
-            }
-            seen[usize::from(offset / 4)] = true;
-            let control = config.read16(offset + 2);
-            if control == u16::MAX {
-                return Err(Error::PciAuthority);
-            }
-            match config.read8(offset) {
-                1 if offset > 0xf8 || config.read16(offset + 4) & 3 != 0 => {
-                    return Err(Error::PciAuthority);
-                }
-                5 if control & 1 != 0 => return Err(Error::PciAuthority),
-                0x11 if control & 0x8000 != 0 => return Err(Error::PciAuthority),
-                _ => (),
-            }
-            offset = u16::from(config.read8(offset + 1));
-        }
+    if !capability::stopped_in_d0(config) {
+        return Err(Error::PciAuthority);
     }
     Ok(identity)
 }
