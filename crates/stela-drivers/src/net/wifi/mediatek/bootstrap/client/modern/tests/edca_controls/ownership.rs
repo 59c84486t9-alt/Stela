@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn queue_parameters_update_beside_an_outstanding_packet_owner() {
+fn update_retains_outstanding_packet() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
@@ -33,7 +33,7 @@ fn queue_parameters_update_beside_an_outstanding_packet_owner() {
 }
 
 #[test]
-fn negative_late_and_unmatched_actual_edca_ack_quarantine_original_owner_without_fake_rollback() {
+fn uncertain_ack_quarantines_owner() {
     for failure in 0..3 {
         let (mut driver, model, mut owner, _) = secure_modern();
         let context = driver.modern_context().unwrap().clone();
@@ -62,7 +62,7 @@ fn negative_late_and_unmatched_actual_edca_ack_quarantine_original_owner_without
 }
 
 #[test]
-fn queue_parameters_update_beside_block_ack_work_like_mt7925_mcu_set_tx() {
+fn update_preserves_pending_block_ack() {
     let (mut driver, model, mut owner, _) = secure_modern();
     let parameters: u16 = 1 | 2 | (6 << 2) | (8 << 6);
     let mut body = vec![3, 0, 7];

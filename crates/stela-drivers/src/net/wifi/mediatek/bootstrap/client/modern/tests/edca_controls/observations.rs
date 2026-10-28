@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn associated_native_beacon_applies_new_baseline_only_after_actual_ack_and_dma() {
+fn beacon_update_waits_for_ack_and_dma() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let context = driver.modern_context().unwrap().clone();
     let original = context.negotiated().clone();
@@ -65,7 +65,7 @@ fn associated_native_beacon_applies_new_baseline_only_after_actual_ack_and_dma()
 }
 
 #[test]
-fn beacon_admission_control_changes_apply_like_ieee80211_sta_wmm_params() {
+fn beacon_admission_control_fields() {
     let (mut driver, model, mut owner, _) = secure_modern();
     let frame = beacon(&driver, 1, |w| {
         for record in (8..24).step_by(4) {
@@ -84,7 +84,7 @@ fn beacon_admission_control_changes_apply_like_ieee80211_sta_wmm_params() {
 }
 
 #[test]
-fn unchanged_count_and_four_bit_wrap_use_source_equality_not_ordering() {
+fn parameter_count_equality_and_wrap() {
     let (mut driver, model, mut owner, _) = secure_modern();
     let before = commands(&model);
     let frame = beacon(&driver, 0, |w| w[9] = 0x52);
@@ -105,7 +105,7 @@ fn unchanged_count_and_four_bit_wrap_use_source_equality_not_ordering() {
 }
 
 #[test]
-fn latest_completed_native_observation_replaces_only_unpublished_cpu_update() {
+fn latest_unpublished_observation() {
     let (mut driver, model, mut owner, _) = secure_modern();
     let before = commands(&model);
     for count in [1, 2] {

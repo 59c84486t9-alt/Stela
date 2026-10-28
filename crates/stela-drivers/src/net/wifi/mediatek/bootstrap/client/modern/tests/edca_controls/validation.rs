@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn wrong_peer_channel_and_receiver_never_create_current_edca_authority() {
+fn peer_channel_and_receiver_preflight() {
     let (mut driver, model, _, _) = secure_modern();
     let before = commands(&model);
     for field in [4, 10, 16] {
@@ -52,7 +52,7 @@ fn wrong_peer_channel_and_receiver_never_create_current_edca_authority() {
 }
 
 #[test]
-fn malformed_or_unsupported_current_wmm_cancels_unpublished_relaxation() {
+fn malformed_wmm_cancels_pending_update() {
     let (mut driver, model, _, _) = secure_modern();
     let before = commands(&model);
     for change in [0, 1, 3, 4, 5] {
@@ -77,7 +77,7 @@ fn malformed_or_unsupported_current_wmm_cancels_unpublished_relaxation() {
 }
 
 #[test]
-fn actual_initial_key_installation_makes_pending_native_observation_stale_without_publication() {
+fn key_installation_invalidates_observation() {
     let (mut driver, model, _) = awaiting();
     let (mut owner, _) = authority(&driver, &model);
     let permit = admit(&mut owner, &driver, AssociationUse::Configure);

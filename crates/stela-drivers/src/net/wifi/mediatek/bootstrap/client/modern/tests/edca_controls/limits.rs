@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn current_regulatory_queue_limits_clamp_actual_dynamic_edca_bytes() {
+fn regulatory_limits_clamp_queue_bytes() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();

@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn revoked_policy_and_foreign_context_cannot_publish_observed_update() {
+fn revoked_and_foreign_update_admission() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
@@ -26,7 +26,7 @@ fn revoked_policy_and_foreign_context_cannot_publish_observed_update() {
 }
 
 #[test]
-fn independently_denied_hardware_and_os_current_queue_guards_preserve_pending_owner() {
+fn independent_queue_policy_denials() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
@@ -55,7 +55,7 @@ fn independently_denied_hardware_and_os_current_queue_guards_preserve_pending_ow
 }
 
 #[test]
-fn original_association_only_provider_cannot_implicitly_authorize_dynamic_queues() {
+fn association_permission_does_not_grant_edca() {
     struct OriginalOnly(Hardware);
     struct Guard(HardwareGuard);
     impl reg::HardwareLease for Guard {
