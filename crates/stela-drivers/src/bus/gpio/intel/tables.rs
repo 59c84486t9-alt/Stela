@@ -2,6 +2,7 @@
 // Copyright (C) 2015-2022 Intel Corporation
 // Generated numeric tables: tests/reference/intel_gpio_tables.py.
 // Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; original family-specific notices in ../THIRD_PARTY.md.
+//! Per-platform Intel pin-controller community and pad-group tables, generated from Linux.
 use super::{Community, Group, Profile};
 
 pub(super) static SPTLP_SOC_DATA: Profile = Profile {

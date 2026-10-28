@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2015, Intel Corporation.
+//! Configuration access to devices on a VMD child bus.
 use super::*;
 
 /// Exclusive child configuration borrow. This intentionally supplies no

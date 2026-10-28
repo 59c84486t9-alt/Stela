@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+//! MSI-X capability discovery: where the table and pending-bit array sit.
 use super::*;
 use crate::bus::pci::ConfigSpace;
 

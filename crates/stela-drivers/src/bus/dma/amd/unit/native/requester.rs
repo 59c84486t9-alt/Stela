@@ -1,3 +1,4 @@
+//! Requester ownership and DMA bindings behind one AMD IOMMU unit.
 use super::*;
 use crate::bus::pci::{ConfigSpace, Function, owned::OwnedConfig};
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+//! Uncached mappings of the MSI-X table and pending-bit array windows of one BAR.
 use super::*;
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
 use core::ptr::NonNull;

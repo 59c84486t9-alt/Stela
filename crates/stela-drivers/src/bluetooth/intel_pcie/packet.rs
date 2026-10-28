@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2024 Intel Corporation
+//! HCI packet types and their framing on the Intel PCIe Bluetooth rings.
 use super::{Error, Result};
 use alloc::vec::Vec;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
