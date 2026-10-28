@@ -1056,9 +1056,9 @@ fn store_nzcv(asm: &mut asm::Asm) {
     asm.mov_store(asm::Size::Dword, frame(NZCV), asm::Gpr::Rax);
 }
 
-/// The bytes of the capture's `lea eax,[rax+rdx*4]`, which the region cost
-/// gates find it by.
-pub(crate) const CAPTURE_COMBINE: [u8; 3] = [0x8d, 0x04, 0x90];
+/// Expected bytes of the capture's `lea eax,[rax+rdx*4]`.
+#[cfg(test)]
+const CAPTURE_COMBINE: [u8; 3] = [0x8d, 0x04, 0x90];
 /// The scale of the capture's LEA: C and V move above N and Z.
 const CAPTURE_CARRY_SHIFT: u8 = 2;
 /// The SETcc bytes' low bits.
