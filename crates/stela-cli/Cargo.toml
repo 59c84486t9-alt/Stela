@@ -36,12 +36,20 @@ p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 plist = "1"
 zeroize = "1"
 libc.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha1 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 cliclack = "0.5"
 indicatif = "0.18"
 console = "0.16"
+
+# HTTPS through the operating system's TLS and trust store on Windows
+# (SChannel) and macOS (Security.framework), and through rustls with the
+# webpki roots elsewhere.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 # Setup's disk backend on Windows: storage and volume control codes.
 [target.'cfg(windows)'.dependencies]
