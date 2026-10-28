@@ -1300,7 +1300,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_ax200_mld_station_default_v1_and_tlc4_require_selected_owner_ack_lifetime",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mld_peer_tests.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mld_peer_tests/cases.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
