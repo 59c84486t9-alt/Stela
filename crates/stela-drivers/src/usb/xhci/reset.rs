@@ -271,6 +271,58 @@ impl Controller {
         }
     }
 
+    /// `usb_queue_reset_device`: the device's native class owner asks the
+    /// topology owner to reset it and bind its drivers again, as Linux does for
+    /// a driver without pre_reset/post_reset. Every access through `id` fails
+    /// once the reset runs.
+    pub fn queue_reset(&mut self, id: SlotId) -> Result<(), BlockError> {
+        let slot = self.validate_id(id)?;
+        if self.slot(slot)?.consumer != identity::Consumer::Native {
+            return Err(BlockError::Unsupported(
+                "USB reset request without a native class owner",
+            ));
+        }
+        if !self.queued_resets.contains(&id) {
+            self.queued_resets.push(id);
+        }
+        Ok(())
+    }
+    pub(super) fn take_queued_resets(&mut self) -> Vec<SlotId> {
+        core::mem::take(&mut self.queued_resets)
+    }
+    /// `usb_reset_device` for a queued request: Disable Slot stops every
+    /// class transfer, as unbinding the drivers kills their URBs, and the fresh
+    /// device chooses its configuration again, unclaimed for normal binding.
+    pub(super) fn reset_queued(
+        &mut self,
+        device: &Device,
+        dma: &mut dyn DmaAllocator,
+        failures: &mut Vec<(String, BlockError)>,
+    ) -> Result<Device, (String, BlockError)> {
+        let slot = during("validate queued reset", self.validate_id(device.id))?;
+        let configured = &self.slot(slot).unwrap().endpoints;
+        let mut endpoints: Vec<Endpoint> = Vec::new();
+        for endpoint in interfaces(&device.configuration)
+            .iter()
+            .flat_map(|interface| interface.endpoints.iter())
+        {
+            let dci = endpoint.dci();
+            if configured[usize::from(dci)].is_some()
+                && !endpoints.iter().any(|known| known.dci() == dci)
+            {
+                endpoints.push(*endpoint);
+            }
+        }
+        // SAFETY: the class owner asked for this reset and its old-generation
+        // identity fails every access afterwards; Disable Slot retires every
+        // configured endpoint before any of its buffers could be reused.
+        let mut fresh = unsafe { self.reset_and_identify(device, &endpoints, dma) }?;
+        self.choose(&mut fresh, &device.location, failures);
+        let slot = self.slot(fresh.slot).unwrap();
+        slot.consumer = identity::Consumer::Unclaimed;
+        slot.inventory = Some(fresh.clone());
+        Ok(fresh)
+    }
     fn reset_preflight(&self, device: &Device, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         if self.validate_id(device.id)? != device.slot {
             return Err(BlockError::Unsupported(
@@ -1362,6 +1414,7 @@ pub(crate) mod tests {
                 .take(max_slots + 1)
                 .collect(),
             retry_resources: slot_resources::Cache::new(max_slots + 1),
+            queued_resets: Vec::new(),
             slot_ownership: vec![Ownership::Vacant; max_slots + 1],
             test_retired_numbers: vec![false; max_slots + 1],
             power: power::Ledger::new(max_slots + 1),

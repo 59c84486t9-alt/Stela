@@ -290,6 +290,7 @@ fn address_controller_with_capabilities(
         event_cycle: true,
         slots: vec![None, None],
         retry_resources: slot_resources::Cache::new(2),
+        queued_resets: Vec::new(),
         slot_ownership: vec![reset::Ownership::Vacant; 2],
         test_retired_numbers: vec![false; 2],
         power: power::Ledger::new(2),

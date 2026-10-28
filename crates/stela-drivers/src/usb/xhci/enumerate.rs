@@ -328,6 +328,28 @@ impl Controller {
 
     /// Choose an enumerated device's configuration and bring up a hub's
     /// ports; the device joins the inventory either way.
+    /// `usb_choose_configuration` for a freshly identified device. A failed
+    /// selection leaves the descriptor inventory with no configuration.
+    pub(super) fn choose(
+        &mut self,
+        device: &mut Device,
+        location: &str,
+        failures: &mut Vec<(String, BlockError)>,
+    ) -> bool {
+        if let Err(error) = self.preflight_vendor_ethernet(device) {
+            failures.push((format!("{location} RTL815x configuration preflight"), error));
+        }
+        if let Err(why) = configuration::select_with_controller(device, Some(self)) {
+            device.configuration.clear();
+            failures.push((
+                format!("{location} {} choose configuration", device.name()),
+                BlockError::Unsupported(why),
+            ));
+            return false;
+        }
+        true
+    }
+
     fn adopt(
         &mut self,
         mut device: Device,
@@ -337,16 +359,8 @@ impl Controller {
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) {
-        if let Err(error) = self.preflight_vendor_ethernet(&mut device) {
-            failures.push((format!("{location} RTL815x configuration preflight"), error));
-        }
-        if let Err(why) = configuration::select_with_controller(&mut device, Some(self)) {
-            device.configuration.clear();
-            failures.push((
-                format!("{location} {} choose configuration", device.name()),
-                BlockError::Unsupported(why),
-            ));
-        } else if device.descriptor[4] == HUB_CLASS
+        if self.choose(&mut device, &location, failures)
+            && device.descriptor[4] == HUB_CLASS
             && let Err(error) = self.hub(&device, attachment, dma, devices, failures)
         {
             failures.push((format!("{location} {} enumerate hub", device.name()), error));
