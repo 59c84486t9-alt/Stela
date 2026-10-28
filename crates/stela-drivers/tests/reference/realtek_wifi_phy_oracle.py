@@ -51,7 +51,7 @@ for name in ['rtw8822c_mac','rtw8822c_bb','rtw8822c_agc','rtw8822c_array_mp_cal_
 # Reproduce every committed register/condition pair, including currently
 # unselected branches, against the pinned licensed driver source.
 assert hashlib.sha256(source.encode()).hexdigest()=='ec3f4d9eed016932b9100e4e2332c12f67bd0824a3f3b4b05cc515e7916a2247'
-rust=['// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause','// Copyright(c) 2018-2019 Realtek Corporation','// RTL8822C register-initialization values from the licensed driver source.','// Source: Linux a804c5742bff224d4cb4d25dd383554d598be32b rtw88/rtw8822c_table.c.','// Full donor SHA256 ec3f4d9eed016932b9100e4e2332c12f67bd0824a3f3b4b05cc515e7916a2247.']
+rust=['// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause','// Copyright(c) 2018-2019 Realtek Corporation','// RTL8822C register-initialization values from the licensed driver source.','// Source: Linux a804c5742bff224d4cb4d25dd383554d598be32b rtw88/rtw8822c_table.c.','// Full donor SHA256 ec3f4d9eed016932b9100e4e2332c12f67bd0824a3f3b4b05cc515e7916a2247.','//! RTL8822C register-initialization tables from rtw8822c_table.c.']
 for rust_name,name in [('MAC','rtw8822c_mac'),('BB','rtw8822c_bb'),('AGC','rtw8822c_agc'),('CAL','rtw8822c_array_mp_cal_init'),('RF_A','rtw8822c_rf_a'),('RF_B','rtw8822c_rf_b')]:
     match=re.search(r'static const u32 '+name+r'\[\] = \{(.*?)\n};',source,re.S)
     body=re.sub(r'/\*.*?\*/|//[^\n]*','',match.group(1),flags=re.S)
