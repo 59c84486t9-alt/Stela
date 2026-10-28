@@ -1,5 +1,6 @@
 //! SVE shifts. Scalar recipes use host flags only as scratch.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rsp};
+use crate::x86_64::asm::{Alu, Code, Mem, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -18,8 +19,6 @@ mod scalar;
 mod variable;
 pub(crate) use scalar::rounding_variable_chunk;
 
-const SUB_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xc4];
 const BITS_PER_BYTE: u8 = 8;
 const PACKED_SATURATION_VECTOR_BYTES: usize = 256;
 
@@ -32,20 +31,20 @@ pub(super) fn repeated_constant(code: &mut Code, xmm: u8, element: ElementSize, 
     let limbs = value.to_le_bytes();
     let repeated: [u8; core::mem::size_of::<u64>()] =
         core::array::from_fn(|i| limbs[i % element.bytes()]);
-    code.extend([0x48, 0xb8]); // mov rax, imm64
-    code.extend(repeated);
-    packed(code, Host::MoveGprQword, xmm, 0, TargetCpu::Baseline);
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, u64::from_le_bytes(repeated));
+    asm.simd(Host::MoveGprQword, xmm, Rax, TargetCpu::Baseline);
     packed(code, Host::UnpackLowQword, xmm, xmm, TargetCpu::Baseline);
 }
 
 /// Store `xmm` to, or load it from, the stack slot at RSP + `slot`.
 pub(super) fn stack_vector(code: &mut Code, xmm: u8, slot: u8, store: bool) {
-    code.extend(if store {
-        [0xf3, 0x0f, 0x7f] // movdqu [rsp + disp8], xmm
+    let slot = Mem::base_disp8(Rsp, slot as i8);
+    if store {
+        code.asm().movdqu_store(slot, xmm);
     } else {
-        [0xf3, 0x0f, 0x6f] // movdqu xmm, [rsp + disp8]
-    });
-    code.extend([0x44 | xmm << 3, 0x24, slot]);
+        code.asm().movdqu_load(xmm, slot);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -96,8 +95,8 @@ pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength)
 
 fn adjust_stack(code: &mut Code, bytes: u8, allocate: bool) {
     if bytes != 0 {
-        code.extend(if allocate { SUB_RSP_IMM8 } else { ADD_RSP_IMM8 });
-        code.push(bytes);
+        let op = if allocate { Alu::Sub } else { Alu::Add };
+        code.asm().alu_imm8(op, Size::Qword, Rsp, bytes as i8);
     }
 }
 
@@ -271,8 +270,8 @@ mod tests {
         assert!(requires_declared_dit_zero(operand, length));
 
         let excluded = variable_operand(ElementSize::Doubleword, Kind::ArithmeticRight);
-        baseline.clear();
-        avx2.clear();
+        baseline = Code::new();
+        avx2 = Code::new();
         emit(&mut baseline, excluded, length, TargetCpu::Baseline);
         emit(&mut avx2, excluded, length, TargetCpu::Avx2);
         assert_eq!(baseline, avx2);
