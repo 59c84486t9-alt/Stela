@@ -684,10 +684,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         profile: Profile,
     ) -> Result<(), LinkControlError> {
         // Every pairwise and group cipher an RSN request parses to is one
-        // the client installs, as mt7925_set_key takes CCMP and GCMP.
+        // the client installs, as mt7925_set_key takes CCMP and GCMP. An open
+        // network carries data once associated, as mac80211 authorizes it.
         if !matches!(join.channel.band, Band::Ghz2 | Band::Ghz5)
-            || join.policy != station::PortPolicy::Controlled
-            || join.request.key_ciphers().is_none()
+            || (join.policy == station::PortPolicy::Controlled
+                && join.request.key_ciphers().is_none())
         {
             return Err(LinkControlError::UnsupportedProfile);
         }
@@ -937,7 +938,7 @@ mod tests {
         .unwrap();
         let mut body = vec![0; 8];
         body.extend_from_slice(&100u16.to_le_bytes());
-        body.extend_from_slice(&0x11u16.to_le_bytes());
+        body.extend_from_slice(&bss.capabilities.to_le_bytes());
         body.extend_from_slice(&bss.elements);
         let mut beacon = response(0x80, &body);
         beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
@@ -1120,6 +1121,74 @@ mod tests {
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
         assert_eq!(provider.load(Ordering::Relaxed), 1);
         assert!(model.memory.lock().unwrap().mappings.is_empty());
+    }
+    #[test]
+    fn an_open_network_carries_plaintext_ethernet_once_associated() {
+        use station::{
+            phy::{Mode, Width},
+            wire::AssociationRequest,
+        };
+        let without_rsn = |elements: &[u8]| {
+            let mut out = Vec::new();
+            let mut rest = elements;
+            while let [id, length, tail @ ..] = rest {
+                let (data, tail) = tail.split_at(usize::from(*length));
+                if *id != 48 {
+                    out.extend_from_slice(&[*id, *length]);
+                    out.extend_from_slice(data);
+                }
+                rest = tail;
+            }
+            out
+        };
+        let (client, model) = setup_modern();
+        let (mut join, mut bss) = modern_inputs(&client);
+        let local = client.local_advertisement(Band::Ghz5).unwrap();
+        join.request = AssociationRequest::new_modern_with_local(
+            0x01,
+            10,
+            without_rsn(join.request.elements()),
+            local.capabilities().clone(),
+            Mode::Eht,
+            Width::Mhz80,
+        )
+        .unwrap();
+        join.policy = station::PortPolicy::Open;
+        bss.elements = without_rsn(&bss.elements);
+        bss.capabilities = 0x01;
+        let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut link = ManagedLink::new(
+            client,
+            Provider(drops, core::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        let bss = scan_join(&mut link, &model, join, bss);
+        assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
+        link.service().unwrap();
+        incoming(&model, &response(0xb0, &[0, 0, 2, 0, 0, 0]), None, false);
+        link.service().unwrap();
+        assert_eq!(finish_tx(&model)[0][..2], [0, 0]);
+        link.service().unwrap();
+        let mut assoc = vec![0x01, 0, 0, 0, 1, 0xc0];
+        assoc.extend_from_slice(&bss.elements);
+        incoming(&model, &response(0x10, &assoc), None, false);
+        link.service().unwrap();
+        link.configure().unwrap();
+        assert_eq!(link.phase(), Phase::Associated);
+        assert!(link.carrier());
+        link.transmit(&eth(0x800)).unwrap();
+        let frames = finish_tx(&model);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0][1] & 0x40, 0);
+        let mut bytes = data(false);
+        bytes[1] &= !0x40;
+        let mut raw = incoming_bytes(&bytes, None, false);
+        raw[4] = 1;
+        device_receive(&model.queues[&0xd4520], &raw, true, 0);
+        link.service().unwrap();
+        let ethernet = link.receive().unwrap().unwrap();
+        assert_eq!(&ethernet[12..14], &0x800u16.to_be_bytes());
     }
     #[test]
     fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
