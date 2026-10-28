@@ -12,6 +12,7 @@
 use alloc::vec::Vec;
 
 mod integer;
+pub(crate) mod memory;
 mod sse;
 pub(crate) use integer::BitTest;
 pub(crate) use sse::{FloatLanes, FloatOp};
