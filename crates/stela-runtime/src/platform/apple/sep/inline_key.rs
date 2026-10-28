@@ -23,9 +23,9 @@
 //! recovered no key is installed, so the ANS key path still refuses; this
 //! module is the interface and the verified cipher they will use.
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
-use aes::{Aes128, Aes256};
 use alloc::collections::BTreeMap;
-use zeroize::Zeroizing;
+use stela_crypto::{Aes128, Aes256};
+use zeroize::{Zeroize, Zeroizing};
 
 const BLOCK: usize = 16;
 
@@ -72,7 +72,7 @@ fn double_tweak(tweak: &mut [u8; BLOCK]) {
     }
 }
 
-fn xts<C: BlockEncrypt + BlockDecrypt + KeyInit>(
+fn xts<C: BlockEncrypt<BlockSize = aes::cipher::consts::U16> + BlockDecrypt + KeyInit>(
     data_key: &[u8],
     tweak_key: &[u8],
     sector: u64,
@@ -90,23 +90,35 @@ fn xts<C: BlockEncrypt + BlockDecrypt + KeyInit>(
     let mut block = GenericArray::clone_from_slice(&tweak);
     tweak_cipher.encrypt_block(&mut block);
     tweak.copy_from_slice(&block);
+    let mut blocks: [aes::cipher::Block<C>; 8] = core::array::from_fn(|_| Default::default());
+    let mut masks = [[0u8; BLOCK]; 8];
     let (chunks, _) = data.as_chunks_mut::<BLOCK>();
-    for chunk in chunks {
-        for (byte, mask) in chunk.iter_mut().zip(tweak.iter()) {
-            *byte ^= mask;
+    for group in chunks.chunks_mut(8) {
+        for (index, chunk) in group.iter().enumerate() {
+            masks[index] = tweak;
+            for ((byte, plain), mask) in blocks[index].iter_mut().zip(chunk.iter()).zip(tweak) {
+                *byte = *plain ^ mask;
+            }
+            double_tweak(&mut tweak);
         }
-        let mut block = GenericArray::clone_from_slice(chunk);
         if encrypt {
-            data_cipher.encrypt_block(&mut block);
+            data_cipher.encrypt_blocks(&mut blocks[..group.len()]);
         } else {
-            data_cipher.decrypt_block(&mut block);
+            data_cipher.decrypt_blocks(&mut blocks[..group.len()]);
         }
-        chunk.copy_from_slice(&block);
-        for (byte, mask) in chunk.iter_mut().zip(tweak.iter()) {
-            *byte ^= mask;
+        for (index, chunk) in group.iter_mut().enumerate() {
+            for ((byte, cipher), mask) in chunk.iter_mut().zip(blocks[index]).zip(masks[index]) {
+                *byte = cipher ^ mask;
+            }
         }
-        double_tweak(&mut tweak);
     }
+    // Decryption batches can retain plaintext and key-derived tweak masks.
+    // Erase them before releasing this invocation's stack frame.
+    for block in &mut blocks {
+        block.as_mut_slice().zeroize();
+    }
+    masks.zeroize();
+    tweak.zeroize();
     Ok(())
 }
 
@@ -170,6 +182,40 @@ mod tests {
             *byte = n as u8;
         }
         InlineKey::Aes128(Zeroizing::new(key))
+    }
+
+    #[test]
+    fn xts_batches_match_scalar_sector_transforms() {
+        let data_key = [0x51; 16];
+        let tweak_key = [0xc3; 16];
+        for count in [1usize, 7, 8, 9, 31, 32, 33, 256] {
+            for sector in [0u64, 1, u64::MAX] {
+                let plain: alloc::vec::Vec<u8> = (0..count * BLOCK)
+                    .map(|i| i.wrapping_mul(71) as u8)
+                    .collect();
+                let mut scalar = plain.clone();
+                let cipher = aes::Aes128::new_from_slice(&data_key).unwrap();
+                let tweak_cipher = aes::Aes128::new_from_slice(&tweak_key).unwrap();
+                let mut tweak = [0; BLOCK];
+                tweak[..8].copy_from_slice(&sector.to_le_bytes());
+                tweak_cipher.encrypt_block(GenericArray::from_mut_slice(&mut tweak));
+                for chunk in scalar.as_chunks_mut::<BLOCK>().0 {
+                    for (byte, mask) in chunk.iter_mut().zip(tweak) {
+                        *byte ^= mask;
+                    }
+                    cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
+                    for (byte, mask) in chunk.iter_mut().zip(tweak) {
+                        *byte ^= mask;
+                    }
+                    double_tweak(&mut tweak);
+                }
+                let mut batched = plain.clone();
+                xts::<Aes128>(&data_key, &tweak_key, sector, &mut batched, true).unwrap();
+                assert_eq!(batched, scalar, "blocks={count} sector={sector}");
+                xts::<Aes128>(&data_key, &tweak_key, sector, &mut batched, false).unwrap();
+                assert_eq!(batched, plain);
+            }
+        }
     }
 
     #[test]
