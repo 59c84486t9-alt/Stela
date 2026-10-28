@@ -2,7 +2,7 @@
 //! bit-serial for data-independent timing.
 use super::isa::{CrcOpcode, CrcTableInstruction as Table};
 use super::{Register, Shift, Width, load, right_operand, store};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size, Unary};
 use crate::{
     TargetCpu,
     aarch64::crc::{DataSize, Operand, Polynomial},
@@ -13,17 +13,6 @@ const ENTRY_BYTES: u32 = 4;
 const TABLE_BYTES: u32 = TABLE_ENTRIES * ENTRY_BYTES;
 const BITS_PER_BYTE: u8 = 8;
 const DATA_WORD_BYTES: u8 = 4;
-const MOV_EAX_EAX: [u8; 2] = [0x89, 0xc0];
-const MOVZX_ECX_CL: [u8; 3] = [0x0f, 0xb6, 0xc9];
-const MOVZX_ECX_CX: [u8; 3] = [0x0f, 0xb7, 0xc9];
-const MOV_ECX_ECX: [u8; 2] = [0x89, 0xc9];
-const XOR_RAX_RCX: [u8; 3] = [0x48, 0x31, 0xc8];
-const MOV_EDX_EAX: [u8; 2] = [0x89, 0xc2];
-const AND_EDX_ONE: [u8; 3] = [0x83, 0xe2, 0x01];
-const NEG_EDX: [u8; 2] = [0xf7, 0xda];
-const AND_EDX_IMM32: [u8; 2] = [0x81, 0xe2];
-const SHR_RAX_ONE: [u8; 3] = [0x48, 0xd1, 0xe8];
-const XOR_RAX_RDX: [u8; 3] = [0x48, 0x31, 0xd0];
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if operand.destination == Register::Zero {
@@ -51,9 +40,10 @@ fn emit_table(code: &mut Code, operand: &Operand) {
         DataSize::Halfword => Table::TruncateHalfwordData.emit(code),
         DataSize::Word | DataSize::Doubleword => {}
     }
-    Table::TableBaseRip.emit(code);
-    let table_address = code.len();
-    code.extend(0i32.to_le_bytes());
+    // R8 = the table, placed after the jump over it; its displacement is
+    // the lea's last field.
+    code.asm().lea(Size::Qword, Gpr::R8, Mem::rip(0));
+    let table_base = code.len() - size_of::<i32>();
     Table::MergeWordData.emit(code); // W operation also truncates accumulator.
     emit_bytes(code, operand.size.bytes().min(DATA_WORD_BYTES));
     if operand.size == DataSize::Doubleword {
@@ -61,22 +51,24 @@ fn emit_table(code: &mut Code, operand: &Operand) {
         Table::MergeWordData.emit(code);
         emit_bytes(code, DATA_WORD_BYTES);
     }
-    Table::JumpOverTable.emit(code);
-    code.extend(TABLE_BYTES.to_le_bytes());
-    let displacement = i32::try_from(code.len() - table_address - size_of::<i32>())
-        .expect("bounded CRC instruction table displacement");
-    code[table_address..table_address + size_of::<i32>()]
-        .copy_from_slice(&displacement.to_le_bytes());
+    let mut asm = code.asm();
+    let over = asm.jmp();
     // The branch skips this immutable data. All runtime indexes are zero-extended
     // bytes; every read is one dword inside the readable native-code allocation.
+    let table = asm.len();
     for byte in 0..TABLE_ENTRIES {
         let mut remainder = byte;
         for _ in 0..BITS_PER_BYTE {
             remainder = (remainder >> 1)
                 ^ (operand.polynomial.reflected() & 0u32.wrapping_sub(remainder & 1));
         }
-        code.extend(remainder.to_le_bytes());
+        asm.data(&remainder.to_le_bytes());
     }
+    asm.bind(over);
+    debug_assert_eq!(code.len() - table, TABLE_BYTES as usize);
+    let displacement = i32::try_from(table - table_base - size_of::<i32>())
+        .expect("bounded CRC instruction table displacement");
+    code[table_base..table_base + size_of::<i32>()].copy_from_slice(&displacement.to_le_bytes());
 }
 
 /// The reflected CRC one data bit at a time over the accumulator XOR the
@@ -85,22 +77,25 @@ fn emit_table(code: &mut Code, operand: &Operand) {
 /// data's upper bits enter as they reach the low 32, which is the bytewise
 /// CRC by linearity; after the last step the value is 32 bits.
 fn emit_serial(code: &mut Code, operand: &Operand) {
-    code.extend(MOV_EAX_EAX);
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Byte, Dword, Qword, Word};
+    let mut asm = code.asm();
+    asm.mov(Dword, Rax, Rax);
     match operand.size {
-        DataSize::Byte => code.extend(MOVZX_ECX_CL),
-        DataSize::Halfword => code.extend(MOVZX_ECX_CX),
-        DataSize::Word => code.extend(MOV_ECX_ECX),
+        DataSize::Byte => asm.movzx(Dword, Rcx, Byte, Rcx),
+        DataSize::Halfword => asm.movzx(Dword, Rcx, Word, Rcx),
+        DataSize::Word => asm.mov(Dword, Rcx, Rcx),
         DataSize::Doubleword => {}
     }
-    code.extend(XOR_RAX_RCX);
+    asm.alu(Alu::Xor, Qword, Rax, Rcx);
     for _ in 0..operand.size.bytes() * BITS_PER_BYTE {
-        code.extend(MOV_EDX_EAX);
-        code.extend(AND_EDX_ONE);
-        code.extend(NEG_EDX);
-        code.extend(AND_EDX_IMM32);
-        code.extend(operand.polynomial.reflected().to_le_bytes());
-        code.extend(SHR_RAX_ONE);
-        code.extend(XOR_RAX_RDX);
+        // EDX = the polynomial where bit 0 is set, else zero.
+        asm.mov(Dword, Rdx, Rax);
+        asm.alu_imm8(Alu::And, Dword, Rdx, 1);
+        asm.unary(Unary::Neg, Dword, Rdx);
+        asm.alu_imm32(Alu::And, Dword, Rdx, operand.polynomial.reflected() as i32);
+        asm.shift_one(ShiftOp::Shr, Qword, Rax);
+        asm.alu(Alu::Xor, Qword, Rax, Rdx);
     }
 }
 

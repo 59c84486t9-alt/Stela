@@ -408,7 +408,7 @@ pub(super) fn emitter<'a>(
 ) -> Emitter<'a> {
     Emitter {
         output: super::OptimizedRegion {
-            code: Code::from(vec![]),
+            code: Code::new(),
             consumed_instructions: gprs.len(),
             source_map: vec![],
             stats: super::AllocationStats::default(),

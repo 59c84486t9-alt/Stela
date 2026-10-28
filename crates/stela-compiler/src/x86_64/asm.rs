@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 use alloc::vec::Vec;
 
+pub(crate) mod control;
 mod integer;
 pub(crate) mod memory;
 mod sse;

@@ -33,10 +33,6 @@ impl Asm<'_> {
     pub(crate) fn rdtsc(&mut self) {
         self.fixed(&[0x0f, 0x31]);
     }
-    /// `ud2` (0F 0B): raise #UD.
-    pub(crate) fn ud2(&mut self) {
-        self.fixed(&[0x0f, 0x0b]);
-    }
     /// `mfence` (0F AE F0): order every earlier load and store before every
     /// later one.
     pub(crate) fn mfence(&mut self) {

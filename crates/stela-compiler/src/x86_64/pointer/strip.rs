@@ -4,10 +4,9 @@
 //! The runtime derives both keep masks through its authoritative PAC layout
 //! and closes this cell whenever derived state changes. A closed cell takes
 //! the original instruction exit, without changing architectural state.
-use super::{JZ, Thunk, jump, land};
-use crate::x86_64::asm::Code;
+use super::{Thunk, frame};
+use crate::x86_64::asm::{Alu, BitTest, Code, Cond, Gpr, Mem, Size};
 use crate::{GuestAddress, block::ExitKind};
-use alloc::vec::Vec;
 
 /// Fixed-address state read by a strip thunk. Each keep mask excludes the
 /// extension field that is restored from bit 55; tagged bytes remain set.
@@ -21,48 +20,47 @@ pub struct Cell {
     pub upper_extension: u64,
 }
 
-const LOWER: u8 = core::mem::offset_of!(Cell, keep) as u8;
-const UPPER: u8 = LOWER + 8;
-const UPPER_EXTENSION: u8 = core::mem::offset_of!(Cell, upper_extension) as u8;
+const LOWER: i32 = core::mem::offset_of!(Cell, keep) as i32;
+const UPPER: i32 = LOWER + 8;
+const UPPER_EXTENSION: i32 = core::mem::offset_of!(Cell, upper_extension) as i32;
 const REGION_BIT: u8 = 55;
 
 /// Complete XPAC on `register`, with no key access, from `cell` while open.
 /// Only RAX, RCX, RDX, R8 and host flags are clobbered, as at a block exit;
 /// guest NZCV, SP and every other register remain in their canonical frame.
 pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
+    use Gpr::{R8, Rax, Rcx, Rdx};
+    use Size::Qword;
     if register > 31 {
         return None;
     }
     let mut code = Code::new();
-    let mut closed = Vec::new();
+    let mut asm = code.asm();
+    let mut closed = None;
     // XZR has no effect and depends on no regime state.
     if register != 31 {
-        code.extend([0x48, 0xba]); // movabs rdx,cell
-        code.extend(cell.to_le_bytes());
-        code.extend([0x48, 0x83, 0x3a, 0]); // cmp qword [rdx],0
-        jump(&mut code, &mut closed, JZ);
-        code.extend([0x48, 0x8b, 0x87]); // mov rax,[rdi+register]
-        code.extend((u32::from(register) * 8).to_le_bytes());
-        code.extend([0x48, 0x8b, 0x4a, LOWER]); // mov rcx,[rdx+lower]
-        code.extend([0x48, 0x0f, 0xba, 0xe0, REGION_BIT]); // bt rax,55
-        code.extend([0x48, 0x0f, 0x42, 0x4a, UPPER]); // cmovc rcx,[rdx+upper]
-        code.extend([0x4d, 0x19, 0xc0]); // sbb r8,r8: bit 55 replicated
-        code.extend([0x4c, 0x23, 0x42, UPPER_EXTENSION]); // and r8,[rdx+extension]
-        code.extend([0x48, 0x21, 0xc8]); // and rax,rcx
-        code.extend([0x4c, 0x09, 0xc0]); // or rax,r8
-        code.extend([0x48, 0x89, 0x87]); // mov [rdi+register],rax
-        code.extend((u32::from(register) * 8).to_le_bytes());
+        let pointer = frame(u32::from(register) * 8);
+        asm.mov_imm64(Rdx, cell);
+        asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, 0), 0);
+        closed = Some(asm.jcc(Cond::E));
+        asm.mov_load(Qword, Rax, pointer);
+        asm.mov_load(Qword, Rcx, Mem::base(Rdx, LOWER));
+        asm.bit_imm(BitTest::Bt, Qword, Rax, REGION_BIT);
+        asm.cmov(Cond::B, Qword, Rcx, Mem::base(Rdx, UPPER));
+        // Bit 55 replicated.
+        asm.alu(Alu::Sbb, Qword, R8, R8);
+        asm.alu_load(Alu::And, Qword, R8, Mem::base(Rdx, UPPER_EXTENSION));
+        asm.alu(Alu::And, Qword, Rax, Rcx);
+        asm.alu(Alu::Or, Qword, Rax, R8);
+        asm.mov_store(Qword, pointer, Rax);
     }
-    let next = code.len();
-    code.extend(super::super::chain::direct_exit(
-        GuestAddress(pc.0.wrapping_add(4)),
-        ExitKind::Fallthrough,
-    ));
-    land(&mut code, &closed);
-    code.extend(super::super::chain::direct_exit(
-        pc,
-        ExitKind::PointerAuthentication,
-    ));
+    let next = asm.len();
+    let fallthrough = GuestAddress(pc.0.wrapping_add(4));
+    super::super::block::direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
+    if let Some(closed) = closed {
+        asm.bind(closed);
+    }
+    super::super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
     Some(Thunk {
         code: code.into_bytes(),
         next: Some(next),
