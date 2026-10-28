@@ -38,6 +38,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.corb_wp = 0;
         self.rirb_rp = 0;
         self.codec_mask = 0;
+        // A new generation starts from a fresh command transport and codecs.
+        self.outstanding = [0; 15];
+        self.single_command = false;
+        self.allow_bus_reset = false;
+        self.response_reset = false;
+        self.writes = super::cache::Writes::default();
         self.discovery_ready = false;
         if let Err(error) = self.initialize() {
             let _ = self.shutdown();
@@ -162,6 +168,28 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let mut error = Error::CodecAbsent;
             for address in 0..15 {
                 if self.codec_mask & (1 << address) == 0 {
+                    continue;
+                }
+                // azx_probe_codecs: a slot whose vendor ID never answers is
+                // disabled, and the chip reset back to sanity.
+                if let Err(fault) = self.probe_codec(address) {
+                    error = fault;
+                    failures.push(CodecFailure {
+                        attempt,
+                        address,
+                        error: fault,
+                    });
+                    self.codec_mask &= !(1 << address);
+                    if self.codec_mask == 0 || self.command_poisoned {
+                        break;
+                    }
+                    if let Err(error) = self.reset_chip() {
+                        return Err(DiscoveryFailure {
+                            attempts: attempt,
+                            error,
+                            failures,
+                        });
+                    }
                     continue;
                 }
                 match self.enumerate_codec(address) {

@@ -29,6 +29,13 @@ pub(super) const RINTCNT: usize = 0x5a;
 pub(super) const RIRBCTL: usize = 0x5c;
 pub(super) const RIRBSTS: usize = 0x5d;
 pub(super) const RIRBSIZE: usize = 0x5e;
+pub(super) const IC: usize = 0x60;
+pub(super) const IR: usize = 0x64;
+pub(super) const IRS: usize = 0x68;
+pub(super) const IRS_BUSY: u16 = 1;
+pub(super) const IRS_VALID: u16 = 1 << 1;
+/// azx_single_send_cmd's 50 x udelay(1).
+pub(super) const SINGLE_COMMAND_US: u64 = 50;
 pub(super) const DPLBASE: usize = 0x70;
 pub(super) const DPUBASE: usize = 0x74;
 pub(super) const GCTL_RESET: u32 = 1;

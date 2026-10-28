@@ -194,8 +194,8 @@ impl Peer {
     fn width(offset: usize, bytes: usize) {
         let expected = match offset {
             0x02 | 0x03 | 0x4c..=0x4e | 0x5c..=0x5e | 0x80 | 0x83 => 1,
-            0x00 | 0x04 | 0x06 | 0x0c | 0x0e | 0x18 | 0x1a | 0x48 | 0x4a | 0x58 | 0x5a => 2,
-            0x08 | 0x20 | 0x40 | 0x44 | 0x50 | 0x54 | 0x70 | 0x74 => 4,
+            0x00 | 0x04 | 0x06 | 0x0c | 0x0e | 0x18 | 0x1a | 0x48 | 0x4a | 0x58 | 0x5a | 0x68 => 2,
+            0x08 | 0x20 | 0x40 | 0x44 | 0x50 | 0x54 | 0x60 | 0x64 | 0x70 | 0x74 => 4,
             _ => panic!("unexpected register {offset:x}"),
         };
         assert_eq!(bytes, expected);
@@ -578,7 +578,7 @@ fn native_retryable_sink_changes_clear_prior_success() {
 }
 
 #[test]
-fn native_transport_faults_poison_without_further_publication() {
+fn native_transport_faults_fall_back_to_single_commands_like_azx_rirb_get_response() {
     for fault in 0..3 {
         let mut ram = Ram::new();
         let (mut controller, peer) = controller(&mut ram);
@@ -593,22 +593,19 @@ fn native_transport_faults_poison_without_further_publication() {
             }
         }
         let result = controller.poll_digital_pin(&mut pins[0]);
+        if fault == 2 {
+            // azx_interrupt acknowledges an overrun and carries on.
+            assert!(result.is_ok());
+            continue;
+        }
+        // Silence and another codec's answer both time the verb out.
         assert_eq!(
             result,
-            Err(DigitalError::Controller(match fault {
-                0 => Error::Timeout(crate::audio::Phase::Verb),
-                1 => Error::UnexpectedResponse { codec: 1 },
-                2 => Error::RirbOverrun,
-                _ => unreachable!(),
-            }))
+            Err(DigitalError::Controller(Error::Timeout(
+                crate::audio::Phase::Verb
+            )))
         );
-        assert!(controller.command_poisoned);
-        let count = peer.borrow().commands.len();
-        assert_eq!(
-            controller.poll_digital_pin(&mut pins[0]),
-            Err(DigitalError::Controller(Error::NeedsReset))
-        );
-        assert_eq!(peer.borrow().commands.len(), count);
+        assert!(controller.single_command && !controller.command_poisoned);
     }
 }
 

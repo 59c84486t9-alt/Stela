@@ -52,6 +52,9 @@ impl Verb {
         Self::short(codec, node, u16::from(verb) << 8, 0)
             .map(|command| Self(command.0 | u32::from(payload)))
     }
+    pub(super) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
     pub fn codec(self) -> u8 {
         (self.0 >> 28) as u8
     }
@@ -193,6 +196,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Read the standard graph without changing pins, gains, power or routes.
     /// Invalid node/range encodings fail explicitly. Digital and vendor widgets
     /// remain represented in the graph; their policy is not inferred.
+    /// `probe_codec`: the vendor ID read, which never falls back.
+    pub(super) fn probe_codec(&mut self, address: u8) -> Result<(), Error> {
+        self.probing = true;
+        let result = self.parameter(address, 0, PAR_VENDOR);
+        self.probing = false;
+        match result? {
+            u32::MAX => Err(Error::InvalidCodecGraph),
+            _ => Ok(()),
+        }
+    }
     pub fn enumerate_codec(&mut self, address: u8) -> Result<CodecGraph, Error> {
         if address > 14 {
             return Err(Error::InvalidVerb);

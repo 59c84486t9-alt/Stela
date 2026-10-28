@@ -153,10 +153,6 @@ pub enum Error {
     StreamStopped,
     Timeout(Phase),
     CorbMemory,
-    RirbOverrun,
-    UnexpectedResponse {
-        codec: u8,
-    },
     InvalidRingPointer,
     StreamDma {
         status: u8,

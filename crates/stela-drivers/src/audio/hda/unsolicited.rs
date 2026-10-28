@@ -53,6 +53,10 @@ pub(super) struct State {
     lost: u64,
 }
 impl State {
+    /// Whether the controller gate passes unsolicited responses.
+    pub(super) fn capturing(&self) -> bool {
+        self.capturing
+    }
     pub(super) fn new() -> Self {
         Self {
             subscriptions: Vec::new(),
@@ -103,7 +107,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(id.index)
     }
-    fn jack_gate(&mut self, enable: bool) -> Result<(), Error> {
+    pub(super) fn jack_gate(&mut self, enable: bool) -> Result<(), Error> {
         use super::registers::{GCTL, GCTL_RESET, GCTL_UNSOL};
         let value = self.registers.read32(GCTL);
         if value == u32::MAX || value & GCTL_RESET == 0 {
@@ -234,7 +238,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// command/ownership epoch. Raw event bits never replace fresh pin sense.
     pub fn next_unsolicited(&mut self) -> Result<Option<UnsolicitedEvent>, Error> {
         self.jack_ready()?;
-        if let Err(error) = self.responses(None) {
+        if let Err(error) = self.update_rirb() {
             self.command_poisoned = true;
             let _ = self.stop_commands();
             return Err(error);

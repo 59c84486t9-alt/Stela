@@ -253,7 +253,7 @@ mod unsolicited_models {
     }
 
     #[test]
-    fn actual_rirb_fault_refuses_even_cached_notifications_and_requires_reset() {
+    fn a_corb_memory_fault_refuses_even_cached_notifications_and_requires_reset() {
         let mut fixture = Fixture::new();
         let model = jack_model();
         let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -263,11 +263,11 @@ mod unsolicited_models {
         controller
             .verb(Verb::short(0, 0, 0xf00, 0).unwrap())
             .unwrap();
-        model.borrow_mut().set(RIRBSTS, u32::from(RIRB_OVERRUN), 1);
-        assert_eq!(controller.next_unsolicited(), Err(Error::RirbOverrun));
+        model.borrow_mut().set(CORBSTS, u32::from(CORB_MEMORY), 1);
+        assert_eq!(controller.next_unsolicited(), Err(Error::CorbMemory));
         assert_eq!(controller.next_unsolicited(), Err(Error::NeedsReset));
         assert_eq!(model.borrow().get(CORBCTL, 1) & u32::from(COMMAND_RUN), 0);
-        model.borrow_mut().set(RIRBSTS, 0, 1);
+        model.borrow_mut().set(CORBSTS, 0, 1);
         controller.reinitialize().unwrap();
         assert_eq!(controller.next_unsolicited(), Ok(None));
     }

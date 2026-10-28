@@ -153,6 +153,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::RouteInUse);
         }
         let single_adc = profile(graph.vendor_id)?;
+        // cx_probe: unstable Conexant communication resets the bus rather
+        // than falling straight into single-command mode.
+        self.allow_bus_reset = true;
         let (group, subsystem, pins) = self.conexant_identity(graph)?;
         let mode = if pins.len() > 2 {
             ConexantEapdMode::Dynamic

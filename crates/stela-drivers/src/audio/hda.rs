@@ -20,6 +20,7 @@ use crate::bus::{
     i2c::Timer,
 };
 
+mod cache;
 mod cirrus;
 mod codec;
 pub mod digital;
@@ -105,7 +106,8 @@ impl Default for Config {
             probe_policy: ProbePolicy::Once,
             stream_tag_policy: StreamTagPolicy::Global,
             transition_timeout_us: 100_000,
-            verb_timeout_us: 100_000,
+            // snd_hdac_bus_get_response_rirb waits a second.
+            verb_timeout_us: 1_000_000,
         }
     }
 }
@@ -148,6 +150,18 @@ pub struct Controller<R, T> {
     corb_wp: u16,
     rirb_rp: u16,
     command_poisoned: bool,
+    /// `rirb.cmds` and `rirb.res`: commands each codec has yet to answer, and
+    /// its latest answer.
+    outstanding: [u8; 15],
+    answers: [u32; 15],
+    /// azx `single_cmd` and `probing`; hda_bus `allow_bus_reset`,
+    /// `response_reset` and `in_reset`.
+    single_command: bool,
+    probing: bool,
+    allow_bus_reset: bool,
+    response_reset: bool,
+    in_reset: bool,
+    writes: cache::Writes,
     stopped: bool,
     streams: Vec<Option<Stream>>,
     routes: Vec<(StreamId, AnalogRoute)>,
@@ -260,6 +274,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             corb_wp: 0,
             rirb_rp: 0,
             command_poisoned: false,
+            outstanding: [0; 15],
+            answers: [0; 15],
+            single_command: false,
+            probing: false,
+            allow_bus_reset: false,
+            response_reset: false,
+            in_reset: false,
+            writes: cache::Writes::default(),
             stopped: false,
             streams: (0..total).map(|_| None).collect(),
             routes: Vec::new(),
@@ -438,15 +460,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.registers.read8(CORBSTS) & CORB_MEMORY != 0 {
             return Err(Error::CorbMemory);
         }
-        if self.registers.read8(RIRBSTS) & RIRB_OVERRUN != 0 {
-            return Err(Error::RirbOverrun);
-        }
         Ok(())
     }
 
-    /// Exactly one outstanding solicited command across all codecs. A timeout
-    /// poisons the transport: HDA responses have no transaction ID, so a late
-    /// response cannot safely be matched to a later command for the same codec.
+    /// `codec_exec_verb` over `azx_send_cmd`/`azx_get_response`. Responses
+    /// carry no transaction ID, so, as in `snd_hdac_bus_update_rirb`, each
+    /// codec counts its outstanding commands and a verb completes once its
+    /// codec has answered every one; a late answer to a timed-out command is
+    /// consumed by the next. A timeout outside probing either resets the bus
+    /// once, where a codec allowed that (`allow_bus_reset`), and retries, or
+    /// falls back to the immediate command interface for good.
     pub fn verb(&mut self, verb: Verb) -> Result<u32, Error> {
         if self.lifecycle_failed {
             return Err(Error::NeedsReset);
@@ -460,46 +483,86 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.codec_mask & (1 << verb.codec()) == 0 {
             return Err(Error::CodecAbsent);
         }
-        let result = self.execute_verb(verb);
-        if result.is_err() {
-            self.command_poisoned = true;
-            let _ = self.stop_commands();
-        }
-        result
+        self.writes.remember(verb);
+        self.exchange(verb)
     }
 
-    fn responses(&mut self, expected: Option<u8>) -> Result<Option<u32>, Error> {
+    fn exchange(&mut self, verb: Verb) -> Result<u32, Error> {
+        loop {
+            let result = if self.single_command {
+                self.single_verb(verb)
+            } else {
+                self.rirb_verb(verb)
+            };
+            match result {
+                Ok(response) => {
+                    // The communication recovered.
+                    self.response_reset = false;
+                    return Ok(response);
+                }
+                // azx_rirb_get_response: polling already; no MSI to disable.
+                Err(Error::Timeout(Phase::Verb)) if !self.single_command && !self.probing => {
+                    if self.allow_bus_reset && !self.response_reset && !self.in_reset {
+                        self.response_reset = true;
+                        self.bus_reset()?;
+                        continue;
+                    }
+                    self.single_command = true;
+                    self.response_reset = false;
+                    // snd_hdac_bus_stop_cmd_io; rings that keep running stay
+                    // owned by the device.
+                    if let Err(error) = self.stop_commands() {
+                        self.command_poisoned = true;
+                        return Err(error);
+                    }
+                    return Err(Error::Timeout(Phase::Verb));
+                }
+                Err(error @ Error::Timeout(Phase::Verb)) => return Err(error),
+                Err(error) => {
+                    self.command_poisoned = true;
+                    let _ = self.stop_commands();
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// `snd_hdac_bus_update_rirb`: unsolicited responses queue; a solicited
+    /// one from a codec with nothing outstanding is spurious and dropped.
+    fn update_rirb(&mut self) -> Result<(), Error> {
         self.command_fault()?;
         let wp = self.registers.read16(RIRBWP);
+        if wp == u16::MAX {
+            // The controller likely went to D3; nothing arrived.
+            return Ok(());
+        }
         if wp >= self.rirb_entries {
             return Err(Error::InvalidRingPointer);
         }
         fence(Ordering::Acquire);
-        let mut response = None;
         while self.rirb_rp != wp {
             self.rirb_rp = (self.rirb_rp + 1) % self.rirb_entries;
             let offset = usize::from(self.rirb_rp) * 8;
             let extra = u32::from_le(self.rirb.read::<u32>(offset + 4));
             let value = u32::from_le(self.rirb.read::<u32>(offset));
+            let codec = usize::from((extra & 15) as u8);
             if extra & RESPONSE_UNSOL != 0 {
                 self.unsolicited.receive(self.token, value, extra);
-                continue;
+            } else if codec < 15 && self.outstanding[codec] != 0 {
+                self.answers[codec] = value;
+                self.outstanding[codec] -= 1;
             }
-            let codec = (extra & 15) as u8;
-            if expected != Some(codec) || response.is_some() {
-                return Err(Error::UnexpectedResponse { codec });
-            }
-            response = Some(value);
         }
-        // Read status after consuming DMA to avoid accepting data accompanied
-        // by an overrun/memory fault. Only W1C the response bit here.
-        self.command_fault()?;
-        self.registers.write8(RIRBSTS, RIRB_RESPONSE);
-        Ok(response)
+        // azx_interrupt acknowledges both the response and overrun status;
+        // responses an overrun lost time their commands out.
+        self.registers.write8(RIRBSTS, RIRB_RESPONSE | RIRB_OVERRUN);
+        Ok(())
     }
 
-    fn execute_verb(&mut self, verb: Verb) -> Result<u32, Error> {
-        self.responses(None)?; // stale solicited data must never satisfy this verb.
+    /// `snd_hdac_bus_send_cmd` then `snd_hdac_bus_get_response_rirb`. Answers
+    /// already queued are consumed first, as `azx_interrupt` would have.
+    fn rirb_verb(&mut self, verb: Verb) -> Result<u32, Error> {
+        self.update_rirb()?;
         let rp = self.registers.read16(CORBRP);
         if rp >= self.corb_entries {
             return Err(Error::InvalidRingPointer);
@@ -508,20 +571,96 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if next == rp {
             return Err(Error::InvalidRingPointer);
         }
+        let codec = usize::from(verb.codec());
+        self.outstanding[codec] = self.outstanding[codec].saturating_add(1);
         self.corb.write(usize::from(next) * 4, verb.raw().to_le());
         fence(Ordering::SeqCst);
         self.corb_wp = next;
         self.registers.write16(CORBWP, next);
         let start = self.timer.now_us();
         loop {
-            if let Some(response) = self.responses(Some(verb.codec()))? {
-                return Ok(response);
+            self.update_rirb()?;
+            if self.outstanding[codec] == 0 {
+                return Ok(self.answers[codec]);
             }
             if self.timer.now_us().wrapping_sub(start) >= u64::from(self.config.verb_timeout_us) {
                 return Err(Error::Timeout(Phase::Verb));
             }
             self.timer.relax();
         }
+    }
+
+    /// `azx_single_send_cmd` and `azx_single_wait_for_response`: 50us for the
+    /// interface to go idle, then 50us for the response.
+    fn single_verb(&mut self, verb: Verb) -> Result<u32, Error> {
+        let start = self.timer.now_us();
+        while self.registers.read16(IRS) & IRS_BUSY != 0 {
+            if self.timer.now_us().wrapping_sub(start) >= SINGLE_COMMAND_US {
+                return Err(Error::Timeout(Phase::Verb));
+            }
+            self.timer.relax();
+        }
+        let status = self.registers.read16(IRS);
+        self.registers.write16(IRS, status | IRS_VALID);
+        self.registers.write32(IC, verb.raw());
+        let status = self.registers.read16(IRS);
+        self.registers.write16(IRS, status | IRS_BUSY);
+        let start = self.timer.now_us();
+        loop {
+            if self.registers.read16(IRS) & IRS_VALID != 0 {
+                return Ok(self.registers.read32(IR));
+            }
+            if self.timer.now_us().wrapping_sub(start) >= SINGLE_COMMAND_US {
+                return Err(Error::Timeout(Phase::Verb));
+            }
+            self.timer.relax();
+        }
+    }
+
+    /// `snd_hda_bus_reset`: stop and fully reinitialize the controller, then
+    /// resume each codec from its retained writes, as codec resume replays its
+    /// register cache. Streams lose their descriptors to the link reset and
+    /// stay stopped until released.
+    fn bus_reset(&mut self) -> Result<(), Error> {
+        if !self.writes.complete() {
+            // Writes the cache could not key cannot be restored.
+            return Err(Error::Timeout(Phase::Verb));
+        }
+        self.in_reset = true;
+        let result = self.reset_chip().and_then(|()| {
+            if self.unsolicited.capturing() {
+                self.jack_gate(true)?;
+            }
+            // Codec resume does not fail the reset; a write that times out
+            // here falls back to single commands for the rest.
+            for verb in self.writes.replay() {
+                let _ = self.exchange(verb);
+            }
+            Ok(())
+        });
+        self.in_reset = false;
+        result
+    }
+
+    /// `azx_stop_chip` then `azx_init_chip(chip, true)`: a link and command
+    /// ring reset that keeps the codec mask, unlike a new probe.
+    pub(super) fn reset_chip(&mut self) -> Result<(), Error> {
+        for stream in self.streams.iter_mut().flatten() {
+            stream.running = false;
+            stream.poisoned = true;
+        }
+        let mask = self.codec_mask;
+        self.corb_wp = 0;
+        self.rirb_rp = 0;
+        self.outstanding = [0; 15];
+        if let Err(error) = self.initialize() {
+            self.command_poisoned = true;
+            return Err(error);
+        }
+        if mask != 0 {
+            self.codec_mask = mask;
+        }
+        Ok(())
     }
 
     /// Stop every stream and both command engines. Failure retains ownership:
@@ -1014,11 +1153,7 @@ mod tests {
                     self.set(CORBRP, u32::from(next), 2);
                     self.next_consume = now + self.consume_delay;
                     let response = self.reply_for(command);
-                    if !self.drop_reply
-                        && !(self.drop_reply_command == Some(command)
-                            && self.coefficient_writes >= self.drop_reply_min_coefficient_writes)
-                        && self.link_initializations >= self.drop_reply_until_resets
-                    {
+                    if self.answers(command) {
                         let codec = if self.wrong_codec { 1 } else { command >> 28 };
                         if self.inject_unsolicited {
                             self.replies.push(Reply {
@@ -1063,6 +1198,26 @@ mod tests {
                     }
                 }
             }
+        }
+
+        fn answers(&self, command: u32) -> bool {
+            !self.drop_reply
+                && !(self.drop_reply_command == Some(command)
+                    && self.coefficient_writes >= self.drop_reply_min_coefficient_writes)
+                && self.link_initializations >= self.drop_reply_until_resets
+        }
+
+        /// The immediate command interface answers synchronously.
+        fn immediate(&mut self, status: u32) {
+            let mut status = status & !u32::from(IRS_BUSY);
+            let command = self.get(IC, 4);
+            self.commands.push(command);
+            let response = self.reply_for(command);
+            if self.answers(command) {
+                self.set(IR, response, 4);
+                status |= u32::from(IRS_VALID);
+            }
+            self.set(IRS, status, 2);
         }
 
         fn emit(&mut self, value: u32, extra: u32) {
@@ -1586,6 +1741,15 @@ mod tests {
             }
             if offset == CORBSIZE || offset == RIRBSIZE {
                 self.bytes[offset] = (self.bytes[offset] & 0x70) | (value as u8 & 3);
+                return;
+            }
+            if offset == IRS {
+                let status = self.get(IRS, 2) & !(value & u32::from(IRS_VALID));
+                if value & u32::from(IRS_BUSY) != 0 {
+                    self.immediate(status);
+                } else {
+                    self.set(IRS, status, 2);
+                }
                 return;
             }
             if offset == CORBRP {
@@ -2611,42 +2775,34 @@ mod tests {
     }
 
     #[test]
-    fn unsolicited_is_skipped_but_stale_wrong_and_duplicate_replies_are_not_accepted() {
+    fn spurious_and_duplicate_replies_are_dropped_like_snd_hdac_bus_update_rirb() {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
         let mut controller = create(&model, &mut fixture, config()).unwrap();
         model.borrow_mut().inject_unsolicited = true;
         assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+        // Nothing awaits this answer.
         model.borrow_mut().emit(0x9999, 0);
-        let count = model.borrow().commands.len();
-        assert_eq!(
-            controller.verb(verb()),
-            Err(Error::UnexpectedResponse { codec: 0 })
-        );
-        assert_eq!(model.borrow().commands.len(), count);
-        assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
-
-        let model = Model::new(16);
-        let mut controller = create(&model, &mut fixture, config()).unwrap();
-        model.borrow_mut().wrong_codec = true;
-        assert_eq!(
-            controller.verb(verb()),
-            Err(Error::UnexpectedResponse { codec: 1 })
-        );
-        assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
+        model.borrow_mut().duplicate_reply = true;
+        assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+        assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+        assert_eq!(model.borrow().commands.len(), 3);
     }
 
     #[test]
-    fn duplicate_solicited_reply_and_stuck_rirb_reset_fail_explicitly() {
+    fn a_late_answer_completes_the_next_verb_and_a_stuck_rirb_reset_fails() {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
         let mut controller = create(&model, &mut fixture, config()).unwrap();
-        model.borrow_mut().duplicate_reply = true;
-        assert_eq!(
-            controller.verb(verb()),
-            Err(Error::UnexpectedResponse { codec: 0 })
-        );
-        assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
+        // While probing a timeout neither resets nor falls back; the late
+        // answer counts toward the codec's next verb.
+        model.borrow_mut().response_delay = 40;
+        controller.probing = true;
+        assert_eq!(controller.verb(verb()), Err(Error::Timeout(Phase::Verb)));
+        controller.probing = false;
+        model.borrow_mut().response_delay = 3;
+        assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+        assert_eq!(controller.outstanding[0], 0);
         let model = Model::new(16);
         model.borrow_mut().rirb_reset_stuck = true;
         model.borrow_mut().set(RIRBWP, 8, 2);
@@ -2657,27 +2813,47 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_verb_and_late_response_poison_until_platform_reset() {
+    fn a_timed_out_verb_falls_back_to_single_commands_like_azx_rirb_get_response() {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
         let mut controller = create(&model, &mut fixture, config()).unwrap();
         model.borrow_mut().response_delay = 80;
         assert_eq!(controller.verb(verb()), Err(Error::Timeout(Phase::Verb)));
-        advance(&model, 100);
-        // Even an otherwise matching late reply cannot be consumed by another verb.
-        model.borrow_mut().emit(0x7777_7777, 0);
-        assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
-        assert_eq!(model.borrow().commands.len(), 1);
         assert_eq!(model.borrow().get(CORBCTL, 1), 0);
         assert_eq!(model.borrow().get(RIRBCTL, 1), 0);
+        // Later verbs use the immediate command interface.
+        assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+        assert_eq!(model.borrow().commands.len(), 2);
+        assert_eq!(model.borrow().get(IC, 4), verb().raw());
+        model.borrow_mut().drop_reply = true;
+        assert_eq!(controller.verb(verb()), Err(Error::Timeout(Phase::Verb)));
+    }
+
+    #[test]
+    fn a_bus_reset_restores_codec_writes_then_retries_like_snd_hda_bus_reset() {
+        let mut fixture = Fixture::new();
+        let model = Model::new(16);
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        controller.allow_bus_reset = true;
+        let write = Verb::short(0, 2, 0x701, 1).unwrap();
+        assert!(controller.verb(write).is_ok());
+        let resets = model.borrow().link_initializations;
+        model.borrow_mut().drop_reply_until_resets = resets + 1;
+        let count = model.borrow().commands.len();
+        assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+        let m = model.borrow();
+        assert_eq!(m.link_initializations, resets + 1);
+        assert_eq!(
+            m.commands[count..],
+            [verb().raw(), write.raw(), verb().raw()]
+        );
+        assert!(!controller.single_command && !controller.response_reset);
     }
 
     #[test]
     fn command_faults_and_invalid_pointers_are_explicit_and_poison() {
         for (offset, value, expected) in [
             (CORBSTS, 1, Error::CorbMemory),
-            (RIRBSTS, 4, Error::RirbOverrun),
-            (RIRBWP, 0xffff, Error::InvalidRingPointer),
             (CORBRP, 0xffff, Error::InvalidRingPointer),
         ] {
             let mut fixture = Fixture::new();
@@ -3440,9 +3616,11 @@ mod tests {
         model.borrow_mut().advertised_codecs = 3;
         model.borrow_mut().drop_reply_until_resets = 2;
         let mut controller = create(&model, &mut fixture, retry_config(2)).unwrap();
+        // azx_probe_codecs disables the silent slot and resets the chip.
         let result = controller.discover_codecs().unwrap();
-        assert_eq!(result.attempts, 2);
-        assert_eq!(result.codecs.len(), 2);
+        assert_eq!(result.attempts, 1);
+        assert_eq!(result.codecs.len(), 1);
+        assert_eq!(result.codecs[0].address, 1);
         assert_eq!(
             result.failures,
             [CodecFailure {
@@ -3452,8 +3630,9 @@ mod tests {
             }]
         );
         assert_eq!(model.borrow().commands[0] >> 28, 0);
-        assert_eq!(model.borrow().commands[1] >> 28, 0);
-        assert_eq!(controller.token.generation, 2);
+        assert_eq!(model.borrow().commands[1] >> 28, 1);
+        assert_eq!(model.borrow().link_initializations, 2);
+        assert_eq!(controller.codec_mask(), 2);
         assert!(!controller.command_poisoned);
     }
 
@@ -3475,7 +3654,8 @@ mod tests {
                 error: Error::InvalidCodecGraph
             }]
         );
-        assert_eq!(model.borrow().commands.len(), 1);
+        // The vendor ID probe, then enumeration's own read.
+        assert_eq!(model.borrow().commands.len(), 2);
         let before = access_counts(&model);
         assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
         assert_eq!(
@@ -6951,7 +7131,8 @@ mod tests {
                         Err(Error::Timeout(crate::audio::Phase::Verb))
                     );
                     assert_eq!(model.borrow().route_controls[&(4, 0xf0c)], 2);
-                    assert!(controller.command_poisoned);
+                    // The Conexant bus reset retried, then single commands.
+                    assert!(controller.single_command);
                 }
                 assert_eq!(controller.conexant_codecs.len(), 1);
                 let before = access_counts(&model);
