@@ -68,6 +68,7 @@ pub(crate) fn validate_target_with(
     Ok(())
 }
 pub mod amx;
+pub(crate) mod asm;
 mod atomic;
 mod bitfield;
 pub(crate) mod block;
@@ -154,18 +155,35 @@ pub(crate) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
 }
 
 fn load(code: &mut Vec<u8>, register: Register) {
-    if let Some(offset) = offset(register) {
-        code.extend([0x48, 0x8b, 0x87]); // mov rax,[rdi+disp32]
-        code.extend(offset.to_le_bytes());
-    } else {
-        code.extend([0x31, 0xc0]);
+    load_with(&mut asm::Asm::new(code), register);
+}
+
+/// RAX = the guest register (zero for XZR), from the frame at RDI.
+fn load_with(asm: &mut asm::Asm, register: Register) {
+    use asm::{Alu, Gpr, Mem, Size};
+    match offset(register) {
+        Some(offset) => asm.mov_load(
+            Size::Qword,
+            Gpr::Rax,
+            Mem::base_disp32(Gpr::Rdi, offset as i32),
+        ),
+        None => asm.alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax),
     }
 }
 
 fn store(code: &mut Vec<u8>, register: Register) {
+    store_with(&mut asm::Asm::new(code), register);
+}
+
+/// The guest register (nothing for XZR) = RAX, in the frame at RDI.
+fn store_with(asm: &mut asm::Asm, register: Register) {
+    use asm::{Gpr, Mem, Size};
     if let Some(offset) = offset(register) {
-        code.extend([0x48, 0x89, 0x87]); // mov [rdi+disp32],rax
-        code.extend(offset.to_le_bytes());
+        asm.mov_store(
+            Size::Qword,
+            Mem::base_disp32(Gpr::Rdi, offset as i32),
+            Gpr::Rax,
+        );
     }
 }
 
@@ -774,26 +792,34 @@ fn memory_pair(
 }
 
 fn right_operand(code: &mut Vec<u8>, register: Register, width: Width, shift: Shift, amount: u8) {
-    if let Some(offset) = offset(register) {
-        code.extend([0x48, 0x8b, 0x8f]);
-        code.extend(offset.to_le_bytes());
-    } else {
-        code.extend([0x31, 0xc9]);
+    right_operand_with(&mut asm::Asm::new(code), register, width, shift, amount);
+}
+
+/// RCX = the guest register (zero for XZR) shifted by `amount`.
+fn right_operand_with(
+    asm: &mut asm::Asm,
+    register: Register,
+    width: Width,
+    shift: Shift,
+    amount: u8,
+) {
+    use asm::{Alu, Gpr, Mem, ShiftOp, Size};
+    match offset(register) {
+        Some(offset) => asm.mov_load(
+            Size::Qword,
+            Gpr::Rcx,
+            Mem::base_disp32(Gpr::Rdi, offset as i32),
+        ),
+        None => asm.alu(Alu::Xor, Size::Dword, Gpr::Rcx, Gpr::Rcx),
     }
     if amount != 0 {
-        if width == Width::X64 {
-            code.push(0x48);
-        }
-        code.extend([
-            0xc1,
-            match shift {
-                Shift::Lsl => 0xe1,
-                Shift::Lsr => 0xe9,
-                Shift::Asr => 0xf9,
-                Shift::Ror => 0xc9,
-            },
-            amount,
-        ]);
+        let op = match shift {
+            Shift::Lsl => ShiftOp::Shl,
+            Shift::Lsr => ShiftOp::Shr,
+            Shift::Asr => ShiftOp::Sar,
+            Shift::Ror => ShiftOp::Ror,
+        };
+        asm.shift_imm(op, Size::of(width == Width::X64), Gpr::Rcx, amount);
     }
 }
 
