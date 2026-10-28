@@ -15,6 +15,7 @@ pub mod passthrough;
 pub mod pe;
 pub mod ram;
 pub mod record;
+pub mod remapping;
 pub mod storage;
 pub mod topology;
 pub mod worker_bindings;
