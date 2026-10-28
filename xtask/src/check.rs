@@ -2,8 +2,9 @@
 //!
 //! Formatting reads only sources, so it runs beside everything else. Once
 //! the GPU sources are fetched, two lanes run at once, each in its own
-//! target directory: the UEFI target's Clippy in [`BOOT_TARGET_DIR`], and
-//! the host's Clippy and test build in `target`. The tests then run alone.
+//! target directory: the UEFI target's Clippy in [`BOOT_TARGET_DIR`], then
+//! the other shipped hosts' ([`CROSS`]) in [`CROSS_TARGET_DIR`], and the
+//! host's Clippy and test build in `target`. The tests then run alone.
 //! A lane stops at its first failure; the gate fails if any part did, once
 //! every part has finished. The tree's links and paths are checked first
 //! (`crate::links`).
@@ -23,6 +24,17 @@ pub const BOOT_TARGET_DIR: &str = "target/boot";
 /// takes the `aes` crate's software backend.
 const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft";
 const BOOT: [&str; 2] = ["--manifest-path", BOOT_MANIFEST];
+/// The other hosts Stela ships for, with the packages Clippy checks there
+/// without linking: macOS runs the hosted runtime and `stela-launcher`,
+/// Windows the installer. The development tasks stay on this host.
+const CROSS: [(&str, &[&str]); 2] = [
+    (
+        "x86_64-apple-darwin",
+        &["--workspace", "--exclude", "xtask"],
+    ),
+    ("x86_64-pc-windows-msvc", &["-p", "stela-cli"]),
+];
+const CROSS_TARGET_DIR: &str = "target/cross";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
 pub fn run(fix: bool) -> Result<()> {
@@ -34,7 +46,8 @@ pub fn run(fix: bool) -> Result<()> {
         command(["fmt", "--all", "--", "--check"]),
         command(["fmt", BOOT[0], BOOT[1], "--all", "--", "--check"]),
     ];
-    let boot_lane = vec![
+    let cross = install_targets();
+    let mut boot_lane = vec![
         // Cargo caps Clippy lints on dependencies of the boot package.
         // Select the runtime itself too, so its freestanding-only branches
         // are checked.
@@ -50,6 +63,14 @@ pub fn run(fix: bool) -> Result<()> {
             "nvidia-port,intel-port,amd-port",
         ]),
     ];
+    boot_lane.extend(CROSS.map(|(target, packages)| {
+        let mut clippy = command(["clippy", "--all-targets", "--locked"]);
+        clippy
+            .args(packages)
+            .args(["--target", target, "--target-dir", CROSS_TARGET_DIR])
+            .args(DENY);
+        clippy
+    }));
     // `--all-features` includes xtask's `fetched-sources`, whose tests read
     // the fetched sources.
     let test = ["test", "--workspace", "--all-features", "--locked"];
@@ -85,6 +106,7 @@ pub fn run(fix: bool) -> Result<()> {
             .map(|part| part.join().expect("formatting panicked"))
             .collect();
         results.push(links);
+        results.push(cross);
         match lanes {
             Ok(lanes) => results.extend(lanes),
             Err(error) => results.push(Err(error)),
@@ -97,6 +119,21 @@ pub fn run(fix: bool) -> Result<()> {
     });
     if !failures.is_empty() {
         bail!("the gate failed:\n{}", failures.join("\n"));
+    }
+    Ok(())
+}
+
+/// Add the [`CROSS`] targets rustup does not have yet.
+fn install_targets() -> Result<()> {
+    let installed = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .context("cannot run rustup, which installs the cross-check targets")?;
+    let installed = String::from_utf8_lossy(&installed.stdout);
+    for (target, _) in CROSS {
+        if !installed.lines().any(|line| line.trim() == target) {
+            exec(Command::new("rustup").args(["target", "add", target]))?;
+        }
     }
     Ok(())
 }
