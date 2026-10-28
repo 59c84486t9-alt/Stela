@@ -112,9 +112,6 @@ impl NubPool {
     pub fn code_start(self) -> u64 {
         self.code
     }
-    pub fn metadata(self) -> Metadata {
-        self.metadata
-    }
 }
 
 /// Already emitted native bytes and the separately counted words before the

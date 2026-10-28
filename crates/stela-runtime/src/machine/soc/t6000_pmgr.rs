@@ -87,9 +87,8 @@ impl Descriptor {
         }
         let optional = node
             .property("optional-bridge-mask")
-            .ok_or("T6000 source optional bridge bitmap is missing")?
-            .to_vec();
-        tunables::Selection::new(tuning, &optional).map_err(String::from)?;
+            .ok_or("T6000 source optional bridge bitmap is missing")?;
+        tunables::check_optional_mask(optional).map_err(String::from)?;
         // These two original tables are mandatory on this private source
         // path; the public optional parser may admit absent empty tables.
         for property in ["bridge-counter-configs", "device-bridges"] {
@@ -125,7 +124,7 @@ impl Descriptor {
         Ok(Self {
             registers,
             bridges,
-            optional_bridges: optional,
+            optional_bridges: optional.to_vec(),
             tuning,
             power,
             coverage_requirement,

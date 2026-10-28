@@ -1,20 +1,17 @@
 //! Validation of the source, compiler plan and native carrier of a block.
 mod conditional;
-mod el1_m0;
-mod retired;
 use super::super::super::{
     validate_clock_exit, validate_pauth_exit, validate_source_map, validate_system_exit,
     validate_thread_register_exit, validate_trap_exit,
 };
 use crate::blocks::{BlockRuntime, LoadedBlock};
 use crate::system::execution::EntryBoundary;
-pub(crate) use retired::RetiredInstructionSource;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter,
     aarch64::{Decoder, Operation},
     block::{
         BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, CompilationPlan, DynamicEdgeKind,
-        ExitKind, PointerAuthentication, SuccessorKind, SynchronousTrap, ThreadRegisterInstruction,
+        ExitKind, Features, PointerAuthentication, SynchronousTrap, ThreadRegisterInstruction,
         analyze_with_profile,
     },
     context::memory::{MemoryRequirements, MemoryStatus},
@@ -27,8 +24,6 @@ pub(crate) struct BoundSource<'code> {
     pub(super) source: &'code [u8],
     requirements: Option<MemoryRequirements>,
     analysis: &'code BlockAnalysis,
-    el1_platform: Option<stela_compiler::block::el1_platform::Intent>,
-    el1_m0: Option<stela_compiler::block::el1_m0::Intent>,
 }
 
 /// What the compilation plan says about a loaded block's source. It depends
@@ -37,8 +32,6 @@ pub(crate) struct BoundSource<'code> {
 pub(crate) struct CheckedFacts {
     requirements: Option<MemoryRequirements>,
     analysis: BlockAnalysis,
-    el1_platform: Option<stela_compiler::block::el1_platform::Intent>,
-    el1_m0: Option<stela_compiler::block::el1_m0::Intent>,
 }
 
 pub(crate) enum Helper {
@@ -67,22 +60,6 @@ pub(super) enum ReturnedTerminal {
 }
 
 impl<'code> BoundSource<'code> {
-    pub(super) fn system_instruction(
-        &self,
-    ) -> anyhow::Result<stela_compiler::block::SystemInstruction> {
-        anyhow::ensure!(
-            self.runtime.profile() == BlockProfile::SystemV1
-                && self.requirements.is_none()
-                && self.source.len() == size_of::<u32>()
-                && self.analysis.source_bytes == self.source.len()
-                && self.analysis.terminator_pc == Some(self.entry.entry()),
-            "not original one-word SystemV1 source"
-        );
-        self.analysis
-            .system_instruction
-            .ok_or_else(|| anyhow::anyhow!("original System instruction absent"))
-    }
-
     #[cfg(feature = "std")]
     pub(super) fn memory_profile(
         &self,
@@ -91,43 +68,6 @@ impl<'code> BoundSource<'code> {
             .profile
             .checked_memory()
             .ok_or_else(|| anyhow::anyhow!("bound source lacks checked memory profile"))
-    }
-
-    /// The WFx terminal of this block, checked against its source bytes.
-    pub(super) fn wait_instruction(
-        &self,
-    ) -> anyhow::Result<stela_compiler::block::system::SystemInstruction> {
-        let instruction = self
-            .analysis
-            .system_instruction
-            .ok_or_else(|| anyhow::anyhow!("source has no System terminal"))?;
-        anyhow::ensure!(
-            matches!(
-                instruction.operation,
-                stela_compiler::block::system::SystemOperation::Wait { .. }
-            ),
-            "System terminal is not WFx"
-        );
-        let offset = usize::try_from(
-            instruction
-                .instruction_pc
-                .0
-                .checked_sub(self.entry.entry().0)
-                .ok_or_else(|| anyhow::anyhow!("wait terminal underflows source"))?,
-        )?;
-        let end = offset
-            .checked_add(size_of::<u32>())
-            .ok_or_else(|| anyhow::anyhow!("wait source extent overflow"))?;
-        let bytes: [u8; size_of::<u32>()] = self
-            .source
-            .get(offset..end)
-            .ok_or_else(|| anyhow::anyhow!("wait terminal outside source"))?
-            .try_into()?;
-        anyhow::ensure!(
-            instruction.matches_source(instruction.instruction_pc, u32::from_le_bytes(bytes)),
-            "wait source operands changed"
-        );
-        Ok(instruction)
     }
 
     #[cfg(feature = "std")]
@@ -140,32 +80,6 @@ impl<'code> BoundSource<'code> {
     pub(super) fn memory_requirements(&self) -> anyhow::Result<MemoryRequirements> {
         self.requirements
             .ok_or_else(|| anyhow::anyhow!("source has no checked memory requirements"))
-    }
-
-    /// Exact typed source-derived direct target; output is intent, not a grant.
-    pub(super) fn direct_branch_target(&self) -> anyhow::Result<GuestAddress> {
-        let analysis = &self.analysis;
-        anyhow::ensure!(
-            self.runtime.profile() == BlockProfile::El1DirectBranchV1
-                && self.requirements.is_none()
-                && self.source.len() == size_of::<u32>()
-                && analysis.source_bytes == self.source.len()
-                && analysis.terminator_pc == Some(self.entry.entry())
-                && analysis.static_successors.len() == 1
-                && analysis.dynamic_edge.is_none()
-                && analysis.trap.is_none()
-                && analysis.system_instruction.is_none()
-                && analysis.pointer_authentication.is_none()
-                && analysis.clock_instruction.is_none()
-                && analysis.thread_register_instruction.is_none(),
-            "source is not exact typed direct B"
-        );
-        let edge = &analysis.static_successors[0];
-        anyhow::ensure!(
-            edge.kind == SuccessorKind::Direct,
-            "branch edge is not Direct"
-        );
-        Ok(edge.target)
     }
 
     #[cfg(feature = "std")]
@@ -267,8 +181,6 @@ impl<'code> BoundSource<'code> {
             source,
             requirements: facts.requirements,
             analysis: &facts.analysis,
-            el1_platform: facts.el1_platform,
-            el1_m0: facts.el1_m0,
         })
     }
 
@@ -291,45 +203,22 @@ impl<'code> BoundSource<'code> {
         );
         validate_source_map(&block.prepared.manifest, pc, block.source_bytes)?;
         // Re-parse without emitting, and compare that plan with the loaded one.
-        let plan = CompilationPlan::new(source, pc, runtime.profile, runtime.target_cpu())?;
+        let plan = CompilationPlan::new(
+            source,
+            pc,
+            &stela_compiler::Options::new(runtime.profile, runtime.target_cpu()),
+        )?;
         let requirements = plan.memory_requirements();
-        match runtime.profile {
-            BlockProfile::El1PlatformV1 => {
-                use stela_compiler::block::el1_platform::Intent;
-                match plan.el1_platform_intent() {
-                    Some(Intent::Registers | Intent::System(_)) => anyhow::ensure!(
-                        requirements.is_none(),
-                        "effect-free EL1 platform carrier unexpectedly requires memory"
-                    ),
-                    Some(
-                        Intent::LiteralRead64(_)
-                        | Intent::ScalarLoad(_)
-                        | Intent::ScalarStore(_)
-                        | Intent::Write64Pair(_)
-                        | Intent::Read64Pair(_),
-                    ) => anyhow::ensure!(
-                        requirements.is_some(),
-                        "EL1 platform memory intent requirements absent"
-                    ),
-                    None => anyhow::bail!("EL1 platform source plan intent absent"),
-                }
-            }
-            BlockProfile::El1M0IntegerV1 => anyhow::ensure!(
-                plan.el1_m0_intent().is_some(),
-                "EL1 integer source plan intent absent"
-            ),
-            BlockProfile::SystemV1 => anyhow::ensure!(
+        if runtime.profile == BlockProfile::new(Features::SYSTEM) {
+            anyhow::ensure!(
                 requirements.is_none() && source.len() == size_of::<u32>(),
-                "SystemV1 requires one original no-context source word"
-            ),
-            BlockProfile::El1DirectBranchV1 => anyhow::ensure!(
-                requirements.is_none(),
-                "direct branch plan unexpectedly requires memory"
-            ),
-            _ => anyhow::ensure!(
+                "a System block requires one original no-context source word"
+            );
+        } else {
+            anyhow::ensure!(
                 runtime.profile.checked_memory().is_some() && requirements.is_some(),
                 "checked plan requirements absent"
-            ),
+            );
         }
         anyhow::ensure!(
             plan.source_bytes() == block.source_bytes
@@ -346,8 +235,6 @@ impl<'code> BoundSource<'code> {
         Ok(CheckedFacts {
             requirements,
             analysis,
-            el1_platform: plan.el1_platform_intent(),
-            el1_m0: plan.el1_m0_intent(),
         })
     }
 
@@ -603,13 +490,12 @@ impl<'code> BoundSource<'code> {
 mod tests {
     //! Source descriptor and entry validation.
     use super::BoundSource;
-    use crate::blocks::{BlockRuntime, ThreadState};
+    use crate::blocks::BlockRuntime;
     use stela_compiler::{
-        GuestAddress, GuestState,
+        GuestAddress,
         block::{BlockProfile, CheckedMemoryProfile},
     };
     const BASE: GuestAddress = GuestAddress(0x4000);
-    const TARGET: GuestAddress = GuestAddress(0x4008);
     const B_PLUS8: u32 = 0x1400_0002;
     fn runtime(cache: &std::path::Path, profile: BlockProfile) -> BlockRuntime {
         let mut runtime = BlockRuntime::new_with_profile(73, cache.to_owned(), profile);
@@ -619,23 +505,10 @@ mod tests {
         runtime
     }
     #[test]
-    fn exact_branch_bound_source_retains_none_and_canonical_target_without_entry() {
+    fn checked_memory_bound_source_keeps_plan_requirements() {
         let cache = tempfile::tempdir().unwrap();
-        let mut runtime = runtime(cache.path(), BlockProfile::El1DirectBranchV1);
-        let mut accounting = super::super::empty_accounting();
-        runtime.load(BASE, &mut accounting).unwrap();
-        let bound = BoundSource::new(&runtime, BASE).unwrap();
-        assert_eq!(bound.direct_branch_target().unwrap(), TARGET);
-        assert!(bound.memory_requirements().is_err());
-        assert!(bound.block.prepared.manifest.memory_requirements.is_none());
-        assert_eq!(bound.entry.source_bytes(), size_of::<u32>());
-        assert_eq!(bound.source, B_PLUS8.to_le_bytes());
-        assert_eq!(accounting.blocks_executed, 0);
-    }
-    #[test]
-    fn checked_memory_bound_source_keeps_some_and_cannot_be_el1_branch() {
-        let cache = tempfile::tempdir().unwrap();
-        let profile = BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentEnabled);
+        let profile =
+            BlockProfile::ORDINARY.with_checked_memory(CheckedMemoryProfile::SpAlignmentEnabled);
         let mut runtime = runtime(cache.path(), profile);
         let mut accounting = super::super::empty_accounting();
         runtime.load(BASE, &mut accounting).unwrap();
@@ -644,75 +517,6 @@ mod tests {
             Some(bound.memory_requirements().unwrap()),
             bound.block.prepared.manifest.memory_requirements
         );
-        assert!(bound.direct_branch_target().is_err());
         assert_eq!(accounting.blocks_executed, 0);
-    }
-    #[test]
-    fn legacy_entry_refuses_typed_el1_branch_before_body_or_pc_effect() {
-        let cache = tempfile::tempdir().unwrap();
-        let mut runtime = runtime(cache.path(), BlockProfile::El1DirectBranchV1);
-        let mut thread = ThreadState {
-            registers: GuestState::default(),
-            pc: BASE,
-        };
-        // SAFETY: owned B source and state with no RAM references. This profile
-        // must be refused before any code is loaded or run.
-        let returned = unsafe { runtime.run(&mut thread, Some(TARGET), 1) };
-        assert!(returned.is_err());
-        assert_eq!(thread.pc, BASE);
-        assert_eq!(thread.registers, GuestState::default());
-        assert!(runtime.loaded.is_empty());
-    }
-
-    #[test]
-    fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distinct() {
-        use stela_compiler::block::el1_platform::Intent;
-        // Canonical branch, DAIFSet, LDR literal64 and STP X0,X1,[X2].
-        for (word, memory) in [
-            (B_PLUS8, false),
-            (0xd5034fdf, false),
-            (0x58000040, true),
-            (0x18000040, true),
-            (0x98000040, true),
-            (0x39400020, true),
-            (0xb9400020, true),
-            (0x39000020, true),
-            (0x79000020, true),
-            (0xb9000020, true),
-            (0xf9000020, true),
-            (0xa9000440, true),
-            (0xa9400440, true),
-        ] {
-            let cache = tempfile::tempdir().unwrap();
-            let mut runtime = BlockRuntime::new_with_profile(
-                73,
-                cache.path().to_owned(),
-                BlockProfile::El1PlatformV1,
-            );
-            runtime
-                .register_code(BASE, word.to_le_bytes().to_vec())
-                .unwrap();
-            let mut accounting = super::super::empty_accounting();
-            runtime.load(BASE, &mut accounting).unwrap();
-            let bound = BoundSource::new(&runtime, BASE).unwrap();
-            let intent = bound.el1_platform_intent().unwrap();
-            assert_eq!(
-                matches!(
-                    intent,
-                    Intent::LiteralRead64(_)
-                        | Intent::ScalarLoad(_)
-                        | Intent::ScalarStore(_)
-                        | Intent::Write64Pair(_)
-                        | Intent::Read64Pair(_)
-                ),
-                memory
-            );
-            assert_eq!(bound.memory_requirements().is_ok(), memory);
-            assert_eq!(
-                bound.block.prepared.manifest.memory_requirements.is_some(),
-                memory
-            );
-            assert_eq!(accounting.blocks_executed, 0);
-        }
     }
 }

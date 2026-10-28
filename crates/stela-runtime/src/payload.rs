@@ -1,7 +1,7 @@
 //! The restore payload: the IPSW members an installation needs, how they are
 //! stored on removable media, and verified reads of them.
 //!
-//! `stela efi install --ipsw` writes a payload manifest beside the members,
+//! `stela-dev efi install --ipsw` writes a payload manifest beside the members,
 //! either as split slices for FAT32 or as the whole IPSW. `stela.efi` reads
 //! either form before boot services end, verifies every member's SHA-256
 //! and copies the Erase subset into the target disk's staging partition.

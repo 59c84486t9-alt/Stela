@@ -1,11 +1,12 @@
 //! SHA512: scalar large sigmas and packed small sigmas.
 use super::{Host, commit, packed, read_vector, shuffle, vector_offset};
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
     aarch64::simd::sha512::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
 const QWORD_BITS: u8 = 64;
 const QWORD_BYTES: u32 = 8;
@@ -26,19 +27,6 @@ const LARGE_SIGMA0_ROTATIONS: [u8; 3] = [28, 34, 39];
 const LARGE_SIGMA1_ROTATIONS: [u8; 3] = [14, 18, 41];
 
 // Only caller-saved registers; RDI remains the GuestState pointer.
-#[derive(Clone, Copy)]
-#[repr(u8)]
-enum Gpr {
-    Rax = 0,
-    Rcx = 1,
-    Rdx = 2,
-    Rsi = 6,
-    R8 = 8,
-    R9 = 9,
-    R10 = 10,
-    R11 = 11,
-}
-
 const W0: Gpr = Gpr::Rax;
 const W1: Gpr = Gpr::Rcx;
 const X0: Gpr = Gpr::Rdx;
@@ -48,67 +36,46 @@ const Y1: Gpr = Gpr::R9;
 const VALUE: Gpr = Gpr::R10;
 const SIGMA: Gpr = Gpr::R11;
 
-const REX_W: u8 = 0x48;
-const REX_R: u8 = 0x04;
-const REX_B: u8 = 0x01;
-const REGISTER_LOW_MASK: u8 = 7;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const REGISTER_DIRECT: u8 = 0xc0;
-const STATE_DISPLACEMENT: u8 = 0x87; // mod=10, base=RDI
-const QWORD_LOAD: u8 = 0x8b;
-const QWORD_STORE: u8 = 0x89;
-const SHIFT_IMMEDIATE: u8 = 0xc1;
-const ROTATE_RIGHT_GROUP: u8 = 1 << MODRM_REGISTER_SHIFT;
-
-/// Baseline REX.W register/register instructions, destination in ModRM:r/m.
+/// Baseline 64-bit register/register instructions.
 #[derive(Clone, Copy)]
-#[repr(u8)]
 enum QwordOpcode {
-    Add = 0x01,
-    Or = 0x09,
-    And = 0x21,
-    Xor = 0x31,
-    Move = 0x89,
+    Add,
+    Or,
+    And,
+    Xor,
+    Move,
 }
 
 impl QwordOpcode {
-    fn emit(self, code: &mut Vec<u8>, destination: Gpr, source: Gpr) {
-        let destination = destination as u8;
-        let source = source as u8;
-        let rex =
-            REX_W | if source >= 8 { REX_R } else { 0 } | if destination >= 8 { REX_B } else { 0 };
-        code.extend([
-            rex,
-            self as u8,
-            REGISTER_DIRECT
-                | ((source & REGISTER_LOW_MASK) << MODRM_REGISTER_SHIFT)
-                | (destination & REGISTER_LOW_MASK),
-        ]);
+    fn emit(self, code: &mut Code, destination: Gpr, source: Gpr) {
+        let mut asm = code.asm();
+        let op = match self {
+            Self::Add => Alu::Add,
+            Self::Or => Alu::Or,
+            Self::And => Alu::And,
+            Self::Xor => Alu::Xor,
+            Self::Move => return asm.mov(Size::Qword, destination, source),
+        };
+        asm.alu(op, Size::Qword, destination, source);
     }
 }
 
-fn state_qword(code: &mut Vec<u8>, vector: u8, lane: u32, register: Gpr, load: bool) {
-    let register = register as u8;
-    code.extend([
-        REX_W | if register >= 8 { REX_R } else { 0 },
-        if load { QWORD_LOAD } else { QWORD_STORE },
-        STATE_DISPLACEMENT | ((register & REGISTER_LOW_MASK) << MODRM_REGISTER_SHIFT),
-    ]);
-    code.extend((vector_offset(vector) + lane * QWORD_BYTES).to_le_bytes());
+fn state_qword(code: &mut Code, vector: u8, lane: u32, register: Gpr, load: bool) {
+    let memory = guest(vector_offset(vector) + lane * QWORD_BYTES);
+    if load {
+        code.asm().mov_load(Size::Qword, register, memory);
+    } else {
+        code.asm().mov_store(Size::Qword, memory, register);
+    }
 }
 
-fn rotate(code: &mut Vec<u8>, destination: Gpr, amount: u8) {
-    let register = destination as u8;
-    code.extend([
-        REX_W | if register >= 8 { REX_B } else { 0 },
-        SHIFT_IMMEDIATE,
-        REGISTER_DIRECT | ROTATE_RIGHT_GROUP | (register & REGISTER_LOW_MASK),
-        amount,
-    ]);
+fn rotate(code: &mut Code, destination: Gpr, amount: u8) {
+    code.asm()
+        .shift_imm(ShiftOp::Ror, Size::Qword, destination, amount);
 }
 
 fn large_sigma(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: Gpr,
     source: Gpr,
     scratch: [Gpr; 2],
@@ -128,14 +95,14 @@ fn large_sigma(
     QwordOpcode::Xor.emit(code, destination, second);
 }
 
-fn choose(code: &mut Vec<u8>, destination: Gpr, selector: Gpr, yes: Gpr, no: Gpr) {
+fn choose(code: &mut Code, destination: Gpr, selector: Gpr, yes: Gpr, no: Gpr) {
     QwordOpcode::Move.emit(code, destination, yes);
     QwordOpcode::Xor.emit(code, destination, no);
     QwordOpcode::And.emit(code, destination, selector);
     QwordOpcode::Xor.emit(code, destination, no);
 }
 
-fn majority(code: &mut Vec<u8>, destination: Gpr, scratch: Gpr, x: Gpr, y: Gpr, z: Gpr) {
+fn majority(code: &mut Code, destination: Gpr, scratch: Gpr, x: Gpr, y: Gpr, z: Gpr) {
     QwordOpcode::Move.emit(code, destination, x);
     QwordOpcode::And.emit(code, destination, y);
     QwordOpcode::Move.emit(code, scratch, x);
@@ -144,7 +111,7 @@ fn majority(code: &mut Vec<u8>, destination: Gpr, scratch: Gpr, x: Gpr, y: Gpr, 
     QwordOpcode::Or.emit(code, destination, scratch);
 }
 
-fn hash(code: &mut Vec<u8>, operand: &Operand, second: bool) {
+fn hash(code: &mut Code, operand: &Operand, second: bool) {
     let right = operand.right.expect("three-register SHA512 hash form");
     // Stage every needed qword before either destination store, so the high
     // result can be stored before the low one is computed even when all three
@@ -195,7 +162,7 @@ fn hash(code: &mut Vec<u8>, operand: &Operand, second: bool) {
     }
 }
 
-fn packed_rotate(code: &mut Vec<u8>, destination: u8, scratch: u8, source: u8, amount: u8) {
+fn packed_rotate(code: &mut Code, destination: u8, scratch: u8, source: u8, amount: u8) {
     packed(code, Host::MoveAligned, destination, source);
     Shift::RightQword.emit(code, destination, amount);
     packed(code, Host::MoveAligned, scratch, source);
@@ -203,7 +170,7 @@ fn packed_rotate(code: &mut Vec<u8>, destination: u8, scratch: u8, source: u8, a
     packed(code, Host::Or, destination, scratch);
 }
 
-fn small_sigma(code: &mut Vec<u8>, rotations: [u8; 2], shift: u8) {
+fn small_sigma(code: &mut Code, rotations: [u8; 2], shift: u8) {
     // XMM2 holds both independent sigma inputs. XMM0/1 retain old W/Y.
     packed_rotate(
         code,
@@ -224,7 +191,7 @@ fn small_sigma(code: &mut Vec<u8>, rotations: [u8; 2], shift: u8) {
     packed(code, Host::Xor, SIGMA_OUTPUT_XMM, SIGMA_INPUT_XMM);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, _target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, _target: TargetCpu) {
     match operand.kind {
         Kind::Hash | Kind::Hash2 => hash(code, operand, operand.kind == Kind::Hash2),
         Kind::Schedule0 => {
@@ -260,11 +227,10 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, _target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn scoped_qword_encodings_keep_rex_operand_roles_and_state_base() {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         QwordOpcode::Move.emit(&mut code, Gpr::R10, Gpr::Rdx);
         QwordOpcode::And.emit(&mut code, Gpr::R10, Gpr::R9);
         rotate(&mut code, Gpr::R11, 23);

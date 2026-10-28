@@ -114,6 +114,10 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
     Ok(())
 }
 
+#[cfg_attr(
+    not(feature = "fetched-sources"),
+    ignore = "reads the sources `cargo xtask gpu fetch` checks out"
+)]
 #[test]
 fn original_ordering_hook_keeps_sfence_and_memory_clobber_across_native_abis() {
     let output = tempfile::tempdir().unwrap();

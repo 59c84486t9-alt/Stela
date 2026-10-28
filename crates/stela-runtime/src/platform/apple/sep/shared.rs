@@ -164,6 +164,7 @@ impl Layout {
 /// mode 3). `_sendMessageGated` 0x2d6abcc/0x2d6ac90 preserves ALL payload
 /// bits in raw mode: there is no service byte to mask away. Only a caller
 /// already in the timebase phase may interpret this word as a timebase.
+#[cfg(test)]
 pub fn raw_timebase(message: Message) -> Result<u64, &'static str> {
     if message.endpoint != 0 {
         return Err("SEP raw timebase requires ASC endpoint zero");

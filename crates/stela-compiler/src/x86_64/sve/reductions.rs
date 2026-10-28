@@ -2,9 +2,10 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::reductions::{Kind, Operand, Output};
+use crate::x86_64::asm::Gpr::{R8, R9, Rax};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_mask, store_z_chunk};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
@@ -14,39 +15,16 @@ const NEUTRAL: u8 = 4;
 const CONSTANT: u8 = 5;
 const PREDICATE: u8 = 6;
 const PREDICATE_SCRATCH: u8 = 7;
-const REGISTER_MODE: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
 const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const DWORD_BYTES: usize = core::mem::size_of::<u32>();
-const R8_FIELD: u8 = 0;
-const R9_FIELD: u8 = 1;
 const WORD_ONES: u64 = 0x0001_0001_0001_0001;
 const WORD_ONES_SHIFT: u8 = (u16::BITS - 1) as u8;
-const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
-const MOVQ_RAX_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const MOVD_EAX_XMM: &[u8] = &[0x66, 0x0f, 0x7e];
-const MOVSXD_RAX_EAX: &[u8] = &[0x48, 0x63, 0xc0];
-const MOVZX_EAX_AL: &[u8] = &[0x0f, 0xb6, 0xc0];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const MOVQ_XMM_EXTENDED_GPR: &[u8] = &[0x66, 0x49, 0x0f, 0x6e];
-const MOVQ_EXTENDED_GPR_XMM: &[u8] = &[0x66, 0x49, 0x0f, 0x7e];
-const CMP_R8_RAX: &[u8] = &[0x49, 0x39, 0xc0];
-const CMP_R9_RAX: &[u8] = &[0x49, 0x39, 0xc1];
-const CMP_R8_R9: &[u8] = &[0x4d, 0x39, 0xc8];
-const CMOV_R8_RAX: &[u8] = &[0x4c, 0x0f];
-const CMOV_R9_RAX: &[u8] = &[0x4c, 0x0f];
-const CMOV_R8_R9: &[u8] = &[0x4d, 0x0f];
-const CMOV_BELOW: u8 = 0x42;
-const CMOV_ABOVE: u8 = 0x47;
-const CMOV_LESS: u8 = 0x4c;
-const CMOV_GREATER: u8 = 0x4f;
-const PSADBW: &[u8] = &[0x66, 0x0f, 0xf6];
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
     opcode.register(code, destination, source, target);
 }
 
-fn constant(code: &mut Vec<u8>, destination: u8, value: u64) {
+fn constant(code: &mut Code, destination: u8, value: u64) {
     match value {
         u64::MAX => {
             packed(
@@ -71,10 +49,9 @@ fn constant(code: &mut Vec<u8>, destination: u8, value: u64) {
         }
         _ => {}
     }
-    code.extend(MOVABS_RAX);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(REGISTER_MODE | destination << REGISTER_SHIFT);
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, value);
+    asm.simd(Host::MoveGprQword, destination, Rax, TargetCpu::Baseline);
     packed(
         code,
         Host::UnpackLowQword,
@@ -178,7 +155,7 @@ fn reduction_opcode(kind: Kind, element: ElementSize, target: TargetCpu) -> Opti
 }
 
 /// XMM0/XMM1 hold accumulator and next lanes. Compare/select consumes XMM3.
-fn combine(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: TargetCpu) {
+fn combine(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu) {
     if let Some(opcode) = reduction_opcode(kind, element, target) {
         packed(code, opcode, RESULT, SOURCE, target);
         return;
@@ -195,7 +172,7 @@ fn combine(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: TargetC
     packed(code, Host::Or, RESULT, SIGN, target);
 }
 
-fn mask_source(code: &mut Vec<u8>, neutral_nonzero: bool, target: TargetCpu) {
+fn mask_source(code: &mut Code, neutral_nonzero: bool, target: TargetCpu) {
     packed(code, Host::And, SOURCE, PREDICATE, target);
     if neutral_nonzero {
         packed(code, Host::AndNot, PREDICATE, NEUTRAL, target);
@@ -203,11 +180,10 @@ fn mask_source(code: &mut Vec<u8>, neutral_nonzero: bool, target: TargetCpu) {
     }
 }
 
-fn sum_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: TargetCpu) {
+fn sum_chunk(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu) {
     let signed = kind == Kind::SignedAdd;
     if element == ElementSize::Byte && !signed {
-        code.extend(PSADBW);
-        code.push(REGISTER_MODE | SOURCE << REGISTER_SHIFT | NEUTRAL);
+        code.asm().psadbw(SOURCE, Rm::Xmm(NEUTRAL));
         packed(code, Host::AddQword, RESULT, SOURCE, target);
         return;
     }
@@ -259,55 +235,48 @@ fn sum_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: Targe
     packed(code, add, RESULT, SOURCE, target);
 }
 
-fn scalar_result(code: &mut Vec<u8>, element: ElementSize, sign_extend: bool) {
-    code.extend(if element == ElementSize::Doubleword {
-        MOVQ_RAX_XMM
+fn scalar_result(code: &mut Code, element: ElementSize, sign_extend: bool) {
+    let mut asm = code.asm();
+    if element == ElementSize::Doubleword {
+        asm.movq_from_xmm(Rax, RESULT);
     } else {
-        MOVD_EAX_XMM
-    });
-    code.push(REGISTER_MODE | RESULT << REGISTER_SHIFT);
+        asm.movd_from_xmm(Rax, RESULT);
+    }
     match element {
-        ElementSize::Byte => code.extend(MOVZX_EAX_AL),
-        ElementSize::Halfword => code.extend(MOVZX_EAX_AX),
-        ElementSize::Word if sign_extend => code.extend(MOVSXD_RAX_EAX),
+        ElementSize::Byte => asm.movzx(Size::Dword, Rax, Size::Byte, Rax),
+        ElementSize::Halfword => asm.movzx(Size::Dword, Rax, Size::Word, Rax),
+        ElementSize::Word if sign_extend => asm.movsxd(Rax, Rax),
         _ => {}
     }
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(REGISTER_MODE | RESULT << REGISTER_SHIFT);
+    asm.simd(Host::MoveGprQword, RESULT, Rax, TargetCpu::Baseline);
 }
 
-fn conditional_move(kind: Kind) -> u8 {
+fn conditional_move(kind: Kind) -> Cond {
     match (is_signed(kind), is_minimum(kind)) {
-        (true, true) => CMOV_GREATER,
-        (true, false) => CMOV_LESS,
-        (false, true) => CMOV_ABOVE,
-        (false, false) => CMOV_BELOW,
+        (true, true) => Cond::G,
+        (true, false) => Cond::L,
+        (false, true) => Cond::A,
+        (false, false) => Cond::B,
     }
 }
 
-fn seed_qword_columns(code: &mut Vec<u8>) {
-    for destination in [R8_FIELD, R9_FIELD] {
-        code.extend(MOVQ_EXTENDED_GPR_XMM);
-        code.push(REGISTER_MODE | SOURCE << REGISTER_SHIFT | destination);
-        if destination == R8_FIELD {
+fn seed_qword_columns(code: &mut Code) {
+    for destination in [R8, R9] {
+        code.asm().movq_from_xmm(destination, SOURCE);
+        if destination == R8 {
             ShiftOpcode::RightBytes.emit(code, SOURCE, QWORD_BYTES as u8);
         }
     }
 }
 
-fn combine_qword_columns(code: &mut Vec<u8>, kind: Kind) {
+fn combine_qword_columns(code: &mut Code, kind: Kind) {
     let condition = conditional_move(kind);
-    for (compare, move_prefix, destination) in [
-        (CMP_R8_RAX, CMOV_R8_RAX, R8_FIELD),
-        (CMP_R9_RAX, CMOV_R9_RAX, R9_FIELD),
-    ] {
-        code.extend(MOVQ_RAX_XMM);
-        code.push(REGISTER_MODE | SOURCE << REGISTER_SHIFT);
-        code.extend(compare);
-        code.extend(move_prefix);
-        code.push(condition);
-        code.push(REGISTER_MODE | destination << REGISTER_SHIFT);
-        if destination == R8_FIELD {
+    for destination in [R8, R9] {
+        let mut asm = code.asm();
+        asm.movq_from_xmm(Rax, SOURCE);
+        asm.alu(Alu::Cmp, Size::Qword, destination, Rax);
+        asm.cmov(condition, Size::Qword, destination, Rax);
+        if destination == R8 {
             ShiftOpcode::RightBytes.emit(code, SOURCE, QWORD_BYTES as u8);
         }
     }
@@ -315,7 +284,7 @@ fn combine_qword_columns(code: &mut Vec<u8>, kind: Kind) {
 
 /// Complete ordinary data effects. All source chunks precede any destination
 /// writes, including Vd==Zn. Integer operations leave guest status unchanged.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let sum = operand.output == Output::Scalar && is_sum(operand.kind);
     let qword_extrema = matches!(
         operand.kind,
@@ -382,16 +351,13 @@ pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: 
     }
     if qword_columns {
         if operand.output == Output::Scalar {
-            code.extend(CMP_R8_R9);
-            code.extend(CMOV_R8_R9);
-            code.push(conditional_move(operand.kind));
-            code.push(REGISTER_MODE | R9_FIELD);
+            let mut asm = code.asm();
+            asm.alu(Alu::Cmp, Size::Qword, R8, R9);
+            asm.cmov(conditional_move(operand.kind), Size::Qword, R8, R9);
         }
-        code.extend(MOVQ_XMM_EXTENDED_GPR);
-        code.push(REGISTER_MODE | RESULT << REGISTER_SHIFT);
+        code.asm().movq_to_xmm(RESULT, R8);
         if operand.output == Output::Quadword {
-            code.extend(MOVQ_XMM_EXTENDED_GPR);
-            code.push(REGISTER_MODE | TEMPORARY << REGISTER_SHIFT | R9_FIELD);
+            code.asm().movq_to_xmm(TEMPORARY, R9);
             packed(code, Host::UnpackLowQword, RESULT, TEMPORARY, target);
         }
     } else {

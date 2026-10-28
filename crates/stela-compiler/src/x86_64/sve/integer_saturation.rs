@@ -5,7 +5,8 @@ use crate::aarch64::{
     scalable::{ElementSize, Predication, VectorLength},
     sve::integer_saturation::{Arithmetic, Half, Input, Kind, Operand, Signedness},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Rm};
 
 use super::super::isa::{ShiftOpcode, SimdOpcode as Host};
 
@@ -13,7 +14,6 @@ const REPLICATE_HIGH_DWORDS: u8 = 0xf5;
 const SWAP_DWORD_PAIRS: u8 = 0xb1;
 const SWAP_QWORDS: u8 = 0x4e;
 const SWAP_WORD_PAIRS: u8 = 0xb1;
-const MOV_RAX_IMM64: &[u8] = &[0x48, 0xb8];
 
 #[derive(Clone, Copy)]
 enum ShiftKind {
@@ -30,17 +30,17 @@ const WORD_LOW_BITS: u64 = 0x0000_0001_0000_0001;
 const QWORD_LOW_BITS: u64 = 1;
 const BITS_PER_BYTE: usize = 8;
 
-fn binary(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn binary(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     // This family's packed recipes deliberately require only the SSE2 baseline.
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn copy(code: &mut Code, destination: u8, source: u8) {
     if destination != source {
         binary(code, Host::MoveAligned, destination, source);
     }
 }
 fn shift_immediate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     operation: ShiftKind,
     register: u8,
@@ -59,17 +59,21 @@ fn shift_immediate(
     };
     opcode.emit(code, register, amount as u8);
 }
-fn shuffle(code: &mut Vec<u8>, opcode: Host, register: u8, order: u8) {
-    opcode.register(code, register, register, TargetCpu::Baseline);
-    code.push(order);
+fn shuffle(code: &mut Code, opcode: Host, register: u8, order: u8) {
+    code.asm().simd_imm(
+        opcode,
+        register,
+        Rm::Xmm(register),
+        order,
+        TargetCpu::Baseline,
+    );
 }
-fn splat(code: &mut Vec<u8>, register: u8, pattern: u64) {
-    code.extend(MOV_RAX_IMM64);
-    code.extend(pattern.to_le_bytes());
+fn splat(code: &mut Code, register: u8, pattern: u64) {
+    code.asm().mov_imm64(Rax, pattern);
     Host::MoveGprQword.register(code, register, 0, TargetCpu::Baseline);
     binary(code, Host::UnpackLowQword, register, register);
 }
-fn all_ones(code: &mut Vec<u8>, register: u8) {
+fn all_ones(code: &mut Code, register: u8) {
     binary(code, Host::EqualDword, register, register);
 }
 fn arithmetic_opcode(element: ElementSize, subtract: bool) -> Host {
@@ -86,7 +90,7 @@ fn arithmetic_opcode(element: ElementSize, subtract: bool) -> Host {
     }
 }
 /// Expand each lane's sign bit to a complete lane mask. XMM7 is byte scratch.
-fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, element: ElementSize) {
+fn sign_mask(code: &mut Code, destination: u8, source: u8, element: ElementSize) {
     if element == ElementSize::Byte {
         let source = if destination == source {
             copy(code, 7, source);
@@ -116,7 +120,7 @@ fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, element: ElementSi
     }
 }
 /// Shift a packed lane without leaking neighboring bytes; clobbers XMM6/7.
-fn half_shift(code: &mut Vec<u8>, register: u8, element: ElementSize, signed: bool, amount: usize) {
+fn half_shift(code: &mut Code, register: u8, element: ElementSize, signed: bool, amount: usize) {
     if element == ElementSize::Byte {
         debug_assert_eq!(amount, 1);
         if signed {
@@ -150,14 +154,14 @@ fn half_shift(code: &mut Vec<u8>, register: u8, element: ElementSize, signed: bo
     }
 }
 /// Select replacement XMM5 where mask XMM4 is set, preserving result XMM0 elsewhere.
-fn select_saturated(code: &mut Vec<u8>) {
+fn select_saturated(code: &mut Code) {
     binary(code, Host::And, 5, 4);
     binary(code, Host::AndNot, 4, 0);
     binary(code, Host::Or, 5, 4);
     copy(code, 0, 5);
 }
 /// XMM0=a, XMM1=b. Leaves a in XMM3 and the unsigned carry mask in XMM5.
-fn add_with_carry_mask(code: &mut Vec<u8>, element: ElementSize) {
+fn add_with_carry_mask(code: &mut Code, element: ElementSize) {
     copy(code, 3, 0);
     binary(code, arithmetic_opcode(element, false), 0, 1);
     copy(code, 4, 3);
@@ -169,7 +173,7 @@ fn add_with_carry_mask(code: &mut Vec<u8>, element: ElementSize) {
     binary(code, Host::Or, 5, 6);
     sign_mask(code, 5, 5, element);
 }
-fn saturating(code: &mut Vec<u8>, element: ElementSize, signedness: Signedness, subtract: bool) {
+fn saturating(code: &mut Code, element: ElementSize, signedness: Signedness, subtract: bool) {
     let direct = match (element, signedness, subtract) {
         (ElementSize::Byte, Signedness::Signed, false) => Some(Host::AddSignedSaturatingByte),
         (ElementSize::Halfword, Signedness::Signed, false) => Some(Host::AddSignedSaturatingWord),
@@ -221,7 +225,7 @@ fn saturating(code: &mut Vec<u8>, element: ElementSize, signedness: Signedness, 
         copy(code, 0, 4);
     }
 }
-fn subtract_with_borrow_mask(code: &mut Vec<u8>, element: ElementSize) {
+fn subtract_with_borrow_mask(code: &mut Code, element: ElementSize) {
     copy(code, 3, 0);
     binary(code, arithmetic_opcode(element, true), 0, 1);
     copy(code, 4, 3);
@@ -234,7 +238,7 @@ fn subtract_with_borrow_mask(code: &mut Vec<u8>, element: ElementSize) {
     sign_mask(code, 5, 5, element);
 }
 /// Signed destination minus an unsigned magnitude; only negative saturation occurs.
-fn mixed_subtract(code: &mut Vec<u8>, element: ElementSize) {
+fn mixed_subtract(code: &mut Code, element: ElementSize) {
     subtract_with_borrow_mask(code, element);
     sign_mask(code, 4, 3, element);
     sign_mask(code, 6, 0, element);
@@ -253,7 +257,7 @@ fn mixed_subtract(code: &mut Vec<u8>, element: ElementSize) {
     }
     select_saturated(code);
 }
-fn mixed_add(code: &mut Vec<u8>, element: ElementSize, signed_destination: bool) {
+fn mixed_add(code: &mut Code, element: ElementSize, signed_destination: bool) {
     add_with_carry_mask(code, element);
     if signed_destination {
         sign_mask(code, 4, 3, element);
@@ -284,7 +288,7 @@ fn mixed_add(code: &mut Vec<u8>, element: ElementSize, signed_destination: bool)
     }
 }
 fn halving(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     signedness: Signedness,
     subtract: bool,
@@ -345,7 +349,7 @@ fn halving(
     }
 }
 fn widen_interleaved(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: u8,
     element: ElementSize,
     signedness: Signedness,
@@ -364,7 +368,7 @@ fn widen_interleaved(
     );
 }
 fn difference(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     signedness: Signedness,
     widening: Option<Half>,
@@ -420,7 +424,7 @@ fn difference(
         binary(code, arithmetic_opcode(element, true), 0, 4);
     }
 }
-fn complex_partner(code: &mut Vec<u8>, element: ElementSize) {
+fn complex_partner(code: &mut Code, element: ElementSize) {
     match element {
         ElementSize::Byte => {
             copy(code, 3, 1);
@@ -460,7 +464,7 @@ fn repeat_lane(value: u64, element: ElementSize) -> u64 {
     pattern
 }
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let element = operand.element_size;
     for chunk in 0..length.chunks() {
         load_z_chunk(code, operand.left, chunk, 0, length, target);

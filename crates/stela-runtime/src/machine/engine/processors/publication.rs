@@ -359,10 +359,6 @@ impl WorkerPublications {
     /// Called only after Acquire of the actual AP publication. The trusted
     /// Machine callback must complete precise fault/retirement/frame recovery.
     /// A failed callback retains the real return and blocks all stop credit.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "complete native-frame recovery is not yet joined")
-    )]
     pub(in crate::machine::engine) fn recover<T, E>(
         &mut self,
         mut returned: NativeReturned<T>,

@@ -582,7 +582,7 @@ mod tests {
         let pointer =
             unsafe { NonNull::new_unchecked((*storage.0.get()).as_mut_ptr().cast::<u8>()) };
         let ram = Arc::new(unsafe {
-            crate::memory::source_ram::system::fixture(
+            crate::memory::system_ram::fixture(
                 &[ReservedSystemRamRange {
                     source_pa: 0x4000,
                     host_pa: 0x1000_0000,
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn mounted_profile_and_actual_bus_identity_are_required_beside_numeric_geometry() {
         let mut devices = AppleDevices::new();
-        devices.add_pmp(&pmp()).unwrap();
+        devices.add_pmp(&pmp(), crate::builds::DEFAULT).unwrap();
         let asc = devices
             .coprocessors
             .iter()

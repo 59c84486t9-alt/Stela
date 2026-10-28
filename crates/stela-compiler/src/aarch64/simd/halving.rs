@@ -1,4 +1,5 @@
 //! Halving arithmetic (SHADD, URHADD, ...), narrowing and pairwise widening.
+use crate::aarch64::Unsupported;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Half {
@@ -51,8 +52,7 @@ const UNSIGNED_ACC_PAIR_LONG: u32 = 0x2e206800;
 const TRUNCATE: u32 = 0x0e212800;
 const SHIFT_LONG: u32 = 0x2e213800;
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let q = word & (1 << 30) != 0;
     let opcode = word & SAME_MASK;
     let kind = match opcode {
@@ -88,7 +88,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     })?;
     let size = (word >> 22) & 3;
     if size == 3 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let bytes = if matches!(kind, Kind::HighNarrow { .. } | Kind::Truncate { .. })
         || (!q && !matches!(kind, Kind::ShiftLong { .. }))

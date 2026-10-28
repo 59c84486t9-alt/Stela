@@ -1,4 +1,5 @@
 //! Predicate Boolean operations, permutes and predicate-as-counter extraction.
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::scalable::ElementSize;
 
@@ -128,8 +129,7 @@ pub struct Operand {
 }
 
 /// Feature and streaming-mode checks belong to the shared SVE decode boundary.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let destination = (word & PREDICATE_MASK) as u8;
     let left = ((word >> SOURCE_SHIFT) & PREDICATE_MASK) as u8;
     let right = ((word >> RIGHT_SHIFT) & PREDICATE_MASK) as u8;
@@ -194,7 +194,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         let size_encoding =
             (((word >> PSEL_SIZE_HIGH_SHIFT) & 1) << 3) | ((word >> PSEL_SIZE_LOW_SHIFT) & 7);
         if size_encoding == 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let size = size_encoding.trailing_zeros();
         let immediate =

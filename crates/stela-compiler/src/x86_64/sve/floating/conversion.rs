@@ -1,5 +1,5 @@
 //! SVE predicated conversions.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod bfloat;
 mod double_narrowing;
 mod half_integer;
@@ -21,7 +21,7 @@ use crate::{
 /// Preserve existing Single-to-Double mappings and use the verified baseline
 /// for integer conversions.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

@@ -1,4 +1,5 @@
 //! AESE, AESD, AESMC and AESIMC.
+use crate::aarch64::Unsupported;
 
 const FORM_MASK: u32 = 0xffff_fc00;
 const AESE: u32 = 0x4e28_4800;
@@ -25,8 +26,7 @@ pub struct Operand {
 
 /// Only the exact .16B encodings are accepted. Other classes and reserved size
 /// encodings decline and retain the shared decoder's unsupported failure.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let kind = match word & FORM_MASK {
         AESE => Kind::Encrypt,
         AESD => Kind::Decrypt,

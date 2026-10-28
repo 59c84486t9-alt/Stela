@@ -20,6 +20,10 @@ mod der;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;
+#[expect(
+    dead_code,
+    reason = "wired when the SEP's sks service installs ANS keys"
+)]
 pub mod inline_key;
 pub mod keys;
 pub mod keystore;
@@ -103,6 +107,7 @@ impl Sep {
     /// Apple's BootROM cold state, an authenticated sepOS, or a ready-bit shim.
     /// Entropy, identity, security qualification and persistence remain the
     /// caller's actual inputs, exactly as for `new`.
+    #[cfg(test)]
     pub fn booted_rom(
         entropy: Box<dyn Entropy>,
         lines: Lines,
@@ -133,16 +138,6 @@ impl Sep {
         self.mailbox.dma_pending()
     }
 
-    /// Strict mode for the SEP's unimplemented requests ([`Asc::set_strict`])
-    /// and its observed ones ([`firmware::SepFirmware::set_strict`]).
-    pub fn set_strict(&mut self, strict: bool) {
-        self.mailbox.set_strict(strict);
-        self.mailbox
-            .firmware_mut::<firmware::SepFirmware>()
-            .expect("SEP owns its firmware engine")
-            .set_strict(strict);
-    }
-
     /// The requests answered with an error reply for the first time since
     /// the last call.
     pub fn take_unmodeled(&mut self) -> alloc::vec::Vec<alloc::string::String> {
@@ -150,6 +145,7 @@ impl Sep {
     }
 
     /// Firmware Stela measured and accepted under its own trust policy, if any.
+    #[cfg(test)]
     pub fn evidence(&self) -> Option<&firmware::Evidence> {
         self.mailbox
             .firmware::<firmware::SepFirmware>()
@@ -159,6 +155,7 @@ impl Sep {
 
     /// Whether sepOS has reported OS active (the kernel then publishes
     /// `sepBootedOnce`).
+    #[cfg(test)]
     pub fn booted(&self) -> bool {
         self.mailbox
             .firmware::<firmware::SepFirmware>()
@@ -350,11 +347,19 @@ mod tests {
             0,
             "unqualified raw extension cannot be dropped"
         );
-        assert!(mounted.write(0x8808, Width::Double, 0).is_err());
+        // An entropy failure gets SEPROM's failure reply, reported once.
+        mounted.write(0x8808, Width::Double, 0).unwrap();
         assert_eq!(calls.get(), 1);
-        assert_eq!(mounted.read(0x8114, Width::Word), Ok(1 | 1 << 17));
-        assert!(!mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])));
-        // Retry only the refused commit; the original first word is retained.
+        assert!(mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])));
+        let failure = mounted.read(0x8830, Width::Double).unwrap();
+        assert_eq!(Frame::from_payload(failure).opcode, 199);
+        mounted.read(0x8838, Width::Double).unwrap();
+        let sep = mounted.bus.device_mut::<Sep>(mounted.device).unwrap();
+        assert_eq!(sep.take_unmodeled().len(), 1);
+        // A new request then succeeds.
+        mounted
+            .write(0x8800, Width::Double, random_request())
+            .unwrap();
         mounted.write(0x8808, Width::Double, 0).unwrap();
         assert_eq!(calls.get(), 2);
         assert!(mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])));
@@ -463,11 +468,11 @@ mod tests {
                 .payload,
             )
             .unwrap();
-        assert!(
-            mounted.write(0x8808, Width::Double, 0).is_err(),
-            "unqualified security opcode cannot ACK"
-        );
-        assert_eq!(mounted.read(0x8114, Width::Word), Ok(1 | 1 << 17));
+        // An unqualified security opcode gets SEPROM's failure reply, never
+        // an ACK.
+        mounted.write(0x8808, Width::Double, 0).unwrap();
+        let failure = mounted.read(0x8830, Width::Double).unwrap();
+        assert_eq!(Frame::from_payload(failure).opcode, 199);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Checked scalar loads and stores through the memory service. Guest registers
 //! are written after the access completes.
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
 use crate::x86_64::{
     load,
     memory_context::{self as service, address},
@@ -16,19 +17,17 @@ use crate::{
     },
 };
 use alloc::vec;
-use alloc::vec::Vec;
 
 const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;
 const REQUEST_OFFSET: u32 = 0;
 const DATA_OFFSET: u32 = 32;
 const WRITEBACK_OFFSET: u32 = 40;
 const SCRATCH_BYTES: u8 = 48;
-const SUB_RSP: &[u8] = &[0x48, 0x83, 0xec, SCRATCH_BYTES];
-const ADD_RSP: &[u8] = &[0x48, 0x83, 0xc4, SCRATCH_BYTES];
-const MOV_RSP_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const MOV_RSP_RDX: &[u8] = &[0x48, 0x89, 0x94, 0x24];
-const MOV_RAX_RSP: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+
+/// The private scratch slot at `offset`.
+const fn scratch(offset: u32) -> Mem {
+    Mem::base_disp32(Gpr::Rsp, offset as i32)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Address {
@@ -56,8 +55,6 @@ pub(crate) struct Operand {
     /// Whether the source instruction was unprivileged. At EL0 this is the same
     /// as an ordinary access.
     unprivileged: bool,
-    /// An MMU-off staged scalar load or store, never Normal-WB.
-    m0_scalar: bool,
 }
 fn data_register(register: Register) -> bool {
     matches!(register, Register::X(index) if index < 31) || register == Register::Zero
@@ -94,11 +91,8 @@ impl Operand {
     ) -> Option<Self> {
         if matches!(operation, Operation::Literal(_)) {
             // Literal PC arithmetic has no register base, SP check, writeback
-            // or tag check. Keep the legacy staged read64 specialization closed.
-            if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
-                return None;
-            }
-            return Self::literal_load(operation, profile, false);
+            // or tag check.
+            return Self::literal_load(operation, profile);
         }
         let operand = match *operation {
             Operation::Memory {
@@ -116,7 +110,6 @@ impl Operand {
                 base,
                 address: Address::Immediate { displacement, mode },
                 unprivileged: false,
-                m0_scalar: false,
             },
             Operation::MemoryRegisterOffset(operand) => Self {
                 profile,
@@ -130,7 +123,6 @@ impl Operand {
                     shift: operand.shift,
                 },
                 unprivileged: false,
-                m0_scalar: false,
             },
             Operation::MemoryUnprivileged(operand) => Self {
                 profile,
@@ -143,7 +135,6 @@ impl Operand {
                     mode: AddressMode::Offset,
                 },
                 unprivileged: true,
-                m0_scalar: false,
             },
             _ => return None,
         };
@@ -164,25 +155,6 @@ impl Operand {
             if !valid {
                 return None;
             }
-        }
-        if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged
-            && (operand.bytes != DOUBLEWORD_BYTES
-                || operand.transfer
-                    != (MemoryTransfer::Load {
-                        signed: false,
-                        width: Width::X64,
-                    })
-                || !matches!(operand.base, Register::X(index) if index < 31)
-                || !matches!(
-                    operand.address,
-                    Address::Immediate {
-                        mode: AddressMode::Offset,
-                        ..
-                    }
-                )
-                || operand.unprivileged)
-        {
-            return None;
         }
         if operand.unprivileged && operand.writeback() {
             return None;
@@ -205,27 +177,9 @@ impl Operand {
         }
         Some(operand)
     }
-    /// The checked scalar adapter with the staged M0 capability. Literal
-    /// operands are already lifted by the decoder.
-    pub(crate) fn from_m0_scalar_load(operation: &Operation) -> Option<Self> {
-        if matches!(operation, Operation::Literal(_)) {
-            return Self::literal_load(operation, CheckedMemoryProfile::SpAlignmentDisabled, true);
-        }
-        let mut operand =
-            Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
-        if operand.unprivileged || !matches!(operand.transfer, MemoryTransfer::Load { .. }) {
-            return None;
-        }
-        operand.m0_scalar = true;
-        Some(operand)
-    }
-    /// The one typed integer literal adapter for checked and staged profiles.
-    /// Exact source address/width/extension were lifted by the shared decoder.
-    fn literal_load(
-        operation: &Operation,
-        profile: CheckedMemoryProfile,
-        m0_scalar: bool,
-    ) -> Option<Self> {
+    /// The one typed integer literal adapter for checked profiles. Exact
+    /// source address/width/extension were lifted by the shared decoder.
+    fn literal_load(operation: &Operation, profile: CheckedMemoryProfile) -> Option<Self> {
         let Operation::Literal(operand) = *operation else {
             return None;
         };
@@ -252,18 +206,19 @@ impl Operand {
                 address: operand.address,
             },
             unprivileged: false,
-            m0_scalar,
         })
     }
-    /// The scalar store operand; unprivileged and literal forms are excluded.
-    pub(crate) fn from_m0_scalar_store(operation: &Operation) -> Option<Self> {
-        let mut operand =
-            Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
-        if operand.unprivileged || operand.transfer != MemoryTransfer::Store {
-            return None;
-        }
-        operand.m0_scalar = true;
-        Some(operand)
+    /// An ordinary or literal integer load, without a checked profile's
+    /// SP-alignment specialization.
+    pub(crate) fn scalar_load(operation: &Operation) -> Option<Self> {
+        let operand = Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
+        (!operand.unprivileged && matches!(operand.transfer, MemoryTransfer::Load { .. }))
+            .then_some(operand)
+    }
+    /// An ordinary integer store; unprivileged and literal forms are excluded.
+    pub(crate) fn scalar_store(operation: &Operation) -> Option<Self> {
+        let operand = Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
+        (!operand.unprivileged && operand.transfer == MemoryTransfer::Store).then_some(operand)
     }
     pub(crate) fn bytes(self) -> u8 {
         self.bytes
@@ -296,42 +251,6 @@ impl Operand {
 }
 
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
-    if operand.m0_scalar {
-        let write = operand.transfer == MemoryTransfer::Store;
-        return MemoryRequirements {
-            required_address_checks: Default::default(),
-            required_pointer_arithmetic: None,
-            required_flags: if write { flags::WRITE } else { 0 }
-                | if operand.tag_checked() {
-                    flags::TAG_CHECKED
-                } else {
-                    0
-                },
-            required_host_caps: 0,
-            required_profile: if write {
-                profile_requirements::M0_DEVICE_RAM_SCALAR_STORE
-            } else {
-                profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
-            },
-            // The EL1 runtime checks SP against SCTLR.SA before address
-            // arithmetic.
-            required_sp_alignment: SpAlignmentRequirement::Any,
-            ..MemoryRequirements::default()
-        };
-    }
-    if operand.profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
-        // The runtime enforces the 8-byte alignment before the Device access;
-        // no wider snapshot, tag plane or 16-byte atomicity is required.
-        return MemoryRequirements {
-            required_address_checks: Default::default(),
-            required_pointer_arithmetic: None,
-            required_flags: flags::TAG_CHECKED,
-            required_host_caps: 0,
-            required_profile: profile_requirements::M0_DEVICE_RAM_READ64,
-            required_sp_alignment: SpAlignmentRequirement::Any,
-            ..MemoryRequirements::default()
-        };
-    }
     let write = matches!(operand.transfer, MemoryTransfer::Store);
     let tag_checked = operand.tag_checked();
     MemoryRequirements {
@@ -366,26 +285,28 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
-fn result(code: &mut Vec<u8>, bytes: u8, signed: bool, width: Width) {
-    if width == Width::X64 {
-        code.push(0x48);
-    }
+fn result(code: &mut Code, bytes: u8, signed: bool, width: Width) {
+    let size = Size::of(width == Width::X64);
+    let data = scratch(DATA_OFFSET);
+    let mut asm = code.asm();
     match (bytes, signed) {
-        (1, false) => code.extend([0x0f, 0xb6]),
-        (2, false) => code.extend([0x0f, 0xb7]),
-        (1, true) => code.extend([0x0f, 0xbe]),
-        (2, true) => code.extend([0x0f, 0xbf]),
-        (4, true) => code.push(0x63),
-        (4 | 8, false) => code.push(0x8b),
+        (1, false) => asm.movzx(size, Gpr::Rax, Size::Byte, data),
+        (2, false) => asm.movzx(size, Gpr::Rax, Size::Word, data),
+        (1, true) => asm.movsx(size, Gpr::Rax, Size::Byte, data),
+        (2, true) => asm.movsx(size, Gpr::Rax, Size::Word, data),
+        (4, true) => {
+            debug_assert!(size == Size::Qword);
+            asm.movsxd(Gpr::Rax, data);
+        }
+        (4 | 8, false) => asm.mov_load(size, Gpr::Rax, data),
         _ => unreachable!("validated scalar result"),
     }
-    code.extend([0x84, 0x24]);
-    code.extend(DATA_OFFSET.to_le_bytes());
 }
 
-pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
+pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     let req = requirements(operand);
-    code.extend(SUB_RSP);
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     service::begin(code);
     let mut failures = vec![];
     if operand.profile.sp_requirement() == SpAlignmentRequirement::Enabled
@@ -395,8 +316,8 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
     }
     if matches!(operand.transfer, MemoryTransfer::Store) {
         load(code, operand.data);
-        code.extend(MOV_RSP_RAX);
-        code.extend(DATA_OFFSET.to_le_bytes());
+        code.asm()
+            .mov_store(Size::Qword, scratch(DATA_OFFSET), Gpr::Rax);
     }
     match operand.address {
         Address::Literal { address } => crate::x86_64::immediate(code, address),
@@ -421,8 +342,8 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         ),
     }
     if operand.writeback() {
-        code.extend(MOV_RSP_RDX);
-        code.extend(WRITEBACK_OFFSET.to_le_bytes());
+        code.asm()
+            .mov_store(Size::Qword, scratch(WRITEBACK_OFFSET), Gpr::Rdx);
     }
     service::request(
         code,
@@ -441,16 +362,17 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         store(code, operand.data);
     }
     if operand.writeback() {
-        code.extend(MOV_RAX_RSP);
-        code.extend(WRITEBACK_OFFSET.to_le_bytes());
+        code.asm()
+            .mov_load(Size::Qword, Gpr::Rax, scratch(WRITEBACK_OFFSET));
         store(code, operand.base);
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
     for failed in failures {
         service::patch_branch(code, failed, cleanup);
     }
-    code.extend(ADD_RSP);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     address::return_if_failed(code);
 }
 
@@ -476,10 +398,10 @@ mod tests {
         .unwrap();
         let traffic = operand.profile_success_traffic();
         assert_eq!((traffic.gpr_frame_loads, traffic.gpr_direct_stores), (4, 0));
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit_context(&mut code, &operand, 0x4000);
         for (register, count) in [(Register::X(0), 1), (Register::Sp, 2)] {
-            let mut expected = Vec::new();
+            let mut expected = Code::new();
             load(&mut expected, register);
             assert_eq!(
                 code.windows(expected.len())
@@ -539,26 +461,11 @@ mod tests {
                             );
                             assert!(!operand.tag_checked());
                             assert!(!operand.writeback());
-                            assert!(!operand.m0_scalar);
                             let required = requirements(&operand);
                             assert_eq!(required.required_flags, 0);
                             assert_eq!(required.required_sp_alignment, SpAlignmentRequirement::Any);
                             assert_eq!(required.required_host_caps, host_caps::ATOMIC_LOAD16);
-                            let staged =
-                                Operand::from_m0_scalar_load(&instruction.operation).unwrap();
-                            assert!(staged.m0_scalar);
-                            assert_ne!(
-                                requirements(&staged).required_profile,
-                                required.required_profile
-                            );
                         }
-                        assert!(
-                            Operand::from_operation(
-                                &instruction.operation,
-                                CheckedMemoryProfile::M0DeviceRamRead64Staged
-                            )
-                            .is_none()
-                        );
                     }
                 }
             }

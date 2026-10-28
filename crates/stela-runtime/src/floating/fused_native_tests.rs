@@ -7,7 +7,7 @@ use stela_compiler::{
         floating::{fused::FusedOperation, *},
         simd::fused::{Operand, decode},
     },
-    block::{BlockProfile, CompilationPlan, ExitKind},
+    block::{BlockProfile, CompilationPlan, ExitKind, Features},
 };
 
 const PC: u64 = 0x1000;
@@ -60,8 +60,7 @@ fn compile(word: u32, target: TargetCpu) -> (Operand, Mapping) {
     let block = CompilationPlan::new(
         &source,
         GuestAddress(PC),
-        BlockProfile::SystemModeV1,
-        target,
+        &stela_compiler::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
     )
     .unwrap()
     .compile()

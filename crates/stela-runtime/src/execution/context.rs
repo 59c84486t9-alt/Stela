@@ -16,15 +16,6 @@ impl<'a> ContextLoan<'a> {
         }
     }
 
-    pub(crate) fn scalable(
-        context: &'a mut ExecutionContext,
-        view: &mut ScalableStateView,
-    ) -> Self {
-        let loan = Self::new(context);
-        loan.context.scalable = core::ptr::from_mut(view);
-        loan
-    }
-
     pub(crate) fn memory(context: &'a mut ExecutionContext, view: &mut MemoryContextView) -> Self {
         let loan = Self::new(context);
         loan.context.memory = core::ptr::from_mut(view).cast();

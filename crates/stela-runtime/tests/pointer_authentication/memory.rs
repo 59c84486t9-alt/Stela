@@ -8,7 +8,9 @@ use std::{
     sync::Arc,
 };
 use stela_compiler::{
-    GuestAddress, GuestState, TargetCpu, block::BlockProfile, context::memory::MemoryStatus,
+    GuestAddress, GuestState, TargetCpu,
+    block::{BlockProfile, Features},
+    context::memory::MemoryStatus,
 };
 use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
@@ -30,7 +32,7 @@ const TAG: u8 = 7;
 const OTHER_TAG: u8 = TAG + 1;
 const VALUE: u64 = 0x8877_6655_4433_2211;
 const KEY: [u64; 2] = [0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff00];
-const PROFILE: BlockProfile = BlockProfile::AppleArm64eSoftwarePauthV1;
+const PROFILE: BlockProfile = BlockProfile::new(Features::POINTER_AUTHENTICATION);
 const LDRAA_X1_X0: u32 = 0xf820_0401;
 const LDRAA_X1_SP: u32 = 0xf820_07e1;
 const LDRAA_X1_SP_WRITEBACK: u32 = 0xf820_0fe1;

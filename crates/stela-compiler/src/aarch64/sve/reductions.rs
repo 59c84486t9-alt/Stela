@@ -1,5 +1,6 @@
 //! SVE predicated integer reductions to a scalar or 128-bit result.
 use super::prefix;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 
 const REDUCTION_MASK: u32 = 0xff3f_e000;
@@ -60,13 +61,12 @@ pub struct Operand {
 impl Operand {
     /// The scalar and quadword reductions allow no MOVPRFX; the word is
     /// re-checked before returning that.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<prefix::PrefixRequirement>, Unsupported> {
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         Ok(None)
     }
@@ -83,7 +83,7 @@ impl Operand {
     }
 }
 
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (kind, output) = match word & REDUCTION_MASK {
         AND_CLASS => (Kind::And, Output::Scalar),
         OR_CLASS => (Kind::Or, Output::Scalar),
@@ -108,7 +108,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let element_size =
         ElementSize::from_bytes(element_bytes).expect("two-bit SVE reduction element size");
     if kind == Kind::SignedAdd && element_size == ElementSize::Doubleword {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         kind,
@@ -181,7 +181,7 @@ mod tests {
                                 | source << SOURCE_SHIFT
                                 | destination;
                             if kind == Kind::SignedAdd && size == SIZE_MASK {
-                                assert_eq!(decode(word), Some(Err(())));
+                                assert_eq!(decode(word), Some(Err(Unsupported)));
                             } else {
                                 let operand = decode(word).unwrap().unwrap();
                                 assert_eq!(operand.kind, kind);
@@ -288,9 +288,9 @@ mod tests {
                     ..operand
                 },
             ] {
-                assert_eq!(changed.prefix_requirement(word), Err(()));
+                assert_eq!(changed.prefix_requirement(word), Err(Unsupported));
             }
-            assert_eq!(operand.prefix_requirement(word ^ 1), Err(()));
+            assert_eq!(operand.prefix_requirement(word ^ 1), Err(Unsupported));
         }
     }
 
@@ -300,7 +300,7 @@ mod tests {
         for word in [AND_CLASS, QUADWORD_AND_CLASS] {
             let operand = decode(word).unwrap().unwrap();
             for original_word in [0, u32::MAX, reserved] {
-                assert_eq!(operand.prefix_requirement(original_word), Err(()));
+                assert_eq!(operand.prefix_requirement(original_word), Err(Unsupported));
             }
         }
         let forged_reserved = Operand {
@@ -311,7 +311,10 @@ mod tests {
             governing: 0,
             source: 0,
         };
-        assert_eq!(forged_reserved.prefix_requirement(reserved), Err(()));
+        assert_eq!(
+            forged_reserved.prefix_requirement(reserved),
+            Err(Unsupported)
+        );
     }
 
     #[test]

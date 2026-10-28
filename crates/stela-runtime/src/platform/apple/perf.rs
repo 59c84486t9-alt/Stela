@@ -76,6 +76,7 @@ impl PerfCounters {
 
     /// Record documented units from a source whose mode includes polarity
     /// and the mode nibble exactly as programmed. No guessed event scaling.
+    #[cfg(test)]
     pub fn record(&mut self, selector: u16, mode: u32, amount: u64) -> Result<(), &'static str> {
         if mode & !MODE_MASK != 0 {
             return Err("PMGR event mode contains undescribed fields");

@@ -254,7 +254,7 @@ mod tests {
                 profile::ScalableControls,
             },
             context::{ScalableStateView, memory::MemoryImplementationProfile},
-            extended::ScalableProfile,
+            scalable_context::ScalableProfile,
         };
 
         pub(super) const PC: u64 = 0x1000;
@@ -874,7 +874,7 @@ mod tests {
                 leaf::{PreparedScalableLeaf, ScalableLeafExit},
             },
             system::{
-                process_memory::{FixedProcessMemoryControls, ScalableExecutionError},
+                process_memory::{FixedProcessMemoryControls, scalable::ScalableExecutionError},
                 scalable_controls::ScalableControlOwner,
                 state::SystemState,
             },

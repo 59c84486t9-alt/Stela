@@ -20,7 +20,9 @@ use crate::apple_device_tree::DeviceTree;
 use crate::im4m::{Manifest, Value};
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+pub use stela_runtime::boot_bundle::schema::{
+    Decision, OsEnvironment, SecurityMode, SecurityPolicy,
+};
 
 pub mod mcc;
 
@@ -37,33 +39,6 @@ const STRING_SLOT_BYTES: usize = 0x40;
 const INTEGER_SLOT: &str = "UnusedIntegerProperty";
 const BOOLEAN_SLOT: &str = "UnusedBooleanProperty";
 const STRING_SLOT: &str = "UnusedStringProperty";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SecurityMode {
-    /// `smb0`: globally signed boot objects are admitted.
-    Reduced,
-    /// `smb0` and `smb1`: objects signed with the LocalPolicy key as well.
-    Permissive,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SecurityPolicy {
-    pub mode: SecurityMode,
-    /// `sip0`: System Integrity Protection bits (`csr-active-config`).
-    pub sip_bits: u64,
-    /// Overrides the template's `/chosen sepfw-load-at-boot`.
-    pub sepfw_load_at_boot: Option<bool>,
-}
-
-/// One `/chosen` value written or deliberately kept, and why.
-#[derive(Debug, Clone, Serialize)]
-pub struct Decision {
-    pub path: String,
-    pub property: String,
-    pub value_hex: String,
-    pub source: String,
-}
 
 fn boolean(value: bool) -> Vec<u8> {
     u32::from(value).to_le_bytes().to_vec()
@@ -452,7 +427,7 @@ pub fn refuse_ramdisk_image_root(boot_args: &str) -> Result<()> {
 }
 
 /// The sealed volume a boot roots from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SealedVolume {
     /// The installed System volume (`SystemVolume`, IM4P `isys`).
     System,
@@ -547,72 +522,14 @@ pub fn apply_root_hash(
 const ENVIRONMENTS: &str = "/osenvironments";
 const OSENVIRONMENT: &str = "osenvironment";
 
-/// An OS environment iBoot boots. iBoot's setter (26A434 J473 iBoot
-/// 0x24e60) writes the name as `/chosen osenvironment` and applies the
-/// `/osenvironments/<name>-environment` child; its callers pass
-/// `diagnostics`, `kcgen`, `recoveryos`, `upgrade` and, by darwinOS boot
-/// kind, `darwinos-ramdisk` or `macos-darwinos` (table 0x170838). The
-/// kernel and TXM also compare `recovery`, whose child the J473 DeviceTree
-/// has, but no J473 iBoot caller passes it. macOS itself is the absence of
-/// an environment: the template's empty value stays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OsEnvironment {
-    /// The Mac's recoveryOS, paired or System Recovery.
-    Recoveryos,
-    /// `recovery-environment`: ephemeral storage, no SEP firmware load and
-    /// an ephemeral data volume in `/filesystems`. No J473 iBoot caller
-    /// enters it.
-    Recovery,
-    /// A restore ramdisk.
-    DarwinosRamdisk,
-    MacosDarwinos,
-    /// A macOS update's ramdisk.
-    Upgrade,
-    Diagnostics,
-    Kcgen,
-}
-
-impl OsEnvironment {
-    pub const ALL: [Self; 7] = [
-        Self::Recoveryos,
-        Self::Recovery,
-        Self::DarwinosRamdisk,
-        Self::MacosDarwinos,
-        Self::Upgrade,
-        Self::Diagnostics,
-        Self::Kcgen,
-    ];
-
-    /// The `/chosen osenvironment` value, without its NUL.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Recoveryos => "recoveryos",
-            Self::Recovery => "recovery",
-            Self::DarwinosRamdisk => "darwinos-ramdisk",
-            Self::MacosDarwinos => "macos-darwinos",
-            Self::Upgrade => "upgrade",
-            Self::Diagnostics => "diagnostics",
-            Self::Kcgen => "kcgen",
-        }
-    }
-
-    /// The `/osenvironments` child iBoot applies.
-    pub fn node(self) -> String {
-        format!("{}-environment", self.name())
-    }
-
-    pub fn parse(name: &str) -> Result<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|e| e.name() == name)
-            .with_context(|| {
-                format!(
-                    "{name:?} is not an OS environment ({})",
-                    Self::ALL.map(Self::name).join(", ")
-                )
-            })
-    }
+/// The OS environment named `name`.
+pub fn os_environment(name: &str) -> Result<OsEnvironment> {
+    OsEnvironment::from_name(name).with_context(|| {
+        format!(
+            "{name:?} is not an OS environment ({})",
+            OsEnvironment::ALL.map(OsEnvironment::name).join(", ")
+        )
+    })
 }
 
 fn text_value(bytes: &[u8]) -> Result<String> {
@@ -891,13 +808,10 @@ mod tests {
     #[test]
     fn os_environments_are_named_as_iboot_names_them() {
         for environment in OsEnvironment::ALL {
-            assert_eq!(
-                OsEnvironment::parse(environment.name()).unwrap(),
-                environment
-            );
+            assert_eq!(os_environment(environment.name()).unwrap(), environment);
         }
         assert_eq!(OsEnvironment::Recoveryos.node(), "recoveryos-environment");
-        assert!(OsEnvironment::parse("recovery-environment").is_err());
+        assert!(os_environment("recovery-environment").is_err());
     }
 
     fn environment_entry(tree: &mut DeviceTree, entry: &str, values: &[(&str, &[u8])]) {

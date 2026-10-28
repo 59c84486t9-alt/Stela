@@ -26,8 +26,8 @@ static inline struct stela_xe *stela_xe(struct xe_device *xe)
 }
 
 /* Services for Linux code run on a device's behalf, whose context is its
- * struct stela_xe: the owner's clock and delays, and graceful mode's record
- * of the first unsupported operation, after which the adapter fails its call
+ * struct stela_xe: the owner's clock and delays, and the record of the first
+ * unsupported operation, after which the adapter fails its call
  * with -EOPNOTSUPP. */
 s64 stela_xe_now_ns(void *context);
 void stela_xe_delay_us(void *context, u64 minimum, u64 maximum, bool atomic);

@@ -11,10 +11,7 @@ use alloc::{rc::Rc, vec::Vec};
 
 pub mod activation;
 
-pub const SRAM_BASE: u64 = 0x292f00000;
-pub const SRAM_LIMIT: u64 = SRAM_BASE + 0x70000;
-pub const TABLE_BASE: u64 = SRAM_BASE + 0x1000;
-pub const CODE_BASE: u64 = SRAM_BASE + 0x1a00;
+pub use super::super::t6000::{CODE_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE};
 const GPCE_BINDINGS: u64 = 0x28e099040;
 const GROUPS: u8 = 10;
 

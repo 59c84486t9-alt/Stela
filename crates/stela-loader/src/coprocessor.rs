@@ -124,7 +124,7 @@ pub fn prepare_im4p(
         "coprocessor IM4P type/description disagree with selected source"
     );
     ensure!(
-        decode.decoded_bytes == source.decoded_bytes
+        decode.decoded_bytes as u64 == source.decoded_bytes
             && decode.decoded_sha256 == source.decoded_sha256,
         "coprocessor decoded identity disagrees with selected source"
     );
@@ -480,7 +480,7 @@ pub(super) mod tests {
             container_sha256: sha256(&container),
             payload_type: "dcpf".into(),
             description: "1".into(),
-            decoded_bytes: decoded.len(),
+            decoded_bytes: decoded.len() as u64,
             decoded_sha256: sha256(decoded),
         };
         (container, source)

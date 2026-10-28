@@ -400,7 +400,7 @@ pub(in crate::machine::apple) mod tests {
     use super::*;
     use crate::{
         machine::{Devices, apple::AppleDevices, engine::DeviceReadShape, soc::PtdBank},
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::{
             amcc::{Layout, LockGroup, Register},
             interrupt::InterruptLatch,

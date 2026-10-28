@@ -1,4 +1,5 @@
 //! Saturating integer arithmetic, which sets FPSR.QC.
+use crate::aarch64::Unsupported;
 /// Architectural cumulative saturation bit; unrelated FPSR bits stay unchanged.
 pub use crate::aarch64::floating::FPSR_QC;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +48,7 @@ const SIGNED_NARROW: u32 = 0x0e214800;
 const UNSIGNED_NARROW: u32 = 0x2e214800;
 const SIGNED_TO_UNSIGNED_NARROW: u32 = 0x2e212800;
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let scalar = word & SCALAR != 0;
     let q = word & Q != 0;
     let normalized = word & !SCALAR;
@@ -91,7 +91,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let lane_bytes = 1 << ((word >> 22) & 3);
     let narrow = matches!(kind, Kind::Narrow { .. });
     if (narrow && lane_bytes == 8) || (!narrow && !scalar && !q && lane_bytes == 8) {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         kind,

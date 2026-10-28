@@ -44,7 +44,7 @@
 //! shows CRn-11 accesses only in the T8132,
 //! T6040/1, T8140, T8142, T6050 and T8152 SPTMs and kernels. m1n1
 //! `src/cpu_regs.h` (7cde7d1a, "M4 CTRR/CTXR registers") names the EL1, EL12
-//! and per-cluster `ACC_*_EL2` copies of six regions ([`Region`]) and the
+//! and per-cluster `ACC_*_EL2` copies of six regions ([`LockRegion`]) and the
 //! EL2 limits of CTRR-C/D; the EL2 controls and CTXR limits follow the same
 //! VHE layout (Binary Ninja's `sysregs_gen.h` names, as qemu-sptm's
 //! `scripts/darwin/sysregs.py` lists them; inference for the encodings no
@@ -100,7 +100,7 @@
 use super::Chip;
 use super::mmu;
 use super::registers::encodings::Encoding;
-use serde::{Deserialize, Serialize};
+pub use crate::boot_bundle::schema::{CoreLocks, LockRegion, Locked};
 
 const fn sys(op1: u8, crn: u8, crm: u8, op2: u8) -> Encoding {
     Encoding::new(3, op1, crn, crm, op2)
@@ -155,7 +155,7 @@ pub enum Register {
     /// copy.
     Region {
         view: View,
-        region: Region,
+        region: LockRegion,
         field: Field,
     },
     /// M4 and later: CTRR-A's (0) or CTRR-B's (1) control, per core or per
@@ -258,13 +258,13 @@ pub struct Cluster {
 
 impl Cluster {
     /// The registers iBoot leaves in a cluster.
-    pub fn handed_off(handoff: &Handoff) -> Self {
+    pub fn handed_off(handoff: &CoreLocks) -> Self {
         let mut copies = Bank::default();
         for locked in &handoff.locked {
             copies.windows[locked.region as usize] = Window {
                 lower: locked.first & LIMIT_MASK,
                 upper: locked.last & LIMIT_MASK,
-                control: locked.region.handoff_control(),
+                control: handoff_control(locked.region),
             };
         }
         if handoff.legacy_locked {
@@ -306,42 +306,28 @@ impl Cluster {
 
 const CHANGE_AFTER_LOCK: &str = "CTRR register change after its lock";
 
-/// The regions of the M4 and later register file, in register order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Region {
-    CtrrC,
-    CtrrD,
-    CtxrA,
-    CtxrB,
-    CtxrC,
-    CtxrD,
-}
-
-const REGIONS: [Region; 6] = [
-    Region::CtrrC,
-    Region::CtrrD,
-    Region::CtxrA,
-    Region::CtxrB,
-    Region::CtxrC,
-    Region::CtxrD,
+const REGIONS: [LockRegion; 6] = [
+    LockRegion::CtrrC,
+    LockRegion::CtrrD,
+    LockRegion::CtxrA,
+    LockRegion::CtxrB,
+    LockRegion::CtxrC,
+    LockRegion::CtxrD,
 ];
 
-impl Region {
-    fn execute_range(self) -> bool {
-        !matches!(self, Region::CtrrC | Region::CtrrD)
-    }
+fn execute_range(region: LockRegion) -> bool {
+    !matches!(region, LockRegion::CtrrC | LockRegion::CtrrD)
+}
 
-    /// The control iBoot locks into the region's per-cluster copy and SPTM
-    /// requires.
-    pub const fn handoff_control(self) -> u64 {
-        match self {
-            Region::CtrrC | Region::CtrrD => CTRR_HANDOFF,
-            Region::CtxrA => CTXR_HANDOFF[0],
-            Region::CtxrB => CTXR_HANDOFF[1],
-            Region::CtxrC => CTXR_HANDOFF[2],
-            Region::CtxrD => CTXR_HANDOFF[3],
-        }
+/// The control iBoot locks into `region`'s per-cluster copy and SPTM
+/// requires.
+pub const fn handoff_control(region: LockRegion) -> u64 {
+    match region {
+        LockRegion::CtrrC | LockRegion::CtrrD => CTRR_HANDOFF,
+        LockRegion::CtxrA => CTXR_HANDOFF[0],
+        LockRegion::CtxrB => CTXR_HANDOFF[1],
+        LockRegion::CtxrC => CTXR_HANDOFF[2],
+        LockRegion::CtxrD => CTXR_HANDOFF[3],
     }
 }
 
@@ -470,7 +456,7 @@ pub struct Bank {
 }
 
 impl Bank {
-    pub fn read(&self, region: Region, field: Field) -> u64 {
+    pub fn read(&self, region: LockRegion, field: Field) -> u64 {
         let window = &self.windows[region as usize];
         match field {
             Field::Lower => window.lower,
@@ -482,7 +468,7 @@ impl Bank {
     /// A write: what it leaves unmodeled, or why it cannot complete.
     pub fn write(
         &mut self,
-        region: Region,
+        region: LockRegion,
         field: Field,
         value: u64,
     ) -> Result<Option<&'static str>, &'static str> {
@@ -508,7 +494,7 @@ impl Bank {
             Field::Lower => window.lower = value,
             Field::Upper => window.upper = value,
             _ => {
-                let enable = if region.execute_range() {
+                let enable = if execute_range(region) {
                     CTXR_ENABLE | CTXR_FIELDS
                 } else {
                     CTRR_ENABLE
@@ -516,7 +502,7 @@ impl Bank {
                 if value & !(LOCK | enable) != 0 {
                     return Err("CTRR control bit without observed meaning");
                 }
-                if region.execute_range() && value & enable != 0 {
+                if execute_range(region) && value & enable != 0 {
                     unmodeled = Some(CTXR_UNMODELED);
                 }
                 window.control = value;
@@ -545,7 +531,7 @@ impl Bank {
 
     /// The write protection the enabled CTRR-C and CTRR-D regions apply.
     fn protection(&self) -> [Option<mmu::CtrrRegion>; 2] {
-        [Region::CtrrC, Region::CtrrD].map(|region| {
+        [LockRegion::CtrrC, LockRegion::CtrrD].map(|region| {
             let window = &self.windows[region as usize];
             (window.control & CTRR_ENABLE != 0).then_some(mmu::CtrrRegion {
                 first: window.lower,
@@ -567,7 +553,7 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn handed_off(handoff: &Handoff) -> Self {
+    pub fn handed_off(handoff: &CoreLocks) -> Self {
         let mut core = Self::default();
         if handoff.legacy_locked {
             core.el1.legacy = [LEGACY_HANDOFF; 2];
@@ -598,34 +584,6 @@ pub fn protection(
         Generation::Ctrr3 if el2 => core.el2.protection(),
         Generation::Ctrr3 => core.el1.protection(),
     }
-}
-
-/// A region iBoot locked into the per-cluster copies: its first and last
-/// byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Locked {
-    pub region: Region,
-    pub first: u64,
-    pub last: u64,
-}
-
-/// What iBoot leaves in the core lock registers before SPTM starts, which
-/// the boot bundle states (`stela_loader::lock_regs::core_handoff`). Empty
-/// on the chips and bundles without one: every register then resets to 0.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Handoff {
-    /// The regions locked into every cluster's `ACC_*_EL2` copy, each with
-    /// its [`Region::handoff_control`].
-    #[serde(default)]
-    pub locked: alloc::vec::Vec<Locked>,
-    /// CTRR-A's and CTRR-B's per-core and per-cluster controls are locked
-    /// and enabled.
-    #[serde(default)]
-    pub legacy_locked: bool,
-    /// TAG_OFFSET_EL2 as iBoot locks it (`machine::tag_storage`), 0 where
-    /// it leaves it unprogrammed, its reset value.
-    #[serde(default)]
-    pub tag_offset: u64,
 }
 
 #[cfg(test)]
@@ -677,15 +635,21 @@ mod tests {
                 field,
             })
         };
-        assert_eq!(region(0, 0), named(View::El1, Region::CtrrC, Field::Lower));
-        assert_eq!(region(1, 3), named(View::El2, Region::CtrrD, Field::Upper));
+        assert_eq!(
+            region(0, 0),
+            named(View::El1, LockRegion::CtrrC, Field::Lower)
+        );
+        assert_eq!(
+            region(1, 3),
+            named(View::El2, LockRegion::CtrrD, Field::Upper)
+        );
         assert_eq!(
             region(6, 1),
-            named(View::El12, Region::CtxrD, Field::Control)
+            named(View::El12, LockRegion::CtxrD, Field::Control)
         );
         assert_eq!(
             region(8, 4),
-            named(View::Cluster, Region::CtxrA, Field::Control)
+            named(View::Cluster, LockRegion::CtxrA, Field::Control)
         );
         assert_eq!(region(9, 0), None);
         assert_eq!(
@@ -716,31 +680,37 @@ mod tests {
         let mut core = Core::default();
         let bank = core.bank(Holder::CoreEl2).unwrap();
         // The limits drop bits 11:0, as SPTM's read-back expects.
-        bank.write(Region::CtrrC, Field::Lower, 0x100_06fb_8000)
+        bank.write(LockRegion::CtrrC, Field::Lower, 0x100_06fb_8000)
             .unwrap();
-        bank.write(Region::CtrrC, Field::Upper, 0x100_0710_bfff)
+        bank.write(LockRegion::CtrrC, Field::Upper, 0x100_0710_bfff)
             .unwrap();
-        assert_eq!(bank.read(Region::CtrrC, Field::Upper), 0x100_0710_b000);
-        bank.write(Region::CtrrC, Field::Control, CTRR_ENABLE)
+        assert_eq!(bank.read(LockRegion::CtrrC, Field::Upper), 0x100_0710_b000);
+        bank.write(LockRegion::CtrrC, Field::Control, CTRR_ENABLE)
             .unwrap();
-        bank.write(Region::CtrrC, Field::Control, CTRR_HANDOFF)
+        bank.write(LockRegion::CtrrC, Field::Control, CTRR_HANDOFF)
             .unwrap();
-        assert!(bank.write(Region::CtrrC, Field::Lower, 0).is_err());
+        assert!(bank.write(LockRegion::CtrrC, Field::Lower, 0).is_err());
         assert_eq!(
-            bank.write(Region::CtrrC, Field::Control, CTRR_HANDOFF),
+            bank.write(LockRegion::CtrrC, Field::Control, CTRR_HANDOFF),
             Ok(None)
         );
-        assert!(bank.write(Region::CtrrD, Field::Control, 1 << 1).is_err());
+        assert!(
+            bank.write(LockRegion::CtrrD, Field::Control, 1 << 1)
+                .is_err()
+        );
         // A CTXR enable completes and is reported.
         assert_eq!(
-            bank.write(Region::CtxrA, Field::Control, CTXR_ENABLE),
+            bank.write(LockRegion::CtxrA, Field::Control, CTXR_ENABLE),
             Ok(Some(CTXR_UNMODELED))
         );
         assert_eq!(
-            bank.write(Region::CtxrA, Field::Control, CTXR_HANDOFF[0]),
+            bank.write(LockRegion::CtxrA, Field::Control, CTXR_HANDOFF[0]),
             Ok(Some(CTXR_UNMODELED))
         );
-        assert!(bank.write(Region::CtxrB, Field::Control, 1 << 40).is_err());
+        assert!(
+            bank.write(LockRegion::CtxrB, Field::Control, 1 << 40)
+                .is_err()
+        );
         let [c, d] = protection(Chip::AppleM4, &Cluster::default(), &core, true, false);
         let c = c.unwrap();
         assert_eq!((c.first, c.last), (0x100_06fb_8000, 0x100_0710_bfff));
@@ -753,9 +723,9 @@ mod tests {
 
     #[test]
     fn the_handoff_locks_the_cluster_copies_and_legacy_controls() {
-        let handoff = Handoff {
+        let handoff = CoreLocks {
             locked: alloc::vec![Locked {
-                region: Region::CtxrB,
+                region: LockRegion::CtxrB,
                 first: 0x100_0945_0000,
                 last: 0x100_0945_3fff,
             }],
@@ -763,7 +733,7 @@ mod tests {
             tag_offset: 0,
         };
         let mut cluster = Cluster::handed_off(&handoff);
-        let window = cluster.copies.windows[Region::CtxrB as usize];
+        let window = cluster.copies.windows[LockRegion::CtxrB as usize];
         assert_eq!(
             (window.lower, window.upper, window.control),
             (0x100_0945_0000, 0x100_0945_3000, CTXR_HANDOFF[1])
@@ -773,17 +743,20 @@ mod tests {
         assert!(
             cluster
                 .copies
-                .write(Region::CtxrB, Field::Upper, 0x100_0945_3fff)
+                .write(LockRegion::CtxrB, Field::Upper, 0x100_0945_3fff)
                 .is_ok()
         );
         // A region iBoot leaves unlocked resets to 0.
         assert_eq!(
-            cluster.copies.windows[Region::CtrrD as usize],
+            cluster.copies.windows[LockRegion::CtrrD as usize],
             Window::default()
         );
         let core = Core::handed_off(&handoff);
         assert_eq!(core.el1.legacy, [CTRR_HANDOFF; 2]);
         assert_eq!(core.el2, Bank::default());
-        assert_eq!(Cluster::handed_off(&Handoff::default()), Cluster::default());
+        assert_eq!(
+            Cluster::handed_off(&CoreLocks::default()),
+            Cluster::default()
+        );
     }
 }

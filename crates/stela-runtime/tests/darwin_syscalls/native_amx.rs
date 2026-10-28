@@ -6,7 +6,7 @@ use super::*;
 use stela_compiler::{
     TargetCpu,
     amx::{AmxOperation, AmxRegisters, model},
-    block::BlockProfile,
+    block::{BlockProfile, Features},
 };
 use stela_runtime::{
     amx::Failure,
@@ -27,7 +27,7 @@ fn amx_runtime(cache: &std::path::Path, words: &[u32], target: TargetCpu) -> Res
     let mut runtime = BlockRuntime::new_for_target(
         ADDRESS_SPACE_ID,
         cache.into(),
-        BlockProfile::DarwinArm64ThreadV1,
+        BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
         target,
     );
     runtime.register_code(
@@ -233,7 +233,7 @@ fn profiles_without_thread_state_refuse_amx() -> Result<()> {
     let mut runtime = BlockRuntime::new_with_profile(
         ADDRESS_SPACE_ID,
         cache.path().into(),
-        BlockProfile::Ordinary,
+        BlockProfile::ORDINARY,
     );
     runtime.register_code(
         GuestAddress(BASE),

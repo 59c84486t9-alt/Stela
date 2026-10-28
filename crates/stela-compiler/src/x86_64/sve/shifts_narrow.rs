@@ -1,4 +1,6 @@
 //! SVE2 widening and narrowing shifts with SSE2 or SSE4.1.
+use crate::x86_64::asm::Gpr::{Rax, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -6,11 +8,10 @@ use crate::{
         sve::shifts_narrow::{Kind, Operand, Part},
     },
     x86_64::{
-        isa::SimdOpcode as Host,
+        isa::{ShiftOpcode as Shift, SimdOpcode as Host},
         scalable::{load_z_chunk, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 
 const SOURCE_XMM: u8 = 0;
 const TEMP_XMM: u8 = 1;
@@ -23,36 +24,6 @@ const BYTE_BITS: u8 = 8;
 const WORD_BITS: u8 = 16;
 const DWORD_BITS: u8 = 32;
 const QWORD_BITS: u8 = 64;
-const SSE_PREFIX: &[u8] = &[0x66, 0x0f];
-const REGISTER_MODE: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MOVDQA: u8 = 0x6f;
-const PAND: u8 = 0xdb;
-const PANDN: u8 = 0xdf;
-const POR: u8 = 0xeb;
-const PXOR: u8 = 0xef;
-const PSHUFD: u8 = 0x70;
-const PUNPCKLQDQ: u8 = 0x6c;
-const PUNPCKLBW: u8 = 0x60;
-const PUNPCKLWD: u8 = 0x61;
-const PACKSSWB: u8 = 0x63;
-const PACKSSDW: u8 = 0x6b;
-const PACKUSWB: u8 = 0x67;
-const PCMPGTD: u8 = 0x66;
-const PSUBUSW: u8 = 0xd9;
-const PSUBW: u8 = 0xf9;
-const PSUBD: u8 = 0xfa;
-const PADDW: u8 = 0xfd;
-const PADDD: u8 = 0xfe;
-const PADDQ: u8 = 0xd4;
-const SHIFT_WORD: u8 = 0x71;
-const SHIFT_DWORD: u8 = 0x72;
-const SHIFT_QWORD: u8 = 0x73;
-const RIGHT_LOGICAL: u8 = 2;
-const RIGHT_BYTES: u8 = 3;
-const RIGHT_ARITHMETIC: u8 = 4;
-const LEFT_LOGICAL: u8 = 6;
-const LEFT_BYTES: u8 = 7;
 const SIGNED_BOTTOM_SHUFFLE: u8 = 0xa0;
 const SIGNED_TOP_SHUFFLE: u8 = 0xf5;
 const EVEN_DWORDS_SHUFFLE: u8 = 0x88;
@@ -68,28 +39,8 @@ const UNSIGNED_WORD_MAX_DWORDS: u64 = 0x0000ffff0000ffff;
 const BIASED_UNSIGNED_WORD_MAX: u64 = 0x8000ffff8000ffff;
 const PACK_WORD_BIAS: u64 = 0x0000800000008000;
 const PACKED_WORD_SIGN: u64 = 0x8000800080008000;
-const MOV_RAX_IMM64: &[u8] = &[0x48, 0xb8];
-const MOV_RDX_IMM64: &[u8] = &[0x48, 0xba];
-const MOVQ_XMM_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e];
-const MOVQ_RAX_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const MOVQ_XMM_XMM: &[u8] = &[0xf3, 0x0f, 0x7e];
-const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const SHR_RAX: &[u8] = &[0x48, 0xc1, 0xe8];
-const SAR_RAX: &[u8] = &[0x48, 0xc1, 0xf8];
-const SHR_RDX: &[u8] = &[0x48, 0xc1, 0xea];
-const AND_EDX_ONE: &[u8] = &[0x83, 0xe2, 0x01];
-const ADD_RAX_RDX: &[u8] = &[0x48, 0x01, 0xd0];
-const CMP_RAX_RDX: &[u8] = &[0x48, 0x39, 0xd0];
-const TEST_RAX_RAX: &[u8] = &[0x48, 0x85, 0xc0];
-const XOR_EDX_EDX: &[u8] = &[0x31, 0xd2];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const CMOVL_RAX_RDX: &[u8] = &[0x48, 0x0f, 0x4c, 0xc2];
-const CMOVG_RAX_RDX: &[u8] = &[0x48, 0x0f, 0x4f, 0xc2];
-const CMOVA_RAX_RDX: &[u8] = &[0x48, 0x0f, 0x47, 0xc2];
-const CMOVS_RAX_RDX: &[u8] = &[0x48, 0x0f, 0x48, 0xc2];
-const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
 
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let small_bits = operand.element_size.bits() as u8;
     for chunk in 0..length.chunks() {
         load_z_chunk(code, operand.source, chunk, SOURCE_XMM, length, target);
@@ -115,7 +66,7 @@ pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: 
 /// `element` is Byte/Halfword/Word. Right shifts accept 1..=source bits;
 /// extract kinds require zero. Widening kinds are outside this kernel's contract.
 pub(crate) fn narrow_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     amount: u8,
@@ -134,7 +85,7 @@ pub(crate) fn narrow_chunk(
 /// Narrow XMM0 into consecutive low-eight-byte results, clearing the upper eight.
 /// Operand and clobber contracts match `narrow_chunk`; group staging stays outside.
 pub(crate) fn narrow_packed_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     amount: u8,
@@ -157,7 +108,7 @@ enum NarrowProjection {
 }
 
 fn narrow_projected(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     amount: u8,
@@ -190,73 +141,82 @@ fn narrow_projected(
     }
 }
 
-fn clear_packed_upper(code: &mut Vec<u8>) {
-    code.extend(MOVQ_XMM_XMM);
-    code.push(REGISTER_MODE | (SOURCE_XMM << MODRM_REGISTER_SHIFT) | SOURCE_XMM);
+fn clear_packed_upper(code: &mut Code) {
+    code.asm().movq_xmm(SOURCE_XMM, Rm::Xmm(SOURCE_XMM));
 }
 
-fn compact_even_lanes(code: &mut Vec<u8>, small: u8) {
+fn compact_even_lanes(code: &mut Code, small: u8) {
     match small {
-        BYTE_BITS => binary(code, PACKUSWB, SOURCE_XMM, SOURCE_XMM),
+        BYTE_BITS => binary(code, Host::PackUnsignedWordToByte, SOURCE_XMM, SOURCE_XMM),
         WORD_BITS => {
             // Sign-extend the retained bits before packing: every lane is representable.
-            shift(code, DWORD_BITS, LEFT_LOGICAL, SOURCE_XMM, WORD_BITS);
-            shift(code, DWORD_BITS, RIGHT_ARITHMETIC, SOURCE_XMM, WORD_BITS);
-            binary(code, PACKSSDW, SOURCE_XMM, SOURCE_XMM);
+            shift(code, DWORD_BITS, Direction::Left, SOURCE_XMM, WORD_BITS);
+            shift(
+                code,
+                DWORD_BITS,
+                Direction::Arithmetic,
+                SOURCE_XMM,
+                WORD_BITS,
+            );
+            binary(code, Host::PackSignedDwordToWord, SOURCE_XMM, SOURCE_XMM);
         }
-        DWORD_BITS => {
-            binary(code, PSHUFD, SOURCE_XMM, SOURCE_XMM);
-            code.push(EVEN_DWORDS_SHUFFLE);
-        }
+        DWORD_BITS => shuffle(code, SOURCE_XMM, SOURCE_XMM, EVEN_DWORDS_SHUFFLE),
         _ => unreachable!(),
     }
     clear_packed_upper(code);
 }
 
-fn binary(code: &mut Vec<u8>, opcode: u8, destination: u8, source: u8) {
-    code.extend(SSE_PREFIX);
-    code.extend([
-        opcode,
-        REGISTER_MODE | (destination << MODRM_REGISTER_SHIFT) | source,
-    ]);
+fn binary(code: &mut Code, opcode: Host, destination: u8, source: u8) {
+    code.asm()
+        .simd(opcode, destination, Rm::Xmm(source), TargetCpu::Baseline);
 }
 
-fn shift(code: &mut Vec<u8>, bits: u8, group: u8, register: u8, amount: u8) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8) {
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        control,
+        TargetCpu::Baseline,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Left,
+    Right,
+    Arithmetic,
+}
+
+fn shift(code: &mut Code, bits: u8, direction: Direction, register: u8, amount: u8) {
     if amount == 0 {
         return;
     }
-    let opcode = match bits {
-        WORD_BITS => SHIFT_WORD,
-        DWORD_BITS => SHIFT_DWORD,
-        QWORD_BITS => SHIFT_QWORD,
+    let opcode = match (bits, direction) {
+        (WORD_BITS, Direction::Left) => Shift::LeftWord,
+        (WORD_BITS, Direction::Right) => Shift::RightWord,
+        (WORD_BITS, Direction::Arithmetic) => Shift::ArithmeticWord,
+        (DWORD_BITS, Direction::Left) => Shift::LeftDword,
+        (DWORD_BITS, Direction::Right) => Shift::RightDword,
+        (DWORD_BITS, Direction::Arithmetic) => Shift::ArithmeticDword,
+        (QWORD_BITS, Direction::Left) => Shift::LeftQword,
+        (QWORD_BITS, Direction::Right) => Shift::RightQword,
         _ => unreachable!(),
     };
-    code.extend(SSE_PREFIX);
-    code.extend([
-        opcode,
-        REGISTER_MODE | (group << MODRM_REGISTER_SHIFT) | register,
-        amount,
-    ]);
+    opcode.emit(code, register, amount);
 }
 
-fn byte_shift(code: &mut Vec<u8>, group: u8, register: u8, amount: usize) {
-    if amount == 0 {
-        return;
+fn byte_shift(code: &mut Code, opcode: Shift, register: u8, amount: usize) {
+    if amount != 0 {
+        opcode.emit(code, register, amount as u8);
     }
-    code.extend(SSE_PREFIX);
-    code.extend([
-        SHIFT_QWORD,
-        REGISTER_MODE | (group << MODRM_REGISTER_SHIFT) | register,
-        amount as u8,
-    ]);
 }
 
-fn constant(code: &mut Vec<u8>, register: u8, value: u64) {
-    code.extend(MOV_RAX_IMM64);
-    code.extend(value.to_le_bytes());
-    code.extend(MOVQ_XMM_RAX);
-    code.push(REGISTER_MODE | (register << MODRM_REGISTER_SHIFT));
-    binary(code, PUNPCKLQDQ, register, register);
+fn constant(code: &mut Code, register: u8, value: u64) {
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, value);
+    asm.movq_to_xmm(register, Rax);
+    binary(code, Host::UnpackLowQword, register, register);
 }
 
 fn low_mask(bits: u8) -> u64 {
@@ -268,62 +228,77 @@ fn low_mask(bits: u8) -> u64 {
     }
 }
 
-fn widen(code: &mut Vec<u8>, operand: Operand, small: u8, target: TargetCpu) {
+fn widen(code: &mut Code, operand: Operand, small: u8, target: TargetCpu) {
     let wide = 2 * small;
     let top = operand.part == Part::Top;
     if operand.kind == Kind::WidenSigned && small == DWORD_BITS && target.supports(TargetCpu::Sse41)
     {
-        Host::ShuffleDword.register(code, SOURCE_XMM, SOURCE_XMM, target);
-        code.push(if top {
-            ODD_DWORDS_SHUFFLE
-        } else {
-            EVEN_DWORDS_SHUFFLE
-        });
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            SOURCE_XMM,
+            Rm::Xmm(SOURCE_XMM),
+            if top {
+                ODD_DWORDS_SHUFFLE
+            } else {
+                EVEN_DWORDS_SHUFFLE
+            },
+            target,
+        );
         Host::SignExtendDwordToQword.register(code, SOURCE_XMM, SOURCE_XMM, target);
-        shift(code, wide, LEFT_LOGICAL, SOURCE_XMM, operand.shift);
+        shift(code, wide, Direction::Left, SOURCE_XMM, operand.shift);
         return;
     }
     if operand.kind == Kind::WidenUnsigned {
         if top {
-            shift(code, wide, RIGHT_LOGICAL, SOURCE_XMM, small);
+            shift(code, wide, Direction::Right, SOURCE_XMM, small);
         } else {
             constant(code, MASK_XMM, low_mask(small));
-            binary(code, PAND, SOURCE_XMM, MASK_XMM);
+            binary(code, Host::And, SOURCE_XMM, MASK_XMM);
         }
     } else if small != DWORD_BITS {
         if !top {
-            shift(code, wide, LEFT_LOGICAL, SOURCE_XMM, small);
+            shift(code, wide, Direction::Left, SOURCE_XMM, small);
             // The first shift already creates the low zero bits of the widened result.
             shift(
                 code,
                 wide,
-                RIGHT_ARITHMETIC,
+                Direction::Arithmetic,
                 SOURCE_XMM,
                 small - operand.shift,
             );
             return;
         }
-        shift(code, wide, RIGHT_ARITHMETIC, SOURCE_XMM, small);
+        shift(code, wide, Direction::Arithmetic, SOURCE_XMM, small);
     } else {
-        binary(code, MOVDQA, TEMP_XMM, SOURCE_XMM);
-        shift(code, DWORD_BITS, RIGHT_ARITHMETIC, TEMP_XMM, DWORD_BITS - 1);
-        binary(code, PSHUFD, TEMP_XMM, TEMP_XMM);
-        code.push(if top {
-            SIGNED_TOP_SHUFFLE
-        } else {
-            SIGNED_BOTTOM_SHUFFLE
-        });
+        binary(code, Host::MoveAligned, TEMP_XMM, SOURCE_XMM);
+        shift(
+            code,
+            DWORD_BITS,
+            Direction::Arithmetic,
+            TEMP_XMM,
+            DWORD_BITS - 1,
+        );
+        shuffle(
+            code,
+            TEMP_XMM,
+            TEMP_XMM,
+            if top {
+                SIGNED_TOP_SHUFFLE
+            } else {
+                SIGNED_BOTTOM_SHUFFLE
+            },
+        );
         constant(code, MASK_XMM, HIGH_DWORDS);
-        binary(code, PAND, TEMP_XMM, MASK_XMM);
+        binary(code, Host::And, TEMP_XMM, MASK_XMM);
         if top {
-            shift(code, QWORD_BITS, RIGHT_LOGICAL, SOURCE_XMM, DWORD_BITS);
+            shift(code, QWORD_BITS, Direction::Right, SOURCE_XMM, DWORD_BITS);
         } else {
             constant(code, MASK_XMM, LOW_DWORDS);
-            binary(code, PAND, SOURCE_XMM, MASK_XMM);
+            binary(code, Host::And, SOURCE_XMM, MASK_XMM);
         }
-        binary(code, POR, SOURCE_XMM, TEMP_XMM);
+        binary(code, Host::Or, SOURCE_XMM, TEMP_XMM);
     }
-    shift(code, wide, LEFT_LOGICAL, SOURCE_XMM, operand.shift);
+    shift(code, wide, Direction::Left, SOURCE_XMM, operand.shift);
 }
 
 fn signed_input(kind: Kind) -> bool {
@@ -357,13 +332,13 @@ fn signed_output(kind: Kind) -> bool {
     )
 }
 
-fn shift_narrow_input(code: &mut Vec<u8>, operand: Operand, wide: u8) {
+fn shift_narrow_input(code: &mut Code, operand: Operand, wide: u8) {
     if operand.kind.is_extract() {
         return;
     }
     if rounded(operand.kind) {
-        binary(code, MOVDQA, TEMP_XMM, SOURCE_XMM);
-        shift(code, wide, RIGHT_LOGICAL, TEMP_XMM, operand.shift - 1);
+        binary(code, Host::MoveAligned, TEMP_XMM, SOURCE_XMM);
+        shift(code, wide, Direction::Right, TEMP_XMM, operand.shift - 1);
         constant(
             code,
             MASK_XMM,
@@ -374,15 +349,15 @@ fn shift_narrow_input(code: &mut Vec<u8>, operand: Operand, wide: u8) {
                 _ => unreachable!(),
             },
         );
-        binary(code, PAND, TEMP_XMM, MASK_XMM);
+        binary(code, Host::And, TEMP_XMM, MASK_XMM);
     }
     shift(
         code,
         wide,
         if signed_input(operand.kind) {
-            RIGHT_ARITHMETIC
+            Direction::Arithmetic
         } else {
-            RIGHT_LOGICAL
+            Direction::Right
         },
         SOURCE_XMM,
         operand.shift,
@@ -391,9 +366,9 @@ fn shift_narrow_input(code: &mut Vec<u8>, operand: Operand, wide: u8) {
         binary(
             code,
             match wide {
-                WORD_BITS => PADDW,
-                DWORD_BITS => PADDD,
-                QWORD_BITS => PADDQ,
+                WORD_BITS => Host::AddWord,
+                DWORD_BITS => Host::AddDword,
+                QWORD_BITS => Host::AddQword,
                 _ => unreachable!(),
             },
             SOURCE_XMM,
@@ -403,7 +378,7 @@ fn shift_narrow_input(code: &mut Vec<u8>, operand: Operand, wide: u8) {
 }
 
 fn narrow(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     small: u8,
     projection: NarrowProjection,
@@ -413,7 +388,7 @@ fn narrow(
     shift_narrow_input(code, operand, wide);
     if matches!(operand.kind, Kind::ShiftRight | Kind::RoundRight) {
         constant(code, MASK_XMM, low_mask(small));
-        binary(code, PAND, SOURCE_XMM, MASK_XMM);
+        binary(code, Host::And, SOURCE_XMM, MASK_XMM);
         if projection == NarrowProjection::Packed {
             compact_even_lanes(code, small);
         }
@@ -423,9 +398,9 @@ fn narrow(
         binary(
             code,
             if small == BYTE_BITS {
-                PACKSSWB
+                Host::PackSignedWordToByte
             } else {
-                PACKSSDW
+                Host::PackSignedDwordToWord
             },
             SOURCE_XMM,
             SOURCE_XMM,
@@ -436,12 +411,12 @@ fn narrow(
             if target.supports(TargetCpu::Sse41) {
                 Host::MinUnsignedWord.register(code, SOURCE_XMM, TEMP_XMM, target);
             } else {
-                binary(code, MOVDQA, MASK_XMM, SOURCE_XMM);
-                binary(code, PSUBUSW, MASK_XMM, TEMP_XMM);
-                binary(code, PSUBW, SOURCE_XMM, MASK_XMM);
+                binary(code, Host::MoveAligned, MASK_XMM, SOURCE_XMM);
+                binary(code, Host::SubUnsignedSaturatingWord, MASK_XMM, TEMP_XMM);
+                binary(code, Host::SubWord, SOURCE_XMM, MASK_XMM);
             }
         }
-        binary(code, PACKUSWB, SOURCE_XMM, SOURCE_XMM);
+        binary(code, Host::PackUnsignedWordToByte, SOURCE_XMM, SOURCE_XMM);
     } else if target.supports(TargetCpu::Sse41) {
         if !signed_input(operand.kind) {
             constant(code, TEMP_XMM, UNSIGNED_WORD_MAX_DWORDS);
@@ -449,52 +424,52 @@ fn narrow(
         }
         Host::PackUnsignedDwordToWord.register(code, SOURCE_XMM, SOURCE_XMM, target);
     } else {
-        // PACKSSDW after a 32768 bias represents the full unsigned word range.
+        // Host::PackSignedDwordToWord after a 32768 bias represents the full unsigned word range.
         if signed_input(operand.kind) {
-            binary(code, PXOR, TEMP_XMM, TEMP_XMM);
-            binary(code, PCMPGTD, TEMP_XMM, SOURCE_XMM);
-            binary(code, PANDN, TEMP_XMM, SOURCE_XMM);
-            binary(code, MOVDQA, SOURCE_XMM, TEMP_XMM);
+            binary(code, Host::Xor, TEMP_XMM, TEMP_XMM);
+            binary(code, Host::GreaterDword, TEMP_XMM, SOURCE_XMM);
+            binary(code, Host::AndNot, TEMP_XMM, SOURCE_XMM);
+            binary(code, Host::MoveAligned, SOURCE_XMM, TEMP_XMM);
         }
         unsigned_min_words(code);
         constant(code, TEMP_XMM, PACK_WORD_BIAS);
-        binary(code, PSUBD, SOURCE_XMM, TEMP_XMM);
-        binary(code, PACKSSDW, SOURCE_XMM, SOURCE_XMM);
+        binary(code, Host::SubDword, SOURCE_XMM, TEMP_XMM);
+        binary(code, Host::PackSignedDwordToWord, SOURCE_XMM, SOURCE_XMM);
         constant(code, TEMP_XMM, PACKED_WORD_SIGN);
-        binary(code, PXOR, SOURCE_XMM, TEMP_XMM);
+        binary(code, Host::Xor, SOURCE_XMM, TEMP_XMM);
     }
     if projection == NarrowProjection::Packed {
         clear_packed_upper(code);
         return;
     }
-    binary(code, PXOR, TEMP_XMM, TEMP_XMM);
+    binary(code, Host::Xor, TEMP_XMM, TEMP_XMM);
     binary(
         code,
         if small == BYTE_BITS {
-            PUNPCKLBW
+            Host::UnpackLowByte
         } else {
-            PUNPCKLWD
+            Host::UnpackLowWord
         },
         SOURCE_XMM,
         TEMP_XMM,
     );
 }
 
-fn unsigned_min_words(code: &mut Vec<u8>) {
-    binary(code, MOVDQA, TEMP_XMM, SOURCE_XMM);
+fn unsigned_min_words(code: &mut Code) {
+    binary(code, Host::MoveAligned, TEMP_XMM, SOURCE_XMM);
     constant(code, MASK_XMM, SIGN_DWORDS);
-    binary(code, PXOR, TEMP_XMM, MASK_XMM);
+    binary(code, Host::Xor, TEMP_XMM, MASK_XMM);
     constant(code, MASK_XMM, BIASED_UNSIGNED_WORD_MAX);
-    binary(code, PCMPGTD, TEMP_XMM, MASK_XMM);
+    binary(code, Host::GreaterDword, TEMP_XMM, MASK_XMM);
     constant(code, MASK_XMM, UNSIGNED_WORD_MAX_DWORDS);
-    binary(code, PAND, MASK_XMM, TEMP_XMM);
-    binary(code, PANDN, TEMP_XMM, SOURCE_XMM);
-    binary(code, POR, TEMP_XMM, MASK_XMM);
-    binary(code, MOVDQA, SOURCE_XMM, TEMP_XMM);
+    binary(code, Host::And, MASK_XMM, TEMP_XMM);
+    binary(code, Host::AndNot, TEMP_XMM, SOURCE_XMM);
+    binary(code, Host::Or, TEMP_XMM, MASK_XMM);
+    binary(code, Host::MoveAligned, SOURCE_XMM, TEMP_XMM);
 }
 
 fn merge_top(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     chunk: usize,
     result: u8,
@@ -505,79 +480,79 @@ fn merge_top(
         return;
     }
     let small = operand.element_size.bits() as u8;
-    shift(code, 2 * small, LEFT_LOGICAL, result, small);
+    shift(code, 2 * small, Direction::Left, result, small);
     load_z_chunk(code, operand.destination, chunk, TEMP_XMM, length, target);
     constant(code, MASK_XMM, low_mask(small));
-    binary(code, PAND, TEMP_XMM, MASK_XMM);
-    binary(code, POR, result, TEMP_XMM);
+    binary(code, Host::And, TEMP_XMM, MASK_XMM);
+    binary(code, Host::Or, result, TEMP_XMM);
 }
 
-fn scalar_narrow_qwords(code: &mut Vec<u8>, operand: Operand) {
-    binary(code, PXOR, RESULT_XMM, RESULT_XMM);
+fn scalar_narrow_qwords(code: &mut Code, operand: Operand) {
+    binary(code, Host::Xor, RESULT_XMM, RESULT_XMM);
     for offset in (0..CHUNK_BYTES).step_by(QWORD_BYTES) {
-        binary(code, MOVDQA, MASK_XMM, SOURCE_XMM);
-        byte_shift(code, RIGHT_BYTES, MASK_XMM, offset);
-        code.extend(MOVQ_RAX_XMM);
-        code.push(REGISTER_MODE | (MASK_XMM << MODRM_REGISTER_SHIFT));
+        binary(code, Host::MoveAligned, MASK_XMM, SOURCE_XMM);
+        byte_shift(code, Shift::RightBytes, MASK_XMM, offset);
+        code.asm().movq_from_xmm(Rax, MASK_XMM);
         if !operand.kind.is_extract() {
             if operand.shift == QWORD_BITS {
                 // x86 scalar shift counts are masked to six bits, so full-width
                 // shifts are handled explicitly.
                 if rounded(operand.kind) && signed_input(operand.kind) {
-                    code.extend(XOR_EAX_EAX);
+                    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
                 } else if rounded(operand.kind) || signed_input(operand.kind) {
-                    code.extend(if signed_input(operand.kind) {
-                        SAR_RAX
-                    } else {
-                        SHR_RAX
-                    });
-                    code.push(QWORD_BITS - 1);
+                    code.asm()
+                        .shift_imm(right(operand.kind), Size::Qword, Rax, QWORD_BITS - 1);
                 } else {
-                    code.extend(XOR_EAX_EAX);
+                    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
                 }
             } else {
                 if rounded(operand.kind) {
-                    code.extend(MOV_RDX_RAX);
+                    code.asm().mov(Size::Qword, Rdx, Rax);
                 }
-                code.extend(if signed_input(operand.kind) {
-                    SAR_RAX
-                } else {
-                    SHR_RAX
-                });
-                code.push(operand.shift);
+                code.asm()
+                    .shift_imm(right(operand.kind), Size::Qword, Rax, operand.shift);
                 if rounded(operand.kind) {
                     if operand.shift != 1 {
-                        code.extend(SHR_RDX);
-                        code.push(operand.shift - 1);
+                        code.asm()
+                            .shift_imm(ShiftOp::Shr, Size::Qword, Rdx, operand.shift - 1);
                     }
-                    code.extend(AND_EDX_ONE);
-                    code.extend(ADD_RAX_RDX);
+                    let mut asm = code.asm();
+                    asm.alu_imm8(Alu::And, Size::Dword, Rdx, 1);
+                    asm.alu(Alu::Add, Size::Qword, Rax, Rdx);
                 }
             }
         }
         if signed_output(operand.kind) {
-            scalar_bound(code, i64::from(i32::MIN) as u64, CMOVL_RAX_RDX);
-            scalar_bound(code, i32::MAX as u64, CMOVG_RAX_RDX);
+            scalar_bound(code, i64::from(i32::MIN) as u64, Cond::L);
+            scalar_bound(code, i32::MAX as u64, Cond::G);
         } else {
             if signed_input(operand.kind) {
-                code.extend(XOR_EDX_EDX);
-                code.extend(TEST_RAX_RAX);
-                code.extend(CMOVS_RAX_RDX);
+                let mut asm = code.asm();
+                asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+                asm.test(Size::Qword, Rax, Rax);
+                asm.cmov(Cond::S, Size::Qword, Rax, Rdx);
             }
-            scalar_bound(code, u64::from(u32::MAX), CMOVA_RAX_RDX);
+            scalar_bound(code, u64::from(u32::MAX), Cond::A);
         }
-        code.extend(MOV_EAX_EAX);
-        code.extend(MOVQ_XMM_RAX);
-        code.push(REGISTER_MODE | (LANE_XMM << MODRM_REGISTER_SHIFT));
-        byte_shift(code, LEFT_BYTES, LANE_XMM, offset);
-        binary(code, POR, RESULT_XMM, LANE_XMM);
+        code.asm().mov(Size::Dword, Rax, Rax);
+        code.asm().movq_to_xmm(LANE_XMM, Rax);
+        byte_shift(code, Shift::LeftBytes, LANE_XMM, offset);
+        binary(code, Host::Or, RESULT_XMM, LANE_XMM);
     }
-    binary(code, MOVDQA, SOURCE_XMM, RESULT_XMM);
+    binary(code, Host::MoveAligned, SOURCE_XMM, RESULT_XMM);
 }
 
-fn scalar_bound(code: &mut Vec<u8>, bound: u64, move_condition: &[u8]) {
-    code.extend(MOV_RDX_IMM64);
-    code.extend(bound.to_le_bytes());
-    code.extend(CMP_RAX_RDX);
-    code.extend(move_condition);
+fn right(kind: Kind) -> ShiftOp {
+    if signed_input(kind) {
+        ShiftOp::Sar
+    } else {
+        ShiftOp::Shr
+    }
+}
+
+fn scalar_bound(code: &mut Code, bound: u64, condition: Cond) {
+    let mut asm = code.asm();
+    asm.mov_imm64(Rdx, bound);
+    asm.alu(Alu::Cmp, Size::Qword, Rax, Rdx);
+    asm.cmov(condition, Size::Qword, Rax, Rdx);
 }

@@ -2,13 +2,10 @@
 
 use super::tags::AllocationTag;
 use crate::platform::sync::RwLock;
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, Ordering};
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 
 pub use super::tags::TAG_GRANULE_BYTES;
 const TAG_CHUNK_GRANULES: usize = 256;
@@ -40,7 +37,7 @@ impl core::error::Error for TagStoreError {}
 pub struct TagStore {
     backing_bytes: usize,
     initial_tag: AllocationTag,
-    chunks: RwLock<HashMap<usize, Vec<AtomicU8>>>,
+    chunks: RwLock<BTreeMap<usize, Vec<AtomicU8>>>,
 }
 
 impl TagStore {
@@ -51,7 +48,7 @@ impl TagStore {
         Ok(Self {
             backing_bytes,
             initial_tag,
-            chunks: RwLock::new(HashMap::new()),
+            chunks: RwLock::new(BTreeMap::new()),
         })
     }
 
@@ -104,10 +101,6 @@ impl TagStore {
             AtomicU8::new(self.initial_tag.value())
         });
         tags[tag_index].store(tag.value(), Ordering::Relaxed);
-        #[cfg(feature = "std")]
-        chunks
-            .try_reserve(1)
-            .map_err(|_| TagStoreError::AllocationFailed)?;
         chunks.insert(chunk_index, tags);
         Ok(())
     }

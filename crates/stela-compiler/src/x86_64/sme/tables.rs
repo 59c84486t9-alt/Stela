@@ -1,5 +1,7 @@
 //! SME2 multi-vector permutes, specialized to the streaming vector length.
 //! Sources are staged whole so aliases are preserved across chunks.
+use crate::x86_64::asm::Code;
+use crate::x86_64::simd::encode::stack;
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};
@@ -7,44 +9,30 @@ use crate::aarch64::sme::tables::{Kind, Operand, PermuteSources};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, routing, store_z_chunk};
 use crate::x86_64::sve::predicate::{emit_prepared_counter_mask, prepare_counter};
-use alloc::vec::Vec;
 
 mod lookup;
 
 const MAX_SOURCE_REGISTERS: usize = 4;
 const MAX_PRIVATE_FRAME_BYTES: usize = MAX_SOURCE_REGISTERS * MAX_VECTOR_BYTES;
-const MODRM_STACK_DISP32: u8 = 0x84;
-const SIB_STACK: u8 = 0x24;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-
-fn stack_chunk(code: &mut Vec<u8>, load: bool, offset: usize, xmm: u8, target: TargetCpu) {
+fn stack_chunk(code: &mut Code, load: bool, offset: usize, xmm: u8, target: TargetCpu) {
     if load {
         Host::LoadUnaligned
     } else {
         Host::StoreUnaligned
     }
-    .append(code, target);
-    code.extend([
-        MODRM_STACK_DISP32 | (xmm << MODRM_REGISTER_SHIFT),
-        SIB_STACK,
-    ]);
-    code.extend((offset as u32).to_le_bytes());
+    .emit(code, xmm, stack(offset), target);
 }
 
-fn allocate_frame(code: &mut Vec<u8>, bytes: usize) {
+fn allocate_frame(code: &mut Code, bytes: usize) {
     assert!(bytes <= MAX_PRIVATE_FRAME_BYTES && bytes.is_multiple_of(VECTOR_CHUNK_BYTES));
-    code.extend(SUB_RSP_IMM32);
-    code.extend((bytes as u32).to_le_bytes());
+    code.asm().reserve_stack(bytes);
 }
 
-fn release_frame(code: &mut Vec<u8>, bytes: usize) {
-    code.extend(ADD_RSP_IMM32);
-    code.extend((bytes as u32).to_le_bytes());
+fn release_frame(code: &mut Code, bytes: usize) {
+    code.asm().release_stack(bytes);
 }
 
-fn stage(code: &mut Vec<u8>, sources: &[u8], length: VectorLength, target: TargetCpu) {
+fn stage(code: &mut Code, sources: &[u8], length: VectorLength, target: TargetCpu) {
     assert!(sources.len() <= MAX_SOURCE_REGISTERS);
     for (source_index, register) in sources.iter().enumerate() {
         for chunk in 0..length.chunks() {
@@ -61,7 +49,7 @@ fn stage(code: &mut Vec<u8>, sources: &[u8], length: VectorLength, target: Targe
 }
 
 fn commit_global_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     global_chunk: usize,
     xmm: u8,
@@ -82,7 +70,7 @@ fn commit_global_chunk(
 }
 
 fn load_source_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     registers: &[u8],
     source_chunk: usize,
     xmm: u8,
@@ -105,7 +93,7 @@ fn load_source_chunk(
 }
 
 fn permutation(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     sources: PermuteSources,
     unzip: bool,
@@ -137,7 +125,7 @@ fn permutation(
     if shuffled {
         routing::prepare_split_masks(code, operand.element, target);
     }
-    let split = |code: &mut Vec<u8>, first, second, even, odd| {
+    let split = |code: &mut Code, first, second, even, odd| {
         if shuffled {
             routing::split_destructive(code, first, second, even, odd, target);
         } else {
@@ -217,7 +205,7 @@ fn permutation(
 }
 
 fn unpack(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     source: crate::aarch64::sme::tables::VectorGroup,
     signed: bool,
@@ -293,7 +281,7 @@ fn unpack(
 }
 
 fn select(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     left: crate::aarch64::sme::tables::VectorGroup,
     right: crate::aarch64::sme::tables::VectorGroup,
@@ -365,7 +353,7 @@ pub(crate) fn requires_dit_zero(
     }
 }
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     assert!(length.bits() >= operand.minimum_svl_bits());
     match operand.kind {
         Kind::Lookup {
@@ -386,7 +374,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
 }
 
 pub(crate) fn emit_lut_v2(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &crate::aarch64::sme::lut_v2::Operand,
     length: VectorLength,
     target: TargetCpu,

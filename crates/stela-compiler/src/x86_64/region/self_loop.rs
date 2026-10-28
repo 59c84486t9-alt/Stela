@@ -4,6 +4,7 @@ use super::{
     AllocationStats, Effects, Emitter, FRAME_LOCATIONS, GPR_SLOTS, HostGpr, Location,
     MAX_INSTRUCTIONS, OptimizedRegion, POOL, Resident, analysis, constant, encoding, flags,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation},
@@ -16,7 +17,7 @@ const ARM_CONDITION_INVERSE_BIT: u8 = 1;
 const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
 
 pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) -> NativeBlock {
-    let mut code = vec![];
+    let mut code = Code::new();
     encoding::load_budget(&mut code);
     encoding::skip_jump_if_budget_zero(&mut code);
     let body_jump = encoding::near_jump(&mut code);
@@ -32,7 +33,7 @@ pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) ->
     if let Some((_, offset)) = native.source_map.first_mut() {
         *offset = 0;
     }
-    native.x86_64_code = code;
+    native.x86_64_code = code.into_bytes();
     native
 }
 
@@ -210,7 +211,7 @@ impl LegacyPlan {
         };
         let prefix = &instructions[..instructions.len() - 1];
         let available = (0..POOL.len()).filter(|&index| POOL[index] != HostGpr::Rcx);
-        let mut code = vec![];
+        let mut code = Code::new();
         encoding::push_budget_pointer(&mut code);
         encoding::load_budget(&mut code);
         encoding::skip_jump_if_budget_zero(&mut code);
@@ -305,18 +306,13 @@ impl LegacyPlan {
             *offset = 0;
         }
         Ok(NativeBlock {
-            x86_64_code: emitter.output.code,
+            x86_64_code: emitter.output.code.into_bytes(),
             source_map: emitter.output.source_map,
         })
     }
 }
 
-fn settle_exit(
-    code: &mut Vec<u8>,
-    dirty: &[(HostGpr, usize)],
-    next_pc: GuestAddress,
-    kind: ExitKind,
-) {
+fn settle_exit(code: &mut Code, dirty: &[(HostGpr, usize)], next_pc: GuestAddress, kind: ExitKind) {
     // Every instruction before NZCV capture preserves host subtraction flags.
     for &(host, guest) in dirty {
         encoding::store(code, host, guest);
@@ -451,7 +447,7 @@ fn allocated_loop(
         // complete body, then the smaller native callee-save footprint.
         let cost = (hot_frame, emitter.output.code.len(), callee_slots);
         let native = NativeBlock {
-            x86_64_code: emitter.output.code,
+            x86_64_code: emitter.output.code.into_bytes(),
             source_map: emitter.output.source_map,
         };
         if best.as_ref().is_none_or(|(old, _)| cost < *old) {
@@ -462,7 +458,7 @@ fn allocated_loop(
 }
 
 fn settle_allocated_exit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     dirty: &[(HostGpr, usize)],
     callee_slots: usize,
     carry: flags::Carry,

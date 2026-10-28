@@ -1,7 +1,7 @@
 //! macOS: `diskutil` lists and names the disks, mounts, unmounts and erases;
 //! `system_profiler` and `ioreg` report serial numbers; partitions are read
 //! and written through their raw devices, `/dev/rdiskNsM`.
-use super::{Cpu, Disk, FileSystem, Host, Partition, PartitionInfo, Volume};
+use super::{Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume};
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use std::{
@@ -74,7 +74,17 @@ impl Host for System {
                     .and_then(|d| d.get("TotalSize").or_else(|| d.get("Size")))
                     .and_then(Value::as_unsigned_integer)
                     .unwrap_or(0),
-                internal: flag("Internal"),
+                removal: DiskFacts {
+                    bus: match text(&info, "BusProtocol").as_str() {
+                        "USB" => Bus::Usb,
+                        "FireWire" => Bus::FireWire,
+                        "Disk Image" => Bus::Image,
+                        _ => Bus::Other,
+                    },
+                    removable_media: flag("RemovableMedia"),
+                    external: !flag("Internal"),
+                }
+                .removal(),
                 system: system_disks.contains(&identifier),
                 partitions,
                 identifier,

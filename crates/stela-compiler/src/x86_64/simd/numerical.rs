@@ -1,19 +1,24 @@
 //! Shared FP emission: integer lane classification and a private MXCSR.
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Vex};
+use crate::x86_64::asm::{FloatLanes, FloatOp};
 use alloc::vec;
 use alloc::vec::Vec;
 mod control;
 
 use super::super::isa::ShiftOpcode;
-use super::{Host, packed, read_vector, vector_offset};
+use super::{Host, packed, packed_imm, read_vector, vector_offset};
 use crate::{
     GuestState,
     aarch64::{floating::Format, simd::arithmetic::Shape},
 };
+use Gpr::{Rax, Rcx, Rdi, Rsp};
 pub(in crate::x86_64) use control::rounding_control;
 
 const MXCSR_EXCEPTION_MASKS: u32 = 0x3f << 7;
 pub(super) const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
+/// Every MXCSR status flag.
+const MXCSR_STATUS_FLAGS: u8 = 0x3f;
 const MXCSR_POSITIVE_ROUNDING: u32 = 1 << 14;
 const MXCSR_NEGATIVE_ROUNDING: u32 = 1 << 13;
 const FPCR_POSITIVE_TO_MXCSR_SHIFT: u8 = 8;
@@ -21,12 +26,6 @@ const FPCR_NEGATIVE_TO_MXCSR_SHIFT: u8 = 10;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 pub(super) const INPUT_MINIMUM_EXPONENT: u8 = 1;
 pub(super) const RESULT_MINIMUM_EXPONENT: u8 = 2;
-/// Callers must prove usable AVX through their independent FMA/F16C capability.
-pub(in crate::x86_64) const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
-const SCALAR_SINGLE_PREFIX: u8 = 0xf3;
-const SCALAR_DOUBLE_PREFIX: u8 = 0xf2;
-const PACKED_DOUBLE_PREFIX: u8 = 0x66;
-const SSE_ESCAPE: u8 = 0x0f;
 pub(super) const LEFT_VECTOR: u8 = 0;
 pub(super) const RIGHT_VECTOR: u8 = 1;
 pub(super) const EXPONENT_VECTOR: u8 = 2;
@@ -42,56 +41,45 @@ const HALF_LOW_BYTE_MASK: u32 = 0xff;
 const HALF_VECTOR_BYTE_MASK: u32 = 0xffff;
 const SIGN_BITS: u8 = 1;
 pub(super) const SINGLE_EXPONENT_BIAS_BITS: u8 = 7;
-pub(super) const MOVLHPS_XMM1_XMM2: &[u8] = &[0x0f, 0x16, 0xca];
-const TEST_STATE_IMM32: &[u8] = &[0xf7, 0x87];
-const MOV_ECX_STATE: &[u8] = &[0x8b, 0x8f];
-const OR_STATE_ECX: &[u8] = &[0x09, 0x8f];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const SHR_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe8];
-const SHR_ECX_IMM8: &[u8] = &[0xc1, 0xe9];
-const AND_EAX_IMM32: u8 = 0x25;
-const OR_EAX_IMM32: u8 = 0x0d;
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const TEST_ECX_IMM32: &[u8] = &[0xf7, 0xc1];
-const OR_EAX_ECX: &[u8] = &[0x09, 0xc8];
-const SUB_EAX_IMM8: &[u8] = &[0x83, 0xe8];
-const CMP_EAX_IMM32: u8 = 0x3d;
-const CMP_EAX_IMM8: &[u8] = &[0x83, 0xf8];
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
-const MOVD_EAX_XMM6: &[u8] = &[0x66, 0x0f, 0x7e, 0xf0];
-const MOVQ_RAX_XMM6: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xf0];
-const MOVD_EAX_XMM1: &[u8] = &[0x66, 0x0f, 0x7e, 0xc8];
-const MOVQ_RAX_XMM0: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc0];
-const MOVQ_RAX_XMM1: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc8];
-pub(super) const MOVQ_XMM0_XMM0: &[u8] = &[0xf3, 0x0f, 0x7e, 0xc0];
 pub(super) const ENVIRONMENT_STACK_BYTES: u8 = 16;
+/// The environment frame: the saved MXCSR, then the installed control,
+/// then the captured status, then a product's status.
+const MXCSR_SAVED_OFFSET: u8 = 0;
 const MXCSR_CONTROL_OFFSET: u8 = 4;
 const MXCSR_STATUS_OFFSET: u8 = 8;
-const SUB_RSP_ENVIRONMENT: &[u8] = &[0x48, 0x83, 0xec, ENVIRONMENT_STACK_BYTES];
-const ADD_RSP_ENVIRONMENT: &[u8] = &[0x48, 0x83, 0xc4, ENVIRONMENT_STACK_BYTES];
-const STMXCSR_SAVED: &[u8] = &[0x0f, 0xae, 0x1c, 0x24];
-const MOV_CONTROL_EAX: &[u8] = &[0x89, 0x44, 0x24, MXCSR_CONTROL_OFFSET];
-const LDMXCSR_CONTROL: &[u8] = &[0x0f, 0xae, 0x54, 0x24, MXCSR_CONTROL_OFFSET];
-const STMXCSR_STATUS: &[u8] = &[0x0f, 0xae, 0x5c, 0x24, MXCSR_STATUS_OFFSET];
-const LDMXCSR_SAVED: &[u8] = &[0x0f, 0xae, 0x14, 0x24];
-const MOV_ECX_STATUS: &[u8] = &[0x8b, 0x4c, 0x24, MXCSR_STATUS_OFFSET];
-const MOV_EAX_IMM32: u8 = 0xb8;
-
-const FMA_VEX3: u8 = 0xc4;
-const FMA_MAP_0F38: u8 = 0xe2;
-const FMA_128_ADDEND_XMM6: u8 = 0x49;
-const FMA_DOUBLE_W: u8 = 0x80;
+const MXCSR_PRODUCT_OFFSET: u8 = 12;
+/// The FMA addend of the shared numerical allocation.
+const ADDEND_VECTOR: u8 = 6;
 const FMA_SCALAR_OPCODE_BIT: u8 = 1;
 
-#[repr(u8)]
 pub(in crate::x86_64) enum Condition {
-    Below = 0x82,
-    AboveOrEqual = 0x83,
-    Zero = 0x84,
-    NotZero = 0x85,
-    Above = 0x87,
+    Below,
+    AboveOrEqual,
+    Zero,
+    NotZero,
+    Above,
+}
+
+impl Condition {
+    const fn cond(self) -> Cond {
+        match self {
+            Self::Below => Cond::B,
+            Self::AboveOrEqual => Cond::Ae,
+            Self::Zero => Cond::E,
+            Self::NotZero => Cond::Ne,
+            Self::Above => Cond::A,
+        }
+    }
+}
+
+/// `[rdi + offset]` in GuestState, with a 32-bit displacement.
+pub(in crate::x86_64) fn state(offset: usize) -> Mem {
+    Mem::base_disp32(Rdi, offset as i32)
+}
+
+/// `[rsp + offset]` in the environment frame.
+fn frame(offset: u8) -> Mem {
+    Mem::base(Rsp, offset.into())
 }
 
 #[repr(u8)]
@@ -102,12 +90,46 @@ pub(in crate::x86_64) enum ArithmeticOpcode {
     Divide = 0x5e,
 }
 
+impl ArithmeticOpcode {
+    const fn float_op(self) -> FloatOp {
+        match self {
+            Self::Add => FloatOp::Add,
+            Self::Subtract => FloatOp::Sub,
+            Self::Multiply => FloatOp::Mul,
+            Self::Divide => FloatOp::Div,
+        }
+    }
+}
+
+/// The SSE lane form of a `format` operation over `shape`: scalar Half
+/// operates on its exact Double widening.
+pub(in crate::x86_64) const fn float_lanes(format: Format, shape: Shape) -> FloatLanes {
+    match (shape, format) {
+        (Shape::Scalar, Format::Single) => FloatLanes::ScalarSingle,
+        (Shape::Scalar, _) => FloatLanes::ScalarDouble,
+        (_, Format::Double) => FloatLanes::PackedDouble,
+        _ => FloatLanes::PackedSingle,
+    }
+}
+
 #[repr(u8)]
 pub(in crate::x86_64) enum FusedOpcode {
     MultiplyAdd = 0x98,
     MultiplySubtract = 0x9a,
     NegativeMultiplyAdd = 0x9c,
     NegativeMultiplySubtract = 0x9e,
+}
+
+impl From<crate::aarch64::floating::fused::FusedOperation> for FusedOpcode {
+    fn from(operation: crate::aarch64::floating::fused::FusedOperation) -> Self {
+        use crate::aarch64::floating::fused::FusedOperation;
+        match operation {
+            FusedOperation::Add => Self::MultiplyAdd,
+            FusedOperation::Subtract => Self::NegativeMultiplyAdd,
+            FusedOperation::NegatedAdd => Self::NegativeMultiplySubtract,
+            FusedOperation::NegatedSubtract => Self::MultiplySubtract,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -130,42 +152,39 @@ pub(in crate::x86_64) use quantization::{
 /// Checked FMA132 with the shared numerical allocation: XMM0 is the product
 /// destination, XMM1 the multiplier and XMM6 the addend. All are caller-volatile.
 pub(in crate::x86_64) fn emit_fma(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     opcode: FusedOpcode,
     target: crate::TargetCpu,
 ) {
-    const REGISTER_DIRECT: u8 = 0xc0;
     assert!(
         target.supports(crate::TargetCpu::Fma),
         "FMA3 requires usable AVX/FMA state"
     );
     // 132 order: XMM0 = XMM0 * XMM1 + XMM6, with the selected sign variant.
-    code.extend([
-        FMA_VEX3,
-        FMA_MAP_0F38,
-        FMA_128_ADDEND_XMM6
-            | if format == Format::Double {
-                FMA_DOUBLE_W
-            } else {
-                0
-            },
+    code.asm().vex(
+        Vex {
+            map: Map::M0f38,
+            pp: Pp::P66,
+            w: format == Format::Double,
+            l: false,
+        },
         opcode as u8
             | if shape == Shape::Scalar {
                 FMA_SCALAR_OPCODE_BIT
             } else {
                 0
             },
-        REGISTER_DIRECT | RIGHT_VECTOR,
-    ]);
+        LEFT_VECTOR,
+        ADDEND_VECTOR,
+        Rm::Xmm(RIGHT_VECTOR),
+    );
 }
 
-pub(in crate::x86_64) fn branch(code: &mut Vec<u8>, condition: Condition) -> usize {
-    code.extend([SSE_ESCAPE, condition as u8]);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
+/// A `jcc rel32` to resolve later, returning its displacement field.
+pub(in crate::x86_64) fn branch(code: &mut Code, condition: Condition) -> usize {
+    code.asm().jcc(condition.cond()).offset()
 }
 pub(in crate::x86_64) fn resolve(code: &mut [u8], patch: usize, target: usize) {
     let target = i64::try_from(target).expect("numerical branch target fits i64");
@@ -174,7 +193,7 @@ pub(in crate::x86_64) fn resolve(code: &mut [u8], patch: usize, target: usize) {
     code[patch..patch + size_of::<i32>()].copy_from_slice(&distance.to_le_bytes());
 }
 /// Refuse retained numerical enables unless AH suppresses exceptions.
-pub(super) fn guard_ah0_exceptions(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+pub(super) fn guard_ah0_exceptions(code: &mut Code, helper: &mut Vec<usize>) {
     use crate::aarch64::floating::{FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK};
     test_control(code, FPCR_AH);
     let suppressed = branch(code, Condition::NotZero);
@@ -186,15 +205,12 @@ pub(super) fn guard_ah0_exceptions(code: &mut Vec<u8>, helper: &mut Vec<usize>) 
 
 /// Select guest RC for AH0 and mandatory nearest-even for AH1.
 /// Inputs are already normal, so the forced AH1 flush controls are immaterial.
-pub(super) fn environment_alternative_nearest(code: &mut Vec<u8>) {
+pub(super) fn environment_alternative_nearest(code: &mut Code) {
     use crate::aarch64::floating::FPCR_AH;
     test_control(code, FPCR_AH);
     let nearest = branch(code, Condition::NotZero);
     environment(code);
-    const JMP_REL32: u8 = 0xe9;
-    code.push(JMP_REL32);
-    let done = code.len();
-    code.extend(0i32.to_le_bytes());
+    let done = jump(code);
     let nearest_start = code.len();
     resolve(code, nearest, nearest_start);
     environment_round(code, Rounding::NearestEven);
@@ -204,7 +220,7 @@ pub(super) fn environment_alternative_nearest(code: &mut Vec<u8>) {
 
 /// Commit the accepted host inexact status, only when FPCR.AH allows fresh
 /// status.
-pub(super) fn commit_ah0_inexact(code: &mut Vec<u8>) {
+pub(super) fn commit_ah0_inexact(code: &mut Code) {
     use crate::aarch64::floating::FPCR_AH;
     test_control(code, FPCR_AH);
     let suppressed = branch(code, Condition::NotZero);
@@ -233,8 +249,6 @@ pub(super) const FPCR_STICKY_MASK: u32 = {
 };
 /// FPSR.IXC.
 const FPSR_INEXACT: u8 = 1 << 4;
-const TEST_STATE_BYTE_IMM8: &[u8] = &[0xf6, 0x87];
-const JMP_REL32: u8 = 0xe9;
 
 /// Enter the sticky-inexact path, or take one of the returned branches to
 /// the full path. With FPCR at its defaults ([`FPCR_STICKY_MASK`]) and
@@ -253,15 +267,17 @@ const JMP_REL32: u8 = 0xe9;
 ///
 /// Unless `entry.checked`, the caller knows the conditions hold
 /// ([`Entry`]). There are then no branches.
-pub(super) fn sticky_inexact(code: &mut Vec<u8>, entry: Entry) -> Vec<usize> {
+pub(super) fn sticky_inexact(code: &mut Code, entry: Entry) -> Vec<usize> {
     if !entry.checked {
         return vec![];
     }
     test_control(code, FPCR_STICKY_MASK);
     let control = branch(code, Condition::NotZero);
-    code.extend(TEST_STATE_BYTE_IMM8);
-    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
-    code.push(FPSR_INEXACT);
+    code.asm().test_imm(
+        Size::Byte,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        FPSR_INEXACT.into(),
+    );
     let status = branch(code, Condition::Zero);
     vec![control, status]
 }
@@ -305,12 +321,44 @@ pub(in crate::x86_64) struct ColdSplit {
     pub(in crate::x86_64) result: u8,
 }
 
+/// Jump over a cold section that exits to software completion at `pc`, and
+/// point each `helper` branch at that section. Every branch enters it with
+/// the caller's MXCSR and stack restored; success continues after it.
+pub(in crate::x86_64) fn helper_section(
+    code: &mut Code,
+    helper: &[usize],
+    pc: crate::GuestAddress,
+) {
+    let completed = jump(code);
+    let helper_start = code.len();
+    super::super::block::direct_exit(code, pc, crate::block::ExitKind::FloatingPoint);
+    let success = code.len();
+    for &patch in helper {
+        resolve(code, patch, helper_start);
+    }
+    resolve(code, completed, success);
+}
+
+/// Packed single-precision `opcode` on whole XMM registers.
+pub(in crate::x86_64) fn single_vector_arithmetic(
+    code: &mut Code,
+    opcode: ArithmeticOpcode,
+    destination: u8,
+    source: u8,
+) {
+    emit_opcode_to(
+        code,
+        crate::aarch64::floating::Format::Single,
+        crate::aarch64::simd::arithmetic::Shape::Vector128,
+        opcode,
+        destination,
+        source,
+    );
+}
+
 /// An unconditional `jmp rel32` to resolve later.
-pub(super) fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_REL32);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
+pub(in crate::x86_64) fn jump(code: &mut Code) -> usize {
+    code.asm().jmp().offset()
 }
 
 /// Classify the active result lanes in `source` for the sticky-inexact
@@ -320,7 +368,7 @@ pub(super) fn jump(code: &mut Vec<u8>) -> usize {
 /// so does every lane below twice the minimum normal, which may be tiny
 /// before rounding, zero included.
 pub(super) fn sticky_result_check(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     source: u8,
@@ -352,28 +400,45 @@ pub(super) fn sticky_result_check(
 /// [`exponent_range`] of a Single in `source` (XMM0 or XMM1) with one
 /// instruction fewer: doubling its bits drops the sign and puts the
 /// exponent field at the top, so the range bounds shift with it.
-fn single_exponent_range(code: &mut Vec<u8>, source: u8, minimum: u8) {
-    const SUB_EAX_IMM32: u8 = 0x2d;
+fn single_exponent_range(code: &mut Code, source: u8, minimum: u8) {
     const FIELD_SHIFT: u32 = u32::BITS - 8;
     let maximum = (Format::Single.exponent_mask() >> Format::Single.fraction_bits()) as u32;
-    code.extend(match source {
-        0 => MOVD_EAX_XMM0,
-        1 => MOVD_EAX_XMM1,
-        _ => unreachable!("allocated numerical source register"),
-    });
-    code.extend(ADD_EAX_EAX);
+    assert!(
+        matches!(source, 0 | 1),
+        "allocated numerical source register"
+    );
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, source);
+    asm.alu(Alu::Add, Size::Dword, Rax, Rax);
     if minimum != 0 {
-        code.push(SUB_EAX_IMM32);
-        code.extend((u32::from(minimum) << FIELD_SHIFT).to_le_bytes());
+        asm.alu_accumulator_imm32(
+            Alu::Sub,
+            Size::Dword,
+            (u32::from(minimum) << FIELD_SHIFT) as i32,
+        );
     }
-    code.push(CMP_EAX_IMM32);
-    code.extend(((maximum - u32::from(minimum)) << FIELD_SHIFT).to_le_bytes());
+    asm.alu_accumulator_imm32(
+        Alu::Cmp,
+        Size::Dword,
+        ((maximum - u32::from(minimum)) << FIELD_SHIFT) as i32,
+    );
+}
+
+/// `op eax, imm8`.
+fn eax_imm8(code: &mut Code, op: Alu, value: u8) {
+    code.asm().alu_imm8(op, Size::Dword, Rax, value as i8);
+}
+
+/// `op eax, imm32`, the accumulator short form.
+fn eax_imm32(code: &mut Code, op: Alu, value: u32) {
+    code.asm()
+        .alu_accumulator_imm32(op, Size::Dword, value as i32);
 }
 
 /// Leave ZF set when every active S/D lane of `source` has an exponent
 /// below all ones, with the maximum from [`prepare_vector_input_range`].
 /// The high dwords of Double lanes hold zero, which is below it too.
-fn vector_below_maximum(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
+fn vector_below_maximum(code: &mut Code, format: Format, shape: Shape, source: u8) {
     vector_exponent_fields(code, format, source, false);
     packed(
         code,
@@ -385,15 +450,13 @@ fn vector_below_maximum(code: &mut Vec<u8>, format: Format, shape: Shape, source
     Host::DwordSignMask.register(code, 0, VALIDITY_VECTOR, crate::TargetCpu::Baseline);
     let mask = match (shape, format) {
         (Shape::Vector64, Format::Single) => {
-            code.extend(AND_EAX_IMM8);
-            code.push(SINGLE_LOW_VECTOR_MASK);
+            eax_imm8(code, Alu::And, SINGLE_LOW_VECTOR_MASK);
             SINGLE_LOW_VECTOR_MASK
         }
         (Shape::Vector128, Format::Single | Format::Double) => SINGLE_VECTOR_MASK,
         _ => unreachable!("allocated S/D vector shape"),
     };
-    code.extend(CMP_EAX_IMM8);
-    code.push(mask);
+    eax_imm8(code, Alu::Cmp, mask);
 }
 
 /// The operands of a product whose result the sticky classification
@@ -421,12 +484,6 @@ const SWAP_DWORD_PAIRS: u8 = 0xb1;
 /// MOVMSKPS lanes that are active: the low dword of each D lane holds its
 /// classification.
 const DOUBLE_LOW_DWORDS: u8 = 0b0101;
-const MOV_RAX_STATE: &[u8] = &[0x48, 0x8b, 0x87];
-const MOV_EAX_STATE: &[u8] = &[0x8b, 0x87];
-const ADD_RAX_RAX: &[u8] = &[0x48, 0x01, 0xc0];
-const ADD_EAX_EAX: &[u8] = &[0x01, 0xc0];
-const MOVQ_RAX_XMM_PREFIX: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
 
 /// Out of line after a sticky-inexact product (`sticky_inexact`): return
 /// to `resume` when every active lane the classification rejected is a
@@ -436,7 +493,7 @@ const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
 /// branches to `resume`. Other zeros and tiny
 /// results may have underflowed, and need the helper.
 pub(super) fn zero_product_check(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     product: &ZeroProduct,
     resume: usize,
     resumes: &mut Vec<usize>,
@@ -458,17 +515,10 @@ pub(super) fn zero_product_check(
         let right_zero = branch(code, Condition::Zero);
         resolve(code, right_zero, resume);
         resumes.push(right_zero);
-        code.extend(if format == Format::Double {
-            MOV_RAX_STATE
-        } else {
-            MOV_EAX_STATE
-        });
-        code.extend(vector_offset(left).to_le_bytes());
-        code.extend(if format == Format::Double {
-            ADD_RAX_RAX
-        } else {
-            ADD_EAX_EAX
-        });
+        let size = Size::of(format == Format::Double);
+        let mut asm = code.asm();
+        asm.mov_load(size, Rax, state(vector_offset(left) as usize));
+        asm.alu(Alu::Add, size, Rax, Rax);
         let left_zero = branch(code, Condition::Zero);
         resolve(code, left_zero, resume);
         resumes.push(left_zero);
@@ -494,10 +544,8 @@ pub(super) fn zero_product_check(
         (Shape::Vector128, Format::Double) => DOUBLE_LOW_DWORDS,
         _ => unreachable!("allocated S/D vector shape"),
     };
-    code.extend(AND_EAX_IMM8);
-    code.push(mask);
-    code.extend(CMP_EAX_IMM8);
-    code.push(mask);
+    eax_imm8(code, Alu::And, mask);
+    eax_imm8(code, Alu::Cmp, mask);
     let passed = branch(code, Condition::Zero);
     resolve(code, passed, resume);
     resumes.push(passed);
@@ -505,24 +553,21 @@ pub(super) fn zero_product_check(
 }
 
 /// Leave ZF set when the low S/D lane of `xmm` is a zero of either sign.
-pub(super) fn zero_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
-    const REGISTER_DIRECT: u8 = 0xc0;
-    const MODRM_REGISTER_SHIFT: u8 = 3;
+pub(super) fn zero_scalar(code: &mut Code, format: Format, xmm: u8) {
+    let mut asm = code.asm();
     if format == Format::Double {
-        code.extend(MOVQ_RAX_XMM_PREFIX);
-        code.push(REGISTER_DIRECT | xmm << MODRM_REGISTER_SHIFT);
-        code.extend(ADD_RAX_RAX);
+        asm.movq_from_xmm(Rax, xmm);
     } else {
-        code.extend(MOVD_EAX_XMM_PREFIX);
-        code.push(REGISTER_DIRECT | xmm << MODRM_REGISTER_SHIFT);
-        code.extend(ADD_EAX_EAX);
+        asm.movd_from_xmm(Rax, xmm);
     }
+    let size = Size::of(format == Format::Double);
+    asm.alu(Alu::Add, size, Rax, Rax);
 }
 
 /// Return the failure branch for a finite S/D exponent range or an actual
 /// signed zero. Preserve ECX, which may hold the pending fresh host status.
 pub(super) fn scalar_range_or_zero(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     source: u8,
     minimum: u8,
@@ -533,19 +578,18 @@ pub(super) fn scalar_range_or_zero(
     let maximum = (format.exponent_mask() >> format.fraction_bits()) as u32;
     if format == Format::Single {
         // Doubling discarded the sign and moved the exponent above the fraction.
-        const SUB_EAX_IMM32: u8 = 0x2d;
         let shift = format.fraction_bits() + u32::from(SIGN_BITS);
-        code.push(SUB_EAX_IMM32);
-        code.extend((u32::from(minimum) << shift).to_le_bytes());
-        code.push(CMP_EAX_IMM32);
-        code.extend(((maximum - u32::from(minimum)) << shift).to_le_bytes());
+        eax_imm32(code, Alu::Sub, u32::from(minimum) << shift);
+        eax_imm32(code, Alu::Cmp, (maximum - u32::from(minimum)) << shift);
     } else {
-        code.extend(SHR_RAX_IMM8);
-        code.push((format.fraction_bits() + u32::from(SIGN_BITS)) as u8);
-        code.extend(SUB_EAX_IMM8);
-        code.push(minimum);
-        code.push(CMP_EAX_IMM32);
-        code.extend((maximum - u32::from(minimum)).to_le_bytes());
+        code.asm().shift_imm(
+            ShiftOp::Shr,
+            Size::Qword,
+            Rax,
+            (format.fraction_bits() + u32::from(SIGN_BITS)) as u8,
+        );
+        eax_imm8(code, Alu::Sub, minimum);
+        eax_imm32(code, Alu::Cmp, maximum - u32::from(minimum));
     }
     let failed = branch(code, Condition::AboveOrEqual);
     let end = code.len();
@@ -556,7 +600,7 @@ pub(super) fn scalar_range_or_zero(
 /// Set every S lane, or both dwords of every D lane, of `destination` to
 /// all ones where `source` holds a zero of either sign, using ZERO_VECTOR
 /// and, for D, ZERO_PAIR.
-fn zero_lanes(code: &mut Vec<u8>, format: Format, destination: u8, source: u8) {
+fn zero_lanes(code: &mut Code, format: Format, destination: u8, source: u8) {
     if destination != source {
         packed(code, Host::MoveAligned, destination, source);
     }
@@ -567,28 +611,35 @@ fn zero_lanes(code: &mut Vec<u8>, format: Format, destination: u8, source: u8) {
     }
     packed(code, Host::EqualDword, destination, ZERO_VECTOR);
     if format == Format::Double {
-        packed(code, Host::ShuffleDword, ZERO_PAIR, destination);
-        code.push(SWAP_DWORD_PAIRS);
+        packed_imm(
+            code,
+            Host::ShuffleDword,
+            ZERO_PAIR,
+            destination,
+            SWAP_DWORD_PAIRS,
+        );
         packed(code, Host::And, destination, ZERO_PAIR);
     }
 }
 
-pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
-    code.extend(TEST_STATE_IMM32);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(mask.to_le_bytes());
+pub(super) fn test_control(code: &mut Code, mask: u32) {
+    code.asm().test_imm(
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpcr)),
+        mask as i32,
+    );
 }
 
 /// Leave flags from (exponent-minimum) versus the exclusive range length.
 /// Below is allocated normal; zero/all-ones exponents fail one unsigned test.
-pub(super) fn exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
+pub(super) fn exponent_range(code: &mut Code, format: Format, source: u8, minimum: u8) {
     let maximum = (format.exponent_mask() >> format.fraction_bits()) as u32;
     exponent_range_impl(code, format, source, minimum, maximum, false);
 }
 
 /// A stricter exclusive upper exponent bounds finite arithmetic outputs too.
 pub(super) fn exponent_range_below(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     source: u8,
     minimum: u8,
@@ -598,74 +649,67 @@ pub(super) fn exponent_range_below(
 }
 
 /// Keep the sign alongside the exponent so every negative input also fails.
-pub(super) fn positive_exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
+pub(super) fn positive_exponent_range(code: &mut Code, format: Format, source: u8, minimum: u8) {
     let maximum = (format.exponent_mask() >> format.fraction_bits()) as u32;
     exponent_range_impl(code, format, source, minimum, maximum, true);
 }
 
 fn exponent_range_impl(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     source: u8,
     minimum: u8,
     maximum: u32,
     positive_only: bool,
 ) {
-    code.extend(match (format, source) {
-        (Format::Half | Format::Single, 0) => MOVD_EAX_XMM0,
-        (Format::Half | Format::Single, 1) => MOVD_EAX_XMM1,
-        (Format::Double, 0) => MOVQ_RAX_XMM0,
-        (Format::Double, 1) => MOVQ_RAX_XMM1,
-        (Format::Half | Format::Single, 6) => MOVD_EAX_XMM6,
-        (Format::Double, 6) => MOVQ_RAX_XMM6,
-        _ => unreachable!("allocated numerical source register"),
-    });
-    code.extend(if format == Format::Double {
-        SHR_RAX_IMM8
+    assert!(
+        matches!(source, 0 | 1 | 6),
+        "allocated numerical source register"
+    );
+    let size = Size::of(format == Format::Double);
+    let mut asm = code.asm();
+    if format == Format::Double {
+        asm.movq_from_xmm(Rax, source);
     } else {
-        SHR_EAX_IMM8
-    });
-    code.push(format.fraction_bits() as u8);
+        asm.movd_from_xmm(Rax, source);
+    }
+    asm.shift_imm(ShiftOp::Shr, size, Rax, format.fraction_bits() as u8);
     let exponent_mask = (1u32 << (format.bits() - format.fraction_bits() - 1)) - 1;
-    code.push(AND_EAX_IMM32);
     let field_mask = if positive_only {
         exponent_mask * 2 + 1
     } else {
         exponent_mask
     };
-    code.extend(field_mask.to_le_bytes());
+    eax_imm32(code, Alu::And, field_mask);
     if minimum != 0 {
-        code.extend(SUB_EAX_IMM8);
-        code.push(minimum);
+        eax_imm8(code, Alu::Sub, minimum);
     }
-    code.push(CMP_EAX_IMM32);
-    code.extend((maximum - u32::from(minimum)).to_le_bytes());
+    eax_imm32(code, Alu::Cmp, maximum - u32::from(minimum));
 }
 
-pub(super) fn environment(code: &mut Vec<u8>) {
+pub(super) fn environment(code: &mut Code) {
     environment_round(code, Rounding::Fpcr);
 }
 
 /// Save the complete caller environment and install masked, nonflushing SSE
 /// control. Conversion instructions may select rounding independently of FPCR.
-pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
-    code.extend(SUB_RSP_ENVIRONMENT);
-    code.extend(STMXCSR_SAVED);
+pub(super) fn environment_round(code: &mut Code, rounding: Rounding) {
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Sub, Size::Qword, Rsp, ENVIRONMENT_STACK_BYTES as i8);
+    asm.stmxcsr(frame(MXCSR_SAVED_OFFSET));
     if matches!(rounding, Rounding::Fpcr) {
-        code.extend(MOV_ECX_STATE);
-        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-        code.extend(MOV_EAX_ECX);
-        code.extend(SHR_EAX_IMM8);
-        code.push(FPCR_POSITIVE_TO_MXCSR_SHIFT);
-        code.push(AND_EAX_IMM32);
-        code.extend(MXCSR_POSITIVE_ROUNDING.to_le_bytes());
-        code.extend(SHR_ECX_IMM8);
-        code.push(FPCR_NEGATIVE_TO_MXCSR_SHIFT);
-        code.extend(AND_ECX_IMM32);
-        code.extend(MXCSR_NEGATIVE_ROUNDING.to_le_bytes());
-        code.extend(OR_EAX_ECX);
-        code.push(OR_EAX_IMM32);
-        code.extend(MXCSR_EXCEPTION_MASKS.to_le_bytes());
+        asm.mov_load(
+            Size::Dword,
+            Rcx,
+            state(core::mem::offset_of!(GuestState, fpcr)),
+        );
+        asm.mov(Size::Dword, Rax, Rcx);
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, FPCR_POSITIVE_TO_MXCSR_SHIFT);
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_POSITIVE_ROUNDING as i32);
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, FPCR_NEGATIVE_TO_MXCSR_SHIFT);
+        asm.alu_imm32(Alu::And, Size::Dword, Rcx, MXCSR_NEGATIVE_ROUNDING as i32);
+        asm.alu(Alu::Or, Size::Dword, Rax, Rcx);
+        asm.alu_accumulator_imm32(Alu::Or, Size::Dword, MXCSR_EXCEPTION_MASKS as i32);
     } else {
         let direction = match rounding {
             Rounding::NearestEven => 0,
@@ -674,46 +718,50 @@ pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
             Rounding::Zero => MXCSR_POSITIVE_ROUNDING | MXCSR_NEGATIVE_ROUNDING,
             Rounding::Fpcr => unreachable!("FPCR control emitted above"),
         };
-        code.push(MOV_EAX_IMM32);
-        code.extend((MXCSR_EXCEPTION_MASKS | direction).to_le_bytes());
+        asm.mov_imm32(Rax, MXCSR_EXCEPTION_MASKS | direction);
     }
-    code.extend(MOV_CONTROL_EAX);
-    code.extend(LDMXCSR_CONTROL);
+    asm.mov_store(Size::Dword, frame(MXCSR_CONTROL_OFFSET), Rax);
+    asm.ldmxcsr(frame(MXCSR_CONTROL_OFFSET));
 }
 
-pub(super) fn restore_environment(code: &mut Vec<u8>) {
-    code.extend(STMXCSR_STATUS);
-    code.extend(LDMXCSR_SAVED);
-    code.extend(MOV_ECX_STATUS);
-    code.extend(ADD_RSP_ENVIRONMENT);
+pub(super) fn restore_environment(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.stmxcsr(frame(MXCSR_STATUS_OFFSET));
+    asm.ldmxcsr(frame(MXCSR_SAVED_OFFSET));
+    asm.mov_load(Size::Dword, Rcx, frame(MXCSR_STATUS_OFFSET));
+    asm.alu_imm8(Alu::Add, Size::Qword, Rsp, ENVIRONMENT_STACK_BYTES as i8);
 }
 
 /// Observe a real arithmetic stage without leaving the private environment.
-pub(super) fn capture_environment_status(code: &mut Vec<u8>) {
-    code.extend(STMXCSR_STATUS);
-    code.extend(MOV_ECX_STATUS);
+pub(super) fn capture_environment_status(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.stmxcsr(frame(MXCSR_STATUS_OFFSET));
+    asm.mov_load(Size::Dword, Rcx, frame(MXCSR_STATUS_OFFSET));
 }
 
 /// Discard private scratch-operation status before the next arithmetic stage.
-pub(super) fn clear_environment_status(code: &mut Vec<u8>) {
-    code.extend(LDMXCSR_CONTROL);
+pub(super) fn clear_environment_status(code: &mut Code) {
+    code.asm().ldmxcsr(frame(MXCSR_CONTROL_OFFSET));
 }
 
 /// Accumulate status and leave ECX holding only fresh guest IXC (zero or INEXACT).
-pub(super) fn commit_inexact(code: &mut Vec<u8>) {
-    code.extend(AND_ECX_IMM32);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
-    code.extend(SHR_ECX_IMM8);
-    code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
-    code.extend(OR_STATE_ECX);
-    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+pub(super) fn commit_inexact(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, MXCSR_INEXACT as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, MXCSR_TO_FPSR_INEXACT_SHIFT);
+    asm.alu(
+        Alu::Or,
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        Rcx,
+    );
 }
 
 /// Extract exponent magnitudes into words/dwords and compare an open range.
 /// Double exponents occupy the low dword of each qword; their high dwords and
 /// inactive S lanes are excluded from the dword sign mask. No numerical FP runs here.
 pub(in crate::x86_64) fn vector_exponent_range(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     source: u8,
@@ -723,7 +771,7 @@ pub(in crate::x86_64) fn vector_exponent_range(
 
 /// Reject negative inputs as well as zero and all-ones exponents.
 pub(super) fn vector_positive_exponent_range(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     source: u8,
@@ -733,7 +781,7 @@ pub(super) fn vector_positive_exponent_range(
 
 /// Copy `source` to EXPONENT_VECTOR and reduce every lane to its exponent
 /// field, with the sign above it if `positive_only`.
-fn vector_exponent_fields(code: &mut Vec<u8>, format: Format, source: u8, positive_only: bool) {
+fn vector_exponent_fields(code: &mut Code, format: Format, source: u8, positive_only: bool) {
     packed(code, Host::MoveAligned, EXPONENT_VECTOR, source);
     let (left, right) = match format {
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
@@ -752,7 +800,7 @@ fn vector_exponent_fields(code: &mut Vec<u8>, format: Format, source: u8, positi
     }
 }
 
-fn vector_exponent_validity(code: &mut Vec<u8>, format: Format, source: u8, positive_only: bool) {
+fn vector_exponent_validity(code: &mut Code, format: Format, source: u8, positive_only: bool) {
     vector_exponent_fields(code, format, source, positive_only);
     packed(
         code,
@@ -770,26 +818,20 @@ fn vector_exponent_validity(code: &mut Vec<u8>, format: Format, source: u8, posi
     packed(code, Host::And, EXPONENT_VECTOR, VALIDITY_VECTOR);
 }
 
-fn half_validity_mask(code: &mut Vec<u8>, byte_mask: u32) {
+fn half_validity_mask(code: &mut Code, byte_mask: u32) {
     Host::ByteSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
-    code.push(AND_EAX_IMM32);
-    code.extend(byte_mask.to_le_bytes());
-    code.push(CMP_EAX_IMM32);
-    code.extend(byte_mask.to_le_bytes());
+    eax_imm32(code, Alu::And, byte_mask);
+    eax_imm32(code, Alu::Cmp, byte_mask);
 }
 
 /// Classify a caller-selected low Half lane span without inventing a vector shape.
-pub(in crate::x86_64) fn vector_half_exponent_range(
-    code: &mut Vec<u8>,
-    source: u8,
-    byte_mask: u32,
-) {
+pub(in crate::x86_64) fn vector_half_exponent_range(code: &mut Code, source: u8, byte_mask: u32) {
     vector_exponent_validity(code, Format::Half, source, false);
     half_validity_mask(code, byte_mask);
 }
 
 fn vector_exponent_range_impl(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     source: u8,
@@ -803,7 +845,7 @@ fn vector_exponent_range_impl(
 /// remain live in XMM4/5; XMM3 and `scratch` are classifier scratch. Unlike a zero
 /// fraction test, clearing just the sign rejects infinities and subnormals.
 pub(super) fn vector_normal_or_zero_range(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     source: u8,
@@ -833,15 +875,20 @@ pub(super) fn vector_normal_or_zero_range(
     packed(code, Host::Xor, scratch, scratch);
     packed(code, Host::EqualDword, VALIDITY_VECTOR, scratch);
     if format == Format::Double {
-        packed(code, Host::ShuffleDword, scratch, VALIDITY_VECTOR);
-        code.push(SWAP_DWORD_PAIRS);
+        packed_imm(
+            code,
+            Host::ShuffleDword,
+            scratch,
+            VALIDITY_VECTOR,
+            SWAP_DWORD_PAIRS,
+        );
         packed(code, Host::And, VALIDITY_VECTOR, scratch);
     }
     packed(code, Host::Or, EXPONENT_VECTOR, VALIDITY_VECTOR);
     vector_validity_mask(code, format, shape);
 }
 
-fn vector_validity_mask(code: &mut Vec<u8>, format: Format, shape: Shape) {
+fn vector_validity_mask(code: &mut Code, format: Format, shape: Shape) {
     if format == Format::Half {
         let mask = match shape {
             Shape::Scalar => HALF_SCALAR_BYTE_MASK,
@@ -854,34 +901,30 @@ fn vector_validity_mask(code: &mut Vec<u8>, format: Format, shape: Shape) {
     Host::DwordSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
     let mask = match (shape, format) {
         (Shape::Scalar, _) => {
-            code.extend(AND_EAX_IMM8);
-            code.push(SCALAR_VECTOR_MASK);
+            eax_imm8(code, Alu::And, SCALAR_VECTOR_MASK);
             SCALAR_VECTOR_MASK
         }
         (Shape::Vector64, Format::Single) => {
-            code.extend(AND_EAX_IMM8);
-            code.push(SINGLE_LOW_VECTOR_MASK);
+            eax_imm8(code, Alu::And, SINGLE_LOW_VECTOR_MASK);
             SINGLE_LOW_VECTOR_MASK
         }
         (Shape::Vector128, Format::Single) => SINGLE_VECTOR_MASK,
         (Shape::Vector128, Format::Double) => {
             // Normal exponent validity occupies the low dword; exact-zero
             // validity fills both. Reduce one bit per architectural D lane.
-            code.extend(AND_EAX_IMM8);
-            code.push(DOUBLE_VECTOR_MASK);
+            eax_imm8(code, Alu::And, DOUBLE_VECTOR_MASK);
             DOUBLE_VECTOR_MASK
         }
         _ => unreachable!("allocated vector shape"),
     };
-    code.extend(CMP_EAX_IMM8);
-    code.push(mask);
+    eax_imm8(code, Alu::Cmp, mask);
 }
 
 /// Widen four staged Half fields with integer operations. Callers guard active
 /// inputs and supply zero and the broadcast Single-minus-Half exponent bias.
 /// Inactive raw fields also become finite normal Single values without status.
 pub(in crate::x86_64) fn widen_half_to_single(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     source: u8,
     sign: u8,
@@ -910,14 +953,15 @@ pub(in crate::x86_64) fn widen_half_to_single(
     packed(code, Host::Or, destination, sign);
 }
 
-pub(super) fn read_numerical_vector(code: &mut Vec<u8>, shape: Shape, source: u8, xmm: u8) {
+pub(super) fn read_numerical_vector(code: &mut Code, shape: Shape, source: u8, xmm: u8) {
     if shape == Shape::Vector64 {
         // MOVQ loads only active bits and clears the high qword, even for DIV.
-        Host::MoveQword.append(code, crate::TargetCpu::Baseline);
-        const STATE_MEMORY: u8 = 0x87;
-        const MODRM_REGISTER_SHIFT: u8 = 3;
-        code.push(STATE_MEMORY | (xmm << MODRM_REGISTER_SHIFT));
-        code.extend(vector_offset(source).to_le_bytes());
+        Host::MoveQword.emit(
+            code,
+            xmm,
+            state(vector_offset(source) as usize),
+            crate::TargetCpu::Baseline,
+        );
     } else {
         read_vector(code, source, xmm);
     }
@@ -927,17 +971,18 @@ pub(super) fn read_numerical_vector(code: &mut Vec<u8>, shape: Shape, source: u8
 /// it clear (MOVSS or MOVSD from memory), so that a scalar operation with
 /// `xmm` as its destination leaves the upper bits an Arm scalar write
 /// clears already clear.
-pub(super) fn read_numerical_scalar(code: &mut Vec<u8>, format: Format, source: u8, xmm: u8) {
-    const STATE_MEMORY: u8 = 0x87;
-    const MODRM_REGISTER_SHIFT: u8 = 3;
+pub(super) fn read_numerical_scalar(code: &mut Code, format: Format, source: u8, xmm: u8) {
     match format {
         Format::Single => Host::MoveScalarSingle,
         Format::Double => Host::MoveScalarDouble,
         Format::Half => unreachable!("Half has its own mapping policy"),
     }
-    .append(code, crate::TargetCpu::Baseline);
-    code.push(STATE_MEMORY | (xmm << MODRM_REGISTER_SHIFT));
-    code.extend(vector_offset(source).to_le_bytes());
+    .emit(
+        code,
+        xmm,
+        state(vector_offset(source) as usize),
+        crate::TargetCpu::Baseline,
+    );
 }
 
 /// How a sticky path reads one input from the frame: a zeroing scalar
@@ -959,7 +1004,7 @@ const INSERT_LOW_LANE_ALONE: u8 = 0b1110;
 /// read into XMM0 replaces it. A Single scalar copy needs SSE4.1's
 /// INSERTPS; without it the frame provides the input.
 pub(super) fn read_inputs(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     xmm0: Option<u8>,
     target: crate::TargetCpu,
     inputs: &[(Input, u8, u8)],
@@ -968,10 +1013,15 @@ pub(super) fn read_inputs(
         xmm0 == Some(source)
             && !matches!(input, Input::Scalar(Format::Single) if !target.supports(crate::TargetCpu::Sse41))
     };
-    let copy = |code: &mut Vec<u8>, input: Input, xmm: u8| match input {
+    let copy = |code: &mut Code, input: Input, xmm: u8| match input {
         Input::Scalar(Format::Single) => {
-            Host::InsertSingle.register(code, xmm, LEFT_VECTOR, target);
-            code.push(INSERT_LOW_LANE_ALONE);
+            Host::InsertSingle.emit_imm(
+                code,
+                xmm,
+                Rm::Xmm(LEFT_VECTOR),
+                INSERT_LOW_LANE_ALONE,
+                target,
+            );
         }
         Input::Scalar(Format::Double) | Input::Vector(Shape::Vector64) => {
             packed(code, Host::MoveQword, xmm, LEFT_VECTOR);
@@ -1003,7 +1053,7 @@ pub(super) fn read_inputs(
 /// Select from the whole indexed source before broadcasting. A 64-bit indexed
 /// form may read a lane in the upper qword.
 pub(super) fn read_numerical_right(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     source: u8,
@@ -1019,12 +1069,22 @@ pub(super) fn read_numerical_right(
         );
         if shape != Shape::Scalar {
             if format == Format::Half {
-                packed(code, Host::ShuffleLowWord, RIGHT_VECTOR, RIGHT_VECTOR);
-                code.push(BROADCAST_LOW_LANE);
+                packed_imm(
+                    code,
+                    Host::ShuffleLowWord,
+                    RIGHT_VECTOR,
+                    RIGHT_VECTOR,
+                    BROADCAST_LOW_LANE,
+                );
             }
             if format != Format::Double {
-                packed(code, Host::ShuffleDword, RIGHT_VECTOR, RIGHT_VECTOR);
-                code.push(BROADCAST_LOW_LANE);
+                packed_imm(
+                    code,
+                    Host::ShuffleDword,
+                    RIGHT_VECTOR,
+                    RIGHT_VECTOR,
+                    BROADCAST_LOW_LANE,
+                );
             } else {
                 packed(code, Host::UnpackLowQword, RIGHT_VECTOR, RIGHT_VECTOR);
             }
@@ -1034,7 +1094,7 @@ pub(super) fn read_numerical_right(
     }
 }
 
-pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Vec<u8>, format: Format) {
+pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Code, format: Format) {
     prepare_vector_maximum(code, format);
     packed(
         code,
@@ -1046,7 +1106,7 @@ pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Vec<u8>, format: 
 
 /// The all-ones exponent of `format` in every lane of
 /// MAXIMUM_EXPONENT_VECTOR.
-fn prepare_vector_maximum(code: &mut Vec<u8>, format: Format) {
+fn prepare_vector_maximum(code: &mut Code, format: Format) {
     packed(
         code,
         Host::EqualDword,
@@ -1063,24 +1123,23 @@ fn prepare_vector_maximum(code: &mut Vec<u8>, format: Format) {
 }
 /// Set an exclusive upper bound, keeping the normal lower bound used by
 /// `vector_exponent_range`. Half precision repeats the limit in both words.
-pub(super) fn prepare_vector_input_range_below(code: &mut Vec<u8>, format: Format, maximum: u32) {
-    const MOVD_MAXIMUM_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xe0];
+pub(super) fn prepare_vector_input_range_below(code: &mut Code, format: Format, maximum: u32) {
     const BROADCAST_LOW_DWORD: u8 = 0;
     let limit = if format == Format::Half {
         maximum | maximum << u16::BITS
     } else {
         maximum
     };
-    code.push(MOV_EAX_IMM32);
-    code.extend(limit.to_le_bytes());
-    code.extend(MOVD_MAXIMUM_EAX);
-    packed(
+    let mut asm = code.asm();
+    asm.mov_imm32(Rax, limit);
+    asm.movd_to_xmm(MAXIMUM_EXPONENT_VECTOR, Rax);
+    packed_imm(
         code,
         Host::ShuffleDword,
         MAXIMUM_EXPONENT_VECTOR,
         MAXIMUM_EXPONENT_VECTOR,
+        BROADCAST_LOW_DWORD,
     );
-    code.push(BROADCAST_LOW_DWORD);
     packed(
         code,
         Host::Xor,
@@ -1089,7 +1148,7 @@ pub(super) fn prepare_vector_input_range_below(code: &mut Vec<u8>, format: Forma
     );
 }
 
-pub(in crate::x86_64) fn prepare_vector_result_range(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn prepare_vector_result_range(code: &mut Code) {
     packed(
         code,
         Host::EqualDword,
@@ -1099,7 +1158,7 @@ pub(in crate::x86_64) fn prepare_vector_result_range(code: &mut Vec<u8>) {
     ShiftOpcode::RightDword.emit(code, MINIMUM_EXPONENT_VECTOR, u32::BITS as u8 - SIGN_BITS);
 }
 pub(super) fn emit_opcode(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     opcode: ArithmeticOpcode,
@@ -1110,78 +1169,53 @@ pub(super) fn emit_opcode(
 
 /// Arithmetic encoding with an explicit destination register.
 pub(in crate::x86_64) fn emit_opcode_to(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     opcode: ArithmeticOpcode,
     destination: u8,
     source: u8,
 ) {
-    if shape == Shape::Scalar {
-        code.push(if format == Format::Single {
-            SCALAR_SINGLE_PREFIX
-        } else {
-            SCALAR_DOUBLE_PREFIX
-        });
-    } else if format == Format::Double {
-        code.push(PACKED_DOUBLE_PREFIX);
-    }
-    const REGISTER_DIRECT: u8 = 0xc0;
-    const MODRM_REGISTER_SHIFT: u8 = 3;
-    code.extend([
-        SSE_ESCAPE,
-        opcode as u8,
-        REGISTER_DIRECT | destination << MODRM_REGISTER_SHIFT | source,
-    ]);
+    code.asm().float(
+        opcode.float_op(),
+        float_lanes(format, shape),
+        destination,
+        Rm::Xmm(source),
+    );
 }
-pub(super) fn reject_other_status(code: &mut Vec<u8>) -> usize {
-    code.extend(TEST_ECX_IMM32);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+pub(super) fn reject_other_status(code: &mut Code) -> usize {
+    code.asm()
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     branch(code, Condition::NotZero)
 }
-pub(super) fn save_product_status(code: &mut Vec<u8>) {
-    const STMXCSR_PRODUCT: &[u8] = &[0x0f, 0xae, 0x5c, 0x24, 12];
-    code.extend(STMXCSR_PRODUCT);
+pub(super) fn save_product_status(code: &mut Code) {
+    code.asm().stmxcsr(frame(MXCSR_PRODUCT_OFFSET));
 }
-pub(super) fn restore_environment_with_product(code: &mut Vec<u8>) {
-    const MOV_EAX_PRODUCT: &[u8] = &[0x8b, 0x44, 0x24, 12];
-    code.extend(STMXCSR_STATUS);
-    code.extend(LDMXCSR_SAVED);
-    code.extend(MOV_EAX_PRODUCT);
-    code.extend(MOV_ECX_STATUS);
-    code.extend(ADD_RSP_ENVIRONMENT);
+pub(super) fn restore_environment_with_product(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.stmxcsr(frame(MXCSR_STATUS_OFFSET));
+    asm.ldmxcsr(frame(MXCSR_SAVED_OFFSET));
+    asm.mov_load(Size::Dword, Rax, frame(MXCSR_PRODUCT_OFFSET));
+    asm.mov_load(Size::Dword, Rcx, frame(MXCSR_STATUS_OFFSET));
+    asm.alu_imm8(Alu::Add, Size::Qword, Rsp, ENVIRONMENT_STACK_BYTES as i8);
 }
-pub(super) fn reject_product_status(code: &mut Vec<u8>) -> usize {
-    const TEST_AL_STATUS: &[u8] = &[0xa8, 0x3f];
-    code.extend(TEST_AL_STATUS);
+pub(super) fn reject_product_status(code: &mut Code) -> usize {
+    code.asm()
+        .test_accumulator_imm(Size::Byte, MXCSR_STATUS_FLAGS.into());
     branch(code, Condition::NotZero)
 }
-pub(super) fn clear_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
-    const REGISTER_DIRECT: u8 = 0xc0;
-    const MODRM_REGISTER_SHIFT: u8 = 3;
+/// `movq xmm, xmm`: clear the high qword of `xmm`.
+pub(super) fn clear_high_qword(code: &mut Code, xmm: u8) {
+    Host::MoveQword.register(code, xmm, xmm, crate::TargetCpu::Baseline);
+}
+pub(super) fn clear_scalar(code: &mut Code, format: Format, xmm: u8) {
     if format == Format::Double {
-        code.extend([
-            0xf3,
-            0x0f,
-            0x7e,
-            REGISTER_DIRECT | (xmm << MODRM_REGISTER_SHIFT) | xmm,
-        ]);
+        Host::MoveQword.register(code, xmm, xmm, crate::TargetCpu::Baseline);
     } else {
-        code.extend([
-            0x66,
-            0x0f,
-            0x7e,
-            REGISTER_DIRECT | (xmm << MODRM_REGISTER_SHIFT),
-        ]);
+        code.asm().movd_from_xmm(Rax, xmm);
         if format == Format::Half {
-            code.push(AND_EAX_IMM32);
-            code.extend(u32::from(u16::MAX).to_le_bytes());
+            eax_imm32(code, Alu::And, u32::from(u16::MAX));
         }
-        code.extend([
-            0x66,
-            0x0f,
-            0x6e,
-            REGISTER_DIRECT | (xmm << MODRM_REGISTER_SHIFT),
-        ]);
+        code.asm().movd_to_xmm(xmm, Rax);
     }
 }

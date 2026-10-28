@@ -1,4 +1,5 @@
 //! SHA512H, SHA512H2, SHA512SU0 and SHA512SU1.
+use crate::aarch64::Unsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -30,8 +31,7 @@ const RIGHT_SHIFT: u32 = 16;
 
 /// Exact allocated forms only: all register aliases are legal and no size/Q
 /// variants exist. Other members of the crypto classes belong to other families.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let kind = if word & TWO_REGISTER_MASK == SCHEDULE0 {
         Kind::Schedule0
     } else {

@@ -1,4 +1,5 @@
 //! SVE FP8 conversions.
+use crate::aarch64::Unsupported;
 
 const REGISTER_MASK: u32 = 31;
 const SOURCE_SHIFT: u32 = 5;
@@ -170,8 +171,7 @@ pub fn canonical_id(word: u32) -> Option<&'static str> {
     encoding(word).map(|encoding| encoding.id)
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = encoding(word)?;
     let source_mask = match encoding.kind {
         Kind::Widen { .. } => REGISTER_MASK,

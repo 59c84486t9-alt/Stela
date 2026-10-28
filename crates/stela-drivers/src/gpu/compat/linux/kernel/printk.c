@@ -108,7 +108,7 @@ void __warn_printk(const char *fmt, ...)
 
 /* Only the current function's saved return address is compiler-defined here.
  * Reading a caller's frame chain needs a retained native stack and its bounds.
- * Preserve this diagnostic before strict mode stops at the missing unwinder. */
+ * The diagnostic precedes the unsupported report, which an owner may stop at. */
 static void dump_caller(const char *level, const void *caller)
 {
 	const char *prefix = level;
@@ -155,15 +155,15 @@ static void test_missing(void *context, const char *operation)
 	missing++;
 }
 
-static void strict_missing(void *context, const char *operation)
+static void trapping_missing(void *context, const char *operation)
 {
 	test_missing(context, operation);
 	__builtin_trap();
 }
 
-static void strict_trace(void)
+static void trapping_trace(void)
 {
-	const struct stela_linux_services services = {.log = test_log, .unsupported = strict_missing};
+	const struct stela_linux_services services = {.log = test_log, .unsupported = trapping_missing};
 	const struct stela_linux_owner owner = {.services = &services, .context = &messages};
 	stela_linux_enter(&owner);
 	dump_stack();
@@ -188,7 +188,7 @@ int main(void)
 	dump_stack();
 	assert(observed_level == MESSAGE_LOGLEVEL_DEFAULT && missing == 3);
 	stela_linux_exit();
-	assert(stela_test_traps(strict_trace));
+	assert(stela_test_traps(trapping_trace));
 	assert(stela_test_traps(outside_owner));
 	printf("Linux stack diagnostic: caller, severity, missing-unwinder policy passed\n");
 	return 0;

@@ -585,14 +585,17 @@ fn execute_original(original: &Original) {
         profile,
         target,
     );
-    machine.set_strict(true);
     machine.set_watches(&[(GUARD_BASE, GUARD_BASE + GUARD_BYTES as u64 - 1)]);
     let mut watch = Vec::new();
     // Drain per-block so the bounded watch buffer cannot erase an earlier
     // committed prefix. There is one PE and no chaining across routed faults.
     let stopped = (1..=256)
         .find_map(|budget| {
-            let stopped = machine.run(budget);
+            // The probe ends at the first operation answered degraded.
+            let mut stopped = machine.run(budget);
+            if let Some(first) = machine.take_unmodeled().into_iter().next() {
+                stopped = Stop::Unsupported(first);
+            }
             for hit in machine.take_watch_hits() {
                 assert_eq!(
                     hit.dropped, 0,

@@ -88,7 +88,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 mod tests {
     use super::super::guarded::tests::gxf;
     use super::super::{
-        NoDevices, Stop,
+        NoDevices,
         tests::{BASE, FakeHost},
     };
     use super::*;
@@ -268,18 +268,11 @@ mod tests {
             guarded: true,
             ..Pstate::reset(1)
         });
-        machine.set_strict(true);
         let count = traces(&machine).len();
-        assert!(matches!(
-            machine.system_instruction(GENTER),
-            Err(Stop::Unsupported(_))
-        ));
-        assert_eq!(traces(&machine).len(), count);
-        machine.set_strict(false);
         machine.system_instruction(GENTER).unwrap();
         let hits = traces(&machine);
         assert_eq!(hits.len(), count + 1);
-        // Graceful GL0 GENTER really takes UNDEFINED, never a successful call.
+        // GL0 GENTER takes UNDEFINED, never a successful call.
         assert!(
             matches!(hits.last().unwrap().kind, MonitorKind::Exception { syndrome, .. } if syndrome >> 26 == 0)
         );

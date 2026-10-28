@@ -1,6 +1,7 @@
 //! AdvSIMD and FP: register transfers (LDR/STR/LDUR/STUR/LDP/STP), MOVI and the
 //! shared operand types of the SIMD families.
 use super::{AddressMode, Register, register};
+use crate::aarch64::Unsupported;
 pub mod aes;
 pub mod arithmetic;
 pub mod bfloat16;
@@ -126,8 +127,7 @@ pub enum Operand {
 
 /// None means another encoding class; Err means an unsupported or reserved
 /// member.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if let Some(operand) = lut::decode(word) {
         return Some(Ok(Operand::Lut(operand)));
     }
@@ -207,7 +207,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             return None;
         }
         if !scalar && !q && size == 3 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Compare {
             operation,
@@ -258,7 +258,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             1 << ((word >> 22) & 3)
         };
         if vector_math.is_some() && !q && lane_bytes == 8 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Integer {
             operation,
@@ -275,17 +275,17 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             1 => AddressMode::PostIndex,
             2 => AddressMode::Offset,
             3 => AddressMode::PreIndex,
-            _ => return Some(Err(())), // non-temporal pairs are a separate class
+            _ => return Some(Err(Unsupported)), // non-temporal pairs are a separate class
         };
         if opcode == 3 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let load = word & (1 << 22) != 0;
         let vectors = [(word & 31) as u8, ((word >> 10) & 31) as u8];
         // LDPOVERLAP allows UNKNOWN, UNDEFINED or NOP, never two ordinary
         // writes, so every duplicate destination is refused (V31 included).
         if load && vectors[0] == vectors[1] {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let bytes = 4u8 << opcode;
         let immediate = ((word >> 15) & 127) as i32;
@@ -320,7 +320,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let opcode = (word >> 22) & 3;
     // opc[1] selects Q, whose size field must be 00.
     if opcode & 2 != 0 && size != 0 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let scale = if opcode & 2 != 0 { 4 } else { size };
     let (displacement, mode) = if unsigned {
@@ -330,7 +330,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             0 => AddressMode::Offset,
             1 => AddressMode::PostIndex,
             3 => AddressMode::PreIndex,
-            _ => return Some(Err(())),
+            _ => return Some(Err(Unsupported)),
         };
         let immediate = ((word >> 12) & 511) as i32;
         ((immediate << 23) >> 23, mode)
@@ -343,6 +343,23 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         displacement,
         mode,
     }))
+}
+
+/// The scalar FP `ftype` field and its values.
+const FORMAT_SHIFT: u32 = 22;
+const FORMAT_SINGLE: u32 = 0;
+const FORMAT_DOUBLE: u32 = 1;
+const FORMAT_HALF: u32 = 3;
+
+/// A scalar FP instruction's format from its `ftype` field (bits 22-23).
+fn scalar_format(word: u32) -> Result<crate::aarch64::floating::Format, Unsupported> {
+    use crate::aarch64::floating::Format;
+    match (word >> FORMAT_SHIFT) & 3 {
+        FORMAT_SINGLE => Ok(Format::Single),
+        FORMAT_DOUBLE => Ok(Format::Double),
+        FORMAT_HALF => Ok(Format::Half),
+        _ => Err(Unsupported),
+    }
 }
 
 #[cfg(test)]
@@ -368,7 +385,7 @@ mod tests {
                         | if unary { 0 } else { 31 << 16 };
                     let decoded = decode(word).unwrap();
                     if q == 0 && size == 3 {
-                        assert_eq!(decoded, Err(()));
+                        assert_eq!(decoded, Err(Unsupported));
                     } else if let Ok(Operand::Integer {
                         destination,
                         left,
@@ -429,7 +446,7 @@ mod tests {
                         if scalar != 0 && (q == 0 || size != 3) {
                             assert!(!matches!(decode(word), Some(Ok(Operand::Compare { .. }))));
                         } else if scalar == 0 && q == 0 && size == 3 {
-                            assert_eq!(decode(word), Some(Err(())));
+                            assert_eq!(decode(word), Some(Err(Unsupported)));
                         } else if let Some(Ok(Operand::Compare {
                             destination,
                             left,
@@ -597,11 +614,11 @@ mod tests {
     fn reserved_sizes_and_adjacent_memory_classes_decline() {
         for size in 1..4 {
             for prefix in [0x3d800000, 0x3dc00000, 0x3c800000, 0x3cc00000] {
-                assert_eq!(decode(prefix | (size << 30)), Some(Err(())));
+                assert_eq!(decode(prefix | (size << 30)), Some(Err(Unsupported)));
             }
         }
-        assert_eq!(decode(0x3cc00800), Some(Err(()))); // unprivileged/reserved SIMD mode
-        assert_eq!(decode(0x3ce00800), Some(Err(()))); // register offset with reserved option 000
+        assert_eq!(decode(0x3cc00800), Some(Err(Unsupported))); // unprivileged/reserved SIMD mode
+        assert_eq!(decode(0x3ce00800), Some(Err(Unsupported))); // register offset with reserved option 000
         for word in [0xfd000000 ^ (1 << 26), 0x9c000000, 0xc85f7c00] {
             assert!(decode(word).is_none());
         }
@@ -632,7 +649,7 @@ mod tests {
                                     | (first << 5)
                                     | first;
                                 let expected = if load && first == second {
-                                    Err(())
+                                    Err(Unsupported)
                                 } else {
                                     Ok(Operand::MemoryPair {
                                         load,
@@ -661,10 +678,10 @@ mod tests {
         for load in [false, true] {
             for opcode in 0..4 {
                 let prefix = (opcode << 30) | 0x2c000400 | (u32::from(load) << 22);
-                assert_eq!(decode(prefix), Some(Err(()))); // mode00: STNP/LDNP
+                assert_eq!(decode(prefix), Some(Err(Unsupported))); // mode00: STNP/LDNP
                 for mode in 1..4 {
                     if opcode == 3 {
-                        assert_eq!(decode(prefix | (mode << 23)), Some(Err(())));
+                        assert_eq!(decode(prefix | (mode << 23)), Some(Err(Unsupported)));
                     }
                 }
             }

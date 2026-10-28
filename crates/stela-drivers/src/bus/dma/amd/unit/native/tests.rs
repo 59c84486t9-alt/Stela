@@ -288,22 +288,87 @@ fn cold_and_firmware_refusals_precede_native_publication() {
     }
 }
 
+fn unit_with_entries(entries: &[u8]) -> (Unit<Platform>, Peer) {
+    let (inspection, platform, peer, bytes) = inputs_with_entries(entries);
+    let ivrs = Ivrs::parse(&bytes, 8).unwrap();
+    (
+        unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap(),
+        peer,
+    )
+}
+
 #[test]
-fn original_alias_bypass_overlap_and_uncovered_requesters_are_denied() {
-    for entries in [
-        vec![0x42, 0x20, 0, 0, 0, 0x21, 0, 0], // Actual valid alias encoding.
-        vec![1, 0, 0, 0x10],                   // System-management bypass.
-        vec![1, 0, 0, 0, 2, 0x20, 0, 0],       // Overlap has no guessed precedence.
-    ] {
-        let (inspection, platform, peer, bytes) = inputs_with_entries(&entries);
-        let ivrs = Ivrs::parse(&bytes, 8).unwrap();
-        assert!(matches!(
-            unsafe { Unit::cold(inspection, &ivrs, platform, limits()) },
-            Err(Error::Firmware)
-        ));
-        assert_eq!(peer.register(DEVICE_TABLE), 0);
-        assert_eq!(peer.live_ram(), 0);
+fn an_alias_shares_its_sources_domain_and_a_shared_alias_has_none_of_its_own() {
+    let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
+    let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
+    let pages = peer.pages(4096);
+    let physical = pages.physical_pages()[0];
+    let mapping = requester
+        .map(pages.into(), Direction::ToDevice, u32::MAX as u64)
+        .unwrap();
+    for rid in [0x20, 0x21] {
+        assert_eq!(
+            peer.walk(rid, mapping.address()),
+            Some((physical, true, false))
+        );
     }
+    unsafe { requester.unmap(&mapping) }.unwrap();
+    unsafe { requester.detach() }.unwrap();
+    assert_eq!(peer.walk(0x21, mapping.address()), None);
+    // Two sources under one alias: neither gets a domain of its own.
+    let (mut unit, _) = unit_with_entries(&[
+        0x42, 0x20, 0, 0, 0, 0x30, 0, 0, 0x42, 0x28, 0, 0, 0, 0x30, 0, 0,
+    ]);
+    assert!(matches!(
+        unsafe { unit.attach(function(0x20)) },
+        Err(Error::Requester)
+    ));
+}
+
+#[test]
+fn device_settings_reach_the_dte_and_later_entries_override_earlier_ones() {
+    // SysMgt=01 and Lint1Pass on every requester, then plain settings for
+    // 0x20; an IOAPIC special entry names only an interrupt source.
+    let (unit, _) = unit_with_entries(&[
+        1, 0, 0, 0x90, 2, 0x20, 0, 0, 0x48, 0, 0, 0xd7, 0x21, 0xa0, 0, 1,
+    ]);
+    let other = unit.table.borrow().snapshot(0x28).unwrap();
+    assert_eq!(other[1] >> 40 & 3, 1);
+    assert_ne!(other[0] & 1 << 62, 0, "AMD erratum 63 write permission");
+    assert_ne!(other[2] & 1 << 63, 0);
+    let plain = unit.table.borrow().snapshot(0x20).unwrap();
+    assert_eq!(plain, [1, 0, 0, 0]);
+}
+
+#[test]
+fn window_requesters_reach_its_memory_until_they_attach() {
+    let (mut unit, peer) = model::unit();
+    let pages = peer.pages(8192);
+    let physical = pages.physical_pages()[0];
+    unsafe { unit.window(&[0x20, 0x21], vec![pages.into()]) }.unwrap();
+    for rid in [0x20, 0x21] {
+        assert_eq!(peer.walk(rid, physical), Some((physical, true, true)));
+        assert_eq!(
+            peer.walk(rid, physical + 4096),
+            Some((physical + 4096, true, true))
+        );
+        assert_eq!(peer.walk(rid, physical + 8192), None);
+    }
+    assert_eq!(peer.walk(0x22, physical), None);
+    let mut own = unsafe { unit.attach(function(0x20)) }.unwrap();
+    assert_eq!(peer.walk(0x20, physical), None);
+    assert_eq!(peer.walk(0x21, physical), Some((physical, true, true)));
+    unsafe { own.detach() }.unwrap();
+    drop(own);
+    assert_eq!(peer.walk(0x20, physical), None);
+    unsafe { unit.retire() }.unwrap();
+    drop(unit);
+    // Retirement releases every pin, the window's included.
+    assert_eq!(peer.live_ram(), 0);
+}
+
+#[test]
+fn uncovered_and_attached_requesters_are_refused() {
     let (inspection, platform, peer, bytes) = inputs_with_entries(&[2, 0x20, 0, 0]);
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     let mut unit = unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap();

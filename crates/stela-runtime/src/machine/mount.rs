@@ -2,7 +2,7 @@
 //! (`soc::board`), placed on one [`AppleDevices`] and connected to its PMGR
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
-//! `stela boot check` mount the same machine.
+//! `stela-dev boot check` mount the same machine.
 use super::apple::{
     AicInput, AppleDevices, AscLines, ConsoleSink, Range, RtcEpoch, Scanout, SepEntropy,
     SepProvisioning, UsbCables, UsbId, WallClock,
@@ -81,13 +81,13 @@ impl MemoryResources {
 /// before it locks them (`amcc`). CTRR-B stays unprogrammed.
 pub fn memory_locks(
     read_only_region: Option<(u64, u64)>,
-    core_locks: &ctrr::Handoff,
+    core_locks: &ctrr::CoreLocks,
 ) -> amcc::Programmed {
     let mut programmed = amcc::ctrr_a(read_only_region);
     for locked in &core_locks.locked {
         let group = match locked.region {
-            ctrr::Region::CtrrC => 2,
-            ctrr::Region::CtrrD => 3,
+            ctrr::LockRegion::CtrrC => 2,
+            ctrr::LockRegion::CtrrD => 3,
             _ => continue,
         };
         programmed[group] = Some((locked.first, locked.last + 1 - locked.first));
@@ -96,13 +96,8 @@ pub fn memory_locks(
 }
 
 /// Report unsupported PMGR qualifications once, before a device is placed.
-/// A diagnostic supplies no successful MMIO or lifecycle response. Strict
-/// callers preflight this list before handing any host resources to the mount.
-pub fn pmgr_qualifications(
-    refusals: &[PmgrBankRefusal],
-    strict: bool,
-    log: &mut dyn FnMut(fmt::Arguments<'_>),
-) -> Result<(), String> {
+/// A diagnostic supplies no successful MMIO or lifecycle response.
+pub fn pmgr_qualifications(refusals: &[PmgrBankRefusal], log: &mut dyn FnMut(fmt::Arguments<'_>)) {
     for (index, refusal) in refusals.iter().enumerate() {
         if refusals[..index].contains(refusal) {
             continue;
@@ -111,20 +106,12 @@ pub fn pmgr_qualifications(
             "UNMODELED PMGR {:?}: {}; no register/lifecycle model\n",
             refusal.bank, refusal.reason,
         ));
-        if strict {
-            return Err(format!("PMGR {:?}: {}", refusal.bank, refusal.reason));
-        }
     }
-    Ok(())
 }
 
 /// Paths qualified by immutable source identity and bundle admission. Keeping
 /// CLPC unavailable is a documented degradation, not a successful controller.
-pub fn clpc_absence(
-    hidden: &[String],
-    strict: bool,
-    log: &mut dyn FnMut(fmt::Arguments<'_>),
-) -> Result<(), String> {
+pub fn clpc_absence(hidden: &[String], log: &mut dyn FnMut(fmt::Arguments<'_>)) {
     for (index, path) in hidden.iter().enumerate() {
         if hidden[..index].contains(path) {
             continue;
@@ -132,11 +119,7 @@ pub fn clpc_absence(
         log(format_args!(
             "UNMODELED CLPC {path}: controller hidden; closed-loop CPU power control unavailable\n"
         ));
-        if strict {
-            return Err(format!("CLPC {path} has no qualified controller"));
-        }
     }
-    Ok(())
 }
 
 /// What the host connects to the board.
@@ -167,6 +150,9 @@ pub struct Inputs<'f> {
     pub scanout: Option<Box<dyn Scanout>>,
     /// Board device firmware images by guest file name.
     pub firmware: &'f dyn Fn(&str) -> Option<&'f [u8]>,
+    /// The boot bundle's macOS build, whose firmware protocols the
+    /// coprocessor models speak; `None` without a bundle.
+    pub build: Option<&'static crate::builds::Build>,
 }
 
 /// Place `board`'s devices, writing `DEVICES` summaries to `log`, and return
@@ -206,7 +192,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         )?;
     }
     let native_memory = memory.is_some();
-    pmgr_qualifications(&board.pmgr_refusals, false, log)?;
+    pmgr_qualifications(&board.pmgr_refusals, log);
     let Inputs {
         programmed,
         reset,
@@ -221,7 +207,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         mut usb,
         scanout,
         firmware,
+        build,
     } = inputs;
+    let build =
+        build.ok_or("the board's coprocessors need the boot bundle's supported macOS build")?;
     let place = |device: super::soc::Device| {
         (
             Range {
@@ -265,7 +254,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_spi_nor(spi)?;
     }
     match (board.ans.as_ref(), backing) {
-        (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
+        (Some(ans), Some(backing)) => devices.add_ans(ans, backing, build)?,
         (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
         (None, Some(_)) => {
             return Err(
@@ -275,10 +264,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         (None, None) => (),
     }
     if let Some(smc) = board.smc.as_ref() {
-        devices.add_smc(smc)?;
+        devices.add_smc(smc, build)?;
     }
     if let Some(pmp) = board.pmp.as_ref() {
-        devices.add_pmp(pmp)?;
+        devices.add_pmp(pmp, build)?;
     }
     for spmi in &board.spmis {
         // A newly created Stela PMIC starts with its own oscillator origin
@@ -480,6 +469,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                 (None, None, None) => None,
                 _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
             },
+            build,
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions
@@ -715,7 +705,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
     // bridge) and owns only the bytes they leave.
     if let Some(gfx) = board.gfx.as_ref() {
-        devices.add_gfx(gfx)?;
+        devices.add_gfx(gfx, build)?;
     }
     // Finalize only after every native constructor, including SGX's final
     // overlapping-window placement, has registered its actual banks.
@@ -788,30 +778,20 @@ mod tests {
     }
 
     #[test]
-    fn clpc_absence_reports_each_path_once_and_strict_stops_at_the_first() {
+    fn clpc_absence_reports_each_path_once() {
         let paths = [
             "/arm-io/pmgr/clpc".into(),
             "/arm-io/pmgr/clpc".into(),
             "/arm-io/die1/clpc".into(),
         ];
-        let mut graceful = Vec::new();
-        clpc_absence(&paths, false, &mut |message| {
-            graceful.push(format!("{message}"))
-        })
-        .unwrap();
-        assert_eq!(graceful.len(), 2);
-        assert!(graceful[0].contains("UNMODELED CLPC /arm-io/pmgr/clpc: controller hidden"));
-        let mut strict = Vec::new();
-        assert!(
-            clpc_absence(&paths, true, &mut |message| strict
-                .push(format!("{message}")))
-            .is_err()
-        );
-        assert_eq!(strict, graceful[..1]);
+        let mut messages = Vec::new();
+        clpc_absence(&paths, &mut |message| messages.push(format!("{message}")));
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("UNMODELED CLPC /arm-io/pmgr/clpc: controller hidden"));
     }
 
     #[test]
-    fn graceful_qualifications_report_each_requirement_once_without_a_model() {
+    fn pmgr_qualifications_report_each_requirement_once_without_a_model() {
         let unsupported = PmgrBankRefusal {
             bank: PmgrBank::CpuClusters,
             reason: "unknown cluster layout",
@@ -821,12 +801,9 @@ mod tests {
             reason: "unknown bridge layout",
         };
         let mut messages = Vec::new();
-        assert_eq!(
-            pmgr_qualifications(&[unsupported, unsupported, bridge], false, &mut |message| {
-                messages.push(format!("{message}"))
-            }),
-            Ok(())
-        );
+        pmgr_qualifications(&[unsupported, unsupported, bridge], &mut |message| {
+            messages.push(format!("{message}"))
+        });
         assert_eq!(messages.len(), 2);
         assert!(messages[0].contains("UNMODELED PMGR CpuClusters"));
         assert!(
@@ -834,26 +811,5 @@ mod tests {
                 .iter()
                 .all(|message| message.contains("no register/lifecycle model"))
         );
-    }
-
-    #[test]
-    fn strict_qualifications_stop_at_the_first_requirement() {
-        let refusals = [
-            PmgrBankRefusal {
-                bank: PmgrBank::CpuClusters,
-                reason: "unknown cluster layout",
-            },
-            PmgrBankRefusal {
-                bank: PmgrBank::Bridges,
-                reason: "unknown bridge layout",
-            },
-        ];
-        let mut messages = Vec::new();
-        assert_eq!(
-            pmgr_qualifications(&refusals, true, &mut |message| messages
-                .push(format!("{message}"))),
-            Err("PMGR CpuClusters: unknown cluster layout".into())
-        );
-        assert_eq!(messages.len(), 1);
     }
 }

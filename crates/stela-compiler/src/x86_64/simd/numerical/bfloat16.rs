@@ -3,7 +3,7 @@ use super::super::super::isa::ShiftOpcode;
 use super::super::{Host, packed};
 use super::quantization::{IntegerRoundingRegister, broadcast_integer_rounding};
 use crate::aarch64::floating::bfloat16::BFLOAT16_TO_SINGLE_SHIFT;
-use alloc::vec::Vec;
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size, Unary};
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
@@ -19,34 +19,20 @@ const DISCARDED_BITS: u8 = BFLOAT16_TO_SINGLE_SHIFT as u8;
 const DISCARDED_MASK: u32 = (1 << DISCARDED_BITS) - 1;
 const VECTOR_LANES: u32 = 4;
 const VECTOR_LANE_MASK: u32 = (1 << VECTOR_LANES) - 1;
-const NOT_EAX: &[u8] = &[0xf7, 0xd0];
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const MOV_R10D_EAX: &[u8] = &[0x41, 0x89, 0xc2];
-const MOV_EDX_EAX: &[u8] = &[0x89, 0xc2];
-const AND_EDX_IMM32: &[u8] = &[0x81, 0xe2];
-const OR_R10D_EDX: &[u8] = &[0x41, 0x09, 0xd2];
-const SHR_EDX_IMM8: &[u8] = &[0xc1, 0xea];
-const AND_EDX_R11D: &[u8] = &[0x44, 0x21, 0xda];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const SAR_ECX_IMM8: &[u8] = &[0xc1, 0xf9];
-const AND_ECX_R9D: &[u8] = &[0x44, 0x21, 0xc9];
-const XOR_ECX_R8D: &[u8] = &[0x44, 0x31, 0xc1];
-const ADD_ECX_EDX: &[u8] = &[0x01, 0xd1];
-const ADD_EAX_ECX: &[u8] = &[0x01, 0xc8];
 
 /// Record four lanes' discarded bits in R10D and apply shared selectors.
 /// XMM0 is output, XMM1 input, XMM2..5 scratch; XMM6/7 and R8/9/11 survive.
-pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Code) {
     packed(code, Host::MoveAligned, RESULT, SOURCE);
     packed(code, Host::MoveAligned, TEMPORARY, SOURCE);
     ShiftOpcode::LeftDword.emit(code, TEMPORARY, SINGLE_BITS - DISCARDED_BITS);
     packed(code, Host::Xor, ZERO, ZERO);
     packed(code, Host::EqualDword, TEMPORARY, ZERO);
     packed(code, Host::DwordSignMask, GPR_RAX, TEMPORARY);
-    code.extend(NOT_EAX);
-    code.extend(AND_EAX_IMM8);
-    code.push(VECTOR_LANE_MASK as u8);
-    code.extend(MOV_R10D_EAX);
+    let mut asm = code.asm();
+    asm.unary(Unary::Not, Size::Dword, Gpr::Rax);
+    asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rax, VECTOR_LANE_MASK as i8);
+    asm.mov(Size::Dword, Gpr::R10, Gpr::Rax);
 
     packed(code, Host::MoveAligned, SIGN, SOURCE);
     ShiftOpcode::ArithmeticDword.emit(code, SIGN, SIGN_POSITION);
@@ -65,20 +51,20 @@ pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Vec<u8>) {
 /// Round the single-precision bits in EAX to BF16, ORing the discarded bits
 /// into R10D. ECX/EDX are scratch; XMM registers, state, stack and MXCSR are
 /// untouched.
-pub(in crate::x86_64) fn quantize_bfloat_scalar_bits(code: &mut Vec<u8>) {
-    code.extend(MOV_EDX_EAX);
-    code.extend(AND_EDX_IMM32);
-    code.extend(DISCARDED_MASK.to_le_bytes());
-    code.extend(OR_R10D_EDX);
-    code.extend(MOV_EDX_EAX);
-    code.extend(SHR_EDX_IMM8);
-    code.push(DISCARDED_BITS);
-    code.extend(AND_EDX_R11D);
-    code.extend(MOV_ECX_EAX);
-    code.extend(SAR_ECX_IMM8);
-    code.push(SIGN_POSITION);
-    code.extend(AND_ECX_R9D);
-    code.extend(XOR_ECX_R8D);
-    code.extend(ADD_ECX_EDX);
-    code.extend(ADD_EAX_ECX);
+pub(in crate::x86_64) fn quantize_bfloat_scalar_bits(code: &mut Code) {
+    use Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdx};
+    use Size::Dword;
+    let mut asm = code.asm();
+    asm.mov(Dword, Rdx, Rax);
+    asm.alu_imm32(Alu::And, Dword, Rdx, DISCARDED_MASK as i32);
+    asm.alu(Alu::Or, Dword, R10, Rdx);
+    asm.mov(Dword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, DISCARDED_BITS);
+    asm.alu(Alu::And, Dword, Rdx, R11);
+    asm.mov(Dword, Rcx, Rax);
+    asm.shift_imm(ShiftOp::Sar, Dword, Rcx, SIGN_POSITION);
+    asm.alu(Alu::And, Dword, Rcx, R9);
+    asm.alu(Alu::Xor, Dword, Rcx, R8);
+    asm.alu(Alu::Add, Dword, Rcx, Rdx);
+    asm.alu(Alu::Add, Dword, Rax, Rcx);
 }

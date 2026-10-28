@@ -5,17 +5,23 @@
 //! revision getter. Neither the GPU family nor its identification register
 //! establishes the selected member. Parsing/selection grants no execution,
 //! hardware reset state, signature authenticity or startup completion.
-
+#[cfg(test)]
 use super::super::power::t6000::identity::Image;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 const HEADER: usize = 0x30;
+#[cfg(test)]
 const ENTRY: usize = 0x10;
+#[cfg(test)]
 const MAX_ENTRIES: usize = 32;
+#[cfg(test)]
 const MAGIC: &[u8; 8] = b"rkosftab";
 
 /// The immutable source identity carried into a native program binding.
 /// Hashes describe the actual accepted bytes, not a behavior-dispatch key.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Source {
     pub container_sha256: [u8; 32],
@@ -30,16 +36,19 @@ pub struct Source {
 /// The expected digest binds it to the caller's preserved input receipt.
 /// Image4 authentication and qualification of a changed source remain the
 /// loader/registry's independent obligations.
+#[cfg(test)]
 pub struct Ftab<'a> {
     bytes: &'a [u8],
     digest: [u8; 32],
     count: usize,
 }
 
+#[cfg(test)]
 pub struct Selected<'a> {
     payload: &'a [u8],
     source: Source,
 }
+#[cfg(test)]
 impl Selected<'_> {
     pub fn payload(&self) -> &[u8] {
         self.payload
@@ -48,7 +57,7 @@ impl Selected<'_> {
         self.source
     }
 }
-
+#[cfg(test)]
 impl<'a> Ftab<'a> {
     pub fn read(bytes: &'a [u8], expected_sha256: [u8; 32]) -> Result<Self, &'static str> {
         let header = bytes.get(..HEADER).ok_or("GFX FTAB header is truncated")?;

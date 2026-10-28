@@ -1,4 +1,5 @@
 //! SVE integer arithmetic, widening and carry operations.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication};
 const REGISTER_MASK: u32 = 31;
 const SOURCE_SHIFT: u32 = 5;
@@ -127,8 +128,7 @@ const USUBLT_Z_ZZ: u32 = 0x4500_1c00;
 const USUBWB_Z_ZZ: u32 = 0x4500_5800;
 const USUBWT_Z_ZZ: u32 = 0x4500_5c00;
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let destination = (word & REGISTER_MASK) as u8;
     let source = ((word >> SOURCE_SHIFT) & REGISTER_MASK) as u8;
     let right = ((word >> RIGHT_SHIFT) & REGISTER_MASK) as u8;
@@ -188,7 +188,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     };
     if let Some(operation) = operation {
         if matches!(operation, Binary::Divide { .. }) && element_bytes < 4 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return operand(
             element_bytes,
@@ -225,7 +225,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if let Some(operation) = operation {
         let shifted = word & IMMEDIATE_SHIFT_FLAG != 0;
         if element_bytes == 1 && shifted {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let value = i64::from(immediate) << if shifted { IMMEDIATE_SHIFT } else { 0 };
         return operand(
@@ -304,7 +304,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     };
     if let Some((unsigned, subtract, wide_left, left_top, right_top)) = widening {
         if element_bytes == 1 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return operand(
             element_bytes,
@@ -326,15 +326,14 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 impl Operand {
     /// MOVPRFX requirements of the follower, determined before destructive
     /// operands are normalized.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         use crate::aarch64::sve::prefix::{PredicatedPrefixRequirement, PrefixRequirement};
 
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let predicated = match self.predication {
             Predication::Merging(predicate) => Some(PredicatedPrefixRequirement {
@@ -715,33 +714,33 @@ mod tests {
             let operand = decode(word).unwrap().unwrap();
             let mut forged = operand;
             forged.destination = 32;
-            assert_eq!(forged.prefix_requirement(word), Err(()));
+            assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
             let mut forged = operand;
             forged.element_size = ElementSize::Doubleword;
-            assert_eq!(forged.prefix_requirement(word), Err(()));
+            assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
             let mut forged = operand;
             forged.predication = Predication::Merging(7);
-            assert_eq!(forged.prefix_requirement(word), Err(()));
+            assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
             let mut forged = operand;
             forged.kind = Kind::Binary {
                 operation: Binary::Add,
                 left: 3,
                 right: Source::Vector(3),
             };
-            assert_eq!(forged.prefix_requirement(word), Err(()));
-            assert_eq!(operand.prefix_requirement(0), Err(()));
-            assert_eq!(operand.prefix_requirement(SADDLB_Z_ZZ), Err(()));
-            assert_eq!(operand.prefix_requirement(SDIV_Z_P_ZZ), Err(()));
+            assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
+            assert_eq!(operand.prefix_requirement(0), Err(Unsupported));
+            assert_eq!(operand.prefix_requirement(SADDLB_Z_ZZ), Err(Unsupported));
+            assert_eq!(operand.prefix_requirement(SDIV_Z_P_ZZ), Err(Unsupported));
             assert_eq!(
                 operand.prefix_requirement(ADD_Z_ZI | IMMEDIATE_SHIFT_FLAG),
-                Err(())
+                Err(Unsupported)
             );
             // The same binary kind cannot authorize a constructive ADD; its exact
             // word and unpredicated role must remain distinct from the merging form.
             let constructive = ADD_Z_ZZ | (3 << SOURCE_SHIFT) | (5 << RIGHT_SHIFT) | 3;
             let constructive_operand = decode(constructive).unwrap().unwrap();
             assert_eq!(constructive_operand.kind, operand.kind);
-            assert_eq!(operand.prefix_requirement(constructive), Err(()));
+            assert_eq!(operand.prefix_requirement(constructive), Err(Unsupported));
             assert_eq!(
                 constructive_operand.prefix_requirement(constructive),
                 Ok(Some(PrefixRequirement::Forbidden))
@@ -812,7 +811,7 @@ mod tests {
                     let word = opcode | (size << SIZE_SHIFT) | destination;
                     let result = decode(word).unwrap();
                     if (widening && size == 0) || (division && size < 2) {
-                        assert_eq!(result, Err(()));
+                        assert_eq!(result, Err(Unsupported));
                         continue;
                     }
                     let operand = result.unwrap();
@@ -837,7 +836,10 @@ mod tests {
     #[test]
     fn immediate_byte_shift_is_reserved_and_signed_minmax_extend_imm8() {
         for opcode in [ADD_Z_ZI, SUB_Z_ZI, SUBR_Z_ZI] {
-            assert_eq!(decode(opcode | IMMEDIATE_SHIFT_FLAG), Some(Err(())));
+            assert_eq!(
+                decode(opcode | IMMEDIATE_SHIFT_FLAG),
+                Some(Err(Unsupported))
+            );
             assert!(
                 decode(opcode | (1 << SIZE_SHIFT) | IMMEDIATE_SHIFT_FLAG)
                     .unwrap()

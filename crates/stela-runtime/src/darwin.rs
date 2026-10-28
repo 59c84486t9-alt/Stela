@@ -575,11 +575,11 @@ pub unsafe fn run_services(
             "refusing execution in an unusable guest address space"
         );
         let mut part = unsafe {
-            if let Some(thread) = services
-                .thread
-                .as_deref()
-                .filter(|_| runtime.profile().supports_thread_registers())
-            {
+            if let Some(thread) = services.thread.as_deref().filter(|_| {
+                runtime
+                    .profile()
+                    .has(stela_compiler::block::Features::THREAD_REGISTERS)
+            }) {
                 runtime.run_with_thread(
                     state,
                     stop,

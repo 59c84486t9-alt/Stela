@@ -52,7 +52,7 @@ use crate::platform::apple::{
     pmu::{self, Pmu},
     power::{self, Power},
     ptd,
-    rtkit::{Management, RtKit},
+    rtkit::RtKit,
     sart::{self, Sart},
     sep::{self, Sep},
     smc::{self, Smc},
@@ -556,25 +556,6 @@ impl AppleDevices {
         lines
     }
 
-    /// Strict mode for every native coprocessor (docs/design/runtime.md
-    /// "Unsupported operations"), the default; otherwise each answers a
-    /// request it does not implement with its own error reply, where its
-    /// protocol has one.
-    pub fn set_strict(&mut self, strict: bool) {
-        let ids: Vec<DeviceId> = self.coprocessors.iter().map(|&(_, id)| id).collect();
-        for id in ids {
-            if let Some(asc) = self.bus.device_mut::<Asc>(id) {
-                asc.set_strict(strict);
-            }
-        }
-        let ids: Vec<DeviceId> = self.sep_masters.iter().map(|master| master.sep).collect();
-        for id in ids {
-            if let Some(sep) = self.bus.device_mut::<Sep>(id) {
-                sep.set_strict(strict);
-            }
-        }
-    }
-
     /// The coprocessor requests answered with an error reply for the first
     /// time since the last call, as log lines naming the coprocessor.
     pub fn take_unmodeled(&mut self) -> Vec<String> {
@@ -1036,11 +1017,12 @@ impl AppleDevices {
         &mut self,
         placement: &super::soc::AnsController,
         backing: Box<dyn stela_drivers::block::BlockDevice>,
+        build: &crate::builds::Build,
     ) -> Result<(), String> {
         let irq = |n| AicInput::new(0, n);
         let rtkit = RtKit::new(
             vec![(ans::RTKIT_ENDPOINT, Box::new(ans::Endpoint) as Box<_>)],
-            Management::Ordinary,
+            build.rtkit_version,
         )
         .map_err(String::from)?;
         let wrapper = Asc::booted(
@@ -1122,7 +1104,11 @@ impl AppleDevices {
     /// RTKit with the native key endpoint, the shared page at the nub's
     /// region base, and the hardware watchdog bank AppleSMC disarms. The
     /// rest of the nub region, the coprocessor's own memory, stays unmapped.
-    pub fn add_smc(&mut self, placement: &super::soc::SmcController) -> Result<(), String> {
+    pub fn add_smc(
+        &mut self,
+        placement: &super::soc::SmcController,
+        build: &crate::builds::Build,
+    ) -> Result<(), String> {
         let sram = smc::Sram::default();
         let keys = placement
             .gpio_keys
@@ -1134,7 +1120,7 @@ impl AppleDevices {
             .with_wake_bits(placement.wake_bits);
         let mut rtkit = RtKit::new(
             vec![(smc::ENDPOINT, Box::new(endpoint))],
-            Management::Ordinary,
+            build.rtkit_version,
         )
         .map_err(String::from)?;
         if placement.quiesced {
@@ -1166,10 +1152,14 @@ impl AppleDevices {
     /// Place an explicitly described PMP: its started, user-power-managed
     /// RTKit with the native `PMPEndpoint1` (`pmp::Pmp`). Its PTD bank is
     /// the memory cache's ([`Self::add_memory_channels`]).
-    pub fn add_pmp(&mut self, placement: &super::soc::PmpController) -> Result<(), String> {
+    pub fn add_pmp(
+        &mut self,
+        placement: &super::soc::PmpController,
+        build: &crate::builds::Build,
+    ) -> Result<(), String> {
         let mut rtkit = RtKit::new(
             vec![(pmp::ENDPOINT, Box::new(pmp::Pmp::default()))],
-            Management::Ordinary,
+            build.rtkit_version,
         )
         .map_err(String::from)?;
         if placement.quiesced {
@@ -1192,7 +1182,11 @@ impl AppleDevices {
     /// GFX endpoints, `agx::firmware`) behind its ASC wrapper, and the `sgx`
     /// register block whose MMU configuration roots the UAT the firmware
     /// masters memory through.
-    pub fn add_gfx(&mut self, placement: &super::soc::GfxController) -> Result<(), String> {
+    pub fn add_gfx(
+        &mut self,
+        placement: &super::soc::GfxController,
+        build: &crate::builds::Build,
+    ) -> Result<(), String> {
         let sgx_physical = placement
             .sgx
             .first()
@@ -1206,7 +1200,7 @@ impl AppleDevices {
             .map_err(String::from)?;
         let native_control = power.native_asc_control();
         let coprocessor =
-            GfxCoprocessor::with_power(placement.gpu.family, power).map_err(String::from)?;
+            GfxCoprocessor::with_power(placement.gpu.family, power, build).map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(coprocessor),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
@@ -1267,6 +1261,7 @@ impl AppleDevices {
         (dart, stream): (DartId, usize),
         window: Option<u64>,
         surface: Option<(DartId, usize)>,
+        build: &crate::builds::Build,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
@@ -1275,8 +1270,8 @@ impl AppleDevices {
         if let Some((dart, stream)) = surface {
             self.validate_native_dart("DCP surface", dart, stream)?;
         }
-        let mut coprocessor =
-            dcp::Coprocessor::for_external(scanout, window, identity).map_err(String::from)?;
+        let mut coprocessor = dcp::Coprocessor::for_external(scanout, window, identity, build)
+            .map_err(String::from)?;
         if quiesced {
             coprocessor = coprocessor.quiesced();
         }
@@ -5017,7 +5012,11 @@ mod tests {
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
         devices
-            .add_ans(&placement, Box::new(RamDisk::new("backing", 16, 4096)))
+            .add_ans(
+                &placement,
+                Box::new(RamDisk::new("backing", 16, 4096)),
+                crate::builds::DEFAULT,
+            )
             .unwrap();
         assert_eq!(devices.power_devices.len(), 4);
         assert!(
@@ -5046,7 +5045,9 @@ mod tests {
         devices.write(0, SUPPLY, 4, 15, 0).unwrap();
         assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(pmgr_before));
         devices.write(0, WRAPPER + 0x8800, 8, 1, 0).unwrap();
-        assert!(devices.write(0, WRAPPER + 0x8808, 8, 0x20, 0).is_err());
+        // A request the ANS firmware does not implement is reported once.
+        devices.write(0, WRAPPER + 0x8808, 8, 0x20, 0).unwrap();
+        assert_eq!(devices.take_unmodeled().len(), 1);
         devices.write(0, NVME + 0x13e8, 4, 1, 0).unwrap();
         assert_eq!(devices.read(0, NVME + 0x13e8, 4, 0), Ok(1));
         assert_eq!(devices.read(0, NVME + 0x1300, 4, 0), Ok(0xde71_ce55));
@@ -5198,12 +5199,15 @@ mod tests {
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
         devices
-            .add_pmp(&PmpController {
-                wrapper: (WRAPPER, 0x6c000),
-                interrupts: [0x275, 0x274, 0x277, 0x276],
-                quiesced: false,
-                mapper: None,
-            })
+            .add_pmp(
+                &PmpController {
+                    wrapper: (WRAPPER, 0x6c000),
+                    interrupts: [0x275, 0x274, 0x277, 0x276],
+                    quiesced: false,
+                    mapper: None,
+                },
+                crate::builds::DEFAULT,
+            )
             .unwrap();
         assert_eq!(devices.power_devices.len(), 2);
         assert_eq!(devices.power_devices[1].physical, WRAPPER);
@@ -5246,7 +5250,7 @@ mod tests {
             }));
             devices.bus.map(foreign, base, bytes, 0).unwrap();
             assert_eq!(
-                devices.add_gfx(&placement),
+                devices.add_gfx(&placement, crate::builds::DEFAULT),
                 Err("GFX native ASC control is not wholly owned by its mounted SGX bank".into())
             );
             assert!(devices.gfx_masters.is_empty());
@@ -5283,7 +5287,7 @@ mod tests {
                 shared_l2: 0x100_0000_8000,
             };
             let mut devices = AppleDevices::new();
-            devices.add_gfx(&placement).unwrap();
+            devices.add_gfx(&placement, crate::builds::DEFAULT).unwrap();
             let (asc, block) = devices.gfx_masters[0];
             assert_eq!(
                 devices.bus.route(WRAPPER + 0x8110, Width::Word),
@@ -5326,7 +5330,7 @@ mod tests {
         devices
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
-        devices.add_gfx(&placement).unwrap();
+        devices.add_gfx(&placement, crate::builds::DEFAULT).unwrap();
         assert_eq!(devices.power_devices.len(), 3);
         assert_eq!(devices.power_devices[1].physical, WRAPPER);
         assert_eq!(devices.power_devices[2].physical, SGX);
@@ -5462,7 +5466,7 @@ mod tests {
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
         assert!(devices.power_button(true).is_err());
-        devices.add_smc(&placement).unwrap();
+        devices.add_smc(&placement, crate::builds::DEFAULT).unwrap();
         // The press waits in the key endpoint until the AP enables
         // notifications.
         devices.power_button(true).unwrap();
@@ -5587,7 +5591,8 @@ mod tests {
                     Box::new(UnusedScreen),
                     (dart, input),
                     None,
-                    None
+                    None,
+                    crate::builds::DEFAULT
                 )
                 .unwrap_err()
                 .contains("DART")
@@ -5647,7 +5652,8 @@ mod tests {
                     Box::new(UnusedScreen),
                     (owner, 1),
                     None,
-                    Some((owner, 2))
+                    Some((owner, 2)),
+                    crate::builds::DEFAULT
                 )
                 .unwrap_err()
                 .contains("DCP surface")
@@ -5787,6 +5793,7 @@ mod tests {
             (dart, 5),
             Some(RAM),
             Some((dart, 5)),
+            crate::builds::DEFAULT,
         )
         .unwrap();
         connect_native_power(&mut d, SUPPLY, &[("/arm-io/dcpext", WRAPPER)], true);
@@ -5896,6 +5903,7 @@ mod tests {
                 (dart, 5),
                 Some(0x8_0000_0000),
                 None,
+                crate::builds::DEFAULT,
             )
             .unwrap();
         devices

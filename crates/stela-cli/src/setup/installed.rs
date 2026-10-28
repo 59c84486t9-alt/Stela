@@ -304,7 +304,7 @@ pub(super) fn state_area(
         layout.state_offset() == recorded,
         "{identifier} holds {bytes:#x} bytes, so its machine state would start at {:#x}, not \
          at the recorded {recorded:#x}: the partition was resized, and stela.efi would no \
-         longer find its NVRAM and SEP state. Restore its size, or restore a --backup-state \
+         longer find its NVRAM and SEP state. Restore its size, or restore a `state backup` \
          file after setting the install up again.",
         layout.state_offset()
     );
@@ -576,7 +576,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         boot_log::PARTITION_BYTES
     );
     notes.push(if area.bytes >= boot_log::PARTITION_BYTES {
-        format!("{label} also keeps stela.efi's boot log (`stela setup --boot-log`)")
+        format!("{label} also keeps stela.efi's boot log (`stela setup boot-log`)")
     } else {
         format!(
             "{label} holds {:#x} bytes: it boots without a boot log, which is optional and needs \

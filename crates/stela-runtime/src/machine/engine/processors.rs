@@ -778,7 +778,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
         // Its cluster-scoped implementation-defined registers too
         // (`impdef::Scope::Cluster`). A new cluster's CTRR registers, and
-        // every PE's own, start from what iBoot left (`ctrr::Handoff`).
+        // every PE's own, start from what iBoot left (`ctrr::CoreLocks`).
         cpu.core_locks = self.cpu.core_locks.clone();
         cpu.ctrr_core = ctrr::Core::handed_off(&cpu.core_locks);
         // In parallel, the cluster's state outlives its PEs on the hub.
@@ -1905,9 +1905,9 @@ mod tests {
             })
             .collect();
         let mut machine = board_on(Chip::AppleM5, &[], super::super::NoDevices, identities);
-        let handoff = ctrr::Handoff {
+        let handoff = ctrr::CoreLocks {
             locked: alloc::vec![ctrr::Locked {
-                region: ctrr::Region::CtxrA,
+                region: ctrr::LockRegion::CtxrA,
                 first: 0x100_070a_4000,
                 last: 0x100_0710_bfff,
             }],
@@ -2181,17 +2181,17 @@ mod tests {
         machine.system_instruction(MRS_X1_RMR_EL2).unwrap();
         assert_eq!(machine.cpu.state.x[1], 1);
         // EL1 cannot reach RMR_EL2, and a board without a reset vector
-        // cannot reset the PE.
+        // cannot reset the PE: the request is reported once and the PE runs on.
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
         assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
         machine.devices.reset = None;
         machine.cpu.set_pstate(Pstate::reset(2));
         machine.cpu.state.x[1] = 0b10;
-        assert!(matches!(
-            machine.system_instruction(MSR_RMR_EL2_X1),
-            Err(Stop::Unsupported(_))
-        ));
+        let pc = machine.cpu.pc;
+        machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (pc + 4, 2));
+        assert_eq!(machine.take_unmodeled().len(), 1);
     }
 
     #[test]

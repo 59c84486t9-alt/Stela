@@ -51,7 +51,7 @@ impl CacheRequirement {
 }
 
 /// A newly initialized software lock image, associated with the existing
-/// DCS/PTD RAM owner. Its private cache=None AMCC cannot expose FirmwareCache.
+/// DCS/PTD RAM owner.
 /// Do not clone the lock model into another state bank or assign the DCS/PTD
 /// publication ID as this resource's distinct memory-controller identity.
 pub struct LockResource {
@@ -277,7 +277,7 @@ pub(in crate::machine::apple) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
     use crate::{
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::{
             amcc::{Layout, LockGroup},
             interrupt::InterruptLatch,

@@ -158,6 +158,7 @@ pub struct Rect {
 
 impl Rect {
     /// The rectangle at the origin of a `width` by `height` area.
+    #[cfg(test)]
     pub fn whole(width: u32, height: u32) -> Self {
         Self {
             x: 0,

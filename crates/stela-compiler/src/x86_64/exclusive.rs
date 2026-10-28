@@ -1,5 +1,7 @@
 //! Exclusive loads and stores through the per-thread reservation in the memory
 //! service, which owns the access, ordering, faults and monitor state.
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size};
+use crate::x86_64::isa::SimdOpcode;
 
 use super::{load, memory_context as memory, store};
 use crate::{
@@ -19,7 +21,6 @@ use crate::{
         flags, host_caps, profile_requirements,
     },
 };
-use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;
@@ -36,20 +37,11 @@ const SCRATCH_BYTES: u32 = (DATA_OFFSET + EXCLUSIVE_DATA_BYTES as u32)
     .div_ceil(STACK_ALIGNMENT_BYTES)
     * STACK_ALIGNMENT_BYTES;
 const _: () = assert!(SCRATCH_BYTES <= i8::MAX as u32);
-const SUB_RSP_IMM8: &[u8] = &[0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: &[u8] = &[0x48, 0x83, 0xc4];
-const PXOR_XMM0_XMM0: &[u8] = &[0x66, 0x0f, 0xef, 0xc0];
-const MOVDQU_RSP_DISP8_XMM0: &[u8] = &[0xf3, 0x0f, 0x7f, 0x44, 0x24];
-const MOV_RSP_DISP8_IMM32: &[u8] = &[0xc7, 0x44, 0x24];
-const MOV_RSP_DISP8_AL: &[u8] = &[0x88, 0x44, 0x24];
-const MOV_RSP_DISP8_AX: &[u8] = &[0x66, 0x89, 0x44, 0x24];
-const MOV_RSP_DISP8_EAX: &[u8] = &[0x89, 0x44, 0x24];
-const MOV_RSP_DISP8_RAX: &[u8] = &[0x48, 0x89, 0x44, 0x24];
-const MOVZX_EAX_BYTE_RSP_DISP8: &[u8] = &[0x0f, 0xb6, 0x44, 0x24];
-const MOVZX_EAX_WORD_RSP_DISP8: &[u8] = &[0x0f, 0xb7, 0x44, 0x24];
-const MOV_EAX_RSP_DISP8: &[u8] = &[0x8b, 0x44, 0x24];
-const MOV_RAX_RSP_DISP8: &[u8] = &[0x48, 0x8b, 0x44, 0x24];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+
+/// The scratch payload field at `offset`.
+fn scratch(offset: u32) -> Mem {
+    Mem::base_disp8(Gpr::Rsp, (DATA_OFFSET + offset) as i8)
+}
 
 /// One control specialization drives both the body's metadata and its emission.
 /// The checked entry selects it from the live controls.
@@ -201,54 +193,53 @@ pub(crate) fn requirements(checked: &CheckedOperand) -> MemoryRequirements {
     }
 }
 
-fn initialize(code: &mut Vec<u8>) {
-    code.extend(PXOR_XMM0_XMM0);
+fn initialize(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.simd(SimdOpcode::Xor, 0, Rm::Xmm(0), crate::TargetCpu::Baseline);
     for offset in (0..EXCLUSIVE_DATA_BYTES as u32).step_by(VECTOR_BYTES as usize) {
-        code.extend(MOVDQU_RSP_DISP8_XMM0);
-        code.push((DATA_OFFSET + offset) as u8);
+        asm.movdqu_store(scratch(offset), 0);
     }
 }
 
-fn set_field(code: &mut Vec<u8>, offset: u32, value: u32) {
+fn set_field(code: &mut Code, offset: u32, value: u32) {
     // The complete payload was initialized. Zero-valued fields need no rewrite.
     if value != 0 {
-        code.extend(MOV_RSP_DISP8_IMM32);
-        code.push((DATA_OFFSET + offset) as u8);
-        code.extend(value.to_le_bytes());
+        code.asm()
+            .mov_rm_imm32(Size::Dword, scratch(offset), value as i32);
     }
 }
 
-fn stage(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
+fn stage(code: &mut Code, register: Register, bytes: u8, offset: u32) {
     if register == Register::Zero {
         return;
     }
     load(code, register);
-    code.extend(match bytes {
-        BYTE_BYTES => MOV_RSP_DISP8_AL,
-        HALFWORD_BYTES => MOV_RSP_DISP8_AX,
-        WORD_BYTES => MOV_RSP_DISP8_EAX,
-        DOUBLEWORD_BYTES => MOV_RSP_DISP8_RAX,
+    let size = match bytes {
+        BYTE_BYTES => Size::Byte,
+        HALFWORD_BYTES => Size::Word,
+        WORD_BYTES => Size::Dword,
+        DOUBLEWORD_BYTES => Size::Qword,
         _ => unreachable!("validated exclusive element width"),
-    });
-    code.push((DATA_OFFSET + offset) as u8);
+    };
+    code.asm().mov_store(size, scratch(offset), Gpr::Rax);
 }
 
-fn commit(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
+fn commit(code: &mut Code, register: Register, bytes: u8, offset: u32) {
     if register == Register::Zero {
         return;
     }
-    code.extend(match bytes {
-        BYTE_BYTES => MOVZX_EAX_BYTE_RSP_DISP8,
-        HALFWORD_BYTES => MOVZX_EAX_WORD_RSP_DISP8,
-        WORD_BYTES => MOV_EAX_RSP_DISP8,
-        DOUBLEWORD_BYTES => MOV_RAX_RSP_DISP8,
+    let mut asm = code.asm();
+    match bytes {
+        BYTE_BYTES => asm.movzx(Size::Dword, Gpr::Rax, Size::Byte, scratch(offset)),
+        HALFWORD_BYTES => asm.movzx(Size::Dword, Gpr::Rax, Size::Word, scratch(offset)),
+        WORD_BYTES => asm.mov_load(Size::Dword, Gpr::Rax, scratch(offset)),
+        DOUBLEWORD_BYTES => asm.mov_load(Size::Qword, Gpr::Rax, scratch(offset)),
         _ => unreachable!("validated exclusive result width"),
-    });
-    code.push((DATA_OFFSET + offset) as u8);
+    }
     store(code, register);
 }
 
-fn transfer_data(code: &mut Vec<u8>, data: Data, element_bytes: u8, loading: bool) {
+fn transfer_data(code: &mut Code, data: Data, element_bytes: u8, loading: bool) {
     let emit = if loading { commit } else { stage };
     match data {
         Data::Scalar(register) => emit(code, register, element_bytes, EXCLUSIVE_VALUE_OFFSET),
@@ -269,14 +260,14 @@ fn transfer_data(code: &mut Vec<u8>, data: Data, element_bytes: u8, loading: boo
 /// owner before execution. Each callback handles one exclusive access or CLREX;
 /// on failure scratch space is released first.
 pub(crate) fn emit_context(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     checked: &CheckedOperand,
     pc: u64,
 ) -> Result<(), CompileError> {
     let operand = &checked.operand;
     validate(operand)?;
-    code.extend(SUB_RSP_IMM8);
-    code.push(SCRATCH_BYTES as u8);
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     memory::begin(code);
     let (base, bytes, operation, order, shape) = match *operand {
         Operand::Clear => (
@@ -331,7 +322,7 @@ pub(crate) fn emit_context(
     if let Some(base) = base {
         memory::address::immediate(code, base, 0, AddressMode::Offset);
     } else {
-        code.extend(XOR_EAX_EAX);
+        code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     }
     memory::request(
         code,
@@ -369,14 +360,14 @@ pub(crate) fn emit_context(
         } => commit(code, status, WORD_BYTES, EXCLUSIVE_STATUS_OFFSET),
         Operand::Clear => {}
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
     memory::patch_branch(code, callback_failure, cleanup);
     if let Some(failure) = sp_failure {
         memory::patch_branch(code, failure, cleanup);
     }
-    code.extend(ADD_RSP_IMM8);
-    code.push(SCRATCH_BYTES as u8);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     memory::address::return_if_failed(code);
     Ok(())
 }
@@ -441,7 +432,7 @@ mod tests {
         }
         impl Executable {
             fn new(operand: &Operand) -> Self {
-                let mut bytes = ENTRY.to_vec();
+                let mut bytes = Code::from(ENTRY.to_vec());
                 emit_context(&mut bytes, operand, TEST_PC).unwrap();
                 bytes.push(RET);
                 assert!(bytes.len() <= CODE_ALLOCATION_BYTES);
@@ -464,7 +455,10 @@ mod tests {
                     unsafe { mprotect(pointer, CODE_ALLOCATION_BYTES, PROT_READ_EXECUTE) },
                     0
                 );
-                Self { pointer, bytes }
+                Self {
+                    pointer,
+                    bytes: bytes.into_bytes(),
+                }
             }
             fn run(&self, state: &mut GuestState, view: &mut MemoryContextView) -> u32 {
                 let context = ExecutionContext {
@@ -927,7 +921,7 @@ mod tests {
             CheckedMemoryProfile::SpAlignmentEnabled,
         )?))
     }
-    fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) -> Result<(), CompileError> {
+    fn emit_context(code: &mut Code, operand: &Operand, pc: u64) -> Result<(), CompileError> {
         super::emit_context(
             code,
             &CheckedOperand::new(*operand, CheckedMemoryProfile::SpAlignmentEnabled)?,
@@ -1149,7 +1143,7 @@ mod tests {
         ];
         for operand in invalid {
             assert!(requirements(&operand).is_err());
-            let mut code = vec![0x90];
+            let mut code = Code::from(vec![0x90]);
             assert!(emit_context(&mut code, &operand, 0x1000).is_err());
             assert_eq!(code, [0x90]);
         }
@@ -1339,8 +1333,8 @@ mod tests {
         let historical =
             std::env::var_os("STELA_EXCLUSIVE_HISTORICAL_BODIES").map(std::path::PathBuf::from);
         for (operand, historical_body) in cases {
-            let mut enabled = ENTRY.to_vec();
-            let mut disabled = ENTRY.to_vec();
+            let mut enabled = Code::from(ENTRY.to_vec());
+            let mut disabled = Code::from(ENTRY.to_vec());
             super::emit_context(
                 &mut enabled,
                 &CheckedOperand::new(operand, CheckedMemoryProfile::SpAlignmentEnabled).unwrap(),

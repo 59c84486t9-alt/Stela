@@ -1,7 +1,7 @@
 //! T6000's real shared configuration/SRAM owner.
 //!
 //! These are the original native-program configuration/activation words and the
-//! physical SRAM used by `pmgr::install::t6000`. No request, installed pointer,
+//! physical SRAM iBoot's native-program installation writes. No request, installed pointer,
 //! zero instruction or observed control value alone establishes a hardware
 //! trigger or retirement. The optional Stela-native CIO engine owns accepted
 //! requests, actual packet effects and exact finalized ends. It does not claim
@@ -10,9 +10,7 @@
 use super::{Controller, RequestKind};
 use crate::platform::apple::{
     bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    pmgr::install::t6000::{
-        CODE_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE, activation::PRE_ACTIVATION_BASE,
-    },
+    pmgr::t6000::{CODE_BASE, PRE_ACTIVATION_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE},
 };
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 

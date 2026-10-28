@@ -9,10 +9,9 @@
 //! journal shows the bodies of the commands they refuse. `scrd`'s contract
 //! is not recovered: observation alone advertises it, so its kernel client
 //! binds and registers OOL buffers, and each request is recorded and never
-//! answered. In strict mode it is also refused by name, so the boot stops
-//! at it; in graceful mode the kernel client times out on its own and the
-//! run goes on to record the requests that follow (docs/design/runtime.md
-//! "Unsupported operations" names this diagnostic exception). Observation is
+//! answered: the kernel client times out on its own and the run goes on to
+//! record the requests that follow (docs/design/runtime.md "Unsupported
+//! operations" names this diagnostic exception). Observation is
 //! off by default, and a run with it on qualifies nothing beyond its log.
 //!
 //! The `scrd` capacities are Stela's broad diagnostic choice, one to 32 SEP
@@ -30,9 +29,6 @@ const CAPACITIES: [u8; 4] = [1, 0x20, 1, 0x20];
 pub const INPUT_PREFIX: usize = 4096;
 /// Lines the journal keeps before the host drains it; older ones are counted.
 const JOURNAL_LINES: usize = 512;
-/// The refusal that ends an observed `scrd` request in strict mode.
-pub const REFUSAL: &str =
-    "SEP scrd request recorded (--sep-observe); its contract is not recovered";
 
 /// The services only observation advertises.
 pub fn services() -> [Service; 1] {
@@ -100,7 +96,6 @@ mod tests {
         assert_eq!(name(scrd.id), Some("scrd"));
         assert!(scrd.accepts(true, 0x14000, 0x4000));
         assert!(!scrd.accepts(true, 0x84000, 0x4000));
-        assert!(REFUSAL.contains("scrd"));
         assert_eq!(
             (name(keystore::ID), name(boot_policy::ID)),
             (Some("sks"), Some("pnon"))

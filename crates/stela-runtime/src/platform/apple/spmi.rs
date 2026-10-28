@@ -92,8 +92,6 @@ const REGISTER_READ: u32 = 0x60;
 const REGISTER_ZERO_WRITE: u32 = 0x80;
 const REGISTER_ADDRESS_MASK: u32 = 0x1f;
 const REGISTER_ZERO_DATA_MASK: u8 = 0x7f;
-/// The controller's own response vector.
-pub const RESPONSE_VECTOR: u32 = 0x100;
 
 /// A slave's refusal to complete a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,6 +279,7 @@ pub struct Spmi {
 }
 
 impl Spmi {
+    #[cfg(test)]
     pub fn new(irq: AicInput) -> Self {
         Self::with_configuration(irq, Configuration::GEN2)
     }

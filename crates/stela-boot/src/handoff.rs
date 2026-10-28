@@ -188,6 +188,10 @@ pub struct Handoff {
     pub efi_reset: u64,
     /// The firmware's ACPI RSDP; zero without one.
     pub rsdp: u64,
+    /// The `--wifi-key` file's bytes, read from the ESP; empty when
+    /// `--wifi` names no network or the file could not be read. The engine
+    /// parses and wipes them.
+    pub wifi_key: Region,
 }
 
 #[cfg(test)]

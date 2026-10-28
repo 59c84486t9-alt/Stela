@@ -1,5 +1,6 @@
 //! SVE integer and complex dot products, half-precision FDOT and widening
 //! multiply-add. Indexed sources select within each 128-bit segment.
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::scalable::ElementSize;
 
@@ -364,8 +365,7 @@ const ENCODINGS: &[Encoding] = &[
 
 /// Feature and execution-mode validation belongs to the enclosing SVE profile.
 /// These instructions have no predicate operand; every output lane is active.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = ENCODINGS
         .iter()
         .find(|encoding| word & encoding.mask == encoding.value)?;
@@ -375,7 +375,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         SizeShape::Variable => match (word >> SIZE_SHIFT) & SIZE_MASK {
             2 => ElementSize::Word,
             3 => ElementSize::Doubleword,
-            _ => return Some(Err(())),
+            _ => return Some(Err(Unsupported)),
         },
     };
     let kind = if let Kind::Complex { .. } = encoding.kind {
@@ -417,13 +417,12 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 
 /// Integer-only admission shares allocation checks with the numerical decoder.
 /// Half dot and widening arithmetic remain separate numerical operations.
-#[allow(clippy::result_unit_err)]
-pub fn decode_integer(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode_integer(word: u32) -> Option<Result<Operand, Unsupported>> {
     match decode(word)? {
         Ok(operand) if matches!(operand.kind, Kind::Integer { .. } | Kind::Complex { .. }) => {
             Some(Ok(operand))
         }
-        Err(()) => Some(Err(())),
+        Err(Unsupported) => Some(Err(Unsupported)),
         Ok(_) => None,
     }
 }
@@ -451,7 +450,7 @@ mod tests {
             }
         }
         const CDOT_RESERVED_BYTE: u32 = 0x4400_1000;
-        assert_eq!(decode_integer(CDOT_RESERVED_BYTE), Some(Err(())));
+        assert_eq!(decode_integer(CDOT_RESERVED_BYTE), Some(Err(Unsupported)));
         assert_eq!(decode_integer(0), None);
     }
 
@@ -555,7 +554,10 @@ mod tests {
     #[test]
     fn complex_reserved_sizes_decline_and_rotations_keep_exact_components() {
         for size in 0..2 {
-            assert_eq!(decode(0x44001000 | (size << SIZE_SHIFT)), Some(Err(())));
+            assert_eq!(
+                decode(0x44001000 | (size << SIZE_SHIFT)),
+                Some(Err(Unsupported))
+            );
         }
         for (rotation, expected) in [
             (Rotation::Zero, (0, 1, true)),

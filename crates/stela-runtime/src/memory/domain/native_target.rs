@@ -31,6 +31,13 @@ pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> Target
 mod tests {
     use super::*;
 
+    /// Every capability `restrict` keeps.
+    const LEGACY: TargetCpu = TargetCpu::X86_64_V2
+        .with_pclmulqdq()
+        .with_aes()
+        .with_sha()
+        .with_atomic_load16();
+
     #[test]
     fn neither_limit_nor_current_target_can_promote_the_other() {
         for left in [
@@ -38,8 +45,8 @@ mod tests {
             TargetCpu::Ssse3,
             TargetCpu::Sse41,
             TargetCpu::Sse42,
-            TargetCpu::Sse42Complete,
-            TargetCpu::Avx512Complete,
+            LEGACY,
+            TargetCpu::X86_64_V4,
         ] {
             for right in [
                 TargetCpu::Baseline,
@@ -49,7 +56,7 @@ mod tests {
                 TargetCpu::Aes,
                 TargetCpu::Sha,
                 TargetCpu::AtomicLoad16,
-                TargetCpu::Sse42Complete,
+                LEGACY,
             ] {
                 let common = restrict(left, right);
                 assert!(left.supports(common));
@@ -66,14 +73,14 @@ mod tests {
         let worker = TargetCpu::Sse41.with_aes().with_cx16();
         assert_eq!(restrict(actual, worker), TargetCpu::Sse41.with_aes());
         assert_eq!(
-            restrict(TargetCpu::Baseline, TargetCpu::Avx512Complete),
+            restrict(TargetCpu::Baseline, TargetCpu::X86_64_V4),
             TargetCpu::Baseline
         );
     }
 
     #[test]
     fn caller_modes_and_extended_state_are_never_promoted_by_a_limit() {
-        let rich = TargetCpu::Avx512Complete
+        let rich = TargetCpu::X86_64_V4
             .with_doit()
             .with_line_atomic()
             .with_data_independent_timing();

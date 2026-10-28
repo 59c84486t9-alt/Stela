@@ -108,14 +108,20 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect();
         let base = GuestAddress(0x1000);
-        let plan =
-            CompilationPlan::new(&source, base, BlockProfile::Ordinary, TargetCpu::Baseline)?;
+        let plan = CompilationPlan::new(
+            &source,
+            base,
+            &stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline),
+        )?;
         let identity = crate::block_plan_identity(&source, base, TargetCpu::Baseline, &plan)?;
         let requirements = plan.memory_requirements();
-        let original =
-            CompilationPlan::new(&source, base, BlockProfile::Ordinary, TargetCpu::Baseline)?
-                .compile()?
-                .native;
+        let original = CompilationPlan::new(
+            &source,
+            base,
+            &stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline),
+        )?
+        .compile()?
+        .native;
         let calls = core::cell::Cell::new(0);
         let (manifest, native) = generate(identity.clone(), requirements, || {
             calls.set(calls.get() + 1);

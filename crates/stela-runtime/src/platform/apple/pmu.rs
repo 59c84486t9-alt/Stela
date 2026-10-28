@@ -315,6 +315,7 @@ pub struct Pmu {
 
 impl Pmu {
     /// `windows` are the scratchpad and log windows; the RTC adds its own.
+    #[cfg(test)]
     pub fn new(windows: Vec<Window>, rtc: Option<Rtc>, wall: Option<WallClock>) -> Self {
         // Original J473 legacy API; new board admission supplies the mask explicitly.
         let config = Configuration::new(windows, rtc, u8::from(rtc.is_some()))
@@ -324,6 +325,7 @@ impl Pmu {
 
     /// Instantiate only validated byte resources. Initial wall time is a declared
     /// emulated resource value, never a captured PMIC identity or firmware image.
+    #[cfg(test)]
     pub fn configured(
         config: Configuration,
         wall: Option<WallClock>,

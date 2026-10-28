@@ -1,6 +1,9 @@
 //! FEAT_CPA2 controls for checked memory.
 
-use super::{FixedProcessMemoryControls, ResolvedPointerChecks, SystemState};
+use super::FixedProcessMemoryControls;
+#[cfg(feature = "std")]
+use super::{ResolvedPointerChecks, SystemState};
+#[cfg(feature = "std")]
 use crate::system::debug::DebugControls;
 
 // Preparation is reached only by the hosted EL0 process owner.
@@ -21,12 +24,14 @@ use stela_compiler::{
     },
 };
 
+#[cfg(feature = "std")]
 pub(crate) struct PointerMemoryAuthorization<'run> {
     _controls: &'run FixedProcessMemoryControls,
     _system: &'run SystemState,
     _debug: &'run DebugControls,
     checks: ResolvedPointerChecks,
 }
+#[cfg(feature = "std")]
 impl PointerMemoryAuthorization<'_> {
     pub(crate) const fn checks(&self) -> ResolvedPointerChecks {
         self.checks

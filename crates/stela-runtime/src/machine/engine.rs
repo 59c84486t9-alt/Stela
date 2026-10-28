@@ -8,12 +8,13 @@ mod device_access;
 mod device_read;
 mod device_write;
 mod exclusive;
-// The profiles' reports belong to the hosted runtime, which only an Intel
-// Mac builds (`crate::hosted`); elsewhere the engine records them unread.
 #[cfg(all(feature = "std", feature = "native-profile"))]
 #[cfg_attr(
     not(all(target_os = "macos", target_arch = "x86_64")),
-    allow(dead_code)
+    expect(
+        dead_code,
+        reason = "the hosted runtime, which only an Intel Mac builds, reads the reports"
+    )
 )]
 pub(crate) mod floating_profile;
 mod guarded;
@@ -22,7 +23,10 @@ pub mod installed_code;
 #[cfg(all(feature = "std", feature = "native-profile"))]
 #[cfg_attr(
     not(all(target_os = "macos", target_arch = "x86_64")),
-    allow(dead_code)
+    expect(
+        dead_code,
+        reason = "the hosted runtime, which only an Intel Mac builds, reads the reports"
+    )
 )]
 pub(crate) mod metrics;
 mod monitor;
@@ -110,9 +114,9 @@ use stela_compiler::{
         },
     },
     block::{
-        self, BlockProfile, ExitKind, PointerAuthentication, PointerAuthenticationKey,
+        self, BlockProfile, ExitKind, Features, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation,
-        el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
+        scalar::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::SystemOperation,
     },
     x86_64::{
@@ -124,7 +128,7 @@ use stela_compiler::{
 pub use stored::{Offer, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 
-const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
+const PROFILE: BlockProfile = BlockProfile::new(Features::SYSTEM_MODE);
 const INSTRUCTION: u64 = 4;
 const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
@@ -149,8 +153,7 @@ const CHAIN_LIMIT: u64 = 4096;
 /// every install would not free.
 const LOW_MEMORY_INSTALLS: u64 = 4096;
 
-/// The distinct refusals of one device register and direction that graceful
-/// mode reports.
+/// The distinct refusals of one device register and direction reported.
 const DEVICE_REFUSALS_REPORTED: usize = 16;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
@@ -512,7 +515,7 @@ pub trait Host {
     }
 
     /// The address to call installed context-leaf code at, with
-    /// `stela_compiler::extended`'s two-argument ABI (the SVE and SME
+    /// `stela_compiler::scalable_context`'s two-argument ABI (the SVE and SME
     /// instructions run so), or `None` on a host that cannot run it. The
     /// engine calls it outside any borrow of the host, whose RAM the leaf's
     /// memory service then reads and writes.
@@ -1268,9 +1271,8 @@ pub struct Statistics {
     /// of their accesses reached a guest address outside the host's native
     /// ranges.
     pub translated_pages: u64,
-    /// Operations answered with a degraded response outside strict mode
-    /// ([`Machine::set_strict`]); each distinct one is also reported once
-    /// ([`Machine::take_unmodeled`]).
+    /// Operations answered with a degraded response; each distinct one is
+    /// also reported once ([`Machine::take_unmodeled`]).
     pub degraded: u64,
     /// Counter ticks the host core halted while the PE waited, and spun
     /// while it waited for an event another core's store to its monitored
@@ -1916,9 +1918,6 @@ pub struct Machine<H: Host, D: Devices> {
     /// byte (`set_watches`), and the hits not yet taken (`take_watch_hits`).
     watches: Vec<(u64, u64)>,
     watch_hits: Vec<WatchHit>,
-    /// Stop at the first operation the machine cannot carry out in full
-    /// instead of answering it degraded (`set_strict`).
-    strict: bool,
     /// Every degraded operation met so far, each the first time, and those
     /// not yet taken (`take_unmodeled`); device accesses are keyed by
     /// register, direction and refusal in `degraded_devices`.
@@ -1965,7 +1964,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
-        BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), scalable::Leaf>,
+        BTreeMap<(u64, u32, stela_compiler::scalable_context::ScalableProfile), scalable::Leaf>,
     /// The Allocation Tags of guest memory (FEAT_MTE2).
     tags: crate::machine::tags::Store,
     /// The current [`Regime::tag_checks`].
@@ -2098,7 +2097,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             monitor_tracing: false,
             watches: Vec::new(),
             watch_hits: Vec::new(),
-            strict: true,
             unmodeled_met: Vec::new(),
             unmodeled: Vec::new(),
             slice_end: processors::QUANTUM,
@@ -2480,19 +2478,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         core::mem::take(&mut self.watch_hits)
     }
 
-    /// Strict mode, the default (tests, benchmarks): stop at the first operation this machine cannot carry
-    /// out in full (`Stop::Unsupported`). Graceful mode (`false`, a user's
-    /// boot) answers each with its tier's degraded response, reports it
-    /// once and continues ([`Self::degrade`]; docs/design/runtime.md
-    /// #unsupported-operations).
-    pub fn set_strict(&mut self, strict: bool) {
-        self.strict = strict;
-    }
-
     /// What iBoot left in the core lock registers (`machine::ctrr`): every
     /// cluster and PE takes it now, and again when it starts. The boot
     /// mount calls this before the first instruction.
-    pub fn hand_off_core_locks(&mut self, handoff: ctrr::Handoff) {
+    pub fn hand_off_core_locks(&mut self, handoff: ctrr::CoreLocks) {
         let handoff = alloc::sync::Arc::new(handoff);
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             processors::Peer::Parked(parked) => Some(parked.cpu_mut()),
@@ -2513,14 +2502,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The policy point for an operation this machine cannot carry out in
-    /// full: strict, its stop; graceful, `Ok` after counting it
-    /// (`Statistics::degraded`) and reporting it the first time (device
-    /// accesses once per register, direction and refusal), the caller then giving
-    /// the degraded response of its tier.
-    fn degrade(&mut self, requirement: Requirement) -> Step {
-        if self.strict {
-            return Err(Stop::Unsupported(requirement));
-        }
+    /// full (docs/design/runtime.md "Unsupported operations"): count it
+    /// (`Statistics::degraded`) and report it the first time (device
+    /// accesses once per register, direction and refusal); the caller then
+    /// gives the degraded response of its tier.
+    fn degrade(&mut self, requirement: Requirement) {
         self.statistics.degraded += 1;
         let first = match &requirement.kind {
             RequirementKind::Device {
@@ -2546,10 +2532,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if first {
             self.unmodeled.push(requirement);
         }
-        Ok(())
     }
 
-    /// Graceful mode's answer to an instruction the engine cannot execute,
+    /// The answer to an instruction the engine cannot execute,
     /// at the run loop: the UNDEFINED exception at its PC, which an Apple CPU
     /// takes for an encoding it does not implement. Only a stop raised
     /// before the instruction's effects (the PE still at its PC and EL) on a
@@ -2564,8 +2549,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | RequirementKind::SystemInstruction { .. }
                 | RequirementKind::SystemRegister { .. }
         );
-        if self.strict
-            || !instruction
+        if !instruction
             || requirement.pc != self.cpu.pc
             || requirement.el != self.cpu.pstate.el
             || self.cpu.has_canonical_memory() && self.serial_hold.is_none()
@@ -2573,7 +2557,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return Err(Stop::Unsupported(requirement));
         }
-        self.degrade(requirement)?;
+        self.degrade(requirement);
         self.undefined()
     }
 
@@ -3451,10 +3435,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn poll_devices_at(&mut self, now: u64, deadline: u64) -> Step {
         if now >= deadline {
             // A device's asynchronous work it cannot carry out is dropped,
-            // reported once, outside strict mode.
+            // reported once.
             if let Err(error) = self.device_transfer(now) {
                 let advance = RequirementKind::DeviceAdvance(format!("{error:?}"));
-                self.degrade(self.requirement(advance))?;
+                self.degrade(self.requirement(advance));
             }
             self.device_lines = None;
         }
@@ -4272,9 +4256,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let offset = (pc - page) as usize;
         let mut source = vec![0u8; available];
         if !self.host.read_ram(physical, &mut source) {
-            // Graceful, the fetch takes the external abort the fabric
-            // raises outside memory (IFSC 0b010000).
-            self.degrade(self.requirement(RequirementKind::Fetch { physical }))?;
+            // The fetch takes the external abort the fabric raises outside
+            // memory (IFSC 0b010000).
+            self.degrade(self.requirement(RequirementKind::Fetch { physical }));
             return Ok(Some(Fetched::Exception(self.external_abort_exception(
                 [Class::InstructionAbortLower, Class::InstructionAbortSame],
                 SYNCHRONOUS_EXTERNAL_ABORT,
@@ -5950,9 +5934,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.pc = pc;
         self.next()?;
         // The consumed data is retired; a failed board settlement after it
-        // stops in strict mode and is reported once otherwise.
+        // is reported once.
         if let Some(requirement) = settled_failure {
-            self.degrade(requirement)?;
+            self.degrade(requirement);
         }
         match self.devices.take_reset() {
             Some(reason) => Err(Stop::Reset(reason)),
@@ -5994,7 +5978,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// completes degraded, reading 0 or dropping the write, else the step
     /// the instruction ends with. A survey answers every register access so
     /// and records it ([`Self::begin_survey`]); otherwise [`Self::degrade`]
-    /// decides. Graceful, an address no device covers takes the synchronous
+    /// decides: an address no device covers takes the synchronous
     /// external abort the fabric raises there, and a register, setting or
     /// effect a device does not carry out completes degraded: the device
     /// keeps what it accepted and nothing is invented for the rest.
@@ -6023,16 +6007,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         requirement.address = Some(address);
         // Each written value is the same refusal (`degrade`).
         requirement.written = written;
-        if let Err(stop) = self.degrade(requirement) {
-            return Some(Err(stop));
-        }
+        self.degrade(requirement);
         unmapped.then(|| self.external_abort(address, write))
     }
 
-    /// A device access in a form the engine cannot carry out (`detail`):
-    /// strict, the stop; graceful, reported once per register, direction
-    /// and refusal, it takes the synchronous external abort without reaching
-    /// the device.
+    /// A device access in a form the engine cannot carry out (`detail`),
+    /// reported once per register, direction and refusal: it takes the
+    /// synchronous external abort without reaching the device.
     fn device_unexecuted(
         &mut self,
         address: u64,
@@ -6046,7 +6027,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             detail,
         });
         requirement.address = Some(address);
-        self.degrade(requirement)?;
+        self.degrade(requirement);
         self.external_abort(address, write)
     }
 
@@ -6184,17 +6165,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// clear) while an Apple VM register holds state this machine does not
     /// apply to a guest (`impdef::Registers::guest_state`): SPTM and the
     /// kernel's hypervisor load a VM's values into them before it runs
-    /// (`machine::impdef` `GUEST_EVIDENCE`). Strict, it stops; graceful,
-    /// the guest is entered without that state.
-    fn guest_entry(&mut self, spsr: u64, guarded: bool) -> Result<(), Stop> {
+    /// (`machine::impdef` `GUEST_EVIDENCE`). The guest is entered without
+    /// that state, reported once.
+    fn guest_entry(&mut self, spsr: u64, guarded: bool) {
         let enters_guest = !guarded
             && !self.cpu.in_host()
             && super::exception::spsr_target(spsr).is_ok_and(|(el, _)| el < 2);
-        match self.cpu.apple.impdef.guest_state() {
-            Some(entry) if enters_guest => {
-                self.degrade(self.requirement(RequirementKind::VmState(entry.name)))
-            }
-            _ => Ok(()),
+        if let Some(entry) = self.cpu.apple.impdef.guest_state()
+            && enters_guest
+        {
+            self.degrade(self.requirement(RequirementKind::VmState(entry.name)));
         }
     }
 
@@ -6346,7 +6326,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
         }
-        self.guest_entry(self.cpu.exception_state(), self.cpu.pstate.guarded)?;
+        self.guest_entry(self.cpu.exception_state(), self.cpu.pstate.guarded);
         let trace = self.monitor_before(MonitorKind::ExceptionReturn);
         self.cpu.exception_return(target).map_err(|_| {
             self.unsupported(RequirementKind::Native(
@@ -6638,7 +6618,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 if let Some(missing) = changes.unmodeled {
                     let refusal = Refusal::UnsupportedSetting(missing);
-                    self.degrade(self.register_requirement(word, access, refusal))?;
+                    self.degrade(self.register_requirement(word, access, refusal));
                 }
                 if let Some(refuses) = changes.irq_steering {
                     let now = self.now();
@@ -6698,8 +6678,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// A System register access whose model refused it (an encoding the
     /// chip's components use without a model, or a setting or state the
-    /// model does not carry out): stop in strict mode; graceful, the
-    /// register behaves as storage. A read returns the value last written
+    /// model does not carry out), reported once: the register behaves as
+    /// storage. A read returns the value last written
     /// to it, 0 before the first write, and a write is held without the
     /// refused effect ([`Cpu::degraded`](crate::machine::cpu::Cpu)).
     pub(super) fn register_refused(
@@ -6708,7 +6688,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         access: Option<RegisterAccess>,
         refusal: Refusal,
     ) -> Step {
-        self.degrade(self.register_requirement(word, access, refusal))?;
+        self.degrade(self.register_requirement(word, access, refusal));
         if let Some(access) = access {
             let key = access.encoding().selector();
             let rt = usize::from(access.rt());
@@ -7368,7 +7348,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_instructions_stop_strictly_or_are_undefined_once_reported() {
+    fn unsupported_instructions_are_undefined_once_reported() {
         let mut machine = machine(&[]);
         let instruction = |machine: &Machine<_, _>| {
             machine.unsupported(RequirementKind::Instruction {
@@ -7376,14 +7356,6 @@ mod tests {
                 detail: "an instruction the engine lacks".into(),
             })
         };
-        machine.cpu.pc = BASE;
-        let stop = instruction(&machine);
-        assert!(matches!(
-            machine.undefined_instead(stop),
-            Err(Stop::Unsupported(_))
-        ));
-        assert_eq!(machine.cpu.pc, BASE);
-        machine.set_strict(false);
         for _ in 0..2 {
             machine.cpu.set_pstate(Pstate::reset(1));
             machine.cpu.pc = BASE;
@@ -7423,20 +7395,12 @@ mod tests {
     }
 
     #[test]
-    fn fetches_outside_memory_stop_strictly_or_take_an_external_abort() {
+    fn fetches_outside_memory_take_an_external_abort() {
         const OUTSIDE: u64 = BASE - 0x1000;
         let mut machine = machine(&[]);
         machine.cpu.pc = OUTSIDE;
-        assert!(matches!(
-            machine.fetch_block(OUTSIDE, false),
-            Err(Stop::Unsupported(Requirement {
-                kind: RequirementKind::Fetch { .. },
-                ..
-            }))
-        ));
-        machine.set_strict(false);
         let Ok(Fetched::Exception(exception)) = machine.fetch_block(OUTSIDE, false) else {
-            panic!("graceful fetches outside memory abort");
+            panic!("fetches outside memory abort");
         };
         assert_eq!(
             exception.syndrome,
@@ -7450,7 +7414,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_system_registers_stop_strictly_or_act_as_storage_once_reported() {
+    fn refused_system_registers_act_as_storage_once_reported() {
         // MRS and MSR x0 of S3_4_C15_C13_6, an implementation-defined
         // storage register, and S3_4_C15_C12_0, a control register that
         // takes no set bit (`machine::impdef`).
@@ -7465,16 +7429,9 @@ mod tests {
             let step = machine.system_instruction(word);
             (step, machine.cpu.state.x[0])
         };
-        // Strict: the read before the first write, whose value is unknown,
-        // and the setting the model cannot honor stop.
-        for (word, x0) in [(KEY_READ, 0xdead), (CONTROL_WRITE, 5)] {
-            let (step, _) = run(&mut machine, word, x0);
-            assert!(matches!(step, Err(Stop::Unsupported(_))));
-            assert_eq!(machine.cpu.pc, BASE);
-        }
-        machine.set_strict(false);
-        // Graceful: the read returns 0, and the control holds the refused
-        // setting without its effect.
+        // The read before the first write, whose value is unknown, returns
+        // 0, and the control holds the setting the model cannot honor
+        // without its effect.
         assert_eq!(run(&mut machine, KEY_READ, 0xdead), (Ok(()), 0));
         assert_eq!(machine.cpu.pc, BASE + 4);
         for _ in 0..2 {
@@ -7489,37 +7446,27 @@ mod tests {
     }
 
     #[test]
-    fn refused_device_registers_stop_strictly_or_read_zero_and_drop_writes() {
+    fn refused_device_registers_read_zero_and_drop_writes() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
         // ldr x2, [x1]; str x2, [x1]
         let (load, store) = (0xf940_0022, 0xf900_0022);
-        for strict in [true, false] {
-            let mut devices = pair_fault_device();
-            devices.refused = Some(DEVICE);
-            let mut machine = board(&[], devices, Vec::new());
-            machine.set_strict(strict);
-            machine.write_register(Register::X(1), DEVICE);
-            let esr = machine.cpu.read(SystemRegister::ESR_EL1);
-            for (word, write) in [(load, false), (store, true), (load, false)] {
-                machine.cpu.pc = BASE;
-                machine.write_register(Register::X(2), 0x1234);
-                let step = machine.device_access(word, DEVICE, DEVICE, write);
-                if strict {
-                    assert!(matches!(step, Err(Stop::Unsupported(_))));
-                    assert_eq!(machine.cpu.pc, BASE);
-                    assert_eq!(machine.read_register(Register::X(2)), 0x1234);
-                } else {
-                    step.unwrap();
-                    assert_eq!(machine.cpu.pc, BASE + 4);
-                    let expected = if write { 0x1234 } else { 0 };
-                    assert_eq!(machine.read_register(Register::X(2)), expected);
-                }
-            }
-            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
-            assert!(machine.devices.stores.is_empty());
-            // One report per register and direction.
-            assert_eq!(machine.take_unmodeled().len(), if strict { 0 } else { 2 });
+        let mut devices = pair_fault_device();
+        devices.refused = Some(DEVICE);
+        let mut machine = board(&[], devices, Vec::new());
+        machine.write_register(Register::X(1), DEVICE);
+        let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+        for (word, write) in [(load, false), (store, true), (load, false)] {
+            machine.cpu.pc = BASE;
+            machine.write_register(Register::X(2), 0x1234);
+            machine.device_access(word, DEVICE, DEVICE, write).unwrap();
+            assert_eq!(machine.cpu.pc, BASE + 4);
+            let expected = if write { 0x1234 } else { 0 };
+            assert_eq!(machine.read_register(Register::X(2)), expected);
         }
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
+        assert!(machine.devices.stores.is_empty());
+        // One report per register and direction.
+        assert_eq!(machine.take_unmodeled().len(), 2);
     }
 
     #[test]
@@ -7545,14 +7492,13 @@ mod tests {
     #[test]
     fn a_device_register_reports_each_refusal_once_up_to_its_first_few() {
         let mut machine = machine(&[0]);
-        machine.set_strict(false);
         let mut refuse = |detail: &str| {
             let requirement = machine.requirement(RequirementKind::Device {
                 physical: 0x1000,
                 write: true,
                 detail: detail.into(),
             });
-            machine.degrade(requirement).unwrap();
+            machine.degrade(requirement);
         };
         for detail in ["one operation", "another", "one operation"] {
             refuse(detail);
@@ -7568,18 +7514,12 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_device_accesses_stop_strictly_or_take_an_external_abort_once_reported() {
+    fn unmapped_device_accesses_take_an_external_abort_once_reported() {
         const DEVICE: u64 = 0x2_3d2b_0010;
         // ldr w0, [x1]; str w0, [x1]
         let (load, store) = (0xb940_0020, 0xb900_0020);
         let mut machine = machine(&[0]);
         machine.write_register(Register::X(1), DEVICE);
-        machine.set_strict(true);
-        assert!(matches!(
-            machine.device_access(load, DEVICE, DEVICE, false),
-            Err(Stop::Unsupported(_))
-        ));
-        machine.set_strict(false);
         for (word, write) in [(load, false), (store, true), (load, false)] {
             machine.cpu.pc = BASE;
             machine.device_access(word, DEVICE, DEVICE, write).unwrap();
@@ -7638,12 +7578,12 @@ mod tests {
                 (DEVICE + 8, 8, Some(0xffff_ffff_8000_0a04))
             ]
         );
-        // A pair whose second element lies on another page refuses.
+        // A pair whose second element lies on another page is reported once.
         machine.write_register(Register::X(1), DEVICE + 0x5f8);
-        assert!(matches!(
-            machine.device_access(0xa940_0c22, DEVICE + 0x5f8, DEVICE + 0x5f8, false),
-            Err(Stop::Unsupported(_))
-        ));
+        machine
+            .device_access(0xa940_0c22, DEVICE + 0x5f8, DEVICE + 0x5f8, false)
+            .unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 1);
     }
 
     /// A real register store can start DMA that commits before later failure.
@@ -7760,69 +7700,61 @@ mod tests {
     #[test]
     fn consumed_device_pair_retires_before_reporting_later_board_failure() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
-        for strict in [false, true] {
-            for survey in [false, true] {
-                for writeback in [false, true] {
-                    let mut devices = pair_fault_device();
-                    devices.pair = Some(Ok(ConsumedPair {
-                        values: [0x1234, 0x5678],
-                        settlement: Err(DeviceError::Refused("retained wire failure".into())),
-                    }));
-                    let mut machine = board(&[], devices, Vec::new());
-                    machine.set_strict(strict);
-                    if survey {
-                        machine.begin_survey();
-                    }
-                    machine.set_watches(&[(DEVICE, 16)]);
-                    machine.cpu.pstate.btype = 1;
-                    machine.write_register(Register::X(1), DEVICE - 16);
-                    machine.write_register(Register::X(8), DEVICE);
-                    machine.write_register(Register::X(9), 0xdead);
-                    let esr = machine.cpu.read(SystemRegister::ESR_EL1);
-                    let elr = machine.cpu.read(SystemRegister::ELR_EL1);
-                    // Original PTD shape: ldp x8, x9, [x8]. Also cover
-                    // pre-indexed ldp x2, x3, [x1, #16]! independently.
-                    let word = if writeback { 0xa9c1_0c22 } else { 0xa940_2508 };
-                    // Strict, the failure stops; graceful, it is reported
-                    // once. Neither aborts nor replays the consumed access.
-                    let requirement = match machine.device_access(word, DEVICE, DEVICE, false) {
-                        Err(Stop::Unsupported(requirement)) if strict => requirement,
-                        Ok(()) if !strict => {
-                            let mut reports = machine.take_unmodeled();
-                            assert_eq!(reports.len(), 1);
-                            reports.remove(0)
-                        }
-                        other => panic!("consumed service failure: {other:?}"),
-                    };
-                    assert_eq!(requirement.pc, BASE);
-                    assert_eq!(requirement.address, Some(DEVICE));
-                    assert!(matches!(requirement.kind, RequirementKind::Device {
+        for survey in [false, true] {
+            for writeback in [false, true] {
+                let mut devices = pair_fault_device();
+                devices.pair = Some(Ok(ConsumedPair {
+                    values: [0x1234, 0x5678],
+                    settlement: Err(DeviceError::Refused("retained wire failure".into())),
+                }));
+                let mut machine = board(&[], devices, Vec::new());
+                if survey {
+                    machine.begin_survey();
+                }
+                machine.set_watches(&[(DEVICE, 16)]);
+                machine.cpu.pstate.btype = 1;
+                machine.write_register(Register::X(1), DEVICE - 16);
+                machine.write_register(Register::X(8), DEVICE);
+                machine.write_register(Register::X(9), 0xdead);
+                let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+                let elr = machine.cpu.read(SystemRegister::ELR_EL1);
+                // Original PTD shape: ldp x8, x9, [x8]. Also cover
+                // pre-indexed ldp x2, x3, [x1, #16]! independently.
+                let word = if writeback { 0xa9c1_0c22 } else { 0xa940_2508 };
+                // The failure is reported once, without aborting or
+                // replaying the consumed access.
+                machine.device_access(word, DEVICE, DEVICE, false).unwrap();
+                let mut reports = machine.take_unmodeled();
+                assert_eq!(reports.len(), 1);
+                let requirement = reports.remove(0);
+                assert_eq!(requirement.pc, BASE);
+                assert_eq!(requirement.address, Some(DEVICE));
+                assert!(matches!(requirement.kind, RequirementKind::Device {
                         physical: DEVICE, write: false, ref detail
                     } if detail.contains("retained wire failure")));
-                    assert_eq!(machine.cpu.pc, BASE + 4);
-                    assert_eq!(machine.cpu.pstate.btype, 0);
-                    assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
-                    assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), elr);
-                    let data = if writeback { [2, 3] } else { [8, 9] };
-                    assert_eq!(machine.read_register(Register::X(data[0])), 0x1234);
-                    assert_eq!(machine.read_register(Register::X(data[1])), 0x5678);
-                    assert_eq!(
-                        machine.read_register(Register::X(1)),
-                        if writeback { DEVICE } else { DEVICE - 16 }
-                    );
-                    assert_eq!(machine.devices.pair_reads, 1);
-                    assert!(machine.devices.reads.is_empty());
-                    assert!(machine.devices.stores.is_empty());
-                    assert_eq!(machine.devices.transfers, 0);
-                    assert!(machine.take_survey().is_empty());
-                    let hits = machine.take_watch_hits();
-                    assert_eq!(hits.len(), 2);
-                    for (index, hit) in hits.iter().enumerate() {
-                        assert_eq!(hit.pc, BASE);
-                        assert_eq!(hit.physical, DEVICE + index as u64 * 8);
-                        assert_eq!(hit.value, [0x1234, 0x5678][index]);
-                        assert!(hit.completed && !hit.write);
-                    }
+                assert_eq!(machine.cpu.pc, BASE + 4);
+                assert_eq!(machine.cpu.pstate.btype, 0);
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
+                assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), elr);
+                let data = if writeback { [2, 3] } else { [8, 9] };
+                assert_eq!(machine.read_register(Register::X(data[0])), 0x1234);
+                assert_eq!(machine.read_register(Register::X(data[1])), 0x5678);
+                assert_eq!(
+                    machine.read_register(Register::X(1)),
+                    if writeback { DEVICE } else { DEVICE - 16 }
+                );
+                assert_eq!(machine.devices.pair_reads, 1);
+                assert!(machine.devices.reads.is_empty());
+                assert!(machine.devices.stores.is_empty());
+                assert_eq!(machine.devices.transfers, 0);
+                assert!(machine.take_survey().is_empty());
+                let hits = machine.take_watch_hits();
+                assert_eq!(hits.len(), 2);
+                for (index, hit) in hits.iter().enumerate() {
+                    assert_eq!(hit.pc, BASE);
+                    assert_eq!(hit.physical, DEVICE + index as u64 * 8);
+                    assert_eq!(hit.value, [0x1234, 0x5678][index]);
+                    assert!(hit.completed && !hit.write);
                 }
             }
         }
@@ -7831,37 +7763,27 @@ mod tests {
     #[test]
     fn whole_device_pair_refusal_precedes_consumption_and_retirement() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
-        for strict in [true, false] {
-            let mut devices = pair_fault_device();
-            devices.pair = Some(Err(DeviceError::Refused("unknown publication".into())));
-            let mut machine = board(&[], devices, Vec::new());
-            machine.set_strict(strict);
-            machine.write_register(Register::X(8), DEVICE);
-            machine.write_register(Register::X(9), 0xdead);
-            let esr = machine.cpu.read(SystemRegister::ESR_EL1);
-            let result = machine.device_access(0xa940_2508, DEVICE, DEVICE, false);
-            if strict {
-                // Nothing retires before the stop.
-                assert!(matches!(result, Err(Stop::Unsupported(_))));
-                assert_eq!(machine.cpu.pc, BASE);
-                assert_eq!(machine.read_register(Register::X(8)), DEVICE);
-                assert_eq!(machine.read_register(Register::X(9)), 0xdead);
-            } else {
-                // A register the device refuses reads 0, reported once.
-                result.unwrap();
-                assert_eq!(machine.cpu.pc, BASE + 4);
-                assert_eq!(machine.read_register(Register::X(8)), 0);
-                assert_eq!(machine.read_register(Register::X(9)), 0);
-                assert_eq!(machine.take_unmodeled().len(), 1);
-            }
-            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
-            assert_eq!(machine.devices.pair_reads, 1);
-            assert!(machine.devices.reads.is_empty());
-        }
+        let mut devices = pair_fault_device();
+        devices.pair = Some(Err(DeviceError::Refused("unknown publication".into())));
+        let mut machine = board(&[], devices, Vec::new());
+        machine.write_register(Register::X(8), DEVICE);
+        machine.write_register(Register::X(9), 0xdead);
+        let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+        // A register the device refuses reads 0, reported once.
+        machine
+            .device_access(0xa940_2508, DEVICE, DEVICE, false)
+            .unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        assert_eq!(machine.read_register(Register::X(8)), 0);
+        assert_eq!(machine.read_register(Register::X(9)), 0);
+        assert_eq!(machine.take_unmodeled().len(), 1);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
+        assert_eq!(machine.devices.pair_reads, 1);
+        assert!(machine.devices.reads.is_empty());
     }
 
     #[test]
-    fn device_pair_store_faults_keep_committed_register_and_dma_prefixes_without_writeback() {
+    fn device_pair_store_faults_drop_the_refused_member_and_keep_the_rest() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
         for failed_element in 0..2 {
             for service_failure in [false, true] {
@@ -7872,37 +7794,48 @@ mod tests {
                     devices.refused = Some(DEVICE + failed_element as u64 * 8);
                 }
                 let mut machine = board(&[], devices, Vec::new());
-                machine.set_strict(true);
                 machine.set_watches(&[(DEVICE, 16)]);
                 machine.write_register(Register::X(1), DEVICE - 16);
                 machine.write_register(Register::X(2), 0x1234);
                 machine.write_register(Register::X(3), 0x5678);
                 // stp x2, x3, [x1, #16]!
-                let Err(Stop::Unsupported(requirement)) =
-                    machine.device_access(0xa981_0c22, DEVICE, DEVICE, true)
-                else {
-                    panic!("the pair must expose its original failure");
-                };
+                machine
+                    .device_access(0xa981_0c22, DEVICE, DEVICE, true)
+                    .unwrap();
+                let mut reports = machine.take_unmodeled();
+                assert_eq!(reports.len(), 1);
+                let requirement = reports.remove(0);
                 let failed_address = DEVICE + failed_element as u64 * 8;
                 assert_eq!(requirement.address, Some(failed_address));
                 assert!(
                     matches!(requirement.kind, RequirementKind::Device { physical, write: true, .. } if physical == failed_address)
                 );
-                assert_eq!(machine.cpu.pc, BASE);
-                assert_eq!(machine.read_register(Register::X(1)), DEVICE - 16);
-                let committed = failed_element + usize::from(service_failure);
-                assert_eq!(machine.devices.stores.len(), committed);
-                assert_eq!(machine.devices.transfers, committed);
+                // The pair completes with its writeback. A refused member is
+                // dropped; a member whose service failed keeps its store and
+                // the DMA it committed.
+                assert_eq!(machine.cpu.pc, BASE + 4);
+                assert_eq!(machine.read_register(Register::X(1)), DEVICE);
+                let stored: Vec<_> = [(DEVICE, 0x1234u64), (DEVICE + 8, 0x5678)]
+                    .into_iter()
+                    .enumerate()
+                    .filter(|&(index, _)| service_failure || index != failed_element)
+                    .map(|(_, store)| store)
+                    .collect();
+                assert_eq!(machine.devices.stores, stored);
+                assert_eq!(machine.devices.transfers, stored.len());
                 let mut ram = [0; 16];
                 assert!(machine.host.read_ram(BASE + 0x800, &mut ram));
                 let mut expected = [0; 16];
-                for (index, value) in [0x1234u64, 0x5678].into_iter().take(committed).enumerate() {
+                for (index, &(_, value)) in stored.iter().enumerate() {
                     expected[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
                 }
                 assert_eq!(ram, expected);
                 let hits = machine.take_watch_hits();
-                assert_eq!(hits.len(), failed_element + 1);
-                assert_eq!(hits.iter().filter(|hit| hit.completed).count(), committed);
+                assert_eq!(hits.len(), 2);
+                assert_eq!(
+                    hits.iter().filter(|hit| hit.completed).count(),
+                    stored.len()
+                );
                 assert!(hits.iter().all(|hit| hit.write));
             }
         }
@@ -7911,23 +7844,25 @@ mod tests {
     #[test]
     fn survey_never_substitutes_a_failed_service_after_an_accepted_scalar_or_pair_store() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
-        for word in [0xb900_0022, 0xa900_0c22] {
+        for (word, members) in [(0xb900_0022, 1), (0xa900_0c22, 2)] {
             // str w2 / stp x2, x3, [x1]
             let mut devices = pair_fault_device();
             devices.failed_transfer = Some(0);
             let mut machine = board(&[], devices, Vec::new());
-            machine.set_strict(true);
             machine.begin_survey();
             machine.write_register(Register::X(1), DEVICE);
             machine.write_register(Register::X(2), 0x1234);
             machine.write_register(Register::X(3), 0x5678);
-            assert!(matches!(
-                machine.device_access(word, DEVICE, DEVICE, true),
-                Err(Stop::Unsupported(_))
-            ));
-            assert_eq!(machine.cpu.pc, BASE);
-            assert_eq!(machine.devices.stores, [(DEVICE, 0x1234)]);
-            assert_eq!(machine.devices.transfers, 1);
+            // The accepted store and the DMA it started stand, and the failed
+            // service is reported once.
+            machine.device_access(word, DEVICE, DEVICE, true).unwrap();
+            assert_eq!(machine.take_unmodeled().len(), 1);
+            assert_eq!(machine.cpu.pc, BASE + 4);
+            assert_eq!(
+                machine.devices.stores,
+                [(DEVICE, 0x1234), (DEVICE + 8, 0x5678)][..members]
+            );
+            assert_eq!(machine.devices.transfers, members);
             assert!(machine.take_survey().is_empty());
             let mut committed = [0; 8];
             assert!(machine.host.read_ram(BASE + 0x800, &mut committed));
@@ -7938,43 +7873,29 @@ mod tests {
     #[test]
     fn device_pair_load_refusal_preserves_both_destinations_and_reports_the_failed_member() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
-        for strict in [true, false] {
-            for failed_element in 0..2 {
-                let failed_address = DEVICE + failed_element as u64 * 8;
-                let mut devices = pair_fault_device();
-                devices.refused = Some(failed_address);
-                let mut machine = board(&[], devices, Vec::new());
-                machine.set_strict(strict);
-                machine.write_register(Register::X(1), DEVICE - 16);
-                machine.write_register(Register::X(2), 0x1234);
-                machine.write_register(Register::X(3), 0x5678);
-                // ldp x2, x3, [x1, #16]!
-                let result = machine.device_access(0xa9c1_0c22, DEVICE, DEVICE, false);
-                if strict {
-                    let Err(Stop::Unsupported(requirement)) = result else {
-                        panic!("strict mode stops");
-                    };
-                    assert_eq!(requirement.address, Some(failed_address));
-                    assert_eq!(machine.read_register(Register::X(1)), DEVICE - 16);
-                    assert_eq!(machine.read_register(Register::X(2)), 0x1234);
-                    assert_eq!(machine.read_register(Register::X(3)), 0x5678);
-                    assert_eq!(machine.devices.reads.len(), failed_element + 1);
-                } else {
-                    // The refused member reads 0 and the pair completes.
-                    result.unwrap();
-                    let other = DEVICE + (1 - failed_element) as u64 * 8;
-                    let mut values = [other, other];
-                    values[failed_element] = 0;
-                    assert_eq!(machine.read_register(Register::X(1)), DEVICE);
-                    assert_eq!(machine.read_register(Register::X(2)), values[0]);
-                    assert_eq!(machine.read_register(Register::X(3)), values[1]);
-                    assert_eq!(machine.devices.reads.len(), 2);
-                    let reports = machine.take_unmodeled();
-                    assert_eq!(reports.len(), 1);
-                    assert_eq!(reports[0].address, Some(failed_address));
-                }
-                assert!(machine.devices.stores.is_empty());
-            }
+        for failed_element in 0..2 {
+            let failed_address = DEVICE + failed_element as u64 * 8;
+            let mut devices = pair_fault_device();
+            devices.refused = Some(failed_address);
+            let mut machine = board(&[], devices, Vec::new());
+            machine.write_register(Register::X(1), DEVICE - 16);
+            machine.write_register(Register::X(2), 0x1234);
+            machine.write_register(Register::X(3), 0x5678);
+            // ldp x2, x3, [x1, #16]!
+            let result = machine.device_access(0xa9c1_0c22, DEVICE, DEVICE, false);
+            // The refused member reads 0 and the pair completes.
+            result.unwrap();
+            let other = DEVICE + (1 - failed_element) as u64 * 8;
+            let mut values = [other, other];
+            values[failed_element] = 0;
+            assert_eq!(machine.read_register(Register::X(1)), DEVICE);
+            assert_eq!(machine.read_register(Register::X(2)), values[0]);
+            assert_eq!(machine.read_register(Register::X(3)), values[1]);
+            assert_eq!(machine.devices.reads.len(), 2);
+            let reports = machine.take_unmodeled();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].address, Some(failed_address));
+            assert!(machine.devices.stores.is_empty());
         }
     }
 
@@ -8106,7 +8027,7 @@ mod tests {
         // With one, PSTATE.DIT selects a block of its own, of plain accesses
         // (LOCK has no listed timing), which load first and so report WnR as
         // Arm requires: such a host runs one PE at a time.
-        machine.target = TargetCpu::Sse42Complete.with_doit();
+        machine.target = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS[2].with_doit();
         machine.cpu.pstate.dit = true;
         let Ok(Fetched::Block(timed)) = machine.fetch_block(BASE, false) else {
             panic!("timed block")
@@ -8522,10 +8443,8 @@ mod tests {
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
         // The M2 kernel's JIT box: its range (S3_4_C15_C15_1) and mode
         // (S3_4_C15_C15_4) are held. A mode that enables the box, whose
-        // enforcement is undocumented, is reported once, or stops in strict
-        // mode.
+        // enforcement is undocumented, is reported once.
         let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
-        machine.set_strict(false);
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.cpu.pc = BASE;
         machine.cpu.state.x[0] = 0x0000_0001_0200_0006;
@@ -8540,11 +8459,6 @@ mod tests {
         assert_eq!(reports.len(), 1, "{reports:?}");
         assert_eq!(reports[0].syndrome, Some(0x6239_3c1e));
         assert!(machine.take_unmodeled().is_empty());
-        machine.set_strict(true);
-        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd51c_ff80) else {
-            panic!("strict mode stops")
-        };
-        assert_eq!(requirement.kind, reports[0].kind);
     }
 
     #[test]
@@ -8608,15 +8522,13 @@ mod tests {
             .set(SystemRegister::SCTLR_EL2, 0, sctlr);
         machine.derived_changed();
         machine.cpu.set_pstate(Pstate::reset(1));
-        // Outside RAM the access stops explicitly.
+        // Outside RAM the access is reported once.
         machine
             .cpu
             .registers
             .set(SystemRegister::VNCR_EL2, 0, 0x4000_0000);
-        assert!(matches!(
-            machine.system_instruction(MRS_X0_HCRX_EL2),
-            Err(Stop::Unsupported(_))
-        ));
+        machine.system_instruction(MRS_X0_HCRX_EL2).unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 1);
         // The M2 has no FEAT_NV: the bits are RES0 and ERET returns.
         let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
         machine
@@ -10400,11 +10312,10 @@ mod tests {
         ] {
             machine.system_instruction(word).unwrap();
         }
-        // GL1 bank registers are refused outside the guarded level.
-        assert!(matches!(
-            machine.system_instruction(0xd51e_fa42),
-            Err(Stop::Unsupported(_))
-        ));
+        // GL1 bank registers are refused outside the guarded level, reported
+        // once.
+        machine.system_instruction(0xd51e_fa42).unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 1);
         let genter_pc = machine.cpu.pc;
         machine.system_instruction(0x0020_1420).unwrap();
         assert!(machine.cpu.pstate.guarded);
@@ -10598,16 +10509,12 @@ mod tests {
                 .unwrap(),
             expected
         );
-        // A read or a lower-EL access has no source-qualified permissions.
-        assert!(matches!(
-            machine.system_instruction(0xd51e_fd01),
-            Err(Stop::Unsupported(_))
-        ));
+        // A read or a lower-EL access has no source-qualified permissions:
+        // each is reported once.
+        machine.system_instruction(0xd51e_fd01).unwrap();
         machine.cpu.pstate = Pstate::reset(2);
-        assert!(matches!(
-            machine.system_instruction(0xd53e_fd01),
-            Err(Stop::Unsupported(_))
-        ));
+        machine.system_instruction(0xd53e_fd01).unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 2);
     }
 
     #[test]
@@ -11954,12 +11861,11 @@ mod tests {
         assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (0x1_0200, 1));
     }
 
-    /// An ERET or GEXIT into an EL1&0 guest stops while a VM register holds
-    /// a nonzero value, and enters it once the value is zero; the host's
-    /// own returns are unaffected. Graceful, the guest is entered without
-    /// the state, reported once.
+    /// An ERET or GEXIT into an EL1&0 guest while a VM register holds a
+    /// nonzero value enters it without the state, reported once; the host's
+    /// own returns are unaffected.
     #[test]
-    fn entering_a_guest_with_unapplied_vm_state_stops() {
+    fn entering_a_guest_with_unapplied_vm_state_reports_it_once() {
         const ERET: u32 = 0xd69f_03e0;
         const GEXIT: u32 = 0x0020_1400;
         const EL1H: u64 = 0x3c5;
@@ -11985,13 +11891,6 @@ mod tests {
             .registers
             .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
         machine.cpu.apple.impdef.write(guest, 0x3b).unwrap();
-        match enter(&mut machine, ERET, EL1H) {
-            Err(Stop::Unsupported(requirement)) => {
-                assert_eq!(requirement.kind, RequirementKind::VmState(guest.name));
-                assert_eq!((requirement.pc, requirement.el), (BASE, 2));
-            }
-            other => panic!("{other:?}"),
-        }
         // The host (HCR_EL2.TGE) returning to its EL0 is no guest entry.
         machine
             .cpu
@@ -11999,11 +11898,16 @@ mod tests {
             .set(SystemRegister::HCR_EL2, 0, HCR_E2H | 1 << HCR_TGE);
         enter(&mut machine, ERET, EL0T).unwrap();
         assert_eq!(machine.cpu.pstate.el, 0);
-        // GEXIT from GL2 into the guest stops the same way.
+        assert!(machine.take_unmodeled().is_empty());
         machine
             .cpu
             .registers
             .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+        for _ in 0..2 {
+            enter(&mut machine, ERET, EL1H).unwrap();
+            assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x8000));
+        }
+        // GEXIT from GL2 into the guest enters it the same way.
         machine.cpu.set_pstate(Pstate {
             guarded: true,
             ..Pstate::reset(2)
@@ -12011,26 +11915,18 @@ mod tests {
         machine.cpu.apple.guarded[1].spsr = EL1H;
         machine.cpu.apple.guarded[1].elr = 0x8000;
         machine.cpu.apple.guarded[1].aspsr = 0;
-        assert!(matches!(
-            machine.system_instruction(GEXIT),
-            Err(Stop::Unsupported(_))
-        ));
-        assert!(machine.cpu.pstate.guarded, "the GEXIT was not made");
-        // SPTM's zero loads leave nothing to apply.
-        machine.cpu.apple.impdef.write(guest, 0).unwrap();
         machine.system_instruction(GEXIT).unwrap();
         assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x8000));
-        enter(&mut machine, ERET, EL1H).unwrap();
-        assert_eq!(machine.cpu.pstate.el, 1);
-        machine.cpu.apple.impdef.write(guest, 0x3b).unwrap();
-        machine.set_strict(false);
-        for _ in 0..2 {
-            enter(&mut machine, ERET, EL1H).unwrap();
-            assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x8000));
-        }
         let reports = machine.take_unmodeled();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].kind, RequirementKind::VmState(guest.name));
+        assert_eq!((reports[0].pc, reports[0].el), (BASE, 2));
+        assert_eq!(machine.statistics.degraded, 3);
+        // SPTM's zero loads leave nothing to apply.
+        machine.cpu.apple.impdef.write(guest, 0).unwrap();
+        enter(&mut machine, ERET, EL1H).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 1);
+        assert_eq!(machine.statistics.degraded, 3);
     }
 
     /// HACR_EL2's SPTM VM entry value traps a guest EL1's HID read to EL2 as

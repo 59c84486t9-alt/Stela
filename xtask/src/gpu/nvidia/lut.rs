@@ -227,6 +227,10 @@ pub(super) fn cpu_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg_attr(
+        not(feature = "fetched-sources"),
+        ignore = "reads the sources `cargo xtask gpu fetch` checks out"
+    )]
     #[test]
     fn original_lut_upload_uses_actual_header_prefix_and_common_heap() {
         let output = tempfile::tempdir().unwrap();

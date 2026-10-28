@@ -205,7 +205,7 @@ pub struct Changes {
     pub stored: bool,
     /// The write took a value whose effect this machine does not model
     /// (`impdef::Entry::unmodeled_effect`): what is missing, which the
-    /// engine reports once, or stops at in strict mode.
+    /// engine reports once.
     pub unmodeled: Option<&'static str>,
     /// SIQ_CFG_EL1 now refuses (`true`) or accepts the AIC's IRQs for this
     /// PE ([`SIQ_CFG_NO_IRQ`]).
@@ -2276,9 +2276,9 @@ mod tests {
         use super::super::{Chip, ctrr};
         let crn11 = |crm, op2| Encoding::new(3, 0, 11, crm, op2);
         let (lower_el1, lower_el12, lower_el2) = (crn11(0, 0), crn11(0, 4), crn11(1, 0));
-        let handoff = ctrr::Handoff {
+        let handoff = ctrr::CoreLocks {
             locked: alloc::vec![ctrr::Locked {
-                region: ctrr::Region::CtrrC,
+                region: ctrr::LockRegion::CtrrC,
                 first: 0x100_06fb_8000,
                 last: 0x100_0710_bfff,
             }],
@@ -2350,9 +2350,9 @@ mod tests {
         const LOCKED: u64 = 0x8000_0101_e000_0000;
         for chip in Chip::ALL {
             let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
-            cpu.core_locks = alloc::sync::Arc::new(ctrr::Handoff {
+            cpu.core_locks = alloc::sync::Arc::new(ctrr::CoreLocks {
                 tag_offset: LOCKED,
-                ..ctrr::Handoff::default()
+                ..ctrr::CoreLocks::default()
             });
             let outcome = cpu.apple_access(mrs(0, TAG_OFFSET_EL2), 0);
             if !identification::memory_tagging(chip) {

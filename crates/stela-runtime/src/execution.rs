@@ -4,15 +4,13 @@
 #[cfg(feature = "std")]
 pub mod checked_memory;
 
-#[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
-pub(crate) mod boot_frames;
 pub(crate) mod context;
+#[cfg(feature = "std")]
 pub(crate) mod floating_environment;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(host_memory, target_arch = "x86_64"))]
 mod native_image;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(host_memory, target_arch = "x86_64"))]
 pub(crate) use native_image::ReachedCall as ObservedNativeCall;
-pub(crate) type NativeStorageError = platform::StorageError;
 
 #[cfg(feature = "std")]
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
@@ -27,7 +25,7 @@ use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::io::Read;
 #[cfg(feature = "std")]
-use stela_compiler::{GuestState, NATIVE_ABI};
+use stela_compiler::GuestState;
 
 // Bounds a cached artifact so it cannot force an unbounded allocation or
 // mapping.
@@ -69,7 +67,12 @@ impl ExecutableLeaf {
             identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "generated code uses a different compiler"
         );
-        ensure!(identity.abi == NATIVE_ABI, "unsupported generated-code ABI");
+        ensure!(
+            identity.abi
+                == stela_compiler::block::BlockProfile::new(stela_compiler::block::Features::LEAF)
+                    .abi(),
+            "unsupported generated-code ABI"
+        );
         let target = identity
             .target_cpu
             .parse::<stela_compiler::TargetCpu>()

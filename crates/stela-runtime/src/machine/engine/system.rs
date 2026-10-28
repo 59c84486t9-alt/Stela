@@ -9,7 +9,7 @@
 //!   and Apple VMSA_LOCK. SCTLR_ELx.EE and E0E are RES0 because the profile
 //!   has no FEAT_MixedEnd.
 //!
-//! A refusal stops in strict mode; graceful, the register behaves as storage
+//! A refusal is reported once and the register behaves as storage
 //! (`Machine::register_refused`).
 use super::{
     Devices, Host, Machine, Step,
@@ -1530,7 +1530,7 @@ mod tests {
         enabled: bool,
         execute_inside_only: bool,
     ) {
-        use crate::machine::ctrr::{self, Field, Generation, Region};
+        use crate::machine::ctrr::{self, Field, Generation, LockRegion};
         match ctrr::generation(machine.profile.chip) {
             Generation::A => {
                 let mut cluster = machine.cpu.ctrr.borrow_mut();
@@ -1556,10 +1556,10 @@ mod tests {
                 } else {
                     &mut machine.cpu.ctrr_core.el1
                 };
-                bank.write(Region::CtrrC, Field::Lower, first).unwrap();
-                bank.write(Region::CtrrC, Field::Upper, last).unwrap();
+                bank.write(LockRegion::CtrrC, Field::Lower, first).unwrap();
+                bank.write(LockRegion::CtrrC, Field::Upper, last).unwrap();
                 bank.write(
-                    Region::CtrrC,
+                    LockRegion::CtrrC,
                     Field::Control,
                     if enabled { ctrr::CTRR_ENABLE } else { 0 },
                 )
@@ -1592,81 +1592,77 @@ mod tests {
         const STORED: u64 = 0x7654_3210_5566_7788;
         for chip in Chip::ALL {
             for el in [1, 2] {
-                for strict in [false, true] {
-                    let mut machine = machine_on(chip, &[]);
-                    machine.set_strict(strict);
-                    machine.cpu.set_pstate(Pstate {
-                        uao: true,
-                        ..Pstate::reset(el)
-                    });
-                    machine.cpu.registers.set(
-                        Register::HCR_EL2,
-                        0,
-                        if el == 2 { 1 << 34 } else { 0 },
-                    );
-                    let alias = test_ctrr_alias(&mut machine);
-                    let (vbar, esr, far, elr, spsr) = if el == 2 {
-                        (
-                            Register::VBAR_EL2,
-                            Register::ESR_EL2,
-                            Register::FAR_EL2,
-                            Register::ELR_EL2,
-                            Register::SPSR_EL2,
-                        )
-                    } else {
-                        (
-                            Register::VBAR_EL1,
-                            Register::ESR_EL1,
-                            Register::FAR_EL1,
-                            Register::ELR_EL1,
-                            Register::SPSR_EL1,
-                        )
-                    };
-                    machine.cpu.registers.set(vbar, 0, 0x1_0000);
-                    machine.host.ram[DATA_OFFSET..DATA_OFFSET + 8]
-                        .copy_from_slice(&INITIAL.to_le_bytes());
-                    machine.cpu.state.x[1] = STORED;
-                    machine.cpu.state.x[2] = alias + DATA_OFFSET as u64;
-                    machine.cpu.state.x[8] = 0x55aa;
-                    machine.cpu.state.sp = BASE + 0x8000;
-                    machine.cpu.state.nzcv = 0xa000_0000;
-                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, true, false);
-                    // Ordinary reads remain allowed, and AT ignores CTRR's
-                    // subsequent physical access restriction.
-                    machine.system_instruction(LDTR_X3_X2).unwrap();
-                    assert_eq!(machine.cpu.state.x[3], INITIAL, "{chip:?} EL{el}");
-                    if el == 1 {
-                        machine.system_instruction(AT_S1E1W_X2).unwrap();
-                        let par = machine.cpu.read(Register::PAR_EL1);
-                        assert_eq!(par & 1, 0);
-                        assert_eq!(par & 0x0000_ffff_ffff_f000, BASE + 0x2000);
-                    }
-                    let pc = machine.cpu.pc;
-                    let before = machine.cpu.state.clone();
-                    let pstate = machine.cpu.pstate;
-                    let ram = machine.host.ram.clone();
-                    machine.system_instruction(STTR_X1_X2).unwrap();
-                    assert_eq!(machine.cpu.pc, 0x1_0200, "{chip:?} EL{el}");
-                    assert_eq!(machine.cpu.read(esr), 0x9600_004f, "{chip:?} EL{el}");
-                    assert_eq!(machine.cpu.read(far), alias + DATA_OFFSET as u64);
-                    assert_eq!(machine.cpu.read(elr), pc);
-                    assert_eq!(machine.cpu.read(spsr) & 0xf000_0000, u64::from(before.nzcv));
-                    assert_eq!(machine.cpu.state, before);
-                    assert_eq!(machine.host.ram, ram, "forbidden store changed RAM");
-                    assert!(machine.take_unmodeled().is_empty());
-                    // ERET restores the precise faulting context. Removing
-                    // the protection permits the same instruction to retry.
-                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, false, false);
-                    machine.system_instruction(ERET).unwrap();
-                    assert_eq!((machine.cpu.pc, machine.cpu.pstate), (pc, pstate));
-                    assert_eq!(machine.cpu.state, before);
-                    machine.system_instruction(STTR_X1_X2).unwrap();
-                    assert_eq!(machine.cpu.pc, pc + 4);
-                    assert_eq!(
-                        machine.host.ram[DATA_OFFSET..DATA_OFFSET + 8],
-                        STORED.to_le_bytes()
-                    );
+                let mut machine = machine_on(chip, &[]);
+                machine.cpu.set_pstate(Pstate {
+                    uao: true,
+                    ..Pstate::reset(el)
+                });
+                machine
+                    .cpu
+                    .registers
+                    .set(Register::HCR_EL2, 0, if el == 2 { 1 << 34 } else { 0 });
+                let alias = test_ctrr_alias(&mut machine);
+                let (vbar, esr, far, elr, spsr) = if el == 2 {
+                    (
+                        Register::VBAR_EL2,
+                        Register::ESR_EL2,
+                        Register::FAR_EL2,
+                        Register::ELR_EL2,
+                        Register::SPSR_EL2,
+                    )
+                } else {
+                    (
+                        Register::VBAR_EL1,
+                        Register::ESR_EL1,
+                        Register::FAR_EL1,
+                        Register::ELR_EL1,
+                        Register::SPSR_EL1,
+                    )
+                };
+                machine.cpu.registers.set(vbar, 0, 0x1_0000);
+                machine.host.ram[DATA_OFFSET..DATA_OFFSET + 8]
+                    .copy_from_slice(&INITIAL.to_le_bytes());
+                machine.cpu.state.x[1] = STORED;
+                machine.cpu.state.x[2] = alias + DATA_OFFSET as u64;
+                machine.cpu.state.x[8] = 0x55aa;
+                machine.cpu.state.sp = BASE + 0x8000;
+                machine.cpu.state.nzcv = 0xa000_0000;
+                test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, true, false);
+                // Ordinary reads remain allowed, and AT ignores CTRR's
+                // subsequent physical access restriction.
+                machine.system_instruction(LDTR_X3_X2).unwrap();
+                assert_eq!(machine.cpu.state.x[3], INITIAL, "{chip:?} EL{el}");
+                if el == 1 {
+                    machine.system_instruction(AT_S1E1W_X2).unwrap();
+                    let par = machine.cpu.read(Register::PAR_EL1);
+                    assert_eq!(par & 1, 0);
+                    assert_eq!(par & 0x0000_ffff_ffff_f000, BASE + 0x2000);
                 }
+                let pc = machine.cpu.pc;
+                let before = machine.cpu.state.clone();
+                let pstate = machine.cpu.pstate;
+                let ram = machine.host.ram.clone();
+                machine.system_instruction(STTR_X1_X2).unwrap();
+                assert_eq!(machine.cpu.pc, 0x1_0200, "{chip:?} EL{el}");
+                assert_eq!(machine.cpu.read(esr), 0x9600_004f, "{chip:?} EL{el}");
+                assert_eq!(machine.cpu.read(far), alias + DATA_OFFSET as u64);
+                assert_eq!(machine.cpu.read(elr), pc);
+                assert_eq!(machine.cpu.read(spsr) & 0xf000_0000, u64::from(before.nzcv));
+                assert_eq!(machine.cpu.state, before);
+                assert_eq!(machine.host.ram, ram, "forbidden store changed RAM");
+                assert!(machine.take_unmodeled().is_empty());
+                // ERET restores the precise faulting context. Removing
+                // the protection permits the same instruction to retry.
+                test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, false, false);
+                machine.system_instruction(ERET).unwrap();
+                assert_eq!((machine.cpu.pc, machine.cpu.pstate), (pc, pstate));
+                assert_eq!(machine.cpu.state, before);
+                machine.system_instruction(STTR_X1_X2).unwrap();
+                assert_eq!(machine.cpu.pc, pc + 4);
+                assert_eq!(
+                    machine.host.ram[DATA_OFFSET..DATA_OFFSET + 8],
+                    STORED.to_le_bytes()
+                );
             }
         }
     }
@@ -1679,58 +1675,54 @@ mod tests {
         // execution-context fields remain an explicit separate limitation.
         for chip in [Chip::AppleM1, Chip::AppleM2, Chip::AppleM3] {
             for el in [1, 2] {
-                for strict in [false, true] {
-                    let mut machine = machine_on(chip, &[NOP]);
-                    machine.set_strict(strict);
-                    machine.cpu.set_pstate(Pstate::reset(el));
-                    machine.cpu.registers.set(
-                        Register::HCR_EL2,
-                        0,
-                        if el == 2 { 1 << 34 } else { 0 },
-                    );
-                    let alias = test_ctrr_alias(&mut machine);
-                    let (vbar, esr, far, elr) = if el == 2 {
-                        (
-                            Register::VBAR_EL2,
-                            Register::ESR_EL2,
-                            Register::FAR_EL2,
-                            Register::ELR_EL2,
-                        )
-                    } else {
-                        (
-                            Register::VBAR_EL1,
-                            Register::ESR_EL1,
-                            Register::FAR_EL1,
-                            Register::ELR_EL1,
-                        )
-                    };
-                    machine.cpu.registers.set(vbar, 0, 0x1_0000);
-                    machine.cpu.pc = alias;
-                    machine.cpu.state.x[4] = 0x1234;
-                    machine.cpu.state.sp = BASE + 0x8000;
-                    machine.cpu.state.nzcv = 0x6000_0000;
-                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, true, true);
-                    let before = machine.cpu.state.clone();
-                    let pstate = machine.cpu.pstate;
-                    let ram = machine.host.ram.clone();
-                    machine.step().unwrap();
-                    assert_eq!(machine.cpu.pc, 0x1_0200);
-                    assert_eq!(machine.cpu.read(esr), 0x8600_000f);
-                    assert_eq!(machine.cpu.read(far), alias);
-                    assert_eq!(machine.cpu.read(elr), alias);
-                    assert_eq!(machine.cpu.state, before);
-                    assert_eq!(machine.host.ram, ram);
-                    assert!(
-                        machine.host.installed.is_empty(),
-                        "forbidden fetch compiled code"
-                    );
-                    assert!(machine.take_unmodeled().is_empty());
-                    test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, false, true);
-                    machine.system_instruction(ERET).unwrap();
-                    assert_eq!((machine.cpu.pc, machine.cpu.pstate), (alias, pstate));
-                    assert_eq!(machine.cpu.state, before);
-                    assert_eq!(machine.fetch_physical(alias), Ok(BASE));
-                }
+                let mut machine = machine_on(chip, &[NOP]);
+                machine.cpu.set_pstate(Pstate::reset(el));
+                machine
+                    .cpu
+                    .registers
+                    .set(Register::HCR_EL2, 0, if el == 2 { 1 << 34 } else { 0 });
+                let alias = test_ctrr_alias(&mut machine);
+                let (vbar, esr, far, elr) = if el == 2 {
+                    (
+                        Register::VBAR_EL2,
+                        Register::ESR_EL2,
+                        Register::FAR_EL2,
+                        Register::ELR_EL2,
+                    )
+                } else {
+                    (
+                        Register::VBAR_EL1,
+                        Register::ESR_EL1,
+                        Register::FAR_EL1,
+                        Register::ELR_EL1,
+                    )
+                };
+                machine.cpu.registers.set(vbar, 0, 0x1_0000);
+                machine.cpu.pc = alias;
+                machine.cpu.state.x[4] = 0x1234;
+                machine.cpu.state.sp = BASE + 0x8000;
+                machine.cpu.state.nzcv = 0x6000_0000;
+                test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, true, true);
+                let before = machine.cpu.state.clone();
+                let pstate = machine.cpu.pstate;
+                let ram = machine.host.ram.clone();
+                machine.step().unwrap();
+                assert_eq!(machine.cpu.pc, 0x1_0200);
+                assert_eq!(machine.cpu.read(esr), 0x8600_000f);
+                assert_eq!(machine.cpu.read(far), alias);
+                assert_eq!(machine.cpu.read(elr), alias);
+                assert_eq!(machine.cpu.state, before);
+                assert_eq!(machine.host.ram, ram);
+                assert!(
+                    machine.host.installed.is_empty(),
+                    "forbidden fetch compiled code"
+                );
+                assert!(machine.take_unmodeled().is_empty());
+                test_ctrr_region(&mut machine, el, BASE + 0x2000, BASE + 0x2fff, false, true);
+                machine.system_instruction(ERET).unwrap();
+                assert_eq!((machine.cpu.pc, machine.cpu.pstate), (alias, pstate));
+                assert_eq!(machine.cpu.state, before);
+                assert_eq!(machine.fetch_physical(alias), Ok(BASE));
             }
         }
     }
@@ -1741,12 +1733,13 @@ mod tests {
         for chip in Chip::ALL {
             let mut machine = machine_on(chip, &[]);
             assert!(machine.cpu.pmu.is_none());
+            // Without a monitor the counter reads as storage, reported once.
             machine.cpu.state.x[0] = 0x5a;
-            assert!(matches!(
-                machine.system_instruction(access(true, pmu::PMC[0], 0)),
-                Err(Stop::Unsupported(_))
-            ));
-            assert_eq!(machine.cpu.state.x[0], 0x5a);
+            machine
+                .system_instruction(access(true, pmu::PMC[0], 0))
+                .unwrap();
+            assert_eq!(machine.cpu.state.x[0], 0);
+            assert_eq!(machine.take_unmodeled().len(), 1);
             // A synthetic profile clock tests ownership and routing; it is
             // not a hardware clock declaration for any board.
             machine.profile.processors = alloc::vec![Identity {
@@ -1780,10 +1773,10 @@ mod tests {
                     .system_instruction(access(true, pmu::PMSR, 1))
                     .unwrap();
                 assert_eq!(machine.cpu.state.x[1], 1 << 36);
-                assert!(matches!(
-                    machine.system_instruction(access(false, Encoding::new(3, 0, 11, 13, 5), 0)),
-                    Err(Stop::Unsupported(_))
-                ));
+                machine
+                    .system_instruction(access(false, Encoding::new(3, 0, 11, 13, 5), 0))
+                    .unwrap();
+                assert_eq!(machine.take_unmodeled().len(), 1);
             }
             machine.profile.processors[0].clock = None;
             machine.load_profile();
@@ -2699,12 +2692,6 @@ mod tests {
         machine.cpu.set_pstate(Pstate::reset(2));
         machine.cpu.pc = BASE;
         machine.cpu.state.x[1] = 1 << 2;
-        let unknown = access(false, agt::AGTCNTRDIR_EL1, 1);
-        assert!(matches!(
-            machine.system_instruction(unknown),
-            Err(Stop::Unsupported(_))
-        ));
-        machine.set_strict(false);
         run(&mut machine, 2, false, agt::AGTCNTRDIR_EL1, 1 << 2);
         assert_eq!(machine.take_unmodeled().len(), 1);
         machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
@@ -2779,13 +2766,12 @@ mod tests {
             .registers
             .set(Register::SCTLR_EL1, 0, sctlr | UCT | DZE | UCI);
         // With UCT set the read reaches CTR_EL0, which this machine's profile
-        // does not give.
+        // does not give: reported once.
         machine.cpu.pstate = user;
-        assert!(
-            machine
-                .system_instruction(access(true, CTR_EL0, 1))
-                .is_err()
-        );
+        machine
+            .system_instruction(access(true, CTR_EL0, 1))
+            .unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 1);
         for word in [DC_CVAC_X0, IC_IVAU_X0] {
             assert_eq!(run(&mut machine, user, word), (0, BASE + 4), "{word:#x}");
         }
@@ -2993,11 +2979,13 @@ mod tests {
             .system_instruction(access(true, RMR_EL2, 1))
             .unwrap();
         assert_eq!(machine.cpu.state.x[1], 1);
+        // A warm reset request without a reset vector is reported once and
+        // leaves the register as it was.
         machine.cpu.state.x[0] = 0b10;
-        assert!(matches!(
-            machine.system_instruction(access(false, RMR_EL2, 0)),
-            Err(super::super::Stop::Unsupported(_))
-        ));
+        machine
+            .system_instruction(access(false, RMR_EL2, 0))
+            .unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 1);
         assert_eq!(machine.cpu.registers.get(Register::RMR_EL2, 0), 1);
     }
 
@@ -3048,14 +3036,12 @@ mod tests {
             .system_instruction(access(true, RVBAR_EL2, 1))
             .unwrap();
         assert_eq!(machine.cpu.read(Register::ESR_EL1) >> 26, 0);
-        // A board without one leaves the reset address unknown: the read
-        // refuses rather than reading zero.
+        // A board without one leaves the reset address unknown: the read is
+        // reported once.
         let mut bare = machine_on(crate::machine::Chip::AppleM2, &[]);
         bare.cpu.pstate = Pstate::reset(2);
-        assert!(matches!(
-            bare.system_instruction(access(true, RVBAR_EL2, 1)),
-            Err(super::super::Stop::Unsupported(_))
-        ));
+        bare.system_instruction(access(true, RVBAR_EL2, 1)).unwrap();
+        assert_eq!(bare.take_unmodeled().len(), 1);
     }
 
     #[test]
@@ -3696,11 +3682,11 @@ mod tests {
             assert_eq!(machine.cpu.state.x[3], 0);
         }
         // The test profile has no MIDR_EL1: the read, through VPIDR_EL2 at
-        // EL1, refuses rather than reading zero.
-        assert!(matches!(
-            machine.system_instruction(access(true, MIDR_EL1, 0)),
-            Err(super::super::Stop::Unsupported(_))
-        ));
+        // EL1, is reported once and reads as storage.
+        machine
+            .system_instruction(access(true, MIDR_EL1, 0))
+            .unwrap();
+        assert_eq!(machine.take_unmodeled().len(), 1);
         // A value written to VPIDR_EL2 at EL2 is what EL1 then reads.
         machine.cpu.pstate = Pstate::reset(2);
         machine.cpu.state.x[1] = 0x611f_0320;
@@ -3991,14 +3977,13 @@ mod tests {
                 assert_eq!(machine.cpu.read(Register::ACTLR_EL2), ACTLR_ICDSB);
             }
             let before = machine.cpu.read(Register::ACTLR_EL1);
+            // A refused setting is held without its effect, reported once.
             for refused in [1, 1 << 4, 1 << 5, 1 << 6, 1 << 63] {
-                assert!(matches!(
-                    write(&mut machine, alias, refused),
-                    Err(Stop::Unsupported(_))
-                ));
+                write(&mut machine, alias, refused).unwrap();
                 assert_eq!(machine.cpu.read(Register::ACTLR_EL1), before);
-                assert_eq!(machine.cpu.pc, BASE);
+                assert_eq!(machine.cpu.pc, BASE + 4);
             }
+            assert!(!machine.take_unmodeled().is_empty());
             // XZR is an ordinary discarded destination/zero source.
             machine
                 .system_instruction(access(false, alias, 31))
@@ -4113,7 +4098,7 @@ mod tests {
         assert_eq!(read(&mut machine, AMAIR_EL1), 0x0123_4567_89ab_cdef);
         assert_eq!(read(&mut machine, AMAIR_EL12), u64::MAX);
         // EnAPFLG, EnAFP and EnPRSV, controls of features AIDR_EL1 does not
-        // advertise, refuse by name, as does HACR_EL2's guest timer mask.
+        // advertise, are reported by name, as is HACR_EL2's guest timer mask.
         for (encoding, value, reason) in [
             (ACTLR_EL1, EN_TSO | EN_APFLG, "ACTLR EnAPFLG"),
             (ACTLR_EL12, EN_TSO | EN_AFP | EN_PRSV, "ACTLR EnAFP"),
@@ -4124,12 +4109,14 @@ mod tests {
                 "HACR_EL2 bit 20 masks the guest's virtual timer, whose pending FIQ register is not modeled",
             ),
         ] {
-            match write(&mut machine, encoding, value) {
-                Err(Stop::Unsupported(requirement)) => {
-                    assert!(format!("{requirement}").contains(reason), "{requirement}")
-                }
-                other => panic!("{encoding:?}: {other:?}"),
-            }
+            write(&mut machine, encoding, value).unwrap();
+            let reports = machine.take_unmodeled();
+            assert!(
+                reports
+                    .iter()
+                    .any(|requirement| format!("{requirement}").contains(reason)),
+                "{encoding:?}: {reports:?}"
+            );
         }
         assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO | ICDSB);
         // HACR_EL2 holds the SPTM's VM entry values.

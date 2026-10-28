@@ -172,32 +172,12 @@ pub mod profile_requirements {
     /// Require the fixed named implementation identity above. This is a body
     /// requirement, never a raw access descriptor or a copy of CPU controls.
     pub const SCALABLE_TAG_CHECKS: u32 = 1 << 2;
-    /// Source-bound EL1 MMU-off staged Device RAM read64. No Normal-WB,
-    /// allocation-tag or host-pointer permission is conferred by this bit.
-    pub const M0_DEVICE_RAM_READ64: u32 = 1 << 3;
-    /// MMU-off Device RAM 8-byte and pair writes. Each aligned 8-byte member is
-    /// checked against the source when it is reached.
-    pub const M0_DEVICE_RAM_WRITE8_OR_PAIR: u32 = 1 << 4;
-    /// MMU-off Device pair reads, on a PE without FEAT_LSE2.
-    pub const M0_DEVICE_RAM_READ64_PAIR_NO_LSE2: u32 = 1 << 5;
-    /// EL1 MMU-off scalar loads of 1, 2, 4 or 8 bytes. The runtime handles
-    /// controls, SP alignment and the ordered physical access.
-    pub const M0_DEVICE_RAM_SCALAR_LOAD: u32 = 1 << 6;
-    /// A staged scalar store to M0 RAM at its exact width.
-    pub const M0_DEVICE_RAM_SCALAR_STORE: u32 = 1 << 7;
     /// Canonical native-system RAM permits an unchanged-value CMPXCHG16B
     /// read under the physical all-writer gate. The whole aligned host
     /// footprint must be RW; this grants no guest write permission.
     pub const SYSTEM_ATOMIC_READ_WRITEBACK: u32 = 1 << 8;
-    pub const KNOWN: u32 = NATIVE_ACCESS
-        | TAG_GRANULES
-        | SCALABLE_TAG_CHECKS
-        | M0_DEVICE_RAM_READ64
-        | M0_DEVICE_RAM_WRITE8_OR_PAIR
-        | M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
-        | M0_DEVICE_RAM_SCALAR_LOAD
-        | M0_DEVICE_RAM_SCALAR_STORE
-        | SYSTEM_ATOMIC_READ_WRITEBACK;
+    pub const KNOWN: u32 =
+        NATIVE_ACCESS | TAG_GRANULES | SCALABLE_TAG_CHECKS | SYSTEM_ATOMIC_READ_WRITEBACK;
 }
 
 /// Memory-service outcomes; a load commits only on Success.

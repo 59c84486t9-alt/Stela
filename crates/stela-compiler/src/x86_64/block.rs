@@ -1,43 +1,52 @@
 //! Block control transfers: every branch returns to the dispatcher.
+use crate::x86_64::asm::{Asm, Code, Cond, Gpr, Size};
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
-pub(crate) mod el1_m0;
 pub(crate) use super::region::ResidentLoopPlan;
 
 use crate::{
     GuestAddress, NativeBlock,
-    aarch64::{Instruction, Operation, Register, Width},
+    aarch64::{Instruction, Operation, Register},
     block::{ExitKind, Terminator},
 };
 
-pub(super) fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
-    code.push(0xba); // mov edx,kind: zero-extends to the ABI's u64
-    code.extend((kind as u32).to_le_bytes());
-    code.push(0xc3);
+pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
+    exit_kind_with(&mut code.asm(), kind);
 }
 
-pub(super) fn direct_exit(code: &mut Vec<u8>, target: GuestAddress, kind: ExitKind) {
-    code.extend(super::chain::direct_exit(target, kind));
+/// `mov edx,kind; ret`: the exit to the target in RAX.
+pub(super) fn exit_kind_with(asm: &mut Asm, kind: ExitKind) {
+    // MOV EDX zero-extends to the ABI's u64.
+    asm.mov_imm32(Gpr::Rdx, kind as u32);
+    asm.ret();
+}
+
+pub(crate) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind) {
+    direct_exit_with(&mut code.asm(), target, kind);
+}
+
+/// `movabs rax,target; mov edx,kind; ret`.
+pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, kind: ExitKind) {
+    asm.mov_imm64(Gpr::Rax, target.0);
+    exit_kind_with(asm, kind);
 }
 
 fn conditional_exit(
-    code: &mut Vec<u8>,
-    opcode: Option<u8>,
+    code: &mut Code,
+    taken: Option<Cond>,
     target: GuestAddress,
     fallthrough: GuestAddress,
 ) {
-    if let Some(opcode) = opcode {
-        code.extend([0x0f, opcode]);
-        let fixup = code.len();
-        code.extend([0; 4]);
-        direct_exit(code, fallthrough, ExitKind::Fallthrough);
+    let mut asm = code.asm();
+    if let Some(taken) = taken {
+        let branch = asm.jcc(taken);
+        direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
         // The taken branch skips the complete fallthrough exit. Both paths
         // leave saved NZCV untouched regardless of host predicate evaluation.
-        let relative = (code.len() - fixup - 4) as i32;
-        code[fixup..fixup + 4].copy_from_slice(&relative.to_le_bytes());
+        asm.bind(branch);
     }
-    direct_exit(code, target, ExitKind::Direct);
+    direct_exit_with(&mut asm, target, ExitKind::Direct);
 }
 
 #[cfg(test)]
@@ -90,6 +99,7 @@ pub(crate) fn emit_resident_fallback_for_target(
     super::region::prefix_with_budget(native, base)
 }
 
+#[cfg(test)]
 pub(crate) fn emit_for_target(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
@@ -110,8 +120,8 @@ pub(crate) fn emit_for_target(
     .0
 }
 
-/// [`emit_for_target`] for the system-mode engine, which may also complete
-/// a terminal System instruction natively and fall through: DC ZVA by
+/// A block for the system-mode engine, which may also complete a terminal
+/// System instruction natively and fall through: DC ZVA by
 /// zeroing its block (`x86_64::zero_block`) and DC CVAC, DC CVAU and DC
 /// CIVAC by reading the byte at Xt (`x86_64::cache_clean`).
 pub(crate) fn emit_system_mode(
@@ -157,10 +167,7 @@ fn emit_selected(
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
     let mut fault_recovery = vec![];
-    let mut block = NativeBlock {
-        x86_64_code: vec![],
-        source_map: vec![],
-    };
+    let mut block = super::Emitted::default();
     let code = &mut block.x86_64_code;
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
@@ -201,7 +208,7 @@ fn emit_selected(
             && let Ok(Some(region)) = super::region::emit_allocated_prefix(&instructions[cursor..])
         {
             let count = region.consumed_instructions;
-            let mut baseline = vec![];
+            let mut baseline = Code::new();
             let mut candidate_fixups = vec![];
             for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
                 super::emit_instruction(
@@ -217,7 +224,7 @@ fn emit_selected(
                 block
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                code.extend(region.code);
+                code.append(region.code);
                 cursor += count;
                 continue;
             }
@@ -234,7 +241,7 @@ fn emit_selected(
             let count = region.consumed_instructions;
             let chunk = &instructions[cursor..cursor + count];
             let baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
-                let mut code = vec![];
+                let mut code = Code::new();
                 let mut map = vec![];
                 let mut fixups = vec![];
                 let mut after = held;
@@ -265,7 +272,7 @@ fn emit_selected(
                         ..entry
                     }
                 }));
-                code.extend(region.code);
+                code.append(region.code);
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
                 // could bypass the measured cost gate with a different shape.
@@ -273,7 +280,7 @@ fn emit_selected(
                 block
                     .source_map
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                code.extend(baseline_code);
+                code.append(baseline_code);
                 after = baseline_after;
             }
             // Each region wrote back the full register frame, so what follows
@@ -308,7 +315,7 @@ fn emit_selected(
         checks,
         after.rax,
     );
-    (block, fault_recovery)
+    (block.into_native(), fault_recovery)
 }
 
 /// What registers hold where an instruction outside the regions begins,
@@ -334,7 +341,7 @@ impl Held {
 /// `out_of_line`, numerical instructions move their slow paths there.
 #[allow(clippy::too_many_arguments)]
 fn emit_single(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     out_of_line: Option<&mut OutOfLine>,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
@@ -384,7 +391,7 @@ fn emit_single(
     let rax = super::rax_after(&instruction.operation);
     debug_assert!(match rax {
         super::Rax::Unknown => true,
-        super::Rax::Nzcv => code.ends_with(&STORE_EAX_NZCV),
+        super::Rax::Nzcv => code.ends_with(&nzcv_store()),
         super::Rax::Guest(register) =>
             super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
     });
@@ -422,7 +429,7 @@ const JMP_REL32_BYTES: usize = 1 + REL32_BYTES;
 /// [`ColdSplit`]: super::simd::numerical::ColdSplit
 #[derive(Default)]
 struct OutOfLine {
-    code: Vec<u8>,
+    code: Code,
     /// rel32 fields with the places they target.
     fixups: Vec<(Place, Place)>,
     /// The jump ending the last moved part and where its instruction ended
@@ -443,7 +450,7 @@ impl OutOfLine {
     /// `start` to the end of `code`, which ends its emission.
     fn take(
         &mut self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         start: usize,
         split: Option<super::simd::numerical::ColdSplit>,
     ) {
@@ -479,14 +486,13 @@ impl OutOfLine {
                 .push((place(site, inline), place(target, inline)));
         }
         self.code.extend(&code[split.cold..]);
-        self.code.push(JMP_REL32);
-        self.open = Some((self.code.len(), inline_end));
-        self.code.extend([0; REL32_BYTES]);
+        let back = self.code.asm().jmp();
+        self.open = Some((back.offset(), inline_end));
         code.truncate(inline_end);
     }
 
     /// Lay out the moved code at the end of `code` behind a jump over it.
-    fn place(mut self, code: &mut Vec<u8>) {
+    fn place(mut self, code: &mut Code) {
         if let Some((site, end)) = self.open.take() {
             self.fixups
                 .push((Place::OutOfLine(site), Place::Inline(end)));
@@ -494,14 +500,10 @@ impl OutOfLine {
         if self.code.is_empty() {
             return;
         }
-        code.push(JMP_REL32);
-        code.extend(
-            i32::try_from(self.code.len())
-                .expect("bounded block")
-                .to_le_bytes(),
-        );
+        let over = code.asm().jmp();
         let base = code.len();
-        code.extend(&self.code);
+        code.append(self.code);
+        code.asm().bind(over);
         let at = |place| match place {
             Place::Inline(offset) => offset,
             Place::OutOfLine(offset) => base + offset,
@@ -520,10 +522,11 @@ fn target_of(code: &[u8], site: usize) -> usize {
 
 /// `mov [rdi+GuestState.nzcv],eax`, which ends each emission after which
 /// RAX holds [`super::Rax::Nzcv`].
-const STORE_EAX_NZCV: [u8; 6] = {
-    let offset = (core::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes();
-    [0x89, 0x87, offset[0], offset[1], offset[2], offset[3]]
-};
+fn nzcv_store() -> Code {
+    let mut code = Code::new();
+    super::store_nzcv(&mut code.asm());
+    code
+}
 /// The direct exits to static successors that [`emit_terminal`] ended
 /// `code` with: the target's last, after a conditional branch's fallthrough.
 pub(crate) fn successor_exits(
@@ -572,7 +575,7 @@ pub(crate) fn successor_exits(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_terminal(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source_map: &mut Vec<(GuestAddress, usize)>,
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
@@ -581,7 +584,7 @@ fn emit_terminal(
     rax: super::Rax,
 ) {
     // The terminal's own load of a register RAX already holds.
-    let load = |code: &mut Vec<u8>, register| {
+    let load = |code: &mut Code, register| {
         if rax != super::Rax::Guest(register) {
             super::load(code, register);
         }
@@ -643,18 +646,18 @@ fn emit_terminal(
                 load(code, *source);
                 if *kind == ExitKind::Call {
                     // Capture BLR X30's target before LR is overwritten.
-                    code.extend([0x48, 0x89, 0xc1]); // mov rcx,rax
+                    code.asm().mov(Size::Qword, Gpr::Rcx, Gpr::Rax);
                     super::immediate(code, fallthrough.0);
                     super::store(code, Register::X(30));
-                    code.extend([0x48, 0x89, 0xc8]); // mov rax,rcx
+                    code.asm().mov(Size::Qword, Gpr::Rax, Gpr::Rcx);
                 }
                 exit_kind(code, *kind);
             }
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
                 Operation::BranchCondition { target, condition } => {
-                    let opcode = super::condition_of(code, condition, rax == super::Rax::Nzcv);
-                    conditional_exit(code, opcode, target, fallthrough);
+                    let taken = super::condition_holds(code, condition, rax == super::Rax::Nzcv);
+                    conditional_exit(code, taken, target, fallthrough);
                 }
                 Operation::BranchZero {
                     target,
@@ -663,16 +666,8 @@ fn emit_terminal(
                     nonzero,
                 } => {
                     load(code, source);
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([0x85, 0xc0]); // test (e/r)ax,(e/r)ax
-                    conditional_exit(
-                        code,
-                        Some(if nonzero { 0x85 } else { 0x84 }),
-                        target,
-                        fallthrough,
-                    );
+                    let taken = super::test_zero(code, width, nonzero);
+                    conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 Operation::BranchBit {
                     target,
@@ -681,13 +676,8 @@ fn emit_terminal(
                     nonzero,
                 } => {
                     load(code, source);
-                    code.extend([0x48, 0x0f, 0xba, 0xe0, bit]); // bt rax,bit
-                    conditional_exit(
-                        code,
-                        Some(if nonzero { 0x82 } else { 0x83 }),
-                        target,
-                        fallthrough,
-                    );
+                    let taken = super::test_bit(code, bit, nonzero);
+                    conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 _ => unreachable!("block decoder restricts branch terminators"),
             },
@@ -703,6 +693,26 @@ mod tests {
     use crate::block::{SynchronousTrap, TrapKind};
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// A conditional exit's branch skips its fallthrough exit, and each of
+    /// its instructions counts.
+    #[test]
+    fn conditional_exits_branch_over_the_fallthrough_exit() {
+        let mut code = Code::new();
+        conditional_exit(
+            &mut code,
+            Some(Cond::Ne),
+            GuestAddress(0x2000),
+            GuestAddress(0x1004),
+        );
+        let fallthrough =
+            super::super::chain::direct_exit(GuestAddress(0x1004), ExitKind::Fallthrough);
+        let taken = super::super::chain::direct_exit(GuestAddress(0x2000), ExitKind::Direct);
+        assert_eq!(code[..6], [0x0f, 0x85, 16, 0, 0, 0]);
+        assert_eq!(code[6..22], fallthrough);
+        assert_eq!(code[22..], taken);
+        assert_eq!(code.instructions(), 7);
+    }
 
     /// add x10, x10, #4; cmp x10, #0x600; b.ne: the CMP takes X10 from
     /// RAX where the ADD stored it, and the branch tests the NZCV word the
@@ -946,7 +956,7 @@ mod tests {
                     for instruction in &instructions {
                         before.push((instruction.pc.0, expected.clone(), expected_memory));
                         let next = GuestAddress(instruction.pc.0 + 4);
-                        let mut code = vec![];
+                        let mut code = Code::new();
                         match &instruction.operation {
                             Operation::FloatingPoint(operand) => {
                                 super::super::simd::emit_numerical(
@@ -1199,7 +1209,7 @@ mod tests {
                 // Replays the system-mode selection with its cost gates: a
                 // rejected chunk is emitted as baseline and skipped whole.
                 let baseline = |count: usize| {
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     let mut fixups = vec![];
                     for (index, instruction) in rest[..count].iter().enumerate() {
                         super::super::emit_instruction(
@@ -1269,7 +1279,7 @@ mod tests {
                         operation => category(operation),
                     };
                     *outside.entry(detail).or_default() += 1;
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     let mut fixups = vec![];
                     if let Operation::FloatingPoint(operand) = &instruction.operation {
                         super::super::simd::emit_numerical(

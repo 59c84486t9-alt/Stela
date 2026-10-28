@@ -18,6 +18,7 @@ pub mod assigned;
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+pub use stela_runtime::boot_bundle::schema::Placeholder;
 
 /// `kPropNameLength`: the NUL-padded property name field.
 pub const PROPERTY_NAME_BYTES: usize = 32;
@@ -173,14 +174,6 @@ pub struct PropertyLocation {
     pub property: String,
     pub value_offset: usize,
     pub value_bytes: usize,
-}
-
-/// A template property that still carries iBoot's fill-in recipe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Placeholder {
-    pub path: String,
-    pub property: String,
-    pub recipe: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

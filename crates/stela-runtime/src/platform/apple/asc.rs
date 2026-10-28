@@ -165,9 +165,8 @@ pub trait Firmware: Any {
         None
     }
     /// The coprocessor's own error reply to `message`, a request it does
-    /// not implement (`reason`), outside strict mode (docs/design/runtime.md
-    /// "Unsupported operations"). `None`, the default, when its protocol
-    /// has no error reply for that request: the request is then left
+    /// not implement (`reason`; docs/design/runtime.md "Unsupported
+    /// operations"). `None`, the default, when its protocol has no error reply for that request: the request is then left
     /// unanswered, so the client's own timeout path runs.
     fn error_reply(&mut self, _message: Message, _reason: &'static str) -> Option<Vec<Message>> {
         None
@@ -212,9 +211,6 @@ pub struct Asc {
     lines: Lines,
     /// Levels last reported, in [`Lines`] order.
     levels: [Option<bool>; 4],
-    /// Refuse unimplemented requests instead of answering them degraded
-    /// ([`Self::set_strict`]).
-    strict: bool,
     /// The endpoints and refusals answered degraded so far.
     reported: BTreeSet<(u8, &'static str)>,
     /// Reports not yet taken ([`Self::take_unmodeled`]).
@@ -252,18 +248,9 @@ impl Asc {
             outbox: outbox.into(),
             lines,
             levels: [None; 4],
-            strict: true,
             reported: BTreeSet::new(),
             unmodeled: Vec::new(),
         })
-    }
-
-    /// Refuse the mailbox write of each request the firmware does not
-    /// implement (strict, the default), or answer it with the firmware's
-    /// own error reply where its protocol has one, else leave it
-    /// unanswered, and report it once per endpoint and refusal.
-    pub fn set_strict(&mut self, strict: bool) {
-        self.strict = strict;
     }
 
     /// The requests answered degraded for the first time since the last
@@ -285,6 +272,7 @@ impl Asc {
     /// The ASCv4 provider's second register aperture. It shares this owner's
     /// lifecycle; do not bind a second PMGR lifecycle owner to the handle.
     /// Native protocol firmware does not imply an ARM entry-register value.
+    #[cfg(test)]
     pub fn auxiliary(&self) -> Auxiliary {
         self.auxiliary.clone()
     }
@@ -294,6 +282,7 @@ impl Asc {
     /// three address domains and the expected original instruction.
     /// This never loads or executes ARM firmware, or derives an entry from a
     /// native Rust implementation address.
+    #[cfg(test)]
     pub fn establish_entry(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
         self.check_entry_fetch(handoff)?;
         self.auxiliary.establish(handoff)
@@ -425,7 +414,10 @@ impl Asc {
         let mut replies = Vec::new();
         let result = match self.firmware.receive(message, &mut replies) {
             Ok(()) => Ok(replies),
-            Err(reason) if !self.strict => {
+            // A request the firmware does not implement gets the firmware's
+            // own error reply where its protocol has one, else none, and is
+            // reported once per endpoint and refusal.
+            Err(reason) => {
                 let error = self.firmware.error_reply(message, reason);
                 if self.reported.insert((message.endpoint, reason)) {
                     self.unmodeled.push(alloc::format!(
@@ -441,7 +433,6 @@ impl Asc {
                 }
                 Ok(error.unwrap_or_default())
             }
-            Err(reason) => Err(reason),
         };
         self.deliver(result)?;
         self.send0 = None;
@@ -762,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn graceful_mode_answers_with_the_error_reply_or_none_and_reports_once() {
+    fn unimplemented_requests_get_the_error_reply_or_none_and_report_once() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut asc = Asc::booted(Box::new(Echo), Lines::from_interrupts(LINES)).unwrap();
@@ -773,8 +764,6 @@ mod tests {
                 .unwrap();
             asc.write(A2I_SEND1, Width::Double, 0xff, access)
         };
-        assert!(send(&mut asc, 5, &mut access).is_err());
-        asc.set_strict(false);
         for _ in 0..2 {
             send(&mut asc, 5, &mut access).unwrap();
             assert_eq!(receive(&mut asc, &mut access).0, !5);
@@ -783,7 +772,7 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert!(reports[0].contains("refused"), "{}", reports[0]);
         // Without an error reply in its protocol the request is left
-        // unanswered, so the client's timeout runs; strict mode refuses it.
+        // unanswered, so the client's timeout runs.
         for _ in 0..2 {
             send(&mut asc, 0, &mut access).unwrap();
             assert!(asc.outbox.is_empty());
@@ -791,8 +780,6 @@ mod tests {
         let reports = asc.take_unmodeled();
         assert_eq!(reports.len(), 1);
         assert!(reports[0].contains("left unanswered"), "{}", reports[0]);
-        asc.set_strict(true);
-        assert!(send(&mut asc, 0, &mut access).is_err());
     }
 
     const LINES: [AicInput; 4] = [
@@ -915,11 +902,11 @@ mod tests {
             asc.write(A2I_SEND1, Width::Double, 0x120, &mut access)
                 .is_err()
         );
+        // A request the firmware refuses is answered degraded, reported once.
         asc.write(A2I_SEND0, Width::Double, 1, &mut access).unwrap();
-        assert!(
-            asc.write(A2I_SEND1, Width::Double, 0xff, &mut access)
-                .is_err()
-        );
+        asc.write(A2I_SEND1, Width::Double, 0xff, &mut access)
+            .unwrap();
+        assert_eq!(asc.take_unmodeled().len(), 1);
         assert!(
             asc.write(I2A_CONTROL, Width::Word, 1 << 7, &mut access)
                 .is_err()
@@ -1141,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_command_refusals_discard_tentative_acks_and_preserve_input_for_retry() {
+    fn atomic_refusals_discard_tentative_acks() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut asc = Asc::new(
@@ -1167,17 +1154,18 @@ mod tests {
         asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
             .unwrap();
         assert_eq!(receive(&mut asc, &mut access).0, 0x11);
+        // A refused command publishes no tentative ack: it is left
+        // unanswered and reported once.
         asc.write(A2I_SEND0, Width::Double, 5, &mut access).unwrap();
-        assert!(
-            asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
-                .is_err()
-        );
-        assert_eq!(asc.send0, Some(5));
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        assert_eq!(asc.send0, None);
         assert_eq!(asc.firmware::<AtomicCommand>().unwrap().value, 0);
         assert!(asc.outbox.is_empty());
         assert_eq!(asc.levels[2], Some(false));
+        assert_eq!(asc.take_unmodeled().len(), 1);
         asc.firmware_mut::<AtomicCommand>().unwrap().refuse_receive = false;
-        // Retry only SEND1: its staged payload was not consumed by refusal.
+        asc.write(A2I_SEND0, Width::Double, 5, &mut access).unwrap();
         asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
             .unwrap();
         assert_eq!(asc.send0, None);
@@ -1225,7 +1213,7 @@ mod tests {
 
     #[test]
     fn rtkit_poll_preserves_both_prior_and_failing_endpoint_events_and_irqs() {
-        use super::super::rtkit::{Endpoint, Management, RtKit};
+        use super::super::rtkit::{Endpoint, RtKit};
         let endpoints = (0x20..=0x22)
             .map(|number| {
                 (
@@ -1239,7 +1227,7 @@ mod tests {
                 )
             })
             .collect();
-        let rtkit = RtKit::new(endpoints, Management::Ordinary).unwrap();
+        let rtkit = RtKit::new(endpoints, crate::builds::DEFAULT.rtkit_version).unwrap();
         let mut asc = Asc::booted(Box::new(rtkit), Lines::from_interrupts(LINES)).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);

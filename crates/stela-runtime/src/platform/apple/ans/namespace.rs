@@ -20,7 +20,9 @@
 //! docs/research/ans2.md owns the design (`Formatting the medium`).
 use super::host::HostDisk;
 use alloc::{collections::BTreeMap, vec::Vec};
-use stela_drivers::block::{BlockDevice, BlockError};
+use stela_drivers::block::BlockDevice;
+#[cfg(test)]
+use stela_drivers::block::BlockError;
 
 pub const BLOCK_BYTES: u32 = 4096;
 const RECORD_BYTES: usize = 12;
@@ -227,6 +229,7 @@ impl Medium {
 
     /// Read `buffer` from namespace `id` at `lba`: erased blocks read as
     /// zeros, without touching their stale host bytes.
+    #[cfg(test)]
     pub fn read(&mut self, id: u32, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         let blocks = buffer.len() as u64 / u64::from(BLOCK_BYTES);
         let address = self
@@ -276,6 +279,7 @@ impl Medium {
     /// Write `data` to namespace `id` at `lba`. The written blocks hold
     /// guest data from now on, so they leave the erased runs; a failed write
     /// leaves them erased, its effect on the medium indeterminate.
+    #[cfg(test)]
     pub fn write(&mut self, id: u32, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         let blocks = data.len() as u64 / u64::from(BLOCK_BYTES);
         let address = self
@@ -313,6 +317,7 @@ impl Medium {
     }
 
     /// Blocks erased and not written since, which read as zeros.
+    #[cfg(test)]
     pub fn erased_blocks(&self) -> u64 {
         self.erased.blocks
     }

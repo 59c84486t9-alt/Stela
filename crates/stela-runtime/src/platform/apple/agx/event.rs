@@ -147,6 +147,7 @@ impl Publication {
 
 /// Synchronous component helper; production retains a `Publication` and
 /// waits for space without re-executing the command that produced the event.
+#[cfg(test)]
 pub fn post(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<(), &'static str> {
     Publication::reserve(memory, root, event)?
         .ok_or("GFX firmware event ring is full")?

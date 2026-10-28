@@ -1,5 +1,9 @@
 //! SVE single/double min/max. NaNs, subnormals and zero/zero ties use software
 //! completion.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Cond, Rm, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -33,24 +37,9 @@ const ZERO_VECTOR: u8 = CLASSIFICATION_SCRATCH[1];
 const DOUBLE_ZERO_SCRATCH: u8 = CLASSIFICATION_SCRATCH[2];
 const OLD_DESTINATION: u8 = CLASSIFICATION_SCRATCH[0];
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const PACKED_DOUBLE_PREFIX: u8 = 0x66;
 const REMOVE_SIGN_BITS: u8 = 1;
 const REPEAT_LOW_DWORD: u8 = 0;
 const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-
-#[repr(u8)]
-enum SelectionOpcode {
-    Minimum = 0x5d,
-    Maximum = 0x5f,
-}
 
 fn inputs(operand: Operand) -> Option<(MinMaxOperation, u8, Source, u8)> {
     let Kind::MinMax(operation) = operand.kind else {
@@ -79,23 +68,25 @@ fn inputs(operand: Operand) -> Option<(MinMaxOperation, u8, Source, u8)> {
     Some((operation, left, right, predicate))
 }
 
-fn immediate(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
+fn immediate(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
     if bits == 0 {
         Host::Xor.register(code, RIGHT, RIGHT, target);
         return;
     }
     if format == Format::Single {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend((bits as u32).to_le_bytes());
+        code.asm().mov_imm32(Rax, bits as u32);
     } else {
-        code.extend(MOV_RAX_IMMEDIATE);
-        code.extend(bits.to_le_bytes());
+        code.asm().mov_imm64(Rax, bits);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (RIGHT << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm().simd(Host::MoveGprQword, RIGHT, Rax, target);
     if format == Format::Single {
-        Host::ShuffleDword.register(code, RIGHT, RIGHT, target);
-        code.push(REPEAT_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            RIGHT,
+            Rm::Xmm(RIGHT),
+            REPEAT_LOW_DWORD,
+            target,
+        );
     } else {
         Host::UnpackLowQword.register(code, RIGHT, RIGHT, target);
     }
@@ -105,8 +96,8 @@ fn immediate(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
 /// after OR accepts exactly-one-zero inputs while retaining every signed-zero
 /// tie for the shared semantic helper. Double requires both dwords to be zero.
 /// LEFT/RIGHT/ACTIVE and the invariant classification masks remain live.
-fn guard_zero_pairs(
-    code: &mut Vec<u8>,
+pub(super) fn guard_zero_pairs(
+    code: &mut Code,
     format: Format,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -122,31 +113,34 @@ fn guard_zero_pairs(
     Host::Xor.register(code, ZERO_VECTOR, ZERO_VECTOR, target);
     Host::EqualDword.register(code, ZERO_PAIR, ZERO_VECTOR, target);
     if format == Format::Double {
-        Host::ShuffleDword.register(code, DOUBLE_ZERO_SCRATCH, ZERO_PAIR, target);
-        code.push(SWAP_ADJACENT_DWORDS);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            DOUBLE_ZERO_SCRATCH,
+            Rm::Xmm(ZERO_PAIR),
+            SWAP_ADJACENT_DWORDS,
+            target,
+        );
         Host::And.register(code, ZERO_PAIR, DOUBLE_ZERO_SCRATCH, target);
     }
     Host::And.register(code, ZERO_PAIR, ACTIVE, target);
-    Host::ByteSignMask.register(code, GPR_RAX, ZERO_PAIR, target);
-    code.extend(TEST_EAX_EAX);
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, ZERO_PAIR, target);
+    code.asm().test(Size::Dword, Rax, Rax);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
-fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
-    let opcode = match operation {
-        MinMaxOperation::Minimum | MinMaxOperation::MinimumNumber => SelectionOpcode::Minimum,
-        MinMaxOperation::Maximum | MinMaxOperation::MaximumNumber => SelectionOpcode::Maximum,
-    };
-    if format == Format::Double {
-        code.push(PACKED_DOUBLE_PREFIX);
+pub(super) fn selection(code: &mut Code, operation: MinMaxOperation, format: Format) {
+    let minimum = matches!(
+        operation,
+        MinMaxOperation::Minimum | MinMaxOperation::MinimumNumber
+    );
+    let mut asm = code.asm();
+    match (format == Format::Double, minimum) {
+        (true, true) => asm.float(FloatOp::Min, FloatLanes::PackedDouble, LEFT, Rm::Xmm(RIGHT)),
+        (true, false) => asm.float(FloatOp::Max, FloatLanes::PackedDouble, LEFT, Rm::Xmm(RIGHT)),
+        (false, true) => asm.float(FloatOp::Min, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT)),
+        (false, false) => asm.float(FloatOp::Max, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT)),
     }
-    code.extend([
-        SSE_ESCAPE,
-        opcode as u8,
-        MODRM_REGISTER | (LEFT << MODRM_REGISTER_SHIFT) | RIGHT,
-    ]);
 }
 
 /// Emit the eight predicated vector and immediate min/max forms. Half precision
@@ -155,7 +149,7 @@ fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
 /// MXCSR and add no FPSR bits. Clobbers RAX/RCX/RDX, flags and XMM0-7;
 /// preserves RDI/R15 and NZCV.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -274,7 +268,7 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = vec![0x90];
+            let mut code = Code::from(vec![0x90]);
             assert!(
                 !emit(
                     &mut code,

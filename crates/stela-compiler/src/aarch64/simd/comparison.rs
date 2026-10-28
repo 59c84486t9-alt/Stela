@@ -1,4 +1,6 @@
 //! FCMP/FCCMP and AdvSIMD FCMEQ/FCMGE/FCMGT/FACGE/FACGT.
+use super::scalar_format;
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, comparison::Predicate};
 
 use super::arithmetic::Shape;
@@ -6,11 +8,6 @@ use super::arithmetic::Shape;
 const REGISTER_MASK: u32 = 31;
 const LEFT_SHIFT: u32 = 5;
 const RIGHT_SHIFT: u32 = 16;
-const FORMAT_SHIFT: u32 = 22;
-const FORMAT_MASK: u32 = 3;
-const FORMAT_SINGLE: u32 = 0;
-const FORMAT_DOUBLE: u32 = 1;
-const FORMAT_HALF: u32 = 3;
 const VECTOR_Q: u32 = 1 << 30;
 const SIMD_DOUBLE: u32 = 1 << 22;
 const SIMD_SCALAR_PREFIX: u32 = 0x50000000;
@@ -92,20 +89,10 @@ fn register(word: u32, shift: u32) -> u8 {
     ((word >> shift) & REGISTER_MASK) as u8
 }
 
-fn scalar_format(word: u32) -> Result<Format, ()> {
-    match (word >> FORMAT_SHIFT) & FORMAT_MASK {
-        FORMAT_SINGLE => Ok(Format::Single),
-        FORMAT_DOUBLE => Ok(Format::Double),
-        FORMAT_HALF => Ok(Format::Half),
-        _ => Err(()),
-    }
-}
-
 /// None denotes another family; Err denotes reserved scalar ftype or vector1D.
 /// Every register field is an ordinary V register, including V31. The Rm field
 /// remains unconstrained and ignored in FCMP/FCMPE zero encodings.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & FLAGS_MASK == FCMP {
         return Some(scalar_format(word).map(|format| Operand::Flags {
             format,
@@ -144,7 +131,7 @@ fn predicate(opcode: u32, zero: bool) -> Option<Predicate> {
     })
 }
 
-fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, ()>> {
+fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, Unsupported>> {
     let (scalar_mask, vector_mask, scalar_half_mask, vector_half_mask, half_adjustment) = if zero {
         (
             ZERO_SCALAR_MASK,
@@ -191,7 +178,7 @@ fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, ()>> {
             Shape::Vector128
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Predicate {
             operation,
@@ -212,6 +199,7 @@ fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aarch64::simd::{FORMAT_DOUBLE, FORMAT_HALF, FORMAT_SHIFT, FORMAT_SINGLE};
 
     const FORMATS: [(u32, Format); 3] = [
         (FORMAT_SINGLE, Format::Single),
@@ -372,12 +360,12 @@ mod tests {
             for signal in [0, SIGNAL_ALL_NANS] {
                 assert_eq!(
                     decode(opcode | signal | (RESERVED_FORMAT << FORMAT_SHIFT)),
-                    Some(Err(()))
+                    Some(Err(Unsupported))
                 );
             }
         }
         for (opcode, _) in REGISTER_OPERATIONS.into_iter().chain(ZERO_OPERATIONS) {
-            assert_eq!(decode(opcode | SIMD_DOUBLE), Some(Err(())));
+            assert_eq!(decode(opcode | SIMD_DOUBLE), Some(Err(Unsupported)));
         }
         for (opcode, _) in ZERO_OPERATIONS {
             for right in 1..=REGISTER_MASK {

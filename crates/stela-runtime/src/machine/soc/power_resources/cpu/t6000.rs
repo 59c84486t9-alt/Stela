@@ -188,7 +188,7 @@ pub(super) fn resolve(
             continue;
         }
         let location = view.location.ok_or(Error::RecordMismatch(index))?;
-        if location.address != source_address(&io, &pmgr, location.group, location.index)? {
+        if location.address != ps_address(&io, &pmgr, location.group, location.index)? {
             return Err(Error::RecordMismatch(index));
         }
         let is_core = CORE_PREFIXES
@@ -244,40 +244,6 @@ pub(super) fn resolve(
         }
     }
     Ok(output)
-}
-
-fn source_address(io: &Node<'_>, pmgr: &Node<'_>, group: usize, index: u32) -> Result<u64, Error> {
-    let groups = required(pmgr, "ps-regs")?;
-    let registers = required(pmgr, "reg")?;
-    if !groups.len().is_multiple_of(12) || !registers.len().is_multiple_of(16) || index >= 32 {
-        return Err(Error::Malformed("T6000 PS location cells"));
-    }
-    let group = groups
-        .as_chunks::<12>()
-        .0
-        .get(group)
-        .ok_or(Error::UnqualifiedGeometry("T6000 PS group"))?;
-    let reg = word(&group[..4])? as usize;
-    let offset = u64::from(word(&group[4..8])?) + u64::from(index) * PS_STRIDE;
-    if word(&group[8..])? & (1u32 << index) == 0 {
-        return Err(Error::UnqualifiedGeometry("T6000 PS mask"));
-    }
-    let range = registers
-        .as_chunks::<16>()
-        .0
-        .get(reg)
-        .ok_or(Error::UnqualifiedGeometry("T6000 PS register"))?;
-    let base = u64::from_le_bytes(range[..8].try_into().unwrap());
-    let bytes = u64::from_le_bytes(range[8..].try_into().unwrap());
-    if offset.checked_add(PS_STRIDE).is_none_or(|end| end > bytes) {
-        return Err(Error::UnqualifiedGeometry("T6000 PS extent"));
-    }
-    physical(
-        io,
-        base.checked_add(offset)
-            .ok_or(Error::UnqualifiedGeometry("T6000 PS wraps"))?,
-        PS_STRIDE,
-    )
 }
 
 #[cfg(test)]
@@ -456,8 +422,7 @@ mod tests {
                     location: parsed.location.map(|location| PmgrCpuLocation {
                         group: location.group,
                         index: location.index,
-                        address: source_address(&io, &pmgr, location.group, location.index)
-                            .unwrap(),
+                        address: ps_address(&io, &pmgr, location.group, location.index).unwrap(),
                     }),
                 }
             })

@@ -192,6 +192,7 @@ mod tests {
                 (owners[1], 5),
                 None,
                 Some((owners[0], 0)),
+                crate::builds::DEFAULT,
             )
             .unwrap();
         let views = [

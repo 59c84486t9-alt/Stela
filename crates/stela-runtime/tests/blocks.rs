@@ -86,7 +86,7 @@ mod numerical {
                     let mut runtime = BlockRuntime::new_for_target(
                         71,
                         cache.path().into(),
-                        BlockProfile::Ordinary,
+                        BlockProfile::ORDINARY,
                         target,
                     );
                     runtime.register_code(GuestAddress(BASE), source.clone())?;
@@ -130,7 +130,7 @@ mod numerical {
                     let mut runtime = BlockRuntime::new_for_target(
                         72,
                         cache.path().into(),
-                        BlockProfile::Ordinary,
+                        BlockProfile::ORDINARY,
                         target,
                     );
                     runtime.register_code(GuestAddress(BASE), source.clone())?;
@@ -161,7 +161,7 @@ mod numerical {
         let mut runtime = BlockRuntime::new_for_target(
             72,
             cache.path().into(),
-            BlockProfile::Ordinary,
+            BlockProfile::ORDINARY,
             TargetCpu::Baseline,
         );
         runtime.register_code(
@@ -205,7 +205,7 @@ mod numerical {
             let mut runtime = BlockRuntime::new_for_target(
                 73,
                 cache.path().into(),
-                BlockProfile::Ordinary,
+                BlockProfile::ORDINARY,
                 TargetCpu::Baseline,
             );
             runtime.register_code(GuestAddress(BASE), words(&[FADD_S0_S1_S2, RET]))?;
@@ -349,7 +349,7 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
             let mut runtime = BlockRuntime::new_for_target(
                 802,
                 cache.path().into(),
-                BlockProfile::Ordinary,
+                BlockProfile::ORDINARY,
                 target,
             );
             runtime.register_code(GuestAddress(BASE), program.clone())?;
@@ -446,7 +446,7 @@ fn simd_register_shifts_and_doubled_products_share_dispatch_and_persistent_code(
             let mut runtime = BlockRuntime::new_for_target(
                 803,
                 cache.path().into(),
-                BlockProfile::Ordinary,
+                BlockProfile::ORDINARY,
                 target,
             );
             runtime.register_code(GuestAddress(BASE), program.clone())?;

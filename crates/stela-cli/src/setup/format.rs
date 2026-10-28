@@ -9,6 +9,9 @@
 //! size computation, 32 reserved sectors with the FSInfo sector at 1 and
 //! the backup boot sector at 6, two FATs, and the root directory in cluster
 //! 2, holding only the volume label.
+// macOS erases a USB with diskutil, so only the other hosts write this
+// layout themselves.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 use anyhow::{Result, bail, ensure};
 use stela_runtime::pc::gpt::{self, Guid, Partition};
 

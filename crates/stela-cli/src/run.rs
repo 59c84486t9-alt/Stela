@@ -88,11 +88,7 @@ pub(crate) struct Run {
     /// Requires a build with stela-runtime/native-profile.
     #[arg(long, help_heading = ADVANCED)]
     engine_profile_output: Option<PathBuf>,
-    /// Stop at the first operation Stela does not support instead of
-    /// failing it as macOS fails an operation it lacks (also
-    /// STELA_STRICT=1).
-    #[arg(long, help_heading = ADVANCED)]
-    strict: bool,
+
     /// The Mac to model, by product type (such as Mac14,3 or Mac15,10);
     /// else STELA_MODEL, else the `stela apps --model` preference, else the
     /// default board.
@@ -288,7 +284,6 @@ impl Run {
             statistics: false,
             fp_profile_output: None,
             engine_profile_output: None,
-            strict: false,
             model: None,
         })
     }
@@ -323,9 +318,7 @@ impl Run {
                 command.push(std::path::absolute(output)?.into_os_string());
             }
         }
-        if self.strict {
-            command.push("--strict".into());
-        }
+
         if let Some(model) = &self.model {
             command.push("--model".into());
             command.push(model.into());
@@ -430,8 +423,8 @@ impl Run {
             statistics: self.statistics,
             fp_profile_output: self.fp_profile_output.clone(),
             engine_profile_output: self.engine_profile_output.clone(),
-            strict: self.strict,
         };
+
         let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;
         if self.statistics {
             for (name, count) in &report.calls {
@@ -447,13 +440,6 @@ impl Run {
             }
         }
         report.termination.end_host_process()
-    }
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-impl Run {
-    pub(crate) fn run(self) -> Result<()> {
-        crate::require_hosted("stela run")
     }
 }
 

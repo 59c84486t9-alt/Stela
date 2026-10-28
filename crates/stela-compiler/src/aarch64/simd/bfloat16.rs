@@ -1,5 +1,6 @@
 //! AdvSIMD BF16: BFCVT, BFCVTN, BFDOT, BFMMLA and BFMLAL.
 use super::arithmetic::Shape;
+use crate::aarch64::Unsupported;
 
 const SCALAR_MASK: u32 = 0xffff_fc00;
 const BFCVT: u32 = 0x1e63_4000;
@@ -103,8 +104,7 @@ pub enum Operand {
 
 /// The masks match only this family's formats. Indexed multiplies accept only
 /// V0-V15.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     decode_conversion(word)
         .or_else(|| decode_dot(word))
         .or_else(|| decode_multiply(word))

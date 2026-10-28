@@ -150,6 +150,7 @@ pub struct Gpio {
 impl Gpio {
     /// One AIC input per interrupt group; `selects` are chip-select outputs
     /// and `nets` the pulled-up board nets wired to input pins.
+    #[cfg(test)]
     pub fn new(
         pins: u32,
         lines: Vec<AicInput>,
@@ -232,6 +233,7 @@ impl Gpio {
             _ => Some(true),
         }
     }
+    #[cfg(test)]
     pub fn output(&self, pin: u32) -> Option<bool> {
         Self::driven_level(*self.pins.get(pin as usize)?)
     }

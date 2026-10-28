@@ -88,7 +88,7 @@ const RESTORE: Roles = Roles {
 };
 
 #[derive(Subcommand)]
-pub(crate) enum BootCommand {
+pub enum BootCommand {
     /// Lay out a model's kernel collection, SPTM, TXM, DeviceTree and trust
     /// cache in guest physical memory for `stela.efi`.
     Prepare(Box<Prepare>),
@@ -100,7 +100,7 @@ pub(crate) enum BootCommand {
 }
 
 #[derive(Args)]
-pub(crate) struct Check {
+pub struct Check {
     /// A directory `boot prepare` wrote.
     bundle: PathBuf,
 }
@@ -287,6 +287,12 @@ fn mount(
             usb: UsbCables::default(),
             scanout: Some(Box::new(Discard)),
             firmware: &firmware,
+            build: manifest
+                .target
+                .as_ref()
+                .map(|target| stela_runtime::builds::find(&target.product_build))
+                .transpose()
+                .map_err(|error| error.to_string())?,
         },
         &mut |arguments| log.push(arguments.to_string().trim_end().to_owned()),
     )?;
@@ -324,7 +330,7 @@ fn mount(
 }
 
 #[derive(Args)]
-pub(crate) struct Prepare {
+pub struct Prepare {
     #[arg(skip)]
     quiet: bool,
     #[arg(long, required_unless_present = "disk", conflicts_with = "disk")]
@@ -372,7 +378,7 @@ pub(crate) struct Prepare {
     /// The OS environment iBoot enters (`/chosen osenvironment` and its
     /// `/osenvironments` child): `darwinos-ramdisk` with `--restore`, none
     /// (macOS) otherwise.
-    #[arg(long, value_parser = |name: &str| OsEnvironment::parse(name).map_err(|e| e.to_string()))]
+    #[arg(long, value_parser = |name: &str| stela_loader::boot_policy::os_environment(name).map_err(|e| e.to_string()))]
     osenvironment: Option<OsEnvironment>,
     /// Guest DRAM base; the target SoC's by default (0x800000000 on the M1
     /// and M2, 0x10000000000 on every other SoC).
@@ -485,7 +491,7 @@ pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
 }
 
 impl BootCommand {
-    pub(crate) fn run(self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         match self {
             Self::Prepare(command) => (*command).run(),
             Self::Check(command) => command.run(),
@@ -683,7 +689,7 @@ impl Prepare {
                     .as_ref()
                     .map_or_else(|| "opaque".into(), |r| r.payload_type.clone()),
                 description: receipt.map(|r| r.description).unwrap_or_default(),
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: stela_runtime::sha256(&bytes),
             };
             Ok(Decoded {
@@ -737,7 +743,7 @@ impl Prepare {
                 container_sha256: stela_runtime::sha256(&bytes),
                 payload_type: "im4m".into(),
                 description: String::new(),
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: stela_runtime::sha256(&bytes),
             };
             Ok(Some(Decoded {
@@ -766,7 +772,7 @@ impl Prepare {
                         container_sha256: digest.clone(),
                         payload_type: "im4m".into(),
                         description: String::new(),
-                        decoded_bytes: bytes.len(),
+                        decoded_bytes: bytes.len() as u64,
                         decoded_sha256: digest,
                     },
                     bytes,
@@ -788,7 +794,7 @@ impl Prepare {
                                 source: Source {
                                     payload_type: receipt.payload_type,
                                     description: receipt.description,
-                                    decoded_bytes: bytes.len(),
+                                    decoded_bytes: bytes.len() as u64,
                                     decoded_sha256: stela_runtime::sha256(&bytes),
                                     ..raw.source
                                 },
@@ -836,7 +842,7 @@ impl Prepare {
                     container_sha256: digest.clone(),
                     payload_type: "raw".into(),
                     description: format!("board device firmware {name}"),
-                    decoded_bytes: bytes.len(),
+                    decoded_bytes: bytes.len() as u64,
                     decoded_sha256: digest,
                 };
                 Ok((
@@ -1014,12 +1020,14 @@ impl Prepare {
         }
         stela_runtime::write_json(&self.output.join(MANIFEST_FILE), &written)?;
         let manifest = &bundle.manifest;
-        if !self.quiet {
+        if !self.quiet
+            && let Some(target) = &manifest.target
+        {
             eprintln!(
                 "{} {} {}: {} regions to {:#x}; entry {} at {:#x}, x0 {:#x}; {}",
-                manifest.target.product_type,
-                manifest.target.product_build,
-                manifest.target.variant,
+                target.product_type,
+                target.product_build,
+                target.variant,
                 manifest.regions.len(),
                 manifest.top_of_kernel_data,
                 manifest.entry.image,

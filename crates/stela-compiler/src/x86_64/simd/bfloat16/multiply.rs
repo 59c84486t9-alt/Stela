@@ -1,13 +1,14 @@
 //! BFMLAL with SSE2 or FMA3.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, commit_ah0_inexact, emit_fma,
-    emit_opcode, environment_alternative_nearest, guard_ah0_exceptions, prepare_vector_input_range,
+    ArithmeticOpcode, Condition, FusedOpcode, branch, commit_ah0_inexact, emit_fma, emit_opcode,
+    environment_alternative_nearest, guard_ah0_exceptions, prepare_vector_input_range,
     prepare_vector_result_range, reject_other_status, reject_product_status, resolve,
     restore_environment, restore_environment_with_product, save_product_status,
     vector_exponent_range,
 };
 use super::super::{commit, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -31,7 +32,7 @@ const FIRST_LANE: u8 = 0;
 const OUTPUT_SHAPE: Shape = Shape::Vector128;
 const BFLOAT16_BYTES: u32 = BFLOAT16_BITS / u8::BITS;
 
-fn select_vector(code: &mut Vec<u8>, source: u8, vector: u8, parity: Parity) {
+fn select_vector(code: &mut Code, source: u8, vector: u8, parity: Parity) {
     read_vector(code, source, vector);
     if parity == Parity::Odd {
         ShiftOpcode::RightDword.emit(code, vector, BFLOAT16_BITS as u8);
@@ -41,7 +42,7 @@ fn select_vector(code: &mut Vec<u8>, source: u8, vector: u8, parity: Parity) {
     ShiftOpcode::LeftDword.emit(code, vector, BFLOAT16_TO_SINGLE_SHIFT as u8);
 }
 
-fn prepare_sources(code: &mut Vec<u8>, operand: &MultiplyOperand) {
+fn prepare_sources(code: &mut Code, operand: &MultiplyOperand) {
     select_vector(code, operand.left, LEFT, operand.parity);
     match operand.right {
         MultiplySource::Vector(source) => select_vector(code, source, RIGHT, operand.parity),
@@ -66,14 +67,14 @@ fn prepare_sources(code: &mut Vec<u8>, operand: &MultiplyOperand) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &MultiplyOperand,
     pc: GuestAddress,
     target: TargetCpu,
 ) {
     let native_fma = target.supports(TargetCpu::Fma);
     if native_fma {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let mut helper = Vec::new();
     guard_ah0_exceptions(code, &mut helper);

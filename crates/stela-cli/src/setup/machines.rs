@@ -13,13 +13,13 @@
 //! bound to the old one. Every install needs its own restore bundle,
 //! prepared from the active build's restore image.
 use super::{
-    Environment, Setup, TSS_REQUIRED, apply_install, bundle, check_bundle_revision,
+    Environment, Request, TSS_REQUIRED, apply_install, bundle, check_bundle_revision,
     check_installed_efi, describe_install, ecid::Ecid, installed, plan_install, publish,
     read_record, tss_note, write_record,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
+use std::{fmt::Write as _, fs};
 use stela_loader::mount_interface::MAX_CHOICES;
 
 /// The first install's name unless `--install` gives one.
@@ -72,8 +72,8 @@ pub(super) fn machine_ecid(
         (None, Some(recorded)) => Ok(recorded),
         (None, None) if sep_provisioned && !new_ecid => bail!(
             "the NOR partition holds an earlier Stela machine's SEP state, which is bound to that \
-             machine's ECID. Pass that ECID with --ecid (`stela setup --status` on its old USB \
-             or its --backup-state file shows it), or --new-ecid to start a new machine, which \
+             machine's ECID. Pass that ECID with --ecid (`stela setup status` on its old USB \
+             or its `state backup` file shows it), or --new-ecid to start a new machine, which \
              orphans its LocalPolicy and SEP state."
         ),
         (None, None) => {
@@ -91,7 +91,7 @@ pub(super) fn machine_ecid(
 
 /// `--target` (and an optional `--nor`) on an existing setup: add an
 /// install.
-pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<String> {
+pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
     check_bundle_revision(environment, &record)?;
@@ -257,7 +257,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
 
 /// Settings of an existing setup: the default install, removing one, the
 /// TSS opt-in, the engine profile and the startup choices' timeout.
-pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Result<String> {
+pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let mut record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
     super::update::ready(&record, |_| false)?;
@@ -267,7 +267,7 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
         let install = record.install(Some(name))?.clone();
         ensure!(
             record.installs.len() > 1,
-            "install \"{name}\" is this setup's only one; `stela setup --uninstall` removes the \
+            "install \"{name}\" is this setup's only one; `stela setup uninstall` removes the \
              setup"
         );
         record.installs.retain(|i| i.name != *name);
@@ -329,14 +329,36 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
         record.chooser_timeout = Some(seconds);
         writeln!(text, "  choices        wait {seconds} s")?;
     }
+    if let Some(ssid) = &command.wifi {
+        let network = super::wifi::Network {
+            ssid: ssid.clone(),
+            country: command.wifi_country.clone(),
+        };
+        writeln!(text, "  {}", super::wifi::describe(&network, &record.esp))?;
+        record.wifi = Some(network);
+    }
+    if command.no_wifi && record.wifi.take().is_some() {
+        writeln!(
+            text,
+            "  Wi-Fi          off; remove {}",
+            record.esp.join(super::wifi::KEY_PATH).display()
+        )?;
+    }
     record.choices_text()?;
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
+    if let Some(passphrase) = &command.wifi_passphrase {
+        super::wifi::write_key(&record.esp, passphrase)?;
+    }
     publish(&mut record)?;
     write_record(&record.esp.clone(), &record)?;
     super::remove_bundles(&record, &removed_bundles)?;
+    let key = record.esp.join(super::wifi::KEY_PATH);
+    if command.no_wifi && key.is_file() {
+        fs::remove_file(key)?;
+    }
     text.push_str("Done.\n");
     Ok(text)
 }

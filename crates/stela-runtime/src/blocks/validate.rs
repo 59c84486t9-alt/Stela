@@ -50,7 +50,9 @@ pub(super) fn validate_numerical_exit(
     let word = validate_interior_word(entry, exit, source_bytes, region_base, source)?;
     let operand = stela_compiler::aarch64::FloatingPointOperation::decode(word)
         .context("numerical exit does not identify arithmetic")?
-        .map_err(|()| anyhow::anyhow!("numerical exit identifies reserved arithmetic"))?;
+        .map_err(|stela_compiler::aarch64::Unsupported| {
+            anyhow::anyhow!("numerical exit identifies reserved arithmetic")
+        })?;
     let next = GuestAddress(
         exit.0
             .checked_add(INSTRUCTION_BYTES as u64)
@@ -196,10 +198,8 @@ pub(super) fn validate_source_map(
     base: GuestAddress,
     source_bytes: usize,
 ) -> Result<()> {
-    let first_native_offset = if manifest.memory_requirements.is_some()
-        || manifest.identity.abi == stela_compiler::block::EL1_M0_INTEGER_BLOCK_ABI
-    {
-        stela_compiler::extended::CONTEXT_WRAPPER_BYTES
+    let first_native_offset = if manifest.memory_requirements.is_some() {
+        stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES
     } else {
         0
     };

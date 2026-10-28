@@ -1,5 +1,9 @@
 //! Classic BFDOT with round-to-odd intermediates.
 use super::{LEFT, RIGHT};
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Rm, Size};
+use crate::x86_64::simd::numerical::single_vector_arithmetic;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,8 +14,7 @@ use crate::{
         isa::{ShiftOpcode, SimdOpcode as Host},
         scalable::numerical::{self, Frame},
         simd::numerical::{
-            ArithmeticOpcode, Condition, branch, emit_opcode_to, prepare_vector_input_range,
-            vector_exponent_range,
+            ArithmeticOpcode, Condition, branch, prepare_vector_input_range, vector_exponent_range,
         },
     },
 };
@@ -27,83 +30,61 @@ const ORIGINAL_LEFT: u8 = 7;
 const BFLOAT_BITS: u8 = BFLOAT16_BITS as u8;
 const SIGN_BITS: u8 = 1;
 const SINGLE_TOP_BIT: u8 = Format::Single.bits() as u8 - SIGN_BITS;
-const GPR_RAX: u8 = 0;
 const ALL_SINGLE_LANES: u8 = 15;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_ROUND_ZERO: u32 = 3 << 13;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const CMP_EAX_IMMEDIATE: &[u8] = &[0x83, 0xf8];
-const COMPARE_EQUAL_SINGLE: &[u8] = &[0x0f, 0xc2];
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const EQUAL_PREDICATE: u8 = 0;
 
-pub(super) fn install_environment(code: &mut Vec<u8>, frame: &Frame) {
-    code.push(MOV_EAX_IMMEDIATE);
-    code.extend(MXCSR_ROUND_ZERO.to_le_bytes());
+pub(super) fn install_environment(code: &mut Code, frame: &Frame) {
+    code.asm().mov_imm32(Rax, MXCSR_ROUND_ZERO);
     numerical::install_mxcsr(code, frame);
 }
 
-fn arithmetic(code: &mut Vec<u8>, opcode: ArithmeticOpcode, destination: u8, source: u8) {
-    emit_opcode_to(
-        code,
-        Format::Single,
-        Shape::Vector128,
-        opcode,
-        destination,
-        source,
-    );
-}
-
-fn guard_normal(code: &mut Vec<u8>, source: u8, failures: &mut Vec<usize>) {
+fn guard_normal(code: &mut Code, source: u8, failures: &mut Vec<usize>) {
     vector_exponent_range(code, Format::Single, Shape::Vector128, source);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn guard_normal_or_zero(
-    code: &mut Vec<u8>,
-    source: u8,
-    failures: &mut Vec<usize>,
-    target: TargetCpu,
-) {
+fn guard_normal_or_zero(code: &mut Code, source: u8, failures: &mut Vec<usize>, target: TargetCpu) {
     vector_exponent_range(code, Format::Single, Shape::Vector128, source);
     Host::MoveAligned.register(code, SECOND_RESIDUAL, source, target);
     ShiftOpcode::LeftDword.emit(code, SECOND_RESIDUAL, SIGN_BITS);
     Host::EqualDword.register(code, SECOND_RESIDUAL, ZERO, target);
     Host::Or.register(code, FIRST_RESIDUAL, SECOND_RESIDUAL, target);
-    Host::DwordSignMask.register(code, GPR_RAX, FIRST_RESIDUAL, target);
-    code.extend(CMP_EAX_IMMEDIATE);
-    code.push(ALL_SINGLE_LANES);
+    code.asm()
+        .simd_to_gpr(Host::DwordSignMask, Rax, FIRST_RESIDUAL, target);
+    code.asm()
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, ALL_SINGLE_LANES as i8);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn guard_real_status(code: &mut Vec<u8>, frame: &Frame, failures: &mut Vec<usize>) {
+fn guard_real_status(code: &mut Code, frame: &Frame, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn compare_equal(code: &mut Vec<u8>, destination: u8, source: u8) {
-    code.extend(COMPARE_EQUAL_SINGLE);
-    code.extend([
-        REGISTER_DIRECT | destination << MODRM_REGISTER_SHIFT | source,
+fn compare_equal(code: &mut Code, destination: u8, source: u8) {
+    code.asm().float_compare(
+        FloatLanes::PackedSingle,
+        destination,
+        Rm::Xmm(source),
         EQUAL_PREDICATE,
-    ]);
+    );
 }
 
-fn odd_add(code: &mut Vec<u8>, frame: &Frame, failures: &mut Vec<usize>, target: TargetCpu) {
+fn odd_add(code: &mut Code, frame: &Frame, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::MoveAligned.register(code, ORIGINAL_LEFT, LEFT, target);
-    arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
     guard_real_status(code, frame, failures);
     prepare_vector_input_range(code, Format::Single);
     guard_normal_or_zero(code, LEFT, failures, target);
     // Both residuals are exact only for an exact sum. For an inexact sum, the
     // dominant operand residual is exact (Sterbenz), and the other differs.
     Host::MoveAligned.register(code, FIRST_RESIDUAL, LEFT, target);
-    arithmetic(
+    single_vector_arithmetic(
         code,
         ArithmeticOpcode::Subtract,
         FIRST_RESIDUAL,
@@ -111,7 +92,7 @@ fn odd_add(code: &mut Vec<u8>, frame: &Frame, failures: &mut Vec<usize>, target:
     );
     compare_equal(code, FIRST_RESIDUAL, RIGHT);
     Host::MoveAligned.register(code, SECOND_RESIDUAL, LEFT, target);
-    arithmetic(code, ArithmeticOpcode::Subtract, SECOND_RESIDUAL, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Subtract, SECOND_RESIDUAL, RIGHT);
     compare_equal(code, SECOND_RESIDUAL, ORIGINAL_LEFT);
     Host::And.register(code, FIRST_RESIDUAL, SECOND_RESIDUAL, target);
     Host::EqualDword.register(code, ODD_BIT, ODD_BIT, target);
@@ -123,7 +104,7 @@ fn odd_add(code: &mut Vec<u8>, frame: &Frame, failures: &mut Vec<usize>, target:
 }
 
 pub(super) fn pair_sum(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -138,8 +119,8 @@ pub(super) fn pair_sum(
     for source in [LEFT, RIGHT, LEFT_ODD, RIGHT_ODD] {
         guard_normal(code, source, failures);
     }
-    arithmetic(code, ArithmeticOpcode::Multiply, LEFT, RIGHT);
-    arithmetic(code, ArithmeticOpcode::Multiply, LEFT_ODD, RIGHT_ODD);
+    single_vector_arithmetic(code, ArithmeticOpcode::Multiply, LEFT, RIGHT);
+    single_vector_arithmetic(code, ArithmeticOpcode::Multiply, LEFT_ODD, RIGHT_ODD);
     guard_real_status(code, frame, failures);
     guard_normal(code, LEFT, failures);
     guard_normal(code, LEFT_ODD, failures);
@@ -148,7 +129,7 @@ pub(super) fn pair_sum(
 }
 
 pub(super) fn add_accumulator(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &mut Vec<usize>,
     target: TargetCpu,

@@ -4,8 +4,6 @@ use anyhow::{Context, Result, ensure};
 use core::{convert::Infallible, ptr::NonNull};
 use stela_compiler::GuestState;
 
-pub(crate) type StorageError = Infallible;
-
 pub fn ensure_supported() -> Result<()> {
     // Every x86-64 CPU implements Stela's integer and SSE2 baseline.
     // Mac x86-64 and Linux x86-64 both use the required System V C ABI.

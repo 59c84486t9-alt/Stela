@@ -1,8 +1,5 @@
 //! Protected Darwin process dispatch.
-use super::{
-    checked::{CheckedProcessOwner, OwnedRunRequest, ProcessEntryControls},
-    software_async::SoftwareAsyncDomain,
-};
+use super::checked::{CheckedProcessOwner, OwnedRunRequest, ProcessEntryControls};
 use crate::{
     blocks::{BlockRuntime, ThreadState},
     darwin::{ExecutionServices, ServiceRunOutcome},
@@ -110,10 +107,6 @@ pub(crate) unsafe fn run_protected_services(
             )
         }
     }?;
-    let mut producers = unsafe { SoftwareAsyncDomain::fresh_software_pe() };
-    let pending = producers
-        .lease_no_sources()
-        .map_err(|e| anyhow::anyhow!("producer ownership: {e:?}"))?;
     let mut backend = unsafe {
         CheckedProcessOwner::fresh_software(
             runtime.address_space(),
@@ -122,7 +115,6 @@ pub(crate) unsafe fn run_protected_services(
             thread_memory,
             endpoint,
             context,
-            pending,
             pauth,
             clock,
             thread,

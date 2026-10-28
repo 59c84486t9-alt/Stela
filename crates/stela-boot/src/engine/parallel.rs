@@ -58,7 +58,6 @@ impl Kick for Doorbells {
 
 /// What every PE's machine shares with the home machine's settings.
 pub(crate) struct Settings {
-    pub strict: bool,
     pub profile: CpuProfile,
     pub target: TargetCpu,
 }
@@ -87,7 +86,6 @@ pub(crate) fn spawn<H: Host>(
             pe: binding.pe,
             devices: home.devices.worker(),
             core_locks: home.cpu.core_locks.clone(),
-            strict: settings.strict,
             profile: settings.profile.clone(),
             target: settings.target,
         };
@@ -107,8 +105,7 @@ pub(crate) fn spawn<H: Host>(
 struct Pe {
     pe: usize,
     devices: Board,
-    core_locks: Arc<ctrr::Handoff>,
-    strict: bool,
+    core_locks: Arc<ctrr::CoreLocks>,
     profile: CpuProfile,
     target: TargetCpu,
 }
@@ -119,7 +116,6 @@ impl Pe {
             pe,
             devices,
             core_locks,
-            strict,
             profile,
             target,
         } = self;
@@ -140,7 +136,6 @@ impl Pe {
             "PARALLEL PE {pe} machine takes {} KiB of heap\n",
             own().saturating_sub(before).max(0) >> 10
         ));
-        machine.set_strict(strict);
         // Waits return to this loop, which publishes the counts.
         machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
         if let Err(stop) = machine.start_parallel(Arc::clone(&hub), core_locks, address) {

@@ -1,9 +1,12 @@
 //! Requester ownership and DMA bindings behind one AMD IOMMU unit.
 use super::*;
-use crate::bus::pci::{ConfigSpace, Function, owned::OwnedConfig};
+use crate::bus::pci::{ConfigSpace, Function, owned::OwnedConfig, requester::RequesterBinding};
 
-pub(super) struct Owner {
-    function: RefCell<Function<OwnedConfig>>,
+/// What keeps the requester's configuration epoch: its function, or the
+/// binding of a driver that keeps the function.
+pub(super) enum Owner {
+    Function(RefCell<Function<OwnedConfig>>),
+    Binding(RequesterBinding),
 }
 
 struct Binding {
@@ -42,6 +45,8 @@ pub struct Requester<P: ColdPlatform> {
     seal: Rc<()>,
     bindings: Vec<Binding>,
     rid: u16,
+    /// The IDs its DMA arrives under: its own and its alias.
+    group: Vec<u16>,
     next_mapping: u64,
     maximum_mappings: usize,
     detached: bool,
@@ -93,9 +98,48 @@ impl<P: ColdPlatform> Unit<P> {
         if self.engine.retired.get() || self.engine.poisoned.get() {
             return Err(Error::Poisoned);
         }
-        let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
+        let guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         let rid = admit_function(&mut function)?;
-        if function.address.segment != self.segment || !self.coverage[usize::from(rid)] {
+        if function.address.segment != self.segment {
+            return Err(Error::Requester);
+        }
+        drop(guard);
+        // SAFETY: forwarded.
+        unsafe { self.attach_owner(rid, Owner::Function(RefCell::new(function))) }
+    }
+
+    /// Attach the requester a driver's binding names, moving it out of the
+    /// window domain if it is in it.
+    ///
+    /// # Safety
+    /// As for [`Self::attach`]; the driver keeps the function and enables
+    /// bus mastering only after mapping through the returned requester.
+    pub unsafe fn attach_binding(
+        &mut self,
+        binding: RequesterBinding,
+    ) -> Result<Requester<P>, Error> {
+        if self.engine.retired.get() || self.engine.poisoned.get() {
+            return Err(Error::Poisoned);
+        }
+        if binding.address().segment != self.segment || binding.check_live().is_err() {
+            return Err(Error::Requester);
+        }
+        let rid = binding.requester();
+        // SAFETY: forwarded.
+        unsafe { self.attach_owner(rid, Owner::Binding(binding)) }
+    }
+
+    /// # Safety
+    /// As for [`Self::attach`], for `owner`'s requester `rid`.
+    unsafe fn attach_owner(&mut self, rid: u16, owner: Owner) -> Result<Requester<P>, Error> {
+        let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
+        if !self.coverage[usize::from(rid)] {
+            return Err(Error::Requester);
+        }
+        let group = self.group(rid);
+        // A requester whose alias another requester shares has no domain
+        // of its own: the shared ID would carry both.
+        if self.shared(rid, &group) {
             return Err(Error::Requester);
         }
         self.engine.health()?;
@@ -112,9 +156,7 @@ impl<P: ColdPlatform> Unit<P> {
             .borrow_mut()
             .try_reserve(1)
             .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
-        let owner = Rc::new(Owner {
-            function: RefCell::new(function),
-        });
+        let owner = Rc::new(owner);
         let hardware = Hardware {
             engine: self.engine.clone(),
             domain: Some(id),
@@ -136,10 +178,16 @@ impl<P: ColdPlatform> Unit<P> {
         .map_err(Error::Translation)?;
         self.active.borrow_mut().push(rid);
         let root = tree.root_for_publication().map_err(Error::Translation)?;
-        // SAFETY: actual requester stopped/drained by caller; fresh domain ID
-        // and exposed root stay retained through DTE visibility/invalidation.
-        unsafe { self.table.borrow_mut().translate(rid, root, level, id) }
-            .map_err(Error::DeviceTable)?;
+        for &member in &group {
+            // SAFETY: actual requester stopped/drained by caller; fresh domain
+            // ID and exposed root stay retained through DTE visibility and
+            // the old domain's invalidation.
+            unsafe { self.table.borrow_mut().translate(member, root, level, id) }
+                .map_err(Error::DeviceTable)?;
+        }
+        if let Some(window) = &mut self.window {
+            window.requesters.retain(|member| !group.contains(member));
+        }
         drop(_guard);
         Ok(Requester {
             tree,
@@ -150,6 +198,7 @@ impl<P: ColdPlatform> Unit<P> {
             seal: Rc::new(()),
             bindings: Vec::new(),
             rid,
+            group,
             next_mapping: 1,
             maximum_mappings: self.limits.mappings,
             detached: false,
@@ -178,11 +227,11 @@ impl<P: ColdPlatform> Requester<P> {
         self.live()?;
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         self.engine.health()?;
-        let mut function = self
-            .owner
-            .function
-            .try_borrow_mut()
-            .map_err(|_| Error::Busy)?;
+        let Owner::Function(function) = &*self.owner else {
+            // The binding's driver keeps the function.
+            return Err(Error::Requester);
+        };
+        let mut function = function.try_borrow_mut().map_err(|_| Error::Busy)?;
         self.poisoned = true;
         let result = action(&mut function);
         drop(function);
@@ -200,6 +249,12 @@ impl<P: ColdPlatform> Requester<P> {
             || self.engine.poisoned.get()
         {
             return Err(Error::Poisoned);
+        }
+        // A binding's requester lives while its configuration epoch does.
+        if let Owner::Binding(binding) = &*self.owner
+            && binding.check_live().is_err()
+        {
+            return Err(Error::Requester);
         }
         Ok(())
     }
@@ -356,7 +411,10 @@ impl<P: ColdPlatform> Requester<P> {
         self.poisoned = true;
         // SAFETY: caller supplies complete actual requester quiescence; real
         // DTE block invalidates old domain before its root may be retired.
-        unsafe { self.table.borrow_mut().block(self.rid) }.map_err(Error::DeviceTable)?;
+        for &member in &self.group {
+            // SAFETY: as above, for each ID the requester's DMA arrives under.
+            unsafe { self.table.borrow_mut().block(member) }.map_err(Error::DeviceTable)?;
+        }
         drop(_guard);
         // SAFETY: last exposed DTE is now blocked and full-domain invalidation
         // plus completion have acknowledged no remaining invalidated walks.

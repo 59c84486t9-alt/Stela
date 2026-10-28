@@ -99,9 +99,6 @@ impl FastIpi {
             countdown: None,
         }
     }
-    pub fn pending(&self, cpu: CpuIndex) -> bool {
-        self.state.get(cpu).is_some_and(|state| state.pending)
-    }
     /// One MRS or MSR by `cpu` at counter value `now`. Returns the value read,
     /// or 0 for a write.
     pub fn access(

@@ -1,0 +1,57 @@
+//! Clearing upper Z bytes after AdvSIMD writes to V registers.
+use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rdx;
+
+use super::{Host, storage_pointer, upper_offset, vector_memory, xmm};
+use crate::{
+    TargetCpu,
+    aarch64::scalable::{VectorLength, is_z_register},
+    context::SCALABLE_Z_UPPER_OFFSET,
+};
+
+/// Clear the upper Z bytes after an AdvSIMD write to V. The caller decides
+/// which destinations need it. Clobbers the chosen zero XMM and RDX; the low
+/// 128 bits are kept.
+pub(crate) fn clear_z_upper(
+    code: &mut Code,
+    register: u8,
+    zero: u8,
+    length: VectorLength,
+    target: TargetCpu,
+) {
+    assert!(is_z_register(register));
+    xmm(zero);
+    if length.chunks() == 1 {
+        return;
+    }
+    storage_pointer(code, SCALABLE_Z_UPPER_OFFSET);
+    Host::Xor.register(code, zero, zero, target);
+    for chunk in 1..length.chunks() {
+        vector_memory(
+            code,
+            Host::StoreUnaligned,
+            zero,
+            Rdx,
+            upper_offset(register, chunk, length),
+            target,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimum_length_upper_clear_has_no_native_effects() {
+        let mut code = Code::new();
+        clear_z_upper(
+            &mut code,
+            31,
+            7,
+            VectorLength::from_bytes(16).unwrap(),
+            TargetCpu::Baseline,
+        );
+        assert!(code.is_empty());
+    }
+}

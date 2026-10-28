@@ -263,14 +263,13 @@ pub struct Cpu {
     pub ctrr_core: super::ctrr::Core,
     /// What iBoot left in the core lock registers, which every PE and
     /// cluster starts from.
-    pub core_locks: alloc::sync::Arc<super::ctrr::Handoff>,
+    pub core_locks: alloc::sync::Arc<super::ctrr::CoreLocks>,
     /// The region the memory controller has locked against writes, first
     /// and last byte, as the engine last read it from the devices.
     pub memory_lock: super::mmu::MemoryLocks,
     /// System registers answered as storage after their model refused an
-    /// access outside strict mode, by encoding selector: each reads the
-    /// value last written to it until its model accepts a write
-    /// (`engine::Machine::set_strict`).
+    /// access, by encoding selector: each reads the value last written to
+    /// it until its model accepts a write (`engine::Machine::register_refused`).
     pub degraded: alloc::collections::BTreeMap<u16, u64>,
 }
 

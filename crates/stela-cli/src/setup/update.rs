@@ -2,8 +2,8 @@
 //! record: Stela updates replace `stela.efi`, macOS updates add the new
 //! build's install medium and restore bundles and point Install macOS at
 //! them. Both keep what
-//! they replace, so `--rollback` undoes the last one; an update that was
-//! interrupted is finished by running it again or undone by `--rollback`.
+//! they replace, so `rollback` undoes the last one; an update that was
+//! interrupted is finished by running it again or undone by `rollback`.
 //!
 //! - Stela: every `stela.efi` setup has run is kept under
 //!   `EFI/stela/versions/<id>/stela.efi` on the ESP (`id`: the first 16
@@ -27,7 +27,7 @@
 //!   new system on the container's Update volume and sets `boot-command
 //!   upgrade`, which `stela.efi` boots from that volume as iBEC would
 //!   (`stela_loader::upgrade`), and every later boot builds from the
-//!   Preboot volume's new objects. `--update-os` brings the setup's Install
+//!   Preboot volume's new objects. `update os` brings the setup's Install
 //!   macOS to a new build offline: the build's install medium and each
 //!   machine's restore bundles. The previous build's medium is kept for
 //!   rollback ([`MEDIA_KEPT`] media in all), so the USB needs room for
@@ -239,14 +239,14 @@ fn remove_medium(medium: &super::medium::Medium) -> Result<()> {
 pub(super) fn ready(record: &Record, allowed: impl Fn(&Change) -> bool) -> Result<()> {
     ensure!(
         record.complete,
-        "the setup on {} was interrupted; run `stela setup --uninstall` and set up again",
+        "the setup on {} was interrupted; run `stela setup uninstall` and set up again",
         record.esp.display()
     );
     if let Some(pending) = &record.pending {
         ensure!(
             allowed(pending),
             "an update was interrupted ({pending:?}); run it again to finish it, or \
-             `stela setup --rollback` to undo it"
+             `stela setup rollback` to undo it"
         );
     }
     Ok(())
@@ -429,7 +429,7 @@ pub(super) fn update_stela(
         store.prune()?;
     }
     write_record(&esp, &record)?;
-    text.push_str("Done. Undo with: stela setup --rollback\n");
+    text.push_str("Done. Undo with: stela setup rollback\n");
     Ok(text)
 }
 
@@ -459,6 +459,7 @@ pub(super) fn update_os(
 ) -> Result<String> {
     check_bundle_revision(environment, &record)?;
     let (product_version, build) = crate::restore::payload::identity(ipsw, &record.model)?;
+    super::supported(environment, ipsw, &build)?;
     ready(
         &record,
         |pending| matches!(pending, Change::Os { to, .. } if *to == build),
@@ -524,7 +525,7 @@ pub(super) fn update_os(
     record.pending = None;
     prune(&mut record)?;
     write_record(&record.esp.clone(), &record)?;
-    text.push_str("Done. Undo with: stela setup --rollback\n");
+    text.push_str("Done. Undo with: stela setup rollback\n");
     Ok(text)
 }
 
@@ -532,7 +533,7 @@ pub(super) fn update_os(
 pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
     ensure!(
         record.complete,
-        "the setup on {} was interrupted; run `stela setup --uninstall` and set up again",
+        "the setup on {} was interrupted; run `stela setup uninstall` and set up again",
         record.esp.display()
     );
     let (change, pending) = match record.pending.clone() {
@@ -606,7 +607,7 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
                 writeln!(
                     text,
                     "  note           the macOS {from} install medium is no longer kept; \
-                     `stela setup --repair --ipsw` with its restore image writes it again"
+                     `stela setup repair --ipsw` with its restore image writes it again"
                 )?;
             }
         }

@@ -547,8 +547,8 @@ mod tests {
 
     #[test]
     fn shared_rtkit_management_runs_through_the_original_mailbox_framing() {
-        use crate::platform::apple::rtkit::{Management, RtKit};
-        let firmware = RtKit::new(Vec::new(), Management::Ordinary).unwrap();
+        use crate::platform::apple::rtkit::RtKit;
+        let firmware = RtKit::new(Vec::new(), crate::builds::DEFAULT.rtkit_version).unwrap();
         let mut wrapper = MxWrap::booted(Box::new(firmware), Lines::default()).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);

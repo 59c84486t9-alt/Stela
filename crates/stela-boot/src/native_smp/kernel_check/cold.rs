@@ -221,7 +221,7 @@ pub(super) unsafe fn check(
         )
     }?;
     crate::output::arguments(format_args!(
-        "NATIVE COLD source pc={:#x} bytes={code:02x?} warmup=none profile=SystemModeSharedV1\n",
+        "NATIVE COLD source pc={:#x} bytes={code:02x?} warmup=none profile=system-mode+checked-memory\n",
         source::CODE
     ));
     // SAFETY: same real one-BSP mount adapter, closed providers and source

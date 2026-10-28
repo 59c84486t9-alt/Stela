@@ -1,4 +1,5 @@
 //! AdvSIMD shifts by immediate and register: same-width, narrowing and widening.
+use crate::aarch64::Unsupported;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Register {
@@ -86,8 +87,7 @@ const ROUND_NARROW: u32 = 1 << 11;
 const SHIFT_WIDEN_SIGNED: u32 = 0x0f00a400;
 const SHIFT_WIDEN_UNSIGNED: u32 = 0x2f00a400;
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let scalar = word & SCALAR != 0;
     let q = word & Q != 0;
     if let Some(result) = decode_register(word, scalar, q) {
@@ -164,7 +164,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         || (changes_width && lane_bytes == 8)
         || (!scalar && !changes_width && !q && lane_bytes == 8)
     {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let bits = lane_bytes * 8;
     let amount = if matches!(
@@ -191,7 +191,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_register(word: u32, scalar: bool, q: bool) -> Option<Result<Operand, ()>> {
+fn decode_register(word: u32, scalar: bool, q: bool) -> Option<Result<Operand, Unsupported>> {
     let opcode = (word & !SCALAR) & REGISTER_SHIFT_MASK;
     if ![
         REGISTER_SHIFT_SIGNED,
@@ -210,7 +210,7 @@ fn decode_register(word: u32, scalar: bool, q: bool) -> Option<Result<Operand, (
     let saturating = word & (1 << 11) != 0;
     let lane_bytes = 1 << ((word >> 22) & 3);
     if (scalar && (!q || (!saturating && lane_bytes != 8))) || (!scalar && !q && lane_bytes == 8) {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         kind: Kind::Register {

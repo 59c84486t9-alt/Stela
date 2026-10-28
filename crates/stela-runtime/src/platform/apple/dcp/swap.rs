@@ -86,8 +86,11 @@ pub const SUBMIT_BYTES: usize = 0x1d30;
 /// Input offsets of the packed arguments.
 pub const SURFACES: usize = RECORD_BYTES;
 pub const DVAS: usize = SURFACES + LAYERS * SURFACE_BYTES;
+#[cfg(test)]
 const LAYER_VALUES: usize = DVAS + LAYERS * 8;
+#[cfg(test)]
 pub const SECONDARY_SURFACES: usize = LAYER_VALUES + LAYERS * 8;
+#[cfg(test)]
 const SECONDARY_DVAS: usize = SECONDARY_SURFACES + SECONDARY * SURFACE_BYTES;
 const RECORD_NULL: usize = 0x1d22;
 pub const SURFACE_NULL: usize = RECORD_NULL + 1;

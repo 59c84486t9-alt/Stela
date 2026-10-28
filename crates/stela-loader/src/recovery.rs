@@ -1,5 +1,5 @@
 //! The kernel boot bundle of a recoveryOS on the installed disk, built in
-//! `no_std` so `stela.efi` boots it as iBoot does and `stela boot prepare
+//! `no_std` so `stela.efi` boots it as iBoot does and `stela-dev boot prepare
 //! --disk --disk-recovery` writes the same one.
 //!
 //! A Mac's internal disk holds two recoveryOS copies (Asahi Linux docs
@@ -477,7 +477,7 @@ impl<R: ReadAt> Reader<'_, R> {
                 container_sha256: sha256(&file),
                 payload_type: receipt.payload_type,
                 description: receipt.description,
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: sha256(&bytes),
             },
             bytes,
@@ -499,7 +499,7 @@ impl<R: ReadAt> Reader<'_, R> {
                 container_sha256: sha256(&file),
                 payload_type: "opaque".into(),
                 description: String::new(),
-                decoded_bytes: parts.payload.len(),
+                decoded_bytes: parts.payload.len() as u64,
                 decoded_sha256: sha256(parts.payload),
             },
             bytes: parts.payload.to_vec(),
@@ -589,7 +589,7 @@ pub fn prepare<R: ReadAt>(
             container_sha256: sha256(&bytes),
             payload_type: "im4m".into(),
             description: "the recoveryOS kernel collection's manifest".into(),
-            decoded_bytes: bytes.len(),
+            decoded_bytes: bytes.len() as u64,
             decoded_sha256: sha256(&bytes),
         },
         bytes,

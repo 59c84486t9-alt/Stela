@@ -352,6 +352,10 @@ mod tests {
         assert_eq!(decoded, input);
     }
 
+    #[cfg_attr(
+        not(feature = "fetched-sources"),
+        ignore = "reads the sources `cargo xtask gpu fetch` checks out"
+    )]
     #[test]
     fn vendor_types_preserve_flags_and_host_addresses_on_both_abis() {
         let tools = Toolchain::discover().unwrap();

@@ -1,10 +1,10 @@
 //! EOR3, BCAX, RAX1 and XAR with SSE2.
-use super::{Host, commit, packed, read_vector};
+use super::{Host, commit, packed, packed_imm, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     aarch64::simd::sha3::{Kind, Operand},
     x86_64::isa::ShiftOpcode,
 };
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SECOND: u8 = 1;
@@ -19,12 +19,17 @@ const SWAP_DWORDS_IN_QWORDS: u8 = 0xb1;
 const ROTATE_WORDS_RIGHT_ONE: u8 = 0x39;
 const ROTATE_WORDS_RIGHT_THREE: u8 = 0x93;
 
-fn rotate_right(code: &mut Vec<u8>, rotation: u8) {
+fn rotate_right(code: &mut Code, rotation: u8) {
     match rotation {
         NO_ROTATION => {}
         DWORD_BITS => {
-            packed(code, Host::ShuffleDword, RESULT, RESULT);
-            code.push(SWAP_DWORDS_IN_QWORDS);
+            packed_imm(
+                code,
+                Host::ShuffleDword,
+                RESULT,
+                RESULT,
+                SWAP_DWORDS_IN_QWORDS,
+            );
         }
         WORD_BITS | ROTATE_RIGHT_THREE_WORDS => {
             let selector = if rotation == WORD_BITS {
@@ -33,8 +38,7 @@ fn rotate_right(code: &mut Vec<u8>, rotation: u8) {
                 ROTATE_WORDS_RIGHT_THREE
             };
             for opcode in [Host::ShuffleLowWord, Host::ShuffleHighWord] {
-                packed(code, opcode, RESULT, RESULT);
-                code.push(selector);
+                packed_imm(code, opcode, RESULT, RESULT, selector);
             }
         }
         _ => {
@@ -46,7 +50,7 @@ fn rotate_right(code: &mut Vec<u8>, rotation: u8) {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     match operand.kind {
         Kind::Eor3 { third } => {
             read_vector(code, operand.left, RESULT);
@@ -87,7 +91,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn staging_cost_accounts_for_complete_state_access_and_immediate_specializations() {
@@ -101,7 +104,7 @@ mod tests {
             (Kind::Xar { rotation: 48 }, 38),
             (Kind::Xar { rotation: 63 }, 46),
         ] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {

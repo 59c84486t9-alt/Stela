@@ -1,7 +1,7 @@
 //! The boot of a staged macOS update: the objects macOS left on its
 //! container's Update volume (APFS role 0xc0), built into a boot bundle in
 //! `no_std`, so `stela.efi` boots it when NVRAM's `boot-command` is
-//! `upgrade` and `stela boot prepare --disk --upgrade` writes the same one.
+//! `upgrade` and `stela-dev boot prepare --disk --upgrade` writes the same one.
 //!
 //! The 26A434 J473 LLB upgrade (image offset 0x448c) mounts the Update
 //! volume at `/boot` and runs `/boot/iBEC`; that iBEC (iBoot 0x5634) loads
@@ -373,7 +373,7 @@ impl<R: ReadAt> Reader<'_, R> {
                 container_sha256: sha256(&file),
                 payload_type: receipt.payload_type,
                 description: receipt.description,
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: sha256(&bytes),
             },
             bytes,
@@ -393,7 +393,7 @@ impl<R: ReadAt> Reader<'_, R> {
                 container_sha256: sha256(&file),
                 payload_type: "opaque".into(),
                 description: String::new(),
-                decoded_bytes: parts.payload.len(),
+                decoded_bytes: parts.payload.len() as u64,
                 decoded_sha256: sha256(parts.payload),
             },
             bytes: parts.payload.to_vec(),
@@ -522,7 +522,7 @@ pub fn prepare<R: ReadAt>(
                 container_sha256: sha256(bytes),
                 payload_type: "im4m".into(),
                 description: "the staged kernel's manifest".into(),
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: sha256(bytes),
             },
         }),

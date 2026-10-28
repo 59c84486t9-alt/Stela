@@ -13,13 +13,6 @@ path = "src/main.rs"
 name = "stela-launcher"
 path = "src/bin/stela-launcher/main.rs"
 
-[features]
-default = ["boot-image"]
-# Build the matching stela.efi with stela, for setup to embed (see build.rs).
-# It needs clang and the sources `cargo xtask gpu fetch` checks out, so xtask
-# leaves it out.
-boot-image = []
-
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -28,8 +21,7 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tempfile.workspace = true
-stela-compiler.workspace = true
-stela-drivers = { workspace = true, features = ["ram-disk"] }
+stela-drivers.workspace = true
 stela-boot-core.workspace = true
 stela-runtime.workspace = true
 stela-loader.workspace = true
@@ -44,12 +36,20 @@ p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 plist = "1"
 zeroize = "1"
 libc.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha1 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 cliclack = "0.5"
 indicatif = "0.18"
 console = "0.16"
+
+# HTTPS through the operating system's TLS and trust store on Windows
+# (SChannel) and macOS (Security.framework), and through rustls with the
+# webpki roots elsewhere.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 # Setup's disk backend on Windows: storage and volume control codes.
 [target.'cfg(windows)'.dependencies]
@@ -66,6 +66,8 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# `block::RamDisk`, the disk setup's erase layout is written to in tests.
+stela-drivers = { workspace = true, features = ["ram-disk"] }
 
 
 [lints]

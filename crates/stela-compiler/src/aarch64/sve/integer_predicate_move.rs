@@ -1,4 +1,5 @@
 //! PMOV between predicates and vector bitmaps.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 
 const DESTINATION_MASK: u32 = 31;
@@ -24,8 +25,7 @@ pub struct Operand {
     pub portion: u8,
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (element_size, portion) = if word & BYTE_MASK == BYTE {
         (ElementSize::Byte, 0)
     } else if word & HALFWORD_MASK == HALFWORD {

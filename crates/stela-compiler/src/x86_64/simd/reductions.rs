@@ -1,13 +1,14 @@
 //! Integer pairwise combines, across-lane reductions and bit counts.
+use super::rearrange::lane_constant;
 use super::{
     Host, commit, packed, read_vector, rearrange::constant, shifts::logical_shift, shuffle,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::reductions::{BitCount, Combine, Kind, Operand, Shape},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
 fn add_opcode(lane: u8) -> Host {
     match lane {
@@ -34,15 +35,7 @@ fn equal_opcode(lane: u8) -> Host {
         _ => unreachable!(),
     }
 }
-fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
-    let bytes = value.to_le_bytes();
-    constant(
-        code,
-        xmm,
-        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
-    );
-}
-fn select_minmax(code: &mut Vec<u8>, lane: u8, signed: bool, maximum: bool, target: TargetCpu) {
+fn select_minmax(code: &mut Code, lane: u8, signed: bool, maximum: bool, target: TargetCpu) {
     let native = match (signed, maximum, lane) {
         (false, false, 1) => Host::MinUnsignedByte,
         (false, true, 1) => Host::MaxUnsignedByte,
@@ -79,7 +72,7 @@ fn select_minmax(code: &mut Vec<u8>, lane: u8, signed: bool, maximum: bool, targ
     packed(code, Host::And, 0, 2);
     packed(code, Host::Xor, 0, 1);
 }
-fn combine(code: &mut Vec<u8>, operation: Combine, lane: u8, target: TargetCpu) {
+fn combine(code: &mut Code, operation: Combine, lane: u8, target: TargetCpu) {
     match operation {
         Combine::Add | Combine::LongAdd { .. } => packed(code, add_opcode(lane), 0, 1),
         Combine::Minimum { signed } => select_minmax(code, lane, signed, false, target),
@@ -89,7 +82,7 @@ fn combine(code: &mut Vec<u8>, operation: Combine, lane: u8, target: TargetCpu) 
 
 /// Produce adjacent even or odd lanes from XMM2/XMM3, respecting active width.
 /// XMM6 preserves the first selection while the second uses XMM0/XMM4/XMM5/7.
-fn pair_selection(code: &mut Vec<u8>, lane: u8, bytes: u8, odd: bool) {
+fn pair_selection(code: &mut Code, lane: u8, bytes: u8, odd: bool) {
     packed(code, Host::MoveAligned, 0, 2);
     packed(code, Host::MoveAligned, 4, 3);
     match lane {
@@ -147,7 +140,7 @@ fn pair_selection(code: &mut Vec<u8>, lane: u8, bytes: u8, odd: bool) {
         _ => unreachable!("allocated pair lane"),
     }
 }
-fn pair_operands(code: &mut Vec<u8>, operand: &Operand) {
+fn pair_operands(code: &mut Code, operand: &Operand) {
     read_vector(code, operand.left, 2);
     read_vector(code, operand.right, 3);
     pair_selection(code, operand.lane_bytes, operand.bytes, false);
@@ -157,7 +150,7 @@ fn pair_operands(code: &mut Vec<u8>, operand: &Operand) {
     packed(code, Host::MoveAligned, 0, 6);
 }
 
-fn long_sum_inputs(code: &mut Vec<u8>, lane: u8, bytes: u8, signed: bool) {
+fn long_sum_inputs(code: &mut Code, lane: u8, bytes: u8, signed: bool) {
     packed(code, Host::Xor, 1, 1);
     if signed {
         packed(code, compare_opcode(lane), 1, 0);
@@ -195,13 +188,7 @@ fn long_sum_inputs(code: &mut Vec<u8>, lane: u8, bytes: u8, signed: bool) {
 /// the minimum of eight unsigned words, into its low word; the bits above
 /// the result lane are left for the caller to clear. A maximum is the
 /// complement of the minimum of the complements.
-fn unsigned_word_extremum(
-    code: &mut Vec<u8>,
-    maximum: bool,
-    lane: u8,
-    bytes: u8,
-    target: TargetCpu,
-) {
+fn unsigned_word_extremum(code: &mut Code, maximum: bool, lane: u8, bytes: u8, target: TargetCpu) {
     const ONES: u8 = 1;
     const SCRATCH: u8 = 2;
     if maximum {
@@ -231,7 +218,7 @@ fn unsigned_word_extremum(
     }
 }
 
-fn across(code: &mut Vec<u8>, operation: Combine, mut lane: u8, mut bytes: u8, target: TargetCpu) {
+fn across(code: &mut Code, operation: Combine, mut lane: u8, mut bytes: u8, target: TargetCpu) {
     if let Combine::LongAdd { signed } = operation {
         long_sum_inputs(code, lane, bytes, signed);
         lane *= 2;
@@ -265,7 +252,7 @@ fn across(code: &mut Vec<u8>, operation: Combine, mut lane: u8, mut bytes: u8, t
 /// The bytes of an XMM register.
 const VECTOR_BYTES: u8 = 16;
 
-fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
+fn nibble_lookup(code: &mut Code, reverse: bool, target: TargetCpu) {
     let table = core::array::from_fn(|i| {
         if reverse {
             (i as u8).reverse_bits() >> 4
@@ -290,7 +277,7 @@ fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
     }
     packed(code, Host::MoveAligned, 0, 2);
 }
-fn bit_population(code: &mut Vec<u8>, target: TargetCpu) {
+fn bit_population(code: &mut Code, target: TargetCpu) {
     if target >= TargetCpu::Ssse3 {
         nibble_lookup(code, false, target);
         return;
@@ -312,7 +299,7 @@ fn bit_population(code: &mut Vec<u8>, target: TargetCpu) {
     constant(code, 2, [15; 16]);
     packed(code, Host::And, 0, 2);
 }
-fn bit_reverse(code: &mut Vec<u8>, target: TargetCpu) {
+fn bit_reverse(code: &mut Code, target: TargetCpu) {
     if target >= TargetCpu::Ssse3 {
         nibble_lookup(code, true, target);
         return;
@@ -327,7 +314,7 @@ fn bit_reverse(code: &mut Vec<u8>, target: TargetCpu) {
         packed(code, Host::Or, 0, 1);
     }
 }
-fn leading_count(code: &mut Vec<u8>, lane: u8, sign: bool) {
+fn leading_count(code: &mut Code, lane: u8, sign: bool) {
     if sign {
         packed(code, Host::Xor, 1, 1);
         packed(code, compare_opcode(lane), 1, 0);
@@ -370,7 +357,7 @@ fn leading_count(code: &mut Vec<u8>, lane: u8, sign: bool) {
     packed(code, Host::MoveAligned, 0, 2);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,
@@ -430,7 +417,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 mod tests {
     use super::*;
     use crate::GuestState;
-    use alloc::vec;
 
     /// UMINV and UMAXV of bytes and halfwords, both widths, run on the host
     /// for each target tier and agree with Arm's definition: the extremum
@@ -455,7 +441,6 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        const RET: u8 = 0xc3;
         const SOURCE: u8 = 1;
         const DESTINATION: u8 = 2;
         fn run(code: &[u8], state: &mut GuestState) {
@@ -497,9 +482,9 @@ mod tests {
                         bytes,
                         lane_bytes,
                     };
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     emit(&mut code, &operand, target);
-                    code.push(RET);
+                    code.asm().ret();
                     for sample in 0..256 {
                         // Edge vectors: all zeros, all ones and lone extrema.
                         let value = match sample {

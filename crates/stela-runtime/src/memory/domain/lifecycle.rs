@@ -47,21 +47,6 @@ impl MemoryExecutionLoan {
         self.check_domain(&self.domain)
     }
 
-    /// Borrow the machine's Device-order lock through this borrow.
-    pub(super) fn device_ram_order(
-        &self,
-    ) -> Result<crate::platform::sync::MutexGuard<'_, ()>, MemoryStatus> {
-        self.check_domain(&self.domain)?;
-        let order = self
-            .domain
-            .system
-            .device_ram_order
-            .try_lock()
-            .map_err(|_| MemoryStatus::Domain)?;
-        self.check_domain(&self.domain)?;
-        Ok(order)
-    }
-
     pub(super) fn check_domain(&self, domain: &Arc<MemoryDomain>) -> Result<(), MemoryStatus> {
         if !Arc::ptr_eq(&self.domain, domain) {
             return Err(MemoryStatus::Domain);
@@ -180,30 +165,6 @@ impl MemoryDomain {
 }
 
 impl MemoryServiceLoan {
-    /// Check that `view` is still registered at `generation`, without copying
-    /// the snapshot or exposing storage.
-    pub(in crate::memory) fn check_registered_view(
-        &self,
-        view: &Arc<MemoryView>,
-        generation: u64,
-    ) -> Result<(), MemoryStatus> {
-        let state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
-        self.domain.check_execution()?;
-        if !state.servicing
-            || state.native_loans != 0
-            || state.snapshot.generation != generation
-            || !view.is_current()
-            || !state
-                .snapshot
-                .views
-                .iter()
-                .any(|registered| Arc::ptr_eq(&registered.view, view))
-        {
-            return Err(MemoryStatus::Domain);
-        }
-        Ok(())
-    }
-
     pub(in crate::memory) fn belongs_to(&self, domain: &Arc<MemoryDomain>) -> bool {
         Arc::ptr_eq(&self.domain, domain)
     }
@@ -226,7 +187,7 @@ impl MemoryServiceLoan {
     }
 
     /// Prepare every fallible view/profile/monitor operation before host effects.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(in crate::memory) fn prepare(
         &self,
         mut views: Vec<(Arc<MemoryView>, MappingAttributes)>,
@@ -260,7 +221,7 @@ impl MemoryServiceLoan {
         })
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(in crate::memory) fn retire(&self, views: &[Arc<MemoryView>]) -> Result<(), MemoryStatus> {
         for view in views {
             self.domain.retire_view(view)?;
@@ -268,7 +229,7 @@ impl MemoryServiceLoan {
         Ok(())
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(in crate::memory) fn commit(&self, snapshot: DomainSnapshot) -> Result<(), MemoryStatus> {
         let mut state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.domain.check_execution()?;
@@ -405,37 +366,6 @@ mod tests {
         assert_eq!(domain.state.lock().unwrap().native_loans, 1);
         drop(execution);
         assert_eq!(domain.state.lock().unwrap().native_loans, 0);
-    }
-
-    #[test]
-    fn retained_execution_order_serializes_same_machine_across_domains() {
-        let system = MemorySystem::new(16, 8).unwrap();
-        let first =
-            MemoryDomain::new(Arc::clone(&system), Vec::new(), TargetCpu::Baseline).unwrap();
-        let second =
-            MemoryDomain::new(Arc::clone(&system), Vec::new(), TargetCpu::Baseline).unwrap();
-        let first_execution = first.execution_loan().unwrap();
-        let second_execution = second.execution_loan().unwrap();
-        let first_order = first_execution.device_ram_order().unwrap();
-        assert!(matches!(
-            second_execution.device_ram_order(),
-            Err(MemoryStatus::Domain)
-        ));
-        assert!(first.observation_loan().is_err());
-        drop(first_order);
-        let second_order = second_execution.device_ram_order().unwrap();
-        assert!(matches!(
-            first_execution.device_ram_order(),
-            Err(MemoryStatus::Domain)
-        ));
-        drop(second_order);
-        system.failed.store(true, Ordering::Release);
-        assert!(matches!(
-            first_execution.device_ram_order(),
-            Err(MemoryStatus::Domain)
-        ));
-        assert_eq!(first.state.lock().unwrap().native_loans, 1);
-        assert_eq!(second.state.lock().unwrap().native_loans, 1);
     }
 
     #[test]

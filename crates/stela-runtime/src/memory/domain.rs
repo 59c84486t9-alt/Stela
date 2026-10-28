@@ -27,22 +27,16 @@ pub use lifecycle::{ExecutionLoanAttempt, MemoryExecutionLoan, MemoryObservation
 pub(in crate::memory) use service::AllWriterService;
 
 mod exclusive;
-pub(crate) mod m0_read;
-mod m0_scalar;
-pub(crate) mod m0_write;
 pub(in crate::memory) mod native_target;
-pub(crate) mod physical;
+
 mod read;
 mod shared;
 
 use crate::platform::sync::Mutex;
 use crate::system::events::{EventEndpoint, EventProducer};
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 
 use stela_compiler::{
     TargetCpu,
@@ -234,7 +228,7 @@ pub struct DataAccess<'a> {
 type ReservationDomain = monitor::MonitorDomain<MemoryBacking, MemoryView, MappingAttributes>;
 type ReservationThread = monitor::ThreadMonitor<MemoryBacking, MemoryView, MappingAttributes>;
 type ReservationMapping = monitor::Mapping<MemoryView, MappingAttributes>;
-type MappingRegistry = HashMap<MappingId, Weak<ReservationMapping>>;
+type MappingRegistry = BTreeMap<MappingId, Weak<ReservationMapping>>;
 
 #[derive(Clone)]
 pub(super) struct RegisteredView {
@@ -260,7 +254,7 @@ impl MemorySystem {
         Ok(Arc::new(Self {
             identity: Arc::new(()),
             reservations,
-            mappings: Mutex::new(HashMap::new()),
+            mappings: Mutex::new(BTreeMap::new()),
             failed: AtomicBool::new(false),
             device_ram_order: Mutex::new(()),
         }))
@@ -334,21 +328,6 @@ impl MemoryDomain {
             views,
             target,
             DomainRole::NormalWb,
-        )
-    }
-
-    pub(in crate::memory) fn new_source_physical_ram(
-        address_space: u64,
-        system: Arc<MemorySystem>,
-        views: Vec<(Arc<MemoryView>, MappingAttributes)>,
-        target: TargetCpu,
-    ) -> Result<Arc<Self>, MemoryStatus> {
-        Self::construct(
-            Some(address_space),
-            system,
-            views,
-            target,
-            DomainRole::SourcePhysicalRam,
         )
     }
 
@@ -540,20 +519,6 @@ impl MemoryDomain {
         kind: AccessKind,
     ) -> Result<PhysicalAccess, MemoryStatus> {
         self.check_data_execution()?;
-        self.resolve_spans(address, bytes, kind)
-    }
-
-    fn resolve_source_physical(
-        self: &Arc<Self>,
-        execution: &MemoryExecutionLoan,
-        address: u64,
-        bytes: usize,
-        kind: AccessKind,
-    ) -> Result<PhysicalAccess, MemoryStatus> {
-        execution.check_domain(self)?;
-        if !self.is_source_physical_ram() {
-            return Err(MemoryStatus::Unsupported);
-        }
         self.resolve_spans(address, bytes, kind)
     }
 
@@ -1572,7 +1537,7 @@ mod tests {
         }
 
         #[test]
-        fn generic_data_and_tag_entries_refuse_every_separately_owned_m0_identity() {
+        fn data_and_tag_entries_refuse_unknown_profile_bits() {
             let backing = backing();
             let domain = domain(vec![view(&backing, 0, STORAGE_BYTES, RIGHTS)]);
             let controls = crate::memory::policy::MemoryControls::new(
@@ -1591,25 +1556,20 @@ mod tests {
             assert!(thread.prepare(ordinary).is_ok());
             assert!(thread.prepare_tag(ordinary, false).is_ok());
             let before = snapshot(&backing, STORAGE_BYTES);
-            for dedicated in [
-                profile_requirements::M0_DEVICE_RAM_READ64,
-                profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR,
-                profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2,
-                profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD,
-                profile_requirements::M0_DEVICE_RAM_SCALAR_STORE,
-            ] {
+            for unknown in (3..8).map(|bit| 1 << bit) {
+                assert_eq!(unknown & profile_requirements::KNOWN, 0);
                 for generic in [0, profile_requirements::NATIVE_ACCESS] {
                     let requirements = MemoryRequirements {
-                        required_profile: dedicated | generic,
+                        required_profile: unknown | generic,
                         ..Default::default()
                     };
                     assert_eq!(
                         thread.prepare(requirements).err(),
-                        Some(MemoryStatus::Unsupported)
+                        Some(MemoryStatus::InvalidRequest)
                     );
                     assert_eq!(
                         thread.prepare_tag(requirements, false).err(),
-                        Some(MemoryStatus::Unsupported)
+                        Some(MemoryStatus::InvalidRequest)
                     );
                 }
             }

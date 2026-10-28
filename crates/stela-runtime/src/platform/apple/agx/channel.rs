@@ -114,6 +114,7 @@ impl Queue {
     }
 
     /// The firmware VA of the next pending command, if any.
+    #[cfg(test)]
     pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>, &'static str> {
         let (read, write, _) = self.indices(memory)?;
         if read == write {
@@ -169,12 +170,14 @@ impl Queue {
 
     /// Retire the command at the read index: the firmware's consume, which
     /// frees the slot `writeChannelCommandPointer` waits on.
+    #[cfg(test)]
     pub fn retire(&self, memory: &mut dyn Shared) -> Result<(), &'static str> {
         self.retirement(memory)?.commit(memory)
     }
 
     /// Accept the exact consumer-index update before the command can have
     /// effects; retrying a later fault must not discover the next command.
+    #[cfg(test)]
     pub fn retirement(&self, memory: &mut dyn Shared) -> Result<Retirement, &'static str> {
         let (read, write, length) = self.indices(memory)?;
         if read == write {
@@ -497,6 +500,7 @@ impl Record {
     /// hardware), so the sampler never runs and the record is skipped, as
     /// the firmware skips it. A caller that found the sampler running would
     /// need the counter hardware, and refuses by name.
+    #[cfg(test)]
     pub fn sample_point(self, sampler_active: bool) -> Result<(), &'static str> {
         match self {
             Record::SamplePoint(_) if !sampler_active => Ok(()),

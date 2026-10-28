@@ -806,7 +806,7 @@ mod native_crossarch {
 #[cfg(target_os = "macos")]
 mod native_thread_services {
     use super::*;
-    use stela_compiler::block::BlockProfile;
+    use stela_compiler::block::{BlockProfile, Features};
     use stela_runtime::{
         clock,
         darwin::{ExecutionServices, ServiceRunOutcome, platform, run_services},
@@ -925,7 +925,7 @@ mod native_thread_services {
         let mut runtime = BlockRuntime::new_with_profile(
             ADDRESS_SPACE_ID,
             cache.into(),
-            BlockProfile::DarwinArm64ThreadV1,
+            BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
         );
         runtime.register_code(
             GuestAddress(BASE),
@@ -1145,29 +1145,37 @@ mod native_thread_services {
         let cache = tempfile::tempdir()?;
         let foreign = ADDRESS_SPACE_ID + 1;
         for (profile, pauth_owner, clock_owner) in [
-            (BlockProfile::Ordinary, None, None),
+            (BlockProfile::ORDINARY, None, None),
             (
-                BlockProfile::DarwinArm64ThreadV1,
+                BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
                 Some(ADDRESS_SPACE_ID),
                 None,
             ),
             (
-                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+                BlockProfile::new(
+                    Features::POINTER_AUTHENTICATION
+                        .union(Features::THREAD_REGISTERS)
+                        .union(Features::AMX),
+                ),
                 Some(foreign),
                 None,
             ),
             (
-                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+                BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
                 Some(ADDRESS_SPACE_ID),
                 Some(foreign),
             ),
             (
-                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+                BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
                 None,
                 Some(ADDRESS_SPACE_ID),
             ),
             (
-                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+                BlockProfile::new(
+                    Features::POINTER_AUTHENTICATION
+                        .union(Features::THREAD_REGISTERS)
+                        .union(Features::AMX),
+                ),
                 Some(ADDRESS_SPACE_ID),
                 Some(ADDRESS_SPACE_ID),
             ),
@@ -1223,7 +1231,7 @@ mod native_thread_services {
         let mut runtime = BlockRuntime::new_with_profile(
             ADDRESS_SPACE_ID,
             cache.path().into(),
-            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+            BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
         );
         runtime.register_code(
             GuestAddress(BASE),

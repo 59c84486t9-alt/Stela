@@ -171,6 +171,7 @@ pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>
 
 /// Synchronous component helper. The production firmware retains each
 /// prepared action and event publication across DMA faults instead.
+#[cfg(test)]
 pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {
     let actions = prepare(memory, command)?;
     let mut events = Vec::new();

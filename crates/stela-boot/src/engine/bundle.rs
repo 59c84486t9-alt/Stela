@@ -1,5 +1,5 @@
 //! The kernel boot bundle: `bundle.json` and the files it lists, as prepared
-//! on the host by `stela boot prepare` (the iBoot side of the hand-off).
+//! on the host by `stela-dev boot prepare` (the iBoot side of the hand-off).
 //! `stela_runtime::boot_bundle` checks every region's SHA-256, writes the
 //! regions and their zero tails into guest DRAM, and fills the patch slots
 //! only the running machine knows; this supplies the machine's side: guest
@@ -10,7 +10,7 @@
 //! `LOADER_DATA` pages, so a restore ramdisk does not have to fit the heap.
 //! [`from_disk`] runs after them instead: Stela's own storage drivers read
 //! the installed system on a host disk's APFS container, and
-//! `stela_loader::installed` builds the same bundle `stela boot prepare
+//! `stela_loader::installed` builds the same bundle `stela-dev boot prepare
 //! --disk` writes, in the heap. [`upgrade_from_disk`] and
 //! [`recovery_from_disk`] build a staged update's and a recoveryOS's the
 //! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
@@ -72,7 +72,7 @@ pub struct Entry {
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
     /// What iBoot leaves in the cores' lock registers (M4 and later).
-    pub core_locks: stela_runtime::machine::ctrr::Handoff,
+    pub core_locks: stela_runtime::machine::ctrr::CoreLocks,
 }
 
 pub(super) fn contents(file: &File) -> &'static [u8] {
@@ -389,7 +389,7 @@ impl<D: BlockDevice> ReadAt for Bytes<D> {
 
 /// Build the boot bundle of the installed system on `partition`, an APFS
 /// container or a disk image with a GUID partition table, as `request`
-/// names it, with `options` (`stela boot prepare`'s defaults and the boot's
+/// names it, with `options` (`stela-dev boot prepare`'s defaults and the boot's
 /// own boot-args); returns `bundle.json` first and then every file it
 /// lists. Runs after boot services end, through Stela's own drivers.
 pub fn from_disk(

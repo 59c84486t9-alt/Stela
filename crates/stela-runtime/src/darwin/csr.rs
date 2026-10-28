@@ -511,7 +511,7 @@ mod tests {
         let mut runtime = BlockRuntime::new_for_target(
             ADDRESS_SPACE,
             cache.path().to_owned(),
-            BlockProfile::Ordinary,
+            BlockProfile::ORDINARY,
             TargetCpu::Baseline,
         );
         runtime.register_code(

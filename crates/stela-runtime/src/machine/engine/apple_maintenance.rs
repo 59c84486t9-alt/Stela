@@ -65,7 +65,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             word,
             detail: unestablished,
         });
-        self.degrade(requirement)?;
+        self.degrade(requirement);
         // m1n1's SPTM emulator flushes the TLB for them; dropping every
         // translation this machine caches (the fetch translations of every PE
         // and the host's whole shadow) covers any translation scope.
@@ -78,7 +78,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Stop;
     use super::super::guarded::tests::{UNDEFINED, VECTORS, gl1, gxf};
     use super::*;
 
@@ -91,7 +90,6 @@ mod tests {
     fn dc_incpa4k_completes_without_effect_from_the_m4() {
         for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
             for mut machine in [gl1(chip), gxf(chip)] {
-                machine.set_strict(true);
                 machine.cpu.state.x[8] = 0x8_1234_4000;
                 let (pc, generation) = (machine.cpu.pc, machine.translation_generation);
                 machine.system_instruction(DC_INCPA4K_X8).unwrap();
@@ -104,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn unestablished_words_stop_strictly_or_drop_every_translation_once_reported() {
+    fn unestablished_words_drop_every_translation_once_reported() {
         for (chip, words) in [
             (Chip::AppleM4, &[PHYSICAL_PAGE_X16, ALL][..]),
             (Chip::AppleM5, &[PHYSICAL_PAGE_X16, ADDRESS_SPACE_X13, ALL]),
@@ -112,14 +110,7 @@ mod tests {
         ] {
             for &word in words {
                 let mut machine = gl1(chip);
-                machine.set_strict(true);
                 let pc = machine.cpu.pc;
-                assert!(
-                    matches!(machine.system_instruction(word), Err(Stop::Unsupported(_))),
-                    "{chip:?} {word:#x}"
-                );
-                assert_eq!(machine.cpu.pc, pc);
-                machine.set_strict(false);
                 for _ in 0..2 {
                     let generation = machine.translation_generation;
                     let reaches = machine.host.reaches.len();
