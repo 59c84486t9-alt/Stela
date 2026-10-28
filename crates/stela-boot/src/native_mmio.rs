@@ -17,7 +17,7 @@ pub(crate) use capture::{Prepared, Wire};
 #[cfg(feature = "diagnostics")]
 pub(crate) use platform::ScopedSource;
 pub(crate) use platform::{ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication};
-pub(crate) use shared::{PROCESSORS, Source};
+pub(crate) use shared::{IoapicRegisters, IoapicUnit, PROCESSORS, Source};
 
 use stela_drivers::bus::mmio::owned::Error;
 const PAGE: u64 = 4096;

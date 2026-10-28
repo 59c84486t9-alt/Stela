@@ -64,7 +64,10 @@ fn word(tree: &DeviceTree, field: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("live selected bundle requires complete /chosen/{field}"))
 }
 
-#[allow(dead_code)] // Retained provenance getters also serve the parent Plan/owner join.
+#[allow(
+    dead_code,
+    reason = "retained provenance getters also serve the parent Plan and owner join"
+)]
 impl Intake {
     /// Called only with the SAME json parsed into `verified.manifest` by the
     /// enclosing load_named path. Every file/region has already been verified;

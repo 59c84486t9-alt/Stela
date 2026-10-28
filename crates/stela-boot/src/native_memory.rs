@@ -18,7 +18,10 @@ use stela_drivers::bus::dma::memory::{
 use crate::ALLOCATOR;
 #[cfg(test)]
 #[path = "heap.rs"]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "hosted page-source fixtures reuse the complete production allocator, while UEFI-only registration paths are exercised by boot checks"
+)]
 mod test_heap;
 #[cfg(test)]
 static ALLOCATOR: test_heap::Heap = test_heap::Heap::new();
@@ -764,8 +767,8 @@ mod tests {
             .unwrap();
         let pointer = tail.address(0, PAGE - 1).unwrap().as_ptr();
         assert_eq!(pointer as usize, first_cpu as usize + 1);
-        // SAFETY: the exclusive fixture mapping owns the entire native tail.
         assert!(
+            // SAFETY: the exclusive fixture mapping owns the entire native tail.
             unsafe { core::slice::from_raw_parts(pointer, PAGE - 1) }
                 .iter()
                 .all(|byte| *byte == 0)
@@ -819,8 +822,8 @@ mod tests {
             selected.physical_pages(),
             [selected_physical, selected_physical + PAGE as u64]
         );
-        // SAFETY: the retained CPU view still owns b throughout selection.
         assert!(
+            // SAFETY: the retained CPU view still owns b throughout selection.
             unsafe { core::slice::from_raw_parts(b_pointer, PAGE) }
                 .iter()
                 .all(|byte| *byte == 0x49)
@@ -960,8 +963,8 @@ mod tests {
         assert!((pointer as usize).is_multiple_of(8192));
         let physical = 0x4000_0000 + (pointer as usize - ram as usize) as u64;
         assert_eq!(pin.physical_pages(), &[physical, physical + 4096]);
-        // SAFETY: CPU-exclusive test memory; the mapping retains the whole pin.
         assert!(
+            // SAFETY: CPU-exclusive test memory; the mapping retains the whole pin.
             unsafe { core::slice::from_raw_parts(pointer, mapping.bytes()) }
                 .iter()
                 .all(|byte| *byte == 0)
@@ -1060,9 +1063,9 @@ mod tests {
         unsafe { dma.unmap() }.unwrap();
         assert_eq!(dma.address(), Err(DmaError::Unmapped));
         assert_eq!(dma.sync_for_device(0..4096), Err(DmaError::Unmapped));
-        // SAFETY: hardware remains quiescent, but the retired token must be
-        // rejected by the wrapper before any backend cache operation.
         assert_eq!(
+            // SAFETY: hardware remains quiescent, but the retired token must be
+            // rejected by the wrapper before any backend cache operation.
             unsafe { dma.sync_for_cpu(0..4096) },
             Err(DmaError::Unmapped)
         );
@@ -1127,8 +1130,8 @@ mod tests {
                 pin.physical_pages()[0],
                 0x4000_0000 + (pointer as usize - ram as usize) as u64
             );
-            // SAFETY: the CPU mapping owns this complete exclusive test extent.
             assert!(
+                // SAFETY: the CPU mapping owns this complete exclusive test extent.
                 unsafe { core::slice::from_raw_parts(pointer, bytes) }
                     .iter()
                     .all(|byte| *byte == 0)

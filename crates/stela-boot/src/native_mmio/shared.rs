@@ -361,6 +361,7 @@ pub(crate) struct Source {
     authority: Authority,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
+    ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
 }
 
 impl Source {
@@ -478,6 +479,7 @@ impl Source {
             platform,
             authority,
             buses: core::cell::RefCell::new(Vec::new()),
+            ioapics: core::cell::RefCell::new(Vec::new()),
         })
     }
 
@@ -649,63 +651,184 @@ fn out8(port: u16, value: u8) {
     };
 }
 
-/// The I/O APIC's index and data registers, and its first redirection entry
-/// (Intel 82093AA datasheet 3.1, 3.2.4).
-const IOREGSEL: usize = 0;
-const IOWIN: usize = 0x10;
-const IOAPICVER: u32 = 1;
-const REDIRECTION: u32 = 0x10;
-const MASKED: u32 = 1 << 16;
+/// A mapping retained by every pin using the controller. Unit serializes
+/// selector/window pairs with local interrupt exclusion.
+pub(crate) struct IoapicRegisters {
+    mapping: core::mem::ManuallyDrop<stela_drivers::bus::mmio::owned::Mapping>,
+    mmio: crate::native_irq::ioapic::Mmio,
+}
+// SAFETY: the all-root UC mapping is retained for every access; IOAPIC Unit
+// serializes selector/window operations on the owning boot processor.
+unsafe impl crate::native_irq::ioapic::Registers for IoapicRegisters {
+    fn read(&self, index: u8) -> u32 {
+        crate::native_irq::ioapic::Registers::read(&self.mmio, index)
+    }
+    fn write(&self, index: u8, value: u32) {
+        crate::native_irq::ioapic::Registers::write(&self.mmio, index, value);
+    }
+}
+impl Drop for IoapicRegisters {
+    fn drop(&mut self) {
+        if crate::native_irq::in_device_dispatch()
+            || crate::native_irq::NativePlatform::current().is_err()
+        {
+            return;
+        }
+        // SAFETY: the last Unit owner has gone, every pin retired or retained
+        // the Unit in quarantine, and this is the owning process CPU.
+        let _ = unsafe { self.mapping.retire() };
+        // SAFETY: same final process context. Failed retirement is quarantined
+        // by Mapping's destructor rather than authorizing reuse.
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.mapping) };
+    }
+}
+pub(crate) type IoapicUnit =
+    crate::native_irq::ioapic::Unit<IoapicRegisters, crate::native_irq::NativePlatform>;
 
 impl Source {
-    /// Mask ISA interrupts `irqs` at the 8259 PICs and at the I/O APIC pins
-    /// the MADT routes them to.
+    /// Reuse this source's one selector/window owner and UC mapping.
     ///
     /// # Safety
-    /// No other owner programs the PICs or those I/O APICs.
+    /// This boot owns the complete physical IOAPIC handoff. Individual lines
+    /// require separate contributor ownership before they can be claimed.
+    pub(crate) unsafe fn ioapic(
+        &self,
+        descriptor: crate::native_irq::madt::Unit,
+    ) -> Result<Arc<IoapicUnit>, Error> {
+        if let Some((_, unit)) = self
+            .ioapics
+            .borrow()
+            .iter()
+            .find(|(old, _)| *old == descriptor)
+        {
+            return Ok(unit.clone());
+        }
+        let routing = self.routing()?;
+        if !routing.units.contains(&descriptor) {
+            return Err(Error::OutsideResource);
+        }
+        let span = PhysicalSpan::new(descriptor.base, PAGE)?;
+        if !self
+            .platform
+            .wire()
+            .excludes_memory(span.start(), span.end())
+        {
+            return Err(Error::OutsideResource);
+        }
+        let resource = self.reserve(span, ResourceKind::Registers)?;
+        let mapping = self.authority.map(
+            resource,
+            0,
+            PAGE as usize,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )?;
+        let address = mapping.address(0, 32)?.as_ptr() as usize;
+        // SAFETY: exclusive all-root UC mapping of the MADT controller page.
+        let mmio = unsafe { crate::native_irq::ioapic::Mmio::new(address) }.map_err(failed)?;
+        let registers = IoapicRegisters {
+            mapping: core::mem::ManuallyDrop::new(mapping),
+            mmio,
+        };
+        let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
+        // SAFETY: mapping and complete exclusive controller handoff above.
+        let unit =
+            unsafe { IoapicUnit::attach(registers, platform, descriptor.id, descriptor.gsi_base) }
+                .map_err(failed)?;
+        self.ioapics.borrow_mut().push((descriptor, unit.clone()));
+        Ok(unit)
+    }
+    /// Stop PCI INTx contributors before SCI acquires its shared legacy line.
+    /// No bus-master or device-reset state is changed.
+    ///
+    /// # Safety
+    /// Before native probing/AP startup, this boot owns every captured ECAM
+    /// function and the firmware has stopped submitting interrupt work.
+    pub(crate) unsafe fn mask_pci_intx(&self) -> Result<(), Error> {
+        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
+        for window in windows {
+            for bus in window.start_bus..=window.end_bus {
+                // SAFETY: caller owns every function on this captured bus.
+                let (_, resource) = unsafe { self.claim_bus(window.segment, bus) }?;
+                let mut mapping = self.authority.map(
+                    resource,
+                    0,
+                    1 << 20,
+                    CacheAttribute::Uncached,
+                    Protection::ReadWrite,
+                )?;
+                let result = (|| {
+                    for device in 0..32usize {
+                        let first = device << 15;
+                        if mapping.read32(first)? & 0xffff == 0xffff {
+                            continue;
+                        }
+                        let functions = if mapping.read32(first + 12)? & (0x80 << 16) != 0 {
+                            8
+                        } else {
+                            1
+                        };
+                        for function in 0..functions {
+                            let offset = first | function << 12;
+                            if mapping.read32(offset)? & 0xffff == 0xffff {
+                                continue;
+                            }
+                            let command = mapping.address(offset + 4, 2)?.as_ptr().cast::<u16>();
+                            // SAFETY: the owned UC command register is aligned,
+                            // and the16-bit access avoids W1C status bits at+6.
+                            unsafe {
+                                command.write_volatile(command.read_volatile() | (1 << 10));
+                            }
+                            // SAFETY: same retained command register readback.
+                            if unsafe { command.read_volatile() } & (1 << 10) == 0 {
+                                return Err(Error::InvalidPlatformReply);
+                            }
+                        }
+                    }
+                    Ok(())
+                })();
+                // SAFETY: no borrowed register pointer survives the loop.
+                unsafe { mapping.retire() }?;
+                result?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn routing(&self) -> Result<crate::native_irq::madt::Routing, Error> {
+        crate::native_irq::madt::Routing::parse(
+            self.platform.wire().madt(),
+            self.platform.space.physical_bits,
+        )
+        .map_err(failed)
+    }
+    pub(crate) fn fadt(&self) -> &'static [u8] {
+        self.platform.wire().fadt()
+    }
+
+    /// Mask the PICs and the same retained IOAPIC owners used by SCI routes.
+    ///
+    /// # Safety
+    /// The boot processor owns these PICs and complete IOAPIC handoff.
     pub(crate) unsafe fn mask_isa(&self, irqs: &[u8]) -> Result<(), Error> {
         for &irq in irqs {
-            // OCW1, the interrupt mask register (Intel 8259A datasheet).
             let port = if irq < 8 { 0x21 } else { 0xa1 };
             out8(port, in8(port) | 1 << (irq & 7));
         }
-        let wire = self.platform.wire();
-        let routing =
-            crate::native_irq::madt::Routing::parse(wire.madt(), self.platform.space.physical_bits)
-                .map_err(failed)?;
-        let lines = irqs
-            .iter()
-            .map(|&irq| routing.isa(irq).map(|line| line.gsi))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failed)?;
-        for unit in &routing.units {
-            let page = unit.base & !(PAGE - 1);
-            let offset = (unit.base - page) as usize;
-            let span = PhysicalSpan::new(page, PAGE)?;
-            if !wire.excludes_memory(span.start(), span.end()) {
-                return Err(Error::OutsideResource);
+        let routing = self.routing()?;
+        for descriptor in &routing.units {
+            // SAFETY: forwarded exclusive controller handoff.
+            let unit = unsafe { self.ioapic(*descriptor) }?;
+            for &irq in irqs {
+                let line = routing.isa(irq).map_err(failed)?;
+                if line
+                    .gsi
+                    .checked_sub(unit.gsi_base())
+                    .is_some_and(|pin| pin < u32::from(unit.pins()))
+                {
+                    // SAFETY: caller owns these firmware lines; active claims refuse.
+                    unsafe { unit.mask_unclaimed(line.gsi) }.map_err(failed)?;
+                }
             }
-            let resource = self.reserve(span, ResourceKind::Registers)?;
-            let mut mapping = self.authority.map(
-                resource,
-                0,
-                PAGE as usize,
-                CacheAttribute::Uncached,
-                Protection::ReadWrite,
-            )?;
-            let select = |index: u32| mapping.write32(offset + IOREGSEL, index);
-            select(IOAPICVER)?;
-            let pins = (mapping.read32(offset + IOWIN)? >> 16 & 0xff) + 1;
-            for &gsi in &lines {
-                let Some(pin) = gsi.checked_sub(unit.gsi_base).filter(|pin| *pin < pins) else {
-                    continue;
-                };
-                select(REDIRECTION + 2 * pin)?;
-                let low = mapping.read32(offset + IOWIN)?;
-                mapping.write32(offset + IOWIN, low | MASKED)?;
-            }
-            // SAFETY: the mapping's only user is this loop, which is done.
-            unsafe { mapping.retire() }?;
         }
         Ok(())
     }

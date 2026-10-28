@@ -93,6 +93,20 @@ pub(crate) unsafe fn adopt(
 }
 
 pub struct NativePlatform(());
+impl NativePlatform {
+    pub(crate) fn current() -> Result<Self, IrqError> {
+        let platform = Self(());
+        platform.check_cpu()?;
+        let spurious = controller().read(apic::SPURIOUS);
+        if spurious == u32::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if spurious & (1 << 12) != 0 {
+            return Err(IrqError::Unsupported);
+        }
+        Ok(platform)
+    }
+}
 pub static CONTROLLER: Registry<NativePlatform> = Registry::new(NativePlatform(()));
 
 pub fn service() -> Result<&'static dyn IrqController, IrqError> {

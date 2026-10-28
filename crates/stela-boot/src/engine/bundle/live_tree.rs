@@ -3,7 +3,13 @@
 //! Region byte offsets remain valid until Verified::load finishes. Projection
 //! happens afterwards. Its shorter encoding changes boot_args' data length,
 //! while /chosen/memory-map continues to reserve the original whole allocation.
-#[cfg_attr(test, allow(dead_code))] // Positive native RAM proof runs under UEFI.
+#[cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "positive native RAM ownership proof runs under UEFI; hosted mounts exercise its pure refusal paths"
+    )
+)]
 #[path = "live_tree/registered.rs"]
 pub(crate) mod registered;
 
@@ -146,7 +152,10 @@ impl LiveTree {
     /// Consumes the old snapshot. Any reached write failure is terminal before
     /// guest entry: a later boot_args failure does not undo an earlier ADT write.
     /// This supplies no new RAM reservation, physical resource or CPU authority.
-    #[allow(dead_code)] // Adoption also needs the actual Plan/RAM/device owners.
+    #[allow(
+        dead_code,
+        reason = "retained live-tree operations serve later source-qualified topology publication"
+    )] // Adoption also needs the actual Plan/RAM/device owners.
     pub(crate) fn publish(
         self,
         ram: &mut impl Ram,

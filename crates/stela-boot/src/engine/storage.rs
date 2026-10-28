@@ -391,7 +391,9 @@ pub struct Partitions<'a> {
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, `root` is the loader's root, and it and the window
-/// remain live for the boot.
+/// remain live for the boot. The actual owned work dispatcher already holds
+/// its RestoreRoot/host-driver guard and this is a real admitted continuation;
+/// acquiring that non-reentrant guard again is forbidden.
 pub unsafe fn open(
     handoff: &Handoff,
     root: u64,
@@ -417,8 +419,6 @@ pub unsafe fn open(
             "host disk {serial} is both a USB storage disk and a partition target"
         ));
     }
-    // SAFETY: forwarded caller contract; nothing below enters it again.
-    let _root = unsafe { RestoreRoot::enter(root) };
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     let firmware = stela_drivers::probe::handoff_provider(handoff);
@@ -619,6 +619,7 @@ pub unsafe fn open(
         usb,
         usb_disks,
         disks: host_disks,
+        power: core::mem::take(&mut devices.power),
     })
 }
 
@@ -641,6 +642,7 @@ impl Optional {
 /// What [`open`] brought up: a service per target, in order, and the
 /// host's input devices and network adapters.
 pub struct Opened {
+    pub power: stela_drivers::probe::Power,
     pub services: alloc::vec::Vec<Box<dyn BlockDevice>>,
     /// The install medium's partition, found by its GUID.
     pub medium: Option<Box<dyn BlockDevice>>,

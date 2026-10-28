@@ -170,6 +170,29 @@ impl<R: Registers, P: Platform> Unit<R, P> {
             delivery_pending: low & DELIVERY != 0,
         })
     }
+    /// Mask an unclaimed firmware route before another subsystem takes it.
+    ///
+    /// # Safety
+    /// The caller has the exclusive handoff of this physical line and its
+    /// former firmware consumers; no registered contributor owns it.
+    pub unsafe fn mask_unclaimed(&self, gsi: u32) -> Result<(), IrqError> {
+        self.platform.check_cpu()?;
+        let pin = gsi
+            .checked_sub(self.gsi_base)
+            .filter(|pin| *pin < u32::from(self.pins))
+            .ok_or(IrqError::Route)? as u8;
+        let _guard = self.lock();
+        // SAFETY: the selector/claims lock protects this pin's metadata.
+        if unsafe { (*self.claims.get())[usize::from(pin)] } {
+            return Err(IrqError::Route);
+        }
+        let low = self.low(pin)?;
+        self.registers.write(0x10 + pin * 2, low | MASK);
+        if self.low(pin)? & MASK == 0 {
+            return Err(IrqError::Mask);
+        }
+        Ok(())
+    }
     fn lock(&self) -> Guard<'_, R, P> {
         let saved = self.platform.save_and_disable();
         while self
@@ -284,6 +307,42 @@ pub struct ParentMask<R: Registers, P: Platform> {
     unit: Arc<Unit<R, P>>,
     pin: u8,
     epoch: u64,
+}
+impl<R: Registers, P: Platform> ParentMask<R, P> {
+    /// Rearm the same claimed route after its deferred source has been drained.
+    /// This does not enable contributors or create another route.
+    ///
+    /// # Safety
+    /// Process context on the owning CPU. The native callback has returned and
+    /// its pending flag is clear. The source handler acknowledged or locally
+    /// masked every contributor it observed; any outstanding deferred worker
+    /// retains its disabled contributor until that device's work completes.
+    /// No callback/source-owner retirement overlaps this operation. A new
+    /// physical event after unmask is handled by the same retained callback.
+    pub unsafe fn rearm(&self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        let _guard = self.unit.lock();
+        // SAFETY: the lock serializes claim/epoch checks with route retirement.
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        let low = self.unit.low(self.pin)?;
+        let vector = low as u8;
+        if low & MASK == 0
+            || vector < FIRST_VECTOR
+            || usize::from(vector - FIRST_VECTOR) >= VECTOR_COUNT
+        {
+            return Err(IrqError::Route);
+        }
+        if low & (REMOTE_IRR | DELIVERY) != 0 || self.unit.platform.pending(vector)? {
+            return Err(IrqError::Drain);
+        }
+        self.unit.registers.write(0x10 + self.pin * 2, low & !MASK);
+        if self.unit.low(self.pin)? & MASK != 0 {
+            return Err(IrqError::Mask);
+        }
+        Ok(())
+    }
 }
 // SAFETY: Pin alone creates this endpoint from its actual Unit/claim. The
 // existing IRQ-save selector lock checks the nonwrapping epoch and performs
@@ -722,6 +781,51 @@ mod tests {
             Ok(())
         );
         replacement.retire().unwrap();
+    }
+
+    #[test]
+    fn deferred_rearm_checks_drain_epoch_and_retirement() {
+        struct Deferred(Arc<ParentMask<Io, Cpu>>);
+        impl Handler for Deferred {
+            fn handle(&self) -> Disposition {
+                stela_drivers::bus::irq::ParentMask::mask(&*self.0).unwrap();
+                Disposition::Handled
+            }
+        }
+        let (board, unit, registry, line) = fixture();
+        // SAFETY: the fixture owns the stopped line and its contributors.
+        let pin = unsafe { unit.claim(line, Box::new(Contributors(board.clone()))) }.unwrap();
+        let parent = Arc::new(pin.parent_mask().unwrap());
+        let mut route = registry
+            .request(Box::new(pin), Arc::new(Deferred(parent.clone())))
+            .unwrap();
+        // A still-live unmasked route cannot be rearmed as if it was drained.
+        assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Route));
+        {
+            let mut hw = board.hw.lock().unwrap();
+            hw.asserted = 1;
+            hw.service();
+        }
+        assert!(registry.dispatch(route.vector()));
+        {
+            let mut hw = board.hw.lock().unwrap();
+            hw.asserted = 0;
+            hw.regs[0x22] |= REMOTE_IRR;
+        }
+        assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Drain));
+        {
+            let mut hw = board.hw.lock().unwrap();
+            hw.regs[0x22] &= !REMOTE_IRR;
+            hw.pending = true;
+        }
+        assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Drain));
+        board.hw.lock().unwrap().pending = false;
+        // SAFETY: the modeled child is acknowledged, EOI/IRR are drained,
+        // and no deferred producer remains on this owning fixture CPU.
+        unsafe { parent.rearm() }.unwrap();
+        assert_eq!(board.hw.lock().unwrap().regs[0x22] & MASK, 0);
+        route.retire().unwrap();
+        assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Unregistered));
     }
 
     #[test]

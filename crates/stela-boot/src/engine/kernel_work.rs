@@ -348,6 +348,14 @@ impl KernelWork {
         self.busy.set(false);
         Ok(result)
     }
+    /// Actual continuation identity; dispatcher/IRQ/foreign-root callers refuse.
+    pub(super) fn current_id(&self) -> Result<u64, Error> {
+        self.executor
+            .runtime()
+            .current_id()
+            .map(|id| id.get())
+            .map_err(Error::Work)
+    }
     fn qualify_foreground(&self) -> Result<(), Error> {
         let pointer = self.executor.runtime().get_ref() as *const _ as usize;
         let bounds = self.foreground.clone();

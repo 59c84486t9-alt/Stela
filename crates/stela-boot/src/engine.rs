@@ -808,7 +808,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         acpi: host_acpi,
         mmio: native_mmio,
         remappers,
-        _work: _kernel_work,
+        _work: kernel_work,
     } = start_platform(handoff, &mut host_owner);
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
@@ -842,6 +842,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         host_acpi,
         &native_mmio,
         remappers,
+        kernel_work,
     );
     remappers.report_faults();
     let built = preboot.map(|partition| from_disk(partition, &options));
@@ -1794,7 +1795,7 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
 /// registry is attached here too, or its refusal reported.
 struct Platform {
     acpi: Option<&'static aml::HostAcpi>,
-    mmio: Option<crate::native_mmio::Source>,
+    mmio: Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
     /// Affine runtime/source remain retained through paused/quarantined frames.
     /// Its producer services require their own complete admission graph.
@@ -1802,18 +1803,6 @@ struct Platform {
 }
 
 fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -> Platform {
-    // The firmware's ACPI namespace, loaded before the host devices start so
-    // their services can consult it; the host's power transitions run it.
-    let host_acpi = aml::HostAcpi::start(
-        handoff.rsdp,
-        handoff.root,
-        handoff
-            .storage
-            .handoff()
-            .map(|storage| storage.ecam)
-            .unwrap_or_default(),
-        handoff.tsc_hz,
-    );
     // The owned MMIO authority the host devices' services map through. A
     // host it cannot qualify is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
@@ -1826,7 +1815,8 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         .inspect_err(|error| {
             output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));
         })
-        .ok();
+        .ok()
+        .map(|source| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(source)));
     // SAFETY: the installed boot processor with interrupts off; the engine's
     // IDT routes the device vectors to native_irq, and the physmap maps the
     // local APIC in every root.
@@ -1870,6 +1860,40 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
             None
         }
     };
+    let prepared_sci = match (&native_mmio, handoff.power) {
+        (Some(mmio), Some(power)) => {
+            // SAFETY: firmware is stopped, APs have not started, and native
+            // probing has not published any PCI/controller owner yet.
+            let prepared = unsafe { mmio.mask_pci_intx() }
+                .map_err(|error| format!("PCI INTx handoff: {error:?}"))
+                .and_then(|()| {
+                    // SAFETY: PCI INTx contributors are disabled; the boot
+                    // owns the fixed/GPE sources and complete IOAPIC handoff.
+                    unsafe { aml::sci::Prepared::capture(mmio, power) }
+                        .map_err(|error| format!("SCI route: {error:?}"))
+                });
+            match prepared {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error}\n"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let host_acpi = aml::HostAcpi::start(
+        handoff.rsdp,
+        handoff.root,
+        handoff
+            .storage
+            .handoff()
+            .map(|storage| storage.ecam)
+            .unwrap_or_default(),
+        handoff.tsc_hz,
+        prepared_sci,
+        work,
+    );
     Platform {
         acpi: host_acpi,
         mmio: native_mmio,
@@ -1959,8 +1983,9 @@ fn start_devices(
     options: &Options,
     wanted: &Wanted<'_>,
     host_acpi: Option<&'static aml::HostAcpi>,
-    native_mmio: &Option<crate::native_mmio::Source>,
+    native_mmio: &Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
+    kernel_work: Option<&'static kernel_work::KernelWork>,
 ) -> HostDevices {
     let &Wanted {
         firmware: ref host_firmware,
@@ -2011,8 +2036,53 @@ fn start_devices(
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
             }
             crate::status::begin("Starting the PC's disks and USB devices");
-            // SAFETY: sole ownership of the DMA pages and controllers; the
-            // probe runs in the loader's root, which reaches them.
+            // Every admitted input is owned or an actual retained boot owner.
+            // No probe callback can borrow this dispatcher stack on timeout.
+            let owned_targets: Vec<_> = targets.iter().map(|target| (**target).clone()).collect();
+            let owned_preboot = options.preboot.clone();
+            let owned_usb = options.usb_storage.clone();
+            let owned_wifi = wifi_network(handoff, options);
+            let external = options.external_disks.then(|| {
+                stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                    .saturating_sub(owned_usb.len())
+            });
+            let root = handoff.root;
+            let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
+            let tsc_hz = handoff.tsc_hz;
+            let host_clock = storage_handoff.clock;
+            let mmio = *native_mmio;
+            let medium_partition = options.install_source;
+            let log_partition = handoff.log_partition.map(Guid);
+            let work = kernel_work
+                .unwrap_or_else(|| output::fatal("native probe requires an owned continuation"));
+            let opened = work.call_owned(60_000_000, move || {
+                let native = mmio
+                    .map(|mmio| services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz));
+                let targets: Vec<_> = owned_targets.iter().collect();
+                // SAFETY: one actual admitted foreground task under the work
+                // dispatcher's loader-root/driver guard. Owned handoff, inputs
+                // and retained services survive completion or quarantine.
+                unsafe {
+                    storage::open(
+                        &storage_handoff,
+                        root,
+                        native
+                            .as_ref()
+                            .map(|native| native as &dyn stela_drivers::probe::NativeServices),
+                        &storage::Partitions {
+                            targets: &targets,
+                            medium: medium_partition,
+                            preboot: owned_preboot.as_ref(),
+                            store: translation_store,
+                            log: log_partition,
+                            fdr: fdr_partition,
+                        },
+                        &owned_usb,
+                        owned_wifi.as_ref(),
+                        external,
+                    )
+                }
+            });
             let storage::Opened {
                 services,
                 medium,
@@ -2025,42 +2095,16 @@ fn start_devices(
                 usb,
                 usb_disks,
                 disks,
-            } = unsafe {
-                let native = native_mmio.as_ref().map(|mmio| {
-                    services::Services::new(
-                        mmio,
-                        remappers,
-                        host_acpi,
-                        handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes,
-                        handoff.tsc_hz,
-                    )
+                power,
+            } = opened
+                .unwrap_or_else(|error| Err(format!("native probe admission failed: {error}")))
+                .unwrap_or_else(|error| {
+                    output::arguments(format_args!("host storage refusal: {error}\n"));
+                    output::fatal(&format!("host storage could not be opened: {error}"))
                 });
-                storage::open(
-                    &storage_handoff,
-                    handoff.root,
-                    native
-                        .as_ref()
-                        .map(|native| native as &dyn stela_drivers::probe::NativeServices),
-                    &storage::Partitions {
-                        targets,
-                        medium: options.install_source,
-                        preboot: options.preboot.as_ref(),
-                        store: translation_store,
-                        log: handoff.log_partition.map(Guid),
-                        fdr: fdr_partition,
-                    },
-                    &options.usb_storage,
-                    wifi_network(handoff, options).as_ref(),
-                    options.external_disks.then(|| {
-                        stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
-                            .saturating_sub(options.usb_storage.len())
-                    }),
-                )
+            if let Some(acpi) = host_acpi {
+                acpi.retain_power(power);
             }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("host storage refusal: {error}\n"));
-                output::fatal(&format!("host storage could not be opened: {error}"))
-            });
             disks.profile_callbacks(options.profile);
             let count = |count: usize, one: &str, many: &str| {
                 format!("{count} {}", if count == 1 { one } else { many })
@@ -2103,7 +2147,7 @@ fn start_devices(
             // needs it, so the mount still boots and logs how far it gets.
             let network = wants_network.then(|| {
                 crate::status::begin("Getting a network address");
-                network::HostNetwork::open(links, storage_handoff.clock)
+                network::HostNetwork::open(links, host_clock)
                     .inspect(|network| crate::status::done(network.describe()))
                     .map(|network| network::Shared(Rc::new(RefCell::new(network))))
                     .inspect_err(|error| {
@@ -2154,7 +2198,7 @@ fn run_machine<H: Host>(
     options: &Options,
     handoff: &Handoff,
     io: RunIo,
-    execute: impl FnMut(&mut Machine<H, parallel::Board>, u64) -> Stop,
+    mut execute: impl FnMut(&mut Machine<H, parallel::Board>, u64) -> Stop,
 ) -> ! {
     if options.survey {
         output::arguments(format_args!(
@@ -2237,7 +2281,12 @@ fn run_machine<H: Host>(
         options.budget,
         handoff.tsc_hz,
         &mut boot_progress,
-        execute,
+        |machine, limit| {
+            if let Some(acpi) = host_acpi {
+                acpi.poll();
+            }
+            execute(machine, limit)
+        },
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     let mut service = service::take().expect("the run's service");

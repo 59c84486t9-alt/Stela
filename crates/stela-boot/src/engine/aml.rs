@@ -3,24 +3,23 @@
 //! through the engine's own OSL services: its heap, the TSC, port I/O, PCI
 //! configuration space and the loader root's mappings.
 //!
-//! The session is interpreter-only. ACPICA loads the firmware's tables and
-//! namespace and evaluates what the engine asks for, such as `\_PTS` before
-//! S5 ([`HostAcpi::prepare_soft_off`]). Hardware activation needs an SCI,
-//! GPE and EC service, IRQ-safe deferred work and device `_INI`, which the
-//! engine does not have; the mount reports that once and AML runs only when
-//! the engine calls it.
+//! The boot retains its EC binding before namespace initialization. When the
+//! captured SCI resources qualify, a native interrupt masks the owned line
+//! and the BSP later dispatches ACPICA and its FIFO work under RestoreRoot.
+//! Power-device notifications coalesce into refresh work on that same BSP.
 //!
 //! Every ACPICA call runs on the boot processor under the loader root
-//! ([`RestoreRoot`]), with interrupts off and the host drivers' lock held.
+//! ([`super::storage::RestoreRoot`]), with interrupts off and the host drivers' lock held.
 //! There RAM, ACPI tables and NVS included, is reached through the physmap,
 //! write-back; any other address, device registers, through an identity
 //! mapping the provider adds to the loader root uncached on first use. As
 //! Linux, configuration registers below 256 on segment 0 go through
 //! configuration mechanism #1, the rest through the MCFG's ECAM windows.
+pub(super) mod sci;
 use super::{
     host,
+    kernel_work::KernelWork,
     power::{in8, in16, in32, out8, out16, out32},
-    storage::RestoreRoot,
 };
 use crate::{
     layout, output,
@@ -72,15 +71,22 @@ enum Gap {
 }
 
 struct Provider {
+    /// The one actual BSP executor; Session callbacks never infer a task from IF.
+    executor: &'static KernelWork,
     /// The loader root, which takes the identity mappings of device pages.
     root: u64,
     ecam: Vec<EcamWindow>,
     tsc_hz: u64,
     /// `acpi_os_execute`'s work, run in order by [`drain_work`].
     work: RefCell<VecDeque<(Work, usize)>>,
+    queued: AtomicBool,
     /// Quiesced: work is refused.
     closed: Cell<bool>,
     reported: Cell<u32>,
+    prepared_sci: RefCell<Option<sci::Prepared>>,
+    sci: RefCell<Option<sci::Armed>>,
+    polling: Cell<bool>,
+    needs_rearm: Cell<bool>,
 }
 
 impl Provider {
@@ -149,6 +155,47 @@ impl Provider {
         })
     }
 
+    fn dispatch_sci(&self, work: bool) -> bool {
+        if self.polling.replace(true) {
+            return false;
+        }
+        let armed = self.sci.borrow_mut().take();
+        let mut handled = false;
+        if let Some(armed) = &armed {
+            match armed.dispatch() {
+                Ok(dispatched) => {
+                    handled = dispatched;
+                    if dispatched {
+                        self.needs_rearm.set(true);
+                    }
+                }
+                Err(error) => output::arguments(format_args!("HOST ACPI SCI failed: {error:?}\n")),
+            }
+        }
+        // ACPICA's ISR has acknowledged fixed events and disabled deferred
+        // GPE contributors. Rearm the parent before executing AML: a worker
+        // may wait for the FACS global-lock release fixed event on this SCI.
+        if self.needs_rearm.get()
+            && let Some(armed) = &armed
+        {
+            // SAFETY: the native IRQ returned/EOIed and the C ISR completed;
+            // each deferred contributor owns its own disabled source until done.
+            match unsafe { armed.rearm() } {
+                Ok(()) => self.needs_rearm.set(false),
+                Err(error) => {
+                    output::arguments(format_args!("HOST ACPI SCI rearm failed: {error:?}\n"))
+                }
+            }
+        }
+        *self.sci.borrow_mut() = armed;
+        self.polling.set(false);
+        if work {
+            // SAFETY: process queue owned by this provider, with no route or
+            // queue borrow held across a worker's OSL semaphore waits.
+            unsafe { drain_work(core::ptr::from_ref(self).cast_mut().cast()) };
+        }
+        handled
+    }
     fn milliseconds(&self, milliseconds: u64) {
         let start = host::rdtsc();
         let ticks = self.tsc_hz / 1000 * milliseconds;
@@ -307,20 +354,27 @@ unsafe extern "C" fn wait_semaphore(
     if take() {
         return AE_OK;
     }
-    if timeout == WAIT_FOREVER {
-        // Only this processor runs AML, with interrupts off: no one else
-        // can ever signal.
+    if timeout == WAIT_FOREVER && provider.sci.borrow().is_none() {
         provider.report(
             Gap::Wait,
-            format_args!("firmware AML waited forever on a semaphore only it holds"),
+            format_args!("semaphore wait has no interrupt progress source"),
         );
         return AE_TIME;
     }
     let start = host::rdtsc();
     let ticks = provider.tsc_hz / 1000 * u64::from(timeout);
-    while host::rdtsc().wrapping_sub(start) < ticks {
+    loop {
         if take() {
             return AE_OK;
+        }
+        if timeout != WAIT_FOREVER && host::rdtsc().wrapping_sub(start) >= ticks {
+            break;
+        }
+        if let Ok(platform) = crate::native_irq::NativePlatform::current() {
+            // SAFETY: current BSP and provider root are retained through this
+            // wait; only the small native IRQ handlers run in this window.
+            unsafe { stela_drivers::bus::irq::Platform::interrupt_window(&platform) };
+            provider.dispatch_sci(false);
         }
         core::hint::spin_loop();
     }
@@ -345,23 +399,56 @@ unsafe extern "C" fn signal_semaphore(
     }
 }
 
-/// No SCI: the session is interpreter-only.
 unsafe extern "C" fn install_interrupt(
-    _: *mut c_void,
-    _: u32,
-    _: Interrupt,
-    _: *mut c_void,
+    context: *mut c_void,
+    irq: u32,
+    handler: Interrupt,
+    argument: *mut c_void,
 ) -> Status {
-    AE_SUPPORT
+    // SAFETY: this live provider is retained by the active ACPICA session.
+    let provider = unsafe { provider(context) };
+    let Some(prepared) = provider.prepared_sci.borrow_mut().take() else {
+        return AE_SUPPORT;
+    };
+    if prepared.irq() != irq {
+        return AE_BAD_PARAMETER;
+    }
+    // SAFETY: ACPICA's permanent SCI handler/context and exclusive boot route.
+    match unsafe { prepared.install(handler, argument) } {
+        Ok(armed) => {
+            *provider.sci.borrow_mut() = Some(armed);
+            AE_OK
+        }
+        Err(error) => {
+            output::arguments(format_args!("HOST ACPI SCI install failed: {error:?}\n"));
+            AE_ERROR
+        }
+    }
+}
+unsafe extern "C" fn remove_interrupt(context: *mut c_void, _: u32, _: Interrupt) -> Status {
+    // SAFETY: the session's retained provider; process context at termination.
+    let provider = unsafe { provider(context) };
+    let mut slot = provider.sci.borrow_mut();
+    match slot.as_mut() {
+        None => AE_NOT_EXIST,
+        Some(armed) => match armed.retire() {
+            Ok(()) => {
+                slot.take();
+                AE_OK
+            }
+            Err(_) => AE_ERROR,
+        },
+    }
 }
 
-unsafe extern "C" fn remove_interrupt(_: *mut c_void, _: u32, _: Interrupt) -> Status {
-    AE_NOT_EXIST
-}
-
-/// Only the boot processor runs AML.
-unsafe extern "C" fn thread_id(_: *mut c_void) -> u64 {
-    1
+/// ACPICA mutex ownership uses the actual retained continuation identity.
+unsafe extern "C" fn thread_id(context: *mut c_void) -> u64 {
+    // SAFETY: this Session retains its provider and real affine work owner.
+    let provider = unsafe { provider(context) };
+    provider
+        .executor
+        .current_id()
+        .unwrap_or_else(|_| output::fatal("ACPICA called outside its owned native continuation"))
 }
 
 unsafe extern "C" fn execute(
@@ -379,6 +466,7 @@ unsafe extern "C" fn execute(
         .work
         .borrow_mut()
         .push_back((work, argument as usize));
+    provider.queued.store(true, Ordering::Release);
     AE_OK
 }
 
@@ -388,6 +476,7 @@ unsafe extern "C" fn drain_work(context: *mut c_void) {
     loop {
         let next = provider.work.borrow_mut().pop_front();
         let Some((work, argument)) = next else {
+            provider.queued.store(false, Ordering::Release);
             return;
         };
         // SAFETY: ACPICA queued this work with its argument.
@@ -645,7 +734,13 @@ unsafe extern "C" fn flush_cache(_: *mut c_void) {
 /// the queued work quiesces the session.
 unsafe extern "C" fn quiesce(context: *mut c_void) -> Status {
     // SAFETY: ACPICA passes the session's provider.
-    unsafe { provider(context) }.closed.set(true);
+    let provider = unsafe { provider(context) };
+    provider.closed.set(true);
+    if let Some(armed) = provider.sci.borrow_mut().as_mut()
+        && armed.retire().is_err()
+    {
+        return AE_ERROR;
+    }
     // SAFETY: as above.
     unsafe { drain_work(context) };
     AE_OK
@@ -667,35 +762,88 @@ unsafe extern "C" fn fatal(_: *mut c_void, status: Status) -> ! {
 /// the host drivers and power transitions borrow it for `'static`.
 pub struct HostAcpi {
     session: Session,
-    root: u64,
+    provider: *const Provider,
+    ec: RefCell<Option<stela_drivers::platform::ec::binding::Binding<'static>>>,
+    installed_ec: RefCell<Option<stela_drivers::platform::ec::capability::Installed<'static>>>,
+    power: RefCell<stela_drivers::probe::Power>,
+    notification: RefCell<Option<stela_drivers::platform::acpi::Notification<'static>>>,
+    ec_pending: Cell<bool>,
+    hardware: AtomicBool,
+    ec_failed: AtomicBool,
+    deferred_failed: AtomicBool,
 }
+static EC_EVENT: AtomicBool = AtomicBool::new(false);
+static POWER_CHANGED: AtomicBool = AtomicBool::new(false);
+static POWER_BUTTON: AtomicBool = AtomicBool::new(false);
 
 impl HostAcpi {
     /// Load the tables at `rsdp` and their namespace; `None`, reported,
     /// when ACPICA refuses them. `root` is the loader root. The namespace
     /// lives until the host powers off, so it is leaked here, once.
-    pub fn start(
+    pub(super) fn start(
         rsdp: u64,
         root: u64,
         ecam: Vec<EcamWindow>,
         tsc_hz: u64,
+        prepared_sci: Option<sci::Prepared>,
+        executor: Option<&'static KernelWork>,
+    ) -> Option<&'static Self> {
+        let Some(executor) = executor else {
+            output::arguments(format_args!(
+                "ACPI firmware AML unavailable: native continuation owner is unavailable\n"
+            ));
+            return None;
+        };
+        match executor.call_owned(5_000_000, move || {
+            Self::start_entered(rsdp, root, ecam, tsc_hz, prepared_sci, executor)
+        }) {
+            Ok(acpi) => acpi,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "ACPI firmware AML admission failed: {error}\n"
+                ));
+                None
+            }
+        }
+    }
+    /// Called only by the actual owned foreground callback under its retained
+    /// loader-root/host-driver guard. It must never acquire that guard again.
+    fn start_entered(
+        rsdp: u64,
+        root: u64,
+        ecam: Vec<EcamWindow>,
+        tsc_hz: u64,
+        prepared_sci: Option<sci::Prepared>,
+        executor: &'static KernelWork,
     ) -> Option<&'static Self> {
         if rsdp == 0 {
             output::arguments(format_args!("ACPI firmware AML unavailable: no RSDP\n"));
             return None;
         }
+        // An SCI route alone does not qualify ACPICA hardware mode. The draft
+        // provider still lacks real role-specific continuations/thread IDs and
+        // exact resource-owned map/unmap leases. Keep namespace-only operation
+        // until that complete provider is admitted by the actual work owner.
+        let capabilities = 0;
         let provider = Box::new(Provider {
+            executor,
             root,
             ecam,
             tsc_hz,
             work: RefCell::new(VecDeque::new()),
+            queued: AtomicBool::new(false),
             closed: Cell::new(false),
             reported: Cell::new(0),
+            prepared_sci: RefCell::new(prepared_sci),
+            sci: RefCell::new(None),
+            polling: Cell::new(false),
+            needs_rearm: Cell::new(false),
         });
+        let provider = Box::into_raw(provider);
         let services = Services {
-            context: Box::into_raw(provider).cast(),
+            context: provider.cast(),
             root: rsdp,
-            capabilities: 0,
+            capabilities,
             allocate,
             free,
             map,
@@ -729,8 +877,6 @@ impl HostAcpi {
             destroy,
             fatal,
         };
-        // SAFETY: the live loader root, which the session runs under.
-        let _root = unsafe { RestoreRoot::enter(root) };
         // SAFETY: every callback keeps the OSL contract above, the provider
         // is the session's, and only this processor runs ACPICA.
         let session = match unsafe { Session::start(services, Mode::InterpreterOnly) } {
@@ -768,14 +914,209 @@ impl HostAcpi {
                 error.0
             )),
         }
-        output::arguments(format_args!(
-            "UNSUPPORTED ACPI hardware activation: no SCI, GPE or EC events and no device _INI; firmware AML runs only when the engine calls it\n"
-        ));
-        Some(Box::leak(Box::new(Self { session, root })))
+        let host = Box::leak(Box::new(Self {
+            session,
+            provider,
+            ec: RefCell::new(None),
+            installed_ec: RefCell::new(None),
+            power: RefCell::new(Default::default()),
+            notification: RefCell::new(None),
+            ec_pending: Cell::new(false),
+            hardware: AtomicBool::new(false),
+            ec_failed: AtomicBool::new(false),
+            deferred_failed: AtomicBool::new(false),
+        }));
+        if capabilities != 0 {
+            // SAFETY: the boot retains the provider's exclusive EC resources
+            // before namespace initialization and through this permanent owner.
+            let installation =
+                unsafe { stela_drivers::probe::install_embedded_controller(&host.session) };
+            host.ec_failed
+                .store(!installation.failures.is_empty(), Ordering::Release);
+            for (location, error) in installation.failures {
+                output::arguments(format_args!("HOST ACPI EC {location}: {error}\n"));
+            }
+            *host.ec.borrow_mut() = installation.binding;
+            match host.session.enable_hardware() {
+                Ok(()) => {
+                    host.hardware.store(true, Ordering::Release);
+                    if let Some(binding) = host.ec.borrow().as_ref() {
+                        match stela_drivers::platform::ec::capability::Installed::from_binding(
+                            binding,
+                        ) {
+                            Ok(installed) => *host.installed_ec.borrow_mut() = Some(installed),
+                            Err(error) => output::arguments(format_args!(
+                                "HOST ACPI EC activation refused: {error:?}\n"
+                            )),
+                        }
+                        if let Some(gpe) = binding.device().gpe
+                            && let Err(error) = host.session.flag_gpe(gpe, true, &EC_EVENT)
+                        {
+                            output::arguments(format_args!(
+                                "HOST ACPI EC GPE refused: {error:?}\n"
+                            ));
+                        }
+                    }
+                    if let Err(error) = host.session.flag_fixed_event(
+                        stela_drivers::platform::acpi::EVENT_POWER_BUTTON,
+                        &POWER_BUTTON,
+                    ) {
+                        output::arguments(format_args!(
+                            "HOST ACPI power button refused: {error:?}\n"
+                        ));
+                    }
+                    match host
+                        .session
+                        .notify_all(|_, _| POWER_CHANGED.store(true, Ordering::Release))
+                    {
+                        Ok(notification) => *host.notification.borrow_mut() = Some(notification),
+                        Err(error) => {
+                            output::arguments(format_args!("HOST ACPI notify refused: {error:?}\n"))
+                        }
+                    }
+                    if let Err(error) = host.session.update_all_gpes() {
+                        output::arguments(format_args!(
+                            "HOST ACPI GPE update refused: {error:?}\n"
+                        ));
+                    }
+                    output::arguments(format_args!(
+                        "HOST ACPI hardware active: routed SCI and deferred events\n"
+                    ));
+                }
+                Err(error) => output::arguments(format_args!(
+                    "UNSUPPORTED ACPI hardware activation: {error:?}\n"
+                )),
+            }
+        } else {
+            output::arguments(format_args!(
+                "UNSUPPORTED ACPI hardware activation: SCI resources unavailable\n"
+            ));
+        }
+        Some(host)
+    }
+
+    pub(super) fn embedded_controller(
+        &self,
+    ) -> Result<
+        Option<stela_drivers::platform::ec::capability::Installed<'static>>,
+        stela_drivers::probe::ServiceError,
+    > {
+        if let Some(installed) = self.installed_ec.borrow().clone() {
+            return Ok(Some(installed));
+        }
+        if self.ec.borrow().is_some()
+            || self.ec_failed.load(Ordering::Acquire)
+            || !self.hardware_active()
+        {
+            return Err(stela_drivers::probe::ServiceError::Unavailable);
+        }
+        Ok(None)
+    }
+    pub(super) fn retain_power(&self, power: stela_drivers::probe::Power) {
+        *self.power.borrow_mut() = power;
+    }
+    pub(super) fn hardware_active(&self) -> bool {
+        self.hardware.load(Ordering::Acquire)
+    }
+    pub(super) fn take_power_button(&self) -> bool {
+        POWER_BUTTON.swap(false, Ordering::AcqRel)
+    }
+
+    pub(super) fn poll(&'static self) {
+        // SAFETY: this permanent provider is retained by the leaked Session.
+        let provider = unsafe { &*self.provider };
+        // These atomic observations do not borrow AML/provider mutable state
+        // while an uncertain continuation might remain retained in quarantine.
+        if self.deferred_failed.load(Ordering::Acquire)
+            || (!self.hardware_active()
+                && !provider.queued.load(Ordering::Acquire)
+                && !POWER_CHANGED.load(Ordering::Acquire)
+                && !EC_EVENT.load(Ordering::Acquire))
+        {
+            return;
+        }
+        if let Err(error) = provider
+            .executor
+            .call_owned(5_000_000, move || self.poll_entered())
+            && !self.deferred_failed.swap(true, Ordering::AcqRel)
+        {
+            output::arguments(format_args!(
+                "UNSUPPORTED ACPI deferred work admission failed: {error}\n"
+            ));
+        }
+    }
+    fn poll_entered(&self) {
+        // SAFETY: the actual work dispatcher owns the loader root and driver
+        // exclusion across this continuation; the Session retains the provider.
+        let provider = unsafe { &*self.provider };
+        provider.dispatch_sci(true);
+        if EC_EVENT.swap(false, Ordering::AcqRel) || self.ec_pending.get() {
+            let bindings = self.ec.borrow();
+            if let Some(binding) = bindings.as_ref() {
+                self.ec_pending.set(true);
+                for _ in 0..32 {
+                    match binding.poll_query() {
+                        Ok(Some(event)) => {
+                            if let Err(error) = event.dispatch() {
+                                output::arguments(format_args!(
+                                    "HOST ACPI EC query failed: {error:?}\n"
+                                ));
+                            }
+                        }
+                        Ok(None) => {
+                            if let Some(number) = binding.device().gpe {
+                                let gpe = stela_drivers::platform::acpi::Gpe {
+                                    block: None,
+                                    number,
+                                };
+                                if let Err(error) = self.session.enable_gpe(gpe) {
+                                    output::arguments(format_args!(
+                                        "HOST ACPI EC GPE resume failed: {error:?}\n"
+                                    ));
+                                    return;
+                                }
+                            }
+                            self.ec_pending.set(false);
+                            break;
+                        }
+                        Err(error) => {
+                            output::arguments(format_args!(
+                                "HOST ACPI EC transaction failed: {error:?}\n"
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if POWER_CHANGED.swap(false, Ordering::AcqRel) {
+            let mut power = self.power.borrow_mut();
+            for battery in &mut power.batteries {
+                if let Err(error) = battery.refresh() {
+                    output::arguments(format_args!(
+                        "HOST ACPI battery refresh failed: {error:?}\n"
+                    ));
+                }
+            }
+            if let Some(ac) = &mut power.ac
+                && let Err(error) = ac.refresh()
+            {
+                output::arguments(format_args!("HOST ACPI AC refresh failed: {error:?}\n"));
+            }
+            if let Some(lid) = &mut power.lid
+                && let Err(error) = lid.refresh()
+            {
+                output::arguments(format_args!("HOST ACPI lid refresh failed: {error:?}\n"));
+            }
+        }
+        // SAFETY: run Notify/_Q work queued by device methods on the BSP.
+        // A budgeted EC continuation owns only its disabled GPE, allowing
+        // unrelated fixed events and GPEs to keep making SCI progress.
+        unsafe { drain_work(self.provider.cast_mut().cast()) };
     }
 
     /// The loaded namespace. Its calls run in the loader root
-    /// ([`RestoreRoot`]), as the host drivers do.
+    /// ([`super::storage::RestoreRoot`]), as the host drivers do.
     pub fn session(&'static self) -> &'static Session {
         &self.session
     }
@@ -783,9 +1124,23 @@ impl HostAcpi {
     /// Linux's `acpi_power_off_prepare`: S5's SLP_TYPa and SLP_TYPb as the
     /// firmware's `\_S5` evaluates, after `\_PTS(5)` and `\_SST`; `None`
     /// without S5. A failed `\_PTS` is reported, and S5 follows all the same.
-    pub fn prepare_soft_off(&self) -> Option<(u8, u8)> {
-        // SAFETY: the live loader root, which the session runs under.
-        let _root = unsafe { RestoreRoot::enter(self.root) };
+    pub fn prepare_soft_off(&'static self) -> Option<(u8, u8)> {
+        // SAFETY: this permanent provider is retained by the leaked Session.
+        let provider = unsafe { &*self.provider };
+        match provider
+            .executor
+            .call_owned(5_000_000, move || self.prepare_soft_off_entered())
+        {
+            Ok(types) => types,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "POWER firmware continuation unavailable: {error}\n"
+                ));
+                None
+            }
+        }
+    }
+    fn prepare_soft_off_entered(&self) -> Option<(u8, u8)> {
         let types = match self.session.sleep_types(5) {
             Ok(types) => types,
             Err(error) => {

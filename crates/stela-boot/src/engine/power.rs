@@ -178,6 +178,9 @@ impl HostPowerControl {
     }
 
     fn arm_button(&self) -> bool {
+        if self.acpi.is_some_and(|acpi| acpi.hardware_active()) {
+            return true;
+        }
         let Some(power) = self.power.filter(|power| power.fixed_power_button) else {
             output::arguments(format_args!(
                 "POWER host button: no fixed-feature power button\n"
@@ -222,6 +225,9 @@ impl HostPowerControl {
 
     /// Whether the host's power button was pressed since the last call.
     pub fn pressed(&mut self) -> bool {
+        if let Some(acpi) = self.acpi.filter(|acpi| acpi.hardware_active()) {
+            return acpi.take_power_button();
+        }
         let Some(power) = self.power.filter(|_| self.button) else {
             return false;
         };

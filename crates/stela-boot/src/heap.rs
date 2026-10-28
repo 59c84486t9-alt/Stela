@@ -142,6 +142,8 @@ impl Heap {
         #[cfg(target_os = "uefi")]
         let flags: usize;
         #[cfg(target_os = "uefi")]
+        // SAFETY: the UEFI allocator executes at CPL0 on this CPU; save IF
+        // before masking reentry, with no state borrow spanning restoration.
         unsafe {
             core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
@@ -172,6 +174,8 @@ impl Heap {
         #[cfg(target_os = "uefi")]
         let flags: usize;
         #[cfg(target_os = "uefi")]
+        // SAFETY: the UEFI allocator executes at CPL0 on this CPU; save IF
+        // before masking reentry, with no state borrow spanning restoration.
         unsafe {
             core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
@@ -201,10 +205,14 @@ impl Heap {
     /// Called exactly once before any Rust allocation with reentry excluded.
     pub unsafe fn initialize(&self, base: *mut u8, bytes: usize) {
         let _guard = self.lock();
+        // SAFETY: this live acquire/release guard excludes every metadata
+        // writer and masks local reentry until this state borrow ends.
         let state = unsafe { &mut *self.state.get() };
         assert!(!state.ready && !base.is_null() && (base as usize).is_multiple_of(WORD));
         assert!(bytes >= core::mem::size_of::<Free>() && bytes.is_multiple_of(WORD));
         let node = base.cast::<Free>();
+        // SAFETY: initialize's exclusive live extent is aligned for Free and
+        // the assertions above establish space for its complete first node.
         unsafe {
             node.write(Free {
                 bytes,
@@ -228,7 +236,13 @@ impl Heap {
     /// lifetime and exclusively owns a successful payload until its one matching
     /// `GlobalAlloc::dealloc` on this same heap with this exact layout. NMI/fault
     /// handlers do not reenter the heap. No physical/page/DMA authority follows.
-    #[cfg_attr(not(test), allow(dead_code))] // Registered once the boot links the Linux GPU heap.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "reserved nonblocking entry for the retained Linux GPU heap registration"
+        )
+    )]
     pub unsafe fn try_allocate(&self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 {
             return ptr::null_mut();
@@ -249,7 +263,13 @@ impl Heap {
     ///
     /// # Safety
     /// The complete `try_allocate` ownership and exclusion contract applies.
-    #[cfg_attr(not(test), allow(dead_code))] // Same pending Linux GPU heap registration.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "zeroed counterpart of the reserved Linux GPU heap entry"
+        )
+    )]
     pub unsafe fn try_allocate_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller retains the same heap, mapping and exact layout.
         let block = unsafe { self.try_allocate(layout) };
@@ -374,12 +394,18 @@ impl Heap {
         let cache = unsafe { &mut *self.caches[cpu].get() };
         if cache.counts[class] == 0 {
             let _guard = self.lock();
+            // SAFETY: the actual guard excludes all free-list writers, while
+            // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
             while cache.counts[class] < BATCH {
                 let head = state.small[class];
                 let block = if head.is_null() {
+                    // SAFETY: the initialized heap is exclusively guarded;
+                    // this class supplies its nonzero extent and alignment.
                     unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
                 } else {
+                    // SAFETY: the guarded class head is a complete free Small
+                    // node previously published by matching deallocation.
                     state.small[class] = unsafe { (*head).next };
                     head.cast()
                 };
@@ -409,6 +435,8 @@ impl Heap {
         let cache = unsafe { &mut *self.caches[cpu].get() };
         if cache.counts[class] == CACHED {
             let _guard = self.lock();
+            // SAFETY: the actual guard excludes all free-list writers, while
+            // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
             for _ in 0..BATCH {
                 cache.counts[class] -= 1;
@@ -456,6 +484,8 @@ impl Heap {
     /// The heap's usage, walking the free list for its largest extent.
     pub fn usage(&self) -> Usage {
         let _guard = self.lock();
+        // SAFETY: the retained guard excludes metadata writers throughout
+        // this free-list walk; no state reference escapes the guard.
         let state = unsafe { &*self.state.get() };
         let mut largest = 0;
         let mut node = state.first;
@@ -539,6 +569,8 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
         return ptr::null_mut();
     }
     let Some(class) = class(layout) else {
+        // SAFETY: this helper retains the actual initialized state guard and
+        // GlobalAlloc's layout supplies the payload size and alignment.
         let block = unsafe { carve(state, layout.size(), layout.align()) };
         if !block.is_null() {
             state.live += layout.size();
@@ -547,6 +579,7 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
     };
     let head = state.small[class];
     let block = if head.is_null() {
+        // SAFETY: guarded initialized state and a validated nonzero class.
         unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
     } else {
         // SAFETY: a block of this class that `dealloc` linked and
@@ -579,6 +612,8 @@ unsafe impl GlobalAlloc for Heap {
         }
         let block = {
             let _guard = self.lock();
+            // SAFETY: the actual guard excludes all free-list writers, while
+            // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
             // SAFETY: the actual guard owns this state for the entire operation.
             unsafe { allocate_locked(state, layout) }
@@ -601,6 +636,8 @@ unsafe impl GlobalAlloc for Heap {
             return;
         }
         let _guard = self.lock();
+        // SAFETY: this live acquire/release guard excludes every metadata
+        // writer and masks local reentry until this state borrow ends.
         let state = unsafe { &mut *self.state.get() };
         if let Some(class) = class(layout) {
             state.live -= SMALLEST << class;
@@ -615,6 +652,8 @@ unsafe impl GlobalAlloc for Heap {
             state.small[class] = block;
         } else {
             state.live -= layout.size();
+            // SAFETY: GlobalAlloc requires this exact live allocation and
+            // layout; its last owner has ended all payload access, lock held.
             unsafe { release(state, pointer) };
         }
     }
@@ -629,11 +668,15 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
     let alignment = alignment.max(WORD);
     let mut link = &mut state.first as *mut *mut Free;
     loop {
+        // SAFETY: link is State.first or a next field in its retained free
+        // node, protected against mutation by the same heap guard.
         let node = unsafe { *link };
         if node.is_null() {
             return ptr::null_mut();
         }
         let base = node as usize;
+        // SAFETY: a nonnull live free node owned by this locked list; read
+        // its initialized extent before any split/publication changes it.
         let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
             return ptr::null_mut();
         };
@@ -644,6 +687,8 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
             return ptr::null_mut();
         };
         if used_end > end {
+            // SAFETY: the whole current node is still free and locked; its
+            // next link remains live until the following iteration completes.
             link = unsafe { &mut (*node).next };
             continue;
         }
@@ -672,6 +717,8 @@ unsafe fn carve_within(
             return ptr::null_mut();
         }
         let base = node as usize;
+        // SAFETY: a nonnull live free node owned by this locked list; read
+        // its initialized extent before any split/publication changes it.
         let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
             return ptr::null_mut();
         };
@@ -690,6 +737,8 @@ unsafe fn carve_within(
             return ptr::null_mut();
         }
         if used_end > end {
+            // SAFETY: the whole current node is still free and locked; its
+            // next link remains live until the following iteration completes.
             link = unsafe { &mut (*node).next };
             continue;
         }
@@ -726,9 +775,13 @@ unsafe fn publish_carve(
     if end - used_end < minimum {
         used_end = end;
     }
+    // SAFETY: caller retains this actual free node and link under the guard;
+    // save the successor before splitting or overwriting the node.
     let next = unsafe { (*node).next };
     let suffix = if used_end < end {
         let suffix = used_end as *mut Free;
+        // SAFETY: the checked fit leaves at least minimum bytes at this
+        // WORD-aligned suffix, disjoint from payload and allocation header.
         unsafe {
             suffix.write(Free {
                 bytes: end - used_end,
@@ -740,6 +793,8 @@ unsafe fn publish_carve(
         next
     };
     if prefix >= minimum {
+        // SAFETY: the original aligned node owns this retained prefix, large
+        // enough for Free, disjoint from header/payload and suffix.
         unsafe {
             node.write(Free {
                 bytes: prefix,
@@ -747,10 +802,14 @@ unsafe fn publish_carve(
             });
         }
     } else {
+        // SAFETY: link is the exclusively guarded predecessor/State.first;
+        // replacing it removes the consumed original node from the list.
         unsafe {
             *link = suffix;
         }
     }
+    // SAFETY: the caller proved this aligned Header lies inside the removed
+    // extent immediately before the disjoint user payload; it stays private.
     unsafe {
         (header_base as *mut Header).write(Header {
             base: allocated_base,
@@ -778,9 +837,13 @@ unsafe fn release(state: &mut State, pointer: *mut u8) {
     let mut next = state.first;
     while !next.is_null() && (next as usize) < base {
         previous = next;
+        // SAFETY: nonnull free-list nodes stay allocated and initialized
+        // throughout the guarded walk; address order prevents aliasing payload.
         next = unsafe { (*next).next };
     }
     let node = base as *mut Free;
+    // SAFETY: the exact allocation header returns its original WORD-aligned
+    // extent; its owner ended all accesses and the extent can hold Free.
     unsafe {
         node.write(Free {
             bytes: header.bytes,
@@ -788,6 +851,8 @@ unsafe fn release(state: &mut State, pointer: *mut u8) {
         });
     }
     if !next.is_null() && end == next as usize {
+        // SAFETY: both guarded free nodes are contiguous and disjoint from
+        // live payload; absorb the complete initialized successor once.
         unsafe {
             (*node).bytes += (*next).bytes;
             (*node).next = (*next).next;
@@ -795,12 +860,18 @@ unsafe fn release(state: &mut State, pointer: *mut u8) {
     }
     if previous.is_null() {
         state.first = node;
+    // SAFETY: a nonnull predecessor is an initialized node in this guarded
+    // address-ordered list; its extent is valid through this comparison.
     } else if previous as usize + unsafe { (*previous).bytes } == base {
+        // SAFETY: contiguous guarded free extents; relink before the removed
+        // node can be allocated again, with no references escaping this call.
         unsafe {
             (*previous).bytes += (*node).bytes;
             (*previous).next = (*node).next;
         }
     } else {
+        // SAFETY: initialized guarded predecessor; the new free node lies
+        // between it and its prior successor in the same owned heap extent.
         unsafe {
             (*previous).next = node;
         }

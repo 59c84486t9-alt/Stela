@@ -229,6 +229,12 @@ impl<'a> Services<'a> {
 // requesters have with the remapping units off. The ACPI namespace is
 // offered only with the i8042's interrupts masked.
 unsafe impl NativeServices for Services<'_> {
+    fn embedded_controller(
+        &self,
+    ) -> Result<Option<stela_drivers::platform::ec::capability::Installed<'static>>, ServiceError>
+    {
+        self.acpi.map_or(Ok(None), HostAcpi::embedded_controller)
+    }
     fn entropy(&self) -> Result<Arc<dyn stela_drivers::entropy::Entropy>, ServiceError> {
         crate::random::source()
     }

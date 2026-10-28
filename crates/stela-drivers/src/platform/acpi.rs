@@ -208,6 +208,7 @@ unsafe extern "C" {
     ) -> Status;
     fn acpi_clear_gpe(block: *mut c_void, number: u32) -> Status;
     fn acpi_enable_gpe(block: *mut c_void, number: u32) -> Status;
+    fn acpi_disable_gpe(block: *mut c_void, number: u32) -> Status;
     fn acpi_mark_gpe_for_wake(block: *mut c_void, number: u32) -> Status;
     fn acpi_setup_gpe_for_wake(device: *mut c_void, block: *mut c_void, number: u32) -> Status;
     fn acpi_update_all_gpes() -> Status;
@@ -495,8 +496,10 @@ impl Session {
     }
     /// As Linux's EC driver takes its GPE: a raw handler for GPE `number` of
     /// the FADT's blocks (`acpi_install_gpe_raw_handler`) that clears its
-    /// status and sets `flag` for the driver that services the event, then
-    /// the GPE enabled.
+    /// status and sets `flag` for the driver that services the event. The raw
+    /// handler disables this GPE before publishing the flag; after draining
+    /// the device, the owner must call [`Self::enable_gpe`] once to resume it.
+    /// Other SCI contributors remain enabled while deferred device work runs.
     pub fn flag_gpe(
         &self,
         number: u32,
@@ -1160,11 +1163,18 @@ unsafe extern "C" fn flag_event(context: *mut c_void) -> u32 {
     unsafe { &*context.cast::<AtomicBool>() }.store(true, Ordering::Release);
     INTERRUPT_HANDLED
 }
-/// A raw GPE handler: ACPICA leaves the status to it, which it clears, as
-/// Linux's EC driver does, before setting the flag.
+/// A raw GPE handler retains a disabled device source until its owner drains
+/// deferred transactions and explicitly resumes it. This permits the parent
+/// SCI to service FACS/global-lock events while a device worker waits.
 unsafe extern "C" fn flag_gpe(block: *mut c_void, number: u32, context: *mut c_void) -> u32 {
-    // SAFETY: ACPICA dispatches its own GPE, its GPE lock released.
-    unsafe { acpi_clear_gpe(block, number) };
+    // SAFETY: ACPICA dispatches its own GPE, its GPE lock released; this raw
+    // registration owns its sole runtime enable reference until resumption.
+    let disabled = unsafe { acpi_disable_gpe(block, number) };
+    // SAFETY: the same live GPE registration owns its status register; clear
+    // only after its runtime enable reference was successfully removed.
+    if disabled != 0 || unsafe { acpi_clear_gpe(block, number) } != 0 {
+        return 0;
+    }
     // SAFETY: `flag_gpe` passed a flag that lives for good.
     unsafe { &*context.cast::<AtomicBool>() }.store(true, Ordering::Release);
     INTERRUPT_HANDLED
