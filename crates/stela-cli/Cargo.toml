@@ -22,7 +22,7 @@ sha2.workspace = true
 hex.workspace = true
 tempfile.workspace = true
 stela-compiler.workspace = true
-stela-drivers = { workspace = true, features = ["ram-disk"] }
+stela-drivers.workspace = true
 stela-runtime.workspace = true
 stela-loader.workspace = true
 aes = "0.8"
@@ -58,6 +58,8 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# `block::RamDisk`, the disk setup's erase layout is written to in tests.
+stela-drivers = { workspace = true, features = ["ram-disk"] }
 
 
 [lints]
