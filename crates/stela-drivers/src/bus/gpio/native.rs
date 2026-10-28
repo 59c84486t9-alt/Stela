@@ -57,6 +57,24 @@ impl Device {
         broker: &MemoryBroker,
         authority: &Authority,
     ) -> Result<Self, Error> {
+        Self::attach_with(
+            device,
+            expected_hid,
+            &|device, ordinal| broker.reserve(device, ordinal),
+            authority,
+        )
+    }
+    /// [`Self::attach`] with `reserve` admitting each memory resource, as a
+    /// mount's `NativeServices::acpi_memory` reserves it from its broker.
+    pub fn attach_with(
+        device: &DeviceResources<'_>,
+        expected_hid: &str,
+        reserve: &dyn Fn(
+            &DeviceResources<'_>,
+            usize,
+        ) -> Result<MemoryReservation, resources::Error>,
+        authority: &Authority,
+    ) -> Result<Self, Error> {
         device.revalidate()?;
         if !device.matches_hid(expected_hid)? {
             return Err(Error::Unsupported);
@@ -76,7 +94,7 @@ impl Device {
                 .try_reserve_exact(1)
                 .map_err(|_| Error::Allocation)?;
             let ordinal = *memory.first().ok_or(Error::MissingResource)?;
-            let reservation = broker.reserve(device, ordinal)?;
+            let reservation = reserve(device, ordinal)?;
             let mapping = map(authority, &reservation)?;
             // The original ordinary AMD GPIO path has no gpio_request_enable
             // pinmux hook. Optional named IOMUX functions are not advertised by
@@ -128,7 +146,7 @@ impl Device {
             .map_err(|_| Error::Allocation)?;
         for bar in profile.resource_bars() {
             let ordinal = *memory.get(usize::from(bar)).ok_or(Error::MissingResource)?;
-            let reservation = broker.reserve(device, ordinal)?;
+            let reservation = reserve(device, ordinal)?;
             windows.push((bar, map(authority, &reservation)?));
             reservations.push(reservation);
         }
@@ -149,6 +167,29 @@ impl Device {
     }
     pub fn first_error(&self) -> Option<&Error> {
         self.first_error.as_ref()
+    }
+    /// Mask `pin`'s interrupt at the controller and acknowledge any status
+    /// it latched, so the line raises no CPU interrupt while a driver samples
+    /// its level.
+    pub fn mask_interrupt(&mut self, pin: u16) -> Result<(), Error> {
+        if self.retired {
+            return Err(Error::Retired);
+        }
+        match &mut self.engine {
+            Engine::Intel(controller) => {
+                let pad = controller
+                    .profile()
+                    .gpio_to_pad(pin)
+                    .ok_or(Error::Intel(intel::Error::InvalidPad))?;
+                controller.interrupt_mask(pad, true).map_err(Error::Intel)
+            }
+            Engine::Amd(controller) => {
+                let pad = u8::try_from(pin)
+                    .map_err(|_| Error::Amd(amd::Error::InvalidPad))
+                    .and_then(|number| amd::Pad::new(number).map_err(Error::Amd))?;
+                controller.interrupt_mask(pad).map_err(Error::Amd)
+            }
+        }
     }
     fn report(&mut self, error: Error) -> acpi::Error {
         let status = match &error {
