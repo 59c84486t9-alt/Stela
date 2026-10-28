@@ -2401,7 +2401,7 @@
   {
     "package": "stela-drivers",
     "test": "source_mac_all_cut_register_patterns_widths_io_and_bar_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/mac.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_SOURCE_MAC_ORACLE"
@@ -2411,7 +2411,7 @@
   {
     "package": "stela-drivers",
     "test": "source_all_channel_geometries_igi_wrap_and_whole_io_bar_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/channel_state.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_CHANNEL_ORACLE"
@@ -2421,7 +2421,7 @@
   {
     "package": "stela-drivers",
     "test": "channel_power_whole_source_calculations_actual_io_and_bar_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE"
@@ -2431,7 +2431,7 @@
   {
     "package": "stela-drivers",
     "test": "phy_tail_whole_source_io_tracking_and_bar_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/tail.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_PHY_TAIL_ORACLE"
@@ -2441,7 +2441,7 @@
   {
     "package": "stela-drivers",
     "test": "factory_all_optional_blank_combinations_and_actual_source_io_bar_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/factory.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_TRIM_ORACLE"
@@ -2451,7 +2451,7 @@
   {
     "package": "stela-drivers",
     "test": "dac_source_complete_initial_sequences_vectors_and_bar_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/calibration.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_DAC_ORACLE"
@@ -2461,7 +2461,7 @@
   {
     "package": "stela-drivers",
     "test": "dynamic_all_source_io_tracking_and_bar_match_with_policy_unqualified",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/dynamic.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_DYNAMIC_ORACLE"
@@ -2471,7 +2471,7 @@
   {
     "package": "stela-drivers",
     "test": "every_igi_and_complete_source_trx_trace_and_bar_matches",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/paths.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_TRX_ORACLE"
@@ -2481,7 +2481,7 @@
   {
     "package": "stela-drivers",
     "test": "every_supported_board_cut_and_crystal_endpoint_matches_complete_source_phase",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy.rs",
+    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/tables.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_PHY_TABLES_ORACLE"
