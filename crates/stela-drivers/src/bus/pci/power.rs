@@ -5,7 +5,7 @@
 //! Retained endpoint PCI PM, with stable main power supplied by the producer.
 //! PMCSR sequences follow Linux pci.c at cc9de5d4b5ab6459f5774946aa3195ad51236fa8.
 //! This owns real configuration effects, not platform rails or a wake route.
-use super::{ConfigSpace, Function, msi::MsiConfigSpace};
+use super::{CapabilityError, ConfigSpace, Function, Layout, msi::MsiConfigSpace};
 
 const STATE: u16 = 3;
 const NO_SOFT_RESET: u16 = 8;
@@ -107,55 +107,30 @@ fn discover<C: MsiConfigSpace>(c: &C) -> Result<(u16, u16), Error> {
     if word(c, 6)? & 0x10 == 0 {
         return Err(Error::Capability);
     }
-    let mut offset = u16::from(c.read8(0x34));
-    let mut occupied = [false; 256];
     let mut pm = None;
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset) || !offset.is_multiple_of(4) {
-            return Err(Error::Capability);
-        }
-        let header = word(c, offset)?;
-        let id = header as u8;
-        let bytes = match id {
+    for entry in c.capabilities() {
+        let entry = entry.map_err(|error| match error {
+            CapabilityError::FailedRead { offset } => Error::Read(offset),
+            _ => Error::Capability,
+        })?;
+        match entry.id {
             1 => {
-                if pm.is_some() || offset + 8 > 256 {
+                if pm.is_some() {
                     return Err(Error::Capability);
                 }
-                let pmc = word(c, offset + 2)?;
+                let pmc = word(c, entry.offset + 2)?;
                 if !(1..=3).contains(&(pmc & 7)) {
                     return Err(Error::Unsupported);
                 }
-                pm = Some((offset, pmc));
-                8
+                pm = Some((entry.offset, pmc));
             }
-            5 => {
-                if offset + 4 > 256 {
+            2 | 3 | 4 | 5 | 7 | 9 | 0x0d | 0x10 | 0x11 | 0x12 | 0x13 => {
+                if entry.layout != Layout::Sized {
                     return Err(Error::Capability);
                 }
-                match word(c, offset + 2)? & 0x180 {
-                    0 => 10,
-                    0x80 => 14,
-                    0x100 => 20,
-                    _ => 24,
-                }
-            }
-            0x11 => 12,
-            2 | 3 | 4 | 7 | 9 | 0x0d | 0x10 | 0x12 | 0x13 => {
-                super::msi::other_capability_bytes(c, offset, id, 0)
-                    .map_err(|_| Error::Capability)?
             }
             _ => return Err(Error::Unsupported),
-        };
-        let end = offset
-            .checked_add(bytes)
-            .filter(|end| *end <= 256)
-            .ok_or(Error::Capability)?;
-        let span = &mut occupied[usize::from(offset)..usize::from(end)];
-        if span.iter().any(|used| *used) {
-            return Err(Error::Capability);
         }
-        span.fill(true);
-        offset = header >> 8;
     }
     pm.ok_or(Error::Capability)
 }

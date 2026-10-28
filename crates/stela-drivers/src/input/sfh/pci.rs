@@ -3,7 +3,10 @@
 use super::{Error, REGION_BYTES, Registers};
 use crate::bus::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
-    pci::{Address, Bar, ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
+    pci::{
+        Address, Bar, ConfigSpace, Function, capability, owned::OwnedConfig,
+        requester::StoppedRequester,
+    },
 };
 /// Rejected attachment returns the exact original owners, without writes.
 pub struct AttachFailure {
@@ -160,31 +163,8 @@ impl Registers for NativeRegisters {
         if status == u16::MAX {
             return Err(Error::PciAuthority);
         }
-        if status & 0x10 != 0 {
-            let mut offset = u16::from(config.read8(0x34));
-            let mut visited = [false; 64];
-            while offset != 0 {
-                if !(0x40..=0xfc).contains(&offset)
-                    || !offset.is_multiple_of(4)
-                    || visited[usize::from(offset / 4)]
-                {
-                    return Err(Error::PciAuthority);
-                }
-                visited[usize::from(offset / 4)] = true;
-                let control = config.read16(offset + 2);
-                if control == u16::MAX {
-                    return Err(Error::PciAuthority);
-                }
-                match config.read8(offset) {
-                    1 if offset > 0xf8 || config.read16(offset + 4) & 3 != 0 => {
-                        return Err(Error::PciAuthority);
-                    }
-                    5 if control & 1 != 0 => return Err(Error::PciAuthority),
-                    0x11 if control & 0x8000 != 0 => return Err(Error::PciAuthority),
-                    _ => (),
-                }
-                offset = u16::from(config.read8(offset + 1));
-            }
+        if !capability::stopped_in_d0(config) {
+            return Err(Error::PciAuthority);
         }
         Ok(())
     }

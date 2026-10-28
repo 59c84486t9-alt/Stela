@@ -5,7 +5,7 @@
 // include/uapi/linux/pci_regs.h. See ../../THIRD_PARTY.md.
 //! Supported endpoint FLR, D0 and exact native command/control writes.
 use super::{Configuration, Error, Time};
-use crate::bus::pci::{ConfigSpace, Function};
+use crate::bus::pci::{CapabilityError, ConfigSpace, Function, Layout as Extent, msi::MsiError};
 
 const COMMAND: u16 = 4;
 const MEMORY: u16 = 2;
@@ -79,15 +79,22 @@ impl Layout {
         if read16(c, 6)? & (1 << 4) == 0 {
             return Err(Error::Requirement("actual PCIe/MSI capability list"));
         }
-        let mut occupied = [false; 256];
-        let mut offset = u16::from(c.read8(0x34));
+        let mut extents = alloc::vec::Vec::new();
         let (mut express, mut power, mut msi, mut msix) = (None, None, None, None);
-        while offset != 0 {
-            if !(0x40..=0xfc).contains(&offset) || !offset.is_multiple_of(4) {
-                return Err(Error::Requirement("valid complete native capability chain"));
-            }
-            let header = read16(c, offset)?;
-            let bytes = match header as u8 {
+        for entry in c.capabilities() {
+            let entry = entry.map_err(|error| match error {
+                CapabilityError::FailedRead { offset } => Error::ConfigRead { offset, width: 2 },
+                CapabilityError::Overlap { .. } => {
+                    Error::Requirement("nonoverlapping native capability bodies")
+                }
+                CapabilityError::OutOfRange { .. } => {
+                    Error::Requirement("complete native capability extent")
+                }
+                _ => Error::Requirement("valid complete native capability chain"),
+            })?;
+            let offset = entry.offset;
+            extents.push(offset..offset + entry.bytes);
+            match entry.id {
                 0x10 => {
                     if express.replace(offset).is_some() {
                         return Err(Error::Requirement("one native PCIe capability"));
@@ -103,7 +110,6 @@ impl Layout {
                     if read16(c, offset + 8)? & INITIATE_FLR != 0 {
                         return Err(Error::Requirement("no in-progress native FLR"));
                     }
-                    if flags & 15 == 1 { 0x14 } else { 0x34 }
                 }
                 1 => {
                     if power.replace(offset).is_some()
@@ -112,7 +118,6 @@ impl Layout {
                         return Err(Error::Requirement("one supported native PCI PM capability"));
                     }
                     read16(c, offset + 4)?;
-                    8
                 }
                 5 => {
                     let control = read16(c, offset + 2)?;
@@ -126,40 +131,26 @@ impl Layout {
                             "one actual inactive supported MSI capability",
                         ));
                     }
-                    match (control & 0x80 != 0, control & 0x100 != 0) {
-                        (false, false) => 10,
-                        (true, false) => 14,
-                        (false, true) => 20,
-                        (true, true) => 24,
-                    }
                 }
                 0x11 => {
                     if msix.replace(offset).is_some() || read16(c, offset + 2)? & (1 << 15) != 0 {
                         return Err(Error::Requirement("inactive MSI-X without fallback"));
                     }
-                    12
                 }
-                id => crate::bus::pci::msi::other_capability_bytes(c, offset, id, 0)
-                    .map_err(Error::Msi)?,
-            };
-            let end = offset
-                .checked_add(bytes)
-                .filter(|end| *end <= 256)
-                .ok_or(Error::Requirement("complete native capability extent"))?;
-            let extent = &mut occupied[usize::from(offset)..usize::from(end)];
-            if extent.iter().any(|v| *v) {
-                return Err(Error::Requirement(
-                    "nonoverlapping native capability bodies",
-                ));
+                _ if entry.layout == Extent::Unsupported => {
+                    return Err(Error::Msi(MsiError::Unsupported));
+                }
+                _ => {}
             }
-            extent.fill(true);
-            offset = header >> 8;
         }
         if msi.is_none() {
             return Err(Error::Requirement("source requires actual single MSI"));
         }
-        for offset in [0x70usize, 0x74, 0x78, 0x80, 0x84, 0x88] {
-            if occupied[offset..offset + 4].iter().any(|value| *value) {
+        for offset in [0x70u16, 0x74, 0x78, 0x80, 0x84, 0x88] {
+            if extents
+                .iter()
+                .any(|extent| extent.start < offset + 4 && offset < extent.end)
+            {
                 return Err(Error::Requirement(
                     "vendor windows cannot alias native PCI capability bodies",
                 ));

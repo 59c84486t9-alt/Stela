@@ -12,6 +12,7 @@ use core::{
 };
 
 mod aspm;
+pub mod capability;
 pub mod msi;
 pub mod msix;
 pub mod native;
@@ -19,14 +20,15 @@ pub mod owned;
 pub mod power;
 pub mod requester;
 pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
+pub use capability::{
+    Capabilities, Capability, CapabilityError, ExtendedCapabilities, ExtendedCapability, Layout,
+};
 
 const VENDOR: u16 = 0x00;
 const COMMAND: u16 = 0x04;
-const STATUS: u16 = 0x06;
 const CLASS: u16 = 0x08;
 const HEADER_TYPE: u16 = 0x0e;
 const BAR0: u16 = 0x10;
-const CAPABILITIES: u16 = 0x34;
 
 const COMMAND_IO: u16 = 1 << 0;
 const COMMAND_MEMORY: u16 = 1 << 1;
@@ -35,16 +37,12 @@ const COMMAND_INTX_DISABLE: u16 = 1 << 10;
 /// MSI-X Message Control: enable, and mask every vector.
 const MSIX_ENABLE: u16 = 1 << 15;
 const MSIX_FUNCTION_MASK: u16 = 1 << 14;
-const STATUS_CAPABILITIES: u16 = 1 << 4;
 /// Memory BAR type field: 64-bit (PCI 3.0 §6.2.5.1).
 const BAR_MEMORY_64: u32 = 2 << 1;
 const BAR_MEMORY_TYPE: u32 = 3 << 1;
 const BAR_PREFETCHABLE: u32 = 1 << 3;
 const BAR_IO: u32 = 1;
 const BARS: usize = 6;
-/// Capability IDs after this one are not followed (Linux `__pci_find_next_cap_ttl`).
-const CAPABILITY_LIST_END: u8 = 0xff;
-const CAPABILITY_LIMIT: usize = 48;
 
 /// Power Management Control/Status (PCI PM 1.2 §3.2.4).
 const PM_CONTROL: u16 = 4;
@@ -90,10 +88,8 @@ const EXPRESS_ROOT_PORT: u16 = 4;
 const EXPRESS_DOWNSTREAM: u16 = 6;
 const EXPRESS_DEVICE_CONTROL_2: u16 = 0x28;
 const ARI_FORWARDING: u16 = 1 << 5;
-/// The first extended capability, the ARI capability's ID and its walk's bound.
-const EXTENDED_CAPABILITIES: u16 = 0x100;
+/// The ARI extended capability's ID.
 const EXTENDED_ARI: u16 = 0x0e;
-const EXTENDED_LIMIT: usize = 96;
 /// The Vendor ID a function still initializing answers with Configuration
 /// RRS Software Visibility on.
 const VENDOR_NOT_READY: u16 = 0x0001;
@@ -161,6 +157,22 @@ pub trait ConfigSpace {
         let shift = (offset & 2) * 8;
         let word = self.read32(offset & !3) & !(0xffff << shift) | u32::from(value) << shift;
         self.write32(offset & !3, word);
+    }
+
+    /// The standard capability list ([`capability::capabilities`]).
+    fn capabilities(&self) -> Capabilities<capability::Config<'_, Self>>
+    where
+        Self: Sized,
+    {
+        capability::capabilities(self)
+    }
+
+    /// The extended capability list ([`capability::extended_capabilities`]).
+    fn extended_capabilities(&self) -> ExtendedCapabilities<capability::Config<'_, Self>>
+    where
+        Self: Sized,
+    {
+        capability::extended_capabilities(self)
     }
 }
 
@@ -412,23 +424,13 @@ impl<C: ConfigSpace> Function<C> {
         Ok(())
     }
 
-    /// Offsets and IDs of the capability list, bounded against loops.
+    /// Offsets and IDs of the capability list, up to its first malformed
+    /// entry, as Linux's `__pci_find_next_cap_ttl` stops.
     pub fn capabilities(&self) -> Vec<(u8, u8)> {
-        let mut found = Vec::new();
-        if self.config.read16(STATUS) & STATUS_CAPABILITIES == 0 {
-            return found;
-        }
-        let mut offset = self.config.read8(CAPABILITIES) & !3;
-        while offset >= 0x40 && found.len() < CAPABILITY_LIMIT {
-            let header = self.config.read16(u16::from(offset));
-            let id = header as u8;
-            if id == CAPABILITY_LIST_END {
-                break;
-            }
-            found.push((offset, id));
-            offset = (header >> 8) as u8 & !3;
-        }
-        found
+        capability::capabilities(&self.config)
+            .map_while(Result::ok)
+            .map(|entry| (entry.offset as u8, entry.id))
+            .collect()
     }
 
     pub fn interrupts(&self) -> Interrupts {
@@ -531,21 +533,10 @@ enum BusScan {
 impl<C: ConfigSpace> Function<C> {
     /// The offset of the PCI Express extended capability `id`.
     fn extended_capability(&self, id: u16) -> Option<u16> {
-        let mut offset = EXTENDED_CAPABILITIES;
-        for _ in 0..EXTENDED_LIMIT {
-            let header = self.config.read32(offset);
-            if header == 0 || header == u32::MAX {
-                return None;
-            }
-            if header as u16 == id {
-                return Some(offset);
-            }
-            offset = (header >> 20) as u16 & !3;
-            if offset < EXTENDED_CAPABILITIES {
-                return None;
-            }
-        }
-        None
+        capability::extended_capabilities(&self.config)
+            .map_while(Result::ok)
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.offset)
     }
 
     /// The bus below this bridge and how to scan it; None for a function
@@ -883,11 +874,11 @@ mod tests {
     }
 
     #[test]
-    fn a_looping_capability_list_is_bounded() {
+    fn a_looping_capability_list_stops_at_the_loop() {
         let mut config = fake();
         config.words[20] = 0x0086_4005; // MSI points back at MSI-X
         let function = Function::new(Address::default_for_tests(), config).unwrap();
-        assert_eq!(function.capabilities().len(), 48);
+        assert_eq!(function.capabilities(), [(0x40, 0x11), (0x50, 0x05)]);
     }
 
     #[test]
@@ -1073,7 +1064,7 @@ mod tests {
         /// A PCI Express port of `kind` on 0:1.0 with bus 1 below it.
         fn port(&mut self, kind: u16, control_2: u16) {
             self.present(0, 1, 0, 1);
-            *self.word(0, 1, 0, 0x04) = u32::from(STATUS_CAPABILITIES) << 16;
+            *self.word(0, 1, 0, 0x04) = 1 << 20; // Status: capabilities list
             *self.word(0, 1, 0, 0x18) = 1 << 8;
             *self.word(0, 1, 0, 0x34) = 0x40;
             *self.word(0, 1, 0, 0x40) =

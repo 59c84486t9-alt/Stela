@@ -6,7 +6,10 @@
 use super::{Error, Identity, Profile, Registers, registers::*};
 use crate::bus::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
-    pci::{Address, Bar, ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
+    pci::{
+        Address, Bar, ConfigSpace, Function, capability, owned::OwnedConfig,
+        requester::StoppedRequester,
+    },
 };
 
 /// Failure preserves both original native resource owners for retirement or
@@ -239,31 +242,8 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
     if u64::from(low & !15) | (u64::from(high) << 32) != base {
         return Err(Error::InvalidBar);
     }
-    if status & 0x10 != 0 {
-        let mut offset = u16::from(config.read8(0x34));
-        let mut seen = [false; 64];
-        while offset != 0 {
-            if !(0x40..=0xfc).contains(&offset)
-                || !offset.is_multiple_of(4)
-                || seen[usize::from(offset / 4)]
-            {
-                return Err(Error::PciAuthority);
-            }
-            seen[usize::from(offset / 4)] = true;
-            let control = config.read16(offset + 2);
-            if control == u16::MAX {
-                return Err(Error::PciAuthority);
-            }
-            match config.read8(offset) {
-                1 if offset > 0xf8 || config.read16(offset + 4) & 3 != 0 => {
-                    return Err(Error::PciAuthority);
-                }
-                5 if control & 1 != 0 => return Err(Error::PciAuthority),
-                0x11 if control & 0x8000 != 0 => return Err(Error::PciAuthority),
-                _ => (),
-            }
-            offset = u16::from(config.read8(offset + 1));
-        }
+    if !capability::stopped_in_d0(config) {
+        return Err(Error::PciAuthority);
     }
     Ok(identity)
 }
