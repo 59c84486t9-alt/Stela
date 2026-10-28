@@ -1,4 +1,5 @@
 //! SVE predicated FABS and FNEG by integer masking; no FP exceptions.
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -11,7 +12,6 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 
 const SOURCE: u8 = 0;
 const SIGN: u8 = 1;
@@ -35,16 +35,16 @@ const HALF_INFINITY: u64 = 0x7c00;
 const SINGLE_INFINITY: u64 = 0x7f80_0000;
 const DOUBLE_INFINITY: u64 = 0x7ff0_0000_0000_0000;
 
-fn packed(code: &mut Vec<u8>, opcode: SimdOpcode, destination: u8, source: u8, target: TargetCpu) {
+fn packed(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8, target: TargetCpu) {
     opcode.register(code, destination, source, target);
 }
 
-fn shuffle(code: &mut Vec<u8>, register: u8, control: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, register: u8, control: u8, target: TargetCpu) {
     packed(code, SimdOpcode::ShuffleDword, register, register, target);
     code.push(control);
 }
 
-fn infinity(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn infinity(code: &mut Code, format: Format, target: TargetCpu) {
     let (lane, lane_bytes) = match format {
         Format::Half => (HALF_INFINITY, 2),
         Format::Single => (SINGLE_INFINITY, 4),
@@ -62,7 +62,7 @@ fn infinity(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
     packed(code, SimdOpcode::UnpackLowQword, INFINITY, INFINITY, target);
 }
 
-fn suppress_nan_sign(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn suppress_nan_sign(code: &mut Code, format: Format, target: TargetCpu) {
     code.extend(TEST_STATE_IMM32);
     code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(FPCR_AH.to_le_bytes());
@@ -139,7 +139,7 @@ fn suppress_nan_sign(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 }
 
 /// Access and profile checks must precede this total, register-only emitter.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     let operation = match operand.kind {
         Kind::Absolute => SimdOpcode::AndNot,
         Kind::Negate => SimdOpcode::Xor,

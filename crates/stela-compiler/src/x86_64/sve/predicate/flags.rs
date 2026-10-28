@@ -1,7 +1,7 @@
 //! Incremental NZCV for predicate-setting instructions (PTEST semantics).
+use crate::x86_64::asm::Code;
 
 use super::{CHUNK_BITS, bind, jump};
-use alloc::vec::Vec;
 
 const JZ: &[u8] = &[0x0f, 0x84];
 const MOV_R8D_IMM32: &[u8] = &[0x41, 0xb8];
@@ -42,17 +42,14 @@ pub(crate) fn leading_bits(element: crate::aarch64::scalable::ElementSize) -> u6
         .fold(0, |mask, bit| mask | (1 << bit))
 }
 
-pub(crate) fn begin_predtest(code: &mut Vec<u8>) {
+pub(crate) fn begin_predtest(code: &mut Code) {
     code.extend(MOV_R8D_IMM32);
     code.extend((1u32 << NZCV_C_SHIFT).to_le_bytes());
     code.extend(XOR_R9D_R9D);
     code.extend(XOR_R10D_R10D);
 }
 
-pub(crate) fn accumulate_predtest(
-    code: &mut Vec<u8>,
-    element: crate::aarch64::scalable::ElementSize,
-) {
+pub(crate) fn accumulate_predtest(code: &mut Code, element: crate::aarch64::scalable::ElementSize) {
     code.extend(MOV_RDX_R11);
     if element != crate::aarch64::scalable::ElementSize::Byte {
         code.extend(MOVABS_RCX);
@@ -87,7 +84,7 @@ pub(crate) fn accumulate_predtest(
     bind(code, empty);
 }
 
-pub(crate) fn finish_predtest(code: &mut Vec<u8>) {
+pub(crate) fn finish_predtest(code: &mut Code) {
     code.extend(TEST_R9_R9);
     code.extend(SETZ_AL);
     code.extend(MOVZX_EAX_AL);

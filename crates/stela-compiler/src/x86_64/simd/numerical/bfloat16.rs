@@ -3,7 +3,7 @@ use super::super::super::isa::ShiftOpcode;
 use super::super::{Host, packed};
 use super::quantization::{IntegerRoundingRegister, broadcast_integer_rounding};
 use crate::aarch64::floating::bfloat16::BFLOAT16_TO_SINGLE_SHIFT;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
@@ -36,7 +36,7 @@ const ADD_EAX_ECX: &[u8] = &[0x01, 0xc8];
 
 /// Record four lanes' discarded bits in R10D and apply shared selectors.
 /// XMM0 is output, XMM1 input, XMM2..5 scratch; XMM6/7 and R8/9/11 survive.
-pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Code) {
     packed(code, Host::MoveAligned, RESULT, SOURCE);
     packed(code, Host::MoveAligned, TEMPORARY, SOURCE);
     ShiftOpcode::LeftDword.emit(code, TEMPORARY, SINGLE_BITS - DISCARDED_BITS);
@@ -65,7 +65,7 @@ pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Vec<u8>) {
 /// Round the single-precision bits in EAX to BF16, ORing the discarded bits
 /// into R10D. ECX/EDX are scratch; XMM registers, state, stack and MXCSR are
 /// untouched.
-pub(in crate::x86_64) fn quantize_bfloat_scalar_bits(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn quantize_bfloat_scalar_bits(code: &mut Code) {
     code.extend(MOV_EDX_EAX);
     code.extend(AND_EDX_IMM32);
     code.extend(DISCARDED_MASK.to_le_bytes());

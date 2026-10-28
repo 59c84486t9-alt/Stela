@@ -1,7 +1,7 @@
 //! LUTI2/LUTI4 from ZT0 with scalar gathers, SSE2 selects and SSSE3 shuffles.
 //! ZT0 entries always have a 32-bit stride. Scratch registers are XMM0-7.
+use crate::x86_64::asm::Code;
 
-use alloc::vec::Vec;
 pub(super) mod lut_v2;
 
 use super::{
@@ -72,7 +72,7 @@ const LOCAL_BYTE_TRANSPOSE_HIGH: u64 = 0x0f0b_0703_0e0a_0602;
 const MIN_POLYNOMIAL_HALFWORD_OUTPUT_CHUNKS: usize = 4;
 
 fn stage_source_and_table(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: u8,
     frame_bytes: usize,
     length: VectorLength,
@@ -87,7 +87,7 @@ fn stage_source_and_table(
 }
 
 fn lookup_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     source: u8,
     index_bits: u8,
@@ -142,7 +142,7 @@ fn lookup_scalar(
     release_frame(code, frame_bytes);
 }
 
-fn splat_dword(code: &mut Vec<u8>, xmm: u8, value: u32, target: TargetCpu) {
+fn splat_dword(code: &mut Code, xmm: u8, value: u32, target: TargetCpu) {
     code.extend(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     code.extend(MOVD_XMM_EAX);
@@ -150,22 +150,22 @@ fn splat_dword(code: &mut Vec<u8>, xmm: u8, value: u32, target: TargetCpu) {
     Host::ShuffleDword.register(code, xmm, xmm, target);
     code.push(REPEAT_FIRST_ELEMENT);
 }
-fn qword_constant(code: &mut Vec<u8>, xmm: u8, value: u64) {
+fn qword_constant(code: &mut Code, xmm: u8, value: u64) {
     code.extend(MOVABS_RAX_IMM64);
     code.extend(value.to_le_bytes());
     code.extend(MOVQ_XMM_RAX);
     code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT));
 }
-fn transpose_constant(code: &mut Vec<u8>, target: TargetCpu) {
+fn transpose_constant(code: &mut Code, target: TargetCpu) {
     qword_constant(code, XMM0, LOCAL_BYTE_TRANSPOSE_LOW);
     qword_constant(code, XMM1, LOCAL_BYTE_TRANSPOSE_HIGH);
     Host::UnpackLowQword.register(code, XMM0, XMM1, target);
 }
-fn load_table_chunk(code: &mut Vec<u8>, xmm: u8, offset: u8) {
+fn load_table_chunk(code: &mut Code, xmm: u8, offset: u8) {
     code.extend(MOVDQU_XMM_R8_DISP8);
     code.extend([MODRM_DISP8 | (xmm << MODRM_REGISTER_SHIFT), offset]);
 }
-fn prepare_planes(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn prepare_planes(code: &mut Code, element: ElementSize, target: TargetCpu) {
     for i in 0..ZT0_CHUNKS {
         load_table_chunk(code, XMM4 + i, i * VECTOR_CHUNK_BYTES as u8);
     }
@@ -205,7 +205,7 @@ fn prepare_planes(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
         Host::MoveAligned.register(code, XMM7, XMM0, target);
     }
 }
-fn load_packed_indexes(code: &mut Vec<u8>, bytes: usize, offset: usize) {
+fn load_packed_indexes(code: &mut Code, bytes: usize, offset: usize) {
     match bytes {
         1 | 2 => {
             code.extend(if bytes == 1 {
@@ -230,12 +230,7 @@ fn load_packed_indexes(code: &mut Vec<u8>, bytes: usize, offset: usize) {
         _ => unreachable!("LUTI packs one, two, four or eight source bytes per output chunk"),
     }
 }
-fn shuffle_lookup_chunk(
-    code: &mut Vec<u8>,
-    element: ElementSize,
-    index_bits: u8,
-    target: TargetCpu,
-) {
+fn shuffle_lookup_chunk(code: &mut Code, element: ElementSize, index_bits: u8, target: TargetCpu) {
     let zero = if index_bits == LUTI4_INDEX_BITS && element == ElementSize::Word {
         Host::Xor.register(code, XMM2, XMM2, target);
         splat_dword(code, XMM3, FOUR_BIT_BYTE_MASK, target);
@@ -300,7 +295,7 @@ fn shuffle_lookup_chunk(
 }
 
 fn lookup_simd(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     source: u8,
     index_bits: u8,
@@ -357,7 +352,7 @@ fn lookup_simd(
 
 /// Expand packed two-bit indices and evaluate the two-variable table polynomial.
 /// Table coefficients occupy XMM4..7; return the result's scratch register.
-fn polynomial_lookup_chunk(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) -> u8 {
+fn polynomial_lookup_chunk(code: &mut Code, element: ElementSize, target: TargetCpu) -> u8 {
     Host::Xor.register(code, XMM2, XMM2, target);
     Host::UnpackLowByte.register(code, XMM0, XMM2, target);
     Host::UnpackLowWord.register(code, XMM0, XMM2, target);
@@ -409,7 +404,7 @@ fn polynomial_lookup_chunk(code: &mut Vec<u8>, element: ElementSize, target: Tar
 }
 
 fn lookup_sse2_poly(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     source: u8,
     immediate: u8,
@@ -507,7 +502,7 @@ pub(super) fn recipe(
 }
 
 pub(super) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     source: u8,
     index_bits: u8,

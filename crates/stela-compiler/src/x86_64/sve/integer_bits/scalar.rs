@@ -1,6 +1,6 @@
 //! Scalar leading-bit counts. BSR's result is undefined for zero and is fixed up.
 use crate::aarch64::scalable::ElementSize;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 const CHUNK_BYTES: usize = 16;
 const RESULT_SLOT: u8 = CHUNK_BYTES as u8;
 const STACK_BYTES: u8 = 2 * CHUNK_BYTES as u8;
@@ -28,11 +28,11 @@ const MOV_RCX_SIGNED_IMM32: [u8; 3] = [0x48, 0xc7, 0xc1];
 const CMOVZ_RDX_RCX: [u8; 4] = [0x48, 0x0f, 0x44, 0xd1];
 const MOV_EAX_IMM32: u8 = 0xb8;
 const SUB_RAX_RDX: [u8; 3] = [0x48, 0x29, 0xd0];
-fn stack(code: &mut Vec<u8>, opcode: &[u8], slot: u8) {
+fn stack(code: &mut Code, opcode: &[u8], slot: u8) {
     code.extend(opcode);
     code.extend([STACK_SIB, slot]);
 }
-pub(super) fn chunk(code: &mut Vec<u8>, element: ElementSize, sign: bool) {
+pub(super) fn chunk(code: &mut Code, element: ElementSize, sign: bool) {
     code.extend(SUB_RSP);
     code.push(STACK_BYTES);
     stack(code, &MOVDQU_STORE_RSP, 0);

@@ -2,19 +2,19 @@
 use super::super::isa::ShiftOpcode;
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::aarch64::floating::{FPCR_AH, FPCR_NEP};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::floating::{Operand, SignOperation},
 };
-use alloc::vec::Vec;
 
-fn test_control(code: &mut Vec<u8>, mask: u32) {
+fn test_control(code: &mut Code, mask: u32) {
     code.extend([0xf7, 0x87]); // test dword [rdi+fpcr],mask
     code.extend((core::mem::offset_of!(crate::GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 
-fn jump(code: &mut Vec<u8>, condition: Option<u8>) -> usize {
+fn jump(code: &mut Code, condition: Option<u8>) -> usize {
     if let Some(condition) = condition {
         code.extend([0x0f, condition]);
     } else {
@@ -30,7 +30,7 @@ fn resolve(code: &mut [u8], patch: usize) {
     code[patch..patch + 4].copy_from_slice(&delta.to_le_bytes());
 }
 
-fn load_lane(code: &mut Vec<u8>, vector: u8, bytes: u8, rcx: bool) {
+fn load_lane(code: &mut Code, vector: u8, bytes: u8, rcx: bool) {
     match bytes {
         2 => code.extend([0x0f, 0xb7]),
         4 => code.push(0x8b),
@@ -41,18 +41,12 @@ fn load_lane(code: &mut Vec<u8>, vector: u8, bytes: u8, rcx: bool) {
     code.extend(vector_offset(vector).to_le_bytes());
 }
 
-fn zero_extended_commit(code: &mut Vec<u8>, destination: u8) {
+fn zero_extended_commit(code: &mut Code, destination: u8) {
     packed(code, Host::MoveGprQword, 0, 0); // RAX was loaded at the exact scalar width.
     commit(code, destination, 0);
 }
 
-fn scalar_sign(
-    code: &mut Vec<u8>,
-    operation: SignOperation,
-    destination: u8,
-    source: u8,
-    bytes: u8,
-) {
+fn scalar_sign(code: &mut Code, operation: SignOperation, destination: u8, source: u8, bytes: u8) {
     load_lane(code, source, bytes, false);
     test_control(code, FPCR_AH);
     let ordinary = jump(code, Some(0x84)); // AH=0 skips all NaN classification.
@@ -102,7 +96,7 @@ fn scalar_sign(
     resolve(code, completed);
 }
 
-fn splat(code: &mut Vec<u8>, xmm: u8, lane: u64, lane_bytes: u8) {
+fn splat(code: &mut Code, xmm: u8, lane: u64, lane_bytes: u8) {
     let mut low = 0;
     for index in 0..8 / lane_bytes {
         low |= lane << (index * lane_bytes * 8);
@@ -114,7 +108,7 @@ fn splat(code: &mut Vec<u8>, xmm: u8, lane: u64, lane_bytes: u8) {
 }
 
 fn vector_sign(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: SignOperation,
     destination: u8,
     source: u8,
@@ -179,7 +173,7 @@ fn vector_sign(
     commit(code, destination, result);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match *operand {
         Operand::Select {
             destination,
@@ -233,7 +227,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn checked_qword_classifier_and_no_numeric_host_fp() {
@@ -245,9 +238,9 @@ mod tests {
             bytes: 16,
             scalar: false,
         };
-        let mut baseline = Vec::new();
+        let mut baseline = Code::new();
         emit(&mut baseline, &operation, TargetCpu::Baseline);
-        let mut optimized = Vec::new();
+        let mut optimized = Code::new();
         emit(&mut optimized, &operation, TargetCpu::Sse42);
         assert!(
             !baseline

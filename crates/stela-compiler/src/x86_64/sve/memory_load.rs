@@ -1,6 +1,7 @@
 //! SVE loads through the memory service into a private staging buffer, so a
 //! fault leaves the destination unchanged.
 use super::super::{isa::SimdOpcode as Host, scalable};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -77,26 +78,26 @@ impl Scratch {
     }
 }
 
-fn displacement(code: &mut Vec<u8>, opcode: &[u8], offset: u32) {
+fn displacement(code: &mut Code, opcode: &[u8], offset: u32) {
     code.extend(opcode);
     code.extend(offset.to_le_bytes());
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let position = code.len();
     code.extend(0_i32.to_le_bytes());
     position
 }
 
-fn add_immediate(code: &mut Vec<u8>, value: i32) {
+fn add_immediate(code: &mut Code, value: i32) {
     if value != 0 {
         code.extend(ADD_RAX_IMM32);
         code.extend(value.to_le_bytes());
     }
 }
 
-fn predicate(code: &mut Vec<u8>, operand: Operand, length: VectorLength, scratch: Scratch) {
+fn predicate(code: &mut Code, operand: Operand, length: VectorLength, scratch: Scratch) {
     if let Some(predicate) = operand.predicate {
         for word in 0..length.predicate_bytes().div_ceil(QWORD_BYTES as usize) {
             scalable::read_predicate_chunk(code, predicate, word, length);
@@ -109,7 +110,7 @@ fn predicate(code: &mut Vec<u8>, operand: Operand, length: VectorLength, scratch
     }
 }
 
-fn inactive_branch(code: &mut Vec<u8>, bit: usize, scratch: Scratch) -> usize {
+fn inactive_branch(code: &mut Code, bit: usize, scratch: Scratch) -> usize {
     let word = bit / PREDICATE_WORD_BITS;
     displacement(
         code,
@@ -168,7 +169,7 @@ pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
 }
 
 fn request(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     scratch: Scratch,
     source_offset: usize,
@@ -190,7 +191,7 @@ fn request(
     failed.push(scalable::memory::branch_failed(code));
 }
 
-fn read_value(code: &mut Vec<u8>, source: u32, element: ElementSize, extension: Extension) {
+fn read_value(code: &mut Code, source: u32, element: ElementSize, extension: Extension) {
     let opcode = match (element, extension) {
         (ElementSize::Byte, Extension::Zero) => MOVZX_EAX_BYTE_RSP_DISP32,
         (ElementSize::Halfword, Extension::Zero) => MOVZX_EAX_WORD_RSP_DISP32,
@@ -204,7 +205,7 @@ fn read_value(code: &mut Vec<u8>, source: u32, element: ElementSize, extension: 
     displacement(code, opcode, source);
 }
 
-fn write_value(code: &mut Vec<u8>, destination: u32, element: ElementSize) {
+fn write_value(code: &mut Code, destination: u32, element: ElementSize) {
     let opcode = match element {
         ElementSize::Byte => MOV_RSP_DISP32_AL,
         ElementSize::Halfword => MOV_RSP_DISP32_AX,
@@ -216,7 +217,7 @@ fn write_value(code: &mut Vec<u8>, destination: u32, element: ElementSize) {
 }
 
 fn lanes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     scratch: Scratch,
@@ -250,7 +251,7 @@ fn lanes(
 }
 
 fn scalar_replicate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     scratch: Scratch,
@@ -334,7 +335,7 @@ fn scalar_replicate(
     scalable::memory::patch_branch(code, empty, end);
 }
 
-fn commit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+fn commit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     if operand.kind == Kind::WholePredicate {
         for word in 0..length.predicate_bytes().div_ceil(QWORD_BYTES as usize) {
             displacement(code, MOV_RAX_RSP_DISP32, word as u32 * QWORD_BYTES);
@@ -361,7 +362,7 @@ fn commit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: Ta
 /// and returns through the shared epilogue; success falls through. Both restore
 /// the private stack allocation. SCTLR.A is 0; SP alignment is still checked.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     target: TargetCpu,

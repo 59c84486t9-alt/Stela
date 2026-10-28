@@ -1,6 +1,7 @@
 //! BF16 binary arithmetic. Normal inputs widen exactly to single; a nearest-even
 //! double rounding can differ only at a BF16 midpoint, which with host inexact
 //! takes software completion.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -64,14 +65,14 @@ const TEST_R10D_R10D: &[u8] = &[0x45, 0x85, 0xd2];
 const SETNE_AL: &[u8] = &[0x0f, 0x95, 0xc0];
 const MOVZX_EAX_AL: &[u8] = &[0x0f, 0xb6, 0xc0];
 
-fn jump(code: &mut Vec<u8>) -> usize {
+fn jump(code: &mut Code) -> usize {
     code.push(JMP_REL32);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
     displacement
 }
 
-fn constant(code: &mut Vec<u8>, vector: u8, value: u32, target: TargetCpu) {
+fn constant(code: &mut Code, vector: u8, value: u32, target: TargetCpu) {
     code.push(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     code.extend(MOVD_XMM_EAX);
@@ -89,7 +90,7 @@ fn half_group(group: usize) -> Host {
 }
 
 fn active_mask(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     chunk: usize,
     group: usize,
@@ -113,13 +114,13 @@ fn active_mask(
     }
 }
 
-fn widen(code: &mut Vec<u8>, register: u8, group: usize, target: TargetCpu) {
+fn widen(code: &mut Code, register: u8, group: usize, target: TargetCpu) {
     Host::Xor.register(code, TEMPORARY, TEMPORARY, target);
     half_group(group).register(code, register, TEMPORARY, target);
     ShiftOpcode::LeftDword.emit(code, register, DISCARDED_BITS);
 }
 
-fn benign_inactive(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
+fn benign_inactive(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
     constant(code, CONSTANT, value, target);
     Host::MoveAligned.register(code, TEMPORARY, ACTIVE, target);
     Host::AndNot.register(code, TEMPORARY, CONSTANT, target);
@@ -128,7 +129,7 @@ fn benign_inactive(code: &mut Vec<u8>, register: u8, value: u32, target: TargetC
 }
 
 fn load_right(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     chunk: usize,
     group: usize,
@@ -156,7 +157,7 @@ fn load_right(
 /// Reject possible first-rounding ambiguity before the integer BF rounding.
 /// This conservative check also rejects directed/inactive cross-lane ties; it
 /// never accepts an ambiguous nearest-even double rounding.
-fn midpoint_guard(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu) {
+fn midpoint_guard(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     code.extend(TEST_ECX_IMM32);
     code.extend(MXCSR_INEXACT.to_le_bytes());
     let exact = branch(code, Condition::Zero);
@@ -184,7 +185,7 @@ fn arithmetic_opcode(operation: BinaryOperation) -> Option<ArithmeticOpcode> {
 /// Emit the seven nonwidening BFADD/BFSUB/BFMUL forms. All sources remain in
 /// architectural storage until the shared frame commits the complete vector.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

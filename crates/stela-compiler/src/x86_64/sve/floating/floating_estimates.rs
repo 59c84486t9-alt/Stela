@@ -1,5 +1,6 @@
 //! SVE FRECPE/FRSQRTE tables on normal values. Host RCP/RSQRT approximations
 //! are never used; integer DIV and a masked SQRTSD compute the exact table values.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -103,7 +104,7 @@ enum Operation {
     ReciprocalSquareRoot,
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
@@ -117,23 +118,23 @@ fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
     code[displacement..next].copy_from_slice(&relative.to_le_bytes());
 }
 
-fn immediate(code: &mut Vec<u8>, opcode: &[u8], value: u32) {
+fn immediate(code: &mut Code, opcode: &[u8], value: u32) {
     code.extend(opcode);
     code.extend(value.to_le_bytes());
 }
 
-fn test_ah(code: &mut Vec<u8>) {
+fn test_ah(code: &mut Code) {
     code.extend(TEST_STATE_IMMEDIATE);
     code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(FPCR_AH.to_le_bytes());
 }
 
-fn xmm_to_gpr(code: &mut Vec<u8>, source: u8, destination: u8) {
+fn xmm_to_gpr(code: &mut Code, source: u8, destination: u8) {
     code.extend(MOVQ_GPR_XMM);
     code.push(MODRM_REGISTER | (source << MODRM_REGISTER_SHIFT) | destination);
 }
 
-fn xmm_constant(code: &mut Vec<u8>, destination: u8, bits: u64, target: TargetCpu) {
+fn xmm_constant(code: &mut Code, destination: u8, bits: u64, target: TargetCpu) {
     code.extend(MOV_RAX_IMMEDIATE);
     code.extend(bits.to_le_bytes());
     Host::MoveGprQword.append(code, target);
@@ -150,7 +151,7 @@ fn numerator(operation: Operation, enhanced: bool) -> u64 {
 }
 
 fn constants(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: Operation,
     format: Format,
     enhanced: bool,
@@ -177,12 +178,7 @@ fn constants(
     xmm_constant(code, RESULT_UNIT, 1 << result_bits, target);
 }
 
-fn guard_normal(
-    code: &mut Vec<u8>,
-    operation: Operation,
-    format: Format,
-    failures: &mut Vec<usize>,
-) {
+fn guard_normal(code: &mut Code, operation: Operation, format: Format, failures: &mut Vec<usize>) {
     code.extend(MOV_R8_RAX);
     code.extend(SHR_R8_IMMEDIATE);
     code.push(format.fraction_bits() as u8);
@@ -208,7 +204,7 @@ fn guard_normal(
     }
 }
 
-fn result_exponent(code: &mut Vec<u8>, operation: Operation, format: Format) {
+fn result_exponent(code: &mut Code, operation: Operation, format: Format) {
     let exponent_base = match operation {
         Operation::Reciprocal => format.exponent_bias() * 2 - 1,
         Operation::ReciprocalSquareRoot => format.exponent_bias() * 3 - 1,
@@ -232,7 +228,7 @@ fn result_exponent(code: &mut Vec<u8>, operation: Operation, format: Format) {
     }
 }
 
-fn midpoint(code: &mut Vec<u8>, operation: Operation, format: Format, dynamic: bool) {
+fn midpoint(code: &mut Code, operation: Operation, format: Format, dynamic: bool) {
     // Strip sign/exponent first. The second shift selects only the top fixed
     // fraction bits, including the enhanced Single table's eleven-bit input.
     code.extend(SHL_RAX_IMMEDIATE);
@@ -265,7 +261,7 @@ fn midpoint(code: &mut Vec<u8>, operation: Operation, format: Format, dynamic: b
 }
 
 fn estimate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: Operation,
     format: Format,
     dynamic: bool,
@@ -312,7 +308,7 @@ fn estimate(
     code.extend(OR_RAX_R9);
 }
 
-fn insert(code: &mut Vec<u8>, format: Format, lane: usize, checked: bool, target: TargetCpu) {
+fn insert(code: &mut Code, format: Format, lane: usize, checked: bool, target: TargetCpu) {
     match format {
         Format::Half => {
             code.extend(PINSRW_XMM1_EAX);
@@ -351,7 +347,7 @@ fn insert(code: &mut Vec<u8>, format: Format, lane: usize, checked: bool, target
 /// raised. Clobbers RAX/RCX/RDX/R8-R11, flags and XMM0-7; preserves the
 /// callee-saved GPRs, RDI/R15, the sources and the caller's MXCSR.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

@@ -1,11 +1,11 @@
 //! FEAT_CPA checked pointer arithmetic. Clobbers caller-saved GPRs and host flags
 //! only.
 use super::{Register, Shift, Width, load, right_operand, store};
+use crate::x86_64::asm::Code;
 use crate::{
     aarch64::checked_pointer::{Kind, Operand},
     context::pointer::EffectivePointerChecks,
 };
-use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
@@ -17,7 +17,7 @@ const IMUL_RAX_RCX: &[u8] = &[0x48, 0x0f, 0xaf, 0xc1];
 const NEG_RAX: &[u8] = &[0x48, 0xf7, 0xd8];
 const SETO_R8B: &[u8] = &[0x41, 0x0f, 0x90, 0xc0];
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: EffectivePointerChecks) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, checks: EffectivePointerChecks) {
     // These arithmetic checks mark a pointer and cannot fault by themselves.
     // Feature/control admission must precede this discarded-result shortcut.
     if operand.destination == Register::Zero {

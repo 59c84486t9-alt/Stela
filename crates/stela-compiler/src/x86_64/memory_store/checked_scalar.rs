@@ -1,5 +1,6 @@
 //! Checked scalar loads and stores through the memory service. Guest registers
 //! are written after the access completes.
+use crate::x86_64::asm::Code;
 use crate::x86_64::{
     load,
     memory_context::{self as service, address},
@@ -16,7 +17,6 @@ use crate::{
     },
 };
 use alloc::vec;
-use alloc::vec::Vec;
 
 const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;
 const REQUEST_OFFSET: u32 = 0;
@@ -286,7 +286,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
-fn result(code: &mut Vec<u8>, bytes: u8, signed: bool, width: Width) {
+fn result(code: &mut Code, bytes: u8, signed: bool, width: Width) {
     if width == Width::X64 {
         code.push(0x48);
     }
@@ -303,7 +303,7 @@ fn result(code: &mut Vec<u8>, bytes: u8, signed: bool, width: Width) {
     code.extend(DATA_OFFSET.to_le_bytes());
 }
 
-pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
+pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     let req = requirements(operand);
     code.extend(SUB_RSP);
     service::begin(code);
@@ -396,10 +396,10 @@ mod tests {
         .unwrap();
         let traffic = operand.profile_success_traffic();
         assert_eq!((traffic.gpr_frame_loads, traffic.gpr_direct_stores), (4, 0));
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit_context(&mut code, &operand, 0x4000);
         for (register, count) in [(Register::X(0), 1), (Register::Sp, 2)] {
-            let mut expected = Vec::new();
+            let mut expected = Code::new();
             load(&mut expected, register);
             assert_eq!(
                 code.windows(expected.len())

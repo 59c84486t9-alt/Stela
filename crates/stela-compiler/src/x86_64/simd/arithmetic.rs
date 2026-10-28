@@ -1,4 +1,5 @@
 //! FP binary arithmetic: guarded SSE2 values and precise software fallback.
+use crate::x86_64::asm::Code;
 use alloc::vec;
 use alloc::vec::Vec;
 mod half;
@@ -62,7 +63,7 @@ fn arithmetic_opcode(operation: BinaryOperation) -> ArithmeticOpcode {
     }
 }
 
-fn shuffle_single(code: &mut Vec<u8>, destination: u8, source: u8, lanes: u8) {
+fn shuffle_single(code: &mut Code, destination: u8, source: u8, lanes: u8) {
     code.extend([
         SSE_ESCAPE,
         SHUFPS,
@@ -73,7 +74,7 @@ fn shuffle_single(code: &mut Vec<u8>, destination: u8, source: u8, lanes: u8) {
 
 /// Stage adjacent Vn pairs before adjacent Vm pairs without numerical work.
 /// Return the right host register; classifier scratch XMM2/3/4/5 must not alias it.
-fn prepare_pairs(code: &mut Vec<u8>, format: Format, shape: Shape) -> u8 {
+fn prepare_pairs(code: &mut Code, format: Format, shape: Shape) -> u8 {
     match (format, shape) {
         (Format::Single, Shape::Vector64) => {
             // Q0 loads zero both high qwords. The extra packed sums are normal
@@ -98,7 +99,7 @@ fn prepare_pairs(code: &mut Vec<u8>, format: Format, shape: Shape) -> u8 {
     }
 }
 
-fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) -> u8 {
+fn prepare_inputs(code: &mut Code, operand: &Operand) -> u8 {
     match operand.inputs {
         Inputs::Elementwise { left, right } => {
             read_numerical_vector(code, operand.shape, left, LEFT_VECTOR);
@@ -148,7 +149,7 @@ fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) -> u8 {
 
 /// FNMUL/FABD transform the rounded result. Only finite normal or zero results reach
 /// this point, so AH's NaN sign policy stays on the exact helper path.
-fn result_sign(code: &mut Vec<u8>, operand: &Operand) {
+fn result_sign(code: &mut Code, operand: &Operand) {
     let negate = match operand.operation {
         BinaryOperation::NegatedMultiply => true,
         BinaryOperation::AbsoluteDifference => false,
@@ -253,12 +254,7 @@ fn product_left(operand: &Operand) -> u8 {
 /// ([`zero_product`]). Returns the branches to the full path, to the helper
 /// and past the full path, and those between the sticky path and the
 /// rest ([`ColdSplit`]).
-fn sticky_path(
-    code: &mut Vec<u8>,
-    operand: &Operand,
-    entry: Entry,
-    target: TargetCpu,
-) -> StickyPath {
+fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetCpu) -> StickyPath {
     let full = sticky_inexact(code, entry);
     // Zeroing loads leave a scalar result's upper bits clear.
     let zeroed =
@@ -352,7 +348,7 @@ fn enter_full(code: &mut [u8], sticky: &mut StickyPath) -> usize {
 }
 
 fn emit_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     entry: Entry,
@@ -436,7 +432,7 @@ fn finish(code: &mut [u8], sticky: StickyPath, full: usize, operand: &Operand) -
 }
 
 fn emit_vector(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     entry: Entry,
@@ -520,7 +516,7 @@ pub(super) fn always_exits(operand: &Operand) -> bool {
 
 /// The S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

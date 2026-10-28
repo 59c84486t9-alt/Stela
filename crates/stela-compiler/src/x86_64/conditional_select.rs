@@ -4,7 +4,7 @@ use crate::aarch64::{
     Shift, Width,
     conditional_select::{CompareOperand, CompareRight, Operand, Otherwise},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 /// MOV EDX,imm32: the fallback NZCV word.
 const MOV_EDX_IMM32: u8 = 0xba;
@@ -18,7 +18,7 @@ const NZCV_SHIFT: u8 = 28;
 
 /// The comparison runs on both arms and a CMOV picks its flags or the
 /// fallback, so the timing depends on neither the condition nor the data.
-pub(super) fn emit_compare(code: &mut Vec<u8>, operand: &CompareOperand) {
+pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand) {
     let predicate = condition(code, operand.condition);
     if let Some(jcc) = predicate {
         // R8 is scratch under the native leaf ABI.
@@ -49,7 +49,7 @@ pub(super) fn emit_compare(code: &mut Vec<u8>, operand: &CompareOperand) {
     code.extend(STATE_NZCV_OFFSET.to_le_bytes());
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     let predicate = condition(code, operand.condition);
     if let Some(jcc) = predicate {
         // Save the condition before zero-register loads or false-arm arithmetic

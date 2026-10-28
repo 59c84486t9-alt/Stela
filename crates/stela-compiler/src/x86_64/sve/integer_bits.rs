@@ -1,4 +1,5 @@
 //! SVE predicated bit operations with SSE2 or SSSE3.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,7 +11,6 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 
 mod scalar;
 
@@ -33,24 +33,24 @@ const SWAP_ADJACENT: u8 = 0xb1;
 const REVERSE_FOUR: u8 = 0x1b;
 const DUPLICATE_HIGH_DWORDS: u8 = 0xf5;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn constant_qword(code: &mut Vec<u8>, destination: u8, value: u64) {
+fn constant_qword(code: &mut Code, destination: u8, value: u64) {
     code.extend(MOV_RAX_IMM64);
     code.extend(value.to_le_bytes());
     packed(code, Host::MoveGprQword, destination, 0);
 }
 
-fn repeated_constant(code: &mut Vec<u8>, destination: u8, element: ElementSize, value: u64) {
+fn repeated_constant(code: &mut Code, destination: u8, element: ElementSize, value: u64) {
     let source = value.to_le_bytes();
     let repeated = core::array::from_fn(|i| source[i % element.bytes()]);
     constant_qword(code, destination, u64::from_le_bytes(repeated));
     packed(code, Host::UnpackLowQword, destination, destination);
 }
 
-fn table_constant(code: &mut Vec<u8>, destination: u8, scratch: u8, values: [u8; 16]) {
+fn table_constant(code: &mut Code, destination: u8, scratch: u8, values: [u8; 16]) {
     constant_qword(
         code,
         destination,
@@ -64,7 +64,7 @@ fn table_constant(code: &mut Vec<u8>, destination: u8, scratch: u8, values: [u8;
     packed(code, Host::UnpackLowQword, destination, scratch);
 }
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, control: u8) {
+fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
     packed(code, opcode, destination, source);
     code.push(control);
 }
@@ -90,7 +90,7 @@ fn subtract(element: ElementSize) -> Host {
 }
 
 /// Immediate logical element shifts. SSE2 byte shifts need a post-shift mask.
-fn logical_shift(code: &mut Vec<u8>, xmm: u8, element: ElementSize, amount: u8, left: bool) {
+fn logical_shift(code: &mut Code, xmm: u8, element: ElementSize, amount: u8, left: bool) {
     let opcode = match (element, left) {
         (ElementSize::Byte | ElementSize::Halfword, false) => Shift::RightWord,
         (ElementSize::Byte | ElementSize::Halfword, true) => Shift::LeftWord,
@@ -113,7 +113,7 @@ fn logical_shift(code: &mut Vec<u8>, xmm: u8, element: ElementSize, amount: u8, 
 }
 
 /// Compare against zero in XMM3. Qword equality requires both dwords to match.
-fn equal_zero(code: &mut Vec<u8>, xmm: u8, element: ElementSize, target: TargetCpu) {
+fn equal_zero(code: &mut Code, xmm: u8, element: ElementSize, target: TargetCpu) {
     if element == ElementSize::Doubleword && target.supports(TargetCpu::Sse41) {
         Host::EqualQword.register(code, xmm, 3, target);
         return;
@@ -131,7 +131,7 @@ fn equal_zero(code: &mut Vec<u8>, xmm: u8, element: ElementSize, target: TargetC
     }
 }
 
-fn leading_count(code: &mut Vec<u8>, element: ElementSize, sign: bool, target: TargetCpu) {
+fn leading_count(code: &mut Code, element: ElementSize, sign: bool, target: TargetCpu) {
     if sign {
         if element == ElementSize::Doubleword {
             packed(code, Host::MoveAligned, 1, SOURCE_XMM);
@@ -177,7 +177,7 @@ fn leading_count(code: &mut Vec<u8>, element: ElementSize, sign: bool, target: T
     packed(code, Host::MoveAligned, SOURCE_XMM, 2);
 }
 
-fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
+fn nibble_lookup(code: &mut Code, reverse: bool, target: TargetCpu) {
     let values = core::array::from_fn(|i| {
         if reverse {
             (i as u8).reverse_bits() >> NIBBLE_BITS
@@ -203,7 +203,7 @@ fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
     packed(code, Host::MoveAligned, SOURCE_XMM, 2);
 }
 
-fn population_bytes(code: &mut Vec<u8>, target: TargetCpu) {
+fn population_bytes(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         nibble_lookup(code, false, target);
         return;
@@ -226,7 +226,7 @@ fn population_bytes(code: &mut Vec<u8>, target: TargetCpu) {
     packed(code, Host::And, SOURCE_XMM, 2);
 }
 
-fn population(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn population(code: &mut Code, element: ElementSize, target: TargetCpu) {
     population_bytes(code, target);
     if element == ElementSize::Doubleword {
         packed(code, Host::Xor, 1, 1);
@@ -249,7 +249,7 @@ fn population(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
     }
 }
 
-fn reverse_groups(code: &mut Vec<u8>, element: ElementSize, group: ElementSize) {
+fn reverse_groups(code: &mut Code, element: ElementSize, group: ElementSize) {
     if group == ElementSize::Byte {
         packed(code, Host::MoveAligned, 1, SOURCE_XMM);
         Shift::RightWord.emit(code, 1, BYTE_BITS);
@@ -275,7 +275,7 @@ fn reverse_groups(code: &mut Vec<u8>, element: ElementSize, group: ElementSize) 
     }
 }
 
-fn reverse_bits(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn reverse_bits(code: &mut Code, element: ElementSize, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         nibble_lookup(code, true, target);
     } else {
@@ -308,7 +308,7 @@ pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength)
                 && length.bytes() == SCALAR_WORD_VECTOR_BYTES))
 }
 
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let Predication::Merging(predicate) = operand.predication else {
         unreachable!("bit-operation decoder owns only merging forms");
     };

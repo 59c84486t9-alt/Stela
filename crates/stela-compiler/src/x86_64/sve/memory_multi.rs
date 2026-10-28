@@ -3,6 +3,7 @@
 use super::super::{isa::SimdOpcode as Host, scalable};
 use super::memory as common;
 use super::predicate::{emit_prepared_counter_chunk, prepare_counter};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -15,7 +16,6 @@ use crate::{
         SpAlignmentRequirement, flags, host_caps, profile_requirements,
     },
 };
-use alloc::vec::Vec;
 
 const HOST_QWORD_BYTES: u32 = size_of::<u64>() as u32;
 const STACK_ALIGNMENT: u32 = 16;
@@ -59,7 +59,7 @@ impl Scratch {
     }
 }
 
-fn stack_vector(code: &mut Vec<u8>, offset: u32, loading: bool, target: TargetCpu) {
+fn stack_vector(code: &mut Code, offset: u32, loading: bool, target: TargetCpu) {
     let opcode = if loading {
         Host::LoadUnaligned
     } else {
@@ -70,14 +70,14 @@ fn stack_vector(code: &mut Vec<u8>, offset: u32, loading: bool, target: TargetCp
     code.extend(offset.to_le_bytes());
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
     displacement
 }
 
-fn prepare_iteration(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
+fn prepare_iteration(code: &mut Code, operand: &Operand, length: VectorLength) {
     common::address(code, operand.address, length);
     code.extend(MOV_RSP_DISP32_RAX);
     code.extend(ADDRESS_OFFSET.to_le_bytes());
@@ -87,7 +87,7 @@ fn prepare_iteration(code: &mut Vec<u8>, operand: &Operand, length: VectorLength
 }
 
 fn prepare_vector_staging(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     scratch: Scratch,
     length: VectorLength,
@@ -117,7 +117,7 @@ fn prepare_vector_staging(
 /// Decode PN once, then spill its packed mask before any memory callback.
 /// The published chunk helper preserves R8/R9/R10 preparation state. Only
 /// private-stack stores intervene, so no callback clobber crosses that interval.
-fn prepare_predicate_staging(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
+fn prepare_predicate_staging(code: &mut Code, operand: &Operand, length: VectorLength) {
     let predicate_bits = usize::from(operand.registers) * length.bytes();
     scalable::read_predicate_chunk(code, operand.predicate, 0, length);
     prepare_counter(code, length);
@@ -129,7 +129,7 @@ fn prepare_predicate_staging(code: &mut Vec<u8>, operand: &Operand, length: Vect
 }
 
 fn commit_load(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     scratch: Scratch,
     length: VectorLength,
@@ -204,7 +204,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
 /// RSP=8 modulo16. Failure restores scratch then returns the inner body to its
 /// outer context wrapper; success has EAX=0 and falls through. RDI/R15 survive.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -272,7 +272,6 @@ pub(crate) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn private_scratch_is_bounded_aligned_and_disjoint() {
@@ -296,7 +295,7 @@ mod tests {
                 let operand = crate::aarch64::sve::memory_multi::decode(word)
                     .unwrap()
                     .unwrap();
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand, length, TargetCpu::Baseline, 0x1000);
                 let scratch = Scratch::new(usize::from(operand.registers) * vector_bytes);
                 assert!(code.starts_with(SUB_RSP_IMM32));

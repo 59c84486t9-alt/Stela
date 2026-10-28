@@ -1,4 +1,5 @@
 //! SVE URECPE and URSQRTE by table lookup.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -55,19 +56,19 @@ fn patch(code: &mut [u8], displacement: usize, destination: usize) {
     code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
     displacement
 }
 
-fn movd_from_xmm(code: &mut Vec<u8>, xmm: u8, gpr: u8) {
+fn movd_from_xmm(code: &mut Code, xmm: u8, gpr: u8) {
     code.extend(MOVD_GPR_XMM);
     code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
 }
 
-fn movq_to_xmm(code: &mut Vec<u8>, xmm: u8, gpr: u8, target: TargetCpu) {
+fn movq_to_xmm(code: &mut Code, xmm: u8, gpr: u8, target: TargetCpu) {
     Host::MoveGprQword.append(code, target);
     code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
 }
@@ -81,7 +82,7 @@ fn first_bin(kind: EstimateKind) -> u32 {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     _features: NumericalFeatures,

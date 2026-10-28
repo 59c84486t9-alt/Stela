@@ -1,6 +1,7 @@
 //! SIMD loads and stores through the memory service. One request covers the whole
 //! access, including both pair elements; destinations and base writeback are
 //! written only after it succeeds.
+use crate::x86_64::asm::Code;
 
 use super::{commit, read_vector, vector_offset};
 use crate::aarch64::{
@@ -272,7 +273,7 @@ impl CheckedOperand {
         transfer_requirements(self.transfer, self.non_temporal, self.profile)
     }
 
-    pub(crate) fn emit_context(&self, code: &mut Vec<u8>, pc: u64) {
+    pub(crate) fn emit_context(&self, code: &mut Code, pc: u64) {
         emit_transfer(code, self.transfer, pc, self.non_temporal, self.profile);
     }
 }
@@ -339,7 +340,7 @@ fn transfer_requirements(
     }
 }
 
-fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile) {
+fn address(code: &mut Code, transfer: Transfer, profile: CheckedMemoryProfile) {
     match transfer.address {
         Address::Literal { address } => crate::x86_64::immediate(code, address),
         Address::Immediate { displacement, mode } => {
@@ -372,7 +373,7 @@ fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile
     }
 }
 
-fn stage_sources(code: &mut Vec<u8>, transfer: Transfer) {
+fn stage_sources(code: &mut Code, transfer: Transfer) {
     for element in 0..transfer.elements {
         let vector = transfer.vectors[usize::from(element)];
         let displacement = element * transfer.bytes;
@@ -391,7 +392,7 @@ fn stage_sources(code: &mut Vec<u8>, transfer: Transfer) {
     }
 }
 
-fn commit_loads(code: &mut Vec<u8>, transfer: Transfer) {
+fn commit_loads(code: &mut Code, transfer: Transfer) {
     for element in 0..transfer.elements {
         let displacement = element * transfer.bytes;
         code.extend(match transfer.bytes {
@@ -414,7 +415,7 @@ fn commit_loads(code: &mut Vec<u8>, transfer: Transfer) {
 /// validates CPU/profile requirements; failure returns through its inner-body
 /// epilogue after releasing scratch. RDI/R15 and full host MXCSR survive calls.
 #[cfg(test)]
-pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
+pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     emit_transfer(
         code,
         Transfer::from_operand(operand).expect("checked fixed SIMD memory operand"),
@@ -425,11 +426,7 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
 }
 
 #[cfg(test)]
-pub(crate) fn emit_non_temporal_context(
-    code: &mut Vec<u8>,
-    operand: &non_temporal::Operand,
-    pc: u64,
-) {
+pub(crate) fn emit_non_temporal_context(code: &mut Code, operand: &non_temporal::Operand, pc: u64) {
     emit_transfer(
         code,
         Transfer::from_non_temporal(operand),
@@ -440,7 +437,7 @@ pub(crate) fn emit_non_temporal_context(
 }
 
 fn emit_transfer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     transfer: Transfer,
     pc: u64,
     non_temporal: bool,
@@ -894,7 +891,7 @@ mod tests {
             }
         }
         let operation = operand(true, 8, false, Register::X(2), 0, AddressMode::Offset);
-        let mut body = vec![];
+        let mut body = Code::new();
         emit_context(&mut body, &operation, GUEST_PC);
         let code = NativeCode::new(&body);
         for caller in [0x1fa1, 0x3fa5, 0x5f85, 0x7fa1] {
@@ -950,7 +947,7 @@ mod tests {
                         for residue in [0, 1, 4, 7, 8, 12, 15] {
                             let operation =
                                 operand(load, bytes, pair, Register::X(2), residue, mode);
-                            let mut body = vec![];
+                            let mut body = Code::new();
                             emit_context(&mut body, &operation, GUEST_PC);
                             let code = NativeCode::new(&body);
                             for fail_part in [None, Some(1)] {
@@ -1081,7 +1078,7 @@ mod tests {
                         CheckedMemoryProfile::SpAlignmentEnabled,
                     )
                     .unwrap();
-                    let mut body = vec![];
+                    let mut body = Code::new();
                     checked.emit_context(&mut body, GUEST_PC);
                     let code = NativeCode::new(&body);
                     for fail_part in [None, Some(0), Some(1)] {
@@ -1147,7 +1144,7 @@ mod tests {
     #[test]
     fn original_sp_fault_precedes_offset_and_callback() {
         let operation = operand(false, 16, true, Register::Sp, -1, AddressMode::PreIndex);
-        let mut body = vec![];
+        let mut body = Code::new();
         emit_context(&mut body, &operation, GUEST_PC);
         let code = NativeCode::new(&body);
         let mut actual = state();
@@ -1198,7 +1195,7 @@ mod tests {
                             extend,
                             shift,
                         });
-                        let mut body = vec![];
+                        let mut body = Code::new();
                         emit_context(&mut body, &operation, GUEST_PC);
                         let code = NativeCode::new(&body);
                         let mut harness = Harness {
@@ -1259,7 +1256,7 @@ mod tests {
                 extend: IndexExtend::Lsl,
                 shift: 0,
             });
-            let mut body = vec![];
+            let mut body = Code::new();
             emit_context(&mut body, &operation, GUEST_PC);
             let code = NativeCode::new(&body);
             let mut actual = state();
@@ -1293,7 +1290,7 @@ mod tests {
                     base: Register::Sp,
                     displacement: 8,
                 };
-                let mut body = vec![];
+                let mut body = Code::new();
                 emit_non_temporal_context(&mut body, &operation, GUEST_PC);
                 let code = NativeCode::new(&body);
                 let mut actual = state();
@@ -1376,8 +1373,8 @@ mod tests {
             disabled.requirements().required_host_caps,
             host_caps::ATOMIC_LOAD16
         );
-        let mut enabled_code = Vec::new();
-        let mut disabled_code = Vec::new();
+        let mut enabled_code = Code::new();
+        let mut disabled_code = Code::new();
         enabled.emit_context(&mut enabled_code, GUEST_PC);
         disabled.emit_context(&mut disabled_code, GUEST_PC);
         assert!(enabled_code.len() > disabled_code.len());

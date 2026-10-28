@@ -7,6 +7,7 @@ use super::numerical::{
     vector_exponent_range, vector_normal_or_zero_range, zero_scalar,
 };
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress,
     aarch64::{
@@ -66,7 +67,7 @@ fn is_minimum(operation: MinMaxOperation) -> bool {
 }
 
 fn raw_selection(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     shape: Shape,
@@ -109,7 +110,7 @@ fn raw_selection(
 /// sign AND (maximum) or OR (minimum) gives Arm's standard zero sign. Plain
 /// AH=1 retains operand2 instead. No inactive scalar lane undergoes FP work.
 fn selection(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     shape: Shape,
@@ -176,25 +177,19 @@ fn selection(
 
 /// Normal half-precision values map to a signed-word order key, and the same
 /// transform restores the bit pattern after integer min/max.
-fn half_order(code: &mut Vec<u8>, vector: u8) {
+fn half_order(code: &mut Code, vector: u8) {
     packed(code, Host::MoveAligned, SIGN_VECTOR, vector);
     ShiftOpcode::ArithmeticWord.emit(code, SIGN_VECTOR, HALF_SIGN_SHIFT);
     ShiftOpcode::RightWord.emit(code, SIGN_VECTOR, SIGN_MASK_TO_MAGNITUDE_SHIFT);
     packed(code, Host::Xor, vector, SIGN_VECTOR);
 }
 
-fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn input_guard(
-    code: &mut Vec<u8>,
-    format: Format,
-    shape: Shape,
-    source: u8,
-    helper: &mut Vec<usize>,
-) {
+fn input_guard(code: &mut Code, format: Format, shape: Shape, source: u8, helper: &mut Vec<usize>) {
     if shape == Shape::Scalar {
         let zero = if format != Format::Half {
             zero_scalar(code, format, source);
@@ -218,12 +213,12 @@ fn input_guard(
     }
 }
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, control: u8) {
+fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
     packed(code, opcode, destination, source);
     code.push(control);
 }
 
-fn shuffle_single(code: &mut Vec<u8>, destination: u8, right: u8, control: u8) {
+fn shuffle_single(code: &mut Code, destination: u8, right: u8, control: u8) {
     code.extend([
         SSE_ESCAPE,
         SHUFFLE_SINGLE,
@@ -232,7 +227,7 @@ fn shuffle_single(code: &mut Vec<u8>, destination: u8, right: u8, control: u8) {
     ]);
 }
 
-fn unpack_double(code: &mut Vec<u8>, destination: u8, right: u8, high: bool) {
+fn unpack_double(code: &mut Code, destination: u8, right: u8, high: bool) {
     code.extend([
         DOUBLE_PACKED_PREFIX,
         SSE_ESCAPE,
@@ -247,7 +242,7 @@ fn unpack_double(code: &mut Vec<u8>, destination: u8, right: u8, high: bool) {
 
 /// Pairwise results fill both words of each pair. Only integer operations run,
 /// so inactive or duplicated lanes have no effect.
-fn half_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, source: u8) {
+fn half_pairs(code: &mut Code, operation: MinMaxOperation, source: u8) {
     shuffle(
         code,
         Host::ShuffleLowWord,
@@ -272,7 +267,7 @@ fn half_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, source: u8) {
     );
 }
 
-fn compact_half_pairs(code: &mut Vec<u8>, shape: Shape, source: u8) {
+fn compact_half_pairs(code: &mut Code, shape: Shape, source: u8) {
     shuffle(code, Host::ShuffleLowWord, source, source, EVEN_WORDS);
     if shape == Shape::Vector128 {
         shuffle(code, Host::ShuffleHighWord, source, source, EVEN_WORDS);
@@ -280,7 +275,7 @@ fn compact_half_pairs(code: &mut Vec<u8>, shape: Shape, source: u8) {
     }
 }
 
-fn vector_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, shape: Shape) {
+fn vector_pairs(code: &mut Code, operation: MinMaxOperation, format: Format, shape: Shape) {
     match format {
         Format::Half => {
             for source in [RESULT_VECTOR, RIGHT_VECTOR] {
@@ -328,7 +323,7 @@ fn vector_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, 
     }
 }
 
-fn finish_binary(code: &mut Vec<u8>, format: Format, shape: Shape, destination: u8) {
+fn finish_binary(code: &mut Code, format: Format, shape: Shape, destination: u8) {
     if shape == Shape::Scalar {
         test_control(code, FPCR_NEP);
         let merge = branch(code, Condition::NotZero);
@@ -350,7 +345,7 @@ fn finish_binary(code: &mut Vec<u8>, format: Format, shape: Shape, destination: 
     commit(code, destination, RESULT_VECTOR);
 }
 
-fn binary(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     let Operand::Binary {
         operation,
         format,
@@ -392,7 +387,7 @@ fn binary(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
 }
 
 fn pairwise_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     destination: u8,
@@ -427,7 +422,7 @@ fn pairwise_scalar(
 }
 
 fn reduction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     shape: Shape,
@@ -490,7 +485,7 @@ fn reduction(
     commit(code, destination, RESULT_VECTOR);
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     match *operand {
         Operand::Binary { .. } => binary(code, operand, pc),
         Operand::PairwiseScalar {

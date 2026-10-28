@@ -40,6 +40,97 @@ impl Code {
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
+    /// Append `other`'s bytes and instructions.
+    pub(crate) fn append(&mut self, other: Code) {
+        self.bytes.extend(other.bytes);
+        self.instructions += other.instructions;
+    }
+}
+
+impl From<Vec<u8>> for Code {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            instructions: 0,
+        }
+    }
+}
+
+impl PartialEq<[u8]> for Code {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.bytes == other
+    }
+}
+
+impl PartialEq<Vec<u8>> for Code {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.bytes == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for Code {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.bytes == other
+    }
+}
+
+impl PartialEq<&[u8]> for Code {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.bytes == *other
+    }
+}
+
+impl PartialEq<Code> for [u8] {
+    fn eq(&self, other: &Code) -> bool {
+        self == other.bytes
+    }
+}
+
+impl PartialEq<Code> for &[u8] {
+    fn eq(&self, other: &Code) -> bool {
+        *self == other.bytes
+    }
+}
+
+impl PartialEq<Code> for Vec<u8> {
+    fn eq(&self, other: &Code) -> bool {
+        *self == other.bytes
+    }
+}
+
+impl<const N: usize> PartialEq<Code> for [u8; N] {
+    fn eq(&self, other: &Code) -> bool {
+        self[..] == other.bytes
+    }
+}
+
+impl From<Code> for Vec<u8> {
+    fn from(code: Code) -> Self {
+        code.bytes
+    }
+}
+
+impl<const N: usize> TryFrom<Code> for [u8; N] {
+    type Error = Vec<u8>;
+    fn try_from(code: Code) -> Result<Self, Vec<u8>> {
+        code.bytes.try_into()
+    }
+}
+
+impl<'a> IntoIterator for &'a Code {
+    type Item = &'a u8;
+    type IntoIter = core::slice::Iter<'a, u8>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.bytes.iter()
+    }
+}
+
+impl IntoIterator for Code {
+    type Item = u8;
+    type IntoIter = alloc::vec::IntoIter<u8>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.bytes.into_iter()
+    }
 }
 
 impl core::ops::Deref for Code {

@@ -1,5 +1,6 @@
 //! Exclusive loads and stores through the per-thread reservation in the memory
 //! service, which owns the access, ordering, faults and monitor state.
+use crate::x86_64::asm::Code;
 
 use super::{load, memory_context as memory, store};
 use crate::{
@@ -19,7 +20,6 @@ use crate::{
         flags, host_caps, profile_requirements,
     },
 };
-use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;
@@ -201,7 +201,7 @@ pub(crate) fn requirements(checked: &CheckedOperand) -> MemoryRequirements {
     }
 }
 
-fn initialize(code: &mut Vec<u8>) {
+fn initialize(code: &mut Code) {
     code.extend(PXOR_XMM0_XMM0);
     for offset in (0..EXCLUSIVE_DATA_BYTES as u32).step_by(VECTOR_BYTES as usize) {
         code.extend(MOVDQU_RSP_DISP8_XMM0);
@@ -209,7 +209,7 @@ fn initialize(code: &mut Vec<u8>) {
     }
 }
 
-fn set_field(code: &mut Vec<u8>, offset: u32, value: u32) {
+fn set_field(code: &mut Code, offset: u32, value: u32) {
     // The complete payload was initialized. Zero-valued fields need no rewrite.
     if value != 0 {
         code.extend(MOV_RSP_DISP8_IMM32);
@@ -218,7 +218,7 @@ fn set_field(code: &mut Vec<u8>, offset: u32, value: u32) {
     }
 }
 
-fn stage(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
+fn stage(code: &mut Code, register: Register, bytes: u8, offset: u32) {
     if register == Register::Zero {
         return;
     }
@@ -233,7 +233,7 @@ fn stage(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
     code.push((DATA_OFFSET + offset) as u8);
 }
 
-fn commit(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
+fn commit(code: &mut Code, register: Register, bytes: u8, offset: u32) {
     if register == Register::Zero {
         return;
     }
@@ -248,7 +248,7 @@ fn commit(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
     store(code, register);
 }
 
-fn transfer_data(code: &mut Vec<u8>, data: Data, element_bytes: u8, loading: bool) {
+fn transfer_data(code: &mut Code, data: Data, element_bytes: u8, loading: bool) {
     let emit = if loading { commit } else { stage };
     match data {
         Data::Scalar(register) => emit(code, register, element_bytes, EXCLUSIVE_VALUE_OFFSET),
@@ -269,7 +269,7 @@ fn transfer_data(code: &mut Vec<u8>, data: Data, element_bytes: u8, loading: boo
 /// owner before execution. Each callback handles one exclusive access or CLREX;
 /// on failure scratch space is released first.
 pub(crate) fn emit_context(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     checked: &CheckedOperand,
     pc: u64,
 ) -> Result<(), CompileError> {
@@ -441,7 +441,7 @@ mod tests {
         }
         impl Executable {
             fn new(operand: &Operand) -> Self {
-                let mut bytes = ENTRY.to_vec();
+                let mut bytes = Code::from(ENTRY.to_vec());
                 emit_context(&mut bytes, operand, TEST_PC).unwrap();
                 bytes.push(RET);
                 assert!(bytes.len() <= CODE_ALLOCATION_BYTES);
@@ -464,7 +464,10 @@ mod tests {
                     unsafe { mprotect(pointer, CODE_ALLOCATION_BYTES, PROT_READ_EXECUTE) },
                     0
                 );
-                Self { pointer, bytes }
+                Self {
+                    pointer,
+                    bytes: bytes.into_bytes(),
+                }
             }
             fn run(&self, state: &mut GuestState, view: &mut MemoryContextView) -> u32 {
                 let context = ExecutionContext {
@@ -927,7 +930,7 @@ mod tests {
             CheckedMemoryProfile::SpAlignmentEnabled,
         )?))
     }
-    fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) -> Result<(), CompileError> {
+    fn emit_context(code: &mut Code, operand: &Operand, pc: u64) -> Result<(), CompileError> {
         super::emit_context(
             code,
             &CheckedOperand::new(*operand, CheckedMemoryProfile::SpAlignmentEnabled)?,
@@ -1149,7 +1152,7 @@ mod tests {
         ];
         for operand in invalid {
             assert!(requirements(&operand).is_err());
-            let mut code = vec![0x90];
+            let mut code = Code::from(vec![0x90]);
             assert!(emit_context(&mut code, &operand, 0x1000).is_err());
             assert_eq!(code, [0x90]);
         }
@@ -1339,8 +1342,8 @@ mod tests {
         let historical =
             std::env::var_os("STELA_EXCLUSIVE_HISTORICAL_BODIES").map(std::path::PathBuf::from);
         for (operand, historical_body) in cases {
-            let mut enabled = ENTRY.to_vec();
-            let mut disabled = ENTRY.to_vec();
+            let mut enabled = Code::from(ENTRY.to_vec());
+            let mut disabled = Code::from(ENTRY.to_vec());
             super::emit_context(
                 &mut enabled,
                 &CheckedOperand::new(operand, CheckedMemoryProfile::SpAlignmentEnabled).unwrap(),

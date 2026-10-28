@@ -1,4 +1,5 @@
 //! SVE BFCVT and BFCVTNT through integer rounding.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -38,7 +39,7 @@ const BFLOAT_SHIFT: u8 = BFLOAT16_TO_SINGLE_SHIFT as u8;
 const SINGLE_ONE: u32 = Format::Single.exponent_bias() << Format::Single.fraction_bits();
 
 fn guard_enables(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     features: NumericalFeatures,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -61,7 +62,7 @@ fn guard_enables(
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

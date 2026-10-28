@@ -5,6 +5,7 @@
 //! and closes this cell whenever derived state changes. A closed cell takes
 //! the original instruction exit, without changing architectural state.
 use super::{JZ, Thunk, jump, land};
+use crate::x86_64::asm::Code;
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
 
@@ -32,7 +33,7 @@ pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
     if register > 31 {
         return None;
     }
-    let mut code = Vec::with_capacity(96);
+    let mut code = Code::new();
     let mut closed = Vec::new();
     // XZR has no effect and depends on no regime state.
     if register != 31 {
@@ -63,7 +64,7 @@ pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
         ExitKind::PointerAuthentication,
     ));
     Some(Thunk {
-        code,
+        code: code.into_bytes(),
         next: Some(next),
         dynamic: None,
     })

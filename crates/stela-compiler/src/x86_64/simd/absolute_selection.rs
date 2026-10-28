@@ -1,4 +1,5 @@
 //! Integer magnitude selection for FAMIN/FAMAX, exact under any host MXCSR.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation},
@@ -16,12 +17,12 @@ const REPEAT_LOW_DWORD: u8 = 0;
 const TEST_EAX: &[u8] = &[0x85, 0xc0];
 const JNZ: &[u8] = &[0x0f, 0x85];
 
-fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, register: u8, order: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, register, register, target);
     code.push(order);
 }
 
-fn infinity(code: &mut Vec<u8>, format: Format, register: u8, target: TargetCpu) {
+fn infinity(code: &mut Code, format: Format, register: u8, target: TargetCpu) {
     code.extend([0x48, 0xb9]); // mov rcx, imm64
     let bits = match format {
         Format::Half => format.exponent_mask() | format.exponent_mask() << Format::Half.bits(),
@@ -37,7 +38,7 @@ fn infinity(code: &mut Vec<u8>, format: Format, register: u8, target: TargetCpu)
     }
 }
 
-fn magnitude(code: &mut Vec<u8>, format: Format, register: u8) {
+fn magnitude(code: &mut Code, format: Format, register: u8) {
     let (left, right) = match format {
         Format::Half => (ShiftOpcode::LeftWord, ShiftOpcode::RightWord),
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
@@ -51,7 +52,7 @@ fn magnitude(code: &mut Vec<u8>, format: Format, register: u8) {
 /// scratch registers must be distinct from each other and the two inputs. NaN
 /// edges are rel32 displacements for the owner's transactional completion exit.
 pub(in crate::x86_64) fn guard_and_magnitudes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     left: u8,
     right: u8,
@@ -96,7 +97,7 @@ pub(in crate::x86_64) fn guard_and_magnitudes(
 /// Inputs must be sign-cleared, non-NaN magnitudes. Produces the result in left,
 /// preserves right, and clobbers four scratch XMMs. No guest or host FP effects.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     operation: AbsoluteMinMaxOperation,
     left: u8,

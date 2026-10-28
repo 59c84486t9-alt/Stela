@@ -2,9 +2,9 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::reductions::{Kind, Operand, Output};
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_mask, store_z_chunk};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
@@ -42,11 +42,11 @@ const CMOV_LESS: u8 = 0x4c;
 const CMOV_GREATER: u8 = 0x4f;
 const PSADBW: &[u8] = &[0x66, 0x0f, 0xf6];
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
     opcode.register(code, destination, source, target);
 }
 
-fn constant(code: &mut Vec<u8>, destination: u8, value: u64) {
+fn constant(code: &mut Code, destination: u8, value: u64) {
     match value {
         u64::MAX => {
             packed(
@@ -178,7 +178,7 @@ fn reduction_opcode(kind: Kind, element: ElementSize, target: TargetCpu) -> Opti
 }
 
 /// XMM0/XMM1 hold accumulator and next lanes. Compare/select consumes XMM3.
-fn combine(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: TargetCpu) {
+fn combine(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu) {
     if let Some(opcode) = reduction_opcode(kind, element, target) {
         packed(code, opcode, RESULT, SOURCE, target);
         return;
@@ -195,7 +195,7 @@ fn combine(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: TargetC
     packed(code, Host::Or, RESULT, SIGN, target);
 }
 
-fn mask_source(code: &mut Vec<u8>, neutral_nonzero: bool, target: TargetCpu) {
+fn mask_source(code: &mut Code, neutral_nonzero: bool, target: TargetCpu) {
     packed(code, Host::And, SOURCE, PREDICATE, target);
     if neutral_nonzero {
         packed(code, Host::AndNot, PREDICATE, NEUTRAL, target);
@@ -203,7 +203,7 @@ fn mask_source(code: &mut Vec<u8>, neutral_nonzero: bool, target: TargetCpu) {
     }
 }
 
-fn sum_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: TargetCpu) {
+fn sum_chunk(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu) {
     let signed = kind == Kind::SignedAdd;
     if element == ElementSize::Byte && !signed {
         code.extend(PSADBW);
@@ -259,7 +259,7 @@ fn sum_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize, target: Targe
     packed(code, add, RESULT, SOURCE, target);
 }
 
-fn scalar_result(code: &mut Vec<u8>, element: ElementSize, sign_extend: bool) {
+fn scalar_result(code: &mut Code, element: ElementSize, sign_extend: bool) {
     code.extend(if element == ElementSize::Doubleword {
         MOVQ_RAX_XMM
     } else {
@@ -285,7 +285,7 @@ fn conditional_move(kind: Kind) -> u8 {
     }
 }
 
-fn seed_qword_columns(code: &mut Vec<u8>) {
+fn seed_qword_columns(code: &mut Code) {
     for destination in [R8_FIELD, R9_FIELD] {
         code.extend(MOVQ_EXTENDED_GPR_XMM);
         code.push(REGISTER_MODE | SOURCE << REGISTER_SHIFT | destination);
@@ -295,7 +295,7 @@ fn seed_qword_columns(code: &mut Vec<u8>) {
     }
 }
 
-fn combine_qword_columns(code: &mut Vec<u8>, kind: Kind) {
+fn combine_qword_columns(code: &mut Code, kind: Kind) {
     let condition = conditional_move(kind);
     for (compare, move_prefix, destination) in [
         (CMP_R8_RAX, CMOV_R8_RAX, R8_FIELD),
@@ -315,7 +315,7 @@ fn combine_qword_columns(code: &mut Vec<u8>, kind: Kind) {
 
 /// Complete ordinary data effects. All source chunks precede any destination
 /// writes, including Vd==Zn. Integer operations leave guest status unchanged.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let sum = operand.output == Output::Scalar && is_sum(operand.kind);
     let qword_extrema = matches!(
         operand.kind,

@@ -6,8 +6,8 @@ use super::{
     WORD_SIGN_SHIFT, XMM_BIAS, XMM_CHUNK_BYTES, XMM_HIGH_GREATER, XMM_LEFT, XMM_RIGHT,
     emit_compare_chunk, emit_compare_mask, register_fields, shuffle,
 };
+use crate::x86_64::asm::Code;
 use crate::x86_64::scalable::load_z_chunk;
-use alloc::vec::Vec;
 
 const XMM_WIDE_LEFT: u8 = 6;
 const XMM_WIDE_RIGHT: u8 = 7;
@@ -82,7 +82,7 @@ fn recipe(operand: Operand, length: VectorLength, target: TargetCpu) -> Recipe {
 }
 
 pub(super) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     right: u8,
     chunk: usize,
@@ -99,7 +99,7 @@ pub(super) fn emit_chunk(
 }
 
 fn widen_left_pair(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     size: ElementSize,
     offset: usize,
     unsigned: bool,
@@ -150,7 +150,7 @@ fn widen_left_pair(
     }
 }
 
-fn pair_chunk(code: &mut Vec<u8>, operand: Operand, target: TargetCpu, checked: bool) {
+fn pair_chunk(code: &mut Code, operand: Operand, target: TargetCpu, checked: bool) {
     code.extend_from_slice(XOR_R8D_R8D);
     let bytes = operand.element_size.bytes();
     for offset in (0..XMM_CHUNK_BYTES).step_by(bytes * 2) {
@@ -199,7 +199,7 @@ fn pair_chunk(code: &mut Vec<u8>, operand: Operand, target: TargetCpu, checked: 
     code.extend_from_slice(MOV_EAX_R8D);
 }
 
-fn range_chunk(code: &mut Vec<u8>, operand: Operand, target: TargetCpu) {
+fn range_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
     // Classify each full64 RHS before narrow packed comparison.
     let bits = operand.element_size.bits();
     let ordered = !matches!(operand.relation, Relation::Equal | Relation::NotEqual);

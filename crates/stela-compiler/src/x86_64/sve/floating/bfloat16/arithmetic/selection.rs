@@ -1,4 +1,5 @@
 //! BF16 min/max and clamp on finite values and zeros, without FP status.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -50,14 +51,14 @@ enum Recipe {
     CheckedBlend,
 }
 
-fn reject_mask(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu) {
+fn reject_mask(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::ByteSignMask.append(code, target);
     code.push(MODRM_REGISTER | (GPR_RAX << MODRM_REGISTER_SHIFT) | TEMPORARY);
     code.extend(TEST_EAX_EAX);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn constants(code: &mut Vec<u8>, target: TargetCpu) {
+fn constants(code: &mut Code, target: TargetCpu) {
     Host::Xor.register(code, ZERO, ZERO, target);
     Host::EqualWord.register(code, EXPONENT_MAXIMUM, EXPONENT_MAXIMUM, target);
     ShiftOpcode::RightWord.emit(code, EXPONENT_MAXIMUM, BFLOAT_BITS - BFLOAT_EXPONENT_BITS);
@@ -66,7 +67,7 @@ fn constants(code: &mut Vec<u8>, target: TargetCpu) {
 /// Preserve raw inputs and classify only active lanes. Exponent-all-ones values
 /// and nonzero subnormals use shared exact completion; signed zeros pass.
 fn guard(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     input: u8,
     predicated: bool,
     failures: &mut Vec<usize>,
@@ -91,7 +92,7 @@ fn guard(
 
 /// LEFT and RIGHT keep their inputs until the comparison. Equal encodings may
 /// return either source; opposite zeros follow the standard numeric order.
-fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, target: TargetCpu) {
+fn select(code: &mut Code, minimum: bool, alternative: bool, recipe: Recipe, target: TargetCpu) {
     if alternative {
         Host::MoveAligned.register(code, TEMPORARY, LEFT, target);
         Host::Or.register(code, TEMPORARY, RIGHT, target);
@@ -131,7 +132,7 @@ fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, 
 }
 
 fn emit_with_recipe(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -220,7 +221,7 @@ fn emit_with_recipe(
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -242,7 +243,6 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     const DESTINATION: u8 = 0;
     const CLAMP_LEFT: u8 = 1;
@@ -284,16 +284,16 @@ mod tests {
         changes_default: bool,
     ) {
         let length = VectorLength::from_bytes(bytes).unwrap();
-        let mut selected = Vec::new();
+        let mut selected = Code::new();
         assert!(emit(&mut selected, operand, length, FEATURES, PC, target).unwrap());
-        let mut expected = Vec::new();
+        let mut expected = Code::new();
         assert!(
             emit_with_recipe(&mut expected, operand, length, FEATURES, PC, target, recipe,)
                 .unwrap()
         );
         assert_eq!(selected, expected, "{operand:?}, {bytes}, {target:?}");
         if changes_default {
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             assert!(
                 emit_with_recipe(
                     &mut baseline,
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn explicit_blend_declines_missing_capability_before_emission() {
         for operand in operands() {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             assert!(
                 !emit_with_recipe(
                     &mut code,

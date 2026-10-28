@@ -1,5 +1,6 @@
 //! SVE FMAXV/FMINV/FMAXNMV/FMINNMV and their QV forms. Only trees of nonzero
 //! normals and infinities take the native path.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -55,7 +56,7 @@ const REMOVE_SIGN_BIT: u8 = 1;
 const TREE_BRANCHES: usize = 2;
 const NEXT_TREE_REGISTER: u8 = 1;
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
@@ -69,18 +70,18 @@ fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
     code[displacement..end].copy_from_slice(&relative.to_le_bytes());
 }
 
-fn state_test(code: &mut Vec<u8>, mask: u32) {
+fn state_test(code: &mut Code, mask: u32) {
     code.extend(TEST_STATE_IMMEDIATE);
     code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 
-fn shuffle(code: &mut Vec<u8>, dst: u8, src: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, dst: u8, src: u8, order: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, dst, src, target);
     code.push(order);
 }
 
-fn broadcast(code: &mut Vec<u8>, format: Format, mut bits: u64, dst: u8, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, mut bits: u64, dst: u8, target: TargetCpu) {
     if format == Format::Half {
         bits |= bits << Format::Half.bits();
     }
@@ -112,7 +113,7 @@ fn minimum(operation: MinMaxOperation) -> bool {
 /// Identity construction is bitwise; no numerical control validation is allowed
 /// in the raw QV base case. DefaultNaN's sign alone depends on stored AH.
 fn identity(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     dst: u8,
@@ -138,7 +139,7 @@ fn identity(
     }
 }
 
-fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, lo: u8, hi: u8) {
+fn selection(code: &mut Code, operation: MinMaxOperation, format: Format, lo: u8, hi: u8) {
     if format == Format::Double {
         code.push(DOUBLE_PREFIX);
     }
@@ -154,7 +155,7 @@ fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, lo:
 }
 
 /// Reject every active zero, deliberately narrower than pairwise zero-tie guards.
-fn guard_nonzero(code: &mut Vec<u8>, format: Format, failures: &mut Vec<usize>, target: TargetCpu) {
+fn guard_nonzero(code: &mut Code, format: Format, failures: &mut Vec<usize>, target: TargetCpu) {
     let [magnitude, zero, other_half] = SCRATCH;
     Host::MoveAligned.register(code, magnitude, RESULT, target);
     match format {
@@ -188,7 +189,7 @@ struct Tree {
 }
 
 impl Tree {
-    fn leaf(&self, code: &mut Vec<u8>, chunk: usize, dst: u8) {
+    fn leaf(&self, code: &mut Code, chunk: usize, dst: u8) {
         if !self.all_active {
             read_predicate_mask(
                 code,
@@ -229,7 +230,7 @@ impl Tree {
         }
     }
 
-    fn emit(&self, code: &mut Vec<u8>, start: usize, count: usize, dst: u8) {
+    fn emit(&self, code: &mut Code, start: usize, count: usize, dst: u8) {
         if count == 1 {
             self.leaf(code, start, dst);
             return;
@@ -252,7 +253,7 @@ impl Tree {
 /// Uses baseline SSE2 only. Clobbers RAX/RCX/RDX, flags and XMM0..7, preserves
 /// caller MXCSR, guest FPSR/NZCV, source aliases and all unrelated state.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

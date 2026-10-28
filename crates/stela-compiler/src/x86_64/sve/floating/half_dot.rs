@@ -1,5 +1,6 @@
 //! SVE half-precision FDOT and FMLALB/FMLALT. Half products are exact singles, so
 //! the pair add and accumulator add keep their two separate roundings.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -81,17 +82,17 @@ pub(in crate::x86_64) struct Recipe {
     pub fused_widening: bool,
 }
 
-fn register(code: &mut Vec<u8>, opcode: &[u8], destination: u8, source: u8) {
+fn register(code: &mut Code, opcode: &[u8], destination: u8, source: u8) {
     code.extend(opcode);
     code.push(MODRM_REGISTER | destination << MODRM_REGISTER_SHIFT | source);
 }
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, vector: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, opcode: Host, vector: u8, order: u8, target: TargetCpu) {
     opcode.register(code, vector, vector, target);
     code.push(order);
 }
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     failures.push(branch(code, Condition::NotZero));
 }
 
@@ -102,7 +103,7 @@ fn source_register(right: RightOperand) -> u8 {
 }
 
 /// Compact H0/H2/H4/H6 or H1/H3/H5/H7 into the low four Half fields.
-fn select_part(code: &mut Vec<u8>, vector: u8, part: VectorPart, target: TargetCpu) {
+fn select_part(code: &mut Code, vector: u8, part: VectorPart, target: TargetCpu) {
     let order = match part {
         VectorPart::Bottom => BOTTOM_WORD_ORDER,
         VectorPart::Top => TOP_WORD_ORDER,
@@ -112,7 +113,7 @@ fn select_part(code: &mut Vec<u8>, vector: u8, part: VectorPart, target: TargetC
     shuffle(code, Host::ShuffleDword, vector, GROUP_DWORD_ORDER, target);
 }
 
-fn select_sources(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: TargetCpu) {
+fn select_sources(code: &mut Code, operand: Operand, recipe: Recipe, target: TargetCpu) {
     match operand.kind {
         Kind::HalfDot => {
             if let RightOperand::Indexed { index, .. } = operand.right {
@@ -159,7 +160,7 @@ fn select_sources(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: 
     }
 }
 
-fn prepare_widening(code: &mut Vec<u8>, target: TargetCpu) {
+fn prepare_widening(code: &mut Code, target: TargetCpu) {
     Host::Xor.register(code, ZERO, ZERO, target);
     code.push(MOV_EAX_IMMEDIATE);
     code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
@@ -174,7 +175,7 @@ fn prepare_widening(code: &mut Vec<u8>, target: TargetCpu) {
     );
 }
 
-fn widen(code: &mut Vec<u8>, vector: u8, recipe: Recipe, target: TargetCpu) {
+fn widen(code: &mut Code, vector: u8, recipe: Recipe, target: TargetCpu) {
     if recipe.half_convert {
         Host::ConvertHalfToSingle.register(code, vector, vector, target);
     } else {
@@ -182,7 +183,7 @@ fn widen(code: &mut Vec<u8>, vector: u8, recipe: Recipe, target: TargetCpu) {
     }
 }
 
-fn dot(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: TargetCpu) {
+fn dot(code: &mut Code, operand: Operand, recipe: Recipe, target: TargetCpu) {
     Host::MoveAligned.register(code, LEFT_HIGH, LEFT, target);
     ShiftOpcode::RightBytes.emit(code, LEFT_HIGH, HALF_GROUP_BYTES);
     let indexed = matches!(operand.right, RightOperand::Indexed { .. });
@@ -217,7 +218,7 @@ fn dot(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: TargetCpu) 
     register(code, ADDPS, LEFT, ADDEND);
 }
 
-fn multiply_long(code: &mut Vec<u8>, subtract: bool, recipe: Recipe, target: TargetCpu) {
+fn multiply_long(code: &mut Code, subtract: bool, recipe: Recipe, target: TargetCpu) {
     if !recipe.half_convert {
         prepare_widening(code, target);
     }
@@ -248,7 +249,7 @@ fn multiply_long(code: &mut Vec<u8>, subtract: bool, recipe: Recipe, target: Tar
 }
 
 pub(in crate::x86_64) fn emit_candidate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -342,7 +343,7 @@ pub(in crate::x86_64) fn emit_candidate(
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -376,7 +377,6 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     const DESTINATION: u8 = 0;
     const LEFT_SOURCE: u8 = 1;
@@ -413,15 +413,15 @@ mod tests {
         changes_default: bool,
     ) {
         let length = VectorLength::from_bytes(bytes).unwrap();
-        let mut selected = Vec::new();
+        let mut selected = Code::new();
         assert!(emit(&mut selected, operand, length, FEATURES, PC, target).unwrap());
-        let mut expected = Vec::new();
+        let mut expected = Code::new();
         assert!(
             emit_candidate(&mut expected, operand, length, FEATURES, PC, target, recipe,).unwrap()
         );
         assert_eq!(selected, expected, "{operand:?}, {bytes}, {target:?}");
         if changes_default {
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             assert!(
                 emit_candidate(
                     &mut baseline,
@@ -538,7 +538,7 @@ mod tests {
             ..Recipe::default()
         };
         for target in [TargetCpu::Baseline, TargetCpu::F16c, TargetCpu::Fma] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             assert!(
                 emit_candidate(
                     &mut code,

@@ -1,5 +1,6 @@
 //! SME loads and stores through the memory service. Loads commit after every
 //! element succeeds; stores submit one active element at a time.
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 mod za;
 
@@ -198,7 +199,7 @@ pub(crate) fn validate_target(operand: &Operand, target: TargetCpu) -> Result<()
 }
 
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -228,7 +229,7 @@ pub(crate) fn emit(
     Ok(())
 }
 
-fn stack_space(code: &mut Vec<u8>, bytes: u32, reserve: bool) {
+fn stack_space(code: &mut Code, bytes: u32, reserve: bool) {
     code.extend(if reserve {
         SUB_RSP_IMM32
     } else {
@@ -237,21 +238,21 @@ fn stack_space(code: &mut Vec<u8>, bytes: u32, reserve: bool) {
     code.extend(bytes.to_le_bytes());
 }
 
-fn load_guest(code: &mut Vec<u8>, register: Register) {
+fn load_guest(code: &mut Code, register: Register) {
     crate::x86_64::load(code, register);
 }
 
-fn stack_load(code: &mut Vec<u8>, offset: u32) {
+fn stack_load(code: &mut Code, offset: u32) {
     code.extend(MOV_RAX_RSP_DISP32);
     code.extend(offset.to_le_bytes());
 }
 
-fn stack_store(code: &mut Vec<u8>, offset: u32) {
+fn stack_store(code: &mut Code, offset: u32) {
     code.extend(MOV_RSP_DISP32_RAX);
     code.extend(offset.to_le_bytes());
 }
 
-fn stack_vector(code: &mut Vec<u8>, load: bool, xmm: u8, offset: u32, target: TargetCpu) {
+fn stack_vector(code: &mut Code, load: bool, xmm: u8, offset: u32, target: TargetCpu) {
     if load {
         Host::LoadUnaligned
     } else {
@@ -263,21 +264,21 @@ fn stack_vector(code: &mut Vec<u8>, load: bool, xmm: u8, offset: u32, target: Ta
     code.extend(offset.to_le_bytes());
 }
 
-fn pointer(code: &mut Vec<u8>, field: u32) {
+fn pointer(code: &mut Code, field: u32) {
     code.extend(MOV_R8_CONTEXT_DISP8);
     code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
     code.extend(MOV_R8_R8_DISP8);
     code.push(field as u8);
 }
 
-fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn jump(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
     displacement
 }
 
-fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64, failures: &mut Vec<usize>) {
+fn check_sp(code: &mut Code, base: Register, pc: u64, failures: &mut Vec<usize>) {
     if base != Register::Sp {
         return;
     }
@@ -292,7 +293,7 @@ fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64, failures: &mut Vec<usiz
 }
 
 fn transfer_loop(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     transfer: Transfer,
     pc: u64,
     scratch: &Scratch,
@@ -362,7 +363,7 @@ fn transfer_loop(
 }
 
 fn emit_vectors(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &VectorTransfer,
     length: VectorLength,
     target: TargetCpu,
@@ -464,7 +465,7 @@ mod tests {
             (QUADWORD_TILE_LOAD, TargetCpu::Cx16),
             (QUADWORD_TILE_STORE, TargetCpu::AtomicLoad16),
         ] {
-            let mut code = vec![NOP];
+            let mut code = Code::from(vec![NOP]);
             assert!(emit(&mut code, &decode(word).unwrap(), length, target, 0).is_err());
             assert_eq!(code, [NOP]);
         }

@@ -6,10 +6,10 @@ use crate::aarch64::sve::integer_arithmetic::Binary;
 use crate::aarch64::sve::rearrange_widen::{
     Arithmetic, Half, Kind, Operand, PairOperation, Signedness,
 };
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 use crate::x86_64::sve::integer_arithmetic::emit_binary_chunk;
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -36,27 +36,27 @@ const LOW_DWORD_MASK: u64 = 0x0000_0000_ffff_ffff;
 const BYTE_WEIGHTS: u64 = 0x0101_0101_0101_0101;
 const WORD_WEIGHTS: u64 = 0x0001_0001_0001_0001;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn copy(code: &mut Code, destination: u8, source: u8) {
     packed(code, Host::MoveAligned, destination, source);
 }
 
-fn qword_constant(code: &mut Vec<u8>, destination: u8, value: u64) {
+fn qword_constant(code: &mut Code, destination: u8, value: u64) {
     code.extend(MOVABS_RAX);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, TargetCpu::Baseline);
     code.push(MODRM_REGISTER | destination << REGISTER_SHIFT);
 }
 
-fn constant(code: &mut Vec<u8>, destination: u8, value: u64) {
+fn constant(code: &mut Code, destination: u8, value: u64) {
     qword_constant(code, destination, value);
     packed(code, Host::UnpackLowQword, destination, destination);
 }
 
-fn constant_bytes(code: &mut Vec<u8>, destination: u8, value: [u8; VECTOR_CHUNK_BYTES]) {
+fn constant_bytes(code: &mut Code, destination: u8, value: [u8; VECTOR_CHUNK_BYTES]) {
     let low = u64::from_le_bytes(value[..QWORD_BYTES].try_into().unwrap());
     let high = u64::from_le_bytes(value[QWORD_BYTES..].try_into().unwrap());
     qword_constant(code, destination, low);
@@ -110,12 +110,12 @@ fn right_shift(element: ElementSize) -> ShiftOpcode {
     }
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, immediate: u8) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, immediate: u8) {
     packed(code, Host::ShuffleDword, destination, source);
     code.push(immediate);
 }
 
-fn signed_qword(code: &mut Vec<u8>, destination: u8, input_size: ElementSize, target: TargetCpu) {
+fn signed_qword(code: &mut Code, destination: u8, input_size: ElementSize, target: TargetCpu) {
     if target.supports(TargetCpu::Sse41) {
         if input_size != ElementSize::Word {
             let shift = (ElementSize::Word.bits() - input_size.bits()) as u8;
@@ -136,7 +136,7 @@ fn signed_qword(code: &mut Vec<u8>, destination: u8, input_size: ElementSize, ta
 }
 
 fn extension(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     input_size: ElementSize,
     signedness: Signedness,
@@ -165,7 +165,7 @@ fn extension(
     .emit(code, RESULT, shift);
 }
 
-fn unpack(code: &mut Vec<u8>, element: ElementSize, signedness: Signedness, target: TargetCpu) {
+fn unpack(code: &mut Code, element: ElementSize, signedness: Signedness, target: TargetCpu) {
     let checked = match (element, signedness) {
         (ElementSize::Word, Signedness::Signed) => Some(Host::SignExtendWordToDword),
         (ElementSize::Word, Signedness::Unsigned) => Some(Host::ZeroExtendWordToDword),
@@ -204,13 +204,7 @@ fn unpack(code: &mut Vec<u8>, element: ElementSize, signedness: Signedness, targ
     );
 }
 
-fn narrow(
-    code: &mut Vec<u8>,
-    element: ElementSize,
-    arithmetic: Arithmetic,
-    round: bool,
-    half: Half,
-) {
+fn narrow(code: &mut Code, element: ElementSize, arithmetic: Arithmetic, round: bool, half: Half) {
     packed(
         code,
         if arithmetic == Arithmetic::Add {
@@ -234,7 +228,7 @@ fn narrow(
     }
 }
 
-fn signed_pair_dwords(code: &mut Vec<u8>, target: TargetCpu) {
+fn signed_pair_dwords(code: &mut Code, target: TargetCpu) {
     copy(code, RIGHT, RESULT);
     if target.supports(TargetCpu::Sse41) {
         shuffle(code, RESULT, RESULT, SELECT_EVEN_DWORDS);
@@ -259,7 +253,7 @@ fn signed_pair_dwords(code: &mut Vec<u8>, target: TargetCpu) {
     packed(code, Host::SubQword, RESULT, AUXILIARY);
 }
 
-fn pair_delta(code: &mut Vec<u8>, element: ElementSize, signedness: Signedness, target: TargetCpu) {
+fn pair_delta(code: &mut Code, element: ElementSize, signedness: Signedness, target: TargetCpu) {
     if element == ElementSize::Halfword && target.supports(TargetCpu::Ssse3) {
         if signedness == Signedness::Signed {
             // Unsigned weights times signed data: saturation cannot occur.
@@ -292,7 +286,7 @@ fn pair_delta(code: &mut Vec<u8>, element: ElementSize, signedness: Signedness, 
     packed(code, add(element), RESULT, RIGHT);
 }
 
-fn gather_even_odd(code: &mut Vec<u8>, register: u8, element: ElementSize, target: TargetCpu) {
+fn gather_even_odd(code: &mut Code, register: u8, element: ElementSize, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         Host::ByteShuffle.register(code, register, CONSTANT, target);
     } else if element == ElementSize::Byte {
@@ -310,7 +304,7 @@ fn gather_even_odd(code: &mut Vec<u8>, register: u8, element: ElementSize, targe
     }
 }
 
-fn pair_inputs(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn pair_inputs(code: &mut Code, element: ElementSize, target: TargetCpu) {
     if matches!(element, ElementSize::Byte | ElementSize::Halfword) {
         if target.supports(TargetCpu::Ssse3) {
             let mut shuffle_bytes = [0; VECTOR_CHUNK_BYTES];
@@ -348,7 +342,7 @@ fn pair_inputs(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
     }
 }
 
-fn pair(code: &mut Vec<u8>, element: ElementSize, operation: PairOperation, target: TargetCpu) {
+fn pair(code: &mut Code, element: ElementSize, operation: PairOperation, target: TargetCpu) {
     if operation == PairOperation::Add
         && element == ElementSize::Word
         && target.supports(TargetCpu::Ssse3)
@@ -371,7 +365,7 @@ fn pair(code: &mut Vec<u8>, element: ElementSize, operation: PairOperation, targ
 }
 
 fn merge(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     predicate: u8,
     chunk: usize,
     operand: Operand,
@@ -417,7 +411,7 @@ fn recipe_target(operand: Operand, length: VectorLength, target: TargetCpu) -> T
     }
 }
 
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let target = recipe_target(operand, length, target);
     if let Kind::Unpack {
         source,

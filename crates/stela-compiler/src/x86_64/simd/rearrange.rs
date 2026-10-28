@@ -1,12 +1,12 @@
 //! Lane moves and permutes. All inputs are read before the destination is written.
 use super::{Host, commit, packed, read_vector, vector_offset};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::rearrange::{LaneSource, Operand},
 };
-use alloc::vec::Vec;
 
-pub(super) fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
+pub(super) fn constant(code: &mut Code, xmm: u8, bytes: [u8; 16]) {
     // MOVQ from a GPR followed by PUNPCKLQDQ avoids constant-pool relocations.
     for (register, limb) in [(xmm, &bytes[..8]), (7, &bytes[8..])] {
         code.extend([0x48, 0xb9]); // movabs rcx,imm64
@@ -17,7 +17,7 @@ pub(super) fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
 }
 
 /// Load `value` repeated in each `lane`-byte lane of `xmm` (clobbers RCX and XMM7).
-pub(super) fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
+pub(super) fn lane_constant(code: &mut Code, xmm: u8, lane: u8, value: u64) {
     let bytes = value.to_le_bytes();
     constant(
         code,
@@ -41,7 +41,7 @@ pub(super) fn add_or_subtract(lane: u8, subtract: bool) -> Host {
     }
 }
 
-fn load_lane(code: &mut Vec<u8>, source: LaneSource, bytes: u8) {
+fn load_lane(code: &mut Code, source: LaneSource, bytes: u8) {
     use crate::aarch64::Register;
     let offset = match source {
         LaneSource::General(Register::Zero) => {
@@ -73,7 +73,7 @@ const MOVZX_EAX_AX: [u8; 3] = [0x0f, 0xb7, 0xc0];
 /// UMOV, SMOV and FMOV to a general register ([`Operand::Extract`]),
 /// which ends with the destination's store from RAX. With `held`, XMM0
 /// holds the source vector whole and the lane is its lowest.
-pub(super) fn extract(code: &mut Vec<u8>, operand: &Operand, held: bool) {
+pub(super) fn extract(code: &mut Code, operand: &Operand, held: bool) {
     let Operand::Extract {
         destination,
         source,
@@ -118,7 +118,7 @@ pub(super) fn extract(code: &mut Vec<u8>, operand: &Operand, held: bool) {
     super::super::store(code, destination);
 }
 
-fn insert_lane(code: &mut Vec<u8>, destination: u8, byte: u8, bytes: u8) {
+fn insert_lane(code: &mut Code, destination: u8, byte: u8, bytes: u8) {
     // Only the selected lane changes; even scalar-size INS preserves all others.
     match bytes {
         1 => code.extend([0x88, 0x87]),
@@ -131,7 +131,7 @@ fn insert_lane(code: &mut Vec<u8>, destination: u8, byte: u8, bytes: u8) {
 }
 
 fn permutation(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     left: u8,
     right: u8,
@@ -171,7 +171,7 @@ fn permutation(
     commit_halves(code, destination);
 }
 
-fn accumulate_byte(code: &mut Vec<u8>, output: usize, r8: bool) {
+fn accumulate_byte(code: &mut Code, output: usize, r8: bool) {
     let shift = (output % 8 * 8) as u8;
     if shift != 0 {
         code.extend(if r8 {
@@ -187,7 +187,7 @@ fn accumulate_byte(code: &mut Vec<u8>, output: usize, r8: bool) {
         (true, false) => [0x4c, 0x09, 0xc2],  // or rdx,r8
     });
 }
-fn commit_halves(code: &mut Vec<u8>, destination: u8) {
+fn commit_halves(code: &mut Code, destination: u8) {
     code.extend([0x48, 0x89, 0x87]); // mov [rdi+disp32],rax
     code.extend(vector_offset(destination).to_le_bytes());
     code.extend([0x48, 0x89, 0x97]); // mov [rdi+disp32+8],rdx
@@ -196,7 +196,7 @@ fn commit_halves(code: &mut Vec<u8>, destination: u8) {
 
 #[allow(clippy::too_many_arguments)]
 fn table(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     first: u8,
     registers: u8,
@@ -258,7 +258,7 @@ fn table(
     commit_halves(code, destination);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match *operand {
         Operand::Duplicate {
             destination,

@@ -1,6 +1,7 @@
 //! Integer encodings, including flag-preserving variants.
 use super::{BYTE_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{AddressMode, Logical, Shift, Width};
+use crate::x86_64::asm::Code;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -85,11 +86,11 @@ pub enum ImmediateExtension {
     Compare = 7,
 }
 
-pub fn nop(code: &mut Vec<u8>) {
+pub fn nop(code: &mut Code) {
     code.push(NOP);
 }
 
-fn rex(code: &mut Vec<u8>, width: Width, reg: HostGpr, rm: HostGpr) {
+fn rex(code: &mut Code, width: Width, reg: HostGpr, rm: HostGpr) {
     let value = REX
         | if width == Width::X64 { REX_W } else { 0 }
         | if reg as u8 >= 8 { REX_R } else { 0 }
@@ -99,7 +100,7 @@ fn rex(code: &mut Vec<u8>, width: Width, reg: HostGpr, rm: HostGpr) {
     }
 }
 
-pub fn copy(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width: Width) {
+pub fn copy(code: &mut Code, destination: HostGpr, source: HostGpr, width: Width) {
     rex(code, width, source, destination);
     code.extend([
         MOV_STORE,
@@ -109,7 +110,7 @@ pub fn copy(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width: Wi
 
 /// `lea destination, [base + displacement]`, 64-bit, with the shortest
 /// displacement.
-pub fn lea(code: &mut Vec<u8>, destination: HostGpr, base: HostGpr, displacement: i32) {
+pub fn lea(code: &mut Code, destination: HostGpr, base: HostGpr, displacement: i32) {
     const SIB_BASE: u8 = 4;
     debug_assert!(base as u8 & 7 != SIB_BASE, "an RSP or R12 base needs a SIB");
     rex(code, Width::X64, destination, base);
@@ -123,7 +124,7 @@ pub fn lea(code: &mut Vec<u8>, destination: HostGpr, base: HostGpr, displacement
 }
 
 /// `test register8, immediate`: the low byte of any GPR.
-pub fn test_low_byte(code: &mut Vec<u8>, register: HostGpr, immediate: u8) {
+pub fn test_low_byte(code: &mut Code, register: HostGpr, immediate: u8) {
     const TEST_BYTE_IMMEDIATE: u8 = 0xf6;
     const FIRST_REX_BYTE_REGISTER: u8 = 4;
     let number = register as u8;
@@ -136,7 +137,7 @@ pub fn test_low_byte(code: &mut Vec<u8>, register: HostGpr, immediate: u8) {
     code.extend([TEST_BYTE_IMMEDIATE, REGISTER_MODE | (number & 7), immediate]);
 }
 
-fn frame_access(code: &mut Vec<u8>, register: HostGpr, slot: usize, opcode: u8) {
+fn frame_access(code: &mut Code, register: HostGpr, slot: usize, opcode: u8) {
     rex(code, Width::X64, register, FRAME);
     let offset = (slot * GPR_BYTES) as u32;
     let mode = if offset <= 127 {
@@ -152,15 +153,15 @@ fn frame_access(code: &mut Vec<u8>, register: HostGpr, slot: usize, opcode: u8) 
     }
 }
 
-pub fn load(code: &mut Vec<u8>, destination: HostGpr, slot: usize) {
+pub fn load(code: &mut Code, destination: HostGpr, slot: usize) {
     frame_access(code, destination, slot, MOV_LOAD);
 }
 
-pub fn store(code: &mut Vec<u8>, source: HostGpr, slot: usize) {
+pub fn store(code: &mut Code, source: HostGpr, slot: usize) {
     frame_access(code, source, slot, MOV_STORE);
 }
 
-fn nzcv_access(code: &mut Vec<u8>, register: HostGpr, opcode: u8) {
+fn nzcv_access(code: &mut Code, register: HostGpr, opcode: u8) {
     const NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
     rex(code, Width::W32, register, FRAME);
     code.extend([
@@ -170,15 +171,15 @@ fn nzcv_access(code: &mut Vec<u8>, register: HostGpr, opcode: u8) {
     code.extend(NZCV_OFFSET.to_le_bytes());
 }
 
-pub fn load_nzcv(code: &mut Vec<u8>, destination: HostGpr) {
+pub fn load_nzcv(code: &mut Code, destination: HostGpr) {
     nzcv_access(code, destination, MOV_LOAD);
 }
 
-pub fn store_nzcv(code: &mut Vec<u8>, source: HostGpr) {
+pub fn store_nzcv(code: &mut Code, source: HostGpr) {
     nzcv_access(code, source, MOV_STORE);
 }
 
-pub fn immediate(code: &mut Vec<u8>, destination: HostGpr, value: u64, width: Width) {
+pub fn immediate(code: &mut Code, destination: HostGpr, value: u64, width: Width) {
     rex(code, width, HostGpr::Rax, destination);
     code.push(MOV_IMMEDIATE | (destination as u8 & 7));
     if width == Width::X64 {
@@ -189,7 +190,7 @@ pub fn immediate(code: &mut Vec<u8>, destination: HostGpr, value: u64, width: Wi
 }
 
 pub fn binary(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: HostGpr,
     source: HostGpr,
     opcode: Binary,
@@ -213,7 +214,7 @@ pub enum Binary {
 }
 
 /// Low product modulo operand width; only destination and host flags change.
-pub fn multiply(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width: Width) {
+pub fn multiply(code: &mut Code, destination: HostGpr, source: HostGpr, width: Width) {
     rex(code, width, destination, source);
     code.extend([
         TWO_BYTE_OPCODE,
@@ -222,7 +223,7 @@ pub fn multiply(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width
     ]);
 }
 
-pub fn negate(code: &mut Vec<u8>, destination: HostGpr, width: Width) {
+pub fn negate(code: &mut Code, destination: HostGpr, width: Width) {
     const NEG_EXTENSION: u8 = 3;
     rex(code, width, HostGpr::Rax, destination);
     code.extend([
@@ -240,7 +241,7 @@ pub fn logical_opcode(kind: Logical) -> Binary {
 }
 
 pub fn arithmetic_immediate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: HostGpr,
     subtract: bool,
     value: u32,
@@ -260,7 +261,7 @@ pub fn arithmetic_immediate(
 }
 
 pub fn integer_immediate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: HostGpr,
     extension: ImmediateExtension,
     value: u32,
@@ -285,7 +286,7 @@ pub fn integer_immediate(
 }
 
 fn group_immediate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: HostGpr,
     extension: ImmediateExtension,
     value: u32,
@@ -299,12 +300,12 @@ fn group_immediate(
     code.extend(value.to_le_bytes());
 }
 
-pub fn shift(code: &mut Vec<u8>, kind: Shift, amount: u8, width: Width) {
+pub fn shift(code: &mut Code, kind: Shift, amount: u8, width: Width) {
     shift_register(code, RIGHT, kind, amount, width);
 }
 
 pub fn shift_register(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: HostGpr,
     kind: Shift,
     amount: u8,
@@ -324,7 +325,7 @@ pub fn shift_register(
     ]);
 }
 
-pub fn invert(code: &mut Vec<u8>, width: Width) {
+pub fn invert(code: &mut Code, width: Width) {
     rex(code, width, HostGpr::Rax, RIGHT);
     const NOT_EXTENSION: u8 = 2;
     code.extend([
@@ -361,7 +362,7 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
         cursor += STACK_ALIGNMENT_CHECK.len();
     }
     // The Offset form's one LEA, or nothing for a zero offset.
-    let mut add = vec![];
+    let mut add = Code::new();
     super::super::address_add(&mut add, displacement, AddressMode::Offset);
     if !add.is_empty() {
         if code.get(cursor..cursor + add.len())? != add {
@@ -653,7 +654,7 @@ impl NativeCondition {
 }
 
 pub fn conditional_copy(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: HostGpr,
     source: HostGpr,
     condition: NativeCondition,
@@ -668,7 +669,7 @@ pub fn conditional_copy(
     ]);
 }
 
-pub fn increment_preserving_flags(code: &mut Vec<u8>, register: HostGpr, width: Width) {
+pub fn increment_preserving_flags(code: &mut Code, register: HostGpr, width: Width) {
     rex(code, width, register, register);
     code.extend([
         LEA,
@@ -687,14 +688,14 @@ const DEC_EXTENSION: u8 = 1;
 const RELATIVE_BYTES: usize = core::mem::size_of::<i32>();
 const NEAR_JUMP_BYTES: u8 = 1 + RELATIVE_BYTES as u8;
 
-pub fn near_jump(code: &mut Vec<u8>) -> usize {
+pub fn near_jump(code: &mut Code) -> usize {
     code.push(NEAR_JUMP);
     let displacement = code.len();
     code.extend(0i32.to_le_bytes());
     displacement
 }
 
-pub fn conditional_jump(code: &mut Vec<u8>, condition: NativeCondition) -> usize {
+pub fn conditional_jump(code: &mut Code, condition: NativeCondition) -> usize {
     code.extend([TWO_BYTE_OPCODE, condition as u8]);
     let displacement = code.len();
     code.extend(0i32.to_le_bytes());
@@ -708,33 +709,33 @@ pub fn patch_relative(code: &mut [u8], displacement: usize, target: usize) {
 }
 
 /// Zero skips exactly the following near jump; no host flags change.
-pub fn skip_jump_if_budget_zero(code: &mut Vec<u8>) {
+pub fn skip_jump_if_budget_zero(code: &mut Code) {
     code.extend([JRCXZ, NEAR_JUMP_BYTES]);
 }
 
-pub fn push_budget_pointer(code: &mut Vec<u8>) {
+pub fn push_budget_pointer(code: &mut Code) {
     push(code, HostGpr::Rsi);
 }
 
-pub fn pop_budget_pointer(code: &mut Vec<u8>) {
+pub fn pop_budget_pointer(code: &mut Code) {
     pop(code, HostGpr::Rsi);
 }
 
-pub fn push(code: &mut Vec<u8>, register: HostGpr) {
+pub fn push(code: &mut Code, register: HostGpr) {
     if register as u8 >= 8 {
         code.push(REX | REX_B);
     }
     code.push(PUSH_REGISTER | (register as u8 & 7));
 }
 
-pub fn pop(code: &mut Vec<u8>, register: HostGpr) {
+pub fn pop(code: &mut Code, register: HostGpr) {
     if register as u8 >= 8 {
         code.push(REX | REX_B);
     }
     code.push(POP_REGISTER | (register as u8 & 7));
 }
 
-pub fn load_budget(code: &mut Vec<u8>) {
+pub fn load_budget(code: &mut Code) {
     const _: () = assert!(crate::block::loop_budget::REMAINING_OFFSET == 0);
     code.extend([
         REX | REX_W,
@@ -743,7 +744,7 @@ pub fn load_budget(code: &mut Vec<u8>) {
     ]);
 }
 
-pub fn store_budget(code: &mut Vec<u8>) {
+pub fn store_budget(code: &mut Code) {
     code.extend([
         REX | REX_W,
         MOV_STORE,
@@ -751,7 +752,7 @@ pub fn store_budget(code: &mut Vec<u8>) {
     ]);
 }
 
-pub fn decrement_budget_preserving_flags(code: &mut Vec<u8>) {
+pub fn decrement_budget_preserving_flags(code: &mut Code) {
     code.extend([
         REX | REX_W,
         LEA,
@@ -761,7 +762,7 @@ pub fn decrement_budget_preserving_flags(code: &mut Vec<u8>) {
 }
 
 /// The fallback path counts one block before running its body.
-pub fn decrement_stored_budget(code: &mut Vec<u8>) {
+pub fn decrement_stored_budget(code: &mut Code) {
     code.extend([
         REX | REX_W,
         INC_DEC_GROUP,
@@ -775,8 +776,8 @@ mod tests {
 
     #[test]
     fn region_address_forms_encode_as_the_assembler_does() {
-        let encode = |emit: &dyn Fn(&mut Vec<u8>)| {
-            let mut code = vec![];
+        let encode = |emit: &dyn Fn(&mut Code)| {
+            let mut code = Code::new();
             emit(&mut code);
             code
         };

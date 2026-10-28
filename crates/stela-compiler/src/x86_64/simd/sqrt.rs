@@ -9,6 +9,7 @@ use super::numerical::{
 };
 use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -51,7 +52,7 @@ const HALF_BIAS_POSITION: u8 = HALF_TO_SINGLE_BIAS.trailing_zeros() as u8;
 const HALF_BIAS_DIGITS: u8 = (HALF_TO_SINGLE_BIAS >> HALF_BIAS_POSITION).ilog2() as u8 + 1;
 const UPPER_HALF_BYTES: u8 = (u64::BITS / u8::BITS) as u8;
 
-fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     read_numerical_vector(code, operand.shape, operand.source, SOURCE);
@@ -65,7 +66,7 @@ fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
     }
 }
 
-fn square_root(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
+fn square_root(code: &mut Code, format: Format, shape: Shape, source: u8) {
     let opcode = match (format, shape) {
         (Format::Single, Shape::Scalar) => Host::SquareRootScalarSingle,
         (Format::Double, Shape::Scalar) => Host::SquareRootScalarDouble,
@@ -79,7 +80,7 @@ fn square_root(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
 /// Select positive-result narrowing bias once for both four-lane H groups.
 /// Nearest-even adds half-minus-one plus retained parity. Positive rounding
 /// adds the entire discarded mask; negative/zero rounding simply truncates.
-fn half_constants(code: &mut Vec<u8>) {
+fn half_constants(code: &mut Code) {
     packed(code, Host::Xor, ZERO, ZERO);
     packed(code, Host::EqualDword, HALF_BIAS, HALF_BIAS);
     ShiftOpcode::RightDword.emit(code, HALF_BIAS, u32::BITS as u8 - HALF_BIAS_DIGITS);
@@ -102,7 +103,7 @@ fn half_constants(code: &mut Vec<u8>) {
 }
 
 /// All active inputs were positive normal H. Integer field construction is exact.
-fn widen_half(code: &mut Vec<u8>, upper: bool) {
+fn widen_half(code: &mut Code, upper: bool) {
     packed(code, Host::MoveAligned, RESULT, SOURCE);
     if upper {
         ShiftOpcode::RightBytes.emit(code, RESULT, UPPER_HALF_BYTES);
@@ -116,7 +117,7 @@ fn widen_half(code: &mut Vec<u8>, upper: bool) {
 /// result as direct half-precision sqrt, with single PE exactly matching half
 /// inexact. Results are positive normal halves of at most 256, so signed dword
 /// packing is exact.
-fn half_fields(code: &mut Vec<u8>) {
+fn half_fields(code: &mut Code) {
     packed(code, Host::SubDword, RESULT, HALF_BIAS);
     packed(code, Host::MoveAligned, TEMP, RESULT);
     ShiftOpcode::RightDword.emit(code, TEMP, HALF_FRACTION_SHIFT);
@@ -128,7 +129,7 @@ fn half_fields(code: &mut Vec<u8>) {
 
 /// The scalar integer recipe avoids vector constant preparation and packing.
 /// BT captures retained parity before ADC adds half-minus-one plus that bit.
-fn scalar_half_root(code: &mut Vec<u8>) {
+fn scalar_half_root(code: &mut Code) {
     code.extend(MOVD_EAX_XMM_PREFIX);
     code.push(REGISTER_DIRECT | (SOURCE << MODRM_REGISTER_SHIFT));
     code.extend(MOVZX_EAX_AX);
@@ -166,7 +167,7 @@ fn scalar_half_root(code: &mut Vec<u8>) {
     code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
 }
 
-fn vector_half_root(code: &mut Vec<u8>, shape: Shape) {
+fn vector_half_root(code: &mut Code, shape: Shape) {
     half_constants(code);
     widen_half(code, false);
     square_root(code, Format::Single, shape, RESULT);
@@ -183,14 +184,14 @@ fn vector_half_root(code: &mut Vec<u8>, shape: Shape) {
     }
 }
 
-fn narrow_half(code: &mut Vec<u8>, destination: u8, source: u8, target: TargetCpu) {
+fn narrow_half(code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
     // VCVTPS2PH encodes source in ModRM.reg and destination in ModRM.r/m,
     // reversing the register field roles of ordinary two-operand SIMD ops.
     Host::ConvertSingleToHalf.register(code, source, destination, target);
     code.push(CONVERT_USING_MXCSR);
 }
 
-fn checked_half_root(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
+fn checked_half_root(code: &mut Code, shape: Shape, target: TargetCpu) {
     if shape == Shape::Scalar {
         clear_scalar(code, Format::Half, SOURCE);
     }
@@ -211,7 +212,7 @@ fn checked_half_root(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
     }
 }
 
-fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
+fn commit_result(code: &mut Code, operand: &Operand) {
     if operand.shape == Shape::Scalar {
         if operand.format == Format::Half {
             // Rebuild the half-precision scalar result in Vd after the
@@ -236,7 +237,7 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
 
 /// S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

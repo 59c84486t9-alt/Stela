@@ -1,5 +1,6 @@
 //! Direct stores to private RAM, keeping the completed prefix when a later page
 //! faults. The protection granule is assumed to be at least 4 KiB.
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 pub(crate) mod checked_pair;
 pub(crate) mod checked_scalar;
@@ -70,7 +71,7 @@ pub(super) fn aligned_register_offset(
 /// RCX, R10 and XMM2 are scratch on the crossing path. The selected XMM0/XMM1
 /// source remains whole, including where the block retains XMM0 for a later
 /// instruction.
-pub(super) fn emit(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source, aligned: bool) {
+pub(super) fn emit(code: &mut Code, bytes: u8, displacement: u8, source: Source, aligned: bool) {
     debug_assert!(bytes.is_power_of_two() && bytes <= VECTOR_BYTES);
     debug_assert!(displacement == 0 || displacement == bytes);
     if bytes == 1 || aligned {
@@ -104,7 +105,7 @@ pub(super) fn crossing_store(bytes: u8) -> Option<(Vec<u8>, Vec<usize>)> {
     if !matches!(bytes, HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES) {
         return None;
     }
-    let mut code = Vec::new();
+    let mut code = Code::new();
     emit(&mut code, bytes, 0, Source::Rcx, false);
     // LEA, XOR, TEST and JZ; every byte's shift but the first and its byte
     // store; JMP; then the fast path's one store.
@@ -131,10 +132,10 @@ pub(super) fn crossing_store(bytes: u8) -> Option<(Vec<u8>, Vec<usize>)> {
     end += 1 + size_of::<i32>();
     ends.push(end);
     ends.push(code.len());
-    Some((code, ends))
+    Some((code.into_bytes(), ends))
 }
 
-fn fast(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source) {
+fn fast(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
     let register = match source {
         Source::Xmm(xmm) => {
             let (prefix, opcode) = match bytes {
@@ -178,7 +179,7 @@ fn fast(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source) {
     }
 }
 
-fn prefix_store(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source) {
+fn prefix_store(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
     match source {
         Source::Rcx => {}
         Source::R8 => code.extend(MOV_RCX_R8),
@@ -209,7 +210,7 @@ fn prefix_store(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source)
     }
 }
 
-fn extract_qword(code: &mut Vec<u8>, xmm: u8) {
+fn extract_qword(code: &mut Code, xmm: u8) {
     code.extend(MOVQ_RCX_XMM);
     code.push(MODRM_RCX | (xmm << REGISTER_SHIFT));
 }

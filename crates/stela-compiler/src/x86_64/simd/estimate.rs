@@ -8,6 +8,7 @@ use super::numerical::{
     restore_environment, test_control, vector_exponent_range, vector_positive_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -99,7 +100,7 @@ fn checked_reciprocal(operand: &Operand, target: TargetCpu) -> bool {
 
 /// Exact table rounding: r=(2^18+a)/(2a+1), a=256+fraction_top8.
 /// The odd denominator cannot tie, so integer DIV needs no FP environment.
-fn scalar_reciprocal(code: &mut Vec<u8>, format: Format) {
+fn scalar_reciprocal(code: &mut Code, format: Format) {
     code.extend(if format == Format::Double {
         MOVQ_RAX_XMM_PREFIX
     } else {
@@ -142,7 +143,7 @@ fn scalar_reciprocal(code: &mut Vec<u8>, format: Format) {
     code.extend(MOVQ_XMM0_R9);
 }
 
-fn dword_constant(code: &mut Vec<u8>, vector: u8, value: u32) {
+fn dword_constant(code: &mut Code, vector: u8, value: u32) {
     code.push(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     code.extend(MOVD_XMM_EAX_PREFIX);
@@ -150,7 +151,7 @@ fn dword_constant(code: &mut Vec<u8>, vector: u8, value: u32) {
     super::shuffle(code, vector, vector, BROADCAST_LOW_DWORD);
 }
 
-fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     if !operand.kind.is_unsigned() {
         // AH suppresses every estimate exception, including retained enables.
         test_control(code, FPCR_AH);
@@ -199,7 +200,7 @@ fn source_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
 
 /// Keep sign, biased exponent and the top eight fraction bits in each dword.
 /// D metadata is compacted before any host floating operation; H expands first.
-fn compact_source(code: &mut Vec<u8>, format: Format, upper: bool) {
+fn compact_source(code: &mut Code, format: Format, upper: bool) {
     packed(code, Host::MoveAligned, COMPACT, SOURCE);
     if upper {
         ShiftOpcode::RightBytes.emit(code, COMPACT, UPPER_HALF_BYTES);
@@ -216,7 +217,7 @@ fn compact_source(code: &mut Vec<u8>, format: Format, upper: bool) {
     }
 }
 
-fn result_exponent(code: &mut Vec<u8>, format: Format, sqrt: bool) {
+fn result_exponent(code: &mut Code, format: Format, sqrt: bool) {
     let bits = exponent_bits(format);
     packed(code, Host::MoveAligned, TEMP, COMPACT);
     ShiftOpcode::LeftDword.emit(code, TEMP, DWORD_BITS - bits - ESTIMATE_FRACTION_BITS);
@@ -230,7 +231,7 @@ fn result_exponent(code: &mut Vec<u8>, format: Format, sqrt: bool) {
     ShiftOpcode::LeftDword.emit(code, EXPONENT, ESTIMATE_FRACTION_BITS);
 }
 
-fn floating_denominator(code: &mut Vec<u8>, sqrt: bool) {
+fn floating_denominator(code: &mut Code, sqrt: bool) {
     packed(code, Host::MoveAligned, DENOMINATOR, COMPACT);
     ShiftOpcode::LeftDword.emit(code, DENOMINATOR, DWORD_BITS - ESTIMATE_FRACTION_BITS);
     ShiftOpcode::RightDword.emit(code, DENOMINATOR, DWORD_BITS - ESTIMATE_FRACTION_BITS);
@@ -256,7 +257,7 @@ fn floating_denominator(code: &mut Vec<u8>, sqrt: bool) {
 /// Bounded denominators are exact Single integers. Primary-derived midpoint
 /// bounds prove nearest(DIV[+SQRT]) followed by nearest integer conversion
 /// reproduces every standard estimate key. Host PE is not guest estimate IXC.
-fn integer_estimate(code: &mut Vec<u8>, sqrt: bool) {
+fn integer_estimate(code: &mut Code, sqrt: bool) {
     packed(
         code,
         Host::ConvertPackedDwordToSingle,
@@ -285,7 +286,7 @@ fn integer_estimate(code: &mut Vec<u8>, sqrt: bool) {
 
 /// RCP raises no exceptions. Its error bound makes floor(q') either r or r - 1;
 /// the exact odd product A*(2*r0+1) decides the increment.
-fn corrected_reciprocal(code: &mut Vec<u8>, target: TargetCpu) {
+fn corrected_reciprocal(code: &mut Code, target: TargetCpu) {
     packed(code, Host::ConvertPackedDwordToSingle, RESULT, DENOMINATOR);
     packed(code, Host::ReciprocalPackedSingle, RESULT, RESULT);
     ShiftOpcode::RightDword.emit(code, RESULT, fraction_shift(Format::Single));
@@ -302,7 +303,7 @@ fn corrected_reciprocal(code: &mut Vec<u8>, target: TargetCpu) {
     packed(code, Host::SubDword, RESULT, TEMP);
 }
 
-fn pack_half(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
+fn pack_half(code: &mut Code, signed: bool, target: TargetCpu) {
     if signed && target.supports(TargetCpu::Sse41) {
         Host::PackUnsignedDwordToWord.register(code, RESULT, RESULT, target);
     } else {
@@ -316,7 +317,7 @@ fn pack_half(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
     }
 }
 
-fn floating_group(code: &mut Vec<u8>, operand: &Operand, upper: bool, target: TargetCpu) {
+fn floating_group(code: &mut Code, operand: &Operand, upper: bool, target: TargetCpu) {
     let sqrt = reciprocal_sqrt(operand.kind);
     compact_source(code, operand.format, upper);
     result_exponent(code, operand.format, sqrt);
@@ -349,7 +350,7 @@ fn floating_group(code: &mut Vec<u8>, operand: &Operand, upper: bool, target: Ta
     }
 }
 
-fn floating_estimate(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn floating_estimate(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if operand.shape == Shape::Scalar {
         clear_scalar(code, operand.format, SOURCE);
     }
@@ -375,7 +376,7 @@ fn floating_estimate(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     }
 }
 
-fn unsigned_estimate(code: &mut Vec<u8>, kind: Kind, target: TargetCpu) {
+fn unsigned_estimate(code: &mut Code, kind: Kind, target: TargetCpu) {
     let sqrt = reciprocal_sqrt(kind);
     let checked = !sqrt && target.supports(TargetCpu::Sse41);
     if !checked {
@@ -425,7 +426,7 @@ fn unsigned_estimate(code: &mut Vec<u8>, kind: Kind, target: TargetCpu) {
     }
 }
 
-fn reciprocal_exponent(code: &mut Vec<u8>, format: Format) {
+fn reciprocal_exponent(code: &mut Code, format: Format) {
     code.extend(if format == Format::Double {
         MOVQ_RAX_XMM_PREFIX
     } else {
@@ -450,7 +451,7 @@ fn reciprocal_exponent(code: &mut Vec<u8>, format: Format) {
     }
 }
 
-fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
+fn commit_result(code: &mut Code, operand: &Operand) {
     let result = if operand.shape == Shape::Scalar {
         read_vector(code, operand.destination, SAVED);
         match operand.format {
@@ -480,7 +481,7 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

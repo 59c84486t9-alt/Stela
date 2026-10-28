@@ -1,4 +1,5 @@
 //! SVE FCPY and FDUP.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,7 +11,6 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 
 const IMMEDIATE: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -30,7 +30,7 @@ const COMPLEMENT_XOR_MEASURED_VECTOR_BYTES: usize = 64;
 /// Fill active SVE lanes with the already expanded VFP immediate. All inactive
 /// lanes preserve their old destination; FDUP supplies no governing predicate.
 /// Full SVE writes cover current VL and do not clear any other Z register tail.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let bits = operand.format.bits();
     let complement_xor =
         bits != u64::BITS && length.bytes() == COMPLEMENT_XOR_MEASURED_VECTOR_BYTES;

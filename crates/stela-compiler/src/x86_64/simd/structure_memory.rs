@@ -6,7 +6,7 @@ use crate::aarch64::simd::structure_memory::{
     Access, Direction, Layout, LoadCommit, Operand, PostIndex,
 };
 use crate::aarch64::{AddressMode, Register};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 mod multiple;
 mod single;
@@ -38,7 +38,7 @@ const JMP_REL32: u8 = 0xe9;
 const MOV_ZERO_QWORD_STATE: &[u8] = &[0x48, 0xc7, 0x87];
 
 pub(super) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: TargetCpu,
     checks: super::super::MemoryChecks,
@@ -101,7 +101,7 @@ pub(super) fn emit(
     }
 }
 
-fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn packed(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match operand.layout {
         Layout::Multiple { .. } => multiple::packed(code, operand, target),
         Layout::Lane { .. } | Layout::Replicate { .. } => single::packed(code, operand, target),
@@ -110,7 +110,7 @@ fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 
 /// Source-width accesses and immediate successful assignments. RDX/RDI survive;
 /// RAX advances through the footprint, RCX/R10/XMM0 are scratch.
-fn ordered(code: &mut Vec<u8>, operand: &Operand, aligned_sp: bool) {
+fn ordered(code: &mut Code, operand: &Operand, aligned_sp: bool) {
     let count = operand.transferred_bytes() / operand.element_bytes;
     for (ordinal, access) in operand.accesses().enumerate() {
         transfer_access(code, operand, access, 0, false, aligned_sp);
@@ -123,14 +123,14 @@ fn ordered(code: &mut Vec<u8>, operand: &Operand, aligned_sp: bool) {
 
 /// The whole footprint is within one granule, so elements are accessed at fixed
 /// displacements without per-element store guards.
-fn ordered_in_granule(code: &mut Vec<u8>, operand: &Operand) {
+fn ordered_in_granule(code: &mut Code, operand: &Operand) {
     for access in operand.accesses() {
         transfer_access(code, operand, access, access.byte_offset, true, false);
     }
 }
 
 fn transfer_access(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     access: Access,
     displacement: u8,
@@ -183,7 +183,7 @@ fn transfer_access(
 }
 
 /// Exact-width RAM read into zero-extended RCX; no guest state commit yet.
-fn element_load(code: &mut Vec<u8>, bytes: u8, displacement: u8) {
+fn element_load(code: &mut Code, bytes: u8, displacement: u8) {
     match bytes {
         BYTE_BYTES => code.extend(MOVZX_ECX_BYTE),
         HALFWORD_BYTES => code.extend(MOVZX_ECX_HALFWORD),
@@ -198,7 +198,7 @@ fn element_load(code: &mut Vec<u8>, bytes: u8, displacement: u8) {
 }
 
 /// Exact scalar RCX store, used only after the whole-footprint granule proof.
-fn element_store(code: &mut Vec<u8>, bytes: u8, displacement: u8) {
+fn element_store(code: &mut Code, bytes: u8, displacement: u8) {
     if bytes == HALFWORD_BYTES {
         code.push(OPERAND_SIZE_PREFIX);
     } else if bytes == QWORD_BYTES {
@@ -216,7 +216,7 @@ fn element_store(code: &mut Vec<u8>, bytes: u8, displacement: u8) {
 }
 
 /// true writes RCX to the selected state lane; false reads it into RCX.
-fn scalar_state_transfer(code: &mut Vec<u8>, load: bool, bytes: u8, state_offset: u32) {
+fn scalar_state_transfer(code: &mut Code, load: bool, bytes: u8, state_offset: u32) {
     if !load && bytes <= HALFWORD_BYTES {
         code.extend(if bytes == BYTE_BYTES {
             MOVZX_ECX_BYTE
@@ -241,7 +241,7 @@ fn scalar_state_transfer(code: &mut Vec<u8>, load: bool, bytes: u8, state_offset
     code.extend(state_offset.to_le_bytes());
 }
 
-fn branch_placeholder(code: &mut Vec<u8>) -> usize {
+fn branch_placeholder(code: &mut Code) -> usize {
     let offset = code.len();
     code.extend(0i32.to_le_bytes());
     offset

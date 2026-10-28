@@ -3,7 +3,7 @@ use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES};
 use crate::aarch64::sve::integer_products::Kind;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 use super::complex_wrapping::{blend_directions, prepare_products};
 use super::emit_saturating_chunk;
@@ -49,7 +49,7 @@ enum Gpr {
 /// Inputs: XMM0=Zn, XMM1=Zm, XMM4=accumulator. Output XMM0; preserve XMM7.
 /// Clobbers caller-saved RAX/RCX/RDX/R8/R9/R10/R11 and restores RSP exactly.
 pub(super) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     rounded: bool,
     rotation_degrees: u16,
@@ -108,7 +108,7 @@ pub(super) fn emit_chunk(
     Ok(())
 }
 
-fn load_signed(code: &mut Vec<u8>, register: Gpr, element: ElementSize, offset: u8) {
+fn load_signed(code: &mut Code, register: Gpr, element: ElementSize, offset: u8) {
     let register = register as u8;
     code.push(
         REX_W
@@ -130,7 +130,7 @@ fn load_signed(code: &mut Vec<u8>, register: Gpr, element: ElementSize, offset: 
     ]);
 }
 
-fn store_result(code: &mut Vec<u8>, element: ElementSize, offset: u8) {
+fn store_result(code: &mut Code, element: ElementSize, offset: u8) {
     match element {
         ElementSize::Word => {}
         ElementSize::Doubleword => code.push(REX_W),
@@ -141,7 +141,7 @@ fn store_result(code: &mut Vec<u8>, element: ElementSize, offset: u8) {
 
 /// Mixed component signs operate on wide products, preserving min*min. Running
 /// both exact packed directions and blending avoids negating a narrow operand.
-fn emit_rounded_packed(code: &mut Vec<u8>, element: ElementSize, rotation: u16) {
+fn emit_rounded_packed(code: &mut Code, element: ElementSize, rotation: u16) {
     prepare_products(code, element, rotation);
     if rotation == 0 || rotation == HALF_TURN_DEGREES {
         emit_saturating_chunk(

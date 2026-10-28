@@ -1,10 +1,10 @@
 //! Constant-time packed-index table lookup shared by the LUTI forms.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES},
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host},
 };
-use alloc::vec::Vec;
 const MOV_EAX: u8 = 0xb8;
 const MOVD: &[u8] = &[0x66, 0x0f, 0x6e];
 const REGISTER: u8 = 0xc0;
@@ -20,7 +20,7 @@ const HALFWORD_OFFSETS: u32 = 0x0100_0100;
 const SHUFFLE_DISABLE: u32 = 0x8080_8080;
 const TABLE_BANK_TO_DISABLE_SHIFT: u8 = 3;
 
-fn splat(code: &mut Vec<u8>, xmm: u8, value: u32, target: TargetCpu) {
+fn splat(code: &mut Code, xmm: u8, value: u32, target: TargetCpu) {
     code.push(MOV_EAX);
     code.extend(value.to_le_bytes());
     code.extend(MOVD);
@@ -28,7 +28,7 @@ fn splat(code: &mut Vec<u8>, xmm: u8, value: u32, target: TargetCpu) {
     Host::ShuffleDword.register(code, xmm, xmm, target);
     code.push(REPEAT_LOW);
 }
-fn expand(code: &mut Vec<u8>, index_bits: u8, target: TargetCpu) {
+fn expand(code: &mut Code, index_bits: u8, target: TargetCpu) {
     splat(
         code,
         MASK,
@@ -57,7 +57,7 @@ fn expand(code: &mut Vec<u8>, index_bits: u8, target: TargetCpu) {
         Host::UnpackLowWord.register(code, 0, 2, target);
     }
 }
-fn boolean(code: &mut Vec<u8>, element: ElementSize, index_bits: u8, target: TargetCpu) {
+fn boolean(code: &mut Code, element: ElementSize, index_bits: u8, target: TargetCpu) {
     if element == ElementSize::Halfword {
         Host::UnpackLowByte.register(code, 0, 0, target);
     }
@@ -90,7 +90,7 @@ fn boolean(code: &mut Vec<u8>, element: ElementSize, index_bits: u8, target: Tar
         Host::Or.register(code, OUTPUT, 1, target);
     }
 }
-fn shuffle(code: &mut Vec<u8>, element: ElementSize, index_bits: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, element: ElementSize, index_bits: u8, target: TargetCpu) {
     if element == ElementSize::Halfword {
         Host::UnpackLowByte.register(code, 0, 0, target);
         Shift::LeftWord.emit(code, 0, 1);
@@ -118,12 +118,7 @@ fn shuffle(code: &mut Vec<u8>, element: ElementSize, index_bits: u8, target: Tar
 /// XMM0 holds packed indices; XMM4/5 hold the low/high 16-byte table.
 /// Returns XMM6, preserves XMM4/5, clobbers XMM0..3,7 and RAX.
 /// Four-bit halfword lookup requires both table chunks. No indexed memory.
-pub(crate) fn emit_chunk(
-    code: &mut Vec<u8>,
-    index_bits: u8,
-    element: ElementSize,
-    target: TargetCpu,
-) {
+pub(crate) fn emit_chunk(code: &mut Code, index_bits: u8, element: ElementSize, target: TargetCpu) {
     assert!(
         matches!(index_bits, 2 | 4) && matches!(element, ElementSize::Byte | ElementSize::Halfword)
     );

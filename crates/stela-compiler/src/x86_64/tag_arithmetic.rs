@@ -1,10 +1,10 @@
 //! MTE tag arithmetic under the fixed guest tag controls.
 use super::{Register, Shift, Width, load, offset, right_operand, store};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState,
     aarch64::tag_arithmetic::{Kind, Operand},
 };
-use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const REX_W_PREFIX: u8 = 0x48;
@@ -51,7 +51,7 @@ const OR_EAX_ECX: &[u8] = &[0x09, 0xc8];
 const OR_EAX_EDX: &[u8] = &[0x09, 0xd0];
 const MOV_STATE_EAX: &[u8] = &[0x89, 0x87];
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero
         && !matches!(operand.kind, Kind::Difference { flags: true, .. })
     {
@@ -95,7 +95,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-fn tag_input(code: &mut Vec<u8>, source: Register, increment: u8) {
+fn tag_input(code: &mut Code, source: Register, increment: u8) {
     let source_offset = offset(source).expect("tag address source is GPR or SP");
     code.extend(MOVZX_ECX_STATE_BYTE);
     code.extend((source_offset + HIGH_BYTE_OFFSET).to_le_bytes());
@@ -108,7 +108,7 @@ fn tag_input(code: &mut Vec<u8>, source: Register, increment: u8) {
 }
 
 fn emit_offset(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: Register,
     source: Register,
     subtract: bool,
@@ -150,7 +150,7 @@ fn emit_offset(
     store(code, destination);
 }
 
-fn emit_mask(code: &mut Vec<u8>, destination: Register, address: Register, mask: Register) {
+fn emit_mask(code: &mut Code, destination: Register, address: Register, mask: Register) {
     if destination == mask {
         // Read the tag before any in-place update, including when the address
         // aliases the mask. EDX's high half stays zero for tags 0-15.
@@ -172,7 +172,7 @@ fn emit_mask(code: &mut Vec<u8>, destination: Register, address: Register, mask:
     }
 }
 
-fn emit_difference_flags(code: &mut Vec<u8>) {
+fn emit_difference_flags(code: &mut Code) {
     // Signed56 differences cannot overflow signed64, so guest V is always0.
     // Capture all three predicates before shifts/ORs alter the host flags.
     for instruction in [

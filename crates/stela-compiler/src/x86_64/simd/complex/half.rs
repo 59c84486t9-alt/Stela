@@ -6,6 +6,7 @@ use super::super::numerical::{
     vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -36,7 +37,7 @@ const OR_RAX_RDX: &[u8] = &[0x48, 0x09, 0xd0];
 const MOVQ_XMM6_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xf0];
 const TEST_ECX_IMM32: &[u8] = &[0xf7, 0xc1];
 
-fn normal_inputs(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn normal_inputs(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     if operand.kind == Kind::MultiplyAdd {
@@ -57,7 +58,7 @@ fn normal_inputs(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>)
     super::rotate_right_sign(code, Format::Half, operand.rotation);
 }
 
-fn widen_addend(code: &mut Vec<u8>, target: TargetCpu) {
+fn widen_addend(code: &mut Code, target: TargetCpu) {
     // The addend's private XMM7 snapshot advances one Half per completed lane.
     // R9 is the shared unscaled Half-to-Double bias and survives MXCSR setup.
     code.extend(MOVD_EAX_XMM7);
@@ -84,7 +85,7 @@ fn widen_addend(code: &mut Vec<u8>, target: TargetCpu) {
     code.extend(MOVQ_XMM6_RAX);
 }
 
-fn arithmetic(code: &mut Vec<u8>, kind: Kind, target: TargetCpu, rollback: &mut Vec<usize>) {
+fn arithmetic(code: &mut Code, kind: Kind, target: TargetCpu, rollback: &mut Vec<usize>) {
     if kind == Kind::Add {
         packed(code, Host::MoveAligned, lanes::RESULT, lanes::LEFT);
         // Normal Half sums need at most 41 bits; nonzero sums are normal Double.
@@ -130,7 +131,7 @@ fn arithmetic(code: &mut Vec<u8>, kind: Kind, target: TargetCpu, rollback: &mut 
     rollback.push(branch(code, Condition::NotZero));
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
     let mut helper = Vec::new();
     let mut rollback = Vec::new();

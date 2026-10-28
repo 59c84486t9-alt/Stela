@@ -5,12 +5,12 @@ use super::sha32::{
     WORDS_PER_VECTOR, pack_state,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::sha256::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
 const EAX: u8 = 0;
 const ECX: u8 = 1;
@@ -45,7 +45,7 @@ const BIG_SIGMA1: [u8; 3] = [6, 11, 25];
 const SMALL_SIGMA0: [u8; 3] = [7, 18, 3];
 const SMALL_SIGMA1: [u8; 3] = [17, 19, 10];
 
-fn preserve_scratch(code: &mut Vec<u8>, restore: bool) {
+fn preserve_scratch(code: &mut Code, restore: bool) {
     // Full host RBX/RBP/R12 values stay in SysV caller-saved XMM4..6.
     // No host stack or guest RAM is touched; these XMMs survive the scalar body.
     for (xmm, register) in [(SAVED_RBX, EBX), (SAVED_RBP, EBP), (SAVED_R12, R12D)] {
@@ -58,7 +58,7 @@ fn preserve_scratch(code: &mut Vec<u8>, restore: bool) {
         code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | (register & LOW_REGISTER_MASK));
     }
 }
-fn big_sigma(code: &mut Vec<u8>, input: u8, result: u8, temporary: u8, amounts: [u8; 3]) {
+fn big_sigma(code: &mut Code, input: u8, result: u8, temporary: u8, amounts: [u8; 3]) {
     Scalar32::Move.register(code, result, input);
     Rotate32::Right.emit(code, result, amounts[0]);
     for amount in &amounts[1..] {
@@ -67,7 +67,7 @@ fn big_sigma(code: &mut Vec<u8>, input: u8, result: u8, temporary: u8, amounts: 
         Scalar32::Xor.register(code, result, temporary);
     }
 }
-fn rounds_baseline(code: &mut Vec<u8>, operand: &Operand) {
+fn rounds_baseline(code: &mut Code, operand: &Operand) {
     use Scalar32::*;
     preserve_scratch(code, false);
     let (x, y) = if operand.kind == Kind::Hash {
@@ -115,7 +115,7 @@ fn rounds_baseline(code: &mut Vec<u8>, operand: &Operand) {
     pack_state(code, [part[0], part[1], part[2], part[3]]);
     preserve_scratch(code, true);
 }
-fn rounds_sha(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn rounds_sha(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let (x, y) = if operand.kind == Kind::Hash {
         (operand.destination, operand.left)
     } else {
@@ -145,7 +145,7 @@ fn rounds_sha(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     shuffle(code, RESULT, TEMPORARY, REVERSE_DWORD_PAIRS);
 }
 
-fn small_sigma(code: &mut Vec<u8>, input: u8, result: u8, temporary: u8, amounts: [u8; 3]) {
+fn small_sigma(code: &mut Code, input: u8, result: u8, temporary: u8, amounts: [u8; 3]) {
     // Two rotates and a logical shift are a linear XOR of five shifted copies.
     // Destructively consume input for the final shift, avoiding a sixth copy.
     packed(code, Host::MoveAligned, result, input);
@@ -164,7 +164,7 @@ fn small_sigma(code: &mut Vec<u8>, input: u8, result: u8, temporary: u8, amounts
     Shift::RightDword.emit(code, input, amounts[2]);
     packed(code, Host::Xor, result, input);
 }
-fn schedule0(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn schedule0(code: &mut Code, operand: &Operand, target: TargetCpu) {
     read_vector(code, operand.destination, RESULT);
     read_vector(code, operand.left, LEFT);
     if target.supports(TargetCpu::Sha) {
@@ -184,7 +184,7 @@ fn schedule0(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         packed(code, Host::AddDword, RESULT, TEMPORARY);
     }
 }
-fn schedule1(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn schedule1(code: &mut Code, operand: &Operand, target: TargetCpu) {
     read_vector(code, operand.destination, RESULT);
     read_vector(code, operand.left, LEFT);
     read_vector(code, operand.right, RIGHT);
@@ -214,7 +214,7 @@ fn schedule1(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match operand.kind {
         Kind::Hash | Kind::Hash2 => {
             if target.supports(TargetCpu::Sha) {
@@ -232,7 +232,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn schedule_gathers_require_ssse3_independently_of_sha() {
@@ -249,7 +248,7 @@ mod tests {
                     left: 31,
                     right: 31,
                 };
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand, target);
                 let alignment = Host::AlignBytes.encoding();
                 let used = code
@@ -271,13 +270,13 @@ mod tests {
                 left: 31,
                 right: 31,
             };
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, &operand, TargetCpu::Sha);
             assert_eq!(
                 code.windows(3).filter(|w| *w == [0x0f, 0x38, 0xcb]).count(),
                 2
             );
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             emit(&mut baseline, &operand, TargetCpu::Baseline);
             assert!(!baseline.windows(3).any(|w| w == [0x0f, 0x38, 0xcb]));
             // Full-width saves/restores cover every callee-saved GPR used.

@@ -1,4 +1,5 @@
 //! SVE conversions between single/double and integers.
+use crate::x86_64::asm::Code;
 
 use super::{half_integer, unsigned64};
 use alloc::vec::Vec;
@@ -237,13 +238,13 @@ impl Conversion {
     }
 }
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(JNZ_REL32);
     failures.push(code.len());
     code.extend(0_i32.to_le_bytes());
 }
 
-fn scalar_opcode(code: &mut Vec<u8>, conversion: Conversion, opcode: u8) {
+fn scalar_opcode(code: &mut Code, conversion: Conversion, opcode: u8) {
     code.push(match conversion.float {
         Format::Single => SINGLE_PREFIX,
         Format::Double => DOUBLE_PREFIX,
@@ -257,7 +258,7 @@ fn scalar_opcode(code: &mut Vec<u8>, conversion: Conversion, opcode: u8) {
 }
 
 fn scalar_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     conversion: Conversion,
     slot_bytes: u8,
     failures: &mut Vec<usize>,
@@ -330,7 +331,7 @@ fn scalar_chunk(
 
 /// MOVD/MOVQ clear all unused packed bits. A returned raw Half also clears the
 /// rest of its H/W/X slot, so the shift/OR assembly cannot contaminate a neighbor.
-fn pack_integer(code: &mut Vec<u8>, slot_bytes: u8, target: TargetCpu) {
+fn pack_integer(code: &mut Code, slot_bytes: u8, target: TargetCpu) {
     if slot_bytes == QWORD_BYTES {
         Host::MoveGprQword.append(code, target);
     } else {
@@ -351,7 +352,7 @@ struct ChunkAccess {
 }
 
 impl ChunkAccess {
-    fn mask(self, code: &mut Vec<u8>, chunk: usize, destination: u8, scratch: u8) {
+    fn mask(self, code: &mut Code, chunk: usize, destination: u8, scratch: u8) {
         read_predicate_mask(
             code,
             self.operand.governing,
@@ -364,7 +365,7 @@ impl ChunkAccess {
         );
     }
 
-    fn source(self, code: &mut Vec<u8>, chunk: usize, destination: u8) {
+    fn source(self, code: &mut Code, chunk: usize, destination: u8) {
         load_z_chunk(
             code,
             self.operand.source,
@@ -376,7 +377,7 @@ impl ChunkAccess {
     }
 }
 
-fn broadcast_dword(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
+fn broadcast_dword(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
     code.extend(MOV_ECX_IMMEDIATE);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, target);
@@ -386,7 +387,7 @@ fn broadcast_dword(code: &mut Vec<u8>, register: u8, value: u32, target: TargetC
 }
 
 fn half_forward_group(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     access: ChunkAccess,
     chunk: usize,
     integer: IntegerFormat,
@@ -424,12 +425,7 @@ fn half_forward_group(
 }
 
 /// Every selected H result is in range before these lossless integer packs.
-fn pack_half_results(
-    code: &mut Vec<u8>,
-    integer: IntegerFormat,
-    mapping: Mapping,
-    target: TargetCpu,
-) {
+fn pack_half_results(code: &mut Code, integer: IntegerFormat, mapping: Mapping, target: TargetCpu) {
     if integer.signed {
         Host::PackSignedDwordToWord.register(code, SCALAR, SCALAR, target);
     } else if mapping.unsigned_half_pack() {
@@ -451,7 +447,7 @@ fn pack_half_results(
 
 /// Return the complete converted chunk register, preserving constants2/3/4.
 fn half_forward_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     access: ChunkAccess,
     chunk: usize,
     integer: IntegerFormat,
@@ -489,7 +485,7 @@ fn half_forward_chunk(
 /// The caller owns RC installation, active-trap guards and whole-state commit.
 /// Input SOURCE1 is read-only; RESULT3 is output; SCALAR0 and XMM4 are scratch.
 /// Preserves ACTIVE6, all other XMMs, GPRs, EFLAGS and pending status channels.
-fn packed_signed_half_chunk(code: &mut Vec<u8>, target: TargetCpu) {
+fn packed_signed_half_chunk(code: &mut Code, target: TargetCpu) {
     Host::MoveAligned.register(code, RESULT, SOURCE, target);
     Host::MoveAligned.register(code, SCALAR, SOURCE, target);
     Host::MoveAligned.register(code, SIGNED_HALF_SIGN_MASK, SOURCE, target);
@@ -506,7 +502,7 @@ fn packed_signed_half_chunk(code: &mut Vec<u8>, target: TargetCpu) {
     Host::UnpackLowQword.register(code, RESULT, SCALAR, target);
 }
 
-fn packed_chunk(code: &mut Vec<u8>, conversion: Conversion, target: TargetCpu) {
+fn packed_chunk(code: &mut Code, conversion: Conversion, target: TargetCpu) {
     Host::MoveAligned.register(code, RESULT, SOURCE, target);
     match (conversion.direction, conversion.float) {
         (Direction::FromInteger, Format::Single) => {
@@ -531,7 +527,7 @@ fn packed_chunk(code: &mut Vec<u8>, conversion: Conversion, target: TargetCpu) {
 /// Unsupported forms leave `code` unchanged. No guest state is changed
 /// until numerical::finish, including when source aliases destination.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

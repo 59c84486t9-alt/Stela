@@ -1,7 +1,7 @@
 //! Vector expansion of predicate-as-counter masks.
 use super::{CHUNK_BITS, emit_prepared_counter_chunk};
 use crate::aarch64::scalable::VectorLength;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const SHR_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe8];
 const VECTOR_MASK_BYTES: usize = 16;
@@ -10,7 +10,7 @@ const VECTOR_MASK_BYTES: usize = 16;
 /// R8/R9/R10/RDX/RDI/R15 and other XMMs; clobbers RAX/RCX/R11 and both mask XMMs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_prepared_counter_mask(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     group: usize,
     chunk: usize,
     element: crate::aarch64::scalable::ElementSize,

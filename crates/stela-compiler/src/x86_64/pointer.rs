@@ -25,6 +25,7 @@
 //! clobbers RAX, RCX, RDX, R8, R9 and flags; a service call every register
 //! the SysV ABI lets a call clobber, which no block keeps live across its
 //! exit. The call aligns the stack to 16 bytes itself.
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress,
     block::{
@@ -230,7 +231,7 @@ pub struct Thunk {
 /// at `memo` under the tag words at `tags`, or through `service`, else
 /// exiting at `pc` for the engine.
 pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Service) -> Thunk {
-    let mut code = Vec::with_capacity(256);
+    let mut code = Code::new();
     let mut exits = Vec::new();
     let pointer = u32::from(form.pointer) * 8;
     code.extend([0x48, 0x8b, 0x87]); // mov rax,[rdi+pointer]
@@ -335,7 +336,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
         ExitKind::PointerAuthentication,
     ));
     Thunk {
-        code,
+        code: code.into_bytes(),
         next,
         dynamic,
     }
@@ -348,7 +349,7 @@ const JNZ: u8 = 0x85;
 const STACK_POINTER: u32 = core::mem::offset_of!(crate::GuestState, sp) as u32;
 
 /// A `jcc` (`opcode` after 0x0f) whose displacement [`land`] fixes up.
-fn jump(code: &mut Vec<u8>, fixups: &mut Vec<usize>, opcode: u8) {
+fn jump(code: &mut Code, fixups: &mut Vec<usize>, opcode: u8) {
     code.extend([0x0f, opcode]);
     fixups.push(code.len());
     code.extend([0; 4]);
@@ -363,7 +364,7 @@ fn land(code: &mut [u8], fixups: &[usize]) {
     }
 }
 
-fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
+fn exit_kind(code: &mut Code, kind: ExitKind) {
     code.push(0xba); // mov edx,kind
     code.extend((kind as u32).to_le_bytes());
     code.push(0xc3); // ret

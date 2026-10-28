@@ -1,5 +1,6 @@
 //! BFMLALB/BFMLALT with exact SSE2 products or FMA3.
 use super::{ADDEND, LEFT, RIGHT, shuffle, test_control};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -39,7 +40,7 @@ const JMP_REL32: u8 = 0xe9;
 const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 
 pub(super) fn install_environment(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     features: NumericalFeatures,
     failures: &mut Vec<usize>,
@@ -64,7 +65,7 @@ pub(super) fn install_environment(
 }
 
 pub(super) fn prepare_sources(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     part: VectorPart,
     index: Option<u8>,
     subtract: bool,
@@ -92,12 +93,12 @@ pub(super) fn prepare_sources(
     }
 }
 
-fn guard_normal(code: &mut Vec<u8>, source: u8, failures: &mut Vec<usize>) {
+fn guard_normal(code: &mut Code, source: u8, failures: &mut Vec<usize>) {
     vector_exponent_range(code, Format::Single, Shape::Vector128, source);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn guard_status(code: &mut Vec<u8>, frame: &Frame, mask: u32, failures: &mut Vec<usize>) {
+fn guard_status(code: &mut Code, frame: &Frame, mask: u32, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
     code.extend(TEST_ECX_IMMEDIATE);
     code.extend(mask.to_le_bytes());
@@ -105,7 +106,7 @@ fn guard_status(code: &mut Vec<u8>, frame: &Frame, mask: u32, failures: &mut Vec
 }
 
 pub(super) fn evaluate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &mut Vec<usize>,
     target: TargetCpu,

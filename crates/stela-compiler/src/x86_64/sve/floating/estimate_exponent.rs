@@ -1,4 +1,5 @@
 //! SVE FRECPX and FLOGB by integer arithmetic.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -63,7 +64,7 @@ fn inputs(operand: Operand) -> Option<(Operation, u8, u8)> {
     Some((operation, source, operand.predicate?))
 }
 
-fn broadcast(code: &mut Vec<u8>, format: Format, value: u64, register: u8, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, value: u64, register: u8, target: TargetCpu) {
     if format == Format::Single {
         code.push(MOV_EAX_IMMEDIATE);
         code.extend((value as u32).to_le_bytes());
@@ -81,12 +82,7 @@ fn broadcast(code: &mut Vec<u8>, format: Format, value: u64, register: u8, targe
     }
 }
 
-fn replicate_exponent_comparison(
-    code: &mut Vec<u8>,
-    format: Format,
-    register: u8,
-    target: TargetCpu,
-) {
+fn replicate_exponent_comparison(code: &mut Code, format: Format, register: u8, target: TargetCpu) {
     if format == Format::Double {
         // Only the high dword contains exponent bits in a Double lane.
         Host::ShuffleDword.register(code, register, register, target);
@@ -94,7 +90,7 @@ fn replicate_exponent_comparison(
     }
 }
 
-fn subtract(code: &mut Vec<u8>, format: Format, destination: u8, source: u8, target: TargetCpu) {
+fn subtract(code: &mut Code, format: Format, destination: u8, source: u8, target: TargetCpu) {
     match format {
         Format::Single => Host::SubDword,
         Format::Double => Host::SubQword,
@@ -103,7 +99,7 @@ fn subtract(code: &mut Vec<u8>, format: Format, destination: u8, source: u8, tar
     .register(code, destination, source, target);
 }
 
-fn right_shift(code: &mut Vec<u8>, format: Format, register: u8, amount: u8) {
+fn right_shift(code: &mut Code, format: Format, register: u8, amount: u8) {
     match format {
         Format::Single => ShiftOpcode::RightDword,
         Format::Double => ShiftOpcode::RightQword,
@@ -112,7 +108,7 @@ fn right_shift(code: &mut Vec<u8>, format: Format, register: u8, amount: u8) {
     .emit(code, register, amount);
 }
 
-fn reciprocal_exponent(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn reciprocal_exponent(code: &mut Code, format: Format, target: TargetCpu) {
     Host::MoveAligned.register(code, TEST_MASK, VALUE, target);
     Host::And.register(code, TEST_MASK, EXPONENT_MASK, target);
     Host::Xor.register(code, TEMPORARY, TEMPORARY, target);
@@ -129,7 +125,7 @@ fn reciprocal_exponent(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 }
 
 fn logarithm_exponent(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -163,7 +159,7 @@ fn logarithm_exponent(
 /// Clobbers volatile RAX/RCX/RDX, host flags and XMM0..7. RDI/R15, guest NZCV,
 /// FPSR, raw FPCR, sources and caller MXCSR survive until the only staged commit.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

@@ -3,8 +3,8 @@ use super::{multiply_low_for_target, packed};
 use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -33,22 +33,22 @@ const MOVQ_TO_GPR: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
 const IMUL_RCX_RAX: [u8; 4] = [0x48, 0x0f, 0xaf, 0xc8];
 const IMUL_RDX_RAX: [u8; 4] = [0x48, 0x0f, 0xaf, 0xd0];
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, register: u8, control: u8) {
+fn shuffle(code: &mut Code, opcode: Host, register: u8, control: u8) {
     packed(code, opcode, register, register);
     code.push(control);
 }
 
-fn extract_qword(code: &mut Vec<u8>, xmm: u8, gpr: u8) {
+fn extract_qword(code: &mut Code, xmm: u8, gpr: u8) {
     code.extend(MOVQ_TO_GPR);
     code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
 }
 
-fn insert_qword(code: &mut Vec<u8>, xmm: u8, gpr: u8) {
+fn insert_qword(code: &mut Code, xmm: u8, gpr: u8) {
     Host::MoveGprQword.append(code, TargetCpu::Baseline);
     code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
 }
 
-fn doubleword_products(code: &mut Vec<u8>, rotation_degrees: u16) {
+fn doubleword_products(code: &mut Code, rotation_degrees: u16) {
     // A doubleword chunk contains one complex pair. Extract its selected Zn
     // component once, then form both low products without stack snapshots.
     let imaginary = matches!(
@@ -72,7 +72,7 @@ fn doubleword_products(code: &mut Vec<u8>, rotation_degrees: u16) {
 /// Replicate the selected Zn component into each complex pair and rotate Zm's
 /// component order when selecting imaginary Zn. Preserves XMM4 and XMM7;
 /// consumes XMM0..2. The caller validates component width and rotation.
-pub(super) fn prepare_products(code: &mut Vec<u8>, element: ElementSize, rotation_degrees: u16) {
+pub(super) fn prepare_products(code: &mut Code, element: ElementSize, rotation_degrees: u16) {
     let imaginary = matches!(
         rotation_degrees,
         QUARTER_TURN_DEGREES | THREE_QUARTER_TURN_DEGREES
@@ -134,7 +134,7 @@ pub(super) fn prepare_products(code: &mut Vec<u8>, element: ElementSize, rotatio
     }
 }
 
-fn negative_component_mask(code: &mut Vec<u8>, element: ElementSize, rotation_degrees: u16) {
+fn negative_component_mask(code: &mut Code, element: ElementSize, rotation_degrees: u16) {
     let odd = rotation_degrees == THREE_QUARTER_TURN_DEGREES;
     let (shift, amount) = match (element, odd) {
         (ElementSize::Byte, false) => (Shift::RightWord, BYTE_BITS),
@@ -159,7 +159,7 @@ fn negative_component_mask(code: &mut Vec<u8>, element: ElementSize, rotation_de
 /// Select between XMM0=minus result and XMM2=plus result for a quarter-turn
 /// rotation. Returns XMM0, consumes XMM5 and preserves XMM2/4/7. This also
 /// serves rounded complex arithmetic, whose directions must saturate separately.
-pub(super) fn blend_directions(code: &mut Vec<u8>, element: ElementSize, rotation_degrees: u16) {
+pub(super) fn blend_directions(code: &mut Code, element: ElementSize, rotation_degrees: u16) {
     negative_component_mask(code, element, rotation_degrees);
     packed(code, Host::And, RESULT, NEGATIVE_COMPONENTS);
     packed(code, Host::AndNot, NEGATIVE_COMPONENTS, TEMPORARY);
@@ -171,7 +171,7 @@ pub(super) fn blend_directions(code: &mut Vec<u8>, element: ElementSize, rotatio
 /// guest architectural status, host MXCSR, RAM and the stack pointer. Doubleword
 /// products additionally consume caller-saved RAX/RCX/RDX.
 pub(super) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     rotation_degrees: u16,
     target: TargetCpu,

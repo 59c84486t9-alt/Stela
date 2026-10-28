@@ -5,7 +5,7 @@
 //! for the AES constants) carries the caller's RSP into the frame's last slot.
 //! The frame is restored before the destination is written.
 use super::{BYTE_BITS, Host, LEFT, MASK, RESULT, Shift, TargetCpu, byte_constant, packed};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const VECTOR_BYTES: u32 = 16;
 const INPUT_PLANES: usize = 8;
@@ -273,18 +273,18 @@ const INVERSE_GATES: [Gate; 121] = [
 ];
 const INVERSE_OUTPUTS: [u8; 8] = [118, 123, 125, 116, 128, 120, 117, 113];
 
-fn stack_plane(code: &mut Vec<u8>, register: u8, plane: usize, opcode: Host) {
+fn stack_plane(code: &mut Code, register: u8, plane: usize, opcode: Host) {
     opcode.append(code, TargetCpu::Baseline);
     stack_slot(code, register, plane);
 }
 
 /// The `[rsp + plane * 16]` operand of `register`, after its opcode.
-fn stack_slot(code: &mut Vec<u8>, register: u8, plane: usize) {
+fn stack_slot(code: &mut Code, register: u8, plane: usize) {
     code.extend([STACK_MODRM_DISP32 | (register << 3), STACK_SIB]);
     code.extend((plane as u32 * VECTOR_BYTES).to_le_bytes());
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, inverse: bool) {
+pub(super) fn emit(code: &mut Code, inverse: bool) {
     let (gates, outputs): (&[Gate], [u8; 8]) = if inverse {
         (&INVERSE_GATES, INVERSE_OUTPUTS)
     } else {

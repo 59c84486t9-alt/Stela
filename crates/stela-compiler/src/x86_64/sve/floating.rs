@@ -1,7 +1,7 @@
 //! SVE floating-point emission: native paths for ordinary values, software
 //! completion for the rest.
+use crate::x86_64::asm::Code;
 
-use alloc::vec::Vec;
 mod add_reductions;
 mod arithmetic;
 mod arithmetic_dispatch;
@@ -35,7 +35,7 @@ use crate::{
 /// Try the admitted instruction's native mapping. A declined shape leaves its
 /// architectural effects to the shared exact numerical completion boundary.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     word: u32,
     operation: Operation,
     length: VectorLength,

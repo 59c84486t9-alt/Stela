@@ -4,6 +4,7 @@ use crate::aarch64::{
     scalable::ElementSize,
     sve::shifts::{Count, Kind},
 };
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 
 const CHUNK_BYTES: usize = 16;
@@ -46,7 +47,7 @@ const MOV_WORD_RSP_AX: [u8; 3] = [0x66, 0x89, 0x44];
 const MOV_DWORD_RSP_EAX: [u8; 2] = [0x89, 0x44];
 const MOV_QWORD_RSP_RAX: [u8; 3] = [0x48, 0x89, 0x44];
 
-fn load_lane(code: &mut Vec<u8>, bytes: usize, signed: bool, slot: u8) {
+fn load_lane(code: &mut Code, bytes: usize, signed: bool, slot: u8) {
     code.extend_from_slice(match (bytes, signed) {
         (1, false) => &MOVZX_EAX_BYTE_RSP,
         (1, true) => &MOVSX_RAX_BYTE_RSP,
@@ -60,7 +61,7 @@ fn load_lane(code: &mut Vec<u8>, bytes: usize, signed: bool, slot: u8) {
     code.extend([STACK_SIB, slot]);
 }
 
-fn store_lane(code: &mut Vec<u8>, bytes: usize, slot: u8) {
+fn store_lane(code: &mut Code, bytes: usize, slot: u8) {
     code.extend_from_slice(match bytes {
         1 => &MOV_BYTE_RSP_AL,
         2 => &MOV_WORD_RSP_AX,
@@ -79,7 +80,7 @@ enum Branch {
     Above,
     AboveOrEqual,
 }
-fn branch(code: &mut Vec<u8>, condition: Branch) -> usize {
+fn branch(code: &mut Code, condition: Branch) -> usize {
     match condition {
         Branch::Always => code.push(0xe9),
         Branch::Nonnegative => code.extend([0x0f, 0x89]),
@@ -103,7 +104,7 @@ enum Shift {
     ArithmeticRight,
 }
 impl Shift {
-    fn count(self, code: &mut Vec<u8>, temporary: bool) {
+    fn count(self, code: &mut Code, temporary: bool) {
         let group = match self {
             Self::Left => 4,
             Self::LogicalRight => 5,
@@ -115,7 +116,7 @@ impl Shift {
             0xc0 | group << 3 | if temporary { 2 } else { 0 },
         ]);
     }
-    fn immediate(self, code: &mut Vec<u8>, amount: u8) {
+    fn immediate(self, code: &mut Code, amount: u8) {
         let group = match self {
             Self::Left => 4,
             Self::LogicalRight => 5,
@@ -125,11 +126,11 @@ impl Shift {
     }
 }
 
-fn bound(code: &mut Vec<u8>, value: u64, rdx: bool) {
+fn bound(code: &mut Code, value: u64, rdx: bool) {
     code.extend(if rdx { MOVABS_RDX } else { MOVABS_RAX });
     code.extend(value.to_le_bytes());
 }
-fn normalize(code: &mut Vec<u8>, bits: u8, signed: bool) {
+fn normalize(code: &mut Code, bits: u8, signed: bool) {
     if bits < HOST_BITS {
         Shift::Left.immediate(code, HOST_BITS - bits);
         if signed {
@@ -144,7 +145,7 @@ fn normalize(code: &mut Vec<u8>, bits: u8, signed: bool) {
 /// Preloaded XMM0=data and XMM1=complete signed counts; result XMM0.
 /// Preserves other XMMs and RDI/R15, clobbers RAX/RCX/RDX/R10, restores RSP.
 /// Group instructions own source snapshots, group ordering and destination commit.
-pub(crate) fn rounding_variable_chunk(code: &mut Vec<u8>, element_size: ElementSize, signed: bool) {
+pub(crate) fn rounding_variable_chunk(code: &mut Code, element_size: ElementSize, signed: bool) {
     super::adjust_stack(code, STACK_BYTES, true);
     chunk(
         code,
@@ -159,7 +160,7 @@ pub(crate) fn rounding_variable_chunk(code: &mut Vec<u8>, element_size: ElementS
     super::adjust_stack(code, STACK_BYTES, false);
 }
 
-pub(super) fn chunk(code: &mut Vec<u8>, kind: Kind, element_size: ElementSize, count: Count) {
+pub(super) fn chunk(code: &mut Code, kind: Kind, element_size: ElementSize, count: Count) {
     stack_vector(code, 0, SOURCE_SLOT, true);
     if !matches!(count, Count::Immediate(_)) {
         stack_vector(code, 1, COUNT_SLOT, true);
@@ -260,13 +261,13 @@ pub(super) fn chunk(code: &mut Vec<u8>, kind: Kind, element_size: ElementSize, c
     stack_vector(code, 0, RESULT_SLOT, false);
 }
 
-fn clamp_unsigned_count(code: &mut Vec<u8>, bits: u8) {
+fn clamp_unsigned_count(code: &mut Code, bits: u8) {
     // Compare the full count before x86 CL masking; source RAX remains intact.
     bound(code, u64::from(bits), true);
     code.extend(CMP_RCX_RDX);
     code.extend([0x48, 0x0f, 0x47, 0xca]); // cmova rcx,rdx
 }
-fn clamp_signed_count(code: &mut Vec<u8>, bits: u8) {
+fn clamp_signed_count(code: &mut Code, bits: u8) {
     let ceiling = i64::from(bits) + 1;
     bound(code, ceiling as u64, true);
     code.extend(CMP_RCX_RDX);
@@ -278,7 +279,7 @@ fn clamp_signed_count(code: &mut Vec<u8>, bits: u8) {
     code.push(0xca);
 }
 
-fn divide_signed(code: &mut Vec<u8>, bits: u8, amount: u8) {
+fn divide_signed(code: &mut Code, bits: u8, amount: u8) {
     if amount == bits {
         code.extend(XOR_EAX);
         return;
@@ -291,7 +292,7 @@ fn divide_signed(code: &mut Vec<u8>, bits: u8, amount: u8) {
     Shift::ArithmeticRight.immediate(code, amount);
 }
 
-fn right(code: &mut Vec<u8>, signed: bool, round: bool) {
+fn right(code: &mut Code, signed: bool, round: bool) {
     code.extend(CMP_ECX_IMM8);
     code.push(HOST_BITS);
     let large = branch(code, Branch::AboveOrEqual);
@@ -321,7 +322,7 @@ fn right(code: &mut Vec<u8>, signed: bool, round: bool) {
     resolve(code, done);
 }
 
-fn left(code: &mut Vec<u8>, bits: u8, signed: bool, unsigned_result: bool, saturating: bool) {
+fn left(code: &mut Code, bits: u8, signed: bool, unsigned_result: bool, saturating: bool) {
     let mut done = Vec::new();
     let mut negative = None;
     if saturating {

@@ -1,12 +1,12 @@
 //! Immediate construction and lane moves.
 use super::{Host, commit, packed, read_vector, rearrange};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::immediates::{ConstantOperation, Operand},
 };
-use alloc::vec::Vec;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand::Constant {
         destination,
         value,

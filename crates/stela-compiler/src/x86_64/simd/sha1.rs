@@ -4,12 +4,12 @@ use super::sha32::{
     move_to_vector, pack_state, read_scalar_vector,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::sha1::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
 const EAX: u8 = 0;
 const ECX: u8 = 1;
@@ -42,7 +42,7 @@ const CHOOSE_CONSTANT: u32 = 0x5a827999;
 const PARITY_CONSTANT: u32 = 0x6ed9eba1;
 const MAJORITY_CONSTANT: u32 = 0x8f1bbcdc;
 
-fn rounds_baseline(code: &mut Vec<u8>, operand: &Operand) {
+fn rounds_baseline(code: &mut Code, operand: &Operand) {
     use Scalar32::*;
     let mut state = [EAX, ECX, EDX, ESI, R8D];
     for (lane, register) in state[..WORDS_PER_VECTOR].iter().enumerate() {
@@ -85,7 +85,7 @@ fn rounds_baseline(code: &mut Vec<u8>, operand: &Operand) {
     pack_state(code, [state[0], state[1], state[2], state[3]]);
 }
 
-fn rounds_sha(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn rounds_sha(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let (function, constant) = match operand.kind {
         Kind::Choose => (CHOOSE_FUNCTION, CHOOSE_CONSTANT),
         Kind::Parity => (PARITY_FUNCTION, PARITY_CONSTANT),
@@ -109,7 +109,7 @@ fn rounds_sha(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     shuffle(code, RESULT, RESULT, REVERSE_DWORDS);
 }
 
-fn schedule0(code: &mut Vec<u8>, operand: &Operand) {
+fn schedule0(code: &mut Code, operand: &Operand) {
     read_vector(code, operand.destination, RESULT);
     read_vector(code, operand.left, LEFT);
     read_vector(code, operand.right, RIGHT);
@@ -119,13 +119,13 @@ fn schedule0(code: &mut Vec<u8>, operand: &Operand) {
     packed(code, Host::Xor, RESULT, TEMPORARY);
     packed(code, Host::Xor, RESULT, RIGHT);
 }
-fn rotate_lanes(code: &mut Vec<u8>, vector: u8, temporary: u8, amount: u8) {
+fn rotate_lanes(code: &mut Code, vector: u8, temporary: u8, amount: u8) {
     packed(code, Host::MoveAligned, temporary, vector);
     Shift::LeftDword.emit(code, vector, amount);
     Shift::RightDword.emit(code, temporary, WORD_BITS - amount);
     packed(code, Host::Or, vector, temporary);
 }
-fn schedule1(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn schedule1(code: &mut Code, operand: &Operand, target: TargetCpu) {
     read_vector(code, operand.destination, RESULT);
     read_vector(code, operand.left, LEFT);
     if target.supports(TargetCpu::Sha) {
@@ -144,7 +144,7 @@ fn schedule1(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match operand.kind {
         Kind::Choose | Kind::Parity | Kind::Majority => {
             if target.supports(TargetCpu::Sha) {
@@ -167,7 +167,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn baseline_has_no_sha_and_checked_rounds_cancel_the_selected_constant() {
@@ -182,10 +181,10 @@ mod tests {
                 left: 31,
                 right: 31,
             };
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             emit(&mut baseline, &operand, TargetCpu::Baseline);
             assert!(!baseline.windows(3).any(|w| w == [0x0f, 0x3a, 0xcc]));
-            let mut checked = Vec::new();
+            let mut checked = Code::new();
             emit(&mut checked, &operand, TargetCpu::Sha);
             assert!(checked.windows(3).any(|w| w == [0x0f, 0x3a, 0xcc]));
             assert!(checked.windows(4).any(|w| w == constant.to_le_bytes()));

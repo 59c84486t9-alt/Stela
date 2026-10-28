@@ -8,6 +8,7 @@ use super::numerical::{
     reject_other_status, resolve, restore_environment, test_control, vector_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress,
     aarch64::{
@@ -74,12 +75,12 @@ const DOUBLE_TO_SINGLE_DISCARDED_MASK: u32 = (1 << DOUBLE_TO_SINGLE_DISCARDED_BI
 const COMPACT_QWORD_LOW_DWORDS: u8 = 0x88;
 const DWORD_SIGN_TO_LSB_SHIFT: u8 = u32::BITS as u8 - 1;
 
-fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn scalar_commit(code: &mut Vec<u8>, destination: u8, format: Format) {
+fn scalar_commit(code: &mut Code, destination: u8, format: Format) {
     test_control(code, FPCR_NEP);
     let merging = branch(code, Condition::NotZero);
     clear_scalar(code, format, RESULT_VECTOR);
@@ -88,7 +89,7 @@ fn scalar_commit(code: &mut Vec<u8>, destination: u8, format: Format) {
     commit(code, destination, RESULT_VECTOR);
 }
 
-fn half_normal_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn half_normal_guard(code: &mut Code, helper: &mut Vec<usize>) {
     code.extend(MOVD_EAX_XMM1);
     code.extend(SHR_EAX_IMM8);
     code.push(Format::Half.fraction_bits() as u8);
@@ -102,7 +103,7 @@ fn half_normal_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
 
 /// Exact normal half widening uses only field construction. In particular,
 /// conversion ignores FZ16, and no host numerical half extension is assumed.
-fn half_to_single(code: &mut Vec<u8>) {
+fn half_to_single(code: &mut Code) {
     code.extend(MOVD_EAX_XMM1);
     code.extend(MOV_ECX_EAX);
     code.push(AND_EAX_IMM32);
@@ -119,7 +120,7 @@ fn half_to_single(code: &mut Vec<u8>) {
     code.extend(MOVD_XMM1_EAX);
 }
 
-fn scalar_odd_jam(code: &mut Vec<u8>) {
+fn scalar_odd_jam(code: &mut Code) {
     // The source is a normal double and the result a normal single, so exactly
     // the low 29 fraction bits are discarded.
     code.extend(MOVQ_RAX_XMM1);
@@ -131,7 +132,7 @@ fn scalar_odd_jam(code: &mut Vec<u8>) {
     packed(code, Host::Or, RESULT_VECTOR, JAM_VECTOR);
 }
 
-pub(in crate::x86_64) fn jam_odd_pair(code: &mut Vec<u8>, one_vector: u8) {
+pub(in crate::x86_64) fn jam_odd_pair(code: &mut Code, one_vector: u8) {
     // The normal single widens exactly and is compared with its source double
     // lane without raising host status. A lane's sticky bit never comes from
     // the aggregate PE flag. The range preparation leaves 1 in every dword of
@@ -146,12 +147,12 @@ pub(in crate::x86_64) fn jam_odd_pair(code: &mut Vec<u8>, one_vector: u8) {
     packed(code, Host::Or, RESULT_VECTOR, JAM_VECTOR);
 }
 
-fn vector_odd_jam(code: &mut Vec<u8>) {
+fn vector_odd_jam(code: &mut Code) {
     jam_odd_pair(code, MINIMUM_EXPONENT_VECTOR);
 }
 
 fn emit_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &PrecisionOperand,
     source: Format,
     destination: Format,
@@ -204,7 +205,7 @@ fn emit_scalar(
     scalar_commit(code, operand.destination, destination);
 }
 
-fn half_vector_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn half_vector_guard(code: &mut Code, helper: &mut Vec<usize>) {
     packed(
         code,
         Host::EqualDword,
@@ -241,7 +242,7 @@ fn half_vector_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn emit_widen_half(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
+fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_vector(code, operand.source, SOURCE_VECTOR);
@@ -272,7 +273,7 @@ fn emit_widen_half(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, 
     commit(code, operand.destination, RESULT_VECTOR);
 }
 
-fn emit_widen(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
+fn emit_widen(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_vector(code, operand.source, SOURCE_VECTOR);
@@ -288,7 +289,7 @@ fn emit_widen(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, pc: G
 }
 
 fn emit_narrow(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &PrecisionOperand,
     upper: bool,
     rounding: PrecisionRounding,
@@ -331,7 +332,7 @@ fn emit_narrow(
     }
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &PrecisionOperand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(code: &mut Code, operand: &PrecisionOperand, pc: GuestAddress) {
     match operand.mode {
         PrecisionMode::Scalar {
             source,

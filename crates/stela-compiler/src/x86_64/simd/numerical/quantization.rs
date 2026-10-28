@@ -4,7 +4,7 @@ use super::{
     AND_ECX_IMM32, Condition, MOV_ECX_STATE, SHR_ECX_IMM8, TEST_ECX_IMM32, branch, resolve,
 };
 use crate::GuestState;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const ROUND_TOWARD_POSITIVE: u8 = 1;
 const MOVD_XMM_EXTENDED_GPR_PREFIX: &[u8] = &[0x66, 0x41, 0x0f, 0x6e];
@@ -36,7 +36,7 @@ pub(in crate::x86_64) enum IntegerRoundingRegister {
 }
 
 pub(in crate::x86_64) fn broadcast_integer_rounding(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     vector: u8,
     register: IntegerRoundingRegister,
 ) {
@@ -49,7 +49,7 @@ pub(in crate::x86_64) fn broadcast_integer_rounding(
 /// R10D starts fresh exception accumulation; ordinary arithmetic keeps guest RC,
 /// while BF16 conversion selects nearest-even when alternative handling is set.
 pub(in crate::x86_64) fn integer_rounding_policy(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     discarded_bits: u8,
     alternative_nearest: bool,
 ) {

@@ -4,7 +4,7 @@ use crate::aarch64::{
     prefetch::{Address, Hint, Operand},
     register_offset::IndexExtend,
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
 const MOV_ECX_STATE: &[u8] = &[0x8b, 0x8f];
@@ -56,7 +56,7 @@ fn locality(hint: Hint) -> Option<Locality> {
     })
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     let Some(locality) = locality(operand.hint) else {
         // One byte preserves strict source-map intervals for the no-action hint.
         code.push(NOP);
@@ -100,7 +100,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-fn immediate(code: &mut Vec<u8>, locality: Locality, displacement: i32) {
+fn immediate(code: &mut Code, locality: Locality, displacement: i32) {
     code.extend(PREFETCH);
     if displacement == 0 {
         code.push(locality.modrm()); // [rax]
@@ -117,14 +117,14 @@ fn immediate(code: &mut Vec<u8>, locality: Locality, displacement: i32) {
 mod tests {
     use super::*;
     use crate::{GuestAddress, aarch64::prefetch};
-    use alloc::vec;
+
     use alloc::vec::Vec;
 
     fn emitted(word: u32) -> Vec<u8> {
         let operand = prefetch::decode(GuestAddress(0), word).unwrap().unwrap();
-        let mut code = vec![];
+        let mut code = Code::new();
         emit(&mut code, &operand);
-        code
+        code.into_bytes()
     }
 
     #[test]

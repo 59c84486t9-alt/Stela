@@ -10,6 +10,7 @@ use super::numerical::{
     test_control, vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -34,7 +35,7 @@ const DOUBLE_PREFIX: u8 = 0xf2;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 
-fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
         code,
         operand.format,
@@ -44,7 +45,7 @@ fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     );
 }
 
-fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_right(code: &mut Code, operand: &Operand) {
     read_numerical_right(
         code,
         operand.format,
@@ -54,7 +55,7 @@ fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
     );
 }
 
-fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {
+fn prepare_negation(code: &mut Code, operand: &Operand) -> u8 {
     let merge = if operand.shape == Shape::Scalar && operand.operation.negate_addend() {
         packed(code, Host::MoveAligned, ORIGINAL_ADDEND, ADDEND);
         ORIGINAL_ADDEND
@@ -81,7 +82,7 @@ fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {
 
 /// With FMA3, S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
@@ -213,7 +214,7 @@ pub(in crate::x86_64) fn emit(
 /// and past the full path, and those between the sticky path and the rest
 /// ([`ColdSplit`]).
 fn sticky_path(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: TargetCpu,
     entry: Entry,

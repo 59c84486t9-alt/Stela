@@ -1,11 +1,11 @@
 //! SP alignment checks and address arithmetic for checked accesses.
 use super::{fault, patch_branch};
+use crate::x86_64::asm::Code;
 use crate::x86_64::load;
 use crate::{
     aarch64::{AddressMode, Register, register_offset::IndexExtend},
     context::memory::{MemoryStatus, address::AddressAddChecks},
 };
-use alloc::vec::Vec;
 
 const STACK_ALIGNMENT_MASK: u8 = 15;
 const TEST_AL_IMM8: u8 = 0xa8;
@@ -23,7 +23,7 @@ const MOV_RAX_R8: &[u8] = &[0x4c, 0x89, 0xc0];
 /// Check SP before the offset is applied. The caller patches the returned rel32
 /// to its cleanup. On failure RAX holds the faulting SP. Clobbers RAX/RCX/RDX
 /// and flags.
-pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<usize> {
+pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize> {
     if base != Register::Sp {
         return None;
     }
@@ -43,14 +43,14 @@ pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<us
 
 /// Return only after scratch cleanup. The checked outer CALL wrapper owns R15.
 /// The runtime inspects the fault view before interpreting native block returns.
-pub(crate) fn return_if_failed(code: &mut Vec<u8>) {
+pub(crate) fn return_if_failed(code: &mut Code) {
     code.extend(TEST_EAX_EAX);
     code.extend([JE_REL8, 1, RET]);
 }
 
 /// Unchecked arithmetic AFTER check_sp ([`crate::x86_64::address_add`]).
 /// Snapshot pending writeback before callbacks; commit only on full success.
-pub(crate) fn immediate(code: &mut Vec<u8>, base: Register, displacement: i32, mode: AddressMode) {
+pub(crate) fn immediate(code: &mut Code, base: Register, displacement: i32, mode: AddressMode) {
     load(code, base);
     crate::x86_64::address_add(code, displacement, mode);
 }
@@ -60,7 +60,7 @@ pub(crate) fn immediate(code: &mut Vec<u8>, base: Register, displacement: i32, m
 /// leave the pending writeback in RDX. Post-index keeps the original access
 /// address and marks only the writeback.
 pub(crate) fn immediate_with_checks(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     base: Register,
     displacement: i32,
     mode: AddressMode,
@@ -97,7 +97,7 @@ pub(crate) fn immediate_with_checks(
 /// Unchecked arithmetic AFTER check_sp. RAX=EA; no base writeback. Operands are
 /// the existing validated decoder types, including W extension and ZR index.
 pub(crate) fn register_offset(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     base: Register,
     index: Register,
     extend: IndexExtend,
@@ -110,7 +110,7 @@ pub(crate) fn register_offset(
 /// AddressAdd for an extended or shifted register offset. RAX is the effective
 /// address and RDX keeps the base. There is no writeback.
 pub(crate) fn register_offset_with_checks(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     base: Register,
     index: Register,
     extend: IndexExtend,

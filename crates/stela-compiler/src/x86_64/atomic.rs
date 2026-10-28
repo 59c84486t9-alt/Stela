@@ -4,7 +4,7 @@ use crate::aarch64::{
     Register,
     atomic::{Kind, Operand},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 mod compare_exchange;
 mod compare_exchange_pair;
@@ -80,7 +80,7 @@ pub(super) fn requires_cx16(
 /// a store to read-only memory WnR 1, as Arm requires of an atomic that
 /// reads and writes (ESR_ELx.WnR); a locked x86 update faults as a write.
 pub(super) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
@@ -98,7 +98,7 @@ pub(super) fn emit(
 
 /// SP is checked first. LSE2 accesses must fit the selected aligned 16-byte granule.
 /// RAX/RCX are scratch, RDX receives the address, and guest state is untouched.
-pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8, checks: super::MemoryChecks) {
+pub(super) fn address(code: &mut Code, base: Register, bytes: u8, checks: super::MemoryChecks) {
     let access = super::Access::write(bytes.into()).atomic();
     address_offset(code, base, bytes, 0, checks, true, access);
 }
@@ -108,7 +108,7 @@ pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8, checks: sup
 /// a known-aligned SP needs no run-time boundary test. Without the SP
 /// alignment check, SP is an ordinary base.
 pub(super) fn address_offset(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     base: Register,
     bytes: u8,
     displacement: i32,
@@ -147,7 +147,7 @@ pub(super) fn address_offset(
     code.extend(MOV_RDX_RAX);
 }
 
-fn input(code: &mut Vec<u8>, bytes: u8, register: Register, destination: InputRegister) {
+fn input(code: &mut Code, bytes: u8, register: Register, destination: InputRegister) {
     let rcx = matches!(destination, InputRegister::Rcx);
     let Some(displacement) = offset(register) else {
         code.extend(if rcx { XOR_ECX_ECX } else { XOR_EAX_EAX });
@@ -164,16 +164,16 @@ fn input(code: &mut Vec<u8>, bytes: u8, register: Register, destination: InputRe
     code.extend(displacement.to_le_bytes());
 }
 
-pub(super) fn input_rax(code: &mut Vec<u8>, bytes: u8, register: Register) {
+pub(super) fn input_rax(code: &mut Code, bytes: u8, register: Register) {
     input(code, bytes, register, InputRegister::Rax);
 }
 
-pub(super) fn input_rcx(code: &mut Vec<u8>, bytes: u8, register: Register) {
+pub(super) fn input_rcx(code: &mut Code, bytes: u8, register: Register) {
     input(code, bytes, register, InputRegister::Rcx);
 }
 
 /// [`input_rcx`] without changing the host flags: ZR is a MOV of zero.
-pub(super) fn input_rcx_keeping_flags(code: &mut Vec<u8>, bytes: u8, register: Register) {
+pub(super) fn input_rcx_keeping_flags(code: &mut Code, bytes: u8, register: Register) {
     if register == Register::Zero {
         code.push(MOV_ECX_IMM32);
         code.extend(0u32.to_le_bytes());
@@ -183,7 +183,7 @@ pub(super) fn input_rcx_keeping_flags(code: &mut Vec<u8>, bytes: u8, register: R
 }
 
 /// [`input_rax`] without changing the host flags: ZR is a MOV of zero.
-pub(super) fn input_rax_keeping_flags(code: &mut Vec<u8>, bytes: u8, register: Register) {
+pub(super) fn input_rax_keeping_flags(code: &mut Code, bytes: u8, register: Register) {
     if register == Register::Zero {
         code.push(MOV_EAX_IMM32);
         code.extend(0u32.to_le_bytes());
@@ -192,16 +192,16 @@ pub(super) fn input_rax_keeping_flags(code: &mut Vec<u8>, bytes: u8, register: R
     }
 }
 
-pub(super) fn read_rax(code: &mut Vec<u8>, bytes: u8) {
+pub(super) fn read_rax(code: &mut Code, bytes: u8) {
     read(code, bytes, 0);
 }
 
 /// [RDX] at `bytes` into R8, zero-extended.
-pub(super) fn read_r8(code: &mut Vec<u8>, bytes: u8) {
+pub(super) fn read_r8(code: &mut Code, bytes: u8) {
     read(code, bytes, REX_R_BIT);
 }
 
-fn read(code: &mut Vec<u8>, bytes: u8, rex: u8) {
+fn read(code: &mut Code, bytes: u8, rex: u8) {
     let wide = if bytes == QWORD_BYTES { REX_W_BIT } else { 0 };
     if rex | wide != 0 {
         code.push(REX_PREFIX | rex | wide);
@@ -215,7 +215,7 @@ fn read(code: &mut Vec<u8>, bytes: u8, rex: u8) {
 }
 
 /// MOV of RCX's low `bytes` to [RDX].
-pub(super) fn store_rcx(code: &mut Vec<u8>, bytes: u8) {
+pub(super) fn store_rcx(code: &mut Code, bytes: u8) {
     match bytes {
         HALFWORD_BYTES => code.push(OPERAND_SIZE_PREFIX),
         QWORD_BYTES => code.push(REX_PREFIX | REX_W_BIT),
@@ -232,7 +232,7 @@ pub(super) fn store_rcx(code: &mut Vec<u8>, bytes: u8) {
 }
 
 /// Input staging and exact-width updates keep the complete old value zero-extended.
-pub(super) fn commit_rax(code: &mut Vec<u8>, bytes: u8, destination: Register) {
+pub(super) fn commit_rax(code: &mut Code, bytes: u8, destination: Register) {
     debug_assert!(matches!(
         bytes,
         BYTE_BYTES | HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES
@@ -240,7 +240,7 @@ pub(super) fn commit_rax(code: &mut Vec<u8>, bytes: u8, destination: Register) {
     store(code, destination);
 }
 
-pub(super) fn locked_compare_exchange(code: &mut Vec<u8>, bytes: u8, source: ValueRegister) {
+pub(super) fn locked_compare_exchange(code: &mut Code, bytes: u8, source: ValueRegister) {
     code.push(LOCK);
     if bytes == HALFWORD_BYTES {
         code.push(OPERAND_SIZE_PREFIX);

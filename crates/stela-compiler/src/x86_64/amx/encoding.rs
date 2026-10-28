@@ -1,6 +1,7 @@
 //! The VEX and EVEX forms the AMX kernels use (Intel SDM Vol. 2, sections 2.3
 //! and 2.7). Operands are named registers and base+displacement memory; no
 //! index registers are needed.
+use crate::x86_64::asm::Code;
 
 /// General-purpose register numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +49,7 @@ pub(crate) enum Operand {
 /// ModRM, SIB and displacement for `reg` and `rm`. `scale` is the EVEX
 /// disp8*N factor (1 for VEX and legacy encodings). RBP is never a base, so
 /// mod 00 always means no displacement.
-fn modrm(code: &mut alloc::vec::Vec<u8>, reg: u8, rm: Operand, scale: i32) {
+fn modrm(code: &mut Code, reg: u8, rm: Operand, scale: i32) {
     match rm {
         Operand::Register(register) => code.push(0xc0 | ((reg & 7) << 3) | (register & 7)),
         Operand::Memory(Memory { base, displacement }) => {
@@ -78,7 +79,7 @@ fn modrm(code: &mut alloc::vec::Vec<u8>, reg: u8, rm: Operand, scale: i32) {
 /// Three-byte VEX: C4, RXB.mmmmm, W.vvvv.L.pp, opcode, ModRM.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vex(
-    code: &mut alloc::vec::Vec<u8>,
+    code: &mut Code,
     map: Map,
     prefix: Prefix,
     wide: bool,
@@ -103,7 +104,7 @@ pub(crate) fn vex(
 /// EVEX.512: 62, P0 (R X B R' 0 0 mm), P1 (W vvvv 1 pp), P2 (z L'L b V' aaa).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evex(
-    code: &mut alloc::vec::Vec<u8>,
+    code: &mut Code,
     map: Map,
     prefix: Prefix,
     wide: bool,
@@ -148,12 +149,7 @@ pub(crate) fn evex(
 }
 
 /// A legacy-encoded `opcode /digit` with a memory operand, such as LDMXCSR.
-pub(crate) fn legacy_memory(
-    code: &mut alloc::vec::Vec<u8>,
-    opcode: &[u8],
-    digit: u8,
-    memory: Memory,
-) {
+pub(crate) fn legacy_memory(code: &mut Code, opcode: &[u8], digit: u8, memory: Memory) {
     code.extend(opcode);
     modrm(code, digit, Operand::Memory(memory), 1);
 }
@@ -161,11 +157,10 @@ pub(crate) fn legacy_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn memory_forms_use_sib_for_rsp_and_compress_evex_displacements() {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         // ldmxcsr [rsp]; stmxcsr [rsp+4]
         legacy_memory(&mut code, &[0x0f, 0xae], 2, at(Gpr::Rsp, 0));
         legacy_memory(&mut code, &[0x0f, 0xae], 3, at(Gpr::Rsp, 4));

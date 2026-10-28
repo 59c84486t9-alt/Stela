@@ -1,6 +1,7 @@
 //! SVE stores through the memory service, one element per request in ascending
 //! order. Sources and loop state live on the stack across calls.
 use super::memory as shared_address;
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -75,13 +76,13 @@ fn align(bytes: u32) -> u32 {
     bytes.div_ceil(STACK_ALIGNMENT_BYTES) * STACK_ALIGNMENT_BYTES
 }
 
-fn store_stack_chunk(code: &mut Vec<u8>, offset: u32, target: TargetCpu) {
+fn store_stack_chunk(code: &mut Code, offset: u32, target: TargetCpu) {
     Host::StoreUnaligned.append(code, target);
     code.extend([X86_MODRM_DISP32, X86_SIB_RSP]);
     code.extend(offset.to_le_bytes());
 }
 
-fn stack_rax(code: &mut Vec<u8>, offset: u32, store: bool) {
+fn stack_rax(code: &mut Code, offset: u32, store: bool) {
     code.extend(if store {
         MOV_RSP_DISP32_RAX
     } else {
@@ -90,25 +91,25 @@ fn stack_rax(code: &mut Vec<u8>, offset: u32, store: bool) {
     code.extend(offset.to_le_bytes());
 }
 
-fn set_index(code: &mut Vec<u8>) {
+fn set_index(code: &mut Code) {
     code.extend(MOV_RSP_DISP32_IMM32_QWORD);
     code.extend(INDEX_OFFSET.to_le_bytes());
     code.extend(0_u32.to_le_bytes());
 }
 
-fn load_index(code: &mut Vec<u8>) {
+fn load_index(code: &mut Code) {
     code.extend(MOV_ECX_RSP_DISP8);
     code.push(INDEX_OFFSET as u8);
 }
 
-fn add_stack(code: &mut Vec<u8>, offset: u32, bytes: u8) {
+fn add_stack(code: &mut Code, offset: u32, bytes: u8) {
     debug_assert!(bytes <= i8::MAX as u8);
     code.extend(ADD_RSP_DISP32_IMM8);
     code.extend(offset.to_le_bytes());
     code.push(bytes);
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
@@ -116,7 +117,7 @@ fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
 }
 
 fn copy_sources(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: u8,
     count: u8,
     layout: &Layout,
@@ -135,7 +136,7 @@ fn copy_sources(
     }
 }
 
-fn copy_predicate(code: &mut Vec<u8>, predicate: u8, destination: u32, length: VectorLength) {
+fn copy_predicate(code: &mut Code, predicate: u8, destination: u32, length: VectorLength) {
     for chunk in 0..length.predicate_bytes().div_ceil(HOST_QWORD_BYTES) {
         read_predicate_chunk(code, predicate, chunk, length);
         stack_rax(code, destination + (chunk * HOST_QWORD_BYTES) as u32, true);
@@ -143,7 +144,7 @@ fn copy_predicate(code: &mut Vec<u8>, predicate: u8, destination: u32, length: V
 }
 
 /// Snapshot P and branch around all source staging when no element is active.
-fn copy_active_predicate(code: &mut Vec<u8>, store: &Store, length: VectorLength) -> usize {
+fn copy_active_predicate(code: &mut Code, store: &Store, length: VectorLength) -> usize {
     let mask = (0..u64::BITS as usize)
         .step_by(store.element.bytes())
         .fold(0_u64, |bits, bit| bits | (1_u64 << bit));
@@ -167,7 +168,7 @@ fn copy_active_predicate(code: &mut Vec<u8>, store: &Store, length: VectorLength
 }
 
 fn submit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: u32,
     bytes: u32,
     descriptor: u32,
@@ -193,7 +194,7 @@ fn submit(
     failures.push(memory::branch_failed(code));
 }
 
-fn loop_end(code: &mut Vec<u8>, step: u8, limit: u32, start: usize) {
+fn loop_end(code: &mut Code, step: u8, limit: u32, start: usize) {
     add_stack(code, INDEX_OFFSET, step);
     code.extend(CMP_RSP_DISP32_IMM32);
     code.extend(INDEX_OFFSET.to_le_bytes());
@@ -203,7 +204,7 @@ fn loop_end(code: &mut Vec<u8>, step: u8, limit: u32, start: usize) {
 }
 
 fn store_loop(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     store: &Store,
     layout: &Layout,
     length: VectorLength,
@@ -247,7 +248,7 @@ fn store_loop(
 }
 
 fn whole_loop(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     store: &WholeStore,
     layout: &Layout,
     bytes: usize,
@@ -322,7 +323,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
 /// exits on nonzero. Alignment is not enforced, but the 16-byte SP check runs
 /// before any offset, even with an empty predicate.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,

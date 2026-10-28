@@ -8,9 +8,10 @@ use super::{
     SIGN_BITS, SUB_EDX_IMM8, SUB_EDX_IMM32, SUB_RAX_R9, TEST_ECX_ECX, XOR_EAX_IMM32, branch,
     immediate64, jump, resolve, shift, test_control,
 };
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 
-fn round_half_magnitude(code: &mut Vec<u8>, rounding: RoundingPolicy) {
+fn round_half_magnitude(code: &mut Code, rounding: RoundingPolicy) {
     // RAX holds the rebased double fields, RCX the sign.
     let nearest_ah = if rounding == RoundingPolicy::AhNearestEven {
         test_control(code, FPCR_AH);
@@ -58,7 +59,7 @@ fn round_half_magnitude(code: &mut Vec<u8>, rounding: RoundingPolicy) {
 }
 
 pub(in crate::x86_64) fn emit_normal(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     rollback: &mut Vec<usize>,
     rounding: RoundingPolicy,
     sign: ResultSign,

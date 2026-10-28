@@ -1,5 +1,6 @@
 //! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked.
 use super::numerical::{helper_section, jump};
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod kernel;
 use super::super::isa::ShiftOpcode;
@@ -119,7 +120,7 @@ enum Direction {
     Zero,
 }
 
-fn immediate(code: &mut Vec<u8>, instruction: &[u8], value: u32) {
+fn immediate(code: &mut Code, instruction: &[u8], value: u32) {
     code.extend(instruction);
     code.extend(value.to_le_bytes());
 }
@@ -158,7 +159,7 @@ fn fixed_direction(operation: RoundingOperation) -> Option<Direction> {
 }
 
 /// Dynamic FPCR is read at execution time, without installing host control.
-fn current_direction(code: &mut Vec<u8>, mut emit: impl FnMut(&mut Vec<u8>, Direction)) {
+fn current_direction(code: &mut Code, mut emit: impl FnMut(&mut Code, Direction)) {
     test_control(code, FPCR_HIGH_ROUNDING_BIT);
     let high = branch(code, Condition::NotZero);
     test_control(code, FPCR_LOW_ROUNDING_BIT);
@@ -185,9 +186,9 @@ fn current_direction(code: &mut Vec<u8>, mut emit: impl FnMut(&mut Vec<u8>, Dire
 }
 
 fn direction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: RoundingOperation,
-    mut emit: impl FnMut(&mut Vec<u8>, Direction),
+    mut emit: impl FnMut(&mut Code, Direction),
 ) {
     if let Some(fixed) = fixed_direction(operation) {
         emit(code, fixed);
@@ -196,7 +197,7 @@ fn direction(
     }
 }
 
-fn read_lane(code: &mut Vec<u8>, format: Format, xmm: u8) {
+fn read_lane(code: &mut Code, format: Format, xmm: u8) {
     code.extend(if format == Format::Double {
         MOVQ_TO_RAX
     } else {
@@ -209,7 +210,7 @@ fn read_lane(code: &mut Vec<u8>, format: Format, xmm: u8) {
     }
 }
 
-fn source_class(code: &mut Vec<u8>, format: Format, helper: &mut Vec<usize>) {
+fn source_class(code: &mut Code, format: Format, helper: &mut Vec<usize>) {
     code.extend(MOV_RDX_RAX);
     code.extend(MOV_RCX_RAX);
     code.extend(SHR_RCX);
@@ -227,7 +228,7 @@ fn source_class(code: &mut Vec<u8>, format: Format, helper: &mut Vec<usize>) {
     resolve(code, normal, accepted);
 }
 
-fn fractional_bias(code: &mut Vec<u8>, format: Format, rounding: Direction) {
+fn fractional_bias(code: &mut Code, format: Format, rounding: Direction) {
     match rounding {
         Direction::NearestEven => {
             code.extend(SHR_R8_1);
@@ -250,7 +251,7 @@ fn fractional_bias(code: &mut Vec<u8>, format: Format, rounding: Direction) {
     }
 }
 
-fn or_one(code: &mut Vec<u8>, format: Format) {
+fn or_one(code: &mut Code, format: Format) {
     let one = u64::from(bias(format)) << format.fraction_bits();
     if format == Format::Double {
         code.extend(MOVABS_R8);
@@ -262,7 +263,7 @@ fn or_one(code: &mut Vec<u8>, format: Format) {
     }
 }
 
-fn small_increment(code: &mut Vec<u8>, format: Format, rounding: Direction, done: &mut Vec<usize>) {
+fn small_increment(code: &mut Code, format: Format, rounding: Direction, done: &mut Vec<usize>) {
     match rounding {
         Direction::NearestEven | Direction::NearestAway => {
             immediate(code, CMP_ECX, bias(format) - 1);
@@ -292,7 +293,7 @@ fn small_increment(code: &mut Vec<u8>, format: Format, rounding: Direction, done
     }
 }
 
-fn bounded(code: &mut Vec<u8>, format: Format, width: u32, helper: &mut Vec<usize>) {
+fn bounded(code: &mut Code, format: Format, width: u32, helper: &mut Vec<usize>) {
     code.extend(MOV_R9_RAX);
     code.extend(BTR_R9);
     code.push(sign_bit(format));
@@ -308,7 +309,7 @@ fn bounded(code: &mut Vec<u8>, format: Format, width: u32, helper: &mut Vec<usiz
     resolve(code, smaller, accepted);
 }
 
-fn integer_lane(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn integer_lane(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let format = operand.format;
     read_lane(code, format, SOURCE);
     source_class(code, format, helper);
@@ -364,7 +365,7 @@ fn integer_lane(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
     }
 }
 
-fn insert_lane(code: &mut Vec<u8>, operand: &Operand) {
+fn insert_lane(code: &mut Code, operand: &Operand) {
     match operand.format {
         Format::Half => {
             code.extend(PINSRW_FROM_EAX);
@@ -385,7 +386,7 @@ fn insert_lane(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-fn integer_rounding(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn integer_rounding(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     if operand.operation.exact() {
         code.extend(XOR_R10D_R10D);
     }
@@ -428,7 +429,7 @@ fn packed_right(format: Format) -> ShiftOpcode {
     }
 }
 
-fn checked_source(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn checked_source(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let format = operand.format;
     prepare_vector_input_range(code, format);
     vector_exponent_range(code, format, operand.shape, SOURCE);
@@ -472,7 +473,7 @@ fn checked_source(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>
 }
 
 fn round_instruction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     rounding: Direction,
@@ -496,7 +497,7 @@ fn round_instruction(
     code.push(PRECISION_SUPPRESSED | mode);
 }
 
-fn fp_prefix(code: &mut Vec<u8>, format: Format, shape: Shape) {
+fn fp_prefix(code: &mut Code, format: Format, shape: Shape) {
     if shape == Shape::Scalar {
         code.push(if format == Format::Double {
             SCALAR_DOUBLE_PREFIX
@@ -509,7 +510,7 @@ fn fp_prefix(code: &mut Vec<u8>, format: Format, shape: Shape) {
 }
 
 fn fp_arithmetic(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     opcode: ArithmeticOpcode,
@@ -524,7 +525,7 @@ fn fp_arithmetic(
     ]);
 }
 
-fn splat(code: &mut Vec<u8>, format: Format, vector: u8, bits: u64) {
+fn splat(code: &mut Code, format: Format, vector: u8, bits: u64) {
     code.extend(MOVABS_RAX);
     code.extend(bits.to_le_bytes());
     packed(code, Host::MoveGprQword, vector, ACCUMULATOR_GPR);
@@ -535,12 +536,12 @@ fn splat(code: &mut Vec<u8>, format: Format, vector: u8, bits: u64) {
     }
 }
 
-fn magnitude_mask(code: &mut Vec<u8>, format: Format, vector: u8) {
+fn magnitude_mask(code: &mut Code, format: Format, vector: u8) {
     packed(code, Host::EqualDword, vector, vector);
     packed_right(format).emit(code, vector, SIGN_BITS as u8);
 }
 
-fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu) {
+fn ties_away(code: &mut Code, format: Format, shape: Shape, target: TargetCpu) {
     round_instruction(code, format, shape, Direction::Zero, target);
     packed(code, Host::MoveAligned, RESIDUAL, SOURCE);
     fp_arithmetic(
@@ -590,7 +591,7 @@ fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu
 }
 
 fn checked_compute(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: RoundingOperation,
     format: Format,
     shape: Shape,
@@ -605,7 +606,7 @@ fn checked_compute(
     }
 }
 
-fn half_bias(code: &mut Vec<u8>, vector: u8) {
+fn half_bias(code: &mut Code, vector: u8) {
     let adjustment = (bias(Format::Single) - bias(Format::Half)) << Format::Single.fraction_bits();
     let position = adjustment.trailing_zeros();
     let digits = (adjustment >> position).ilog2() + 1;
@@ -614,7 +615,7 @@ fn half_bias(code: &mut Vec<u8>, vector: u8) {
     ShiftOpcode::LeftDword.emit(code, vector, position as u8);
 }
 
-fn widen_half(code: &mut Vec<u8>, upper: bool) {
+fn widen_half(code: &mut Code, upper: bool) {
     let sign_shift = (Format::Single.bits() - Format::Half.bits()) as u8;
     let strip_sign = sign_shift + SIGN_BITS as u8;
     let fraction_shift = (Format::Single.fraction_bits() - Format::Half.fraction_bits()) as u8;
@@ -641,7 +642,7 @@ fn widen_half(code: &mut Vec<u8>, upper: bool) {
     packed(code, Host::MoveAligned, SOURCE, RESIDUAL);
 }
 
-fn pack_half(code: &mut Vec<u8>, target: TargetCpu) {
+fn pack_half(code: &mut Code, target: TargetCpu) {
     packed(code, Host::MoveAligned, TEMP, RESULT);
     ShiftOpcode::RightDword.emit(code, TEMP, sign_bit(Format::Single));
     ShiftOpcode::LeftDword.emit(code, TEMP, sign_bit(Format::Half));
@@ -663,7 +664,7 @@ fn pack_half(code: &mut Vec<u8>, target: TargetCpu) {
     Host::PackUnsignedDwordToWord.register(code, MASK, MASK, target);
 }
 
-fn checked_half(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn checked_half(code: &mut Code, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, ORIGINAL_HALF, SOURCE);
     widen_half(code, false);
     checked_compute(
@@ -693,7 +694,7 @@ fn checked_half(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, SOURCE, ORIGINAL_HALF);
 }
 
-fn checked_bounds(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn checked_bounds(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let Some(width) = operand.operation.signed_width() else {
         return;
     };
@@ -705,7 +706,7 @@ fn checked_bounds(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>
     }
 }
 
-fn checked_inexact(code: &mut Vec<u8>, operand: &Operand) {
+fn checked_inexact(code: &mut Code, operand: &Operand) {
     if !operand.operation.exact() {
         return;
     }
@@ -722,7 +723,7 @@ fn checked_inexact(code: &mut Vec<u8>, operand: &Operand) {
 }
 
 fn checked_rounding(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     helper: &mut Vec<usize>,
     target: TargetCpu,
@@ -743,7 +744,7 @@ fn checked_rounding(
     checked_inexact(code, operand);
 }
 
-fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
+fn commit_result(code: &mut Code, operand: &Operand) {
     if operand.operation.exact() {
         code.extend(SHL_R10D);
         code.push(INEXACT_SHIFT);
@@ -778,7 +779,7 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

@@ -4,11 +4,11 @@ use super::{
     asm::{Alu, Asm, Cond, Gpr, Mem, ShiftOp, Size, Unary},
     load_with, offset, store_with,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::integer_unary::{Kind, Operand},
 };
-use alloc::vec::Vec;
 
 use Gpr::{Rax, Rcx, Rdi, Rdx};
 
@@ -19,8 +19,8 @@ const BYTE_SUM_MULTIPLIER: u64 = 0x0101_0101_0101_0101;
 const TWO_BIT_SHIFT: u8 = 2;
 const NIBBLE_SHIFT: u8 = 4;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
-    emit_with(&mut Asm::new(code), operand, target);
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
+    emit_with(&mut code.asm(), operand, target);
 }
 
 fn size(width: Width) -> Size {
@@ -160,7 +160,7 @@ mod tests {
     use alloc::vec::Vec;
 
     fn emitted(kind: Kind, width: Width, source: Register, target: TargetCpu) -> Vec<u8> {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand {
@@ -171,7 +171,7 @@ mod tests {
             },
             target,
         );
-        code
+        code.into_bytes()
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
                     TargetCpu::Baseline,
                     TargetCpu::Baseline.with_popcnt().with_bmi1(),
                 ] {
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     emit(
                         &mut code,
                         &Operand {

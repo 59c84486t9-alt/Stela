@@ -1,4 +1,5 @@
 //! SVE extraction and broadcast (SSE2) and insertion (SSSE3).
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -55,7 +56,7 @@ const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
 const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
 const NOP: u8 = 0x90;
 
-fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn jump(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend_from_slice(opcode);
     let displacement = code.len();
     code.extend(0i32.to_le_bytes());
@@ -68,11 +69,11 @@ fn resolve(code: &mut [u8], displacement: usize, target: usize) {
     code[displacement..next].copy_from_slice(&offset.to_le_bytes());
 }
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8, target: TargetCpu) {
     opcode.register(code, destination, source, target);
 }
 
-fn narrow_general(code: &mut Vec<u8>, element: ElementSize) {
+fn narrow_general(code: &mut Code, element: ElementSize) {
     code.extend_from_slice(match element {
         ElementSize::Byte => MOVZX_EAX_AL,
         ElementSize::Halfword => MOVZX_EAX_AX,
@@ -82,7 +83,7 @@ fn narrow_general(code: &mut Vec<u8>, element: ElementSize) {
     });
 }
 
-fn broadcast(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn broadcast(code: &mut Code, element: ElementSize, target: TargetCpu) {
     match element {
         ElementSize::Byte => {
             packed(code, Host::UnpackLowByte, VALUE_XMM, VALUE_XMM, target);
@@ -102,7 +103,7 @@ fn broadcast(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
     code.push(LOW_DWORD_CONTROL);
 }
 
-fn broadcast_last(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+fn broadcast_last(code: &mut Code, element: ElementSize, target: TargetCpu) {
     if element == ElementSize::Byte && target.supports(TargetCpu::Ssse3) {
         packed(code, Host::Xor, ZERO_XMM, ZERO_XMM, target);
         packed(code, Host::ByteShuffle, VALUE_XMM, ZERO_XMM, target);
@@ -111,7 +112,7 @@ fn broadcast_last(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
     }
 }
 
-fn store_broadcast(code: &mut Vec<u8>, destination: u8, length: VectorLength, target: TargetCpu) {
+fn store_broadcast(code: &mut Code, destination: u8, length: VectorLength, target: TargetCpu) {
     for chunk in 0..length.chunks() {
         store_z_chunk(code, destination, chunk, VALUE_XMM, length, target);
     }
@@ -125,7 +126,7 @@ fn predicate_start_mask(element: ElementSize) -> u64 {
     mask
 }
 
-fn emit_last(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+fn emit_last(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let Kind::Last {
         source,
         predicate,
@@ -253,7 +254,7 @@ fn emit_last(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target:
 }
 
 fn emit_insert(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     element: ElementSize,
     length: VectorLength,
@@ -333,7 +334,7 @@ fn valid(operand: Operand) -> bool {
 
 /// Emit a decoded register-only operation after shared streaming permission checks.
 /// Uses caller-saved RAX/RCX/RDX/R8 and XMM0..3, preserving RDI/R15 and MXCSR.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     assert!(
         valid(operand),
         "extraction emitter requires validated operands"

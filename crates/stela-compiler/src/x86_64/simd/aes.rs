@@ -1,6 +1,6 @@
 //! AES: constant-time SSE2 circuits, or AES-NI when available. All sources are
 //! read before the destination is written.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod sbox;
 
 use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle};
@@ -29,7 +29,7 @@ const MOVABS_RCX: [u8; 2] = [0x48, 0xb9];
 const SHIFT_ROWS: [u8; 16] = [0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11];
 const INVERSE_SHIFT_ROWS: [u8; 16] = [0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3];
 /// Broadcast a byte without a memory pool or an additional SIMD clobber.
-fn byte_constant(code: &mut Vec<u8>, destination: u8, value: u8) {
+fn byte_constant(code: &mut Code, destination: u8, value: u8) {
     code.extend(MOVABS_RCX);
     code.extend((u64::from(value) * BYTE_REPLICATION).to_le_bytes());
     packed(code, Host::MoveGprQword, destination, RCX); // RCX -> XMM.
@@ -38,7 +38,7 @@ fn byte_constant(code: &mut Vec<u8>, destination: u8, value: u8) {
 
 /// Per-byte multiplication by x modulo x^8+x^4+x^3+x+1. MASK holds 1b;
 /// HIGH is scratch. PADDB avoids carries between adjacent byte lanes.
-fn xtime(code: &mut Vec<u8>, value: u8) {
+fn xtime(code: &mut Code, value: u8) {
     packed(code, Host::Xor, HIGH, HIGH);
     packed(code, Host::GreaterByte, HIGH, value);
     packed(code, Host::AddByte, value, value);
@@ -46,7 +46,7 @@ fn xtime(code: &mut Vec<u8>, value: u8) {
     packed(code, Host::Xor, value, HIGH);
 }
 
-fn shift_rows(code: &mut Vec<u8>, inverse: bool, target: TargetCpu) {
+fn shift_rows(code: &mut Code, inverse: bool, target: TargetCpu) {
     let selection = if inverse {
         INVERSE_SHIFT_ROWS
     } else {
@@ -84,7 +84,7 @@ fn shift_rows(code: &mut Vec<u8>, inverse: bool, target: TargetCpu) {
 
 /// Rotate each four-byte AES column right, keeping the input. MASK and HIGH
 /// stay free for xtime; RESULT may be the destination.
-fn rotate_column(code: &mut Vec<u8>, destination: u8, source: u8, bits: u8) {
+fn rotate_column(code: &mut Code, destination: u8, source: u8, bits: u8) {
     packed(code, Host::MoveAligned, TERM, source);
     packed(code, Host::MoveAligned, destination, source);
     Shift::LeftDword.emit(code, TERM, COLUMN_BITS - bits);
@@ -92,7 +92,7 @@ fn rotate_column(code: &mut Vec<u8>, destination: u8, source: u8, bits: u8) {
     packed(code, Host::Or, destination, TERM);
 }
 
-fn mix_columns(code: &mut Vec<u8>, inverse: bool) {
+fn mix_columns(code: &mut Code, inverse: bool) {
     byte_constant(code, MASK, FIELD_REDUCTION);
     if inverse {
         rotate_column(code, RIGHT, RESULT, BYTE_BITS * 2);
@@ -115,7 +115,7 @@ fn mix_columns(code: &mut Vec<u8>, inverse: bool) {
     // rot24(a): a XOR columnXor simplifies away the duplicate a.
 }
 
-fn aes(code: &mut Vec<u8>, kind: Kind, target: TargetCpu) {
+fn aes(code: &mut Code, kind: Kind, target: TargetCpu) {
     if kind == Kind::InverseMixColumns {
         Host::AesInverseMixColumns.register(code, RESULT, RESULT, target);
         return;
@@ -132,7 +132,7 @@ fn aes(code: &mut Vec<u8>, kind: Kind, target: TargetCpu) {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     read_vector(code, operand.source, RESULT);
     if matches!(operand.kind, Kind::Encrypt | Kind::Decrypt) {
         read_vector(code, operand.destination, OLD_DESTINATION);
@@ -190,7 +190,7 @@ mod tests {
                 destination: 31,
                 source: 31,
             };
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, &operand, TargetCpu::Aes);
             assert_eq!(code.len(), bytes); // Complete body, excludes harness RET.
             for opcode in [
@@ -217,7 +217,7 @@ mod tests {
             Kind::MixColumns,
             Kind::InverseMixColumns,
         ] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {
@@ -316,7 +316,7 @@ mod tests {
                 .iter()
                 .map(|&row| table[usize::from(state_bytes[usize::from(row)])])
                 .collect();
-            let mut code = WRAPPER.to_vec();
+            let mut code = Code::from(WRAPPER.to_vec());
             emit(
                 &mut code,
                 &Operand {

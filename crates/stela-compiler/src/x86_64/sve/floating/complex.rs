@@ -1,4 +1,5 @@
 //! SVE FCADD (packed ADD) and FCMLA (FMA3, one rounding per component).
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -111,13 +112,13 @@ fn admitted(operand: Operand, target: TargetCpu) -> Option<Operation> {
     }
 }
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(JNZ_REL32);
     failures.push(code.len());
     code.extend(0_i32.to_le_bytes());
 }
 
-fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, register: u8, order: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, register, register, target);
     code.push(order);
 }
@@ -125,7 +126,7 @@ fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
 /// Rotate M before active-lane masking; an active output may read an inactive
 /// partner input. NaN sign rules remain with fallback because active NaNs fail
 /// the following integer exponent guards before any architectural commit.
-fn rotate_right(code: &mut Vec<u8>, format: Format, rotation: Rotation, target: TargetCpu) {
+fn rotate_right(code: &mut Code, format: Format, rotation: Rotation, target: TargetCpu) {
     if matches!(rotation, Rotation::Degrees90 | Rotation::Degrees270) {
         shuffle(
             code,
@@ -167,7 +168,7 @@ fn rotate_right(code: &mut Vec<u8>, format: Format, rotation: Rotation, target: 
     Host::Xor.register(code, RIGHT, MASK_SCRATCH, target);
 }
 
-fn selected_left(code: &mut Vec<u8>, format: Format, rotation: Rotation, target: TargetCpu) {
+fn selected_left(code: &mut Code, format: Format, rotation: Rotation, target: TargetCpu) {
     let imaginary = matches!(rotation, Rotation::Degrees90 | Rotation::Degrees270);
     let order = match (format, imaginary) {
         (Format::Single, false) => DUPLICATE_SINGLE_REAL,
@@ -180,7 +181,7 @@ fn selected_left(code: &mut Vec<u8>, format: Format, rotation: Rotation, target:
 }
 
 fn load_right(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: Source,
     chunk: usize,
     length: VectorLength,
@@ -206,7 +207,7 @@ fn load_right(
 }
 
 /// Inactive FCADD uses1+1; inactive FCMLA uses2+1*1, both exact normals.
-fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: TargetCpu) {
+fn benign_inactive(code: &mut Code, format: Format, input: u8, target: TargetCpu) {
     let increment = if input == ADDEND {
         BENIGN_ADDEND_INCREMENT
     } else {
@@ -237,7 +238,7 @@ fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: Target
 /// normal; indexed half precision and FCMLA without FMA return false without
 /// emitting. RAX/RCX/RDX, flags and XMM0-7 are clobbered.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

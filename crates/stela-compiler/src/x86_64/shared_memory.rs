@@ -1,6 +1,7 @@
 //! Typed checked LSE, acquire/release and DMB requests. No guest RAM pointer
 //! is embedded in native code; the shared writer/monitor owner performs effects.
 use super::{load, memory_context as memory, store};
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError,
     aarch64::{AddressMode, Operation, Register, Width, atomic, ordered},
@@ -11,7 +12,6 @@ use crate::{
         profile_requirements,
     },
 };
-use alloc::vec::Vec;
 
 const DATA_OFFSET: u32 = MEMORY_REQUEST_BYTES as u32;
 const STACK_ALIGNMENT: u32 = 16;
@@ -248,7 +248,7 @@ impl CheckedOperand {
             ..MemoryRequirements::default()
         }
     }
-    pub(crate) fn emit(&self, code: &mut Vec<u8>, pc: u64) {
+    pub(crate) fn emit(&self, code: &mut Code, pc: u64) {
         let data_bytes = match self.operand {
             Operand::Atomic(_) => wire_atomic::DATA_BYTES,
             Operand::Ordered(_) => wire_ordered::DATA_BYTES,
@@ -309,14 +309,14 @@ impl CheckedOperand {
         memory::address::return_if_failed(code);
     }
 }
-fn field(code: &mut Vec<u8>, offset: u32, value: u32) {
+fn field(code: &mut Code, offset: u32, value: u32) {
     if value != 0 {
         code.extend(STORE_FIELD);
         code.push((DATA_OFFSET + offset) as u8);
         code.extend(value.to_le_bytes());
     }
 }
-fn stage(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
+fn stage(code: &mut Code, register: Register, bytes: u8, offset: u32) {
     if register == Register::Zero {
         return;
     }
@@ -331,7 +331,7 @@ fn stage(code: &mut Vec<u8>, register: Register, bytes: u8, offset: u32) {
     code.push((DATA_OFFSET + offset) as u8);
 }
 fn commit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: Register,
     bytes: u8,
     offset: u32,
@@ -375,7 +375,7 @@ fn atomic_operation(kind: atomic::Kind) -> wire_atomic::AtomicOperation {
         },
     }
 }
-fn stage_atomic(code: &mut Vec<u8>, operand: atomic::Operand) {
+fn stage_atomic(code: &mut Code, operand: atomic::Operand) {
     use atomic::{Kind, Order};
     let acquire = match operand.kind {
         Kind::CompareExchange { compare, .. } => operand.order.acquires(compare),
@@ -424,7 +424,7 @@ fn stage_atomic(code: &mut Vec<u8>, operand: atomic::Operand) {
         }
     }
 }
-fn commit_atomic(code: &mut Vec<u8>, operand: atomic::Operand) {
+fn commit_atomic(code: &mut Code, operand: atomic::Operand) {
     use atomic::Kind;
     let extension = ordered::LoadExtension::Zero;
     match operand.kind {
@@ -464,7 +464,7 @@ fn wire_feature(feature: ordered::Feature) -> wire_ordered::OrderedFeature {
         ordered::Feature::Lor => wire_ordered::OrderedFeature::Lor,
     }
 }
-fn stage_ordered(code: &mut Vec<u8>, operand: ordered::Operand) {
+fn stage_ordered(code: &mut Code, operand: ordered::Operand) {
     use wire_ordered::{
         BARRIER_OFFSET, FEATURE_OFFSET, OPERATION_OFFSET, ORDER_OFFSET, OrderedOperation,
         VALUE_OFFSET,

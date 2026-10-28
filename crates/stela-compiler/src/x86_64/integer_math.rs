@@ -4,16 +4,16 @@ use super::{
     asm::{Alu, Asm, Cond, Gpr, Rm, ShiftOp, Size, Unary},
     integer_unary, load_with, right_operand_with, store_with,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::integer_math::{Kind, Operand},
 };
-use alloc::vec::Vec;
 
 use Gpr::{Rax, Rcx, Rdx};
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
-    emit_with(&mut Asm::new(code), operand, target);
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
+    emit_with(&mut code.asm(), operand, target);
 }
 
 fn size(width: Width) -> Size {
@@ -306,7 +306,7 @@ mod tests {
     /// host.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     fn run(kind: Kind, target: TargetCpu, value: u64, right: u64) -> u64 {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(&mut code, &operand(kind), target);
         let mut state = GuestState::default();
         state.x[1] = value;
@@ -330,7 +330,7 @@ mod tests {
                 Kind::LeadingSignBits { width },
             ] {
                 let code = |target| {
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     emit(&mut code, &operand(kind), target);
                     code
                 };
@@ -356,7 +356,7 @@ mod tests {
             for shift in [Shift::Lsl, Shift::Lsr, Shift::Asr, Shift::Ror] {
                 let kind = Kind::VariableShift { width, shift };
                 let code = |target| {
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     emit(&mut code, &operand(kind), target);
                     code
                 };
@@ -420,7 +420,7 @@ mod tests {
         for width in [Width::W32, Width::X64] {
             let kind = Kind::ReverseBits { width };
             let code = |target| {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand(kind), target);
                 code
             };
@@ -534,9 +534,9 @@ mod tests {
                 Kind::LeadingZeros { width },
                 Kind::LeadingSignBits { width },
             ] {
-                let mut ordinary = Vec::new();
+                let mut ordinary = Code::new();
                 emit(&mut ordinary, &operand(kind), TargetCpu::Baseline);
-                let mut timed = Vec::new();
+                let mut timed = Code::new();
                 emit(&mut timed, &operand(kind), TargetCpu::DataIndependentTiming);
                 let bsr = |code: &[u8]| code.windows(2).any(|pair| pair == [0x0f, 0xbd]);
                 assert!(bsr(&ordinary));

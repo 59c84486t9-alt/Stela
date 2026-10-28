@@ -1,4 +1,5 @@
 //! SVE FP comparisons without exceptions; signaling cases use software completion.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -42,7 +43,7 @@ enum Comparison {
     NotEqual = 4,
 }
 
-fn magnitudes(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn magnitudes(code: &mut Code, format: Format, target: TargetCpu) {
     Host::EqualDword.register(code, MAGNITUDE_MASK, MAGNITUDE_MASK, target);
     match format {
         Format::Single => ShiftOpcode::RightDword,
@@ -56,7 +57,7 @@ fn magnitudes(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 
 /// Operands contain only normals, signed zero or infinity. Return FF/00 lanes.
 /// Masking inactive lanes and classification belong to the instruction emitter.
-fn compare_mask(code: &mut Vec<u8>, kind: Kind, format: Format, target: TargetCpu) -> u8 {
+fn compare_mask(code: &mut Code, kind: Kind, format: Format, target: TargetCpu) -> u8 {
     if matches!(kind, Kind::AbsoluteGreaterEqual | Kind::AbsoluteGreater) {
         magnitudes(code, format, target);
     }
@@ -97,7 +98,7 @@ fn packed_leading_bits(element: ElementSize) -> u32 {
 /// Accepted host comparisons preserve caller MXCSR without saving/installing it.
 /// Clobbers RAX/RCX/RDX, host flags and XMM0..7; preserves RDI/R15 and guest NZCV.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -188,7 +189,7 @@ mod tests {
 
     #[test]
     fn half_refusal_emits_no_frame_or_guard() {
-        let mut code = vec![0x90];
+        let mut code = Code::from(vec![0x90]);
         let operand = Operand {
             kind: Kind::Equal,
             format: Format::Half,

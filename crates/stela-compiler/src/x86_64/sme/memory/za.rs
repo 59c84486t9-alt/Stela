@@ -5,6 +5,7 @@ use super::{
 };
 use crate::aarch64::sme::memory::TileTransfer;
 use crate::context::{SCALABLE_ZA_OFFSET, SCALABLE_ZT0_OFFSET};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -46,7 +47,7 @@ const ZA_STORE_HALFWORD_R8_DISP32: &[u8] = &[0x66, 0x41, 0x89, 0x80];
 const ZA_STORE_WORD_R8_DISP32: &[u8] = &[0x41, 0x89, 0x80];
 const ZA_STORE_DOUBLEWORD_R8_DISP32: &[u8] = &[0x49, 0x89, 0x80];
 
-fn za_add_rax(code: &mut Vec<u8>, immediate: usize) {
+fn za_add_rax(code: &mut Code, immediate: usize) {
     if immediate != 0 {
         code.extend(ADD_RAX_IMM32);
         code.extend(
@@ -57,14 +58,14 @@ fn za_add_rax(code: &mut Vec<u8>, immediate: usize) {
     }
 }
 
-fn za_shift_rax(code: &mut Vec<u8>, shift: u32) {
+fn za_shift_rax(code: &mut Code, shift: u32) {
     if shift != 0 {
         code.extend(SHL_RAX_IMM8);
         code.push(shift as u8);
     }
 }
 
-fn za_selector(code: &mut Vec<u8>, register: u8, offset: u8, count: usize, scale: usize) {
+fn za_selector(code: &mut Code, register: u8, offset: u8, count: usize, scale: usize) {
     debug_assert!(count.is_power_of_two() && scale.is_power_of_two());
     load_guest(code, Register::X(register));
     // Addition modulo32 is equivalent before the power-of-two slice modulus.
@@ -81,7 +82,7 @@ fn za_selector(code: &mut Vec<u8>, register: u8, offset: u8, count: usize, scale
     za_shift_rax(code, scale.trailing_zeros());
 }
 
-fn za_selected_pointer(code: &mut Vec<u8>, field: u32, selector: Option<u32>) {
+fn za_selected_pointer(code: &mut Code, field: u32, selector: Option<u32>) {
     if field == SCALABLE_ZA_OFFSET {
         crate::x86_64::scalable_matrix::load_za_pointer_r8(code);
     } else {
@@ -93,7 +94,7 @@ fn za_selected_pointer(code: &mut Vec<u8>, field: u32, selector: Option<u32>) {
     }
 }
 
-fn za_scalar_memory(code: &mut Vec<u8>, load: bool, bytes: usize, offset: u32) {
+fn za_scalar_memory(code: &mut Code, load: bool, bytes: usize, offset: u32) {
     let encoding = match (load, bytes) {
         (true, 1) => ZA_LOAD_BYTE_R8_DISP32,
         (true, 2) => ZA_LOAD_HALFWORD_R8_DISP32,
@@ -111,7 +112,7 @@ fn za_scalar_memory(code: &mut Vec<u8>, load: bool, bytes: usize, offset: u32) {
 
 // Copy one internal-state chunk to/from staging; no guest RAM is accessed here.
 fn za_copy_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     to_staging: bool,
     bank_offset: usize,
     data_offset: u32,
@@ -128,7 +129,7 @@ fn za_copy_chunk(
 }
 
 fn za_copy_bank(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     to_staging: bool,
     field: u32,
     selector: Option<u32>,
@@ -142,7 +143,7 @@ fn za_copy_bank(
     }
 }
 
-fn za_staging_pointer_scalar(code: &mut Vec<u8>, load: bool, bytes: usize) {
+fn za_staging_pointer_scalar(code: &mut Code, load: bool, bytes: usize) {
     code.extend(match (load, bytes) {
         (true, 1) => ZA_LOAD_BYTE_R9,
         (true, 2) => ZA_LOAD_HALFWORD_R9,
@@ -157,7 +158,7 @@ fn za_staging_pointer_scalar(code: &mut Vec<u8>, load: bool, bytes: usize) {
 }
 
 fn za_copy_tile(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     to_staging: bool,
     transfer: &TileTransfer,
     length: VectorLength,
@@ -236,7 +237,7 @@ pub(super) fn access_flags(direction: Direction, tag_checked: bool) -> u32 {
 }
 
 fn za_tile_body(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     transfer: &TileTransfer,
     length: VectorLength,
     target: TargetCpu,
@@ -308,7 +309,7 @@ fn za_tile_body(
 }
 
 fn za_whole_body(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -361,7 +362,7 @@ fn za_whole_body(
 }
 
 pub(super) fn emit_za_body(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,

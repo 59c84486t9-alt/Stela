@@ -10,6 +10,7 @@ use super::numerical::{
     restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
 use super::{Host, commit, half, packed};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -73,7 +74,7 @@ const OR_EAX_R9D: &[u8] = &[0x44, 0x09, 0xc8];
 const OR_ECX_R10D: &[u8] = &[0x44, 0x09, 0xd1];
 const ADD_RSP_MXCSR: &[u8] = &[0x48, 0x83, 0xc4, MXCSR_STACK_BYTES];
 
-fn constant(code: &mut Vec<u8>, format: Format, kind: Kind, destination: u8) {
+fn constant(code: &mut Code, format: Format, kind: Kind, destination: u8) {
     packed(code, Host::EqualDword, destination, destination);
     let (right, left) = if format == Format::Single {
         (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
@@ -91,7 +92,7 @@ fn constant(code: &mut Vec<u8>, format: Format, kind: Kind, destination: u8) {
     left.emit(code, destination, left_bits as u8);
 }
 
-fn normal_sources(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn normal_sources(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let minimum = if operand.kind == Kind::ReciprocalSquareRoot {
         RESULT_MINIMUM_EXPONENT
     } else {
@@ -114,7 +115,7 @@ fn normal_sources(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>
     }
 }
 
-fn prehalve(code: &mut Vec<u8>, operand: &Operand) {
+fn prehalve(code: &mut Code, operand: &Operand) {
     if operand.format == Format::Single && operand.shape == Shape::Scalar {
         code.extend(MOVD_EAX_XMM0);
         code.push(SUB_EAX_IMM32);
@@ -143,7 +144,7 @@ fn prehalve(code: &mut Vec<u8>, operand: &Operand) {
 
 /// The first pair's target PE must not contaminate the second pair's exact
 /// Double-affine status. R9D/R10D retain wide/target flags across the reset.
-fn widen_single_pairs(code: &mut Vec<u8>) {
+fn widen_single_pairs(code: &mut Code) {
     packed(code, Host::MoveAligned, SPLIT_SINGLE_LEFT, LEFT);
     packed(code, Host::MoveAligned, SAVED_SINGLE_RIGHT, RIGHT);
     packed(code, Host::MoveAligned, SAVED_SINGLE_CONSTANT, CONSTANT);
@@ -193,7 +194,7 @@ fn widen_single_pairs(code: &mut Vec<u8>) {
     packed(code, Host::MoveAligned, CONSTANT, FIRST_SINGLE_PAIR);
 }
 
-fn widened_product(code: &mut Vec<u8>, shape: Shape) {
+fn widened_product(code: &mut Code, shape: Shape) {
     emit_opcode_to(
         code,
         Format::Double,
@@ -216,7 +217,7 @@ fn widened_product(code: &mut Vec<u8>, shape: Shape) {
 /// environment. The double product of widened singles is exact (at most 48
 /// bits), and the affine step must also be exact before the single final
 /// rounding.
-fn widened_single_fallback(code: &mut Vec<u8>, operand: &Operand, helper_start: usize) {
+fn widened_single_fallback(code: &mut Code, operand: &Operand, helper_start: usize) {
     packed(code, Host::MoveAligned, LEFT, SAVED_SINGLE_LEFT);
     constant(code, Format::Double, operand.kind, CONSTANT);
     environment_alternative_nearest(code);
@@ -245,7 +246,7 @@ fn widened_single_fallback(code: &mut Vec<u8>, operand: &Operand, helper_start: 
     resolve(code, invalid_target, helper_start);
 }
 
-fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let native_fma = target.supports(TargetCpu::Fma);
     if native_fma {
         code.extend(VZEROUPPER);
@@ -356,7 +357,7 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
     }
 }
 
-fn emit_half(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+fn emit_half(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     let mut helper = Vec::new();
     let mut rollback = Vec::new();
     guard_ah0_exceptions(code, &mut helper);
@@ -427,7 +428,7 @@ fn emit_half(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

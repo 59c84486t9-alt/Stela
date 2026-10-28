@@ -1,6 +1,7 @@
 //! Predicate Boolean operations and permutes.
 use super::super::scalable;
 use super::predicate;
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -8,7 +9,6 @@ use crate::{
         sve::predicate_logic::{Boolean, Kind, Operand, Permutation},
     },
 };
-use alloc::vec::Vec;
 
 const CHUNK_BITS: usize = 64;
 const CHUNK_BYTES: usize = 8;
@@ -54,7 +54,7 @@ const SPREAD_STAGES: [(u8, u64); 5] = [
     (1, 0x5555_5555_5555_5555),
 ];
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     match operand.kind {
         Kind::Boolean {
             operation,
@@ -257,31 +257,31 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
     }
 }
 
-fn snapshot(code: &mut Vec<u8>, source: u8, slot: usize, length: VectorLength) {
+fn snapshot(code: &mut Code, source: u8, slot: usize, length: VectorLength) {
     for chunk in 0..length.predicate_bytes().div_ceil(CHUNK_BYTES) {
         scalable::read_predicate_chunk(code, source, chunk, length);
         store_snapshot(code, slot + chunk * CHUNK_BYTES);
     }
 }
-fn store_snapshot(code: &mut Vec<u8>, offset: usize) {
+fn store_snapshot(code: &mut Code, offset: usize) {
     code.extend(MOV_STACK_RAX);
     code.extend((offset as u32).to_le_bytes());
 }
-fn load_snapshot(code: &mut Vec<u8>, offset: usize) {
+fn load_snapshot(code: &mut Code, offset: usize) {
     code.extend(MOV_RAX_STACK);
     code.extend((offset as u32).to_le_bytes());
 }
-fn load_bits(code: &mut Vec<u8>, slot: usize, bit: usize) {
+fn load_bits(code: &mut Code, slot: usize, bit: usize) {
     load_snapshot(code, slot + (bit / CHUNK_BITS) * CHUNK_BYTES);
     shift(code, SHR_RAX_IMM8, bit % CHUNK_BITS);
 }
-fn shift(code: &mut Vec<u8>, opcode: &[u8], bits: usize) {
+fn shift(code: &mut Code, opcode: &[u8], bits: usize) {
     if bits != 0 {
         code.extend(opcode);
         code.push(bits as u8);
     }
 }
-fn and_mask(code: &mut Vec<u8>, mask: u64) {
+fn and_mask(code: &mut Code, mask: u64) {
     code.extend(MOVABS_R11);
     code.extend(mask.to_le_bytes());
     code.extend(AND_RAX_R11);
@@ -291,7 +291,7 @@ fn low_group_mask(group: usize) -> u64 {
         .filter(|bit| (bit / group).is_multiple_of(2))
         .fold(0, |mask, bit| mask | (1 << bit))
 }
-fn spread(code: &mut Vec<u8>, group: usize, output_bits: usize) {
+fn spread(code: &mut Code, group: usize, output_bits: usize) {
     if output_bits < CHUNK_BITS {
         code.extend(AND_EAX_IMM32);
         code.extend(((1u32 << (output_bits / 2)) - 1).to_le_bytes());
@@ -307,7 +307,7 @@ fn spread(code: &mut Vec<u8>, group: usize, output_bits: usize) {
         and_mask(code, mask);
     }
 }
-fn compact(code: &mut Vec<u8>, group: usize, odd: bool) {
+fn compact(code: &mut Code, group: usize, odd: bool) {
     shift(code, SHR_RAX_IMM8, usize::from(odd) * group);
     and_mask(code, low_group_mask(group));
     for distance in [1, 2, 4, 8, 16]
@@ -322,7 +322,7 @@ fn compact(code: &mut Vec<u8>, group: usize, odd: bool) {
     code.extend(MOV_EAX_EAX);
 }
 fn permutation(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: Permutation,
     element: ElementSize,
     chunk: usize,
@@ -377,7 +377,7 @@ fn permutation(
     }
 }
 
-fn dilate(code: &mut Vec<u8>, stride: usize) {
+fn dilate(code: &mut Code, stride: usize) {
     if stride == 1 {
         return;
     }

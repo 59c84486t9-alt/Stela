@@ -1,5 +1,6 @@
 //! SVE single/double min/max. NaNs, subnormals and zero/zero ties use software
 //! completion.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -79,7 +80,7 @@ fn inputs(operand: Operand) -> Option<(MinMaxOperation, u8, Source, u8)> {
     Some((operation, left, right, predicate))
 }
 
-fn immediate(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
+fn immediate(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
     if bits == 0 {
         Host::Xor.register(code, RIGHT, RIGHT, target);
         return;
@@ -106,7 +107,7 @@ fn immediate(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
 /// tie for the shared semantic helper. Double requires both dwords to be zero.
 /// LEFT/RIGHT/ACTIVE and the invariant classification masks remain live.
 pub(super) fn guard_zero_pairs(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -134,7 +135,7 @@ pub(super) fn guard_zero_pairs(
     code.extend(0_i32.to_le_bytes());
 }
 
-pub(super) fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
+pub(super) fn selection(code: &mut Code, operation: MinMaxOperation, format: Format) {
     let opcode = match operation {
         MinMaxOperation::Minimum | MinMaxOperation::MinimumNumber => SelectionOpcode::Minimum,
         MinMaxOperation::Maximum | MinMaxOperation::MaximumNumber => SelectionOpcode::Maximum,
@@ -155,7 +156,7 @@ pub(super) fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: 
 /// MXCSR and add no FPSR bits. Clobbers RAX/RCX/RDX, flags and XMM0-7;
 /// preserves RDI/R15 and NZCV.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -274,7 +275,7 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = vec![0x90];
+            let mut code = Code::from(vec![0x90]);
             assert!(
                 !emit(
                     &mut code,

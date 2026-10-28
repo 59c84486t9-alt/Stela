@@ -7,6 +7,7 @@ use super::super::numerical::{
     quantize_bfloat_scalar_bits, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, GuestState,
     aarch64::{
@@ -46,7 +47,7 @@ const MOVD_XMM0_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc0];
 const PINSRW_XMM0_EAX_LOW: &[u8] = &[0x66, 0x0f, 0xc4, 0xc0, 0];
 const MOVLHPS_XMM1_XMM0: &[u8] = &[0x0f, 0x16, 0xc8];
 
-fn input_guard(code: &mut Vec<u8>, mode: ConversionMode, helper: &mut Vec<usize>) {
+fn input_guard(code: &mut Code, mode: ConversionMode, helper: &mut Vec<usize>) {
     if mode == ConversionMode::Scalar {
         exponent_range(code, Format::Single, SOURCE, INPUT_MINIMUM_EXPONENT);
         helper.push(branch(code, Condition::AboveOrEqual));
@@ -59,7 +60,7 @@ fn input_guard(code: &mut Vec<u8>, mode: ConversionMode, helper: &mut Vec<usize>
 
 /// Quantize one active Single without packed broadcasts or inactive lane work.
 /// Shared selectors remain in R8D/R9D/R11D; R10D records only discarded bits.
-fn quantize_scalar(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn quantize_scalar(code: &mut Code, helper: &mut Vec<usize>) {
     packed(code, Host::Xor, RESULT, RESULT);
     code.extend(MOVD_EAX_XMM1);
     quantize_bfloat_scalar_bits(code);
@@ -77,7 +78,7 @@ fn quantize_scalar(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
 
 /// Rounding can carry a finite Single into BF16 infinity. The cold core owns
 /// its OFC/IXC policy; no guest state has changed at this guard.
-fn packed_overflow_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn packed_overflow_guard(code: &mut Code, helper: &mut Vec<usize>) {
     packed(code, Host::MoveAligned, TEMPORARY, RESULT);
     ShiftOpcode::LeftDword.emit(code, TEMPORARY, SIGN_BITS);
     ShiftOpcode::RightDword.emit(code, TEMPORARY, EXPONENT_TO_LOW_SHIFT);
@@ -90,7 +91,7 @@ fn packed_overflow_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn commit_inexact(code: &mut Vec<u8>) {
+fn commit_inexact(code: &mut Code) {
     test_control(code, FPCR_AH);
     let suppressed = branch(code, Condition::NotZero);
     code.extend(TEST_R10D_R10D);
@@ -103,7 +104,7 @@ fn commit_inexact(code: &mut Vec<u8>) {
     resolve(code, suppressed, ready);
 }
 
-fn scalar_commit(code: &mut Vec<u8>, destination: u8) {
+fn scalar_commit(code: &mut Code, destination: u8) {
     // PEXTRW zero-extends the low BF16 encoding before MOVD clears all upper bits.
     code.extend(PEXTRW_EAX_XMM0_LOW);
     code.extend(MOVD_XMM0_EAX);
@@ -116,7 +117,7 @@ fn scalar_commit(code: &mut Vec<u8>, destination: u8) {
     commit(code, destination, RESULT);
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &ConversionOperand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(code: &mut Code, operand: &ConversionOperand, pc: GuestAddress) {
     let mut helper = Vec::new();
     guard_ah0_exceptions(code, &mut helper);
     read_vector(code, operand.source, SOURCE);
@@ -151,7 +152,7 @@ pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &ConversionOperand, p
 
 /// Prepare selectors once; preserves every XMM and RSP. R8/R9/R11 retain
 /// rounding selectors and R10 starts fresh. AH selects mandatory nearest-even.
-pub(in crate::x86_64) fn prepare_conversion_rounding(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn prepare_conversion_rounding(code: &mut Code) {
     integer_rounding_policy(code, DISCARDED_BITS, true);
 }
 
@@ -159,20 +160,20 @@ pub(in crate::x86_64) fn prepare_conversion_rounding(code: &mut Vec<u8>) {
 /// survives; result XMM0 retains rounded Single fields, XMM2..5 are scratch.
 /// R8/R9/R11 selectors survive; R10 records discarded lanes. RAX/RCX/RDX and
 /// flags are scratch. No frame, environment, state writes, or packed slot layout.
-pub(in crate::x86_64) fn quantize_normal_conversion(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+pub(in crate::x86_64) fn quantize_normal_conversion(code: &mut Code, failures: &mut Vec<usize>) {
     input_guard(code, ConversionMode::Narrow { upper: false }, failures);
     quantize_bfloat_packed(code);
     packed_overflow_guard(code, failures);
 }
 
 /// Callers gate this on any active lane and the effective FA64 policy.
-pub(in crate::x86_64) fn guard_conversion_enables(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+pub(in crate::x86_64) fn guard_conversion_enables(code: &mut Code, failures: &mut Vec<usize>) {
     guard_ah0_exceptions(code, failures);
 }
 
 /// Return approved fresh BF IXC in EAX without committing guest state. AH1
 /// suppresses all numerical exceptions; accepted normal lanes can only add IXC.
-pub(in crate::x86_64) fn conversion_inexact(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn conversion_inexact(code: &mut Code) {
     const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
     const MOV_EAX_IMM32: u8 = 0xb8;
     code.extend(XOR_EAX_EAX);

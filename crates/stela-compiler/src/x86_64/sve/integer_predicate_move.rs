@@ -1,12 +1,12 @@
 //! PMOV between predicates and vector bitmaps.
 use crate::aarch64::sve::integer_predicate_move::Operand;
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_chunk, store_z_chunk};
 use crate::{
     TargetCpu,
     aarch64::scalable::{BITS_PER_BYTE, ElementSize, VECTOR_CHUNK_BYTES, VectorLength},
 };
-use alloc::vec::Vec;
 
 const QWORD_BITS: usize = u64::BITS as usize;
 const QWORD_BYTES: usize = core::mem::size_of::<u64>();
@@ -37,11 +37,11 @@ const BYTE_GATHER_SHIFT: usize = QWORD_BITS - BITS_PER_BYTE;
 const MODRM_REGISTER: u8 = 0xc0;
 const REGISTER_SHIFT: u8 = 3;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn mask_rax(code: &mut Vec<u8>, mask: u64) {
+fn mask_rax(code: &mut Code, mask: u64) {
     if mask <= u64::from(u32::MAX) {
         code.extend(AND_EAX_IMM32);
         code.extend((mask as u32).to_le_bytes());
@@ -61,7 +61,7 @@ fn compact_mask(stride: usize, group: usize) -> u64 {
 }
 
 /// Compress each element-leading P bit in RAX to consecutive low bits.
-fn compact(code: &mut Vec<u8>, element: ElementSize, input_bits: usize) {
+fn compact(code: &mut Code, element: ElementSize, input_bits: usize) {
     let stride = element.bytes();
     if stride == 1 {
         return;
@@ -88,7 +88,7 @@ fn compact(code: &mut Vec<u8>, element: ElementSize, input_bits: usize) {
     }
 }
 
-fn constant_half(code: &mut Vec<u8>, value: u64, destination: u8) {
+fn constant_half(code: &mut Code, value: u64, destination: u8) {
     code.extend(MOVABS_RAX);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, TargetCpu::Baseline);
@@ -97,7 +97,7 @@ fn constant_half(code: &mut Vec<u8>, value: u64, destination: u8) {
 
 /// No guest RAM, flags or other register-bank effects. P/Z are separate banks,
 /// so each P chunk may be read immediately before its Z chunk is committed.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let stride = operand.element_size.bytes();
     assert!(stride <= QWORD_BYTES);
     assert!(usize::from(operand.portion) < stride);

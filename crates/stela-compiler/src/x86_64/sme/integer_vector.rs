@@ -1,4 +1,5 @@
 //! SME2 multi-vector integer arithmetic on the shared SVE kernels.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -20,7 +21,6 @@ use crate::{
         },
     },
 };
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -34,15 +34,15 @@ const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
 const PSLLDQ: &[u8] = &[0x66, 0x0f, 0x73];
 const LEFT_BYTES_GROUP: u8 = 7;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn copy(code: &mut Code, destination: u8, source: u8) {
     packed(code, Host::MoveAligned, destination, source);
 }
 
-fn stack_space(code: &mut Vec<u8>, bytes: usize, reserve: bool) {
+fn stack_space(code: &mut Code, bytes: usize, reserve: bool) {
     code.extend(if reserve {
         SUB_RSP_IMM32
     } else {
@@ -51,7 +51,7 @@ fn stack_space(code: &mut Vec<u8>, bytes: usize, reserve: bool) {
     code.extend((bytes as u32).to_le_bytes());
 }
 
-fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, store: bool, target: TargetCpu) {
+fn stack_chunk(code: &mut Code, register: u8, offset: usize, store: bool, target: TargetCpu) {
     if store {
         Host::StoreUnaligned
     } else {
@@ -63,7 +63,7 @@ fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, store: bool, tar
     code.extend((offset as u32).to_le_bytes());
 }
 
-fn byte_shift(code: &mut Vec<u8>, bytes: usize, group: u8) {
+fn byte_shift(code: &mut Code, bytes: usize, group: u8) {
     if bytes != 0 {
         code.extend(PSLLDQ);
         code.extend([MOD_REGISTER | group << REGISTER_SHIFT, bytes as u8]);
@@ -76,7 +76,7 @@ fn unsigned(signedness: Signedness) -> bool {
 
 /// RDI/R15 preserve the shared entry context; all kernels preserve XMM7.
 /// Access/profile checks are performed before entering this emitter.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     match operand {
         Operand::Arithmetic(operand) => {
             arithmetic(code, operand, length, target);
@@ -85,7 +85,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
     }
 }
 
-fn arithmetic(code: &mut Vec<u8>, operand: &Arithmetic, length: VectorLength, target: TargetCpu) {
+fn arithmetic(code: &mut Code, operand: &Arithmetic, length: VectorLength, target: TargetCpu) {
     let clamp = matches!(operand.kind, ArithmeticKind::Clamp(_));
     if clamp {
         stack_space(code, VECTOR_CHUNK_BYTES, true);
@@ -200,7 +200,7 @@ fn narrow_kind(source: Signedness, destination: Signedness, rounded: bool) -> Na
     }
 }
 
-fn narrow_source_chunk(code: &mut Vec<u8>, operand: &Narrow, target: TargetCpu) {
+fn narrow_source_chunk(code: &mut Code, operand: &Narrow, target: TargetCpu) {
     let intermediate = ElementSize::from_bytes(operand.source_element.bytes() / 2).unwrap();
     let project = if operand.interleaved {
         narrow_chunk
@@ -233,7 +233,7 @@ fn narrow_source_chunk(code: &mut Vec<u8>, operand: &Narrow, target: TargetCpu) 
     }
 }
 
-fn narrow(code: &mut Vec<u8>, operand: &Narrow, length: VectorLength, target: TargetCpu) {
+fn narrow(code: &mut Code, operand: &Narrow, length: VectorLength, target: TargetCpu) {
     let register_count = usize::from(operand.group.count());
     let aliases =
         (operand.source..operand.source + operand.group.count()).contains(&operand.destination);

@@ -1,4 +1,5 @@
 //! SME_LUTv2: LUTI4 with two index vectors, and MOVT to ZT0.
+use crate::x86_64::asm::Code;
 
 use super::super::{allocate_frame, release_frame, stage};
 use super::{MOV_R8_CONTEXT_DISP8, MOV_R8_R8_DISP8, XMM0, load_packed_indexes, prepare_planes};
@@ -8,7 +9,6 @@ use crate::aarch64::sme::lut_v2::Operand;
 use crate::context::{EXECUTION_CONTEXT_SCALABLE_OFFSET, SCALABLE_ZT0_OFFSET};
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, lut, store_z_chunk};
-use alloc::vec::Vec;
 
 const INDEX_BITS: u8 = 4;
 const RESULT_XMM: u8 = 6;
@@ -17,14 +17,14 @@ const MODRM_DISP32_R8: u8 = 0x80;
 const REGISTER_SHIFT: u8 = 3;
 const REX_R8_BASE: u8 = 0x41;
 
-fn table_pointer(code: &mut Vec<u8>) {
+fn table_pointer(code: &mut Code) {
     code.extend(MOV_R8_CONTEXT_DISP8);
     code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
     code.extend(MOV_R8_R8_DISP8);
     code.push(SCALABLE_ZT0_OFFSET as u8);
 }
 
-fn store_table_chunk(code: &mut Vec<u8>, xmm: u8, offset: usize, target: TargetCpu) {
+fn store_table_chunk(code: &mut Code, xmm: u8, offset: usize, target: TargetCpu) {
     assert!(target.supports(Host::StoreUnaligned.requires()));
     let opcode = Host::StoreUnaligned.encoding();
     // REX.B selects R8 after the mandatory REP prefix and before the opcode.
@@ -36,7 +36,7 @@ fn store_table_chunk(code: &mut Vec<u8>, xmm: u8, offset: usize, target: TargetC
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,

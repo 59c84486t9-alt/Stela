@@ -1,7 +1,7 @@
 //! FEAT_CSSC min/max through CMP and CMOV.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::integer_minmax::{Kind, Operand, Right};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const REX_W: u8 = 0x48;
 const NOP: u8 = 0x90;
@@ -15,7 +15,7 @@ const CMOVL: u8 = 0x4c;
 const CMOVA: u8 = 0x47;
 const CMOVB: u8 = 0x42;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         code.push(NOP);
         return;
@@ -63,7 +63,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn signed_x_immediates_sign_extend_but_unsigned_do_not() {
@@ -75,7 +74,7 @@ mod tests {
                     Kind::UnsignedMinimum,
                     Kind::UnsignedMaximum,
                 ] {
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     emit(
                         &mut code,
                         &Operand {
@@ -86,7 +85,7 @@ mod tests {
                             right: Right::Immediate(value),
                         },
                     );
-                    let mut prefix = Vec::new();
+                    let mut prefix = Code::new();
                     load(&mut prefix, Register::X(1));
                     let signed_negative_x = width == Width::X64 && kind.signed() && value >= 0x80;
                     let materialization = if signed_negative_x {
@@ -122,7 +121,7 @@ mod tests {
             (Kind::UnsignedMaximum, CMOVB),
         ] {
             for width in [Width::W32, Width::X64] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(
                     &mut code,
                     &Operand {
@@ -133,7 +132,7 @@ mod tests {
                         right: Right::Register(Register::Zero),
                     },
                 );
-                let mut prefix = Vec::new();
+                let mut prefix = Code::new();
                 load(&mut prefix, Register::X(1));
                 right_operand(&mut prefix, Register::Zero, Width::X64, Shift::Lsl, 0);
                 let expected = if width == Width::X64 {
@@ -149,16 +148,16 @@ mod tests {
                 } else {
                     vec![0x39, 0xc8, OPCODE_ESCAPE, condition, MODRM_EAX_ECX]
                 };
-                let mut suffix = Vec::new();
+                let mut suffix = Code::new();
                 store(&mut suffix, Register::X(1));
-                assert_eq!(code, [prefix, expected, suffix].concat());
+                assert_eq!(code, [&prefix[..], &expected[..], &suffix[..]].concat());
             }
         }
     }
 
     #[test]
     fn discarded_result_preserves_a_nonempty_interval() {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand {

@@ -1,4 +1,5 @@
 //! SVE conversions between half precision and integers.
+use crate::x86_64::asm::Code;
 
 use super::half_widening::{guard_normal_half_fields, normal_half_to_single_fields};
 use crate::{
@@ -70,7 +71,7 @@ const MOVD_XMM6_ECX: &[u8] = &[0x66, 0x0f, 0x6e, 0xf1];
 const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
 const AND_EAX_IMMEDIATE: &[u8] = &[0x25];
 
-fn broadcast(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
+fn broadcast(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
     code.extend(MOV_ECX_IMMEDIATE);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, target);
@@ -79,13 +80,13 @@ fn broadcast(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
     code.push(REPEAT_LOW_DWORD);
 }
 
-fn failure(code: &mut Vec<u8>, opcode: &[u8], failures: &mut Vec<usize>) {
+fn failure(code: &mut Code, opcode: &[u8], failures: &mut Vec<usize>) {
     code.extend(opcode);
     failures.push(code.len());
     code.extend(0_i32.to_le_bytes());
 }
 
-fn reject_mask(code: &mut Vec<u8>, mask: u8, failures: &mut Vec<usize>, target: TargetCpu) {
+fn reject_mask(code: &mut Code, mask: u8, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::ByteSignMask.register(code, EAX, mask, target);
     code.extend(TEST_EAX_EAX);
     failure(code, JNZ_REL32, failures);
@@ -93,13 +94,13 @@ fn reject_mask(code: &mut Vec<u8>, mask: u8, failures: &mut Vec<usize>, target: 
 
 /// Prepare invariant normal-Half guard, field projection and neutral input.
 /// Preserved by to_integer_words; caller may hoist once per guest instruction.
-pub(crate) fn prepare_to_integer(code: &mut Vec<u8>, target: TargetCpu) {
+pub(crate) fn prepare_to_integer(code: &mut Code, target: TargetCpu) {
     broadcast(code, MAXIMUM_EXPONENT, HALF_EXPONENT_MAX, target);
     broadcast(code, SINGLE_BIAS, HALF_TO_SINGLE_BIAS, target);
     broadcast(code, HALF_ONE, HALF_ONE_BITS, target);
 }
 
-fn signed_half_range(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu) {
+fn signed_half_range(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::MoveAligned.register(code, SIGN, INPUT, target);
     ShiftOpcode::LeftDword.emit(code, SIGN, HALF_MAGNITUDE_TO_TOP);
     ShiftOpcode::RightDword.emit(code, SIGN, HALF_MAGNITUDE_TO_TOP);
@@ -123,7 +124,7 @@ fn signed_half_range(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: Targ
 /// The caller checks for F16C first. Host PE is the only status accepted,
 /// mapped to guest inexact by the caller.
 pub(crate) fn to_integer_words(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: IntegerFormat,
     f16c: bool,
     failures: &mut Vec<usize>,
@@ -170,7 +171,7 @@ pub(crate) fn to_integer_words(
     code.push(REGISTER_DIRECT | (INPUT << REGISTER_SHIFT) | INPUT);
 }
 
-fn normalize_integer(code: &mut Vec<u8>, source: IntegerFormat) {
+fn normalize_integer(code: &mut Code, source: IntegerFormat) {
     code.extend(match (source.width, source.signed) {
         (IntegerWidth::Bits16, true) => MOVSX_RAX_AX,
         (IntegerWidth::Bits16, false) => MOVZX_EAX_AX,
@@ -190,7 +191,7 @@ fn normalize_integer(code: &mut Vec<u8>, source: IntegerFormat) {
 /// No frame/store/commit/exit; host PE remains a separate pending channel.
 /// Clobbers XMM0/6, RAX/RCX/RDX/R9/R10 and flags; preserves other registers.
 pub(crate) fn from_integer_lane(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: IntegerFormat,
     f16c: bool,
     failures: &mut Vec<usize>,

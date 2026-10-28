@@ -1,4 +1,5 @@
 //! SVE FSCALE on normal values through packed integer exponent arithmetic.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -36,7 +37,7 @@ const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
 const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
 fn packed(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     single: Host,
     double: Host,
@@ -52,7 +53,7 @@ fn packed(
     .register(code, destination, source, target);
 }
 
-fn reject_invalid_active(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu) {
+fn reject_invalid_active(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::AndNot.register(code, VALID, ACTIVE, target);
     Host::ByteSignMask.register(code, GPR_RAX, VALID, target);
     code.extend(TEST_EAX_EAX);
@@ -62,7 +63,7 @@ fn reject_invalid_active(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: 
 }
 
 fn guard_normal_exponent(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -93,7 +94,7 @@ fn guard_normal_exponent(
 }
 
 fn guard_bounded_scale(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -132,7 +133,7 @@ fn guard_bounded_scale(
     reject_invalid_active(code, failures, target);
 }
 
-fn broadcast_maximum(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn broadcast_maximum(code: &mut Code, format: Format, target: TargetCpu) {
     let maximum = format.exponent_mask() >> format.fraction_bits();
     if format == Format::Single {
         code.push(MOV_EAX_IMMEDIATE);
@@ -157,7 +158,7 @@ fn broadcast_maximum(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 /// Every accepted value changes only its exponent field, preserving sign and
 /// fraction exactly, independent of all FPCR rounding/flush/AH controls.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

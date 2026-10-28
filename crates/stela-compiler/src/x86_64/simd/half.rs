@@ -1,5 +1,6 @@
 //! Half-precision lane unpacking, rounding and packing for normal values.
 use super::numerical::jump;
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 mod kernel;
 use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test_control};
@@ -123,18 +124,18 @@ const CVTSS2SD_XMM6_XMM6: &[u8] = &[0xf3, 0x0f, 0x5a, 0xf6];
 const MOVQ_XMM6_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xf0];
 const ADD_RAX_R9: &[u8] = &[0x4c, 0x01, 0xc8];
 
-fn shift(code: &mut Vec<u8>, opcode: &[u8], amount: u8) {
+fn shift(code: &mut Code, opcode: &[u8], amount: u8) {
     code.extend(opcode);
     code.push(amount);
 }
 
-fn immediate64(code: &mut Vec<u8>, opcode: &[u8], value: u64) {
+fn immediate64(code: &mut Code, opcode: &[u8], value: u64) {
     code.extend(opcode);
     code.extend(value.to_le_bytes());
 }
 
 /// Inputs XMM0/XMM1 are snapshotted before any widened lane overwrites them.
-pub(super) fn allocate_frame(code: &mut Vec<u8>) {
+pub(super) fn allocate_frame(code: &mut Code) {
     code.extend(SUB_RSP);
     code.push(HALF_STACK_BYTES);
     code.extend(SAVE_LEFT);
@@ -143,7 +144,7 @@ pub(super) fn allocate_frame(code: &mut Vec<u8>) {
     code.extend(SAVE_ZERO_RESULT);
 }
 
-pub(super) fn set_biases(code: &mut Vec<u8>, scale: LeftScale) {
+pub(super) fn set_biases(code: &mut Code, scale: LeftScale) {
     let left_bias = HALF_TO_DOUBLE_BIAS
         - match scale {
             LeftScale::Identity => 0,
@@ -154,19 +155,19 @@ pub(super) fn set_biases(code: &mut Vec<u8>, scale: LeftScale) {
 }
 
 /// Checked hardware widening needs only the integer packer's unscaled bias.
-pub(super) fn set_pack_bias(code: &mut Vec<u8>) {
+pub(super) fn set_pack_bias(code: &mut Code) {
     immediate64(code, MOVABS_R9, HALF_TO_DOUBLE_BIAS);
 }
 
 /// Family constants may be prepared after biases and before this loop label.
-pub(super) fn start_lanes(code: &mut Vec<u8>) -> usize {
+pub(super) fn start_lanes(code: &mut Code) -> usize {
     code.extend(XOR_R10D_R10D);
     code.extend(XOR_R11D_R11D);
     code.len()
 }
 
 /// Normal Half field construction is exact and cannot raise host FP status.
-pub(super) fn widen_lane(code: &mut Vec<u8>) {
+pub(super) fn widen_lane(code: &mut Code) {
     code.extend(LOAD_LEFT_HALF);
     code.extend(MOV_EDX_EAX);
     code.push(AND_EAX_IMM32);
@@ -193,7 +194,7 @@ pub(super) fn widen_lane(code: &mut Vec<u8>) {
 
 /// Normal Half to Single to Double is exact. MOVZX and MOVD zero all inactive
 /// lanes before the packed hardware conversion, including poisoned scalar bits.
-pub(super) fn widen_lane_checked(code: &mut Vec<u8>, target: TargetCpu) {
+pub(super) fn widen_lane_checked(code: &mut Code, target: TargetCpu) {
     code.extend(LOAD_LEFT_HALF);
     code.extend(MOVD_XMM0_EAX);
     Host::ConvertHalfToSingle.register(code, LEFT, LEFT, target);
@@ -205,7 +206,7 @@ pub(super) fn widen_lane_checked(code: &mut Vec<u8>, target: TargetCpu) {
 }
 
 pub(super) fn pack_lane(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     rollback: &mut Vec<usize>,
     rounding: RoundingPolicy,
     sign: ResultSign,
@@ -217,7 +218,7 @@ pub(super) fn pack_lane(
 /// Every failed output guard drops private status/results and restores RSP.
 /// Successful lanes return an assembled XMM0, final Half EAX and fresh IXC R10D.
 pub(super) fn finish_lanes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     lanes: u8,
     loop_start: usize,
     helper: &[usize],
@@ -249,13 +250,13 @@ pub(super) fn finish_lanes(
 }
 
 /// The caller applies instruction-specific AH status policy before this store.
-pub(super) fn commit_inexact(code: &mut Vec<u8>) {
+pub(super) fn commit_inexact(code: &mut Code) {
     code.extend(OR_STATE_R10D);
     code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
 }
 
 /// Original Vn is XMM7. Scalar-pair callers skip NEP merging entirely.
-pub(super) fn merge_scalar(code: &mut Vec<u8>) {
+pub(super) fn merge_scalar(code: &mut Code) {
     test_control(code, FPCR_NEP);
     let clearing = branch(code, Condition::Zero);
     code.extend(PINSRW_XMM7_EAX);
@@ -271,7 +272,7 @@ pub(super) fn merge_scalar(code: &mut Vec<u8>) {
 /// Callers own enabled-exception policy, finite-domain proofs, staging, fallback
 /// cleanup and guest commit. No frame, host environment, store or CALL is emitted.
 /// Clobbers RAX/RCX/RDX/R9/R10 and flags; every XMM and other GPR survives.
-pub(in crate::x86_64) fn emit_normal_or_zero(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+pub(in crate::x86_64) fn emit_normal_or_zero(code: &mut Code, failures: &mut Vec<usize>) {
     set_pack_bias(code);
     code.extend(MOVQ_RAX_XMM6);
     code.extend(MOV_RDX_RAX);
@@ -297,7 +298,7 @@ pub(in crate::x86_64) use kernel::emit_normal as pack_normal;
 /// XMM6. R9 contains the unscaled Half-to-Double bias. Only RAX/RDX/flags and
 /// XMM6 are clobbered; no frame or MXCSR change occurs. Checked F16C receives
 /// an isolated Half with zero upper lanes, preserving the existing kernel.
-pub(in crate::x86_64) fn widen_normal(code: &mut Vec<u8>, target: TargetCpu) {
+pub(in crate::x86_64) fn widen_normal(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::F16c) {
         // Isolate the selected Half before packed conversion: the next lane in
         // XMM7 may be an inactive sNaN. MOVD also zeros every higher Half lane.

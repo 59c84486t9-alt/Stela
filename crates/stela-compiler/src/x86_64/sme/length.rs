@@ -2,8 +2,8 @@
 use crate::aarch64::Register;
 use crate::aarch64::scalable::VectorLength;
 use crate::aarch64::sme::length::{Kind, Operand, Scale};
+use crate::x86_64::asm::Code;
 use crate::x86_64::{load, offset, store};
-use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
@@ -13,7 +13,7 @@ const ADD_STATE_IMM8: &[u8] = &[0x48, 0x83, 0x87];
 const ADD_STATE_IMM32: &[u8] = &[0x48, 0x81, 0x87];
 const MOV_STATE_IMM32_SIGNED: &[u8] = &[0x48, 0xc7, 0x87];
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength) {
     // The caller must check SME access before entering this emitter, including
     // discarded results and identity operations. SM and ZA need not be enabled.
     if operand.destination == Register::Zero {

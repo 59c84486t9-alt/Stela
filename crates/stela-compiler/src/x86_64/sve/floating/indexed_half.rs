@@ -1,4 +1,5 @@
 //! SVE indexed half-precision arithmetic through exact double intermediates.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -157,14 +158,14 @@ fn admitted(operand: Operand) -> Option<Operation> {
     }
 }
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, register: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, opcode: Host, register: u8, order: u8, target: TargetCpu) {
     opcode.register(code, register, register, target);
     code.push(order);
 }
 
 /// Materialize the effective eight Half fields once per segment. Real and
 /// imaginary selection occurs before any classification or FP conversion.
-fn select_sources(code: &mut Vec<u8>, operation: Operation, target: TargetCpu) {
+fn select_sources(code: &mut Code, operation: Operation, target: TargetCpu) {
     let sign = Format::Half.sign_mask() as u32;
     let sign_pair = if let Some(rotation) = operation.rotation {
         let imaginary = matches!(rotation, Rotation::Degrees90 | Rotation::Degrees270);
@@ -248,7 +249,7 @@ fn select_sources(code: &mut Vec<u8>, operation: Operation, target: TargetCpu) {
 /// never reach a hardware conversion. The unsigned interval admits exponents
 /// 1..30, rejecting zeros, subnormals, infinities and every NaN payload.
 fn widen_input(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     original: u8,
     output: u8,
     failures: &mut Vec<usize>,
@@ -272,7 +273,7 @@ fn widen_input(
 /// Optional selection changes only exact input widening. No feature is assumed
 /// from the guest profile; unsupported checked selection declines untouched.
 pub(in crate::x86_64) fn emit_candidate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -394,7 +395,7 @@ pub(in crate::x86_64) fn emit_candidate(
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -433,7 +434,6 @@ fn selected_recipe(operand: Operand, length: VectorLength, target: TargetCpu) ->
 mod tests {
     use super::*;
     use crate::aarch64::sve::floating::arithmetic;
-    use alloc::vec::Vec;
 
     const INDEXED_FCMLA_HALF: u32 = 0x64a21020;
     const INDEXED_FMLA_HALF: u32 = 0x64220020;
@@ -463,8 +463,8 @@ mod tests {
                                 && matches!(word, INDEXED_FMLA_HALF | INDEXED_FMLS_HALF));
                     let recipe = selected_recipe(operand, length, target);
                     assert_eq!(matches!(recipe, Recipe::CheckedWidening), checked);
-                    let mut selected = Vec::new();
-                    let mut explicit = Vec::new();
+                    let mut selected = Code::new();
+                    let mut explicit = Code::new();
                     let features = NumericalFeatures::new(false, true, true);
                     let pc = GuestAddress(0x123456789abcdef0);
                     assert!(emit(&mut selected, operand, length, features, pc, target).unwrap());

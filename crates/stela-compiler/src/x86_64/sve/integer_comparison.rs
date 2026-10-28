@@ -3,8 +3,8 @@ use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, VectorLength};
 use crate::aarch64::sve::integer_comparison::{Operand, Relation, Right};
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
-use alloc::vec::Vec;
 
 const XMM_LEFT: u8 = 0;
 const XMM_RIGHT: u8 = 1;
@@ -87,17 +87,17 @@ const XMM_IMMEDIATE: u8 = 5;
 
 mod wide;
 
-fn register_fields(code: &mut Vec<u8>, opcode: &[u8], reg: u8, rm: u8) {
+fn register_fields(code: &mut Code, opcode: &[u8], reg: u8, rm: u8) {
     code.extend_from_slice(opcode);
     code.push(MOD_REGISTER | (reg << REGISTER_SHIFT) | rm);
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8) {
     Host::ShuffleDword.register(code, destination, source, TargetCpu::Baseline);
     code.push(control);
 }
 
-fn sign_bias(code: &mut Vec<u8>, size: ElementSize) {
+fn sign_bias(code: &mut Code, size: ElementSize) {
     Host::EqualDword.register(code, XMM_BIAS, XMM_BIAS, TargetCpu::Baseline);
     let (opcode, amount) = match size {
         ElementSize::Byte => (Shift::LeftWord, BYTE_SIGN_SHIFT),
@@ -112,13 +112,13 @@ fn sign_bias(code: &mut Vec<u8>, size: ElementSize) {
     }
 }
 
-fn equal_doublewords(code: &mut Vec<u8>, left: u8, right: u8) {
+fn equal_doublewords(code: &mut Code, left: u8, right: u8) {
     Host::EqualDword.register(code, left, right, TargetCpu::Baseline);
     shuffle(code, XMM_HIGH_GREATER, left, SWAP_ADJACENT_WORDS);
     Host::And.register(code, left, XMM_HIGH_GREATER, TargetCpu::Baseline);
 }
 
-fn greater_doublewords(code: &mut Vec<u8>, left: u8, right: u8) {
+fn greater_doublewords(code: &mut Code, left: u8, right: u8) {
     Host::MoveAligned.register(code, XMM_HIGH_GREATER, left, TargetCpu::Baseline);
     Host::GreaterDword.register(code, XMM_HIGH_GREATER, right, TargetCpu::Baseline);
     shuffle(
@@ -140,7 +140,7 @@ fn greater_doublewords(code: &mut Vec<u8>, left: u8, right: u8) {
 }
 
 fn compare_lanes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     relation: Relation,
     unsigned: bool,
     size: ElementSize,
@@ -198,7 +198,7 @@ fn compare_lanes(
 /// Clobbers XMM0..XMM4; preserves all GPRs, host flags and MXCSR. Callers that
 /// select source values must preserve their originals outside this scratch set.
 pub(crate) fn emit_compare_mask(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     relation: Relation,
     unsigned: bool,
     size: ElementSize,
@@ -217,7 +217,7 @@ pub(crate) fn emit_compare_mask(
 /// Governing masks, packed lane-start bits, NZCV and state commits belong to the
 /// outer instruction emitter. Immediate/wide operands must be prepared there.
 pub(crate) fn emit_compare_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     relation: Relation,
     unsigned: bool,
     size: ElementSize,
@@ -232,7 +232,7 @@ pub(crate) fn emit_compare_chunk(
     Ok(())
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend_from_slice(opcode);
     let position = code.len();
     code.extend(0i32.to_le_bytes());
@@ -244,7 +244,7 @@ fn finish_branch(code: &mut [u8], position: usize) {
     code[position..position + size_of::<i32>()].copy_from_slice(&displacement.to_le_bytes());
 }
 
-fn splat_immediate(code: &mut Vec<u8>, value: i16, size: ElementSize) {
+fn splat_immediate(code: &mut Code, value: i16, size: ElementSize) {
     if size == ElementSize::Doubleword {
         if value < 0 {
             code.extend_from_slice(MOV_RAX_SIGNED_IMMEDIATE);
@@ -269,7 +269,7 @@ fn splat_immediate(code: &mut Vec<u8>, value: i16, size: ElementSize) {
     }
 }
 
-fn load_result_chunk(code: &mut Vec<u8>, chunk: usize, predicate_bytes: usize) {
+fn load_result_chunk(code: &mut Code, chunk: usize, predicate_bytes: usize) {
     let offset = chunk * QWORD_BYTES;
     code.extend_from_slice(match (predicate_bytes - offset).min(QWORD_BYTES) {
         2 => LOAD_STACK_WORD_EAX,
@@ -280,7 +280,7 @@ fn load_result_chunk(code: &mut Vec<u8>, chunk: usize, predicate_bytes: usize) {
     code.push(offset as u8);
 }
 
-fn accumulate_predtest(code: &mut Vec<u8>) {
+fn accumulate_predtest(code: &mut Code) {
     // RDX is the effective governing64-bit mask; RAX is the governed result.
     // R9 holds N plus a first-active-seen marker, R10 any result and R11 !last.
     code.extend_from_slice(OR_R10_RAX);
@@ -307,7 +307,7 @@ fn accumulate_predtest(code: &mut Vec<u8>) {
 /// Comparison results are staged on the stack until every governing bit and
 /// PredTest input is consumed, so Pd == Pg sees the original predicate
 /// throughout.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, write_predicate_chunk};
     let single_chunk = length.chunks() == 1;
     if !single_chunk {
@@ -426,7 +426,6 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, t
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn optional_doubleword_opcodes_require_exact_tier() {
@@ -442,7 +441,7 @@ mod tests {
                 Host::GreaterQword.encoding(),
             ),
         ] {
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             emit_compare_chunk(
                 &mut baseline,
                 relation,
@@ -456,7 +455,7 @@ mod tests {
                     .windows(optional.len())
                     .any(|bytes| bytes == optional)
             );
-            let mut checked = Vec::new();
+            let mut checked = Code::new();
             emit_compare_chunk(
                 &mut checked,
                 relation,
@@ -476,7 +475,7 @@ mod tests {
 
     #[test]
     fn reserved_element_width_does_not_emit_prefix() {
-        let mut code = vec![0x90];
+        let mut code = Code::from(vec![0x90]);
         assert_eq!(
             emit_compare_chunk(
                 &mut code,

@@ -6,6 +6,7 @@ use super::super::super::numerical::{
     widen_half_to_single,
 };
 use super::super::super::{Host, packed, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress,
     aarch64::{
@@ -60,14 +61,14 @@ const MOV_ECX_IMM32: u8 = 0xb9;
 const DEC_ECX: &[u8] = &[0xff, 0xc9];
 const JMP_REL32: u8 = 0xe9;
 
-fn jump(code: &mut Vec<u8>) -> usize {
+fn jump(code: &mut Code) -> usize {
     code.push(JMP_REL32);
     let patch = code.len();
     code.extend(0i32.to_le_bytes());
     patch
 }
 
-fn constant(code: &mut Vec<u8>, vector: u8, value: u32) {
+fn constant(code: &mut Code, vector: u8, value: u32) {
     code.push(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     code.extend(MOVD_XMM_EAX_PREFIX);
@@ -76,7 +77,7 @@ fn constant(code: &mut Vec<u8>, vector: u8, value: u32) {
 }
 
 /// One four-lane group, with fresh IXC accumulating only in private R10D.
-fn group(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn group(code: &mut Code, helper: &mut Vec<usize>) {
     packed(code, Host::Xor, ZERO, ZERO);
     constant(code, CONSTANT, SINGLE_HALF_BIAS);
     widen_half_to_single(code, RESULT, LEFT, SIGN, ZERO, CONSTANT);
@@ -152,7 +153,7 @@ pub(super) fn supports(operand: &Operand) -> bool {
 
 /// Return XMM0 and private fresh IXC after every group passes. No stack or host
 /// environment changes are needed, so every failed guard enters the cold helper.
-pub(super) fn emit(code: &mut Vec<u8>, shape: Shape, mut helper: Vec<usize>, pc: GuestAddress) {
+pub(super) fn emit(code: &mut Code, shape: Shape, mut helper: Vec<usize>, pc: GuestAddress) {
     integer_rounding_policy(code, DISCARDED_BITS, false);
     if shape == Shape::Vector128 {
         // ECX is dead after integer_rounding_policy; group scratch uses only EAX.

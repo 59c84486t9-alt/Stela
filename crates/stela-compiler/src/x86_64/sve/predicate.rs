@@ -1,5 +1,5 @@
 //! Packed predicate helpers.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod counter;
 mod counter_mask;
 mod flags;
@@ -11,7 +11,7 @@ pub(crate) use flags::{accumulate_predtest, begin_predtest, finish_predtest, lea
 const CHUNK_BITS: usize = 64;
 const REL32_BYTES: usize = 4;
 
-fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn jump(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend([0; REL32_BYTES]);

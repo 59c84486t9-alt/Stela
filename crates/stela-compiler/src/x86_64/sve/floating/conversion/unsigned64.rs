@@ -1,5 +1,6 @@
 //! SSE2 conversions between single/double and unsigned 64-bit integers. The
 //! caller owns the MXCSR frame, lane guards and staging.
+use crate::x86_64::asm::Code;
 
 use crate::aarch64::floating::Format;
 use alloc::vec::Vec;
@@ -35,7 +36,7 @@ const JNS_REL32: &[u8] = &[0x0f, 0x89];
 const JB_REL32: &[u8] = &[0x0f, 0x82];
 const JMP_REL32: &[u8] = &[0xe9];
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
@@ -57,12 +58,12 @@ fn prefix(format: Format) -> u8 {
     }
 }
 
-fn convert(code: &mut Vec<u8>, format: Format, opcode: u8) {
+fn convert(code: &mut Code, format: Format, opcode: u8) {
     // Both directions use RAX and XMM0; the opcode assigns their roles.
     code.extend([prefix(format), REX_W, SSE_ESCAPE, opcode, REGISTER_DIRECT]);
 }
 
-fn scalar(code: &mut Vec<u8>, format: Format, opcode: u8, source: u8) {
+fn scalar(code: &mut Code, format: Format, opcode: u8, source: u8) {
     code.extend([
         prefix(format),
         SSE_ESCAPE,
@@ -71,7 +72,7 @@ fn scalar(code: &mut Vec<u8>, format: Format, opcode: u8, source: u8) {
     ]);
 }
 
-fn unsigned_split_constant(code: &mut Vec<u8>, format: Format) {
+fn unsigned_split_constant(code: &mut Code, format: Format) {
     let bias = match format {
         Format::Single => SINGLE_EXPONENT_BIAS,
         Format::Double => DOUBLE_EXPONENT_BIAS,
@@ -87,7 +88,7 @@ fn unsigned_split_constant(code: &mut Vec<u8>, format: Format) {
 /// Consume unsigned RAX, produce low S/D in XMM0. Upper XMM0 must start zero.
 /// Scratch RAX/RCX and flags; preserves XMM1..7, RDX and all caller pointers.
 /// Private MXCSR must contain effective guest RC, clear status and masked traps.
-pub(crate) fn from_integer(code: &mut Vec<u8>, format: Format) {
+pub(crate) fn from_integer(code: &mut Code, format: Format) {
     let _ = prefix(format); // Reject a violated S/D contract before emitting bytes.
     code.extend(TEST_RAX_RAX);
     let low = branch(code, JNS_REL32);
@@ -112,7 +113,7 @@ pub(crate) fn from_integer(code: &mut Vec<u8>, format: Format) {
 /// Consume low S/D XMM0, produce unsigned RAX. Scratch XMM0/XMM7/RDX/flags.
 /// Caller must reject NaNs/subnormals, then reject all private status except PE.
 /// This appends a negative-result failure to the shared transactional rollback.
-pub(crate) fn to_integer(code: &mut Vec<u8>, format: Format, failures: &mut Vec<usize>) {
+pub(crate) fn to_integer(code: &mut Code, format: Format, failures: &mut Vec<usize>) {
     let _ = prefix(format);
     unsigned_split_constant(code, format);
     if format == Format::Double {

@@ -1,5 +1,6 @@
 //! MOVT (vector to ZT0) prepared for execution from the halted-debug ITR.
 use super::{MOV_R15_RSI, POP_R15, PUSH_R15, RET, ScalableProfile};
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress,
     aarch64::{
@@ -108,7 +109,7 @@ pub fn prepare(
             ),
             GuestMemoryQuantity::None,
         )]);
-    let mut code = Vec::new();
+    let mut code = Code::new();
     let discarded = direction == Direction::FromZa && register == ZERO_REGISTER;
     if !discarded {
         code.extend(PUSH_R15);
@@ -126,7 +127,7 @@ pub fn prepare(
         operand,
         profile,
         recipe,
-        code,
+        code: code.into_bytes(),
         word_to_native: [(EXTERNAL_WORD_ORDINAL, native_offset)],
         requirements,
     })

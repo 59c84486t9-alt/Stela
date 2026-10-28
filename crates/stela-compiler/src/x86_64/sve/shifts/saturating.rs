@@ -1,11 +1,11 @@
 //! SVE saturating shifts by signed counts.
 use super::{repeated_constant, stack_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{scalable::ElementSize, sve::shifts::Kind},
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host},
 };
-use alloc::vec::Vec;
 const SOURCE_SLOT: u8 = 0;
 const COUNTS_SLOT: u8 = 16;
 const LEFT_SLOT: u8 = 32;
@@ -15,7 +15,7 @@ const DWORD_SIGN_SHIFT: u8 = u32::BITS as u8 - 1;
 const WORD_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 const DUPLICATE_HIGH_DWORDS: u8 = 0xf5;
 const ADJACENT_DWORDS: u8 = 0xb1;
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 fn add(element: ElementSize) -> Host {
@@ -36,7 +36,7 @@ fn subtract(element: ElementSize) -> Host {
         _ => unreachable!(),
     }
 }
-fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, element: ElementSize) {
+fn sign_mask(code: &mut Code, destination: u8, source: u8, element: ElementSize) {
     if element == ElementSize::Byte {
         let input = if source == destination {
             packed(code, Host::MoveAligned, 4, source);
@@ -60,7 +60,7 @@ fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, element: ElementSi
         }
     }
 }
-fn equal(code: &mut Vec<u8>, element: ElementSize) {
+fn equal(code: &mut Code, element: ElementSize) {
     let opcode = match element {
         ElementSize::Byte => Host::EqualByte,
         ElementSize::Halfword => Host::EqualWord,
@@ -77,7 +77,7 @@ fn equal(code: &mut Vec<u8>, element: ElementSize) {
 }
 /// Inputs XMM0=data, XMM1=full signed counts; preserve counts1 and old merge6.
 /// Caller owns a64-byte stack scratch frame at RSP.
-pub(super) fn chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
+pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     let signed = matches!(
         kind,
         Kind::SaturatingSigned | Kind::SaturatingRoundingSigned

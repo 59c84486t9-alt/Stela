@@ -2,9 +2,9 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::integer_logic::{Boolean, CopySource, Kind, Operand, Ternary};
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -21,11 +21,11 @@ const BITS_PER_BYTE: usize = 8;
 const ADJACENT_DWORD_SWAP: u8 = 0xb1;
 const BROADCAST_LOW_DWORD: u8 = 0;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn constant(code: &mut Vec<u8>, value: u64) {
+fn constant(code: &mut Code, value: u64) {
     code.extend(MOVABS_RAX);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, TargetCpu::Baseline);
@@ -42,7 +42,7 @@ fn repeat_qword(value: u64, element: ElementSize) -> u64 {
     (0..QWORD_BYTES / element.bytes()).fold(0, |result, lane| result | (value << (lane * bits)))
 }
 
-fn broadcast_scalar(code: &mut Vec<u8>, element: ElementSize) {
+fn broadcast_scalar(code: &mut Code, element: ElementSize) {
     if element == ElementSize::Byte {
         packed(code, Host::UnpackLowByte, CONSTANT, CONSTANT);
     }
@@ -59,7 +59,7 @@ fn broadcast_scalar(code: &mut Vec<u8>, element: ElementSize) {
 
 /// Inputs XMM0/XMM1 are snapshotted source chunks. Produces XMM0 and may
 /// consume XMM1; RDI/R15 and guest architectural status are untouched.
-pub fn emit_binary_chunk(code: &mut Vec<u8>, operation: Boolean) {
+pub fn emit_binary_chunk(code: &mut Code, operation: Boolean) {
     match operation {
         Boolean::And => packed(code, Host::And, RESULT, RIGHT),
         Boolean::Or => packed(code, Host::Or, RESULT, RIGHT),
@@ -73,7 +73,7 @@ pub fn emit_binary_chunk(code: &mut Vec<u8>, operation: Boolean) {
 
 /// XMM0 is the old destructive destination, XMM1 the right operand, XMM2
 /// the mask/third source. All three must be staged before entering.
-pub fn emit_ternary_chunk(code: &mut Vec<u8>, operation: Ternary) {
+pub fn emit_ternary_chunk(code: &mut Code, operation: Ternary) {
     match operation {
         Ternary::BitClearXor => {
             packed(code, Host::AndNot, THIRD, RIGHT);
@@ -103,7 +103,7 @@ pub fn emit_ternary_chunk(code: &mut Vec<u8>, operation: Ternary) {
     }
 }
 
-fn emit_unary_chunk(code: &mut Vec<u8>, conditional: bool, element: ElementSize) {
+fn emit_unary_chunk(code: &mut Code, conditional: bool, element: ElementSize) {
     if !conditional {
         packed(code, Host::EqualDword, RIGHT, RIGHT);
         packed(code, Host::Xor, RESULT, RIGHT);
@@ -129,7 +129,7 @@ fn emit_unary_chunk(code: &mut Vec<u8>, conditional: bool, element: ElementSize)
     packed(code, Host::And, RESULT, CONSTANT);
 }
 
-fn merge(code: &mut Vec<u8>, predication: Predication) {
+fn merge(code: &mut Code, predication: Predication) {
     packed(code, Host::And, RESULT, PREDICATE);
     if matches!(predication, Predication::Merging(_)) {
         packed(code, Host::AndNot, PREDICATE, PREVIOUS);
@@ -142,7 +142,7 @@ fn merge(code: &mut Vec<u8>, predication: Predication) {
 /// has no RAM accesses or guest flag changes. Per-chunk source staging is enough
 /// because its only cross-lane accesses remain within one 128-bit chunk; scalar
 /// sources are broadcast once before an aliased low-V destination can change.
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     match operand.kind {
         Kind::Immediate { value, .. } => constant(code, value),
         Kind::Copy(CopySource::Immediate(value)) => {

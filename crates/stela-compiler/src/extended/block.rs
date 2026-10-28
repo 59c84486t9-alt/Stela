@@ -1,5 +1,6 @@
 //! Blocks compiled with an execution context. A service exit returns the PC of
 //! the instruction still to execute.
+use crate::x86_64::asm::Code;
 
 use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, context_wrapper, decode};
 use crate::{
@@ -190,7 +191,7 @@ pub fn compile_for_profile(
             }
         }
     }
-    let mut code = context_wrapper();
+    let mut code = Code::from(context_wrapper());
     let mut source_map = Vec::with_capacity(instructions.len() + usize::from(terminal.is_some()));
     let mut fixups = Vec::new();
     for (pc, instruction) in instructions {
@@ -280,7 +281,7 @@ pub fn compile_for_profile(
     }
     Ok(CompiledBlock {
         native: NativeBlock {
-            x86_64_code: code,
+            x86_64_code: code.into_bytes(),
             source_map,
         },
         source_bytes,

@@ -6,6 +6,7 @@ use super::{
     numerical::{Condition, branch, prepare_vector_input_range, vector_exponent_range},
     packed,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{floating::Format, simd::arithmetic::Shape},
@@ -46,7 +47,7 @@ const DOUBLE_EXPONENT_MASK: u32 =
 const DOUBLE_MAXIMUM_NORMAL_MINUS_ONE: u32 = DOUBLE_EXPONENT_MASK - 1;
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     failures: &mut Vec<usize>,
@@ -122,7 +123,7 @@ pub(in crate::x86_64) fn emit(
     packed(code, add, LEFT, RIGHT);
 }
 
-fn scale_double(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn scale_double(code: &mut Code, failures: &mut Vec<usize>) {
     for lane in 0..2 {
         packed(code, Host::MoveAligned, EXPONENT, LEFT);
         packed(code, Host::MoveAligned, VALID, RIGHT);

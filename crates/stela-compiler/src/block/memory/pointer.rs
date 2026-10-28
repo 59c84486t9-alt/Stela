@@ -1,4 +1,5 @@
 //! FEAT_CPA arithmetic within checked memory plans.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -79,7 +80,7 @@ impl CheckedOperation {
 
     pub(crate) fn emit(
         &self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         pc: GuestAddress,
         target: TargetCpu,
         fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,

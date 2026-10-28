@@ -13,7 +13,7 @@ use crate::aarch64::{
     system::registers::{Direction, Encoding},
 };
 use crate::block::{SystemInstruction, system::SystemOperation};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 /// DC ZVA: SYS #3, C7, C4, #1.
 const DC_ZVA: Encoding = Encoding::new(1, 3, 7, 4, 1);
@@ -39,7 +39,7 @@ pub fn operand(instruction: &SystemInstruction) -> Option<u8> {
 
 /// Zero the `bytes` block (a power of two in [`MIN_BYTES`]..=[`MAX_BYTES`])
 /// holding Xt.
-pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, bytes: u16, checks: super::MemoryChecks) {
+pub(crate) fn emit(code: &mut Code, rt: u8, bytes: u16, checks: super::MemoryChecks) {
     debug_assert!(bytes.is_power_of_two() && (MIN_BYTES..=MAX_BYTES).contains(&bytes));
     super::load(
         code,
@@ -126,7 +126,7 @@ mod tests {
             let mut state = GuestState::default();
             // Xt points inside the block, past its start.
             state.x[5] = block + u64::from(bytes) - 1;
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, 5, bytes, super::super::MemoryChecks::DEFAULT);
             code.push(0xc3); // ret
             // SAFETY: private anonymous memory, RX after the copy, unmapped

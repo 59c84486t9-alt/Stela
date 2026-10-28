@@ -5,7 +5,7 @@ use super::{
     locked_compare_exchange, read_r8, store_rcx,
 };
 use crate::aarch64::atomic::{Kind, Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;
@@ -22,7 +22,7 @@ const MODRM_RAX_R8: u8 = 0xc0;
 /// `ecx, r8d` (CMOVNE with REX.B).
 const MODRM_RCX_R8: u8 = 0xc8;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, plain_access: bool) {
     let Kind::CompareExchange { compare, source } = operand.kind else {
         unreachable!("compare-exchange emitter receives a CAS operand");
     };
@@ -46,7 +46,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
 /// LOCK CMPXCHG writes back a failed comparison's old value (Arm permits a
 /// failed CAS to write, `Unpredictable_WRITEFAILEDCAS`). RAX then returns
 /// the old value. No branch, LOCK prefix or retry.
-fn plain(code: &mut Vec<u8>, bytes: u8) {
+fn plain(code: &mut Code, bytes: u8) {
     let wide = if bytes == QWORD_BYTES { REX_W_BIT } else { 0 };
     read_r8(code, bytes);
     if bytes == HALFWORD_BYTES {
@@ -75,6 +75,7 @@ fn plain(code: &mut Vec<u8>, bytes: u8) {
 mod tests {
     use super::*;
     use crate::aarch64::{Register, atomic::Order};
+    use alloc::vec::Vec;
 
     #[test]
     fn a_single_agent_cas_loads_compares_selects_and_stores() {
@@ -121,7 +122,7 @@ mod tests {
                     source: Register::X(2),
                 },
             };
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, &operand, true);
             let expected: Vec<u8> = [load, compare, select, store, result].concat();
             let at = code
@@ -130,7 +131,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{bytes}: {code:02x?}"));
             // Then only the commit of the old value to X1.
             assert_eq!(&code[at + expected.len()..], [0x48, 0x89, 0x87, 8, 0, 0, 0]);
-            let mut locked = Vec::new();
+            let mut locked = Code::new();
             emit(&mut locked, &operand, false);
             assert!(locked.contains(&0xf0) && !code.contains(&0xf0));
         }

@@ -1,9 +1,9 @@
 //! ADR and ADRP as MOV of the computed guest address.
 use super::store;
 use crate::aarch64::{Register, pc_relative::Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         // Keep each guest instruction's native source-map interval nonempty.
         code.push(0x90);
@@ -17,12 +17,12 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+
     use alloc::vec::Vec;
 
     #[test]
     fn address_is_full_width_and_discarded_destination_keeps_map_interval() {
-        let mut code = vec![];
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand {

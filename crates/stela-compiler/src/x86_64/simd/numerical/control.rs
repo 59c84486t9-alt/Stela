@@ -1,7 +1,7 @@
 //! Translate FPCR rounding controls into a private MXCSR.
+use crate::x86_64::asm::Code;
 
 use crate::{GuestState, aarch64::floating::FPCR_ROUNDING_SHIFT};
-use alloc::vec::Vec;
 
 const MXCSR_POSITIVE_ROUNDING_SHIFT: u8 = 14;
 const MXCSR_NEGATIVE_ROUNDING_SHIFT: u8 = 13;
@@ -22,7 +22,7 @@ const OR_EAX_ECX: &[u8] = &[0x09, 0xc8];
 /// Clobbers ECX and host flags; preserves every XMM, RDI/R15 and guest state.
 /// Operation-specific AH/rounding policy and MXCSR installation remain callers'
 /// responsibilities. This helper neither installs nor reads host MXCSR.
-pub(in crate::x86_64) fn rounding_control(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn rounding_control(code: &mut Code) {
     code.extend(MOV_EAX_STATE);
     code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(MOV_ECX_EAX);

@@ -1,4 +1,5 @@
 //! FAMIN/FAMAX and FSCALE. FSCALE on normal values changes only exponent bits.
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -26,7 +27,7 @@ pub(super) fn always_exits(_operand: &Operand) -> bool {
 }
 
 fn absolute(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     operation: AbsoluteMinMaxOperation,
     failures: &mut Vec<usize>,
@@ -52,7 +53,7 @@ fn absolute(
     );
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let mut failures = Vec::new();
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     failures.push(branch(code, Condition::NotZero));

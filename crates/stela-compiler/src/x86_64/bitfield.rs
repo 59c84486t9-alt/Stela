@@ -1,9 +1,9 @@
 //! Bitfield moves using shifts and masks. Guest NZCV is untouched.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::bitfield::{Kind, Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
-fn shift(code: &mut Vec<u8>, width: Width, opcode: u8, amount: u8) {
+fn shift(code: &mut Code, width: Width, opcode: u8, amount: u8) {
     if amount != 0 {
         if width == Width::X64 {
             code.push(0x48);
@@ -12,7 +12,7 @@ fn shift(code: &mut Vec<u8>, width: Width, opcode: u8, amount: u8) {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         // Discarding a result must still own a nonempty source-map interval.
         code.push(0x90);
@@ -78,11 +78,11 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+
     use alloc::vec::Vec;
 
     fn code(width: Width, kind: Kind, rotation: u8, mask_end: u8) -> Vec<u8> {
-        let mut result = vec![];
+        let mut result = Code::new();
         emit(
             &mut result,
             &Operand {
@@ -94,7 +94,7 @@ mod tests {
                 mask_end,
             },
         );
-        result
+        result.into_bytes()
     }
 
     #[test]
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn aliased_insert_stages_both_original_operands_before_the_only_state_store() {
-        let mut emitted = vec![];
+        let mut emitted = Code::new();
         emit(
             &mut emitted,
             &Operand {
@@ -207,7 +207,7 @@ mod tests {
                 rotation: 0,
                 mask_end: 63,
             };
-            let mut emitted = vec![];
+            let mut emitted = Code::new();
             emit(&mut emitted, &operand);
             assert_eq!(&emitted[..2], [0x31, 0xc0]);
             operand.destination = Register::Zero;

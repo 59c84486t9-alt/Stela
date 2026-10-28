@@ -1,5 +1,6 @@
 //! BF16 fused multiply-add through exact double arithmetic. Close exponents make
 //! the product and sum exact in double; round-to-odd then feeds BF16 rounding.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -96,19 +97,19 @@ const MOV_R10D_EAX: &[u8] = &[0x41, 0x89, 0xc2];
 const MOV_EAX_R10D: &[u8] = &[0x44, 0x89, 0xd0];
 const MOV_EAX_IMM32: u8 = 0xb8;
 
-fn scalar(code: &mut Vec<u8>, opcode: &[u8], destination: u8, source: u8) {
+fn scalar(code: &mut Code, opcode: &[u8], destination: u8, source: u8) {
     code.extend(opcode);
     code.push(MODRM_REGISTER | destination << MODRM_REGISTER_SHIFT | source);
 }
 
-fn extract(code: &mut Vec<u8>, source: u8, lane: usize) {
+fn extract(code: &mut Code, source: u8, lane: usize) {
     scalar(code, PEXTRW, GPR_RAX, source);
     code.push(lane as u8);
 }
 
 /// Preserve raw BF16 in EAX and its biased exponent in ECX. Reject zeros,
 /// subnormals and nonfinite values before any host floating-point instruction.
-fn normal_input(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn normal_input(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(MOV_ECX_EAX);
     code.extend(SHR_ECX_IMM8);
     code.push(BFLOAT_FRACTION_BITS);
@@ -121,7 +122,7 @@ fn normal_input(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
     failures.push(branch(code, Condition::Above));
 }
 
-fn widen(code: &mut Vec<u8>, destination: u8) {
+fn widen(code: &mut Code, destination: u8) {
     code.extend(SHL_EAX_IMM8);
     code.push(SINGLE_TO_BFLOAT_SHIFT);
     scalar(code, MOVD, destination, GPR_RAX);
@@ -131,7 +132,7 @@ fn widen(code: &mut Vec<u8>, destination: u8) {
 /// Product precision is at most16 bits. With |eL+eR-eA| <=32, aligning the
 /// accumulator and product requires at most48 significant bits plus one carry,
 /// fitting Double53 even before cancellation. Both Double operations are exact.
-fn exact_exponent_guard(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn exact_exponent_guard(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(SUB_R10D_IMM8);
     code.push(BFLOAT_EXPONENT_BIAS as u8);
     code.extend(ADD_R10D_IMM8);
@@ -145,7 +146,7 @@ fn exact_exponent_guard(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
 /// The low29 discarded bits become one sticky bit. Sixteen retained guard bits
 /// remain below BF precision, so every final BF rounding mode sees the same
 /// below-half/equal-half/above-half and nonzero-remainder classification.
-fn compress(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn compress(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(MOVQ_RAX_XMM6);
     code.extend(MOV_RCX_RAX);
     code.extend(SHR_RCX_IMM8);
@@ -177,7 +178,7 @@ fn compress(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
 
 /// Shared R8D/R9D/R11D selectors own RC and nearest-even parity. Every discarded
 /// bit records true-BF IXC, including AH1. Pending status commits only at finish.
-fn quantize(code: &mut Vec<u8>, frame: &numerical::Frame, failures: &mut Vec<usize>) {
+fn quantize(code: &mut Code, frame: &numerical::Frame, failures: &mut Vec<usize>) {
     // R10D holds the compression sticky bit, which is already part of EAX.
     // The shared helper's OR-accumulation therefore records exactly low16.
     quantize_bfloat_scalar_bits(code);
@@ -201,7 +202,7 @@ fn quantize(code: &mut Vec<u8>, frame: &numerical::Frame, failures: &mut Vec<usi
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

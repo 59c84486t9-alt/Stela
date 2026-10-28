@@ -1,4 +1,5 @@
 //! SVE FRINT*.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -42,7 +43,7 @@ const INEXACT_SHIFT: u8 = INEXACT.trailing_zeros() as u8;
 /// rejection discards the staged result and restores the caller's MXCSR at the
 /// instruction.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

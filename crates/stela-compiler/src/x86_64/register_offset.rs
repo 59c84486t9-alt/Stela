@@ -4,9 +4,9 @@ use super::{
     offset, right_operand,
 };
 use crate::aarch64::register_offset::{IndexExtend, Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     address(
         code,
         checks,
@@ -25,7 +25,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
 /// and SCTLR_ELx.A checks the result against the access's `bytes`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn address(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     checks: super::MemoryChecks,
     base: Register,
     index: Register,
@@ -62,7 +62,7 @@ const MAX_SCALE_SHIFT: u8 = 3;
 /// The index register, extended and shifted, added to the base in RAX
 /// modulo 2^64. A W index is read with its extension from its frame slot;
 /// a ZR index adds nothing. RCX and host flags are scratch.
-pub(crate) fn index_add(code: &mut Vec<u8>, index: Register, extend: IndexExtend, shift: u8) {
+pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, shift: u8) {
     let Some(slot) = offset(index) else {
         return;
     };
@@ -88,7 +88,7 @@ pub(crate) fn index_add(code: &mut Vec<u8>, index: Register, extend: IndexExtend
     code.push(scale << SIB_SCALE_SHIFT | SIB_RCX_INDEX_RAX_BASE);
 }
 
-fn transfer(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
+fn transfer(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     match operand.transfer {
         MemoryTransfer::Store => {
             right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);

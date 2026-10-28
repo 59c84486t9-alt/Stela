@@ -4,6 +4,7 @@
 //! Half precision and exceptional values use software completion. With DAZ
 //! clear, a normal output with only inexact status implies no denormal
 //! operand.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -58,20 +59,14 @@ const AND_EAX_IMMEDIATE: u8 = 0x25;
 const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
 const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(JNZ_REL32);
     failures.push(code.len());
     code.extend([0; REL32_BYTES]);
 }
 
 /// Broadcast `bits` to every lane of `destination`.
-fn broadcast_bits(
-    code: &mut Vec<u8>,
-    format: Format,
-    bits: u64,
-    destination: u8,
-    target: TargetCpu,
-) {
+fn broadcast_bits(code: &mut Code, format: Format, bits: u64, destination: u8, target: TargetCpu) {
     match format {
         Format::Single => {
             code.push(MOV_EAX_IMMEDIATE);
@@ -95,7 +90,7 @@ fn broadcast_bits(
 
 /// Replace inactive lanes with exact benign normals before any host arithmetic.
 /// Left=2 and right=1 make every admitted operation exact in inactive lanes.
-fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: TargetCpu) {
+fn benign_inactive(code: &mut Code, format: Format, input: u8, target: TargetCpu) {
     let increment = if input == LEFT {
         BENIGN_LEFT_EXPONENT_INCREMENT
     } else {
@@ -133,7 +128,7 @@ fn element(format: Format) -> Option<ElementSize> {
 /// Load the active-lane mask for `chunk` into ACTIVE: the governing
 /// predicate's lanes, or all lanes when unpredicated under full A64 rules.
 fn active_lanes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     element: ElementSize,
     chunk: usize,
@@ -159,7 +154,7 @@ fn active_lanes(
 
 /// Merge LEFT into the old destination's inactive lanes when predicated.
 fn merge_inactive(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     chunk: usize,
     length: VectorLength,
@@ -182,7 +177,7 @@ fn merge_inactive(
 
 /// Reject any status other than inexact, add inexact to FPSR and commit.
 fn finish_status(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &mut Vec<usize>,
     pc: GuestAddress,
@@ -236,7 +231,7 @@ fn core_inputs(operand: Operand) -> Option<(BinaryOperation, u8, u8)> {
 /// feature admission and streaming entry checks. RDI/R15, guest NZCV and every
 /// source survive; RAX/RCX/RDX, flags and XMM0..7 are caller-volatile.
 pub(crate) fn emit_core(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -333,7 +328,7 @@ fn operand_form_inputs(operand: Operand) -> Option<(BinaryOperation, Source, Sou
 /// Indexed inputs select one lane separately in each guest 128-bit segment.
 /// No source is loaded from a previously staged destination chunk.
 fn load_source(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: Source,
     format: Format,
     chunk: usize,
@@ -367,7 +362,7 @@ fn load_source(
 
 /// FPAbs transforms the rounded subtraction result. Active NaNs fail the result
 /// exponent guard before this finite-only sign clear, preserving AH NaN policy.
-fn absolute_result(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn absolute_result(code: &mut Code, format: Format, target: TargetCpu) {
     let sign_shift = if format == Format::Single {
         SINGLE_SIGN_SHIFT
     } else {
@@ -388,7 +383,7 @@ fn absolute_result(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 /// feature admission and streaming entry checks. RDI/R15, guest NZCV and every
 /// source survive; RAX/RCX/RDX, flags and XMM0..7 are caller-volatile.
 pub(in crate::x86_64) fn emit_operand_forms(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

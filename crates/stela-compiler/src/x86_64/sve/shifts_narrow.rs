@@ -1,4 +1,5 @@
 //! SVE2 widening and narrowing shifts with SSE2 or SSE4.1.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,7 +11,6 @@ use crate::{
         scalable::{load_z_chunk, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 
 const SOURCE_XMM: u8 = 0;
 const TEMP_XMM: u8 = 1;
@@ -89,7 +89,7 @@ const CMOVA_RAX_RDX: &[u8] = &[0x48, 0x0f, 0x47, 0xc2];
 const CMOVS_RAX_RDX: &[u8] = &[0x48, 0x0f, 0x48, 0xc2];
 const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
 
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let small_bits = operand.element_size.bits() as u8;
     for chunk in 0..length.chunks() {
         load_z_chunk(code, operand.source, chunk, SOURCE_XMM, length, target);
@@ -115,7 +115,7 @@ pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: 
 /// `element` is Byte/Halfword/Word. Right shifts accept 1..=source bits;
 /// extract kinds require zero. Widening kinds are outside this kernel's contract.
 pub(crate) fn narrow_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     amount: u8,
@@ -134,7 +134,7 @@ pub(crate) fn narrow_chunk(
 /// Narrow XMM0 into consecutive low-eight-byte results, clearing the upper eight.
 /// Operand and clobber contracts match `narrow_chunk`; group staging stays outside.
 pub(crate) fn narrow_packed_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     amount: u8,
@@ -157,7 +157,7 @@ enum NarrowProjection {
 }
 
 fn narrow_projected(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     amount: u8,
@@ -190,12 +190,12 @@ fn narrow_projected(
     }
 }
 
-fn clear_packed_upper(code: &mut Vec<u8>) {
+fn clear_packed_upper(code: &mut Code) {
     code.extend(MOVQ_XMM_XMM);
     code.push(REGISTER_MODE | (SOURCE_XMM << MODRM_REGISTER_SHIFT) | SOURCE_XMM);
 }
 
-fn compact_even_lanes(code: &mut Vec<u8>, small: u8) {
+fn compact_even_lanes(code: &mut Code, small: u8) {
     match small {
         BYTE_BITS => binary(code, PACKUSWB, SOURCE_XMM, SOURCE_XMM),
         WORD_BITS => {
@@ -213,7 +213,7 @@ fn compact_even_lanes(code: &mut Vec<u8>, small: u8) {
     clear_packed_upper(code);
 }
 
-fn binary(code: &mut Vec<u8>, opcode: u8, destination: u8, source: u8) {
+fn binary(code: &mut Code, opcode: u8, destination: u8, source: u8) {
     code.extend(SSE_PREFIX);
     code.extend([
         opcode,
@@ -221,7 +221,7 @@ fn binary(code: &mut Vec<u8>, opcode: u8, destination: u8, source: u8) {
     ]);
 }
 
-fn shift(code: &mut Vec<u8>, bits: u8, group: u8, register: u8, amount: u8) {
+fn shift(code: &mut Code, bits: u8, group: u8, register: u8, amount: u8) {
     if amount == 0 {
         return;
     }
@@ -239,7 +239,7 @@ fn shift(code: &mut Vec<u8>, bits: u8, group: u8, register: u8, amount: u8) {
     ]);
 }
 
-fn byte_shift(code: &mut Vec<u8>, group: u8, register: u8, amount: usize) {
+fn byte_shift(code: &mut Code, group: u8, register: u8, amount: usize) {
     if amount == 0 {
         return;
     }
@@ -251,7 +251,7 @@ fn byte_shift(code: &mut Vec<u8>, group: u8, register: u8, amount: usize) {
     ]);
 }
 
-fn constant(code: &mut Vec<u8>, register: u8, value: u64) {
+fn constant(code: &mut Code, register: u8, value: u64) {
     code.extend(MOV_RAX_IMM64);
     code.extend(value.to_le_bytes());
     code.extend(MOVQ_XMM_RAX);
@@ -268,7 +268,7 @@ fn low_mask(bits: u8) -> u64 {
     }
 }
 
-fn widen(code: &mut Vec<u8>, operand: Operand, small: u8, target: TargetCpu) {
+fn widen(code: &mut Code, operand: Operand, small: u8, target: TargetCpu) {
     let wide = 2 * small;
     let top = operand.part == Part::Top;
     if operand.kind == Kind::WidenSigned && small == DWORD_BITS && target.supports(TargetCpu::Sse41)
@@ -357,7 +357,7 @@ fn signed_output(kind: Kind) -> bool {
     )
 }
 
-fn shift_narrow_input(code: &mut Vec<u8>, operand: Operand, wide: u8) {
+fn shift_narrow_input(code: &mut Code, operand: Operand, wide: u8) {
     if operand.kind.is_extract() {
         return;
     }
@@ -403,7 +403,7 @@ fn shift_narrow_input(code: &mut Vec<u8>, operand: Operand, wide: u8) {
 }
 
 fn narrow(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     small: u8,
     projection: NarrowProjection,
@@ -480,7 +480,7 @@ fn narrow(
     );
 }
 
-fn unsigned_min_words(code: &mut Vec<u8>) {
+fn unsigned_min_words(code: &mut Code) {
     binary(code, MOVDQA, TEMP_XMM, SOURCE_XMM);
     constant(code, MASK_XMM, SIGN_DWORDS);
     binary(code, PXOR, TEMP_XMM, MASK_XMM);
@@ -494,7 +494,7 @@ fn unsigned_min_words(code: &mut Vec<u8>) {
 }
 
 fn merge_top(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     chunk: usize,
     result: u8,
@@ -512,7 +512,7 @@ fn merge_top(
     binary(code, POR, result, TEMP_XMM);
 }
 
-fn scalar_narrow_qwords(code: &mut Vec<u8>, operand: Operand) {
+fn scalar_narrow_qwords(code: &mut Code, operand: Operand) {
     binary(code, PXOR, RESULT_XMM, RESULT_XMM);
     for offset in (0..CHUNK_BYTES).step_by(QWORD_BYTES) {
         binary(code, MOVDQA, MASK_XMM, SOURCE_XMM);
@@ -575,7 +575,7 @@ fn scalar_narrow_qwords(code: &mut Vec<u8>, operand: Operand) {
     binary(code, MOVDQA, SOURCE_XMM, RESULT_XMM);
 }
 
-fn scalar_bound(code: &mut Vec<u8>, bound: u64, move_condition: &[u8]) {
+fn scalar_bound(code: &mut Code, bound: u64, move_condition: &[u8]) {
     code.extend(MOV_RDX_IMM64);
     code.extend(bound.to_le_bytes());
     code.extend(CMP_RAX_RDX);

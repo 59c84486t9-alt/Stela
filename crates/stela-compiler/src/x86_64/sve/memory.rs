@@ -1,4 +1,5 @@
 //! Address computation and fault exits shared by the SVE memory families.
+use crate::x86_64::asm::Code;
 
 use super::super::{load, scalable::memory as service};
 use crate::aarch64::{
@@ -7,7 +8,6 @@ use crate::aarch64::{
     sve::memory::{Address, Offset, Scale},
 };
 use crate::context::memory::MemoryStatus;
-use alloc::vec::Vec;
 
 const ADD_RAX_IMM8: &[u8] = &[0x48, 0x83, 0xc0];
 const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
@@ -46,7 +46,7 @@ fn scale_bytes(scale: Scale, length: VectorLength) -> usize {
 
 /// Return the effective guest address in RAX, with 64-bit wrapping arithmetic.
 /// CPA2 is disabled; translation owns TBI handling. Clobbers RCX; RDI/R15 survive.
-pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength) {
+pub(crate) fn address(code: &mut Code, operand: Address, length: VectorLength) {
     match operand.offset {
         Offset::Immediate { value, scale } => {
             load(code, operand.base);
@@ -83,7 +83,7 @@ pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength
 /// Check SP before applying the displacement. Requires SA/SA0 enabled, with
 /// CHECKSPNONEACTIVE true. Prefetches must not call this. The caller patches
 /// the fault site to its cleanup.
-pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<usize> {
+pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize> {
     if base != Register::Sp {
         return None;
     }
@@ -105,7 +105,7 @@ pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<us
 /// After family scratch cleanup, return a failed inner body to its outer entry.
 /// The outer entry CALLs the body and owns POP_R15; this RET cannot bypass it.
 /// Success (EAX=0) falls through to the next translated guest instruction.
-pub(crate) fn return_if_failed(code: &mut Vec<u8>) {
+pub(crate) fn return_if_failed(code: &mut Code) {
     code.extend(TEST_EAX_EAX);
     code.push(JE_REL8);
     code.push(RET_BYTES);

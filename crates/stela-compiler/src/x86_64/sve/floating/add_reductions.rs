@@ -1,5 +1,6 @@
 //! FADDP, FADDV and FADDQV. NaNs, subnormals and any host status other than
 //! inexact take the software path for the whole instruction.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -55,7 +56,7 @@ fn element(format: Format) -> ElementSize {
     }
 }
 
-fn low_lane(code: &mut Vec<u8>, format: Format, lane: usize, register: u8) {
+fn low_lane(code: &mut Code, format: Format, lane: usize, register: u8) {
     let bytes = format.bits() as usize / BITS_PER_BYTE;
     if lane != 0 {
         ShiftOpcode::RightBytes.emit(code, register, (lane * bytes) as u8);
@@ -66,7 +67,7 @@ fn low_lane(code: &mut Vec<u8>, format: Format, lane: usize, register: u8) {
 }
 
 fn guard(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     classification: Classification,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -97,7 +98,7 @@ impl Tree {
     // inactive.
     fn emit(
         &self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         start: usize,
         count: usize,
         depth: usize,
@@ -147,7 +148,7 @@ impl Tree {
     }
 }
 
-fn status(code: &mut Vec<u8>, frame: &numerical::Frame, failures: &mut Vec<usize>) {
+fn status(code: &mut Code, frame: &numerical::Frame, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
     code.extend(TEST_ECX_IMMEDIATE);
     code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
@@ -162,7 +163,7 @@ fn status(code: &mut Vec<u8>, frame: &numerical::Frame, failures: &mut Vec<usize
 
 #[allow(clippy::too_many_arguments)]
 fn pairwise(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     left: u8,
     right: u8,
@@ -240,7 +241,7 @@ fn pairwise(
 /// Unsupported lengths or formats return false before emitting, leaving the
 /// instruction to software completion.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

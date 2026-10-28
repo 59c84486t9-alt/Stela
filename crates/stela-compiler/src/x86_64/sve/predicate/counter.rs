@@ -1,7 +1,7 @@
 //! Expanding predicate-as-counter registers into packed predicate chunks.
 use super::{CHUNK_BITS, bind, jump};
 use crate::aarch64::scalable::VectorLength;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const XOR_R9D_R9D: &[u8] = &[0x45, 0x31, 0xc9];
 const XOR_R10D_R10D: &[u8] = &[0x45, 0x31, 0xd2];
@@ -51,7 +51,7 @@ const JMP: &[u8] = &[0xe9];
 /// The instruction's own element size is deliberately absent: a consumer samples
 /// this mask using its independent stride, including mismatched counter sizes.
 /// This baseline mapping uses no optional host capability or guest RAM access.
-pub(crate) fn emit_counter_chunk(code: &mut Vec<u8>, chunk: usize, length: VectorLength) {
+pub(crate) fn emit_counter_chunk(code: &mut Code, chunk: usize, length: VectorLength) {
     prepare_counter(code, length);
     emit_prepared_counter_chunk(code, chunk, length);
 }
@@ -60,7 +60,7 @@ pub(crate) fn emit_counter_chunk(code: &mut Vec<u8>, chunk: usize, length: Vecto
 /// low16 input, R9 the exclusive active-bit boundary, R10 the leading-bit pattern.
 /// Zero format initializes a zero pattern regardless of the inversion bit.
 /// Clobbers RAX/RCX/RDX/R8..R11; preserves RDI/R15 and all XMMs.
-pub(crate) fn prepare_counter(code: &mut Vec<u8>, length: VectorLength) {
+pub(crate) fn prepare_counter(code: &mut Code, length: VectorLength) {
     let expanded_bits = length.bytes() * 4;
     let counter_bits = expanded_bits.ilog2() + 1;
     let count_mask = (1u32 << counter_bits) - 1;
@@ -100,7 +100,7 @@ pub(crate) fn prepare_counter(code: &mut Vec<u8>, length: VectorLength) {
 
 /// Produce a chunk from prepare_counter state without changing R8/R9/R10.
 /// Clobbers RAX/RCX/R11 and host flags; preserves RDX/RDI/R15 and XMMs.
-pub(crate) fn emit_prepared_counter_chunk(code: &mut Vec<u8>, chunk: usize, length: VectorLength) {
+pub(crate) fn emit_prepared_counter_chunk(code: &mut Code, chunk: usize, length: VectorLength) {
     assert!(chunk < length.bytes() * 4 / CHUNK_BITS);
     code.extend(MOV_EAX_R9D);
     if chunk != 0 {
@@ -133,14 +133,13 @@ pub(crate) fn emit_prepared_counter_chunk(code: &mut Vec<u8>, chunk: usize, leng
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn every_streaming_length_emits_bounded_chunks_without_optional_instructions() {
         for bytes in [16, 32, 64, 128, 256] {
             let length = VectorLength::from_bytes(bytes).unwrap();
             for chunk in 0..bytes * 4 / CHUNK_BITS {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit_counter_chunk(&mut code, chunk, length);
                 assert!(code.starts_with(MOVZX_R8D_AX));
                 assert!(code.ends_with(AND_RAX_R10));

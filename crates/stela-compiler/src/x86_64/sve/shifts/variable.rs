@@ -1,5 +1,6 @@
 //! Per-lane variable shifts by unsigned counts.
 use super::repeated_constant;
+use crate::x86_64::asm::Code;
 use crate::x86_64::simd::shifts::{
     logical_shift as shared_logical_shift, right_shift as shared_right_shift,
 };
@@ -11,7 +12,6 @@ use crate::{
     },
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host, VexShiftOpcode},
 };
-use alloc::vec::Vec;
 
 /// Only complete unsigned per-element counts map directly. Wide counts,
 /// signed bidirectional/rounded shifts and narrower lanes retain their own
@@ -38,11 +38,11 @@ const ADJACENT_DWORDS: u8 = 0xb1;
 const HIGH_DWORD_SIGN: u8 = 0xf5;
 const DWORD_SIGN_SHIFT: u8 = u32::BITS as u8 - 1;
 const WORD_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 /// Byte logical masks use one repeated qword constant, avoiding two-limb setup.
-fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane: u8, amount: u8, left: bool) {
+fn logical_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, left: bool) {
     if lane != 1 {
         shared_logical_shift(code, xmm, lane, amount, left);
         return;
@@ -66,7 +66,7 @@ fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane: u8, amount: u8, left: bool) 
 }
 /// Arithmetic word shifts independently sign-extend each even and odd byte.
 /// XMM4 is scratch; XMM1, XMM2 and old mergeXMM6 survive unchanged.
-fn right_shift(code: &mut Vec<u8>, xmm: u8, lane: u8, amount: u8, signed: bool) {
+fn right_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, signed: bool) {
     if !signed {
         logical_shift(code, xmm, lane, amount, false);
         return;
@@ -89,7 +89,7 @@ fn right_shift(code: &mut Vec<u8>, xmm: u8, lane: u8, amount: u8, signed: bool) 
     Shift::LeftWord.emit(code, 4, BYTE_BITS);
     packed(code, Host::Or, xmm, 4);
 }
-fn equal_zero(code: &mut Vec<u8>, xmm: u8, element: ElementSize) {
+fn equal_zero(code: &mut Code, xmm: u8, element: ElementSize) {
     packed(code, Host::Xor, 4, 4);
     let op = match element {
         ElementSize::Byte => Host::EqualByte,
@@ -104,7 +104,7 @@ fn equal_zero(code: &mut Vec<u8>, xmm: u8, element: ElementSize) {
         packed(code, Host::And, xmm, 5);
     }
 }
-fn sign_mask(code: &mut Vec<u8>, element: ElementSize) {
+fn sign_mask(code: &mut Code, element: ElementSize) {
     if element == ElementSize::Byte {
         packed(code, Host::Xor, 3, 3);
         packed(code, Host::GreaterByte, 3, 0);
@@ -122,7 +122,7 @@ fn sign_mask(code: &mut Vec<u8>, element: ElementSize) {
         _ => unreachable!(),
     }
 }
-pub(super) fn chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
+pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     assert!(matches!(
         kind,
         Kind::LogicalLeft | Kind::LogicalRight | Kind::ArithmeticRight

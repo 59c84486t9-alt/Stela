@@ -1,5 +1,6 @@
 //! ZA moves and zeroing. R8 holds the selected ZA address across helper calls,
 //! which clobber only RAX/RCX/RDX.
+use crate::x86_64::asm::Code;
 
 use super::super::{
     isa::{ShiftOpcode, SimdOpcode as Host},
@@ -14,7 +15,6 @@ use crate::{
     },
     context::{EXECUTION_CONTEXT_SCALABLE_OFFSET, SCALABLE_ZT0_OFFSET},
 };
-use alloc::vec::Vec;
 
 const VALUE: u8 = 0;
 const PREVIOUS: u8 = 1;
@@ -62,7 +62,7 @@ const MOV_DWORD_R8_EAX: &[u8] = &[0x41, 0x89, 0x80];
 const MOV_QWORD_R8_RAX: &[u8] = &[0x49, 0x89, 0x80];
 
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -244,7 +244,7 @@ pub(crate) fn emit(
 /// Called only by the halted-ITR entry; the ordinary movement emitter still
 /// rejects TableGpr.
 pub(crate) fn emit_debug_table_gpr(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     recipe: crate::extended::debug_movement::Recipe,
 ) -> Result<(), &'static str> {
@@ -316,14 +316,14 @@ pub(crate) fn emit_debug_table_gpr(
     Ok(())
 }
 
-fn pointer(code: &mut Vec<u8>, field: u32) {
+fn pointer(code: &mut Code, field: u32) {
     code.extend(MOV_R8_CONTEXT_DISP8);
     code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
     code.extend(MOV_R8_R8_DISP8);
     code.push(field as u8);
 }
 
-fn index_offset(code: &mut Vec<u8>, register: u8, offset: u8, align: usize, modulus: usize) {
+fn index_offset(code: &mut Code, register: u8, offset: u8, align: usize, modulus: usize) {
     code.extend(MOV_EAX_STATE_DISP32);
     code.extend(
         (core::mem::offset_of!(GuestState, x) as u32 + u32::from(register) * GPR_BYTES as u32)
@@ -343,7 +343,7 @@ fn index_offset(code: &mut Vec<u8>, register: u8, offset: u8, align: usize, modu
     code.extend((modulus as u32 - 1).to_le_bytes());
 }
 
-fn scale_index(code: &mut Vec<u8>, scale: usize) {
+fn scale_index(code: &mut Code, scale: usize) {
     debug_assert!(scale.is_power_of_two());
     if scale > 1 {
         code.extend(SHL_EAX_IMM8);
@@ -351,14 +351,14 @@ fn scale_index(code: &mut Vec<u8>, scale: usize) {
     }
 }
 
-fn add_address(code: &mut Vec<u8>, displacement: usize) {
+fn add_address(code: &mut Code, displacement: usize) {
     if displacement != 0 {
         code.extend(ADD_R8_IMM32);
         code.extend((displacement as u32).to_le_bytes());
     }
 }
 
-fn contiguous(code: &mut Vec<u8>, opcode: Host, xmm: u8, displacement: usize) {
+fn contiguous(code: &mut Code, opcode: Host, xmm: u8, displacement: usize) {
     match opcode {
         Host::LoadUnaligned => {
             load_za_chunk_at_r8(code, xmm, displacement as u32, TargetCpu::Baseline);
@@ -381,19 +381,19 @@ fn contiguous(code: &mut Vec<u8>, opcode: Host, xmm: u8, displacement: usize) {
     code.extend((displacement as u32).to_le_bytes());
 }
 
-fn memory(code: &mut Vec<u8>, opcode: &[u8], displacement: usize) {
+fn memory(code: &mut Code, opcode: &[u8], displacement: usize) {
     code.extend(opcode);
     code.extend((displacement as u32).to_le_bytes());
 }
 
-fn simd_memory(code: &mut Vec<u8>, opcode: &[u8], xmm: u8, displacement: usize) {
+fn simd_memory(code: &mut Code, opcode: &[u8], xmm: u8, displacement: usize) {
     code.extend(opcode);
     code.push(MODRM_DISP32_R8 | (xmm << REGISTER_SHIFT));
     code.extend((displacement as u32).to_le_bytes());
 }
 
 fn load_slice(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     output: u8,
     chunk: usize,
     element: ElementSize,
@@ -449,7 +449,7 @@ fn load_slice(
 }
 
 fn store_slice(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     input: u8,
     chunk: usize,
     element: ElementSize,
@@ -517,7 +517,7 @@ fn store_slice(
     }
 }
 
-fn zero_rows(code: &mut Vec<u8>, count: usize, step: usize, length: VectorLength, zero: u8) {
+fn zero_rows(code: &mut Code, count: usize, step: usize, length: VectorLength, zero: u8) {
     code.extend(MOV_ECX_IMM32);
     code.extend((count as u32).to_le_bytes());
     let start = code.len();
@@ -536,7 +536,6 @@ mod tests {
     use super::*;
     use crate::aarch64::sme::movement::decode;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn rejected_debug_and_short_length_emit_nothing() {
@@ -549,7 +548,7 @@ mod tests {
             0xc0c4_0400,
         ] {
             let operand = decode(word).unwrap();
-            let mut code = vec![0x90];
+            let mut code = Code::from(vec![0x90]);
             assert!(emit(&mut code, &operand, length, TargetCpu::Baseline).is_err());
             assert_eq!(code, [0x90]);
         }
@@ -559,7 +558,7 @@ mod tests {
     fn empty_tile_mask_has_no_output_and_full_mask_is_bounded() {
         for bytes in [16, 32, 64, 128, 256] {
             let length = VectorLength::from_bytes(bytes).unwrap();
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &decode(0xc008_0000).unwrap(),
@@ -590,15 +589,15 @@ mod tests {
             0xc0c2_8000,
         ] {
             let operand = decode(word).unwrap();
-            let mut baseline = Vec::new();
-            let mut checked = Vec::new();
+            let mut baseline = Code::new();
+            let mut checked = Code::new();
             emit(&mut baseline, &operand, length, TargetCpu::Baseline).unwrap();
             emit(&mut checked, &operand, length, TargetCpu::Sse41).unwrap();
             assert_eq!(baseline, checked);
         }
         let operand = decode(0xc0c0_8000).unwrap();
-        let mut baseline = Vec::new();
-        let mut checked = Vec::new();
+        let mut baseline = Code::new();
+        let mut checked = Code::new();
         emit(&mut baseline, &operand, length, TargetCpu::Baseline).unwrap();
         emit(&mut checked, &operand, length, TargetCpu::Sse41).unwrap();
         assert!(checked.len() < baseline.len());

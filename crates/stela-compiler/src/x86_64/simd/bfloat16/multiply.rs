@@ -8,6 +8,7 @@ use super::super::numerical::{
     vector_exponent_range,
 };
 use super::super::{commit, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -31,7 +32,7 @@ const FIRST_LANE: u8 = 0;
 const OUTPUT_SHAPE: Shape = Shape::Vector128;
 const BFLOAT16_BYTES: u32 = BFLOAT16_BITS / u8::BITS;
 
-fn select_vector(code: &mut Vec<u8>, source: u8, vector: u8, parity: Parity) {
+fn select_vector(code: &mut Code, source: u8, vector: u8, parity: Parity) {
     read_vector(code, source, vector);
     if parity == Parity::Odd {
         ShiftOpcode::RightDword.emit(code, vector, BFLOAT16_BITS as u8);
@@ -41,7 +42,7 @@ fn select_vector(code: &mut Vec<u8>, source: u8, vector: u8, parity: Parity) {
     ShiftOpcode::LeftDword.emit(code, vector, BFLOAT16_TO_SINGLE_SHIFT as u8);
 }
 
-fn prepare_sources(code: &mut Vec<u8>, operand: &MultiplyOperand) {
+fn prepare_sources(code: &mut Code, operand: &MultiplyOperand) {
     select_vector(code, operand.left, LEFT, operand.parity);
     match operand.right {
         MultiplySource::Vector(source) => select_vector(code, source, RIGHT, operand.parity),
@@ -66,7 +67,7 @@ fn prepare_sources(code: &mut Vec<u8>, operand: &MultiplyOperand) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &MultiplyOperand,
     pc: GuestAddress,
     target: TargetCpu,

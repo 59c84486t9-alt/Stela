@@ -7,6 +7,7 @@ use super::numerical::{
     vector_exponent_range,
 };
 use super::{Host, commit, packed, read_vector, vector_offset};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress,
     aarch64::{
@@ -71,11 +72,11 @@ const SINGLE_EXPONENT_BIAS: i16 = 127;
 const DOUBLE_EXPONENT_BIAS: i16 = 1023;
 const UNSIGNED_HIGH_EXPONENT: i16 = 63;
 
-fn helper(code: &mut Vec<u8>, pc: GuestAddress) {
+fn helper(code: &mut Code, pc: GuestAddress) {
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
 }
 
-fn scalar_conversion(code: &mut Vec<u8>, format: Format, opcode: u8, wide: bool) {
+fn scalar_conversion(code: &mut Code, format: Format, opcode: u8, wide: bool) {
     code.push(match format {
         Format::Single => SINGLE_PREFIX,
         Format::Double => DOUBLE_PREFIX,
@@ -107,7 +108,7 @@ fn integer_offset(integer: IntegerOperand, lane: u32) -> u32 {
     vector_offset(register) + lane * (format.width.bits() / BITS_PER_BYTE)
 }
 
-fn read_integer(code: &mut Vec<u8>, integer: IntegerOperand, lane: u32) {
+fn read_integer(code: &mut Code, integer: IntegerOperand, lane: u32) {
     let format = integer.format();
     match integer {
         IntegerOperand::General { register, .. } => super::super::load(code, register),
@@ -126,7 +127,7 @@ fn read_integer(code: &mut Vec<u8>, integer: IntegerOperand, lane: u32) {
     }
 }
 
-fn float_constant(code: &mut Vec<u8>, format: Format, exponent: i16, shape: Shape) {
+fn float_constant(code: &mut Code, format: Format, exponent: i16, shape: Shape) {
     let (bias, fraction_bits) = match format {
         Format::Single => (SINGLE_EXPONENT_BIAS, Format::Single.fraction_bits()),
         Format::Double => (DOUBLE_EXPONENT_BIAS, Format::Double.fraction_bits()),
@@ -147,7 +148,7 @@ fn float_constant(code: &mut Vec<u8>, format: Format, exponent: i16, shape: Shap
     }
 }
 
-fn scale(code: &mut Vec<u8>, operand: &IntegerConversion, shape: Shape, direction: i16) {
+fn scale(code: &mut Code, operand: &IntegerConversion, shape: Shape, direction: i16) {
     if operand.frac_bits != 0 {
         float_constant(
             code,
@@ -165,7 +166,7 @@ fn scale(code: &mut Vec<u8>, operand: &IntegerConversion, shape: Shape, directio
     }
 }
 
-fn convert_integer_lane(code: &mut Vec<u8>, operand: &IntegerConversion, lane: u32) {
+fn convert_integer_lane(code: &mut Code, operand: &IntegerConversion, lane: u32) {
     let integer = operand.integer.format();
     read_integer(code, operand.integer, lane);
     let wide = integer.width == IntegerWidth::Bits64 || !integer.signed;
@@ -200,7 +201,7 @@ fn convert_integer_lane(code: &mut Vec<u8>, operand: &IntegerConversion, lane: u
     scale(code, operand, Shape::Scalar, -1);
 }
 
-fn pack_integer_lane(code: &mut Vec<u8>, width: IntegerWidth, lane: u32) {
+fn pack_integer_lane(code: &mut Code, width: IntegerWidth, lane: u32) {
     code.extend(if width == IntegerWidth::Bits64 {
         MOVQ_XMM1_RAX
     } else {
@@ -213,7 +214,7 @@ fn pack_integer_lane(code: &mut Vec<u8>, width: IntegerWidth, lane: u32) {
     packed(code, Host::Or, INTEGER_ACCUMULATOR, TEMPORARY_VECTOR);
 }
 
-fn finish_float(code: &mut Vec<u8>, operand: &IntegerConversion) {
+fn finish_float(code: &mut Code, operand: &IntegerConversion) {
     commit_inexact(code);
     if operand.integer.shape() == Shape::Scalar {
         test_control(code, FPCR_NEP);
@@ -226,7 +227,7 @@ fn finish_float(code: &mut Vec<u8>, operand: &IntegerConversion) {
 }
 
 pub(in crate::x86_64) fn from_integer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &IntegerConversion,
     pc: GuestAddress,
 ) {
@@ -277,7 +278,7 @@ pub(in crate::x86_64) fn from_integer(
     finish_float(code, operand);
 }
 
-fn guard_float_source(code: &mut Vec<u8>, operand: &IntegerConversion) -> usize {
+fn guard_float_source(code: &mut Code, operand: &IntegerConversion) -> usize {
     let shape = operand.integer.shape();
     read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
     if shape == Shape::Scalar {
@@ -290,7 +291,7 @@ fn guard_float_source(code: &mut Vec<u8>, operand: &IntegerConversion) -> usize 
     }
 }
 
-fn read_float_lane(code: &mut Vec<u8>, operand: &IntegerConversion, lane: u32) {
+fn read_float_lane(code: &mut Code, operand: &IntegerConversion, lane: u32) {
     code.extend(if operand.format == Format::Single {
         MOVD_XMM0_STATE
     } else {
@@ -303,7 +304,7 @@ fn read_float_lane(code: &mut Vec<u8>, operand: &IntegerConversion, lane: u32) {
 }
 
 fn convert_float_lane(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &IntegerConversion,
     mode: IntegerRounding,
     failures: &mut Vec<usize>,
@@ -357,7 +358,7 @@ fn convert_float_lane(
     }
 }
 
-fn finish_integer(code: &mut Vec<u8>, operand: &IntegerConversion, packed_result: bool) {
+fn finish_integer(code: &mut Code, operand: &IntegerConversion, packed_result: bool) {
     commit_inexact(code);
     match operand.integer {
         IntegerOperand::General { register, .. } => super::super::store(code, register),
@@ -394,7 +395,7 @@ fn finish_integer(code: &mut Vec<u8>, operand: &IntegerConversion, packed_result
 }
 
 pub(in crate::x86_64) fn to_integer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &IntegerConversion,
     mode: IntegerRounding,
     pc: GuestAddress,
@@ -458,7 +459,7 @@ pub(in crate::x86_64) fn to_integer(
 }
 
 pub(in crate::x86_64) fn javascript(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: Register,
     source: u8,
     pc: GuestAddress,

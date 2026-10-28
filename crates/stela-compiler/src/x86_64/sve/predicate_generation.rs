@@ -1,5 +1,6 @@
 //! Predicate generation, using BMI1 when available.
 use super::predicate;
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -12,7 +13,6 @@ use crate::{
         scalable::{read_predicate_chunk, write_predicate_chunk, zero_predicate},
     },
 };
-use alloc::vec::Vec;
 
 const CHUNK_BITS: usize = u64::BITS as usize;
 const CHUNK_BYTES: usize = core::mem::size_of::<u64>();
@@ -86,7 +86,7 @@ const JBE: &[u8] = &[0x0f, 0x86];
 const JAE: &[u8] = &[0x0f, 0x83];
 const JMP: &[u8] = &[0xe9];
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     match operand {
         Operand::Basic(basic) => emit_basic(code, basic, length, target),
         Operand::Break(operand) => breaks::emit_break(code, *operand, length, target),
@@ -97,7 +97,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
 fn chunks(length: VectorLength) -> usize {
     length.predicate_bytes().div_ceil(CHUNK_BYTES)
 }
-fn constant(code: &mut Vec<u8>, value: u64) {
+fn constant(code: &mut Code, value: u64) {
     if value == 0 {
         code.extend(XOR_EAX_EAX);
     } else if let Ok(value) = u32::try_from(value) {
@@ -114,21 +114,21 @@ fn constant(code: &mut Vec<u8>, value: u64) {
 fn marker_mask(element: ElementSize) -> u64 {
     predicate::leading_bits(element)
 }
-fn stage(code: &mut Vec<u8>, xmm: u8) {
+fn stage(code: &mut Code, xmm: u8) {
     assert!(xmm < 8);
     code.extend(MOVQ_XMM_RAX);
     code.push(MODRM_REGISTER | xmm << MODRM_REGISTER_SHIFT);
 }
-fn restore(code: &mut Vec<u8>, xmm: u8) {
+fn restore(code: &mut Code, xmm: u8) {
     assert!(xmm < 8);
     code.extend(MOVQ_RAX_XMM);
     code.push(MODRM_REGISTER | xmm << MODRM_REGISTER_SHIFT);
 }
-fn restore_guard(code: &mut Vec<u8>, xmm: u8) {
+fn restore_guard(code: &mut Code, xmm: u8) {
     restore(code, xmm);
     code.extend(MOV_R11_RAX);
 }
-fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn jump(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let at = code.len();
     code.extend([0; REL32_BYTES]);
@@ -138,13 +138,13 @@ fn bind(code: &mut [u8], at: usize) {
     let displacement = i32::try_from(code.len() - at - REL32_BYTES).unwrap();
     code[at..at + REL32_BYTES].copy_from_slice(&displacement.to_le_bytes());
 }
-fn commit_staged(code: &mut Vec<u8>, destination: u8, length: VectorLength) {
+fn commit_staged(code: &mut Code, destination: u8, length: VectorLength) {
     for chunk in 0..chunks(length) {
         restore(code, chunk as u8);
         write_predicate_chunk(code, destination, chunk, length);
     }
 }
-fn test_staged(code: &mut Vec<u8>, element: ElementSize, length: VectorLength) {
+fn test_staged(code: &mut Code, element: ElementSize, length: VectorLength) {
     predicate::begin_predtest(code);
     for chunk in 0..chunks(length) {
         restore_guard(code, 4 + chunk as u8);
@@ -153,7 +153,7 @@ fn test_staged(code: &mut Vec<u8>, element: ElementSize, length: VectorLength) {
     }
     predicate::finish_predtest(code);
 }
-fn immediate_flags(code: &mut Vec<u8>, flags: u32) {
+fn immediate_flags(code: &mut Code, flags: u32) {
     code.extend(MOV_STATE_IMM32);
     code.extend(NZCV_OFFSET.to_le_bytes());
     code.extend(flags.to_le_bytes());
@@ -170,7 +170,7 @@ fn pattern_count(pattern: u8, elements: usize) -> usize {
     };
     if count <= elements { count } else { 0 }
 }
-fn emit_basic(code: &mut Vec<u8>, operand: &BasicOperand, length: VectorLength, target: TargetCpu) {
+fn emit_basic(code: &mut Code, operand: &BasicOperand, length: VectorLength, target: TargetCpu) {
     match *operand {
         BasicOperand::False { destination } => zero_predicate(code, destination, length),
         BasicOperand::True {
@@ -230,7 +230,7 @@ fn emit_basic(code: &mut Vec<u8>, operand: &BasicOperand, length: VectorLength, 
     }
 }
 fn emit_first(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     governing: u8,
     length: VectorLength,
@@ -262,7 +262,7 @@ fn emit_first(
     test_staged(code, ElementSize::Byte, length);
 }
 fn emit_next(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     governing: u8,
     element: ElementSize,
@@ -319,13 +319,7 @@ fn emit_next(
     commit_staged(code, destination, length);
     test_staged(code, element, length);
 }
-fn emit_terminate(
-    code: &mut Vec<u8>,
-    first: Register,
-    second: Register,
-    width: Width,
-    equal: bool,
-) {
+fn emit_terminate(code: &mut Code, first: Register, second: Register, width: Width, equal: bool) {
     load(code, first);
     right_operand(code, second, width, Shift::Lsl, 0);
     code.extend(if width == Width::X64 {
@@ -371,7 +365,7 @@ const NOT_RAX: &[u8] = &[0x48, 0xf7, 0xd0];
 /// Emit a complete P/PP prefix or suffix from the clamped R8D element count.
 /// R8 survives; packed physical chunks need not align to a pair's global64 bits.
 fn write_counted(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: Destination,
     element: ElementSize,
     length: VectorLength,
@@ -436,6 +430,7 @@ mod breaks {
     //! Only packed P storage is accessed. RDI/R15 and the host stack survive.
     //! Results use XMM0-3; flag-setting forms other than BRKN keep Pg in
     //! XMM4-7.
+    use crate::x86_64::asm::Code;
 
     use crate::aarch64::scalable::{ElementSize, VectorLength};
     use crate::aarch64::sve::predicate_generation::{Boundary, BreakKind, BreakOperand};
@@ -482,17 +477,17 @@ mod breaks {
     const JMP_REL32: &[u8] = &[0xe9];
     const ALL_BITS: i32 = -1;
 
-    fn stage(code: &mut Vec<u8>, xmm: usize) {
+    fn stage(code: &mut Code, xmm: usize) {
         code.extend(MOVQ_XMM_RAX);
         code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) as u8);
     }
 
-    fn restore(code: &mut Vec<u8>, xmm: usize) {
+    fn restore(code: &mut Code, xmm: usize) {
         code.extend(MOVQ_RAX_XMM);
         code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) as u8);
     }
 
-    fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+    fn jump(code: &mut Code, opcode: &[u8]) -> usize {
         code.extend(opcode);
         let displacement = code.len();
         code.extend(0_i32.to_le_bytes());
@@ -509,7 +504,7 @@ mod breaks {
     /// R10=-1 iff Pn at the last active Pg bit is one; otherwise R10=0.
     /// Read all selection inputs before any result is committed. BSR is never
     /// consumed on zero. Scalable storage reads preserve RCX and R10.
-    fn last_active(code: &mut Vec<u8>, guard: u8, source: u8, length: VectorLength) {
+    fn last_active(code: &mut Code, guard: u8, source: u8, length: VectorLength) {
         let chunks = length.predicate_bytes().div_ceil(QWORD_BYTES);
         code.extend(XOR_R10D_R10D);
         let mut completed = Vec::with_capacity(chunks);
@@ -531,7 +526,7 @@ mod breaks {
         }
     }
 
-    fn all_chunk_bits(code: &mut Vec<u8>, chunk: usize, length: VectorLength) {
+    fn all_chunk_bits(code: &mut Code, chunk: usize, length: VectorLength) {
         let bytes = (length.predicate_bytes() - chunk * QWORD_BYTES).min(QWORD_BYTES);
         if bytes == QWORD_BYTES {
             code.extend(MOV_R11_SIGN_EXTENDED_IMM32);
@@ -545,7 +540,7 @@ mod breaks {
     }
 
     pub(crate) fn emit_break(
-        code: &mut Vec<u8>,
+        code: &mut Code,
         operand: BreakOperand,
         length: VectorLength,
         target: TargetCpu,
@@ -642,6 +637,7 @@ mod whiles {
     //!
     //! Count is retained in R8D across state helpers; RAX/RCX/RDX are scratch.
     //! No callee-saved register is used. Scalar inputs are read before guest writes.
+    use crate::x86_64::asm::Code;
 
     use crate::{
         GuestState,
@@ -655,7 +651,6 @@ mod whiles {
             scalable::{write_predicate_chunk, zero_predicate},
         },
     };
-    use alloc::vec::Vec;
 
     const GPR_BYTES: usize = core::mem::size_of::<u64>();
     const NZCV_OFFSET: u32 = core::mem::offset_of!(GuestState, nzcv) as u32;
@@ -736,17 +731,17 @@ mod whiles {
         AboveEqual = 0x83,
     }
 
-    fn conditional_jump(code: &mut Vec<u8>, condition: JumpCondition) -> usize {
+    fn conditional_jump(code: &mut Code, condition: JumpCondition) -> usize {
         code.extend([TWO_BYTE_OPCODE, condition as u8]);
         relative_jump_slot(code)
     }
 
-    fn jump(code: &mut Vec<u8>) -> usize {
+    fn jump(code: &mut Code) -> usize {
         code.push(JMP_REL32);
         relative_jump_slot(code)
     }
 
-    fn relative_jump_slot(code: &mut Vec<u8>) -> usize {
+    fn relative_jump_slot(code: &mut Code) -> usize {
         let slot = code.len();
         code.extend(0i32.to_le_bytes());
         slot
@@ -758,12 +753,12 @@ mod whiles {
         code[slot..slot + REL32_BYTES].copy_from_slice(&displacement.to_le_bytes());
     }
 
-    fn immediate(code: &mut Vec<u8>, instruction: &[u8], value: u32) {
+    fn immediate(code: &mut Code, instruction: &[u8], value: u32) {
         code.extend(instruction);
         code.extend(value.to_le_bytes());
     }
 
-    fn scalar(code: &mut Vec<u8>, source: Register, width: Width, signed: bool, first: bool) {
+    fn scalar(code: &mut Code, source: Register, width: Width, signed: bool, first: bool) {
         if source == Register::Zero {
             code.extend(if first { XOR_EAX_EAX } else { XOR_ECX_ECX });
             return;
@@ -829,7 +824,7 @@ mod whiles {
     }
 
     /// Compare RCX to the inclusive bound covering the entire modular domain.
-    fn endpoint_compare(code: &mut Vec<u8>, comparison: Comparison, width: Width) {
+    fn endpoint_compare(code: &mut Code, comparison: Comparison, width: Width) {
         if comparison == Comparison::UnsignedGe {
             code.extend(TEST_RCX_RCX);
         } else if comparison == Comparison::UnsignedLe && width == Width::X64 {
@@ -854,7 +849,7 @@ mod whiles {
         }
     }
 
-    fn clamped_distance(code: &mut Vec<u8>, capacity: u32, add_one: bool) {
+    fn clamped_distance(code: &mut Code, capacity: u32, add_one: bool) {
         // The unsigned distance can be UINT64_MAX even for signed64 operands.
         // Clamp BEFORE increment, so inclusive full-domain distance cannot overflow.
         immediate(code, &[MOV_EDX_IMM32], capacity - u32::from(add_one));
@@ -867,7 +862,7 @@ mod whiles {
         });
     }
 
-    fn comparison_count(code: &mut Vec<u8>, operand: &WhileOperand, capacity: u32) {
+    fn comparison_count(code: &mut Code, operand: &WhileOperand, capacity: u32) {
         let add_one = inclusive(operand.comparison);
         if operand.first == operand.limit {
             if !add_one {
@@ -926,7 +921,7 @@ mod whiles {
         }
     }
 
-    fn address_count(code: &mut Vec<u8>, operand: &WhileOperand, capacity: u32) {
+    fn address_count(code: &mut Code, operand: &WhileOperand, capacity: u32) {
         immediate(code, MOV_R8D_IMM32, capacity);
         if operand.first == operand.limit {
             return;
@@ -961,7 +956,7 @@ mod whiles {
         }
     }
 
-    fn count_flags(code: &mut Vec<u8>, capacity: u32, suffix: bool) {
+    fn count_flags(code: &mut Code, capacity: u32, suffix: bool) {
         immediate(code, CMP_R8D_IMM32, capacity);
         code.extend(SETE_CL);
         code.extend(TEST_R8D_R8D);
@@ -990,7 +985,7 @@ mod whiles {
     }
 
     fn counter(
-        code: &mut Vec<u8>,
+        code: &mut Code,
         destination: u8,
         element: ElementSize,
         length: VectorLength,
@@ -1037,10 +1032,10 @@ mod whiles {
     /// Parent callback emits the complete prefix/suffix P or PP write from R8D.
     /// It must preserve R8D. `capacity` spans both destinations for a pair.
     pub(super) fn emit_while(
-        code: &mut Vec<u8>,
+        code: &mut Code,
         operand: &WhileOperand,
         length: VectorLength,
-        write_counted: impl FnOnce(&mut Vec<u8>, Destination, ElementSize, VectorLength, bool, u32),
+        write_counted: impl FnOnce(&mut Code, Destination, ElementSize, VectorLength, bool, u32),
     ) {
         debug_assert!(operand.element.bytes() <= GPR_BYTES);
         let vectors = match operand.destination {

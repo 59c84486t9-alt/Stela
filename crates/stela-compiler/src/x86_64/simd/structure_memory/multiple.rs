@@ -3,6 +3,7 @@ use super::super::{commit, read_vector};
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::simd::structure_memory::{Direction, Layout, Operand};
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::routing;
 use alloc::vec::Vec;
@@ -25,7 +26,7 @@ const JMP_REL32: u8 = 0xe9;
 const SHUFFLE_ZERO: u8 = 0x80;
 
 /// RAX is the guest address; RDI and the pending writeback in RDX survive.
-pub(super) fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn packed(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Layout::Multiple {
         repetitions,
         structures,
@@ -60,15 +61,15 @@ pub(super) fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     }
 }
 
-fn simd(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn simd(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn copy(code: &mut Code, destination: u8, source: u8) {
     simd(code, Host::MoveAligned, destination, source);
 }
 
-fn chunk(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement: u8) {
+fn chunk(code: &mut Code, load: bool, bytes: u8, xmm: u8, displacement: u8) {
     match (load, bytes) {
         (true, QWORD_BYTES) => Host::MoveQword.append(code, TargetCpu::Baseline),
         (true, VECTOR_BYTES) => Host::LoadUnaligned.append(code, TargetCpu::Baseline),
@@ -82,7 +83,7 @@ fn chunk(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement: u8) {
     }
 }
 
-fn contiguous(code: &mut Vec<u8>, operand: &Operand, repetitions: u8, bytes: u8) {
+fn contiguous(code: &mut Code, operand: &Operand, repetitions: u8, bytes: u8) {
     for register in 0..repetitions {
         let vector = (operand.first_vector + register) % VECTOR_REGISTER_COUNT;
         let offset = register * bytes;
@@ -98,8 +99,8 @@ fn contiguous(code: &mut Vec<u8>, operand: &Operand, repetitions: u8, bytes: u8)
 
 /// Gather the low two dwords, repeating that pair in the upper half. Distinct
 /// inputs first broadcast their selected lanes, then interleave the low dwords.
-fn dword_pair(code: &mut Vec<u8>, destination: u8, first: (u8, u8), second: (u8, u8)) {
-    let shuffle = |code: &mut Vec<u8>, destination, source, low, high| {
+fn dword_pair(code: &mut Code, destination: u8, first: (u8, u8), second: (u8, u8)) {
+    let shuffle = |code: &mut Code, destination, source, low, high| {
         simd(code, Host::ShuffleDword, destination, source);
         let control = low
             | high << DWORD_INDEX_BITS
@@ -118,7 +119,7 @@ fn dword_pair(code: &mut Vec<u8>, destination: u8, first: (u8, u8), second: (u8,
 
 /// Three-way dword routing uses fewer state/RAM accesses than the scalar stream
 /// without SSSE3 masks. Each output combines two independently gathered pairs.
-fn dword_three(code: &mut Vec<u8>, operand: &Operand, bytes: u8) {
+fn dword_three(code: &mut Code, operand: &Operand, bytes: u8) {
     let load = operand.direction == Direction::Load;
     let footprint = THREE_STRUCTURES * bytes;
     let memory_chunks = footprint.div_ceil(VECTOR_BYTES);
@@ -191,7 +192,7 @@ fn dword_three(code: &mut Vec<u8>, operand: &Operand, bytes: u8) {
 
 /// Reuse the shared exact-width SSE2 chunk network, preserving the established
 /// multiple-structure operand API and complete baseline recipe.
-fn split(code: &mut Vec<u8>, first: u8, second: u8, even: u8, odd: u8, bytes: u8) {
+fn split(code: &mut Code, first: u8, second: u8, even: u8, odd: u8, bytes: u8) {
     routing::split(
         code,
         first,
@@ -203,7 +204,7 @@ fn split(code: &mut Vec<u8>, first: u8, second: u8, even: u8, odd: u8, bytes: u8
     );
 }
 
-fn load_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, bytes: u8) {
+fn load_interleaved(code: &mut Code, operand: &Operand, structures: u8, bytes: u8) {
     let chunks = structures * bytes / VECTOR_BYTES;
     for source in 0..chunks {
         chunk(code, true, VECTOR_BYTES, source, source * VECTOR_BYTES);
@@ -247,7 +248,7 @@ fn load_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, bytes
     }
 }
 
-fn merge(code: &mut Vec<u8>, first: u8, second: u8, low: u8, high: u8, bytes: u8) {
+fn merge(code: &mut Code, first: u8, second: u8, low: u8, high: u8, bytes: u8) {
     routing::merge(
         code,
         first,
@@ -259,7 +260,7 @@ fn merge(code: &mut Vec<u8>, first: u8, second: u8, low: u8, high: u8, bytes: u8
     );
 }
 
-fn store_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, bytes: u8) {
+fn store_interleaved(code: &mut Code, operand: &Operand, structures: u8, bytes: u8) {
     for source in 0..structures {
         read_vector(
             code,
@@ -304,7 +305,7 @@ fn store_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, byte
 /// exact chunks. Embedded masks use MOVDQU: legacy PSHUFB memory operands would
 /// impose unwanted alignment. Three-way Q0 transfers have an exact 8-byte tail.
 fn shuffled_interleaved(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     structures: u8,
     bytes: u8,

@@ -1,5 +1,6 @@
 //! SVE LUTI2/LUTI4: fixed-load SSE2 selection or SSSE3 PSHUFB. Neither path
 //! branches on or addresses memory with index values.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -11,7 +12,6 @@ use crate::{
         scalable::{load_z_chunk, store_z_chunk},
     },
 };
-use alloc::vec::Vec;
 const SUB_RSP: &[u8] = &[0x48, 0x81, 0xec];
 const ADD_RSP: &[u8] = &[0x48, 0x81, 0xc4];
 const STACK_DISP32: u8 = 0x84;
@@ -21,12 +21,12 @@ const LOW_TABLE: u8 = 4;
 const HIGH_TABLE: u8 = 5;
 const OUTPUT: u8 = 6;
 
-fn stack(code: &mut Vec<u8>, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
+fn stack(code: &mut Code, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
     opcode.append(code, target);
     code.extend([STACK_DISP32 | (xmm << XMM_SHIFT), STACK_SIB]);
     code.extend((offset as u32).to_le_bytes());
 }
-pub(crate) fn emit(code: &mut Vec<u8>, op: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, op: &Operand, length: VectorLength, target: TargetCpu) {
     assert!(length.bits() >= op.minimum_vl_bits());
     code.extend(SUB_RSP);
     code.extend((length.bytes() as u32).to_le_bytes());

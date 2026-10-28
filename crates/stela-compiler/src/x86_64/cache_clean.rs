@@ -15,7 +15,7 @@ use crate::aarch64::{
     system::registers::{Direction, Encoding},
 };
 use crate::block::{SystemInstruction, system::SystemOperation};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 /// SYS #3, C7, Cm, #1 of each operation.
 const DC_CVAC: Encoding = Encoding::new(1, 3, 7, 10, 1);
@@ -78,7 +78,7 @@ pub fn operand(instruction: &SystemInstruction) -> Option<(Operations, u8)> {
 }
 
 /// Read the byte at Xt, so the access faults where its translation would.
-pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, checks: super::MemoryChecks) {
+pub(crate) fn emit(code: &mut Code, rt: u8, checks: super::MemoryChecks) {
     super::load(
         code,
         if rt == 31 {
@@ -155,7 +155,7 @@ mod tests {
         let memory = [0x5au8, 0xc3];
         let mut state = GuestState::default();
         state.x[7] = memory.as_ptr() as u64 + 1;
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(&mut code, 7, super::super::MemoryChecks::DEFAULT);
         code.extend([0x89, 0xc8, 0xc3]); // mov eax,ecx; ret
         // SAFETY: private anonymous memory, RX after the copy, unmapped

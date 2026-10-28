@@ -7,14 +7,14 @@ use super::{
     rearrange::constant,
     shifts::{pack_truncated, right_shift, rounded_right},
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::halving::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
-fn half(code: &mut Vec<u8>, lane: u8, signed: bool, subtract: bool, round: bool) {
+fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool) {
     if round && lane <= 2 {
         if signed {
             lane_constant(code, 2, lane, 1u64 << (lane * 8 - 1));
@@ -58,7 +58,7 @@ fn half(code: &mut Vec<u8>, lane: u8, signed: bool, subtract: bool, round: bool)
         }
     }
 }
-fn pair_long(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
+fn pair_long(code: &mut Code, lane: u8, signed: bool, target: TargetCpu) {
     if lane == 1 && !signed && target >= TargetCpu::Ssse3 {
         constant(code, 1, [1; 16]);
         Host::MultiplyAddUnsignedBytes.register(code, 0, 1, target);
@@ -113,7 +113,7 @@ fn pair_long(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
     packed(code, add_or_subtract(lane * 2, false), 0, 1);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,

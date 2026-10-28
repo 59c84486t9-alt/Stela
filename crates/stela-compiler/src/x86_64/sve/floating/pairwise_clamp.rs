@@ -1,5 +1,6 @@
 //! SVE pairwise min/max and FCLAMP.
 use super::minmax::{guard_zero_pairs, selection};
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -34,14 +35,14 @@ const ODD_DWORDS: u8 = 0xdd;
 const PREPARED_EVEN: u8 = CLASSIFICATION_SCRATCH[0];
 const PREPARED_RIGHT: u8 = CLASSIFICATION_SCRATCH[1];
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, order: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, destination, source, target);
     code.push(order);
 }
 
 /// Interleave source pairs by output lane; the output predicate is applied only
 /// after this permutation, so inactive-index source operands remain available.
-fn paired_inputs(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn paired_inputs(code: &mut Code, format: Format, target: TargetCpu) {
     if format == Format::Single {
         shuffle(code, PREPARED_EVEN, LEFT, EVEN_DWORDS, target);
         shuffle(code, PREPARED_RIGHT, RIGHT, EVEN_DWORDS, target);
@@ -69,7 +70,7 @@ fn element(format: Format) -> Option<ElementSize> {
 /// Four predicated pairwise min/max forms; every failed guard remains atomic
 /// at instruction scope. Exactly-one-zero pairs are allowed, ties are not.
 pub(in crate::x86_64) fn emit_pairwise(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -147,7 +148,7 @@ pub(in crate::x86_64) fn emit_pairwise(
 /// Destructive FCLAMP: MaxNum(lower, old Zd), then MinNum(result, upper).
 /// Aliases stay intact until the final staged commit.
 pub(in crate::x86_64) fn emit_clamp(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -218,7 +219,7 @@ pub(in crate::x86_64) fn emit_clamp(
 
 /// Common-capsule entry point; unrelated arithmetic remains untouched.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

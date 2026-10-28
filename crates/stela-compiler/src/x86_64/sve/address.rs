@@ -6,9 +6,9 @@ use crate::aarch64::{
     scalable::{ElementSize, VectorLength},
     sve::address::{Count, Destination, Kind, Operand, Saturation},
 };
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
-use alloc::vec::Vec;
 
 const MOV_EAX_IMM32: u8 = 0xb8;
 const MOV_RAX_IMM32: &[u8] = &[0x48, 0xc7, 0xc0];
@@ -49,11 +49,7 @@ pub(super) fn pattern_count(pattern: u8, element: ElementSize, length: VectorLen
 
 /// Handles scalar operations whose count is known from the selected profile.
 /// Returns false before emitting anything for instructions needing P/Z access.
-pub(super) fn emit_static_scalar(
-    code: &mut Vec<u8>,
-    operand: &Operand,
-    length: VectorLength,
-) -> bool {
+pub(super) fn emit_static_scalar(code: &mut Code, operand: &Operand, length: VectorLength) -> bool {
     let Destination::Scalar { register, .. } = operand.destination else {
         return false;
     };
@@ -116,11 +112,11 @@ pub(super) fn emit_static_scalar(
 
 /// Consume a nonnegative architectural population count in RCX. Scalar32
 /// saturation always extends its W result, even when the runtime count is zero.
-pub(super) fn emit_scalar_adjust(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit_scalar_adjust(code: &mut Code, operand: &Operand) {
     scalar_adjust(code, operand, None);
 }
 
-fn scalar_adjust(code: &mut Vec<u8>, operand: &Operand, constant_count: Option<u32>) {
+fn scalar_adjust(code: &mut Code, operand: &Operand, constant_count: Option<u32>) {
     let Destination::Scalar { register, bits } = operand.destination else {
         unreachable!("scalar count backend received a vector destination");
     };
@@ -139,7 +135,7 @@ fn scalar_adjust(code: &mut Vec<u8>, operand: &Operand, constant_count: Option<u
 }
 
 fn scalar_value_adjust(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     bits: u8,
     subtract: bool,
     saturation: Saturation,
@@ -235,13 +231,13 @@ const VECTOR_TEMPORARY: u8 = 7;
 const BROADCAST_LOW_DWORD: u8 = 0;
 const DWORD_SIGN_BIT: u32 = 1 << 31;
 
-fn mask_r8(code: &mut Vec<u8>, mask: u64) {
+fn mask_r8(code: &mut Code, mask: u64) {
     code.extend(MOV_R8_IMM64);
     code.extend(mask.to_le_bytes());
 }
 
 /// Count low RAX bits. Preserves RCX; clobbers RAX/RDX/R8 and host flags.
-fn population_count(code: &mut Vec<u8>, target: TargetCpu) {
+fn population_count(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Popcnt) {
         code.extend(POPCNT_RAX_RAX);
         return;
@@ -274,7 +270,7 @@ fn population_count(code: &mut Vec<u8>, target: TargetCpu) {
 /// Read one or two complete P values, count element-leading bits into RCX.
 /// Clobbers RAX/RDX/R8/XMM7; preserves architectural status, RDI and R15.
 fn count_predicate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: u8,
     governing: Option<u8>,
     element: ElementSize,
@@ -302,11 +298,11 @@ fn count_predicate(
     }
 }
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn broadcast_eax(code: &mut Vec<u8>, destination: u8, element: ElementSize) {
+fn broadcast_eax(code: &mut Code, destination: u8, element: ElementSize) {
     if element == ElementSize::Doubleword {
         Host::MoveGprQword.append(code, TargetCpu::Baseline);
         code.push(MODRM_REGISTER | destination << HOST_REGISTER_SHIFT);
@@ -322,7 +318,7 @@ fn broadcast_eax(code: &mut Vec<u8>, destination: u8, element: ElementSize) {
     }
 }
 
-fn broadcast_constant(code: &mut Vec<u8>, value: u32, destination: u8) {
+fn broadcast_constant(code: &mut Code, value: u32, destination: u8) {
     code.push(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     broadcast_eax(code, destination, ElementSize::Word);
@@ -331,12 +327,7 @@ fn broadcast_constant(code: &mut Vec<u8>, value: u32, destination: u8) {
 /// RCX contains one nonnegative count applied to all vector elements.
 /// SSE2 handles H directly and W with threshold masks. Saturating D uses two
 /// scalar ADD/SUB+CMOV lanes per chunk until a measured checked recipe wins.
-fn emit_vector_adjust(
-    code: &mut Vec<u8>,
-    operand: &Operand,
-    length: VectorLength,
-    target: TargetCpu,
-) {
+fn emit_vector_adjust(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     let Destination::Vector(destination) = operand.destination else {
         unreachable!("vector adjustment");
     };
@@ -419,7 +410,7 @@ fn emit_vector_adjust(
     }
 }
 
-fn saturating_qwords(code: &mut Vec<u8>, subtract: bool, saturation: Saturation) {
+fn saturating_qwords(code: &mut Code, subtract: bool, saturation: Saturation) {
     for lane in 0..2 {
         if lane != 0 {
             ShiftOpcode::RightBytes.emit(code, VECTOR_RESULT, QWORD_BYTES as u8);
@@ -445,7 +436,7 @@ const POP_RCX: u8 = 0x59;
 
 /// Emit a complete scalable count instruction after the shared entry profile
 /// checks. Clobbers caller-saved GPRs/XMM0..7; keeps RDI/R15 and guest status.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     if emit_static_scalar(code, operand, length) {
         return;
     }

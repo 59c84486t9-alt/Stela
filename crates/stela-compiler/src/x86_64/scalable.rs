@@ -3,9 +3,9 @@
 //! RDI holds GuestState and R15 the ExecutionContext. The low 128 bits of each Z
 //! register live in `GuestState::v`; the upper bytes and packed predicates live
 //! in the scalable view. Helpers clobber only RAX/RCX/RDX and XMM0-7.
+use crate::x86_64::asm::Code;
 
 pub(crate) use super::memory_context as memory;
-use alloc::vec::Vec;
 
 pub(crate) mod lut;
 pub(crate) mod numerical;
@@ -62,7 +62,7 @@ fn xmm(register: u8) {
     );
 }
 
-fn storage_pointer(code: &mut Vec<u8>, field: u32) {
+fn storage_pointer(code: &mut Code, field: u32) {
     // Both fields fit positive signed disp8 in the versioned shared ABI.
     debug_assert!(EXECUTION_CONTEXT_SCALABLE_OFFSET <= i8::MAX as u32);
     debug_assert!(field <= i8::MAX as u32);
@@ -85,7 +85,7 @@ fn upper_offset(register: u8, chunk: usize, length: VectorLength) -> u32 {
 }
 
 fn vector_memory(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     opcode: Host,
     register: u8,
     base: u8,
@@ -100,7 +100,7 @@ fn vector_memory(
 
 /// Read one 16-byte Z segment into XMM0..7. Upper chunks clobber RDX only.
 pub(crate) fn load_z_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: u8,
     chunk: usize,
     destination: u8,
@@ -126,7 +126,7 @@ pub(crate) fn load_z_chunk(
 
 /// Commit one 16-byte Z segment from XMM0..7. Upper chunks clobber RDX only.
 pub(crate) fn store_z_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: u8,
     chunk: usize,
     source: u8,
@@ -156,7 +156,7 @@ fn predicate_offset(predicate: u8, byte_offset: usize, length: VectorLength) -> 
     (usize::from(predicate) * length.predicate_bytes() + byte_offset) as u32
 }
 
-fn read_predicate_at(code: &mut Vec<u8>, displacement: u32, bytes: usize) {
+fn read_predicate_at(code: &mut Code, displacement: u32, bytes: usize) {
     code.extend(match bytes {
         HALFWORD_BYTES => MOVZX_EAX_WORD_RDX_DISP32,
         DWORD_BYTES => MOV_EAX_RDX_DISP32,
@@ -181,7 +181,7 @@ fn predicate_bit_pattern(element: ElementSize) -> u64 {
 /// Clobbers RAX/RCX/RDX and those two XMMs; preserves other XMMs, RDI and R15.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn read_predicate_mask(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     predicate: u8,
     chunk: usize,
     element: ElementSize,
@@ -207,7 +207,7 @@ pub(crate) fn read_predicate_mask(
 /// bits are ignored. Used by packed P and compressed-counter predicate readers.
 /// Clobbers RAX/RCX and destination/scratch XMMs; leaves RDX and other XMMs live.
 pub(crate) fn expand_predicate_mask(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     destination: u8,
     scratch: u8,
@@ -260,7 +260,7 @@ fn predicate_chunk(chunk: usize, length: VectorLength) -> (usize, usize) {
 /// Read an 8-byte packed-P chunk into RAX, zero-extending a final 2/4-byte chunk.
 /// The chunk index addresses packed bytes, not Z chunks. Clobbers RDX only.
 pub(crate) fn read_predicate_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     predicate: u8,
     chunk: usize,
     length: VectorLength,

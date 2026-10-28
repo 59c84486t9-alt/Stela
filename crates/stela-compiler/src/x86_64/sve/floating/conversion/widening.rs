@@ -1,4 +1,5 @@
 //! SVE single-to-double widening.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -54,7 +55,7 @@ const fn source_shuffle(placement: Placement) -> u8 {
 /// untouched for their normal numerical completion path. The caller owns
 /// instruction availability and the streaming-mode entry guard.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

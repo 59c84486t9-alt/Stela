@@ -4,8 +4,8 @@ use super::packed;
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::{Accumulate, Kind, Selection};
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -74,7 +74,7 @@ const MOV_RAX_R9: [u8; 3] = [0x4c, 0x89, 0xc8];
 const SUB_RAX_R10: [u8; 3] = [0x4c, 0x29, 0xd0];
 const SBB_RDX_R8: [u8; 3] = [0x4c, 0x19, 0xc2];
 
-fn constant(code: &mut Vec<u8>, register: u8, value: u64) {
+fn constant(code: &mut Code, register: u8, value: u64) {
     code.extend(MOVABS_RAX);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, TargetCpu::Baseline);
@@ -82,7 +82,7 @@ fn constant(code: &mut Vec<u8>, register: u8, value: u64) {
     packed(code, Host::UnpackLowQword, register, register);
 }
 
-fn sign_extend_bytes(code: &mut Vec<u8>, register: u8, upper: u8, sign: u8) {
+fn sign_extend_bytes(code: &mut Code, register: u8, upper: u8, sign: u8) {
     packed(code, Host::MoveAligned, upper, register);
     packed(code, Host::Xor, sign, sign);
     packed(code, Host::GreaterByte, sign, register);
@@ -90,7 +90,7 @@ fn sign_extend_bytes(code: &mut Vec<u8>, register: u8, upper: u8, sign: u8) {
     packed(code, Host::UnpackHighByte, upper, sign);
 }
 
-fn negate_products(code: &mut Vec<u8>, word: bool) {
+fn negate_products(code: &mut Code, word: bool) {
     let subtract = if word { Host::SubWord } else { Host::SubDword };
     packed(code, Host::Xor, RIGHT, RIGHT);
     packed(code, subtract, RIGHT, RESULT);
@@ -102,7 +102,7 @@ fn negate_products(code: &mut Vec<u8>, word: bool) {
 
 /// Eight byte products fit in each signed-word half. Sixteen-bit inputs use
 /// PMULLW/PMULHW and interleave to retain every bit of each signed-dword product.
-fn narrow_high(code: &mut Vec<u8>, element: ElementSize, rounding: bool, subtract: Option<bool>) {
+fn narrow_high(code: &mut Code, element: ElementSize, rounding: bool, subtract: Option<bool>) {
     let bytes = element == ElementSize::Byte;
     if bytes {
         sign_extend_bytes(code, RESULT, UPPER_PRODUCT, LEFT_SIGN);
@@ -163,7 +163,7 @@ fn narrow_high(code: &mut Vec<u8>, element: ElementSize, rounding: bool, subtrac
     packed(code, pack, RESULT, UPPER_PRODUCT);
 }
 
-fn select_narrow(code: &mut Vec<u8>, register: u8, top: bool, element: ElementSize) {
+fn select_narrow(code: &mut Code, register: u8, top: bool, element: ElementSize) {
     let (left, right, narrow_bits) = match element {
         ElementSize::Halfword => (Shift::LeftWord, Shift::ArithmeticWord, BITS_PER_BYTE as u8),
         ElementSize::Word => (Shift::LeftDword, Shift::RightDword, WORD_BITS),
@@ -175,7 +175,7 @@ fn select_narrow(code: &mut Vec<u8>, register: u8, top: bool, element: ElementSi
     right.emit(code, register, narrow_bits);
 }
 
-fn saturating_dword_accumulate(code: &mut Vec<u8>, subtract: bool) {
+fn saturating_dword_accumulate(code: &mut Code, subtract: bool) {
     packed(code, Host::MoveAligned, UPPER_PRODUCT, ACCUMULATOR);
     packed(
         code,
@@ -215,7 +215,7 @@ fn saturating_dword_accumulate(code: &mut Vec<u8>, subtract: bool) {
 }
 
 fn narrow_long(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     accumulate: Accumulate,
     selection: Selection,
@@ -248,7 +248,7 @@ fn narrow_long(
     }
 }
 
-fn saturate_scalar(code: &mut Vec<u8>, bits: u32) {
+fn saturate_scalar(code: &mut Code, bits: u32) {
     let maximum = (1u64 << (bits - 1)) - 1;
     if bits == QWORD_BITS {
         // A signed result fits iff the high half equals the sign extension of
@@ -276,7 +276,7 @@ fn saturate_scalar(code: &mut Vec<u8>, bits: u32) {
     }
 }
 
-fn shifted_product(code: &mut Vec<u8>, bits: u32, rounding: bool, subtract: bool) {
+fn shifted_product(code: &mut Code, bits: u32, rounding: bool, subtract: bool) {
     code.extend(IMUL_RCX);
     if subtract {
         code.extend(NEG_RAX);
@@ -301,7 +301,7 @@ fn shifted_product(code: &mut Vec<u8>, bits: u32, rounding: bool, subtract: bool
 /// the shifted product wide also represents the positive 2^63 min*min quotient.
 /// Rounding after adding the integral accumulator is exactly equivalent to
 /// adding it after the wide product's arithmetic shift, including subtraction.
-pub(super) fn emit_rounded_scalar(code: &mut Vec<u8>, bits: u32, subtract: bool) {
+pub(super) fn emit_rounded_scalar(code: &mut Code, bits: u32, subtract: bool) {
     shifted_product(code, bits, true, subtract);
     code.extend(MOV_R8_R9);
     code.extend(SAR_R8);
@@ -311,7 +311,7 @@ pub(super) fn emit_rounded_scalar(code: &mut Vec<u8>, bits: u32, subtract: bool)
     saturate_scalar(code, bits);
 }
 
-fn scalar_long(code: &mut Vec<u8>, bits: u32, accumulate: Accumulate) {
+fn scalar_long(code: &mut Code, bits: u32, accumulate: Accumulate) {
     code.extend(IMUL_RCX);
     code.extend(SHLD_RDX_RAX_ONE);
     code.extend(SHL_RAX_ONE);
@@ -346,7 +346,7 @@ enum ScalarInput {
     Accumulator,
 }
 
-fn load_scalar(code: &mut Vec<u8>, input: ScalarInput, bytes: usize, offset: usize) {
+fn load_scalar(code: &mut Code, input: ScalarInput, bytes: usize, offset: usize) {
     let (rex, register) = match input {
         ScalarInput::Left => (REX_W, 0),
         ScalarInput::Right => (REX_W, 1),
@@ -367,7 +367,7 @@ fn load_scalar(code: &mut Vec<u8>, input: ScalarInput, bytes: usize, offset: usi
     ]);
 }
 
-fn store_scalar(code: &mut Vec<u8>, bytes: usize, offset: usize) {
+fn store_scalar(code: &mut Code, bytes: usize, offset: usize) {
     match bytes {
         1 => code.push(MOV_STORE_BYTE),
         2 => code.extend([WORD_PREFIX, MOV_STORE]),
@@ -378,7 +378,7 @@ fn store_scalar(code: &mut Vec<u8>, bytes: usize, offset: usize) {
     code.extend([MODRM_STACK_DISP8, SIB_STACK, offset as u8]);
 }
 
-fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, load: bool) {
+fn stack_chunk(code: &mut Code, register: u8, offset: usize, load: bool) {
     code.extend(if load { MOVDQU_LOAD } else { MOVDQU_STORE });
     code.extend([
         MODRM_STACK_DISP8 | (register << MODRM_REGISTER_SHIFT),
@@ -387,7 +387,7 @@ fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, load: bool) {
     ]);
 }
 
-fn scalar_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
+fn scalar_chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     code.extend(SUB_RSP_IMM8);
     code.push(STACK_BYTES);
     stack_chunk(code, RESULT, STACK_LEFT, false);
@@ -456,7 +456,7 @@ fn scalar_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
 /// Chunk ABI: XMM0/1 are staged sources, XMM4 the old accumulator; XMM7 is
 /// preserved for the caller's merge. Indexed operands are already broadcast at
 /// source width. Result XMM0; scratch XMM1..6 and caller-saved integer registers.
-pub(crate) fn emit_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
+pub(crate) fn emit_chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     match kind {
         Kind::DoublingHigh { rounding } if element.bytes() <= 2 => {
             narrow_high(code, element, rounding, None)
@@ -482,7 +482,7 @@ pub(crate) fn emit_chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
 /// rounded products are within [-32767, 32767], so equality identifies it
 /// exactly. Flipping that lane's bits produces the required saturated +32767.
 pub(super) fn emit_chunk_for_target(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     kind: Kind,
     element: ElementSize,
     target: TargetCpu,

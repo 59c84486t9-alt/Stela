@@ -1,5 +1,6 @@
 //! Integer guards selecting which lanes may use native FP. Inactive operands are
 //! replaced with +0 before classification.
+use crate::x86_64::asm::Code;
 
 use crate::{
     GuestState, TargetCpu,
@@ -23,7 +24,7 @@ const REPEAT_LOW_DWORD: u8 = 0;
 const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
 const REPEAT_HIGH_DWORDS: u8 = 0xf5;
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
@@ -41,12 +42,12 @@ fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
     );
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, order: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, order: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, destination, source, target);
     code.push(order);
 }
 
-fn broadcast(code: &mut Vec<u8>, format: Format, value: u64, destination: u8, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, value: u64, destination: u8, target: TargetCpu) {
     if format == Format::Single {
         code.extend(MOV_ECX_IMMEDIATE);
         code.extend((value as u32).to_le_bytes());
@@ -63,7 +64,7 @@ fn broadcast(code: &mut Vec<u8>, format: Format, value: u64, destination: u8, ta
     }
 }
 
-fn sign_mask(code: &mut Vec<u8>, source: u8, target: TargetCpu) {
+fn sign_mask(code: &mut Code, source: u8, target: TargetCpu) {
     Host::ByteSignMask.append(code, target);
     code.push(MODRM_REGISTER | (RAX_REGISTER << REGISTER_SHIFT) | source);
 }
@@ -80,7 +81,7 @@ pub(in crate::x86_64) struct Classification {
 /// Load invariant masks once, rather than rebroadcasting them for every source
 /// in every vector chunk. Callers preserve these XMMs until staging is finished.
 pub(in crate::x86_64) fn prepare_classification(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     registers: [u8; 2],
     target: TargetCpu,
@@ -104,7 +105,7 @@ pub(in crate::x86_64) fn prepare_classification(
 /// RAX/RCX and host arithmetic flags, without touching MXCSR or guest state.
 /// Failure indices identify rel32 displacements consumed by numerical::finish.
 pub(in crate::x86_64) fn guard_normal_zero_or_infinity(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     classification: Classification,
     input: u8,
     scratch: [u8; 3],
@@ -171,7 +172,7 @@ pub(in crate::x86_64) fn guard_normal_zero_or_infinity(
 /// All-inactive work bypasses the raw control read. Preserves every XMM register;
 /// clobbers RAX and host arithmetic flags only.
 pub(in crate::x86_64) fn guard_active_exception_enables(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     active: u8,
     features: NumericalFeatures,
     failures: &mut Vec<usize>,

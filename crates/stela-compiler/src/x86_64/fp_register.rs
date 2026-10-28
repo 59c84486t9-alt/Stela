@@ -1,5 +1,6 @@
 //! FPCR/FPSR reads and writes, using integer instructions only.
 use super::{load, store};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState,
     aarch64::{
@@ -7,7 +8,6 @@ use crate::{
         fp_register::{Operand, SystemRegister},
     },
 };
-use alloc::vec::Vec;
 
 const FPCR_OFFSET: u32 = core::mem::offset_of!(GuestState, fpcr) as u32;
 const FPSR_OFFSET: u32 = core::mem::offset_of!(GuestState, fpsr) as u32;
@@ -23,12 +23,12 @@ fn field_offset(register: SystemRegister) -> u32 {
     }
 }
 
-fn mask(code: &mut Vec<u8>, register: SystemRegister) {
+fn mask(code: &mut Code, register: SystemRegister) {
     code.push(AND_EAX_IMM32);
     code.extend(register.mask().to_le_bytes());
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     match *operand {
         Operand::Read {
             register,

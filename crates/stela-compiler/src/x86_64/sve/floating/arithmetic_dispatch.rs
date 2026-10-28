@@ -1,5 +1,6 @@
 //! Selection between native and software arithmetic paths.
 use crate::aarch64::Unsupported;
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -9,7 +10,6 @@ use crate::{
         sve::floating::arithmetic::{self as guest, Inputs, Kind, Operand, ResultShape},
     },
 };
-use alloc::vec::Vec;
 
 use super::{
     add_reductions, arithmetic, complex, estimate_exponent, floating_estimates, fused, minmax,
@@ -21,7 +21,7 @@ use super::{
 /// encoding class comes from the shared metadata, so reversed forms with
 /// aliased registers cannot reach the forward-only emitter.
 pub(super) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     word: u32,
     operand: Operand,
     length: VectorLength,

@@ -1,4 +1,5 @@
 //! SME integer outer products.
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -14,7 +15,6 @@ use crate::{
         },
     },
 };
-use alloc::vec::Vec;
 
 const MIXED_CORRECTION: u8 = 5;
 const WORD_SIGN_SHIFT: u8 = 15;
@@ -25,7 +25,7 @@ const WORD_SIGN_SHIFT: u8 = 15;
 /// clobber XMM5. Correcting the unsigned high word by the unsigned other input
 /// for each negative signed input reconstructs the full signed 32-bit product.
 fn word_products_signedness(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     left_signed: bool,
     right_signed: bool,
     target: TargetCpu,
@@ -95,7 +95,7 @@ const XMM_MODRM_RSP_DISP32: u8 = 0x84;
 const RSP_SIB: u8 = 0x24;
 const XMM_REGISTER_SHIFT: u8 = 3;
 
-fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, store: bool, target: TargetCpu) {
+fn stack_chunk(code: &mut Code, register: u8, offset: usize, store: bool, target: TargetCpu) {
     (if store {
         Host::StoreUnaligned
     } else {
@@ -107,7 +107,7 @@ fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, store: bool, tar
     code.extend((offset as u32).to_le_bytes());
 }
 
-fn splat_dword(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
+fn splat_dword(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
     code.push(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     code.extend(MOVD_XMM_EAX);
@@ -116,7 +116,7 @@ fn splat_dword(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) 
     code.push(REPEAT_LOW_DWORD);
 }
 
-fn shuffle(code: &mut Vec<u8>, dst: u8, src: u8, control: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, dst: u8, src: u8, control: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, dst, src, target);
     code.push(control);
 }
@@ -128,7 +128,7 @@ fn patch_relative(code: &mut [u8], immediate: usize, destination: usize) {
 }
 
 fn stage_vector(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     vector: u8,
     predicate: Option<u8>,
     source: ElementSize,
@@ -154,7 +154,7 @@ fn stage_vector(
     }
 }
 
-fn prepare_popcount(code: &mut Vec<u8>, target: TargetCpu) {
+fn prepare_popcount(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         splat_dword(code, HIGH, SWAR_BYTES, target);
         code.extend(MOVABS_RAX_IMM64);
@@ -177,7 +177,7 @@ fn prepare_popcount(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-fn popcount_dwords(code: &mut Vec<u8>, target: TargetCpu) {
+fn popcount_dwords(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         Host::MoveAligned.register(code, TEMP, RESULT, target);
         Host::And.register(code, RESULT, HIGH, target);
@@ -215,7 +215,7 @@ fn popcount_dwords(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-fn adjacent_pair_sums(code: &mut Vec<u8>, target: TargetCpu) {
+fn adjacent_pair_sums(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         Host::HorizontalAddDword.register(code, RESULT, HIGH, target);
     } else {
@@ -229,7 +229,7 @@ fn adjacent_pair_sums(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-fn extend_row_bytes(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
+fn extend_row_bytes(code: &mut Code, signed: bool, target: TargetCpu) {
     Host::Xor.register(code, SCRATCH, SCRATCH, target);
     if signed {
         Host::GreaterByte.register(code, SCRATCH, ROW, target);
@@ -237,7 +237,7 @@ fn extend_row_bytes(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
     Host::UnpackLowByte.register(code, ROW, SCRATCH, target);
 }
 
-fn byte_dot(code: &mut Vec<u8>, right_signed: bool, target: TargetCpu) {
+fn byte_dot(code: &mut Code, right_signed: bool, target: TargetCpu) {
     Host::MoveAligned.register(code, HIGH, RESULT, target);
     Host::Xor.register(code, SCRATCH, SCRATCH, target);
     if right_signed {
@@ -250,7 +250,7 @@ fn byte_dot(code: &mut Vec<u8>, right_signed: bool, target: TargetCpu) {
     adjacent_pair_sums(code, target);
 }
 
-fn sum_four_products_qword(code: &mut Vec<u8>, register: u8, signed: bool, target: TargetCpu) {
+fn sum_four_products_qword(code: &mut Code, register: u8, signed: bool, target: TargetCpu) {
     Host::MoveAligned.register(code, WORK, register, target);
     if signed {
         Host::MoveAligned.register(code, SCRATCH, register, target);
@@ -267,7 +267,7 @@ fn sum_four_products_qword(code: &mut Vec<u8>, register: u8, signed: bool, targe
 }
 
 pub(crate) fn emit_outer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &OuterOperation,
     length: VectorLength,
     target: TargetCpu,

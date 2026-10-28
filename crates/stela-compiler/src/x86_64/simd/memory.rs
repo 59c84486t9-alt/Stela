@@ -1,7 +1,7 @@
 //! SIMD loads and stores to private RAM, immediate and register offsets.
 use super::{commit, read_vector, vector_offset};
 use crate::aarch64::simd::memory::Operand;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;
@@ -23,7 +23,7 @@ const MOV_RCX_STATE_DISP32: [u8; 3] = [0x48, 0x8b, 0x8f];
 
 /// With `held`, XMM0 holds the vector whole ([`transfer`]).
 pub(super) fn emit_register_offset(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     checks: super::super::MemoryChecks,
     held: bool,
@@ -58,7 +58,7 @@ pub(super) fn emit_register_offset(
 /// S/D/Q at [RAX+displacement], using XMM0/XMM1. Loads zero higher bits.
 /// Pair transfers use only positive second-element displacements 4/8/16.
 pub(super) fn wide_transfer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     load: bool,
     bytes: u8,
     xmm: u8,
@@ -100,7 +100,7 @@ pub(super) fn transfers_xmm0(load: bool, bytes: u8) -> bool {
 /// commits nothing. With `held`, XMM0 holds the vector whole, and a store
 /// through XMM0 ([`transfers_xmm0`]) takes it from there.
 pub(in crate::x86_64) fn transfer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     load: bool,
     bytes: u8,
     vector: u8,

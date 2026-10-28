@@ -1,4 +1,5 @@
 //! SVE half-precision widening of normal values, without host FP controls.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -51,7 +52,7 @@ const HALF_TO_SINGLE_BIAS: u32 = (Format::Single.exponent_bias() - Format::Half.
 const HALF_ONE: u32 = Format::Half.exponent_bias() << Format::Half.fraction_bits();
 const ALL_DWORDS_NORMAL: u8 = (1 << (u128::BITS / u32::BITS)) - 1;
 
-fn broadcast(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
+fn broadcast(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
     code.extend(MOV_ECX_IMMEDIATE);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, target);
@@ -64,7 +65,7 @@ fn broadcast(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
 /// clobber three distinct scratch XMMs, EAX and flags. Append a shared-finish
 /// failure offset for any exponent outside1..30, with no frame/state effects.
 pub(in crate::x86_64) fn guard_normal_half_fields(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     input: u8,
     maximum_exponent: u8,
     scratch: [u8; 3],
@@ -98,7 +99,7 @@ pub(in crate::x86_64) fn guard_normal_half_fields(
 /// Output: four exact Single encodings. `bias` already holds the repeated H→S
 /// exponent-bias difference. No frame/state/rounding/status/commit operations.
 pub(in crate::x86_64) fn normal_half_to_single_fields(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     input: u8,
     sign: u8,
     bias: u8,
@@ -116,7 +117,7 @@ pub(in crate::x86_64) fn normal_half_to_single_fields(
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

@@ -1,6 +1,6 @@
 //! 32-bit lane encodings shared by the SHA1 and SHA256 recipes.
 use super::{Host, packed, vector_offset};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 pub(super) const WORD_BITS: u8 = 32;
 pub(super) const WORD_BYTES: u8 = WORD_BITS / 8;
@@ -42,7 +42,7 @@ impl Scalar32 {
             Self::Or => 0x0b,
         }
     }
-    pub(super) fn register(self, code: &mut Vec<u8>, destination: u8, source: u8) {
+    pub(super) fn register(self, code: &mut Code, destination: u8, source: u8) {
         rex(code, destination, source);
         code.extend([
             self.opcode(),
@@ -51,7 +51,7 @@ impl Scalar32 {
                 | (source & LOW_REGISTER_MASK),
         ]);
     }
-    pub(super) fn state(self, code: &mut Vec<u8>, destination: u8, vector: u8, lane: u8) {
+    pub(super) fn state(self, code: &mut Code, destination: u8, vector: u8, lane: u8) {
         rex(code, destination, NO_EXTENDED_OPERAND);
         code.extend([
             self.opcode(),
@@ -62,7 +62,7 @@ impl Scalar32 {
         );
     }
 }
-fn rex(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn rex(code: &mut Code, destination: u8, source: u8) {
     let prefix = REX_BASE
         | ((destination >> EXTENDED_REGISTER_SHIFT) << REX_REGISTER_SHIFT)
         | (source >> EXTENDED_REGISTER_SHIFT);
@@ -76,7 +76,7 @@ pub(super) enum Rotate32 {
     Right,
 }
 impl Rotate32 {
-    pub(super) fn emit(self, code: &mut Vec<u8>, register: u8, amount: u8) {
+    pub(super) fn emit(self, code: &mut Code, register: u8, amount: u8) {
         rex(code, NO_EXTENDED_OPERAND, register);
         let group = match self {
             Self::Left => ROL_GROUP,
@@ -89,13 +89,13 @@ impl Rotate32 {
         ]);
     }
 }
-pub(super) fn move_to_vector(code: &mut Vec<u8>, xmm: u8, register: u8) {
+pub(super) fn move_to_vector(code: &mut Code, xmm: u8, register: u8) {
     code.push(PACKED_PREFIX);
     rex(code, xmm, register);
     code.extend(MOVD_XMM_RM32);
     code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | (register & LOW_REGISTER_MASK));
 }
-pub(super) fn read_scalar_vector(code: &mut Vec<u8>, xmm: u8, vector: u8) {
+pub(super) fn read_scalar_vector(code: &mut Code, xmm: u8, vector: u8) {
     code.push(PACKED_PREFIX);
     rex(code, xmm, NO_EXTENDED_OPERAND);
     code.extend(MOVD_XMM_RM32);
@@ -103,7 +103,7 @@ pub(super) fn read_scalar_vector(code: &mut Vec<u8>, xmm: u8, vector: u8) {
     code.extend(vector_offset(vector).to_le_bytes());
 }
 /// Pack four zero-extended words into RESULT; PACK_PAIR/PACK_LAST are scratch.
-pub(super) fn pack_state(code: &mut Vec<u8>, words: [u8; WORDS_PER_VECTOR]) {
+pub(super) fn pack_state(code: &mut Code, words: [u8; WORDS_PER_VECTOR]) {
     move_to_vector(code, RESULT, words[0]);
     move_to_vector(code, PACK_PAIR, words[1]);
     packed(code, Host::UnpackLowDword, RESULT, PACK_PAIR);

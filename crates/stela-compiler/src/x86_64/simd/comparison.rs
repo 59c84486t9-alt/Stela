@@ -7,6 +7,7 @@ use super::numerical::{
 };
 use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -83,12 +84,12 @@ enum FlagSelect {
     Sign = 0x48,
 }
 
-fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn scalar_normal_guard(code: &mut Vec<u8>, format: Format, source: u8, helper: &mut Vec<usize>) {
+fn scalar_normal_guard(code: &mut Code, format: Format, source: u8, helper: &mut Vec<usize>) {
     exponent_range(code, format, source, INPUT_MINIMUM_EXPONENT);
     helper.push(branch(code, Condition::AboveOrEqual));
 }
@@ -96,7 +97,7 @@ fn scalar_normal_guard(code: &mut Vec<u8>, format: Format, source: u8, helper: &
 /// A zero comparison also accepts signed zero and infinity. A zero fraction
 /// proves one of those classes or an exact normal power of two; remaining
 /// values must pass the ordinary normal guard. No subnormal or NaN executes.
-fn scalar_zero_guard(code: &mut Vec<u8>, format: Format, helper: &mut Vec<usize>) {
+fn scalar_zero_guard(code: &mut Code, format: Format, helper: &mut Vec<usize>) {
     code.extend(if format == Format::Double {
         MOVQ_RAX_XMM0
     } else {
@@ -143,7 +144,7 @@ fn shift_right(format: Format) -> ShiftOpcode {
     }
 }
 
-fn equal_zero(code: &mut Vec<u8>, format: Format, value: u8, zero: u8, temporary: u8) {
+fn equal_zero(code: &mut Code, format: Format, value: u8, zero: u8, temporary: u8) {
     packed(
         code,
         if format == Format::Half {
@@ -160,7 +161,7 @@ fn equal_zero(code: &mut Vec<u8>, format: Format, value: u8, zero: u8, temporary
     }
 }
 
-fn vector_zero_guard(code: &mut Vec<u8>, format: Format, shape: Shape, helper: &mut Vec<usize>) {
+fn vector_zero_guard(code: &mut Code, format: Format, shape: Shape, helper: &mut Vec<usize>) {
     // The shared range leaves per-lane normal validity in EXPONENT_VECTOR.
     // OR fraction-zero validity into it: only zeros/infinities are newly
     // admitted, and none can change host MXCSR or guest FPSR.
@@ -195,23 +196,23 @@ fn vector_zero_guard(code: &mut Vec<u8>, format: Format, shape: Shape, helper: &
 
 /// Signed order key for nonzero normal half values. Sign-complementing the
 /// fraction/exponent reverses negative magnitudes without a host FP operation.
-fn half_order_key(code: &mut Vec<u8>, vector: u8) {
+fn half_order_key(code: &mut Code, vector: u8) {
     packed(code, Host::MoveAligned, TEMP_VECTOR, vector);
     ShiftOpcode::ArithmeticWord.emit(code, TEMP_VECTOR, HALF_SIGN_SHIFT);
     ShiftOpcode::RightWord.emit(code, TEMP_VECTOR, SIGN_BITS);
     packed(code, Host::Xor, vector, TEMP_VECTOR);
 }
 
-fn select_flags(code: &mut Vec<u8>, condition: FlagSelect) {
+fn select_flags(code: &mut Code, condition: FlagSelect) {
     code.extend([SSE_ESCAPE, condition as u8, CMOV_EAX_EDX_MODRM]);
 }
 
-fn store_flags(code: &mut Vec<u8>) {
+fn store_flags(code: &mut Code) {
     code.extend(STORE_STATE_EAX);
     code.extend((core::mem::offset_of!(GuestState, nzcv) as u32).to_le_bytes());
 }
 
-fn ordered_flags(code: &mut Vec<u8>, integer: bool) {
+fn ordered_flags(code: &mut Code, integer: bool) {
     code.push(MOV_EAX_IMMEDIATE);
     code.extend(NZCV_C.to_le_bytes());
     code.push(MOV_EDX_IMMEDIATE);
@@ -230,7 +231,7 @@ fn ordered_flags(code: &mut Vec<u8>, integer: bool) {
     store_flags(code);
 }
 
-fn zero_flags(code: &mut Vec<u8>, format: Format) {
+fn zero_flags(code: &mut Code, format: Format) {
     code.extend(if format == Format::Double {
         MOVQ_RCX_XMM0
     } else {
@@ -258,13 +259,7 @@ fn zero_flags(code: &mut Vec<u8>, format: Format) {
     store_flags(code);
 }
 
-fn emit_flags(
-    code: &mut Vec<u8>,
-    format: Format,
-    left: u8,
-    right: CompareSource,
-    pc: GuestAddress,
-) {
+fn emit_flags(code: &mut Code, format: Format, left: u8, right: CompareSource, pc: GuestAddress) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_vector(code, left, LEFT_VECTOR);
@@ -297,7 +292,7 @@ fn emit_flags(
 }
 
 fn emit_conditional_flags(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     left: u8,
     right: u8,
@@ -332,19 +327,19 @@ fn absolute(operation: Predicate) -> bool {
     )
 }
 
-fn magnitude(code: &mut Vec<u8>, format: Format) {
+fn magnitude(code: &mut Code, format: Format) {
     packed(code, Host::EqualDword, TEMP_VECTOR, TEMP_VECTOR);
     shift_right(format).emit(code, TEMP_VECTOR, SIGN_BITS);
     packed(code, Host::And, LEFT_VECTOR, TEMP_VECTOR);
     packed(code, Host::And, RIGHT_VECTOR, TEMP_VECTOR);
 }
 
-fn invert_mask(code: &mut Vec<u8>, vector: u8) {
+fn invert_mask(code: &mut Code, vector: u8) {
     packed(code, Host::EqualDword, TEMP_VECTOR, TEMP_VECTOR);
     packed(code, Host::Xor, vector, TEMP_VECTOR);
 }
 
-fn half_predicate(code: &mut Vec<u8>, operation: Predicate) -> u8 {
+fn half_predicate(code: &mut Code, operation: Predicate) -> u8 {
     if operation == Predicate::Equal {
         packed(code, Host::EqualWord, LEFT_VECTOR, RIGHT_VECTOR);
         return LEFT_VECTOR;
@@ -379,12 +374,7 @@ fn half_predicate(code: &mut Vec<u8>, operation: Predicate) -> u8 {
     }
 }
 
-fn floating_predicate(
-    code: &mut Vec<u8>,
-    operation: Predicate,
-    format: Format,
-    shape: Shape,
-) -> u8 {
+fn floating_predicate(code: &mut Code, operation: Predicate, format: Format, shape: Shape) -> u8 {
     if absolute(operation) {
         magnitude(code, format);
     }
@@ -419,7 +409,7 @@ fn floating_predicate(
 
 /// Zero predicates use signed magnitude tests instead of numerical host FP.
 /// This also gives exact equality for both signs of zero at every lane width.
-fn zero_predicate(code: &mut Vec<u8>, operation: Predicate, format: Format) -> u8 {
+fn zero_predicate(code: &mut Code, operation: Predicate, format: Format) -> u8 {
     packed(code, Host::MoveAligned, ZERO_RESULT_VECTOR, LEFT_VECTOR);
     shift_left(format).emit(code, ZERO_RESULT_VECTOR, SIGN_BITS);
     shift_right(format).emit(code, ZERO_RESULT_VECTOR, SIGN_BITS);
@@ -466,7 +456,7 @@ fn zero_predicate(code: &mut Vec<u8>, operation: Predicate, format: Format) -> u
     }
 }
 
-fn merge_scalar(code: &mut Vec<u8>, format: Format, result: u8) -> u8 {
+fn merge_scalar(code: &mut Code, format: Format, result: u8) -> u8 {
     if result != LEFT_VECTOR && format != Format::Half {
         packed(code, Host::MoveAligned, LEFT_VECTOR, result);
     }
@@ -483,7 +473,7 @@ fn merge_scalar(code: &mut Vec<u8>, format: Format, result: u8) -> u8 {
 }
 
 fn commit_predicate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     destination: u8,
@@ -515,7 +505,7 @@ fn commit_predicate(
     }
 }
 
-fn emit_predicate(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     let Operand::Predicate {
         operation,
         format,
@@ -573,7 +563,7 @@ fn emit_predicate(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
     commit_predicate(code, format, shape, destination, result, merge, zero);
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     match *operand {
         Operand::Flags {
             format,

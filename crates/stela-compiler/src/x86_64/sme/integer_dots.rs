@@ -1,4 +1,5 @@
 //! SME2 integer dot products, including 16-to-64-bit products.
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -15,7 +16,6 @@ use crate::{
         },
     },
 };
-use alloc::vec::Vec;
 
 const ACCUMULATOR: u8 = 2;
 const TEMPORARY: u8 = 5;
@@ -43,17 +43,17 @@ const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
 // candidates favor PHADDD. Unmeasured 32-byte ordinary shapes stay on SSE2.
 const MIN_PHADDD_VECTOR_BYTES: usize = 64;
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8, target: TargetCpu) {
+fn copy(code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
     Host::MoveAligned.register(code, destination, source, target);
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, destination, source, target);
     code.push(control);
 }
 
 /// ZA pointer stays in caller-saved R8; shared Z helpers clobber only RDX.
-fn za_pointer(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
+fn za_pointer(code: &mut Code, operand: &Operand, length: VectorLength) {
     load_za_pointer_r8(code);
     code.extend(MOV_ECX_STATE_DISP32);
     code.extend(
@@ -74,7 +74,7 @@ fn za_pointer(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
     code.extend(ADD_R8_RCX);
 }
 
-fn vertical_mask(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn vertical_mask(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let source_bits = operand.accumulator.bits() / usize::from(operand.terms);
     code.push(MOV_EAX_IMM32);
     code.extend(((1u32 << source_bits) - 1).to_le_bytes());
@@ -94,7 +94,7 @@ fn vertical_mask(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 }
 
 fn left_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     group: u8,
     chunk: usize,
@@ -139,7 +139,7 @@ fn left_chunk(
     }
 }
 
-fn adjacent_pair_sums(code: &mut Vec<u8>, low: u8, high: u8, target: TargetCpu, horizontal: bool) {
+fn adjacent_pair_sums(code: &mut Code, low: u8, high: u8, target: TargetCpu, horizontal: bool) {
     if horizontal {
         Host::HorizontalAddDword.register(code, low, high, target);
         return;
@@ -153,7 +153,7 @@ fn adjacent_pair_sums(code: &mut Vec<u8>, low: u8, high: u8, target: TargetCpu, 
     Host::UnpackLowQword.register(code, low, high, target);
 }
 
-fn extend_bytes(code: &mut Vec<u8>, low: u8, high: u8, signed: bool, target: TargetCpu) {
+fn extend_bytes(code: &mut Code, low: u8, high: u8, signed: bool, target: TargetCpu) {
     copy(code, high, low, target);
     Host::Xor.register(code, SIGN_MASK, SIGN_MASK, target);
     if signed {
@@ -165,7 +165,7 @@ fn extend_bytes(code: &mut Vec<u8>, low: u8, high: u8, signed: bool, target: Tar
 
 /// Four exact 32-bit products become a duplicated 64-bit sum. Widen first:
 /// PMADDWD's 0x8000*0x8000 pair overflow cannot be sign-extended to 64 bits.
-fn reduce_four_products(code: &mut Vec<u8>, source: u8, signed: bool, target: TargetCpu) {
+fn reduce_four_products(code: &mut Code, source: u8, signed: bool, target: TargetCpu) {
     if signed {
         copy(code, SIGN_MASK, source, target);
         Shift::ArithmeticDword.emit(code, SIGN_MASK, DWORD_SIGN_SHIFT);
@@ -181,7 +181,7 @@ fn reduce_four_products(code: &mut Vec<u8>, source: u8, signed: bool, target: Ta
 }
 
 /// XMM0/1 inputs, XMM2 accumulator, XMM0 result; XMM3..6 scratch, XMM7 preserved.
-fn dot_chunk(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, horizontal: bool) {
+fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: bool) {
     if operand.accumulator == ElementSize::Doubleword {
         word_products(code, operand.left_signed, target);
         reduce_four_products(code, LEFT, operand.left_signed, target);
@@ -209,7 +209,7 @@ fn dot_chunk(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, horizonta
 
 /// Caller validates SME2, SM+ZA, SVL and I16I64 before entry. This unpredicated
 /// family touches only selected ZA vectors; all Z/P/flags/control state survives.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     za_pointer(code, operand, length);
     if operand.kind == Kind::VerticalDot {
         vertical_mask(code, operand, target);

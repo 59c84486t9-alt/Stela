@@ -7,6 +7,7 @@
 //! DMB emits nothing: no other agent observes guest memory, and one PE
 //! observes its own accesses in program order.
 use super::atomic::{address_offset, commit_rax, input_rcx, read_rax, store_rcx};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -14,7 +15,6 @@ use crate::{
         ordered::{Barrier, Kind, LoadExtension, Operand},
     },
 };
-use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;
@@ -88,7 +88,7 @@ fn crossing(base: Register, bytes: u8, displacement: i32, checks: super::MemoryC
 
 /// Jump, by a rel8 the caller patches, when the access at RDX lies inside
 /// its 16-byte granule. EAX is scratch.
-fn branch_within_granule(code: &mut Vec<u8>, bytes: u8) -> usize {
+fn branch_within_granule(code: &mut Code, bytes: u8) -> usize {
     code.extend(MOV_EAX_EDX);
     code.extend(AND_EAX_IMM8);
     code.push(ATOMIC_QUANTITY_MASK);
@@ -97,7 +97,7 @@ fn branch_within_granule(code: &mut Vec<u8>, bytes: u8) -> usize {
     code.len() - 1
 }
 
-fn jump_over(code: &mut Vec<u8>) -> usize {
+fn jump_over(code: &mut Code) -> usize {
     code.extend([JMP_REL8, 0]);
     code.len() - 1
 }
@@ -141,7 +141,7 @@ pub(super) fn requires_atomic_load16(
 }
 
 pub(super) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: TargetCpu,
     checks: super::MemoryChecks,
@@ -241,12 +241,12 @@ pub(super) fn emit(
 /// A store-release that crosses its granule: a plain store, which x86 keeps
 /// in order after earlier accesses, and MFENCE, which keeps later
 /// load-acquires after it (RCsc).
-fn crossing_release(code: &mut Vec<u8>, bytes: u8) {
+fn crossing_release(code: &mut Code, bytes: u8) {
     store_rcx(code, bytes);
     code.extend(MFENCE);
 }
 
-fn release(code: &mut Vec<u8>, bytes: u8) {
+fn release(code: &mut Code, bytes: u8) {
     if bytes == HALFWORD_BYTES {
         code.push(OPERAND_SIZE_PREFIX);
     } else if bytes == QWORD_BYTES {
@@ -262,7 +262,7 @@ fn release(code: &mut Vec<u8>, bytes: u8) {
     ]);
 }
 
-fn read_extended(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension) {
+fn read_extended(code: &mut Code, bytes: u8, extension: LoadExtension) {
     match extension {
         LoadExtension::Zero => read_rax(code, bytes),
         LoadExtension::Sign(width) => sign_extend(code, bytes, width, RDX_ADDRESS),
@@ -271,7 +271,7 @@ fn read_extended(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension) {
 
 /// The memory and register forms share the same extension semantics. A W result
 /// clears upper X bits through its 32-bit destination; an X result sign-fills them.
-fn sign_extend(code: &mut Vec<u8>, bytes: u8, width: Width, operand: u8) {
+fn sign_extend(code: &mut Code, bytes: u8, width: Width, operand: u8) {
     if width == Width::X64 {
         code.push(REX_W_PREFIX);
     }
@@ -285,7 +285,7 @@ fn sign_extend(code: &mut Vec<u8>, bytes: u8, width: Width, operand: u8) {
 
 /// A legal ordered access is contained inside 16 bytes. Exact reads contained inside eight bytes
 /// use the baseline guarantee; only the crossing path reads the containing 16 bytes.
-fn acquire_snapshot(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension) {
+fn acquire_snapshot(code: &mut Code, bytes: u8, extension: LoadExtension) {
     code.extend(MOV_ECX_EDX);
     code.extend(AND_ECX_IMM8);
     code.push(BASELINE_ATOMIC_MASK);
@@ -310,7 +310,7 @@ fn acquire_snapshot(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension) {
 
 /// A known SP residue avoids a runtime boundary branch and variable shift setup.
 /// Generic crossings retain their established CL recipe and output bytes.
-fn snapshot_value(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension, shift: Option<u8>) {
+fn snapshot_value(code: &mut Code, bytes: u8, extension: LoadExtension, shift: Option<u8>) {
     if shift.is_none() {
         code.extend(SHL_ECX_IMM8);
         code.push(BITS_PER_BYTE_SHIFT);
@@ -437,7 +437,7 @@ mod tests {
         };
         let has =
             |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|window| window == bytes);
-        let mut barrier = Vec::new();
+        let mut barrier = Code::new();
         emit(
             &mut barrier,
             &Operand::Barrier {
@@ -458,7 +458,7 @@ mod tests {
                 displacement: 0,
                 extension: LoadExtension::Zero,
             };
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, &operand, TargetCpu::detect(), single);
             // No XCHG, MFENCE, 16-byte snapshot or granule branch.
             assert!(!has(&code, &[0x48, 0x87, 0x0a]) && !has(&code, MFENCE));
@@ -480,7 +480,7 @@ mod tests {
             ..MemoryChecks::DEFAULT
         };
         let emitted = |kind, base, displacement, checks| {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             let operand = Operand::Transfer {
                 feature: crate::aarch64::ordered::Feature::Base,
                 kind,
@@ -544,7 +544,7 @@ mod tests {
                     displacement: 0,
                     extension: LoadExtension::Zero,
                 };
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(
                     &mut code,
                     &operand,

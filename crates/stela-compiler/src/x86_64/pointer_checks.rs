@@ -1,6 +1,6 @@
 //! Result marking shared by the checked pointer arithmetic forms.
+use crate::x86_64::asm::Code;
 
-use alloc::vec::Vec;
 const TOP_BYTE_SHIFT: u8 = 56;
 const POINTER_SIGN_BIT: u8 = 55;
 const DETECTION_BIT: u8 = 54;
@@ -36,7 +36,7 @@ const CMOVNZ_RAX_RCX: &[u8] = &[0x48, 0x0f, 0x45, 0xc1];
 /// RAX is the result and RDX the base; R8 holds the normalized multiplication
 /// predicate when requested. RCX/R9/R10/R11 are scratch. No branch depends on
 /// guest data.
-pub(super) fn emit(code: &mut Vec<u8>, multiplication: bool) {
+pub(super) fn emit(code: &mut Code, multiplication: bool) {
     code.extend(MOV_R9_RAX);
     code.extend(XOR_R9_RDX);
     code.extend(SHR_R9_IMM8);

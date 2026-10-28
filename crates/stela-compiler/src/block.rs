@@ -753,6 +753,7 @@ impl CompilationPlan {
 
 #[cfg(test)]
 mod tests {
+    use crate::x86_64::asm::Code;
     #[test]
     fn shared_system_uses_checked_recipes_and_refuses_serial_native_specialization() {
         use crate::TargetCpu;
@@ -1323,7 +1324,7 @@ mod tests {
         assert_eq!(native.source_bytes, 8, "DC ZVA still ends the block");
         let code = &native.native.x86_64_code;
         let at = native.native.source_map[1].1;
-        let mut zeroing = Vec::new();
+        let mut zeroing = Code::new();
         crate::x86_64::zero_block::emit(&mut zeroing, 3, 64, crate::x86_64::MemoryChecks::DEFAULT);
         assert_eq!(code[at..at + zeroing.len()], zeroing);
         let next = GuestAddress(BASE + 8);
@@ -1401,7 +1402,7 @@ mod tests {
         assert_eq!(native.source_bytes, 8, "the DC still ends the block");
         let code = &native.native.x86_64_code;
         let at = native.native.source_map[1].1;
-        let mut check = Vec::new();
+        let mut check = Code::new();
         crate::x86_64::cache_clean::emit(&mut check, 0, crate::x86_64::MemoryChecks::DEFAULT);
         assert_eq!(code[at..at + check.len()], check);
         let next = GuestAddress(BASE + 8);

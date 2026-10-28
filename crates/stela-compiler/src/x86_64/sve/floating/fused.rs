@@ -1,4 +1,5 @@
 //! SVE fused multiply-add: FMA3, or an exact-product SSE2 path.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -51,13 +52,13 @@ const AND_EAX_IMMEDIATE: u8 = 0x25;
 const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
 const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(JNZ_REL32);
     failures.push(code.len());
     code.extend(0_i32.to_le_bytes());
 }
 
-fn broadcast(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
     if format == Format::Single {
         code.push(MOV_EAX_IMMEDIATE);
         code.extend((bits as u32).to_le_bytes());
@@ -76,7 +77,7 @@ fn broadcast(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
 }
 
 /// Inactive 2 + 1*1 and every signed variant are exact normal results.
-fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: TargetCpu) {
+fn benign_inactive(code: &mut Code, format: Format, input: u8, target: TargetCpu) {
     let increment = if input == ADDEND {
         BENIGN_ADDEND_INCREMENT
     } else {
@@ -91,7 +92,7 @@ fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: Target
 }
 
 fn load_right(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: Source,
     format: Format,
     chunk: usize,
@@ -120,12 +121,7 @@ fn load_right(
     }
 }
 
-fn negate_baseline(
-    code: &mut Vec<u8>,
-    operation: FusedOperation,
-    format: Format,
-    target: TargetCpu,
-) {
+fn negate_baseline(code: &mut Code, operation: FusedOperation, format: Format, target: TargetCpu) {
     if !operation.negate_left() && !operation.negate_addend() {
         return;
     }
@@ -149,7 +145,7 @@ fn negate_baseline(
 /// survive; RAX/RCX/RDX, flags and XMM0-7 are clobbered. `TargetCpu::Fma`
 /// implies OS-enabled AVX state; the baseline target never emits VEX.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

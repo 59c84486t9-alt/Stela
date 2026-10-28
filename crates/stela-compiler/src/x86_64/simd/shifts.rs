@@ -2,6 +2,7 @@
 use super::{
     Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, vector_offset,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::shifts::{Kind, Operand},
@@ -14,7 +15,7 @@ const VECTOR_BYTES: u8 = 16;
 const LOW_DWORDS_OF_QWORDS: u8 = 0x88;
 const HIGH_DWORDS_OF_QWORDS: u8 = 0xdd;
 
-fn lane_mask(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, value: u64) {
+fn lane_mask(code: &mut Code, xmm: u8, lane_bytes: u8, value: u64) {
     let bytes = value.to_le_bytes();
     constant(
         code,
@@ -22,7 +23,7 @@ fn lane_mask(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, value: u64) {
         core::array::from_fn(|i| bytes[i % usize::from(lane_bytes)]),
     );
 }
-fn add(code: &mut Vec<u8>, destination: u8, source: u8, lane_bytes: u8) {
+fn add(code: &mut Code, destination: u8, source: u8, lane_bytes: u8) {
     packed(
         code,
         match lane_bytes {
@@ -36,7 +37,7 @@ fn add(code: &mut Vec<u8>, destination: u8, source: u8, lane_bytes: u8) {
         source,
     );
 }
-pub(crate) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
+pub(crate) fn logical_shift(code: &mut Code, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
     if amount == 0 {
         return;
     }
@@ -61,7 +62,7 @@ pub(crate) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount:
         packed(code, Host::And, xmm, 5);
     }
 }
-pub(crate) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
+pub(crate) fn right_shift(code: &mut Code, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
     if amount == 0 {
         return;
     }
@@ -91,7 +92,7 @@ pub(crate) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u
     }
 }
 pub(crate) fn rounded_right(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     lane_bytes: u8,
     amount: u8,
     signed: bool,
@@ -108,14 +109,7 @@ pub(crate) fn rounded_right(
         add(code, 0, 1, lane_bytes);
     }
 }
-fn narrow(
-    code: &mut Vec<u8>,
-    lane_bytes: u8,
-    amount: u8,
-    round: bool,
-    upper: bool,
-    destination: u8,
-) {
+fn narrow(code: &mut Code, lane_bytes: u8, amount: u8, round: bool, upper: bool, destination: u8) {
     rounded_right(code, lane_bytes * 2, amount, false, round);
     pack_truncated(code, lane_bytes, upper, destination);
 }
@@ -123,7 +117,7 @@ fn narrow(
 /// Shift first, then clamp. Rounding is computed as shifted value plus the
 /// discarded high bit, so signed overflow and unsigned carry are never lost.
 fn saturating_narrow(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     signed_source: bool,
     unsigned_result: bool,
@@ -192,7 +186,7 @@ fn saturating_narrow(
 /// with the shifted source derives QC without reimplementing the pack bounds.
 /// XMM6 retains the packed result and XMM4 receives the wide saturation mask.
 fn saturating_narrow_pack(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     lane: u8,
     signed_source: bool,
     unsigned_result: bool,
@@ -261,7 +255,7 @@ fn saturating_narrow_pack(
 /// SSE2 has no saturating qword pack. Compare both bounds before selecting
 /// clamped qwords; the checked SSE4.2 comparison replaces its baseline recipe.
 fn saturating_narrow_qword(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     unsigned_result: bool,
     signed_source: bool,
     target: TargetCpu,
@@ -301,7 +295,7 @@ fn saturating_narrow_qword(
     packed(code, Host::Or, 4, 6);
     shuffle(code, 6, 5, LOW_DWORDS_OF_QWORDS);
 }
-pub(super) fn pack_truncated(code: &mut Vec<u8>, lane_bytes: u8, upper: bool, destination: u8) {
+pub(super) fn pack_truncated(code: &mut Code, lane_bytes: u8, upper: bool, destination: u8) {
     match lane_bytes {
         1 => {
             lane_mask(code, 2, 2, 0xff);
@@ -327,7 +321,7 @@ pub(super) fn pack_truncated(code: &mut Vec<u8>, lane_bytes: u8, upper: bool, de
         commit(code, destination, 0);
     }
 }
-fn widen(code: &mut Vec<u8>, lane_bytes: u8, amount: u8, signed: bool, upper: bool) {
+fn widen(code: &mut Code, lane_bytes: u8, amount: u8, signed: bool, upper: bool) {
     if upper {
         Shift::RightBytes.emit(code, 0, 8);
     }
@@ -359,7 +353,7 @@ fn widen(code: &mut Vec<u8>, lane_bytes: u8, amount: u8, signed: bool, upper: bo
     logical_shift(code, 0, lane_bytes * 2, amount, true);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,
@@ -486,7 +480,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 /// results in XMM3 and the originals in XMM6; the sign bits of XMM4's active
 /// bytes set QC.
 fn saturating_immediate_vector(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     signed_source: bool,
     unsigned_result: bool,
@@ -578,7 +572,7 @@ fn saturating_immediate_vector(
     finish_immediate_vector(code, operand, 3);
 }
 
-fn finish_immediate_vector(code: &mut Vec<u8>, operand: &Operand, result: u8) {
+fn finish_immediate_vector(code: &mut Code, operand: &Operand, result: u8) {
     if operand.bytes == 8 {
         packed(code, Host::MoveQword, result, result);
     }
@@ -594,7 +588,7 @@ enum LaneBranch {
     Above,
     AboveOrEqual,
 }
-fn lane_branch(code: &mut Vec<u8>, condition: LaneBranch) -> usize {
+fn lane_branch(code: &mut Code, condition: LaneBranch) -> usize {
     match condition {
         LaneBranch::Always => code.push(0xe9),
         LaneBranch::Nonnegative => code.extend([0x0f, 0x89]),
@@ -618,7 +612,7 @@ enum LaneShift {
 }
 impl LaneShift {
     /// RAX or R10, count CL, baseline 64-bit shift group.
-    fn count(self, code: &mut Vec<u8>, r10: bool) {
+    fn count(self, code: &mut Code, r10: bool) {
         let group = match self {
             Self::Left => 4,
             Self::LogicalRight => 5,
@@ -631,13 +625,13 @@ impl LaneShift {
         ]);
     }
 }
-fn normalize_lane(code: &mut Vec<u8>, bits: u8, signed: bool) {
+fn normalize_lane(code: &mut Code, bits: u8, signed: bool) {
     if bits < 64 {
         code.extend([0x48, 0xc1, 0xe0, 64 - bits]); // shl rax,64-width
         code.extend([0x48, 0xc1, if signed { 0xf8 } else { 0xe8 }, 64 - bits]);
     }
 }
-fn load_shift_lane(code: &mut Vec<u8>, operand: &Operand, byte: u8, signed: bool) {
+fn load_shift_lane(code: &mut Code, operand: &Operand, byte: u8, signed: bool) {
     match (operand.lane_bytes, signed) {
         (1, false) => code.extend([0x0f, 0xb6, 0x87]),
         (1, true) => code.extend([0x48, 0x0f, 0xbe, 0x87]),
@@ -650,13 +644,13 @@ fn load_shift_lane(code: &mut Vec<u8>, operand: &Operand, byte: u8, signed: bool
     }
     code.extend((vector_offset(operand.source) + u32::from(byte)).to_le_bytes());
 }
-fn load_bound(code: &mut Vec<u8>, bound: u64) {
+fn load_bound(code: &mut Code, bound: u64) {
     code.extend([0x48, 0xb8]); // movabs rax,bound
     code.extend(bound.to_le_bytes());
 }
 /// CL is 1 to 128. Rounding adds CF from the last discarded bit instead of
 /// adding a bias that could overflow the qword.
-fn register_right(code: &mut Vec<u8>, signed: bool, round: bool) {
+fn register_right(code: &mut Code, signed: bool, round: bool) {
     code.extend([0x83, 0xf9, 64]); // cmp ecx,64
     let large = lane_branch(code, LaneBranch::AboveOrEqual);
     if signed {
@@ -687,7 +681,7 @@ fn register_right(code: &mut Vec<u8>, signed: bool, round: bool) {
     resolve_lane_branch(code, done);
 }
 fn register_left(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     bits: u8,
     signed_source: bool,
     unsigned_result: bool,
@@ -763,7 +757,7 @@ fn register_left(
 /// both). A left count of 64 or more gives zero; a right count is clamped to
 /// 63, which fills with the sign (SSHL) or, below -63, is replaced by zero
 /// (USHL of a 64-bit lane). Narrower lanes are truncated by the caller.
-fn register_plain(code: &mut Vec<u8>, signed: bool) {
+fn register_plain(code: &mut Code, signed: bool) {
     const LEFT_LIMIT: u8 = 64;
     const RIGHT_LIMIT: u8 = 63;
     const RIGHT_ZERO: u8 = (-64i8) as u8;
@@ -796,7 +790,7 @@ fn register_plain(code: &mut Vec<u8>, signed: bool) {
 
 #[allow(clippy::too_many_arguments)]
 fn register_shift(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     counts: Option<u8>,
     signed_source: bool,
@@ -872,9 +866,9 @@ mod tests {
                                 amount: lane * BITS_PER_BYTE,
                                 bytes: if scalar { lane } else { VECTOR_BYTES },
                             };
-                            let mut code = vec![];
+                            let mut code = Code::new();
                             emit(&mut code, &operand, TargetCpu::Baseline);
-                            let mut qc = vec![];
+                            let mut qc = Code::new();
                             Host::ByteSignMask.register(&mut qc, 1, 4, TargetCpu::Baseline);
                             assert_eq!(
                                 code.windows(qc.len()).any(|w| w == qc),
@@ -905,9 +899,9 @@ mod tests {
                         amount: 1,
                         bytes: if scalar { lane } else { VECTOR_BYTES },
                     };
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     emit(&mut code, &operand, target);
-                    let mut checked_pack = vec![];
+                    let mut checked_pack = Code::new();
                     Host::PackUnsignedDwordToWord.register(
                         &mut checked_pack,
                         0,
@@ -949,7 +943,7 @@ mod tests {
                     continue;
                 }
                 for signed in [false, true] {
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     emit(
                         &mut code,
                         &immediate(lane, bytes, 0, signed),
@@ -972,13 +966,13 @@ mod tests {
             (2, false, Host::AddUnsignedSaturatingWord),
         ] {
             for bytes in [8, 16] {
-                let mut code = vec![];
+                let mut code = Code::new();
                 emit(
                     &mut code,
                     &immediate(lane, bytes, 1, signed),
                     TargetCpu::Baseline,
                 );
-                let mut saturating_add = vec![];
+                let mut saturating_add = Code::new();
                 packed(&mut saturating_add, opcode, 0, 0);
                 assert!(
                     code.windows(saturating_add.len())
@@ -1019,7 +1013,7 @@ mod tests {
                     if matches!(kind, Kind::Right { .. }) {
                         operand.amount = lane * 8;
                     }
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     emit(&mut code, &operand, TargetCpu::Baseline);
                     assert_eq!(code.len(), if bytes == 8 { 20 } else { 16 });
                 }

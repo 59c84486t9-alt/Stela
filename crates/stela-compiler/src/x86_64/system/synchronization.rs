@@ -1,6 +1,6 @@
 //! Barriers and hints (ISB, SB, NOP, YIELD, ...).
 use crate::aarch64::system::synchronization::Operation;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const MOV_R8_RBX: &[u8] = &[0x49, 0x89, 0xd8];
 const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
@@ -16,7 +16,7 @@ pub enum EmitError {
 /// Emit the barriers and hints that need no system context. R8 is scratch.
 /// CPUID leaf 0 serializes; RBX is saved around it. Other operations go to the
 /// runtime.
-pub fn emit(code: &mut Vec<u8>, operation: &Operation) -> Result<(), EmitError> {
+pub fn emit(code: &mut Code, operation: &Operation) -> Result<(), EmitError> {
     match operation {
         Operation::Yield => code.extend_from_slice(PAUSE),
         Operation::ConsumptionBarrier
@@ -49,7 +49,7 @@ mod tests {
             Operation::StoreBypassBarrier { physical: false },
             Operation::StoreBypassBarrier { physical: true },
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             assert_eq!(emit(&mut code, &operation), Ok(()));
             assert_eq!(code, expected);
         }
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn yield_uses_pause() {
-        let mut code = vec![];
+        let mut code = Code::new();
         assert_eq!(emit(&mut code, &Operation::Yield), Ok(()));
         assert_eq!(code, PAUSE);
     }
@@ -88,7 +88,7 @@ mod tests {
             Operation::TraceSynchronization,
             Operation::OtherHint { immediate: 127 },
         ] {
-            let mut code = sentinel.clone();
+            let mut code = Code::from(sentinel.clone());
             assert_eq!(emit(&mut code, &operation), Err(EmitError::ContextRequired));
             assert_eq!(code, sentinel);
         }

@@ -7,7 +7,7 @@ use crate::aarch64::{
     Register,
     atomic::{Kind, Operand, Rmw},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;
@@ -50,7 +50,7 @@ const MOV_R8_EAX_OPERANDS: &[u8] = &[0x89, 0xc0];
 const NOT_ECX: &[u8] = &[0xf7, 0xd1];
 const MODRM_EAX_ECX: u8 = 0xc8;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, plain_access: bool) {
     let Kind::ReadModifyWrite {
         operation,
         source,
@@ -101,7 +101,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
 /// first, so an address a read would fault on faults there with WnR 0 and a
 /// read-only one at the store with WnR 1, as Arm requires of an atomic that
 /// both reads and writes; nothing is committed before the store completes.
-fn plain(code: &mut Vec<u8>, bytes: u8, operation: Rmw, source: Register, destination: Register) {
+fn plain(code: &mut Code, bytes: u8, operation: Rmw, source: Register, destination: Register) {
     input_rcx(code, bytes, source);
     if operation == Rmw::Clear {
         wide_prefix(code, bytes);
@@ -143,13 +143,13 @@ fn plain(code: &mut Vec<u8>, bytes: u8, operation: Rmw, source: Register, destin
     commit_rax(code, bytes, destination);
 }
 
-fn wide_prefix(code: &mut Vec<u8>, bytes: u8) {
+fn wide_prefix(code: &mut Code, bytes: u8) {
     if bytes == QWORD_BYTES {
         code.push(REX_W_PREFIX);
     }
 }
 
-fn width_prefix(code: &mut Vec<u8>, bytes: u8) {
+fn width_prefix(code: &mut Code, bytes: u8) {
     match bytes {
         HALFWORD_BYTES => code.push(OPERAND_SIZE_PREFIX),
         QWORD_BYTES => code.push(REX_W_PREFIX),
@@ -158,11 +158,11 @@ fn width_prefix(code: &mut Vec<u8>, bytes: u8) {
     }
 }
 
-fn extended_prefix(code: &mut Vec<u8>, bytes: u8, extension: u8) {
+fn extended_prefix(code: &mut Code, bytes: u8, extension: u8) {
     code.push(extension | if bytes == QWORD_BYTES { REX_W_BIT } else { 0 });
 }
 
-fn direct(code: &mut Vec<u8>, bytes: u8, operation: Rmw, discard: bool) {
+fn direct(code: &mut Code, bytes: u8, operation: Rmw, discard: bool) {
     if operation != Rmw::Swap {
         code.push(LOCK);
     }
@@ -189,7 +189,7 @@ fn direct(code: &mut Vec<u8>, bytes: u8, operation: Rmw, discard: bool) {
     ]);
 }
 
-fn retry(code: &mut Vec<u8>, bytes: u8, operation: Rmw) {
+fn retry(code: &mut Code, bytes: u8, operation: Rmw) {
     read_rax(code, bytes);
     let repeat = code.len();
     // Failed narrow CMPXCHG replaces AL/AX, retaining the zero upper bits from
@@ -221,7 +221,7 @@ fn retry(code: &mut Vec<u8>, bytes: u8, operation: Rmw) {
     code.extend(displacement.to_le_bytes());
 }
 
-fn select_min_max(code: &mut Vec<u8>, bytes: u8, operation: Rmw) {
+fn select_min_max(code: &mut Code, bytes: u8, operation: Rmw) {
     width_prefix(code, bytes);
     code.extend([
         if bytes == BYTE_BYTES {
@@ -286,7 +286,7 @@ mod tests {
         };
         for ((bytes, load), (_, store)) in loads.into_iter().zip(stores) {
             for operation in OPERATIONS {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 plain(&mut code, bytes, operation, Register::X(1), Register::X(2));
                 // X1 and X2 sit at frame offsets 8 and 16, so no other byte
                 // is a LOCK prefix or a conditional jump.
@@ -302,7 +302,7 @@ mod tests {
             }
         }
         // A ZR destination performs the access and commits nothing.
-        let mut code = Vec::new();
+        let mut code = Code::new();
         plain(
             &mut code,
             DWORD_BYTES,

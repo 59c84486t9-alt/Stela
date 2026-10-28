@@ -2,6 +2,7 @@
 //! overwritten before the next exit.
 use super::{Emitter, Resident, analysis::Effects, encoding, flags, location::GPR_SLOTS};
 use crate::aarch64::{Register, Width};
+use crate::x86_64::asm::Code;
 use alloc::vec;
 use alloc::vec::Vec;
 use encoding::{CALLEE_POOL, HostGpr, POOL, RESULT};
@@ -407,7 +408,7 @@ pub(super) fn emitter<'a>(
 ) -> Emitter<'a> {
     Emitter {
         output: super::OptimizedRegion {
-            code: vec![],
+            code: Code::from(vec![]),
             consumed_instructions: gprs.len(),
             source_map: vec![],
             stats: super::AllocationStats::default(),

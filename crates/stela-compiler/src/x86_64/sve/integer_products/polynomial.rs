@@ -3,8 +3,8 @@ use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::Selection;
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
-use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -22,18 +22,18 @@ const DEC_R10D: [u8; 3] = [0x41, 0xff, 0xca];
 const JNZ_REL32: [u8; 2] = [0x0f, 0x85];
 const REL32_BYTES: usize = 4;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn low_lane_mask(code: &mut Vec<u8>, shift: Shift, bits: u8) {
+fn low_lane_mask(code: &mut Code, shift: Shift, bits: u8) {
     packed(code, Host::EqualDword, CONSTANT, CONSTANT);
     shift.emit(code, CONSTANT, bits);
 }
 
 /// Eight Horner steps per byte. PADDB doubles modulo x^8 without permitting
 /// carries between lanes, and signed-byte comparison extracts each top bit.
-fn low_bytes(code: &mut Vec<u8>) {
+fn low_bytes(code: &mut Code) {
     packed(code, Host::Xor, RESULT, RESULT);
     for bit in 0..BYTE_BITS {
         if bit != 0 {
@@ -49,7 +49,7 @@ fn low_bytes(code: &mut Vec<u8>) {
     }
 }
 
-fn widen_bytes(code: &mut Vec<u8>, top: bool) {
+fn widen_bytes(code: &mut Code, top: bool) {
     if top {
         Shift::RightWord.emit(code, LEFT, BYTE_BITS);
         Shift::RightWord.emit(code, RIGHT, BYTE_BITS);
@@ -75,7 +75,7 @@ fn widen_bytes(code: &mut Vec<u8>, top: bool) {
     }
 }
 
-fn widen_dwords(code: &mut Vec<u8>, top: bool) {
+fn widen_dwords(code: &mut Code, top: bool) {
     if top {
         Shift::RightQword.emit(code, LEFT, DWORD_BITS);
         Shift::RightQword.emit(code, RIGHT, DWORD_BITS);
@@ -101,7 +101,7 @@ fn widen_dwords(code: &mut Vec<u8>, top: bool) {
     code.extend(displacement.to_le_bytes());
 }
 
-fn widen_dwords_pclmul(code: &mut Vec<u8>, top: bool, target: TargetCpu) {
+fn widen_dwords_pclmul(code: &mut Code, top: bool, target: TargetCpu) {
     if top {
         Shift::RightQword.emit(code, LEFT, DWORD_BITS);
         Shift::RightQword.emit(code, RIGHT, DWORD_BITS);
@@ -122,7 +122,7 @@ fn widen_dwords_pclmul(code: &mut Vec<u8>, top: bool, target: TargetCpu) {
 /// R15. Each widening result selects even (bottom) or odd (top) narrow lanes.
 /// Reject unallocated widths before emitting any bytes. No RAM or FP effects.
 pub(super) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     widening: bool,
     selection: Selection,

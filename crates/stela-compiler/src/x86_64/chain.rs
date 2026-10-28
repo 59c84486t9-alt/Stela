@@ -265,11 +265,12 @@ pub fn jump(at: u64, to: u64) -> Option<[u8; JUMP_BYTES]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::x86_64::asm::Code;
     use alloc::vec;
 
     #[test]
     fn direct_exits_match_the_block_emitter() {
-        let mut emitted = Vec::new();
+        let mut emitted = Code::new();
         super::super::block::direct_exit(&mut emitted, GuestAddress(0x1234), ExitKind::Direct);
         assert_eq!(emitted, direct_exit(GuestAddress(0x1234), ExitKind::Direct));
     }
@@ -308,7 +309,7 @@ mod tests {
 
     #[test]
     fn dynamic_exits_match_the_block_emitter() {
-        let mut emitted = Vec::new();
+        let mut emitted = Code::new();
         super::super::block::exit_kind(&mut emitted, ExitKind::Return);
         assert_eq!(emitted, dynamic_exit(ExitKind::Return));
         let span = 4 * LOOKUP_ENTRIES as u64;

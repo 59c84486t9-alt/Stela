@@ -4,6 +4,7 @@
 //! stay readable until `finish`, which commits every staged output byte at once.
 //! No CALL or mode change may occur while the frame is live. RDI, R15 and
 //! callee-saved GPRs survive; RAX/RCX/RDX, flags and the chosen XMM are clobbered.
+use crate::x86_64::asm::Code;
 
 use super::{
     DWORD_BYTES, HALFWORD_BYTES, Host, QWORD_BYTES, clear_z_upper, store_z_chunk,
@@ -113,12 +114,12 @@ pub(crate) struct Frame {
     guards_start: usize,
 }
 
-fn memory(code: &mut Vec<u8>, opcode: &[u8], offset: u32) {
+fn memory(code: &mut Code, opcode: &[u8], offset: u32) {
     code.extend(opcode);
     code.extend(offset.to_le_bytes());
 }
 
-fn stack_vector(code: &mut Vec<u8>, opcode: Host, register: u8, offset: u32, target: TargetCpu) {
+fn stack_vector(code: &mut Code, opcode: Host, register: u8, offset: u32, target: TargetCpu) {
     xmm(register);
     opcode.append(code, target);
     code.extend([
@@ -131,7 +132,7 @@ fn stack_vector(code: &mut Vec<u8>, opcode: Host, register: u8, offset: u32, tar
 /// Validate the full constant layout before emitting or reserving any bytes.
 /// A source may alias a destination; two output slots may not overlap.
 pub(crate) fn begin(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     length: VectorLength,
     outputs: &[Output],
     environment: Environment,
@@ -184,7 +185,7 @@ pub(crate) fn begin(
 
 /// Stage one complete 16-byte Z/V segment; other XMMs and guest banks survive.
 pub(crate) fn stage_vector_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     output: usize,
     chunk: usize,
@@ -206,7 +207,7 @@ pub(crate) fn stage_vector_chunk(
 /// Stage exactly two packed P bytes from low16 RAX, one per 16-byte Z chunk.
 /// The caller has already cleared inactive and nonleading predicate bits.
 pub(crate) fn stage_predicate_bits16(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     output: usize,
     z_chunk: usize,
@@ -227,7 +228,7 @@ fn private(frame: &Frame) {
 
 /// Install only EAX rounding bits, masked exceptions, fresh status and no flush.
 /// Effective guest control interpretation remains the instruction family's job.
-pub(crate) fn install_mxcsr(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn install_mxcsr(code: &mut Code, frame: &Frame) {
     private(frame);
     code.extend(AND_EAX_IMM32);
     code.extend(MXCSR_ROUNDING_MASK.to_le_bytes());
@@ -238,7 +239,7 @@ pub(crate) fn install_mxcsr(code: &mut Vec<u8>, frame: &Frame) {
 }
 
 /// Return the six raw host status bits in ECX. This is not an ARM FPSR mapping.
-pub(crate) fn capture_status(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn capture_status(code: &mut Code, frame: &Frame) {
     private(frame);
     memory(code, STMXCSR_RSP_DISP32, CAPTURED_HOST_STATUS);
     memory(code, MOV_ECX_RSP_DISP32, CAPTURED_HOST_STATUS);
@@ -247,24 +248,24 @@ pub(crate) fn capture_status(code: &mut Vec<u8>, frame: &Frame) {
 }
 
 /// Clear host stage status after installation, retaining approved pending FPSR.
-pub(crate) fn clear_status(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn clear_status(code: &mut Code, frame: &Frame) {
     private(frame);
     memory(code, LDMXCSR_RSP_DISP32, PRIVATE_MXCSR);
 }
 
 /// Accumulate only family-approved guest FPSR bits from EAX, without committing.
-pub(crate) fn add_fpsr(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn add_fpsr(code: &mut Code, frame: &Frame) {
     private(frame);
     memory(code, OR_RSP_DISP32_EAX, PENDING_GUEST_FPSR);
 }
 
-fn restore(code: &mut Vec<u8>, frame: &Frame) {
+fn restore(code: &mut Code, frame: &Frame) {
     if frame.environment == Environment::PrivateMxcsr {
         memory(code, LDMXCSR_RSP_DISP32, SAVED_MXCSR);
     }
 }
 
-fn release(code: &mut Vec<u8>, frame: &Frame) {
+fn release(code: &mut Code, frame: &Frame) {
     code.extend(ADD_RSP_IMM32);
     code.extend(frame.bytes.to_le_bytes());
 }
@@ -280,7 +281,7 @@ fn patch(code: &mut [u8], displacement: usize, destination: usize) {
 /// Failure restores MXCSR/RSP before returning the still-unexecuted exact PC.
 /// Success clobbers XMM0 and RAX/RDX, and private mode ORs approved FPSR once.
 pub(crate) fn finish(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &[usize],
     pc: GuestAddress,
@@ -361,7 +362,6 @@ pub(crate) fn finish(
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn invalid_layout_does_not_emit() {
@@ -375,7 +375,7 @@ mod tests {
             vec![Output::Predicate(1); 2],
             vec![Output::Z(0); 5],
         ] {
-            let mut code = vec![0xaa];
+            let mut code = Code::from(vec![0xaa]);
             assert!(begin(&mut code, length, &outputs, Environment::Exact).is_err());
             assert_eq!(code, [0xaa]);
         }
@@ -392,7 +392,7 @@ mod tests {
                     vec![Output::Z(0)],
                     vec![Output::Z(0), Output::Z(1), Output::Z(2), Output::Z(3)],
                 ] {
-                    let frame = begin(&mut Vec::new(), length, &outputs, environment).unwrap();
+                    let frame = begin(&mut Code::new(), length, &outputs, environment).unwrap();
                     assert_eq!(
                         frame.bytes as usize % VECTOR_CHUNK_BYTES,
                         CALL_ALIGNMENT_PAD

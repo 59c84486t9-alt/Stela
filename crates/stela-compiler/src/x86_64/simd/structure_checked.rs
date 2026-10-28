@@ -1,6 +1,7 @@
 //! Fixed-width AdvSIMD structures through exact element memory-service requests.
 //! The typed schedule owns access order and partial load commits. Guest addresses
 //! are never host pointers; only private State and stack staging are dereferenced.
+use crate::x86_64::asm::Code;
 
 use super::{commit, vector_offset};
 use crate::{
@@ -164,7 +165,7 @@ impl CheckedOperand {
         }
     }
 
-    pub(crate) fn emit_context(self, code: &mut Vec<u8>, pc: u64, target: TargetCpu) {
+    pub(crate) fn emit_context(self, code: &mut Code, pc: u64, target: TargetCpu) {
         let operand = self.operand;
         code.extend(SUB_RSP);
         code.push(SCRATCH_BYTES);
@@ -271,13 +272,13 @@ impl CheckedOperand {
     }
 }
 
-fn stack(code: &mut Vec<u8>, opcode: &[u8], displacement: u8) {
+fn stack(code: &mut Code, opcode: &[u8], displacement: u8) {
     code.extend(opcode);
     code.push(displacement);
 }
 
 /// Exact-width state/staging reads zero-extend narrow elements into RCX.
-fn scalar_opcode(code: &mut Vec<u8>, write: bool, bytes: u8) {
+fn scalar_opcode(code: &mut Code, write: bool, bytes: u8) {
     if !write && bytes <= HALFWORD_BYTES {
         code.extend(if bytes == BYTE_BYTES {
             MOVZX_ECX_BYTE
@@ -301,13 +302,13 @@ fn scalar_opcode(code: &mut Vec<u8>, write: bool, bytes: u8) {
     }
 }
 
-fn scalar_state(code: &mut Vec<u8>, write: bool, bytes: u8, displacement: u32) {
+fn scalar_state(code: &mut Code, write: bool, bytes: u8, displacement: u32) {
     scalar_opcode(code, write, bytes);
     code.push(RCX_STATE_DISP32);
     code.extend(displacement.to_le_bytes());
 }
 
-fn clear_upper_half(code: &mut Vec<u8>, vector: u8) {
+fn clear_upper_half(code: &mut Code, vector: u8) {
     code.extend(MOV_ZERO_QWORD_STATE);
     code.extend((vector_offset(vector) + u32::from(QWORD_BYTES)).to_le_bytes());
     code.extend(0_i32.to_le_bytes());
@@ -315,7 +316,7 @@ fn clear_upper_half(code: &mut Vec<u8>, vector: u8) {
 
 /// RCX contains one zero-extended, successfully read element. Rebuild an
 /// optional shuffle mask after each callback; no host vector survives it.
-fn replicate(code: &mut Vec<u8>, bytes: u8, vector_bytes: u8, target: TargetCpu) {
+fn replicate(code: &mut Code, bytes: u8, vector_bytes: u8, target: TargetCpu) {
     Host::MoveGprQword.register(code, 0, 1, TargetCpu::Baseline); // XMM0 <- RCX
     if bytes == BYTE_BYTES && vector_bytes == VECTOR_BYTES && target.supports(TargetCpu::Ssse3) {
         Host::Xor.register(code, 1, 1, TargetCpu::Baseline);
@@ -840,7 +841,7 @@ mod tests {
                 profile: CheckedMemoryProfile,
                 target: TargetCpu,
             ) -> Self {
-                let mut code = crate::extended::context_wrapper();
+                let mut code = Code::from(crate::extended::context_wrapper());
                 checked(operand, profile).emit_context(&mut code, GUEST_PC, target);
                 code.push(0xc3);
                 Self::new(&code)

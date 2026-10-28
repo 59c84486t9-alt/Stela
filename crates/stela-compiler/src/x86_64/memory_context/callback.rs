@@ -1,8 +1,8 @@
 //! The shared memory-service call. Instruction families supply predicates,
 //! addresses and load staging; the service performs translation, splitting,
 //! tag checks and writer tracking.
+use crate::x86_64::asm::Code;
 
-use alloc::vec::Vec;
 use core::mem::offset_of;
 
 use crate::context::{
@@ -45,13 +45,13 @@ fn field_offset(offset: usize) -> u8 {
     u8::try_from(offset).expect("memory view field fits positive disp8")
 }
 
-fn memory_pointer(code: &mut Vec<u8>) {
+fn memory_pointer(code: &mut Code) {
     code.extend(MOV_RDX_CONTEXT_DISP8);
     code.push(EXECUTION_CONTEXT_MEMORY_OFFSET as u8);
 }
 
 /// Start one instruction's exact reached-prefix record. Clobbers RDX only.
-pub(crate) fn begin(code: &mut Vec<u8>) {
+pub(crate) fn begin(code: &mut Code) {
     use crate::context::memory::MemoryContextView;
     memory_pointer(code);
     // v2 places the validated fault-access code directly after fault_kind.
@@ -67,7 +67,7 @@ pub(crate) fn begin(code: &mut Vec<u8>) {
 /// Build a request at a private stack offset. RAX supplies the guest address;
 /// data_offset names private staging relative to the current RSP. Clobbers RCX/RDX.
 pub(crate) fn request(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     request_offset: u32,
     data_offset: u32,
     bytes: u32,
@@ -104,7 +104,7 @@ pub(crate) fn request(
 /// Runs the callback under default MXCSR, then preserves the full caller
 /// MXCSR, including exception status bits, on success and refusal. Returns the
 /// typed MemoryStatus encoding in EAX. No callback address is embedded.
-pub(crate) fn call(code: &mut Vec<u8>, request_offset: u32) {
+pub(crate) fn call(code: &mut Code, request_offset: u32) {
     code.extend(PUSH_RDI);
     code.extend(SUB_RSP_SAVE);
     code.extend(STMXCSR_RSP);
@@ -122,7 +122,7 @@ pub(crate) fn call(code: &mut Vec<u8>, request_offset: u32) {
 }
 
 /// Emit a failure branch; patch the returned displacement to family cleanup.
-pub(crate) fn branch_failed(code: &mut Vec<u8>) -> usize {
+pub(crate) fn branch_failed(code: &mut Code) -> usize {
     code.extend(TEST_EAX_EAX);
     code.extend(JNE_REL32);
     let displacement = code.len();
@@ -139,7 +139,7 @@ pub(crate) fn patch_branch(code: &mut [u8], displacement: usize, destination: us
 
 /// Record a fault found in emitted code (such as SP misalignment). RAX is the
 /// faulting address; the completed prefix stays. Clobbers RCX/RDX.
-pub(crate) fn fault(code: &mut Vec<u8>, status: MemoryStatus, pc: u64) {
+pub(crate) fn fault(code: &mut Code, status: MemoryStatus, pc: u64) {
     use crate::context::memory::MemoryContextView;
     memory_pointer(code);
     code.extend(MOV_RDX_DISP8_IMM32);

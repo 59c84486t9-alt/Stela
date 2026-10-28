@@ -1,11 +1,11 @@
 //! FlagM/FlagM2 on the in-memory guest NZCV.
 use super::load;
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState,
     aarch64::Register,
     aarch64::flags::{Operand, SetWidth},
 };
-use alloc::vec::Vec;
 
 const NZCV_OFFSET: u32 = core::mem::offset_of!(GuestState, nzcv) as u32;
 const NZCV_SHIFT: u8 = 28;
@@ -72,7 +72,7 @@ enum Opcode {
     ShiftLeftEdx,
 }
 impl Opcode {
-    fn emit(self, code: &mut Vec<u8>) {
+    fn emit(self, code: &mut Code) {
         code.extend(match self {
             Self::Nop => &[0x90][..],
             Self::LoadEaxNzcv => &[0x8b, 0x87][..],
@@ -104,17 +104,17 @@ impl Opcode {
             Self::ShiftLeftEdx => &[0xc1, 0xe2],
         });
     }
-    fn immediate(self, code: &mut Vec<u8>, value: u32) {
+    fn immediate(self, code: &mut Code, value: u32) {
         self.emit(code);
         code.extend(value.to_le_bytes());
     }
-    fn shift(self, code: &mut Vec<u8>, amount: u8) {
+    fn shift(self, code: &mut Code, amount: u8) {
         self.emit(code);
         code.push(amount);
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     match *operand {
         Operand::InvertCarry => {
             Opcode::XorNzcvImmediate.immediate(code, NZCV_OFFSET);
@@ -197,7 +197,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     Opcode::StoreEaxNzcv.immediate(code, NZCV_OFFSET);
 }
 
-fn emit_conversion(code: &mut Vec<u8>, table: u32, index_shift: u8, index_mask: u32) {
+fn emit_conversion(code: &mut Code, table: u32, index_shift: u8, index_mask: u32) {
     Opcode::LoadEcxNzcv.immediate(code, NZCV_OFFSET);
     // Each architectural flag result occupies one nibble of the immediate.
     Opcode::ShiftRightEcx.shift(code, index_shift);
@@ -211,7 +211,6 @@ fn emit_conversion(code: &mut Vec<u8>, table: u32, index_shift: u8, index_mask: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn external_table_matches_all_architectural_flag_inputs() {
@@ -240,7 +239,7 @@ mod tests {
 
     #[test]
     fn zero_rotate_mask_keeps_a_nonempty_mapping_interval() {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand::RotateMask {

@@ -2,11 +2,11 @@
 //! bit-serial for data-independent timing.
 use super::isa::{CrcOpcode, CrcTableInstruction as Table};
 use super::{Register, Shift, Width, load, right_operand, store};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::crc::{DataSize, Operand, Polynomial},
 };
-use alloc::vec::Vec;
 
 const TABLE_ENTRIES: u32 = 256;
 const ENTRY_BYTES: u32 = 4;
@@ -25,7 +25,7 @@ const AND_EDX_IMM32: [u8; 2] = [0x81, 0xe2];
 const SHR_RAX_ONE: [u8; 3] = [0x48, 0xd1, 0xe8];
 const XOR_RAX_RDX: [u8; 3] = [0x48, 0x31, 0xd0];
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if operand.destination == Register::Zero {
         Table::Discard.emit(code);
         return;
@@ -45,7 +45,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     store(code, operand.destination);
 }
 
-fn emit_table(code: &mut Vec<u8>, operand: &Operand) {
+fn emit_table(code: &mut Code, operand: &Operand) {
     match operand.size {
         DataSize::Byte => Table::TruncateByteData.emit(code),
         DataSize::Halfword => Table::TruncateHalfwordData.emit(code),
@@ -84,7 +84,7 @@ fn emit_table(code: &mut Vec<u8>, operand: &Operand) {
 /// polynomial masked by the bit shifted out, with no branch or table. The
 /// data's upper bits enter as they reach the low 32, which is the bytewise
 /// CRC by linearity; after the last step the value is 32 bits.
-fn emit_serial(code: &mut Vec<u8>, operand: &Operand) {
+fn emit_serial(code: &mut Code, operand: &Operand) {
     code.extend(MOV_EAX_EAX);
     match operand.size {
         DataSize::Byte => code.extend(MOVZX_ECX_CL),
@@ -104,7 +104,7 @@ fn emit_serial(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-fn emit_bytes(code: &mut Vec<u8>, count: u8) {
+fn emit_bytes(code: &mut Code, count: u8) {
     for _ in 0..count {
         Table::IndexLowByte.emit(code);
         Table::ShiftAccumulatorByte.emit(code);
@@ -115,7 +115,6 @@ fn emit_bytes(code: &mut Vec<u8>, count: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     /// The bit-serial model over the full data width matches the bytewise
     /// CRC, and the lowering has no table, jump or CRC32 instruction.
@@ -172,13 +171,13 @@ mod tests {
                     accumulator: Register::X(1),
                     data: Register::X(2),
                 };
-                let mut timed = Vec::new();
+                let mut timed = Code::new();
                 emit(
                     &mut timed,
                     &operand,
                     TargetCpu::Sse42.with_data_independent_timing(),
                 );
-                let mut baseline = Vec::new();
+                let mut baseline = Code::new();
                 emit(&mut baseline, &operand, TargetCpu::DataIndependentTiming);
                 assert_eq!(timed, baseline);
                 // No RIP-relative table base and no CRC32 (F2 0F 38 F0/F1).
@@ -208,13 +207,13 @@ mod tests {
                     accumulator: Register::X(1),
                     data: Register::X(2),
                 };
-                let mut baseline = Vec::new();
-                let mut checked = Vec::new();
+                let mut baseline = Code::new();
+                let mut checked = Code::new();
                 emit(&mut baseline, &operand, TargetCpu::Baseline);
                 emit(&mut checked, &operand, TargetCpu::Sse42);
                 if polynomial == Polynomial::Castagnoli {
                     assert!(checked.len() < baseline.len());
-                    let mut expected = Vec::new();
+                    let mut expected = Code::new();
                     load(&mut expected, operand.accumulator);
                     right_operand(&mut expected, operand.data, Width::X64, Shift::Lsl, 0);
                     CrcOpcode::for_bytes(size.bytes()).emit(&mut expected, TargetCpu::Sse42);
@@ -225,9 +224,9 @@ mod tests {
                 }
                 operand.destination = Register::Zero;
                 for target in [TargetCpu::Baseline, TargetCpu::Sse42] {
-                    let mut discarded = Vec::new();
+                    let mut discarded = Code::new();
                     emit(&mut discarded, &operand, target);
-                    let mut nop = Vec::new();
+                    let mut nop = Code::new();
                     Table::Discard.emit(&mut nop);
                     assert_eq!(discarded, nop);
                 }

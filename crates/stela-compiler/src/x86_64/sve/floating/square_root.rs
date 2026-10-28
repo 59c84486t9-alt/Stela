@@ -1,4 +1,5 @@
 //! SVE FSQRT: SQRTPS/SQRTPD for positive normals, +0 and +infinity.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -46,14 +47,14 @@ const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(JNZ_REL32);
     failures.push(code.len());
     code.extend(0_i32.to_le_bytes());
 }
 
 fn guard_nonnegative(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -70,7 +71,7 @@ fn guard_nonnegative(
     reject(code, failures);
 }
 
-fn square_root(code: &mut Vec<u8>, format: Format) {
+fn square_root(code: &mut Code, format: Format) {
     if format == Format::Double {
         code.push(PACKED_DOUBLE_PREFIX);
     }
@@ -84,7 +85,7 @@ fn square_root(code: &mut Vec<u8>, format: Format) {
 /// Clobbers volatile RAX/RCX/RDX, host flags and XMM0..7, preserving RDI/R15 and
 /// caller MXCSR through both accepted and exceptional whole-instruction exits.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

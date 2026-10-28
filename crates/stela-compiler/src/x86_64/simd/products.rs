@@ -1,16 +1,16 @@
 //! Integer multiplies, widening arithmetic and absolute differences.
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::products::{Accumulate, Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
 /// Extend the selected 64-bit input half into doubled-width lanes. XMM3 is the
 /// extension mask; extending one operand never changes the other in XMM0/1.
-pub(super) fn extend(code: &mut Vec<u8>, xmm: u8, lane: u8, upper: bool, signed: bool) {
+pub(super) fn extend(code: &mut Code, xmm: u8, lane: u8, upper: bool, signed: bool) {
     if upper {
         Shift::RightBytes.emit(code, xmm, 8);
     }
@@ -40,7 +40,7 @@ pub(super) fn extend(code: &mut Vec<u8>, xmm: u8, lane: u8, upper: bool, signed:
         3,
     );
 }
-fn low_product(code: &mut Vec<u8>, lane: u8, target: TargetCpu) {
+fn low_product(code: &mut Code, lane: u8, target: TargetCpu) {
     match lane {
         1 => {
             // Multiply even and odd bytes separately in 16-bit lanes, then mask
@@ -80,7 +80,7 @@ fn low_product(code: &mut Vec<u8>, lane: u8, target: TargetCpu) {
         _ => unreachable!("allocated product lane size"),
     }
 }
-fn long_product(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
+fn long_product(code: &mut Code, lane: u8, signed: bool, target: TargetCpu) {
     if lane < 4 {
         low_product(code, lane * 2, target);
         return;
@@ -107,7 +107,7 @@ fn long_product(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
         packed(code, Host::MultiplyUnsignedDword, 0, 1);
     }
 }
-fn accumulate(code: &mut Vec<u8>, destination: u8, lane: u8, operation: Accumulate) -> u8 {
+fn accumulate(code: &mut Code, destination: u8, lane: u8, operation: Accumulate) -> u8 {
     if operation == Accumulate::None {
         return 0;
     }
@@ -120,7 +120,7 @@ fn accumulate(code: &mut Vec<u8>, destination: u8, lane: u8, operation: Accumula
         0
     }
 }
-fn absolute_difference(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
+fn absolute_difference(code: &mut Code, lane: u8, signed: bool, target: TargetCpu) {
     if lane <= 2 {
         if signed {
             let bits = (1u64 << (lane * 8 - 1)).to_le_bytes();
@@ -155,7 +155,7 @@ fn absolute_difference(code: &mut Vec<u8>, lane: u8, signed: bool, target: Targe
     }
 }
 
-fn indexed(code: &mut Vec<u8>, lane: u8, index: u8) {
+fn indexed(code: &mut Code, lane: u8, index: u8) {
     if lane == 2 {
         // Halfword shuffles leave the other 64-bit half unchanged. Broadcast
         // one repeated dword from the selected half to complete all eight lanes.
@@ -179,13 +179,7 @@ fn indexed(code: &mut Vec<u8>, lane: u8, index: u8) {
 
 /// Indexed long products have a uniform right operand; avoid materializing
 /// widened input lanes which the native multiply does not consume.
-fn indexed_long_product(
-    code: &mut Vec<u8>,
-    lane: u8,
-    upper: bool,
-    signed: bool,
-    target: TargetCpu,
-) {
+fn indexed_long_product(code: &mut Code, lane: u8, upper: bool, signed: bool, target: TargetCpu) {
     if lane == 2 && !upper && target >= TargetCpu::Sse41 {
         let extension = if signed {
             Host::SignExtendWordToDword
@@ -224,7 +218,7 @@ fn indexed_long_product(
     }
 }
 
-fn indexed_low_product(code: &mut Vec<u8>, lane: u8, bytes: u8, target: TargetCpu) {
+fn indexed_low_product(code: &mut Code, lane: u8, bytes: u8, target: TargetCpu) {
     if lane != 4 || target >= TargetCpu::Sse41 {
         low_product(code, lane, target);
     } else if bytes == 8 {
@@ -246,7 +240,7 @@ fn indexed_low_product(code: &mut Vec<u8>, lane: u8, bytes: u8, target: TargetCp
 
 /// Even/odd byte products form two exact PMADDWD pair sums per dword. Their
 /// sum is the four-byte dot product, with no saturating intermediate operation.
-fn dot(code: &mut Vec<u8>, operand: &Operand, signed: bool) {
+fn dot(code: &mut Code, operand: &Operand, signed: bool) {
     const BYTE_BITS: u8 = 8;
     const LOW_BYTE_MASK: u64 = 0x00ff;
     if let Some(index) = operand.index {
@@ -279,7 +273,7 @@ fn dot(code: &mut Vec<u8>, operand: &Operand, signed: bool) {
 
 /// Clamp the doubled-width sums once, after the rounded product is added to the
 /// accumulator. XMM6 survives for assembling the halves.
-fn clamp_rounded_accumulate(code: &mut Vec<u8>, lane: u8, active: u8) {
+fn clamp_rounded_accumulate(code: &mut Code, lane: u8, active: u8) {
     packed(code, Host::MoveAligned, 5, 0);
     if lane == 2 {
         packed(code, Host::PackSignedDwordToWord, 0, 0);
@@ -321,7 +315,7 @@ fn clamp_rounded_accumulate(code: &mut Vec<u8>, lane: u8, active: u8) {
 /// acc + floor((+/- a*b + 2^(n-2))/2^(n-1)). The latter needs only
 /// signed2n intermediates and preserves MIN*MIN cancellation and subtract ties.
 fn rounded_accumulate_half(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     upper: bool,
     active: u8,
@@ -390,7 +384,7 @@ fn rounded_accumulate_half(
     clamp_rounded_accumulate(code, lane, active);
 }
 
-fn rounded_accumulate(code: &mut Vec<u8>, operand: &Operand, subtract: bool, target: TargetCpu) {
+fn rounded_accumulate(code: &mut Code, operand: &Operand, subtract: bool, target: TargetCpu) {
     const SOURCE_HALF_BYTES: u8 = 8;
     rounded_accumulate_half(
         code,
@@ -409,7 +403,7 @@ fn rounded_accumulate(code: &mut Vec<u8>, operand: &Operand, subtract: bool, tar
 }
 /// Full-width 16-bit high products need no widening or per-half processing.
 /// PMULHRSW shares Arm's ties-up rounding but wraps MIN*MIN instead of clamping.
-fn high_product_words(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn high_product_words(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Kind::Doubling { rounding, .. } = operand.kind else {
         unreachable!()
     };
@@ -447,7 +441,7 @@ fn high_product_words(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) 
     super::saturating::publish_qc(code, operand.bytes);
 }
 /// One selected 64-bit half -> a low 64-bit high-product result. XMM6 survives.
-fn high_product(code: &mut Vec<u8>, operand: &Operand, upper: bool, active: u8, target: TargetCpu) {
+fn high_product(code: &mut Code, operand: &Operand, upper: bool, active: u8, target: TargetCpu) {
     let Kind::Doubling { rounding, .. } = operand.kind else {
         unreachable!()
     };
@@ -485,7 +479,7 @@ fn high_product(code: &mut Vec<u8>, operand: &Operand, upper: bool, active: u8, 
         shuffle(code, 0, 0, 0x88);
     }
 }
-fn doubling(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn doubling(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Kind::Doubling {
         high, accumulate, ..
     } = operand.kind
@@ -527,7 +521,7 @@ fn doubling(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         }
     }
 }
-fn polynomial(code: &mut Vec<u8>, lane: u8, widen: bool, upper: bool, target: TargetCpu) {
+fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: TargetCpu) {
     if lane == 8 {
         if target.supports(TargetCpu::Pclmulqdq) {
             Host::CarrylessMultiplyQword.register(code, 0, 1, target);
@@ -606,7 +600,7 @@ fn polynomial(code: &mut Vec<u8>, lane: u8, widen: bool, upper: bool, target: Ta
     packed(code, Host::MoveAligned, 0, 5);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,
@@ -702,7 +696,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn dot_products_use_exact_unsaturated_pairs_on_every_target() {
@@ -711,7 +704,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand, target);
                 let count = |opcode: Host| {
                     code.windows(opcode.encoding().len())
@@ -736,7 +729,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             for target in [TargetCpu::Baseline, TargetCpu::Sse41] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand, target);
                 let count = |opcode: Host| {
                     code.windows(opcode.encoding().len())
@@ -782,7 +775,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             for target in [TargetCpu::Baseline, TargetCpu::Sse41] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand, target);
                 let has = |opcode: Host| {
                     code.windows(opcode.encoding().len())
@@ -837,7 +830,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Pclmulqdq] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 emit(&mut code, &operand, target);
                 let has = |opcode: Host| {
                     code.windows(opcode.encoding().len())

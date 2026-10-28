@@ -1,4 +1,5 @@
 //! Leaf compilation with an execution context and a scalable specialization.
+use crate::x86_64::asm::Code;
 
 mod admission;
 pub mod block;
@@ -49,7 +50,7 @@ pub(crate) fn context_wrapper() -> Vec<u8> {
 }
 
 fn emit_decoded(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     pc: GuestAddress,
     instruction: Decoded,
     profile: ScalableProfile,
@@ -384,7 +385,7 @@ fn emit_leaf(
     profile: ScalableProfile,
     target: TargetCpu,
 ) -> Result<NativeBlock, CompileError> {
-    let mut code = context_wrapper();
+    let mut code = Code::from(context_wrapper());
     let mut source_map = Vec::with_capacity(instructions.len());
     let mut fixups = Vec::new();
     for DecodedLeafInstruction {
@@ -412,7 +413,7 @@ fn emit_leaf(
             .copy_from_slice(&relative.to_le_bytes());
     }
     Ok(NativeBlock {
-        x86_64_code: code,
+        x86_64_code: code.into_bytes(),
         source_map,
     })
 }
@@ -1215,7 +1216,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             x86_64::sve::integer_arithmetic::emit(
                                 &mut expected,
                                 operand,
@@ -1362,7 +1363,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             x86_64::sve::integer_saturation::emit(
                                 &mut expected,
                                 operand,
@@ -1511,7 +1512,7 @@ mod tests {
                             target,
                         )
                         .unwrap();
-                        let mut body = Vec::new();
+                        let mut body = Code::new();
                         x86_64::sve::integer_bits::emit(
                             &mut body,
                             operand,
@@ -1661,7 +1662,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut body = Vec::new();
+                            let mut body = Code::new();
                             x86_64::sve::integer_bits::emit(&mut body, operand, length, target);
                             assert_eq!(
                                 &positive.x86_64_code[CONTEXT_WRAPPER_BYTES..][..body.len()],
@@ -1827,7 +1828,7 @@ mod tests {
                             target,
                         )
                         .unwrap();
-                        let mut expected = Vec::new();
+                        let mut expected = Code::new();
                         x86_64::sve::integer_products::emit(
                             &mut expected,
                             operand,
@@ -2011,7 +2012,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap();
-                    let mut expected = Vec::new();
+                    let mut expected = Code::new();
                     x86_64::sve::memory_load::emit(
                         &mut expected,
                         operand,
@@ -2235,7 +2236,7 @@ mod tests {
                     let native =
                         compile_for_profile(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
                             .unwrap();
-                    let mut expected = Vec::new();
+                    let mut expected = Code::new();
                     x86_64::sve::memory_multi::emit(
                         &mut expected,
                         &operand,
@@ -2470,7 +2471,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap();
-                    let mut expected = Vec::new();
+                    let mut expected = Code::new();
                     x86_64::sve::memory_store::emit(
                         &mut expected,
                         &operand,
@@ -2698,7 +2699,7 @@ mod tests {
                     let native =
                         compile_for_profile(&input, GUEST_BASE, profile, TargetCpu::Baseline)
                             .unwrap();
-                    let mut expected = Vec::new();
+                    let mut expected = Code::new();
                     x86_64::sve::memory_structure::emit(
                         &mut expected,
                         &operand,
@@ -2934,7 +2935,7 @@ mod tests {
                         }
                         let native =
                             compile_for_profile(&source, SOURCE_BASE, profile, target).unwrap();
-                        let mut body = Vec::new();
+                        let mut body = Code::new();
                         x86_64::sme::movement::emit(
                             &mut body,
                             &operand,
@@ -3219,7 +3220,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             x86_64::sve::predicate_generation::emit(
                                 &mut expected,
                                 &operand,
@@ -3362,7 +3363,7 @@ mod tests {
                             target,
                         )
                         .unwrap();
-                        let mut expected = Vec::new();
+                        let mut expected = Code::new();
                         x86_64::sve::predicate_logic::emit(
                             &mut expected,
                             &operand,
@@ -3532,7 +3533,7 @@ mod tests {
                                     target,
                                 )
                                 .unwrap();
-                                let mut expected = Vec::new();
+                                let mut expected = Code::new();
                                 x86_64::sve::integer_predicate_move::emit(
                                     &mut expected,
                                     operand,
@@ -4059,7 +4060,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             x86_64::sve::rearrange::emit(
                                 &mut expected,
                                 operand,
@@ -4292,7 +4293,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             x86_64::sve::rearrange_extract::emit(
                                 &mut expected,
                                 operand,
@@ -4472,7 +4473,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             x86_64::sve::reductions::emit(
                                 &mut expected,
                                 operand,
@@ -4634,7 +4635,7 @@ mod tests {
                             target,
                         )
                         .unwrap();
-                        let mut body = Vec::new();
+                        let mut body = Code::new();
                         x86_64::sve::shifts::emit(
                             &mut body,
                             operand,
@@ -4989,7 +4990,7 @@ mod tests {
                             target,
                         )
                         .unwrap();
-                        let mut body = Vec::new();
+                        let mut body = Code::new();
                         x86_64::sve::shifts_narrow::emit(
                             &mut body,
                             operand,
@@ -5241,7 +5242,7 @@ mod tests {
                                 target,
                             )
                             .unwrap();
-                            let mut expected = Vec::new();
+                            let mut expected = Code::new();
                             if let Some(Ok(operand)) = reductions::decode(word) {
                                 assert_eq!(operand.output, reductions::Output::Quadword);
                                 x86_64::sve::reductions::emit(
@@ -5495,7 +5496,7 @@ mod tests {
                         let native =
                             compile_for_profile(&dot_body(word), GUEST_BASE, profile, target)
                                 .unwrap();
-                        let mut expected = Vec::new();
+                        let mut expected = Code::new();
                         x86_64::sme::integer_dots::emit(
                             &mut expected,
                             &operand,
@@ -5652,7 +5653,7 @@ mod tests {
                                         "word={word:#x} bytes={bytes} sme2={sme2} i16i64={i16i64} sm={streaming} za={za}"
                                     );
                                     if let Ok(native) = result {
-                                        let mut body = Vec::new();
+                                        let mut body = Code::new();
                                         x86_64::sme::integer_matrix::emit(
                                             &mut body,
                                             &operand,
@@ -5815,7 +5816,7 @@ mod tests {
                 let profile = declared_profile(true, true, true, true);
                 let bytes = source(&[word, RET_X30]);
                 let native = compile_for_profile(&bytes, GUEST_BASE, profile, target()).unwrap();
-                let mut expected = Vec::new();
+                let mut expected = Code::new();
                 x86_64::sme::memory::emit(
                     &mut expected,
                     &operand,

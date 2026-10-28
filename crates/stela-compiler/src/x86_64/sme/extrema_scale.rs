@@ -1,4 +1,5 @@
 //! SME2 FAMIN/FAMAX and FSCALE over whole staged groups.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -29,7 +30,7 @@ const JNZ: &[u8] = &[0x0f, 0x85];
 /// Integer operations preserve complete caller MXCSR.
 /// Clobbers RAX/RCX/RDX, host flags, XMM0..5; preserves RDI/R15 and guest NZCV.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

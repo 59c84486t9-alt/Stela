@@ -147,6 +147,7 @@ pub mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::x86_64::asm::Code;
     use alloc::vec;
     use alloc::vec::Vec;
     #[test]
@@ -157,7 +158,7 @@ mod tests {
         assert!(!TargetCpu::Sse42.supports(opcode.requires()));
         assert!(
             std::panic::catch_unwind(|| {
-                opcode.register(&mut Vec::new(), 0, 1, TargetCpu::Sse42);
+                opcode.register(&mut Code::new(), 0, 1, TargetCpu::Sse42);
             })
             .is_err()
         );

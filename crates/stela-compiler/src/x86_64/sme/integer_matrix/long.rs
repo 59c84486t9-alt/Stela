@@ -1,4 +1,5 @@
 //! Long integer accumulation into ZA rows.
+use crate::x86_64::asm::Code;
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -12,7 +13,6 @@ use crate::{
         sme::integer_products::{PRODUCT_HIGH, PRODUCT_LEFT, PRODUCT_RIGHT, word_products},
     },
 };
-use alloc::vec::Vec;
 
 const ACCUMULATOR: u8 = 2;
 const COMPONENT: u8 = 6;
@@ -56,12 +56,12 @@ impl Recipe {
     }
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8, target: TargetCpu) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8, target: TargetCpu) {
     Host::ShuffleDword.register(code, destination, source, target);
     code.push(control);
 }
 
-fn za_pointer(code: &mut Vec<u8>, operand: &LongOperation, length: VectorLength) {
+fn za_pointer(code: &mut Code, operand: &LongOperation, length: VectorLength) {
     load_za_pointer_r8(code);
     code.extend(MOV_ECX_STATE_DISP32);
     code.extend(
@@ -89,7 +89,7 @@ fn za_pointer(code: &mut Vec<u8>, operand: &LongOperation, length: VectorLength)
     code.extend(ADD_R8_RCX);
 }
 
-fn broadcast_word(code: &mut Vec<u8>, index: u8, target: TargetCpu) {
+fn broadcast_word(code: &mut Code, index: u8, target: TargetCpu) {
     let high = index >= HALFWORDS_PER_QWORD;
     (if high {
         Host::ShuffleHighWord
@@ -113,7 +113,7 @@ fn broadcast_word(code: &mut Vec<u8>, index: u8, target: TargetCpu) {
 
 /// Select one byte from every dword and sign/zero extend it to a dword.
 fn extract_bytes(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     source: u8,
     component: u8,
@@ -135,7 +135,7 @@ fn extract_bytes(
     .emit(code, destination, DWORD_BITS - BYTE_BITS);
 }
 
-fn extend_products(code: &mut Vec<u8>, signed: bool, checked: bool, target: TargetCpu) {
+fn extend_products(code: &mut Code, signed: bool, checked: bool, target: TargetCpu) {
     if checked {
         (if signed {
             Host::SignExtendDwordToQword
@@ -155,7 +155,7 @@ fn extend_products(code: &mut Vec<u8>, signed: bool, checked: bool, target: Targ
 }
 
 fn accumulate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     product: u8,
     displacement: u32,
     operand: &LongOperation,
@@ -177,7 +177,7 @@ fn accumulate(
 /// All inputs remain in architectural storage; only selected ZA rows are written.
 /// R8 holds the selected ZA base, RDX is shared access scratch, XMM0..7 scratch.
 pub(crate) fn emit_long(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &LongOperation,
     length: VectorLength,
     target: TargetCpu,

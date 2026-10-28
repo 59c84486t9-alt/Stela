@@ -1,4 +1,5 @@
 //! Single and double rounding arithmetic shared by the FRINT forms.
+use crate::x86_64::asm::Code;
 
 use crate::{
     TargetCpu,
@@ -23,7 +24,7 @@ const UNUSED_ARCHITECTURAL_REGISTER: u8 = 0;
 /// produces a fresh fractional-change Boolean in R10D. No guest storage, RSP,
 /// callee-saved GPR, frame, control-enable policy or instruction exit is changed.
 pub(in crate::x86_64) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: RoundingOperation,
     format: Format,
     failures: &mut Vec<usize>,
@@ -54,7 +55,7 @@ const ROUND_CURRENT_MXCSR_DIRECTION: u8 = 1 << 2;
 /// no suppressed host precision status is imported as guest FPSR.
 /// Clobbers and architectural commit ownership match `emit_chunk` above.
 pub(in crate::x86_64) fn emit_checked_current_direction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: RoundingOperation,
     format: Format,
     failures: &mut Vec<usize>,

@@ -4,7 +4,7 @@ use crate::aarch64::{
     Width,
     literal::{Operand, Transfer},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 /// Family-local baseline opcodes; address/state displacements follow separately.
 #[derive(Clone, Copy)]
@@ -16,7 +16,7 @@ enum Opcode {
 }
 
 impl Opcode {
-    fn emit(self, code: &mut Vec<u8>) {
+    fn emit(self, code: &mut Code) {
         code.extend(match self {
             Self::MoveAddress => &[0x48, 0xb8][..], // movabs rax,imm64
             Self::LoadWord => &[0x8b, 0x00],        // mov eax,[rax], zeroextends RAX
@@ -26,7 +26,7 @@ impl Opcode {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     Opcode::MoveAddress.emit(code);
     code.extend(operand.address.to_le_bytes());
     let bytes = match operand.transfer {
@@ -65,7 +65,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
 mod tests {
     use super::*;
     use crate::{GuestState, aarch64::Register};
-    use alloc::vec;
 
     #[test]
     fn integer_discard_still_loads_and_signed_load_has_exact_width() {
@@ -74,7 +73,7 @@ mod tests {
             (Width::X64, false, &[0x48, 0x8b, 0x00][..]),
             (Width::X64, true, &[0x48, 0x63, 0x00][..]),
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {
@@ -100,7 +99,7 @@ mod tests {
             (Width::X64, false, 8),
             (Width::X64, true, 4),
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {
@@ -127,7 +126,7 @@ mod tests {
             (8, [0xf3, 0x0f, 0x7e, 0x00]),
             (16, [0xf3, 0x0f, 0x6f, 0x00]),
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {

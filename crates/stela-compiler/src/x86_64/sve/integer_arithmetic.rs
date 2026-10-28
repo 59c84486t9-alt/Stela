@@ -2,9 +2,9 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_arithmetic::{Binary, Kind, Operand, Source};
+use crate::x86_64::asm::Code;
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -57,19 +57,19 @@ const HALFWORD_SIGN_SHIFT: u8 = (u16::BITS - 1) as u8;
 const SELECT_EVEN_DWORDS: u8 = 0x88;
 const SELECT_ODD_DWORDS: u8 = 0xdd;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn copy(code: &mut Code, destination: u8, source: u8) {
     packed(code, Host::MoveAligned, destination, source);
 }
 
-fn zero(code: &mut Vec<u8>, register: u8) {
+fn zero(code: &mut Code, register: u8) {
     packed(code, Host::Xor, register, register);
 }
 
-fn constant(code: &mut Vec<u8>, destination: u8, value: u64) {
+fn constant(code: &mut Code, destination: u8, value: u64) {
     code.extend(MOVABS_RAX);
     code.extend(value.to_le_bytes());
     Host::MoveGprQword.append(code, TargetCpu::Baseline);
@@ -118,13 +118,7 @@ fn right_shift(element: ElementSize) -> ShiftOpcode {
 }
 
 /// XMM0/XMM1 inputs; XMM0 result. XMM2..6 scratch, XMM7 preserved.
-fn minmax(
-    code: &mut Vec<u8>,
-    element: ElementSize,
-    unsigned: bool,
-    maximum: bool,
-    target: TargetCpu,
-) {
+fn minmax(code: &mut Code, element: ElementSize, unsigned: bool, maximum: bool, target: TargetCpu) {
     let direct = match (element, unsigned, maximum) {
         (ElementSize::Byte, true, false) => Some(Host::MinUnsignedByte),
         (ElementSize::Byte, true, true) => Some(Host::MaxUnsignedByte),
@@ -161,7 +155,7 @@ fn minmax(
 /// XMM0 is the result; XMM0..6, RAX/RCX/RDX and host flags are scratch.
 /// XMM7, RDI/R15 and architectural NZCV/FP state remain unchanged.
 pub(crate) fn emit_binary_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: Binary,
     element: ElementSize,
     target: TargetCpu,
@@ -190,7 +184,7 @@ pub(crate) fn emit_binary_chunk(
     }
 }
 
-fn unary(code: &mut Vec<u8>, element: ElementSize, absolute: bool, target: TargetCpu) {
+fn unary(code: &mut Code, element: ElementSize, absolute: bool, target: TargetCpu) {
     let direct = match element {
         ElementSize::Byte => Some(Host::AbsByte),
         ElementSize::Halfword => Some(Host::AbsWord),
@@ -232,7 +226,7 @@ fn unary(code: &mut Vec<u8>, element: ElementSize, absolute: bool, target: Targe
 
 /// Keep every other narrow lane in its containing wide lane, then extend it.
 fn widen(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: u8,
     element: ElementSize,
     unsigned: bool,
@@ -271,7 +265,7 @@ fn widen(
     }
 }
 
-fn complex(code: &mut Vec<u8>, element: ElementSize, rotate_270: bool) {
+fn complex(code: &mut Code, element: ElementSize, rotate_270: bool) {
     if matches!(element, ElementSize::Word | ElementSize::Doubleword) {
         packed(code, Host::ShuffleDword, RIGHT, RIGHT);
         code.push(if element == ElementSize::Word {
@@ -315,7 +309,7 @@ fn complex(code: &mut Vec<u8>, element: ElementSize, rotate_270: bool) {
 }
 
 /// One qword pair fits the host ADC result and its carry flag directly.
-fn carry_qword(code: &mut Vec<u8>, subtract: bool, top: bool) {
+fn carry_qword(code: &mut Code, subtract: bool, top: bool) {
     code.extend(MOVQ_RAX_XMM);
     code.push(MOD_REGISTER | PREVIOUS << REGISTER_SHIFT);
     if top {
@@ -343,7 +337,7 @@ fn carry_qword(code: &mut Vec<u8>, subtract: bool, top: bool) {
 }
 
 /// Paired even result / odd carry; word pairs use packed overflow comparisons.
-fn carry(code: &mut Vec<u8>, element: ElementSize, subtract: bool, top: bool, target: TargetCpu) {
+fn carry(code: &mut Code, element: ElementSize, subtract: bool, top: bool, target: TargetCpu) {
     if element == ElementSize::Doubleword {
         carry_qword(code, subtract, top);
         return;
@@ -387,7 +381,7 @@ fn carry(code: &mut Vec<u8>, element: ElementSize, subtract: bool, top: bool, ta
     packed(code, Host::Or, RESULT, SAVED_LEFT);
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend_from_slice(opcode);
     let displacement = code.len();
     code.extend(0i32.to_le_bytes());
@@ -400,7 +394,7 @@ fn resolve(code: &mut [u8], displacement: usize) {
     code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
 }
 
-fn extract(code: &mut Vec<u8>, source: u8, lane: usize, element: ElementSize, to_rcx: bool) {
+fn extract(code: &mut Code, source: u8, lane: usize, element: ElementSize, to_rcx: bool) {
     copy(code, TEMPORARY, source);
     if lane != 0 {
         ShiftOpcode::RightBytes.emit(code, TEMPORARY, (lane * element.bytes()) as u8);
@@ -418,13 +412,7 @@ fn extract(code: &mut Vec<u8>, source: u8, lane: usize, element: ElementSize, to
 
 /// Scalar IDIV has no packed counterpart. Guard zero, signed overflow and
 /// inactive lanes before issuing it; no guest or host arithmetic exception leaks.
-fn divide(
-    code: &mut Vec<u8>,
-    element: ElementSize,
-    unsigned: bool,
-    reverse: bool,
-    predicated: bool,
-) {
+fn divide(code: &mut Code, element: ElementSize, unsigned: bool, reverse: bool, predicated: bool) {
     zero(code, SAVED_RIGHT);
     for lane in 0..CHUNK_BYTES / element.bytes() {
         let inactive = if predicated {
@@ -507,7 +495,7 @@ fn divide(
     copy(code, RESULT, SAVED_RIGHT);
 }
 
-pub fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     let needs_previous = matches!(operand.predication, Predication::Merging(_))
         || matches!(
             operand.kind,

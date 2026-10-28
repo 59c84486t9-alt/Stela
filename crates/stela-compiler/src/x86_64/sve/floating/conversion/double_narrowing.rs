@@ -1,4 +1,5 @@
 //! SVE double-to-single FCVT and round-to-odd FCVTX on normal values.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -60,13 +61,13 @@ const HOST_TO_GUEST_INEXACT_SHIFT: u8 =
 const LOW_SINGLE_IN_QWORDS: u8 = 0xd8; // dword [0,2,1,3], with original upper64 zero.
 const TOP_SINGLE_IN_QWORDS: u8 = 0x72; // dword [2,0,3,1].
 
-fn failure(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn failure(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(JNE_REL32);
     failures.push(code.len());
     code.extend(0_i32.to_le_bytes());
 }
 
-fn neutralize_inactive(code: &mut Vec<u8>, target: TargetCpu) {
+fn neutralize_inactive(code: &mut Code, target: TargetCpu) {
     code.extend(MOV_RCX_IMMEDIATE);
     code.extend(DOUBLE_ONE.to_le_bytes());
     Host::MoveGprQword.append(code, target);
@@ -81,7 +82,7 @@ fn neutralize_inactive(code: &mut Vec<u8>, target: TargetCpu) {
 /// The mature conservative result range is exponent2..254. This excludes the
 /// minimum-normal binade as well as zero/tiny/Inf/NaN, preventing before/after
 /// rounding tininess differences from being hidden by host status alone.
-fn guard_result(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu) {
+fn guard_result(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::MoveAligned.register(code, SCRATCH, RESULT, target);
     ShiftOpcode::LeftDword.emit(code, SCRATCH, SIGN_BITS);
     ShiftOpcode::RightDword.emit(code, SCRATCH, SINGLE_EXPONENT_TO_BOTTOM);
@@ -102,7 +103,7 @@ fn guard_result(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

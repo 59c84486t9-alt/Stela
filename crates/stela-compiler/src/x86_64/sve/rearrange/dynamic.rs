@@ -2,6 +2,7 @@
 //!
 //! Scratch: RAX/RCX/RDX, XMM0-7 and a stack frame; large SPLICE copies also use
 //! R8-R11/RSI and REP MOVSB (RDI is restored; SysV guarantees DF=0).
+use crate::x86_64::asm::Code;
 
 use crate::aarch64::Register;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};
@@ -9,7 +10,6 @@ use crate::aarch64::sve::rearrange::{IndexOperand, Operand};
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
 use crate::{GuestState, TargetCpu};
-use alloc::vec::Vec;
 
 const RAX: u8 = 0;
 const RCX: u8 = 1;
@@ -96,7 +96,7 @@ const R8_BASE: u8 = 0;
 const R9_BASE: u8 = 1;
 const R10_BASE: u8 = 2;
 
-fn stack_adjust(code: &mut Vec<u8>, bytes: usize, allocate: bool) {
+fn stack_adjust(code: &mut Code, bytes: usize, allocate: bool) {
     assert!(bytes.is_multiple_of(VECTOR_CHUNK_BYTES));
     code.extend(if allocate {
         SUB_RSP_IMM32
@@ -106,7 +106,7 @@ fn stack_adjust(code: &mut Vec<u8>, bytes: usize, allocate: bool) {
     code.extend(i32::try_from(bytes).unwrap().to_le_bytes());
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend([0; REL32_BYTES]);
@@ -121,7 +121,7 @@ fn bind(code: &mut [u8], displacement: usize) {
 
 /// Scalar stack load. Index is RAX/RCX or NO_INDEX; scale is element byte size.
 fn load_stack(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     displacement: usize,
     index: u8,
@@ -143,7 +143,7 @@ fn load_stack(
     code.extend(i32::try_from(displacement).unwrap().to_le_bytes());
 }
 
-fn store_stack(code: &mut Vec<u8>, source: u8, displacement: usize, bytes: usize) {
+fn store_stack(code: &mut Code, source: u8, displacement: usize, bytes: usize) {
     assert!(matches!(source, RAX | RCX));
     match bytes {
         1 => code.push(MOV_STORE_BYTE),
@@ -159,14 +159,14 @@ fn store_stack(code: &mut Vec<u8>, source: u8, displacement: usize, bytes: usize
     code.extend(i32::try_from(displacement).unwrap().to_le_bytes());
 }
 
-fn xmm_stack(code: &mut Vec<u8>, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
+fn xmm_stack(code: &mut Code, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
     opcode.append(code, target);
     code.extend([MODRM_DISP32_SIB | (xmm << REGISTER_SHIFT), SIB_RSP_NO_INDEX]);
     code.extend(i32::try_from(offset).unwrap().to_le_bytes());
 }
 
 fn snapshot_z(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     register: u8,
     offset: usize,
     length: VectorLength,
@@ -184,13 +184,7 @@ fn snapshot_z(
     }
 }
 
-fn commit_z(
-    code: &mut Vec<u8>,
-    register: u8,
-    offset: usize,
-    length: VectorLength,
-    target: TargetCpu,
-) {
+fn commit_z(code: &mut Code, register: u8, offset: usize, length: VectorLength, target: TargetCpu) {
     for chunk in 0..length.chunks() {
         xmm_stack(
             code,
@@ -222,7 +216,7 @@ struct TableFrame {
 }
 
 impl TableFrame {
-    fn snapshot(code: &mut Vec<u8>, op: Table, length: VectorLength, target: TargetCpu) -> Self {
+    fn snapshot(code: &mut Code, op: Table, length: VectorLength, target: TargetCpu) -> Self {
         assert!(matches!(op.register_count, 1 | 2));
         assert!(!op.segment || op.register_count == 1);
         let table_bytes = usize::from(op.register_count) * length.bytes();
@@ -251,7 +245,7 @@ impl TableFrame {
         }
     }
 
-    fn finish(self, code: &mut Vec<u8>, destination: u8, length: VectorLength, target: TargetCpu) {
+    fn finish(self, code: &mut Code, destination: u8, length: VectorLength, target: TargetCpu) {
         commit_z(code, destination, self.output, length, target);
         stack_adjust(code, self.bytes, false);
     }
@@ -296,7 +290,7 @@ pub(super) fn requires_explicit_dit_zero(
     }
 }
 
-fn emit_table(code: &mut Vec<u8>, op: Table, length: VectorLength, target: TargetCpu) {
+fn emit_table(code: &mut Code, op: Table, length: VectorLength, target: TargetCpu) {
     match table_recipe(op.element_size, op.segment, length, target) {
         TableRecipe::ByteShuffle => emit_table_ssse3(code, op, length, target),
         TableRecipe::ScalarGather => emit_table_unrolled(code, op, length, target),
@@ -305,7 +299,7 @@ fn emit_table(code: &mut Vec<u8>, op: Table, length: VectorLength, target: Targe
 
 /// SSE2 baseline: a full unsigned bounds check of B/H/S/D indices before a
 /// bounded gather.
-fn emit_table_unrolled(code: &mut Vec<u8>, op: Table, length: VectorLength, target: TargetCpu) {
+fn emit_table_unrolled(code: &mut Code, op: Table, length: VectorLength, target: TargetCpu) {
     let width = op.element_size.bytes();
     assert!(width <= QWORD_BYTES);
     let frame = TableFrame::snapshot(code, op, length, target);
@@ -337,7 +331,7 @@ fn emit_table_unrolled(code: &mut Vec<u8>, op: Table, length: VectorLength, targ
     frame.finish(code, op.destination, length, target);
 }
 
-fn broadcast_byte(code: &mut Vec<u8>, value: u8, destination: u8, target: TargetCpu) {
+fn broadcast_byte(code: &mut Code, value: u8, destination: u8, target: TargetCpu) {
     code.push(MOV_EAX_IMM32);
     code.extend((u32::from(value) * BYTE_BROADCAST_MULTIPLIER).to_le_bytes());
     code.extend(MOVD_XMM_EAX);
@@ -349,7 +343,7 @@ fn broadcast_byte(code: &mut Vec<u8>, value: u8, destination: u8, target: Target
 /// PSHUFB with every index masked to below 16, so indices 16-127 cannot wrap
 /// and two-table TBL at a 256-bit vector length cannot reach the upper table
 /// through byte indices. The scalar baseline handles full-width H/S/D indices.
-fn emit_table_ssse3(code: &mut Vec<u8>, op: Table, length: VectorLength, target: TargetCpu) {
+fn emit_table_ssse3(code: &mut Code, op: Table, length: VectorLength, target: TargetCpu) {
     assert_eq!(op.element_size, ElementSize::Byte);
     assert!(target.supports(TargetCpu::Ssse3));
     let frame = TableFrame::snapshot(code, op, length, target);
@@ -427,12 +421,12 @@ struct Splice {
     element_size: ElementSize,
 }
 
-fn address(code: &mut Vec<u8>, opcode: &[u8], displacement: usize) {
+fn address(code: &mut Code, opcode: &[u8], displacement: usize) {
     code.extend(opcode);
     code.extend(i32::try_from(displacement).unwrap().to_le_bytes());
 }
 
-fn pointer_load(code: &mut Vec<u8>, bytes: usize, base: u8) {
+fn pointer_load(code: &mut Code, bytes: usize, base: u8) {
     code.push(if bytes == QWORD_BYTES {
         REX_QWORD_EXTENDED_BASE
     } else {
@@ -447,7 +441,7 @@ fn pointer_load(code: &mut Vec<u8>, bytes: usize, base: u8) {
     code.push(base);
 }
 
-fn pointer_store(code: &mut Vec<u8>, bytes: usize) {
+fn pointer_store(code: &mut Code, bytes: usize) {
     if bytes == 2 {
         code.push(WORD_PREFIX);
     }
@@ -464,14 +458,14 @@ fn pointer_store(code: &mut Vec<u8>, bytes: usize) {
     code.push(R10_BASE);
 }
 
-fn backward(code: &mut Vec<u8>, opcode: &[u8], target: usize) {
+fn backward(code: &mut Code, opcode: &[u8], target: usize) {
     let displacement = branch(code, opcode);
     let relative = i32::try_from(target as isize - (displacement + REL32_BYTES) as isize).unwrap();
     code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
 }
 
 fn copy_splice_rep(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     second: usize,
     output: usize,
     first: usize,
@@ -494,7 +488,7 @@ fn copy_splice_rep(
 }
 
 fn copy_splice_counted(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     second: usize,
     output: usize,
     first: usize,
@@ -537,7 +531,7 @@ fn copy_splice_counted(
 
 /// SSE2 baseline SPLICE copies the contiguous first..last active hull, including
 /// inactive holes, then fills from operand2. Empty predicates copy operand2.
-fn emit_splice(code: &mut Vec<u8>, op: Splice, length: VectorLength, target: TargetCpu) {
+fn emit_splice(code: &mut Code, op: Splice, length: VectorLength, target: TargetCpu) {
     let width = op.element_size.bytes();
     assert!(width <= QWORD_BYTES);
     let second = length.bytes();
@@ -623,7 +617,7 @@ fn emit_splice(code: &mut Vec<u8>, op: Splice, length: VectorLength, target: Tar
     stack_adjust(code, frame_bytes, false);
 }
 
-fn read_index_operand(code: &mut Vec<u8>, operand: IndexOperand, destination: u8) {
+fn read_index_operand(code: &mut Code, operand: IndexOperand, destination: u8) {
     assert!(matches!(destination, RAX | RCX));
     match operand {
         IndexOperand::Immediate(value) => {
@@ -666,7 +660,7 @@ struct Index {
 
 /// SSE2 packed ramp: synthesize only the first16 bytes, broadcast the
 /// modulo-width chunk step, then use PADD B/H/S/D for each additional chunk.
-fn emit_index(code: &mut Vec<u8>, op: Index, length: VectorLength, target: TargetCpu) {
+fn emit_index(code: &mut Code, op: Index, length: VectorLength, target: TargetCpu) {
     let width = op.element_size.bytes();
     assert!(width <= QWORD_BYTES);
     stack_adjust(code, VECTOR_CHUNK_BYTES, true);
@@ -721,7 +715,7 @@ fn emit_index(code: &mut Vec<u8>, op: Index, length: VectorLength, target: Targe
 
 /// Complete validated Table/Splice/Index operands. The family dispatcher owns
 /// allocation and streaming-profile checks before calling this module.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
     match operand {
         Operand::Table {
             destination,

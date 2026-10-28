@@ -14,6 +14,7 @@
 //! where `z` is the 4 KiB Z grid, `x`/`y` are the 64-byte operands after the
 //! circular-pool wrap, and `row` is operand bits 25:20. The kernel writes only
 //! the Z rows its shape selects.
+use crate::x86_64::asm::Code;
 mod encoding;
 
 use crate::{TargetCpu, amx::AmxOperation};
@@ -233,7 +234,7 @@ const OPMASK: u8 = 1;
 
 /// Emit one kernel for one tier.
 pub fn emit(kernel: Kernel, tier: Tier) -> Vec<u8> {
-    let mut code = Vec::new();
+    let mut code = Code::new();
     prologue(&mut code, kernel, tier);
     let rows = match kernel.shape {
         Shape::Matrix => kernel.lanes(),
@@ -256,10 +257,10 @@ pub fn emit(kernel: Kernel, tier: Tier) -> Vec<u8> {
         }
     }
     epilogue(&mut code);
-    code
+    code.into_bytes()
 }
 
-fn prologue(code: &mut Vec<u8>, kernel: Kernel, tier: Tier) {
+fn prologue(code: &mut Code, kernel: Kernel, tier: Tier) {
     // sub rsp, 16: [rsp+4] caller MXCSR, [rsp] AMX MXCSR, [rsp+8] constants.
     code.extend([0x48, 0x83, 0xec, 0x10]);
     legacy_memory(code, &[0x0f, 0xae], 3, at(Gpr::Rsp, 4));
@@ -268,7 +269,7 @@ fn prologue(code: &mut Vec<u8>, kernel: Kernel, tier: Tier) {
     legacy_memory(code, &[0x0f, 0xae], 2, at(Gpr::Rsp, 0));
     let double = kernel.precision == Precision::Double;
     let sign = if double { 1u64 << 63 } else { 1 << 31 };
-    let constant = |code: &mut Vec<u8>, value: u64, register: u8| {
+    let constant = |code: &mut Code, value: u64, register: u8| {
         // mov rax, imm64
         code.extend([0x48, 0xb8]);
         code.extend(value.to_le_bytes());
@@ -346,13 +347,13 @@ fn prologue(code: &mut Vec<u8>, kernel: Kernel, tier: Tier) {
     }
 }
 
-fn epilogue(code: &mut Vec<u8>) {
+fn epilogue(code: &mut Code) {
     code.extend([0xc5, 0xf8, 0x77]); // vzeroupper
     legacy_memory(code, &[0x0f, 0xae], 2, at(Gpr::Rsp, 4));
     code.extend([0x48, 0x83, 0xc4, 0x10, 0xc3]); // add rsp, 16; ret
 }
 
-fn vmovups_load(code: &mut Vec<u8>, register: u8, memory: encoding::Memory) {
+fn vmovups_load(code: &mut Code, register: u8, memory: encoding::Memory) {
     vex(
         code,
         Map::Primary,
@@ -366,7 +367,7 @@ fn vmovups_load(code: &mut Vec<u8>, register: u8, memory: encoding::Memory) {
     );
 }
 
-fn vmovups_store(code: &mut Vec<u8>, register: u8, memory: encoding::Memory) {
+fn vmovups_store(code: &mut Code, register: u8, memory: encoding::Memory) {
     vex(
         code,
         Map::Primary,
@@ -388,7 +389,7 @@ fn packed(kernel: Kernel) -> (Prefix, bool) {
     }
 }
 
-fn vex_row(code: &mut Vec<u8>, kernel: Kernel, row: i32, offset: i32) {
+fn vex_row(code: &mut Code, kernel: Kernel, row: i32, offset: i32) {
     let double = kernel.precision == Precision::Double;
     let (prefix, wide) = packed(kernel);
     match kernel.shape {
@@ -487,7 +488,7 @@ fn vex_row(code: &mut Vec<u8>, kernel: Kernel, row: i32, offset: i32) {
     }
 }
 
-fn evex_row(code: &mut Vec<u8>, kernel: Kernel, row: i32, offset: i32, z: u8) {
+fn evex_row(code: &mut Code, kernel: Kernel, row: i32, offset: i32, z: u8) {
     let (prefix, wide) = packed(kernel);
     let memory = at(Gpr::Rdi, offset);
     let (y, broadcast) = match kernel.shape {

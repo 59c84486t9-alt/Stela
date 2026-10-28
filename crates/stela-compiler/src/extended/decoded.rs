@@ -1,5 +1,6 @@
 //! Decoded instructions and the state, memory and prefix requirements they carry.
 use crate::aarch64::Unsupported;
+use crate::x86_64::asm::Code;
 use alloc::{boxed::Box, format, vec::Vec};
 
 use crate::{
@@ -386,7 +387,7 @@ impl Decoded {
     }
     pub(crate) fn emit_checked_ordinary(
         &self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         pc: GuestAddress,
         target: TargetCpu,
         fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
@@ -570,7 +571,7 @@ mod checked_register_tests {
                     let decoded = Decoded::checked_ordinary(instruction.clone(), profile).unwrap();
                     assert!(matches!(decoded, Decoded::PrefetchHint));
                     assert_eq!(decoded.memory_requirements(), Default::default());
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     let mut recovery = Vec::new();
                     decoded
                         .emit_checked_ordinary(&mut code, pc, TargetCpu::Baseline, &mut recovery)
@@ -745,7 +746,7 @@ mod checked_register_tests {
                         decoded.memory_requirements().required_flags & flags::ASIMD,
                         flags::ASIMD
                     );
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     decoded
                         .emit_checked_ordinary(&mut code, pc, TargetCpu::Baseline, &mut Vec::new())
                         .unwrap();

@@ -1,5 +1,6 @@
 //! Multi-instruction scalar regions that keep guest values in host registers and
 //! settle the full register bank at every exit.
+use crate::x86_64::asm::Code;
 use alloc::vec;
 use alloc::vec::Vec;
 mod allocation;
@@ -68,7 +69,7 @@ pub struct AllocationStats {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptimizedRegion {
-    pub code: Vec<u8>,
+    pub code: Code,
     pub consumed_instructions: usize,
     pub source_map: Vec<(GuestAddress, usize)>,
     pub stats: AllocationStats,
@@ -110,7 +111,7 @@ struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
-    fn emit(&mut self, encode: impl FnOnce(&mut Vec<u8>)) {
+    fn emit(&mut self, encode: impl FnOnce(&mut Code)) {
         let start = self.output.code.len();
         encode(&mut self.output.code);
         let end = self.output.code.len();
@@ -317,7 +318,7 @@ impl Emitter<'_> {
             && bytes != BYTE_LOAD_BYTES
             && !(self.checks.stack_alignment
                 && super::memory_store::aligned_immediate(base, displacement, mode, bytes));
-        let mut raw = vec![];
+        let mut raw = Code::new();
         let selected = if let &[first, second] = data {
             super::memory_pair(
                 &mut raw,
@@ -424,7 +425,7 @@ impl Emitter<'_> {
     ) -> Result<(), RegionError> {
         // Obtain the real existing raw-memory emission before mutating output.
         // If its selected form changes, decline this whole candidate prefix.
-        let mut raw = vec![];
+        let mut raw = Code::new();
         super::memory(
             &mut raw,
             self.memory_checks(),
@@ -650,7 +651,7 @@ impl Emitter<'_> {
         displacement: i32,
         mode: AddressMode,
     ) -> Result<(), RegionError> {
-        let mut raw = vec![];
+        let mut raw = Code::new();
         super::memory_pair(
             &mut raw,
             self.memory_checks(),
@@ -1202,7 +1203,7 @@ fn emit_prefix_selected<'a>(
     }
     let mut emitter = Emitter {
         output: OptimizedRegion {
-            code: vec![],
+            code: Code::from(vec![]),
             consumed_instructions: consumed,
             source_map: vec![],
             stats: AllocationStats::default(),
@@ -1738,7 +1739,7 @@ mod tests {
         );
         assert_eq!(checked.code.len(), unchecked.code.len() + 3 * check.len());
         // The cost gate counts each check's six instructions on both sides.
-        let mut baseline = vec![];
+        let mut baseline = Code::new();
         for instruction in &instructions {
             super::super::emit_instruction(
                 &mut baseline,
@@ -1857,7 +1858,7 @@ mod tests {
 
     #[test]
     fn shared_byte_load_recipe_rejects_any_clobber_or_offset_change() {
-        let mut raw = vec![];
+        let mut raw = Code::new();
         super::super::memory(
             &mut raw,
             super::super::MemoryChecks::DEFAULT,
@@ -1920,7 +1921,7 @@ mod tests {
         ];
         for (width, bytes) in sizes {
             for data in [Register::X(16), Register::Zero] {
-                let mut raw = vec![];
+                let mut raw = Code::new();
                 super::super::memory(
                     &mut raw,
                     super::super::MemoryChecks::DEFAULT,
@@ -1994,7 +1995,7 @@ mod tests {
                 .windows(3)
                 .any(|bytes| bytes == [0x48, 0x8b, 0x08])
         );
-        let mut baseline = vec![];
+        let mut baseline = Code::new();
         for instruction in &instructions {
             super::super::emit_instruction(
                 &mut baseline,
@@ -2056,7 +2057,7 @@ mod tests {
         let region = emit_clean_load_prefix(&source, true, None).unwrap();
         assert_eq!(region.consumed_instructions, source.len());
         assert_eq!(region.stats.pair_loads, 1);
-        let mut raw = vec![];
+        let mut raw = Code::new();
         super::super::memory_pair(
             &mut raw,
             super::super::MemoryChecks::DEFAULT,
@@ -2085,7 +2086,7 @@ mod tests {
                 (Register::Sp, true),
                 (Register::Sp, false),
             ] {
-                let mut raw = vec![];
+                let mut raw = Code::new();
                 super::super::memory_pair(
                     &mut raw,
                     super::super::MemoryChecks::system(stack_alignment, false, true, false),
@@ -2176,7 +2177,7 @@ mod tests {
                 .filter(|bytes| *bytes == check)
                 .count();
             assert_eq!(checks, if stack_alignment { 2 } else { 0 });
-            let mut baseline = vec![];
+            let mut baseline = Code::new();
             for instruction in &instructions {
                 super::super::emit_instruction(
                     &mut baseline,
@@ -2570,7 +2571,7 @@ mod tests {
         assert!(contains(&[0x4c, 0x89, 0x40, 0x08]));
         assert!(contains(&[0x88, 0x08]));
         assert!(contains(&[0x66, 0x89, 0x08]));
-        let mut baseline = vec![];
+        let mut baseline = Code::new();
         for instruction in &instructions {
             super::super::emit_instruction(
                 &mut baseline,
@@ -2658,7 +2659,7 @@ mod tests {
             (DOUBLEWORD_LOAD_BYTES, Register::Sp),
         ] {
             for data in [Register::X(16), Register::Zero] {
-                let mut raw = vec![];
+                let mut raw = Code::new();
                 super::super::memory(
                     &mut raw,
                     super::super::MemoryChecks::DEFAULT,
@@ -2718,7 +2719,7 @@ mod tests {
                 [Register::Zero, Register::X(16)],
                 [Register::X(16), Register::Zero],
             ] {
-                let mut raw = vec![];
+                let mut raw = Code::new();
                 super::super::memory_pair(
                     &mut raw,
                     super::super::MemoryChecks::DEFAULT,
@@ -2933,7 +2934,7 @@ mod tests {
         );
         let ordinary =
             super::super::block::emit_ordinary_for_target(&instructions, None, fallthrough, target);
-        let mut baseline_prefix = vec![];
+        let mut baseline_prefix = Code::new();
         let mut fixups = vec![];
         for instruction in &instructions {
             super::super::emit_instruction(
@@ -2955,7 +2956,7 @@ mod tests {
             assert_eq!(ordinary.x86_64_code, baseline.x86_64_code);
             assert_eq!(ordinary.source_map, baseline.source_map);
         }
-        let mut capture = Vec::new();
+        let mut capture = Code::new();
         crate::x86_64::capture_nzcv(&mut capture, true);
         assert_eq!(analysis::selected_output_instruction_count(&capture), None);
         assert_eq!(

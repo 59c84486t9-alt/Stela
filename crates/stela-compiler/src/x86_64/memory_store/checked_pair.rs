@@ -1,6 +1,7 @@
 //! Checked LDP/LDPSW/STP/LDNP/STNP as one pair request to the memory service.
 //! Load destinations and base writeback are written only after both elements
 //! succeed.
+use crate::x86_64::asm::Code;
 
 use crate::{
     aarch64::{AddressMode, MemoryTransfer, Operation, Register, Width, non_temporal::Data},
@@ -14,7 +15,6 @@ use crate::{
         store,
     },
 };
-use alloc::vec::Vec;
 
 const WORD_BYTES: u8 = size_of::<u32>() as u8;
 const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;
@@ -230,7 +230,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
-fn save_source(code: &mut Vec<u8>, register: Register, bytes: u8, destination: u32) {
+fn save_source(code: &mut Code, register: Register, bytes: u8, destination: u32) {
     load(code, register);
     code.extend(if bytes == WORD_BYTES {
         MOV_RSP_DISP8_EAX
@@ -241,7 +241,7 @@ fn save_source(code: &mut Vec<u8>, register: Register, bytes: u8, destination: u
 }
 
 /// Read the private callback output with the source extension semantics.
-fn load_result(code: &mut Vec<u8>, bytes: u8, signed: bool, width: Width, source: u32) {
+fn load_result(code: &mut Code, bytes: u8, signed: bool, width: Width, source: u32) {
     if width == Width::X64 {
         code.push(REX_W);
     }
@@ -262,7 +262,7 @@ fn load_result(code: &mut Vec<u8>, bytes: u8, signed: bool, width: Width, source
 /// memory profile, capabilities and effective SP-alignment controls. RDI points
 /// to GuestState and R15 to ExecutionContext; callback failures leave completed
 /// RAM prefixes visible and return through the enclosing context wrapper.
-pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
+pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     debug_assert!(operand.is_valid());
     code.extend(SUB_RSP_IMM8);
     code.push(STACK_BYTES as u8);

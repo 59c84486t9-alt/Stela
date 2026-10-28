@@ -4,6 +4,7 @@
 //! MXCSR and restores it afterwards; host status is discarded. Inputs: XMM0/XMM1
 //! hold eight BF16 values, XMM6 four single accumulators. Output: XMM0 holds four
 //! singles. Clobbers XMM2-5, XMM7, RAX, RCX and flags.
+use crate::x86_64::asm::Code;
 
 use crate::x86_64::scalable::numerical;
 use alloc::vec::Vec;
@@ -75,17 +76,17 @@ const CMP_RAX_RCX: &[u8] = &[0x48, 0x39, 0xc8];
 const BTR_RAX_SIGN: &[u8] = &[0x48, 0x0f, 0xba, 0xf0, DOUBLE_SIGN_BIT];
 const SHR_RAX_DWORD: &[u8] = &[0x48, 0xc1, 0xe8, DWORD_BITS];
 
-fn vector(code: &mut Vec<u8>, opcode: &[u8], destination: u8, source: u8) {
+fn vector(code: &mut Code, opcode: &[u8], destination: u8, source: u8) {
     code.extend(opcode);
     code.push(REGISTER_MODRM | destination << MODRM_REGISTER_SHIFT | source);
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, lanes: u8) {
+fn shuffle(code: &mut Code, destination: u8, source: u8, lanes: u8) {
     vector(code, PSHUFD, destination, source);
     code.push(lanes);
 }
 
-fn shift(code: &mut Vec<u8>, opcode: &[u8], group: u8, register: u8, amount: u8) {
+fn shift(code: &mut Code, opcode: &[u8], group: u8, register: u8, amount: u8) {
     code.extend(opcode);
     code.extend([
         REGISTER_MODRM | group << MODRM_REGISTER_SHIFT | register,
@@ -93,7 +94,7 @@ fn shift(code: &mut Vec<u8>, opcode: &[u8], group: u8, register: u8, amount: u8)
     ]);
 }
 
-fn branch(code: &mut Vec<u8>, condition: u8) -> usize {
+fn branch(code: &mut Code, condition: u8) -> usize {
     code.extend([CONDITIONAL_ESCAPE, condition]);
     let displacement = code.len();
     code.extend([0; REL32_BYTES]);
@@ -106,20 +107,20 @@ fn skip_to_here(code: &mut [u8], displacement: usize) {
     code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
 }
 
-fn mask(code: &mut Vec<u8>, value: u32) {
+fn mask(code: &mut Code, value: u32) {
     code.push(MOV_EAX_IMM32);
     code.extend(value.to_le_bytes());
     vector(code, MOVD_XMM_EAX, WORK_MASK, EAX);
     shuffle(code, WORK_MASK, WORK_MASK, SPLAT_LOW_DWORD);
 }
 
-fn reject_mask(code: &mut Vec<u8>, register: u8, failures: &mut Vec<usize>) {
+fn reject_mask(code: &mut Code, register: u8, failures: &mut Vec<usize>) {
     vector(code, PMOVMSKB_EAX_XMM, EAX, register);
     code.extend(TEST_EAX_EAX);
     failures.push(branch(code, NOT_EQUAL));
 }
 
-fn guard_bfloat(code: &mut Vec<u8>, source: u8, failures: &mut Vec<usize>) {
+fn guard_bfloat(code: &mut Code, source: u8, failures: &mut Vec<usize>) {
     vector(code, MOVDQA, WORK_LEFT, source);
     vector(code, PAND, WORK_LEFT, WORK_MASK);
     vector(code, MOVDQA, WORK_RIGHT, WORK_LEFT);
@@ -139,7 +140,7 @@ fn guard_bfloat(code: &mut Vec<u8>, source: u8, failures: &mut Vec<usize>) {
     reject_mask(code, WORK_RIGHT, failures);
 }
 
-fn guard_accumulator(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn guard_accumulator(code: &mut Code, failures: &mut Vec<usize>) {
     vector(code, MOVDQA, WORK_LEFT, ACCUMULATOR);
     shift(
         code,
@@ -159,7 +160,7 @@ fn guard_accumulator(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
     reject_mask(code, WORK_LEFT, failures);
 }
 
-fn guard_double(code: &mut Vec<u8>, register: u8, failures: &mut Vec<usize>) {
+fn guard_double(code: &mut Code, register: u8, failures: &mut Vec<usize>) {
     // All inputs/products/sums are finite Double. Unsigned magnitude bits sort
     // numerically. Strict > excludes pre-round tininess obscured by directed
     // rounding up to min-normal; exact signed zero is admitted separately.
@@ -174,7 +175,7 @@ fn guard_double(code: &mut Vec<u8>, register: u8, failures: &mut Vec<usize>) {
     skip_to_here(code, zero);
 }
 
-fn guard_single(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+fn guard_single(code: &mut Code, failures: &mut Vec<usize>) {
     code.extend(MOV_ECX_EAX);
     code.extend(AND_ECX_IMM32);
     code.extend(SINGLE_MAGNITUDE.to_le_bytes());
@@ -186,7 +187,7 @@ fn guard_single(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
     skip_to_here(code, zero);
 }
 
-fn product_pair(code: &mut Vec<u8>, upper: bool) {
+fn product_pair(code: &mut Code, upper: bool) {
     vector(code, PXOR, WORK_MASK, WORK_MASK);
     vector(code, MOVDQA, WORK_LEFT, LEFT);
     vector(code, MOVDQA, WORK_RIGHT, RIGHT);
@@ -232,7 +233,7 @@ fn product_pair(code: &mut Vec<u8>, upper: bool) {
 
 /// Shared-frame guarded enhanced branch. Failures target the outer frame's
 /// common cleanup; pending guest FPSR must remain zero throughout this branch.
-pub(super) fn emit_chunk(code: &mut Vec<u8>, _frame: &numerical::Frame, failures: &mut Vec<usize>) {
+pub(super) fn emit_chunk(code: &mut Code, _frame: &numerical::Frame, failures: &mut Vec<usize>) {
     vector(code, PXOR, OUTPUT, OUTPUT);
     mask(code, BFLOAT_EXPONENT_PAIR);
     guard_bfloat(code, LEFT, failures);

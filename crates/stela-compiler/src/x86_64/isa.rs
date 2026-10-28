@@ -1,7 +1,7 @@
 //! x86 SIMD opcodes and their minimum CPU features. ModRM, displacement and
 //! immediates are supplied by the emitter.
 use crate::TargetCpu;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 macro_rules! catalog {
     ($($name:ident => ($mnemonic:literal, $cpu:ident, [$($byte:expr),+])),+ $(,)?) => {
@@ -183,7 +183,7 @@ impl ShiftOpcode {
             Self::RightBytes => ("psrldq", 0x73, 3),
         }
     }
-    pub(crate) fn emit(self, code: &mut Vec<u8>, register: u8, amount: u8) {
+    pub(crate) fn emit(self, code: &mut Code, register: u8, amount: u8) {
         assert!(register < 8, "legacy SIMD register needs REX encoding");
         code.extend([
             0x66,
@@ -195,7 +195,7 @@ impl ShiftOpcode {
     }
 }
 impl SimdOpcode {
-    pub(crate) fn append(self, code: &mut Vec<u8>, target: TargetCpu) {
+    pub(crate) fn append(self, code: &mut Code, target: TargetCpu) {
         assert!(
             target.supports(self.requires()),
             "selected CPU requirements cannot emit {}",
@@ -203,13 +203,7 @@ impl SimdOpcode {
         );
         code.extend(self.encoding());
     }
-    pub(crate) fn register(
-        self,
-        code: &mut Vec<u8>,
-        destination: u8,
-        source: u8,
-        target: TargetCpu,
-    ) {
+    pub(crate) fn register(self, code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
         assert!(
             destination < 8 && source < 8,
             "legacy SIMD register needs REX encoding"
@@ -234,7 +228,7 @@ pub(crate) enum VexShiftOpcode {
 impl VexShiftOpcode {
     pub(crate) fn register(
         self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         destination: u8,
         source: u8,
         counts: u8,
@@ -275,7 +269,7 @@ impl VexShiftOpcode {
 
 /// Clear caller-volatile upper vector state before an AVX2 body starts mixing
 /// VEX128 arithmetic with its legacy SSE state-access and predication wrapper.
-pub(crate) fn clear_upper_vector_state(code: &mut Vec<u8>, target: TargetCpu) {
+pub(crate) fn clear_upper_vector_state(code: &mut Code, target: TargetCpu) {
     assert!(
         target.supports(TargetCpu::Avx2),
         "VZEROUPPER requires usable AVX state"
@@ -303,7 +297,7 @@ impl CrcOpcode {
         }
     }
     /// Accumulator RAX, data RCX; every form zero-extends its 32-bit remainder.
-    pub(crate) fn emit(self, code: &mut Vec<u8>, target: TargetCpu) {
+    pub(crate) fn emit(self, code: &mut Code, target: TargetCpu) {
         assert!(target.supports(TargetCpu::Sse42));
         code.push(0xf2);
         match self {
@@ -337,7 +331,7 @@ pub(crate) enum CrcTableInstruction {
     Discard,
 }
 impl CrcTableInstruction {
-    pub(crate) fn emit(self, code: &mut Vec<u8>) {
+    pub(crate) fn emit(self, code: &mut Code) {
         code.extend(match self {
             Self::TruncateByteData => &[0x0f, 0xb6, 0xc9][..], // movzx ecx,cl
             Self::TruncateHalfwordData => &[0x0f, 0xb7, 0xc9], // movzx ecx,cx
@@ -356,7 +350,6 @@ impl CrcTableInstruction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn avx2_shift_encodings_keep_data_count_and_destination_fields_distinct() {
@@ -367,7 +360,7 @@ mod tests {
             (VexShiftOpcode::LeftQword, 0x47, 0x80),
             (VexShiftOpcode::RightQword, 0x45, 0x80),
         ] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             opcode.register(&mut code, 3, 6, 7, TargetCpu::Avx2);
             assert_eq!(code, [0xc4, 0xe2, width | 0x49, operation, 0xdf]);
             for target in [TargetCpu::Baseline, TargetCpu::Sse42, TargetCpu::Fma] {
@@ -399,7 +392,7 @@ mod tests {
             assert_eq!(opcode.encoding(), encoding);
             assert_eq!(opcode.requires(), TargetCpu::Sse41);
             for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     opcode.append(&mut code, target)
                 }));
@@ -407,7 +400,7 @@ mod tests {
                 assert!(code.is_empty());
             }
             for target in [TargetCpu::Sse41, TargetCpu::Sse42] {
-                let mut code = Vec::new();
+                let mut code = Code::new();
                 opcode.append(&mut code, target);
                 assert_eq!(code, encoding);
             }
@@ -422,7 +415,7 @@ mod tests {
         assert_eq!(opcode.encoding(), encoding);
         assert_eq!(opcode.requires(), TargetCpu::Sse41);
         for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 opcode.append(&mut code, target);
             }));
@@ -430,7 +423,7 @@ mod tests {
             assert!(code.is_empty());
         }
         for target in [TargetCpu::Sse41, TargetCpu::Sse42] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             opcode.append(&mut code, target);
             assert_eq!(code, encoding);
         }

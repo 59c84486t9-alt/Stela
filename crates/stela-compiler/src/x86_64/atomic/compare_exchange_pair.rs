@@ -4,6 +4,7 @@ use super::{
     DWORD_BYTES, QWORD_BYTES, ValueRegister, XOR_EAX_EAX, XOR_ECX_ECX, commit_rax, input_rax,
     input_rax_keeping_flags, input_rcx, input_rcx_keeping_flags, locked_compare_exchange,
 };
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -11,7 +12,6 @@ use crate::{
         atomic::{Kind, Operand},
     },
 };
-use alloc::vec::Vec;
 
 const WORD_PAIR_BYTES: u8 = 2 * DWORD_BYTES;
 const DOUBLEWORD_PAIR_BYTES: u8 = 2 * QWORD_BYTES;
@@ -54,7 +54,7 @@ const XOR_RCX_R9: &[u8] = &[0x4c, 0x31, 0xc9];
 const CMOVNE_RAX_R8: &[u8] = &[0x49, 0x0f, 0x45, 0xc0];
 const CMOVNE_RCX_R9: &[u8] = &[0x49, 0x0f, 0x45, 0xc9];
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, plain: bool) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, plain: bool) {
     let Kind::CompareExchangePair { compare, source } = operand.kind else {
         unreachable!("pair compare-exchange emitter receives a CASP operand");
     };
@@ -69,7 +69,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, pla
 }
 
 /// Pack the compare pair into RAX and the new pair into RCX, low word first.
-fn pack_word_pairs(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
+fn pack_word_pairs(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
     input_rax(code, DWORD_BYTES, compare[0]);
     if compare[1] != Register::Zero {
         input_rcx(code, DWORD_BYTES, compare[1]);
@@ -86,7 +86,7 @@ fn pack_word_pairs(code: &mut Vec<u8>, compare: [Register; 2], source: [Register
 }
 
 fn word_pair(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     compare: [Register; 2],
     source: [Register; 2],
     target: TargetCpu,
@@ -121,7 +121,7 @@ fn word_pair(
     commit_word_pair(code, compare);
 }
 
-fn commit_word_pair(code: &mut Vec<u8>, compare: [Register; 2]) {
+fn commit_word_pair(code: &mut Code, compare: [Register; 2]) {
     // Preserve the upper old word before normalizing and committing the lower
     // word. Both returned W values independently zero-extend into their X slots.
     if compare[1] != Register::Zero {
@@ -136,7 +136,7 @@ fn commit_word_pair(code: &mut Vec<u8>, compare: [Register; 2]) {
     }
 }
 
-fn word_pair_cx8(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
+fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
     code.extend(MOV_R8_RDX);
     input_rax(code, DWORD_BYTES, compare[0]);
     input_rcx(code, DWORD_BYTES, compare[1]);
@@ -161,7 +161,7 @@ fn word_pair_cx8(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 
 /// failed comparison's old value (Arm `Unpredictable_WRITEFAILEDCAS`). The
 /// pair is 16-byte aligned, so both halves are in one page. No CMPXCHG16B,
 /// and RBX stays the host's.
-fn plain_doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
+fn plain_doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
     code.extend(MOV_R8_RDX_MEMORY);
     code.extend(MOV_R9_RDX_HIGH_MEMORY);
     input_rax(code, QWORD_BYTES, compare[0]);
@@ -183,7 +183,7 @@ fn plain_doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Re
     }
 }
 
-fn doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
+fn doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
     code.extend(MOV_R8_RDX);
     if source == compare {
         code.extend(MOV_R9_RBX);
@@ -217,6 +217,7 @@ fn doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register
 mod tests {
     use super::*;
     use crate::aarch64::atomic::Order;
+    use alloc::vec::Vec;
 
     fn pair(bytes: u8, compare: [Register; 2], source: [Register; 2], plain: bool) -> Vec<u8> {
         let operand = Operand {
@@ -225,9 +226,9 @@ mod tests {
             order: Order::AcquireRelease,
             kind: Kind::CompareExchangePair { compare, source },
         };
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(&mut code, &operand, TargetCpu::detect(), plain);
-        code
+        code.into_bytes()
     }
 
     fn has(code: &[u8], bytes: &[u8]) -> bool {

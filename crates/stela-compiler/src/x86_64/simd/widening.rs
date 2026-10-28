@@ -7,6 +7,7 @@ use super::numerical::{
     vector_exponent_range, vector_half_exponent_range, widen_half_to_single,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -38,7 +39,7 @@ const MOVD_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0x6e];
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 
-fn select_part(code: &mut Vec<u8>, operand: &Operand, source: u8, vector: u8) {
+fn select_part(code: &mut Code, operand: &Operand, source: u8, vector: u8) {
     read_vector(code, source, vector);
     let offset = operand.part.source_lane_offset(operand.shape) * HALF_BYTES;
     if offset != 0 {
@@ -46,7 +47,7 @@ fn select_part(code: &mut Vec<u8>, operand: &Operand, source: u8, vector: u8) {
     }
 }
 
-fn prepare_sources(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_sources(code: &mut Code, operand: &Operand) {
     // Snapshot every guest source before the single eventual destination store.
     select_part(code, operand, operand.left, LEFT);
     if operand.right_lane.is_some() {
@@ -63,7 +64,7 @@ fn prepare_sources(code: &mut Vec<u8>, operand: &Operand) {
     read_numerical_vector(code, operand.shape, operand.destination, ADDEND);
 }
 
-fn prepare_integer_widening(code: &mut Vec<u8>) {
+fn prepare_integer_widening(code: &mut Code) {
     packed(code, Host::Xor, ZERO, ZERO);
     code.push(MOV_EAX_IMM32);
     code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
@@ -75,7 +76,7 @@ fn prepare_integer_widening(code: &mut Vec<u8>) {
     }
 }
 
-fn prepare_checked_widening(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
+fn prepare_checked_widening(code: &mut Code, shape: Shape, target: TargetCpu) {
     for vector in [LEFT, RIGHT] {
         if shape == Shape::Vector64 {
             // Exactly two half lanes are active. Clear H2/H3 before VCVTPH2PS
@@ -91,7 +92,7 @@ fn use_fma(operand: &Operand, target: TargetCpu) -> bool {
         && (operand.operation == WideningOperation::Add || operand.shape == Shape::Vector64)
 }
 
-fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn arithmetic(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if use_fma(operand, target) {
         let opcode = match operand.operation {
             WideningOperation::Add => FusedOpcode::MultiplyAdd,
@@ -127,7 +128,7 @@ fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

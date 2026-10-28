@@ -1,5 +1,6 @@
 //! SVE FRECPS/FRSQRTS on normal values. A baseline multiply is used only when the
 //! host status shows it was exact.
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -49,7 +50,7 @@ const JZ_REL32: &[u8] = &[0x0f, 0x84];
 const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const REL32_BYTES: usize = size_of::<i32>();
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
@@ -62,19 +63,19 @@ fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
     code[displacement..displacement + REL32_BYTES].copy_from_slice(&distance.to_le_bytes());
 }
 
-fn test_control(code: &mut Vec<u8>, mask: u32) {
+fn test_control(code: &mut Code, mask: u32) {
     code.extend(TEST_STATE_IMMEDIATE);
     code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 
-fn reject_status(code: &mut Vec<u8>, mask: u32, failures: &mut Vec<usize>) {
+fn reject_status(code: &mut Code, mask: u32, failures: &mut Vec<usize>) {
     code.extend(TEST_ECX_IMMEDIATE);
     code.extend(mask.to_le_bytes());
     failures.push(branch(code, JNZ_REL32));
 }
 
-fn broadcast(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
     if format == Format::Single {
         code.push(MOV_EAX_IMMEDIATE);
         code.extend((bits as u32).to_le_bytes());
@@ -106,7 +107,7 @@ fn addend_bits(format: Format, kind: RefinementKind) -> u64 {
 
 /// Inputs already passed a normal-domain classifier. For FRSQRTS the left
 /// exponent is >=2, so subtracting one exponent unit is exact and stays normal.
-fn halve_left(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn halve_left(code: &mut Code, format: Format, target: TargetCpu) {
     broadcast(code, format, 1 << format.fraction_bits(), target);
     let opcode = if format == Format::Single {
         Host::SubDword
@@ -116,7 +117,7 @@ fn halve_left(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
     opcode.register(code, LEFT, ADDEND, target);
 }
 
-fn reject_non_normal(code: &mut Vec<u8>, format: Format, register: u8, failures: &mut Vec<usize>) {
+fn reject_non_normal(code: &mut Code, format: Format, register: u8, failures: &mut Vec<usize>) {
     vector_exponent_range(code, format, Shape::Vector128, register);
     failures.push(branch(code, JNZ_REL32));
 }
@@ -127,7 +128,7 @@ fn reject_non_normal(code: &mut Vec<u8>, format: Format, register: u8, failures:
 /// cancellation, tiny/overflowing results and nonprecision host status decline.
 /// All chunks stage before one guest commit; every refusal restores MXCSR/RSP.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -300,7 +301,7 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = vec![0xaa];
+            let mut code = Code::from(vec![0xaa]);
             assert!(
                 !emit(
                     &mut code,

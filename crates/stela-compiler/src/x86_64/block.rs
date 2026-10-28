@@ -1,4 +1,5 @@
 //! Block control transfers: every branch returns to the dispatcher.
+use crate::x86_64::asm::Code;
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
@@ -10,18 +11,18 @@ use crate::{
     block::{ExitKind, Terminator},
 };
 
-pub(super) fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
+pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
     code.push(0xba); // mov edx,kind: zero-extends to the ABI's u64
     code.extend((kind as u32).to_le_bytes());
     code.push(0xc3);
 }
 
-pub(super) fn direct_exit(code: &mut Vec<u8>, target: GuestAddress, kind: ExitKind) {
+pub(super) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind) {
     code.extend(super::chain::direct_exit(target, kind));
 }
 
 fn conditional_exit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     opcode: Option<u8>,
     target: GuestAddress,
     fallthrough: GuestAddress,
@@ -156,10 +157,7 @@ fn emit_selected(
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
     let mut fault_recovery = vec![];
-    let mut block = NativeBlock {
-        x86_64_code: vec![],
-        source_map: vec![],
-    };
+    let mut block = super::Emitted::default();
     let code = &mut block.x86_64_code;
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
@@ -200,7 +198,7 @@ fn emit_selected(
             && let Ok(Some(region)) = super::region::emit_allocated_prefix(&instructions[cursor..])
         {
             let count = region.consumed_instructions;
-            let mut baseline = vec![];
+            let mut baseline = Code::new();
             let mut candidate_fixups = vec![];
             for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
                 super::emit_instruction(
@@ -216,7 +214,7 @@ fn emit_selected(
                 block
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                code.extend(region.code);
+                code.append(region.code);
                 cursor += count;
                 continue;
             }
@@ -233,7 +231,7 @@ fn emit_selected(
             let count = region.consumed_instructions;
             let chunk = &instructions[cursor..cursor + count];
             let baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
-                let mut code = vec![];
+                let mut code = Code::new();
                 let mut map = vec![];
                 let mut fixups = vec![];
                 let mut after = held;
@@ -264,7 +262,7 @@ fn emit_selected(
                         ..entry
                     }
                 }));
-                code.extend(region.code);
+                code.append(region.code);
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
                 // could bypass the measured cost gate with a different shape.
@@ -272,7 +270,7 @@ fn emit_selected(
                 block
                     .source_map
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                code.extend(baseline_code);
+                code.append(baseline_code);
                 after = baseline_after;
             }
             // Each region wrote back the full register frame, so what follows
@@ -307,7 +305,7 @@ fn emit_selected(
         checks,
         after.rax,
     );
-    (block, fault_recovery)
+    (block.into_native(), fault_recovery)
 }
 
 /// What registers hold where an instruction outside the regions begins,
@@ -333,7 +331,7 @@ impl Held {
 /// `out_of_line`, numerical instructions move their slow paths there.
 #[allow(clippy::too_many_arguments)]
 fn emit_single(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     out_of_line: Option<&mut OutOfLine>,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
@@ -421,7 +419,7 @@ const JMP_REL32_BYTES: usize = 1 + REL32_BYTES;
 /// [`ColdSplit`]: super::simd::numerical::ColdSplit
 #[derive(Default)]
 struct OutOfLine {
-    code: Vec<u8>,
+    code: Code,
     /// rel32 fields with the places they target.
     fixups: Vec<(Place, Place)>,
     /// The jump ending the last moved part and where its instruction ended
@@ -442,7 +440,7 @@ impl OutOfLine {
     /// `start` to the end of `code`, which ends its emission.
     fn take(
         &mut self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         start: usize,
         split: Option<super::simd::numerical::ColdSplit>,
     ) {
@@ -485,7 +483,7 @@ impl OutOfLine {
     }
 
     /// Lay out the moved code at the end of `code` behind a jump over it.
-    fn place(mut self, code: &mut Vec<u8>) {
+    fn place(mut self, code: &mut Code) {
         if let Some((site, end)) = self.open.take() {
             self.fixups
                 .push((Place::OutOfLine(site), Place::Inline(end)));
@@ -571,7 +569,7 @@ pub(crate) fn successor_exits(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_terminal(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source_map: &mut Vec<(GuestAddress, usize)>,
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
@@ -580,7 +578,7 @@ fn emit_terminal(
     rax: super::Rax,
 ) {
     // The terminal's own load of a register RAX already holds.
-    let load = |code: &mut Vec<u8>, register| {
+    let load = |code: &mut Code, register| {
         if rax != super::Rax::Guest(register) {
             super::load(code, register);
         }
@@ -945,7 +943,7 @@ mod tests {
                     for instruction in &instructions {
                         before.push((instruction.pc.0, expected.clone(), expected_memory));
                         let next = GuestAddress(instruction.pc.0 + 4);
-                        let mut code = vec![];
+                        let mut code = Code::new();
                         match &instruction.operation {
                             Operation::FloatingPoint(operand) => {
                                 super::super::simd::emit_numerical(
@@ -1198,7 +1196,7 @@ mod tests {
                 // Replays the system-mode selection with its cost gates: a
                 // rejected chunk is emitted as baseline and skipped whole.
                 let baseline = |count: usize| {
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     let mut fixups = vec![];
                     for (index, instruction) in rest[..count].iter().enumerate() {
                         super::super::emit_instruction(
@@ -1268,7 +1266,7 @@ mod tests {
                         operation => category(operation),
                     };
                     *outside.entry(detail).or_default() += 1;
-                    let mut code = vec![];
+                    let mut code = Code::new();
                     let mut fixups = vec![];
                     if let Operation::FloatingPoint(operand) = &instruction.operation {
                         super::super::simd::emit_numerical(

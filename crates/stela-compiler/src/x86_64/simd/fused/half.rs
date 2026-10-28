@@ -5,6 +5,7 @@ use super::super::numerical::{
     prepare_vector_input_range, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -27,18 +28,18 @@ const HALF_EXPONENT_MASK: u8 = 31;
 const EXPONENT_SPAN_BIAS: u8 = 16;
 const MAXIMUM_BIASED_SPAN: u8 = 71;
 
-fn load_half(code: &mut Vec<u8>, slot: u8) {
+fn load_half(code: &mut Code, slot: u8) {
     // MOVZX EAX, word [RSP + R11*2 + slot]. R11 is the active lane index.
     code.extend([0x42, 0x0f, 0xb7, 0x44, 0x5c, slot]);
 }
 
-fn exponent(code: &mut Vec<u8>, slot: u8) {
+fn exponent(code: &mut Code, slot: u8) {
     load_half(code, slot);
     code.extend([0xc1, 0xe8, Format::Half.fraction_bits() as u8]); // SHR EAX,10
     code.extend([0x83, 0xe0, HALF_EXPONENT_MASK]);
 }
 
-fn exact_span(code: &mut Vec<u8>, rollback: &mut Vec<usize>) {
+fn exact_span(code: &mut Code, rollback: &mut Vec<usize>) {
     exponent(code, LEFT_SLOT);
     code.extend([0x89, 0xc1]); // MOV ECX,EAX
     exponent(code, RIGHT_SLOT);
@@ -50,7 +51,7 @@ fn exact_span(code: &mut Vec<u8>, rollback: &mut Vec<usize>) {
     rollback.push(branch(code, Condition::Above));
 }
 
-fn widen_sources(code: &mut Vec<u8>, target: TargetCpu) {
+fn widen_sources(code: &mut Code, target: TargetCpu) {
     load_half(code, LEFT_SLOT);
     lanes::widen_normal(code, target);
     packed(code, Host::MoveAligned, lanes::LEFT, lanes::RESULT);
@@ -61,7 +62,7 @@ fn widen_sources(code: &mut Vec<u8>, target: TargetCpu) {
     lanes::widen_normal(code, target);
 }
 
-fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn arithmetic(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if target.supports(TargetCpu::Fma) {
         // Original signs: the FMA opcode performs the pre-round sign changes.
         emit_fma(
@@ -98,7 +99,7 @@ fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, lanes::RESULT, lanes::LEFT);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
     let mut helper = Vec::new();
     let mut rollback = Vec::new();

@@ -4,6 +4,7 @@ use crate::{
     aarch64::Instruction,
     block::{Terminator, memory::CheckedOperation},
     extended,
+    x86_64::{Emitted, asm::Code},
 };
 use alloc::vec::Vec;
 
@@ -15,8 +16,8 @@ pub(crate) fn emit(
     register_regions: bool,
     mut profile: Option<&mut crate::block::profile::CompileProfile>,
 ) -> Result<NativeBlock, CompileError> {
-    let mut block = NativeBlock {
-        x86_64_code: extended::context_wrapper(),
+    let mut block = Emitted {
+        x86_64_code: Code::from(extended::context_wrapper()),
         source_map: Vec::new(),
     };
     let mut fixups = Vec::new();
@@ -88,11 +89,11 @@ pub(crate) fn emit(
                 traffic,
             });
     }
-    Ok(block)
+    Ok(block.into_native())
 }
 
 fn emit_register_span(
-    block: &mut NativeBlock,
+    block: &mut Emitted,
     instructions: &[Instruction],
     target: TargetCpu,
     source_start: usize,
@@ -109,10 +110,7 @@ fn emit_register_span(
         let count = candidate
             .as_ref()
             .map_or(1, |region| region.consumed_instructions.max(1));
-        let mut baseline = NativeBlock {
-            x86_64_code: Vec::new(),
-            source_map: Vec::new(),
-        };
+        let mut baseline = Emitted::default();
         let mut fixups = Vec::new();
         for instruction in &remaining[..count] {
             baseline
@@ -159,7 +157,7 @@ fn emit_register_span(
                     .into_iter()
                     .map(|(pc, at)| (pc, offset + at)),
             );
-            block.x86_64_code.extend(region.code);
+            block.x86_64_code.append(region.code);
         } else {
             // A rejected candidate consumes its exact original span. Trying
             // shorter suffixes could evade the candidate's measured cost gate.
@@ -169,7 +167,7 @@ fn emit_register_span(
                     .into_iter()
                     .map(|(pc, at)| (pc, offset + at)),
             );
-            block.x86_64_code.extend(baseline.x86_64_code);
+            block.x86_64_code.append(baseline.x86_64_code);
         }
         cursor += count;
     }

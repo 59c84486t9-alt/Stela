@@ -1,5 +1,5 @@
 //! SME integer ZA arithmetic.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod long;
 mod outer;
 
@@ -25,7 +25,7 @@ const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
 const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
 const ADD_R8_RCX: &[u8] = &[0x49, 0x01, 0xc8];
 
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     match operand {
         Operand::AddSub(operation) => {
             emit_add_sub(code, operation, length, target);
@@ -46,7 +46,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
 }
 
 fn emit_add_sub(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &AddSubOperation,
     length: VectorLength,
     target: TargetCpu,

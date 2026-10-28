@@ -1,4 +1,5 @@
 //! Half-precision arithmetic through exact widened intermediates.
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 mod product;
 
@@ -21,14 +22,14 @@ const RIGHT_ODD: u8 = 3;
 const EVEN_HALF_WORDS: u8 = 0x88;
 const SECOND_HALF_WORD: u8 = 0x55;
 
-fn compact_even_words(code: &mut Vec<u8>, source: u8) {
+fn compact_even_words(code: &mut Code, source: u8) {
     packed(code, Host::ShuffleLowWord, source, source);
     code.push(EVEN_HALF_WORDS);
 }
 
 /// Normalize adjacent Vn pairs followed by Vm pairs into two Half vectors.
 /// Q0 inputs were loaded with MOVQ; only the assembled active words are guarded.
-fn prepare_pairs(code: &mut Vec<u8>, shape: Shape) {
+fn prepare_pairs(code: &mut Code, shape: Shape) {
     packed(code, Host::MoveAligned, LEFT_ODD, lanes::LEFT);
     if shape == Shape::Vector128 {
         packed(code, Host::MoveAligned, RIGHT_ODD, lanes::RIGHT);
@@ -56,7 +57,7 @@ fn prepare_pairs(code: &mut Vec<u8>, shape: Shape) {
     packed(code, Host::MoveAligned, lanes::RIGHT, LEFT_ODD);
 }
 
-fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_inputs(code: &mut Code, operand: &Operand) {
     match operand.inputs {
         Inputs::Elementwise { left, right } => {
             read_numerical_vector(code, operand.shape, left, lanes::LEFT);
@@ -102,7 +103,7 @@ fn operation(operation: BinaryOperation) -> (ArithmeticOpcode, lanes::ResultSign
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
     let mut helper = Vec::new();
     let mut rollback = Vec::new();

@@ -5,6 +5,7 @@ use super::super::{
     scalable::{self, memory},
 };
 use super::memory as transfer;
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -72,25 +73,25 @@ impl Scratch {
     }
 }
 
-fn stack_immediate(code: &mut Vec<u8>, opcode: &[u8], offset: u32, value: u32) {
+fn stack_immediate(code: &mut Code, opcode: &[u8], offset: u32, value: u32) {
     code.extend(opcode);
     code.extend(offset.to_le_bytes());
     code.extend(value.to_le_bytes());
 }
 
-fn stack_operand(code: &mut Vec<u8>, opcode: &[u8], offset: u32) {
+fn stack_operand(code: &mut Code, opcode: &[u8], offset: u32) {
     code.extend(opcode);
     code.extend(offset.to_le_bytes());
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
+fn branch(code: &mut Code, opcode: &[u8]) -> usize {
     code.extend(opcode);
     let displacement = code.len();
     code.extend(0_i32.to_le_bytes());
     displacement
 }
 
-fn stack_vector(code: &mut Vec<u8>, opcode: Host, offset: u32, target: TargetCpu) {
+fn stack_vector(code: &mut Code, opcode: Host, offset: u32, target: TargetCpu) {
     opcode.append(code, target);
     code.extend([STACK_DISP32_XMM0, STACK_SIB]);
     code.extend(offset.to_le_bytes());
@@ -143,7 +144,7 @@ pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
 /// in EAX; success sets EAX to 0 and falls through. SP is checked even when
 /// every lane is inactive.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -245,7 +246,6 @@ pub(crate) fn emit(
 mod tests {
     use super::*;
     use crate::aarch64::{scalable::ElementSize, sve::memory_structure};
-    use alloc::vec::Vec;
 
     const LENGTHS: [usize; 5] = [16, 32, 64, 128, 256];
     const TEST_PC: u64 = 0x1_4000_1000;
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(operand.element, ElementSize::Byte);
         for bytes in LENGTHS {
             let length = VectorLength::from_bytes(bytes).unwrap();
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, &operand, length, TargetCpu::Baseline, TEST_PC);
             let calls = code
                 .windows(CALL_MEMORY_CALLBACK.len())

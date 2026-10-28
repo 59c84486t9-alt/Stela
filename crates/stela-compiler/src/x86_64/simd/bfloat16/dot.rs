@@ -8,6 +8,7 @@ use super::super::numerical::{
     restore_environment, vector_exponent_range,
 };
 use super::super::{Host, commit, packed, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -68,7 +69,7 @@ enum SumCheck {
     ExactVector,
 }
 
-fn compare_equal(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn compare_equal(code: &mut Code, destination: u8, source: u8) {
     code.extend([
         SSE_ESCAPE,
         FLOAT_COMPARE_OPCODE,
@@ -77,12 +78,12 @@ fn compare_equal(code: &mut Vec<u8>, destination: u8, source: u8) {
     ]);
 }
 
-fn guard_normal(code: &mut Vec<u8>, shape: Shape, source: u8, rollback: &mut Vec<usize>) {
+fn guard_normal(code: &mut Code, shape: Shape, source: u8, rollback: &mut Vec<usize>) {
     vector_exponent_range(code, Format::Single, shape, source);
     rollback.push(branch(code, Condition::NotZero));
 }
 
-fn guard_normal_or_zero(code: &mut Vec<u8>, shape: Shape, source: u8, rollback: &mut Vec<usize>) {
+fn guard_normal_or_zero(code: &mut Code, shape: Shape, source: u8, rollback: &mut Vec<usize>) {
     // The shared classifier leaves its per-lane normal mask in XMM2. Admit
     // only raw signed zeros as well; BF subnormals require architectural flush.
     vector_exponent_range(code, Format::Single, shape, source);
@@ -105,12 +106,12 @@ fn guard_normal_or_zero(code: &mut Vec<u8>, shape: Shape, source: u8, rollback: 
     rollback.push(branch(code, Condition::NotZero));
 }
 
-fn guard_real_status(code: &mut Vec<u8>, rollback: &mut Vec<usize>) {
+fn guard_real_status(code: &mut Code, rollback: &mut Vec<usize>) {
     capture_environment_status(code);
     rollback.push(reject_other_status(code));
 }
 
-fn widen_pairs(code: &mut Vec<u8>, shape: Shape) {
+fn widen_pairs(code: &mut Code, shape: Shape) {
     for (even, odd) in [(LEFT, LEFT_ODD), (RIGHT, RIGHT_ODD)] {
         packed(code, Host::MoveAligned, odd, even);
         ShiftOpcode::RightDword.emit(code, odd, BFLOAT16_BITS as u8);
@@ -125,7 +126,7 @@ fn widen_pairs(code: &mut Vec<u8>, shape: Shape) {
     }
 }
 
-fn odd_add(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
+fn odd_add(code: &mut Code, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
     packed(code, Host::MoveAligned, ORIGINAL_LEFT, LEFT);
     single_vector_arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
     // Round-toward-zero overflow can clamp to the largest finite value, so
@@ -173,7 +174,7 @@ fn odd_add(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: S
     clear_environment_status(code);
 }
 
-fn pair_sum(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
+fn pair_sum(code: &mut Code, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
     widen_pairs(code, shape);
     prepare_vector_input_range(code, Format::Single);
     for source in [LEFT, RIGHT, LEFT_ODD, RIGHT_ODD] {
@@ -190,13 +191,13 @@ fn pair_sum(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: 
     odd_add(code, shape, rollback, check);
 }
 
-fn add_accumulator(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
+fn add_accumulator(code: &mut Code, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
     prepare_vector_input_range(code, Format::Single);
     guard_normal_or_zero(code, shape, RIGHT, rollback);
     odd_add(code, shape, rollback, check);
 }
 
-fn matrix_accumulator(code: &mut Vec<u8>, opcode: Host) {
+fn matrix_accumulator(code: &mut Code, opcode: Host) {
     // The matrix's private accumulator is above the numerical environment's
     // sixteen-byte save area; no guest destination is written between stages.
     opcode.append(code, TargetCpu::Baseline);
@@ -204,7 +205,7 @@ fn matrix_accumulator(code: &mut Vec<u8>, opcode: Host) {
 }
 
 fn finish(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     shape: Shape,
     destination: u8,
     pc: GuestAddress,
@@ -236,7 +237,7 @@ fn finish(
     commit(code, destination, LEFT);
 }
 
-pub(in crate::x86_64) fn emit_dot(code: &mut Vec<u8>, operand: &DotOperand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit_dot(code: &mut Code, operand: &DotOperand, pc: GuestAddress) {
     let mut rollback = Vec::new();
     environment_round(code, Rounding::Zero);
     read_vector(code, operand.left, LEFT);
@@ -262,11 +263,7 @@ pub(in crate::x86_64) fn emit_dot(code: &mut Vec<u8>, operand: &DotOperand, pc: 
     );
 }
 
-pub(in crate::x86_64) fn emit_matrix(
-    code: &mut Vec<u8>,
-    operand: &MatrixOperand,
-    pc: GuestAddress,
-) {
+pub(in crate::x86_64) fn emit_matrix(code: &mut Code, operand: &MatrixOperand, pc: GuestAddress) {
     let mut rollback = Vec::new();
     code.extend(SUB_RSP_MATRIX_FRAME);
     environment_round(code, Rounding::Zero);

@@ -1,4 +1,5 @@
 //! x86-64 code emission. RDI holds the guest state pointer throughout.
+use crate::x86_64::asm::Code;
 use crate::{
     Backend, GuestAddress, NativeBlock, UnsupportedReason,
     aarch64::{
@@ -67,6 +68,24 @@ pub(crate) fn validate_target_with(
     }
     Ok(())
 }
+
+/// Native code under construction, with its counted instructions and the
+/// native offset of each guest instruction.
+#[derive(Debug, Default)]
+pub(crate) struct Emitted {
+    pub(crate) x86_64_code: asm::Code,
+    pub(crate) source_map: Vec<(crate::GuestAddress, usize)>,
+}
+
+impl Emitted {
+    pub(crate) fn into_native(self) -> crate::NativeBlock {
+        crate::NativeBlock {
+            x86_64_code: self.x86_64_code.into_bytes(),
+            source_map: self.source_map,
+        }
+    }
+}
+
 pub mod amx;
 pub(crate) mod asm;
 mod atomic;
@@ -160,8 +179,8 @@ pub(crate) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
     simd::numerical_always_exits(operation)
 }
 
-fn load(code: &mut Vec<u8>, register: Register) {
-    load_with(&mut asm::Asm::new(code), register);
+fn load(code: &mut Code, register: Register) {
+    load_with(&mut code.asm(), register);
 }
 
 /// RAX = the guest register (zero for XZR), from the frame at RDI.
@@ -177,8 +196,8 @@ fn load_with(asm: &mut asm::Asm, register: Register) {
     }
 }
 
-fn store(code: &mut Vec<u8>, register: Register) {
-    store_with(&mut asm::Asm::new(code), register);
+fn store(code: &mut Code, register: Register) {
+    store_with(&mut code.asm(), register);
 }
 
 /// The guest register (nothing for XZR) = RAX, in the frame at RDI.
@@ -197,7 +216,7 @@ fn store_with(asm: &mut asm::Asm, register: Register) {
 /// the caller keeps code/state separate from guest mappings. Guest NZCV is untouched.
 #[allow(clippy::too_many_arguments)]
 fn memory(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     checks: MemoryChecks,
     transfer: MemoryTransfer,
     bytes: u8,
@@ -448,7 +467,7 @@ impl RangeCheck {
 
     /// The bytes before the failure: the shift, the bias, the comparison
     /// and the branch over the failure, of `failure` bytes.
-    fn test(self, code: &mut Vec<u8>, failure: u8) {
+    fn test(self, code: &mut Code, failure: u8) {
         code.extend([0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, self.shift]); // mov rcx,rax; sar rcx,shift
         if self.bias == OPCODE_INC {
             code.extend([0xff, 0xc1]); // inc ecx
@@ -459,14 +478,14 @@ impl RangeCheck {
     }
 
     /// The mask after the check.
-    fn mask(self, code: &mut Vec<u8>) {
+    fn mask(self, code: &mut Code) {
         code.extend([0x48, 0xb9]); // mov rcx,masked
         code.extend(self.masked.to_le_bytes());
         code.extend([0x48, 0x0f, 0x47, 0xc1]); // cmova rax,rcx
     }
 
     /// The check with a UD2 failure.
-    pub(crate) fn emit(self, code: &mut Vec<u8>) {
+    pub(crate) fn emit(self, code: &mut Code) {
         self.test(code, UD2.len() as u8);
         code.extend(UD2);
         self.mask(code);
@@ -477,7 +496,7 @@ impl RangeCheck {
     /// address in RCX and `access` in the two bytes after the call; the
     /// helper returns past them with the host address of the access in RAX,
     /// which skips the mask (docs/design/system.md, "Host placement").
-    pub(crate) fn emit_translated(self, code: &mut Vec<u8>, helper: u64, access: Access) {
+    pub(crate) fn emit_translated(self, code: &mut Code, helper: u64, access: Access) {
         self.test(code, TRANSLATION_CALL_BYTES);
         code.extend([0x48, 0x89, 0xc1, 0x48, 0xa1]); // mov rcx,rax; movabs rax,[helper]
         code.extend(helper.to_le_bytes());
@@ -489,9 +508,9 @@ impl RangeCheck {
     /// [`Self::emit`]'s bytes.
     #[cfg(test)]
     pub(crate) fn code(self) -> Vec<u8> {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         self.emit(&mut code);
-        code
+        code.into_bytes()
     }
 
     /// If `code` starts with a check of any placement, its length and the
@@ -639,7 +658,7 @@ pub(crate) const STACK_ALIGNMENT_CHECK_ENDS: [usize; 3] = [2, 4, 6];
 
 /// The guest range check of `access`'s address in RAX, in the variant
 /// `checks` selects.
-pub(crate) fn range_check(code: &mut Vec<u8>, checks: MemoryChecks, access: Access) {
+pub(crate) fn range_check(code: &mut Code, checks: MemoryChecks, access: Access) {
     if checks.translated {
         checks
             .range
@@ -649,7 +668,7 @@ pub(crate) fn range_check(code: &mut Vec<u8>, checks: MemoryChecks, access: Acce
     }
 }
 
-fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks, access: Access) {
+fn guest_range_check(code: &mut Code, checks: MemoryChecks, access: Access) {
     if checks.guest_range {
         range_check(code, checks, access);
     }
@@ -659,14 +678,14 @@ fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks, access: Access) {
 /// SCTLR_ELx.A against `unit`, the bytes of each element it transfers. The
 /// translated variant's host address keeps the guest address's offset in
 /// its page, so the alignment checks see the same low bits.
-fn address_checks(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8, access: Access) {
+fn address_checks(code: &mut Code, checks: MemoryChecks, unit: u8, access: Access) {
     guest_range_check(code, checks, access);
     alignment_check(code, checks, unit);
 }
 
 /// SCTLR_ELx.A's check of the effective address in RAX against `unit`, the
 /// bytes of each element the access transfers.
-fn alignment_check(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
+fn alignment_check(code: &mut Code, checks: MemoryChecks, unit: u8) {
     if checks.alignment && unit > 1 {
         debug_assert!(unit.is_power_of_two() && unit <= 16);
         code.extend([0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b]); // test al,unit-1; jz +2; ud2
@@ -679,7 +698,7 @@ fn alignment_check(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
 /// access.
 #[allow(clippy::too_many_arguments)]
 fn memory_address(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     checks: MemoryChecks,
     base: Register,
     displacement: i32,
@@ -708,7 +727,7 @@ const MOV_RAX_RDX: [u8; 3] = [0x48, 0x89, 0xd0];
 /// touching host flags: RAX becomes the access address, and pre- and
 /// post-index forms leave the pending writeback in RDX. An Offset access
 /// leaves RDX unspecified and emits nothing for a zero offset.
-pub(crate) fn address_add(code: &mut Vec<u8>, displacement: i32, mode: AddressMode) {
+pub(crate) fn address_add(code: &mut Code, displacement: i32, mode: AddressMode) {
     let offset = mode == AddressMode::Offset;
     if displacement == 0 {
         if !offset {
@@ -732,7 +751,7 @@ pub(crate) fn address_add(code: &mut Vec<u8>, displacement: i32, mode: AddressMo
     }
 }
 
-fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
+fn memory_writeback(code: &mut Code, base: Register, mode: AddressMode) {
     if mode != AddressMode::Offset {
         code.extend([0x48, 0x89, 0x97]); // mov [rdi+disp32],rdx
         code.extend(
@@ -748,7 +767,7 @@ fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
 /// Concurrent/128-bit single-copy atomic semantics are outside this RAM profile.
 #[allow(clippy::too_many_arguments)]
 fn memory_pair(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     checks: MemoryChecks,
     transfer: MemoryTransfer,
     bytes: u8,
@@ -797,8 +816,8 @@ fn memory_pair(
     memory_writeback(code, base, mode);
 }
 
-fn right_operand(code: &mut Vec<u8>, register: Register, width: Width, shift: Shift, amount: u8) {
-    right_operand_with(&mut asm::Asm::new(code), register, width, shift, amount);
+fn right_operand(code: &mut Code, register: Register, width: Width, shift: Shift, amount: u8) {
+    right_operand_with(&mut code.asm(), register, width, shift, amount);
 }
 
 /// RCX = the guest register (zero for XZR) shifted by `amount`.
@@ -830,7 +849,7 @@ fn right_operand_with(
 }
 
 fn jump(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     opcode: Option<u8>,
     pc: GuestAddress,
     target: GuestAddress,
@@ -846,13 +865,13 @@ fn jump(
 }
 
 /// Evaluate ARM conditions from saved NZCV, independent of incidental host flags.
-fn condition(code: &mut Vec<u8>, condition: u8) -> Option<u8> {
+fn condition(code: &mut Code, condition: u8) -> Option<u8> {
     condition_of(code, condition, false)
 }
 
 /// [`condition`], from the NZCV word already in EAX when `loaded`
 /// ([`Rax::Nzcv`]). Clobbers EAX and ECX.
-fn condition_of(code: &mut Vec<u8>, condition: u8, loaded: bool) -> Option<u8> {
+fn condition_of(code: &mut Code, condition: u8, loaded: bool) -> Option<u8> {
     if condition >= 14 {
         return None;
     } // AL and NV both satisfy ConditionHolds.
@@ -929,24 +948,24 @@ pub(super) fn rax_after(operation: &Operation) -> Rax {
 
 /// [`load`]'s bytes for a frame register.
 pub(super) fn frame_load(register: Register) -> Option<[u8; 7]> {
-    let mut code = Vec::new();
+    let mut code = Code::new();
     load(&mut code, register);
     code.try_into().ok()
 }
 
 /// [`store`]'s bytes for a frame register.
 pub(super) fn frame_store(register: Register) -> Option<[u8; 7]> {
-    let mut code = Vec::new();
+    let mut code = Code::new();
     store(&mut code, register);
     code.try_into().ok()
 }
 
-fn immediate(code: &mut Vec<u8>, value: u64) {
+fn immediate(code: &mut Code, value: u64) {
     code.extend([0x48, 0xb8]); // movabs rax,imm64
     code.extend(value.to_le_bytes());
 }
 
-fn nzcv(code: &mut Vec<u8>, subtract: bool) {
+fn nzcv(code: &mut Code, subtract: bool) {
     const STATE_NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
     capture_nzcv(code, subtract);
     code.extend([0x89, 0x87]); // mov dword [rdi+GuestState.nzcv],eax
@@ -983,7 +1002,7 @@ const _: () = assert!(CAPTURE_MULTIPLIER.trailing_zeros() + u16::BITS >= u32::BI
 /// branch or an instruction outside Intel's data operand independent timing
 /// list (SETcc, LEA, IMUL, AND). `borrow` takes C as an Arm subtraction
 /// does, the complement of the host carry. Clobbers RDX; RCX is intact.
-pub(crate) fn capture_nzcv(code: &mut Vec<u8>, borrow: bool) {
+pub(crate) fn capture_nzcv(code: &mut Code, borrow: bool) {
     code.extend(CAPTURE_SIGN_AL);
     code.extend(CAPTURE_ZERO_AH);
     code.extend(if borrow {
@@ -1001,7 +1020,7 @@ pub(crate) fn capture_nzcv(code: &mut Vec<u8>, borrow: bool) {
 
 /// Shared semantic emission. Block compilation handles control transfers itself.
 pub(crate) fn emit_instruction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
     target: crate::TargetCpu,
@@ -1326,10 +1345,7 @@ impl Emitter {
         instructions: &[Instruction],
         target: crate::TargetCpu,
     ) -> Result<NativeBlock, UnsupportedReason> {
-        let mut block = NativeBlock {
-            x86_64_code: vec![],
-            source_map: vec![],
-        };
+        let mut block = Emitted::default();
         let code = &mut block.x86_64_code;
         let mut fixups = vec![];
         for instruction in instructions {
@@ -1363,7 +1379,7 @@ impl Emitter {
             let relative = i32::try_from(relative).map_err(|_| error())?;
             code[displacement..displacement + 4].copy_from_slice(&relative.to_le_bytes());
         }
-        Ok(block)
+        Ok(block.into_native())
     }
 }
 
@@ -1433,7 +1449,7 @@ mod tests {
             n << 31 | z << 30 | c << 29 | v << 28
         };
         for borrow in [false, true] {
-            let mut code = MOV_RAX_RDI.to_vec();
+            let mut code = Code::from(MOV_RAX_RDI.to_vec());
             code.extend(MOVABS_RDX);
             code.extend(OTHER_BITS.to_le_bytes());
             code.extend(if borrow { SUB_RAX_RSI } else { ADD_RAX_RSI });
@@ -1503,11 +1519,11 @@ mod tests {
         };
         for loaded in [false, true] {
             for condition in 0..14 {
-                let mut code = if loaded {
+                let mut code = Code::from(if loaded {
                     LOAD_EAX_NZCV.to_vec()
                 } else {
                     vec![]
-                };
+                });
                 let jcc = condition_of(&mut code, condition, loaded).unwrap();
                 code.extend([0x0f, jcc + SET_FROM_JUMP, 0xc0]);
                 code.extend(MOVZX_EAX_AL_RET);
@@ -1576,8 +1592,8 @@ mod tests {
             rax: u64,
             rdx: u64,
         }
-        let run = |body: &dyn Fn(&mut Vec<u8>)| -> Result {
-            let mut code = MOV_RAX_RSI.to_vec();
+        let run = |body: &dyn Fn(&mut Code)| -> Result {
+            let mut code = Code::from(MOV_RAX_RSI.to_vec());
             body(&mut code);
             code.push(RET);
             let mut state = crate::GuestState::default();
@@ -1804,7 +1820,7 @@ mod tests {
             let slot = alloc::boxed::Box::new(page as u64);
             // mov rax,rdi; the check; ret, then the same with the branch
             // always taken, as a misprediction runs it.
-            let mut check = vec![];
+            let mut check = Code::new();
             range.emit_translated(&mut check, &*slot as *const u64 as u64, access);
             let (bytes, ends) = RangeCheck::at(&check).unwrap();
             assert_eq!(bytes, check.len());
@@ -1863,7 +1879,7 @@ mod tests {
             assert!(range.valid());
             assert!(range.masked >= upper - (1 << SLICE_SHIFT) && range.masked < upper);
             assert!(upper - range.masked >= 1 << 35);
-            let mut code = Vec::new();
+            let mut code = Code::new();
             range.emit(&mut code);
             // A bias of 1 (63 slices) is INC, as five-level paging's.
             let ends = if slices == HALF_SLICES - 1 {
@@ -1944,9 +1960,9 @@ mod tests {
             let packed = combined.wrapping_mul(CAPTURE_MULTIPLIER) & CAPTURE_NZCV_MASK;
             assert_eq!(packed, flags << 28, "NZCV {flags:#06b}");
         }
-        let mut code = Vec::new();
+        let mut code = Code::new();
         capture_nzcv(&mut code, false);
-        let mut borrow = Vec::new();
+        let mut borrow = Code::new();
         capture_nzcv(&mut borrow, true);
         // Only the carry's SETcc differs.
         assert_eq!(code.len(), borrow.len());
