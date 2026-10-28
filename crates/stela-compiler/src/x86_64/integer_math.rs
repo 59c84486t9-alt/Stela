@@ -93,6 +93,24 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
     }
     right_operand_with(asm, operand.right, Width::X64, Shift::Lsl, 0);
     match operand.kind {
+        Kind::VariableShift { width, shift }
+            if shift != Shift::Ror
+                && target.supports(TargetCpu::Bmi2)
+                && !target.data_independent_timing() =>
+        {
+            // One flagless uop; SHL r,CL is three on Skylake-family cores. The
+            // count is modulo the width, as Arm's, and a 32-bit result
+            // clears Xd's upper half. The DIT lowering keeps to the audited
+            // CL shifts.
+            let op = match shift {
+                Shift::Lsl => ShiftOp::Shl,
+                Shift::Lsr => ShiftOp::Shr,
+                _ => ShiftOp::Sar,
+            };
+            asm.shift_x(op, size(width), Rax, Rax, Rcx);
+            store_with(asm, operand.destination);
+            return;
+        }
         Kind::VariableShift { width, shift } => {
             // A zero shift must still clear Xd's upper half for a W result,
             // so the W form starts with a zero-extending move.
@@ -305,6 +323,72 @@ mod tests {
                 assert!(!lzcnt(&code(
                     TargetCpu::Lzcnt.with_data_independent_timing()
                 )));
+            }
+        }
+    }
+
+    /// SHLX/SHRX/SARX's VEX opcode byte (map 0F38, opcode F7).
+    fn shift_x(code: &[u8]) -> bool {
+        code.windows(4)
+            .any(|bytes| bytes[0] == 0xc4 && bytes[1] & 0x1f == 2 && bytes[3] == 0xf7)
+    }
+
+    #[test]
+    fn variable_shifts_use_bmi2_except_rotation() {
+        for width in [Width::W32, Width::X64] {
+            for shift in [Shift::Lsl, Shift::Lsr, Shift::Asr, Shift::Ror] {
+                let kind = Kind::VariableShift { width, shift };
+                let code = |target| {
+                    let mut code = Vec::new();
+                    emit(&mut code, &operand(kind), target);
+                    code
+                };
+                let (fast, fallback) = (code(TargetCpu::Bmi2), code(TargetCpu::X86_64_V2));
+                assert!(!shift_x(&fallback));
+                assert_eq!(shift_x(&fast), shift != Shift::Ror, "{kind:?}");
+                if shift == Shift::Ror {
+                    assert_eq!(fast, fallback);
+                }
+            }
+        }
+    }
+
+    /// The variable shifts on the host with and without BMI2, against Arm's
+    /// modulo-width counts.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn variable_shifts_match_on_the_host() {
+        let host = TargetCpu::detect();
+        for target in [TargetCpu::X86_64_V2, TargetCpu::Bmi2] {
+            if !host.supports(target) {
+                continue;
+            }
+            for value in VALUES {
+                for count in [0u64, 1, 31, 32, 33, 63, 64, 65, 0xffff_ffff_ffff_ffc1] {
+                    let narrow = value as u32;
+                    let (w, x) = ((count % 32) as u32, (count % 64) as u32);
+                    for (width, shift, expected) in [
+                        (Width::W32, Shift::Lsl, u64::from(narrow << w)),
+                        (Width::W32, Shift::Lsr, u64::from(narrow >> w)),
+                        (
+                            Width::W32,
+                            Shift::Asr,
+                            u64::from((narrow as i32 >> w) as u32),
+                        ),
+                        (Width::W32, Shift::Ror, u64::from(narrow.rotate_right(w))),
+                        (Width::X64, Shift::Lsl, value << x),
+                        (Width::X64, Shift::Lsr, value >> x),
+                        (Width::X64, Shift::Asr, (value as i64 >> x) as u64),
+                        (Width::X64, Shift::Ror, value.rotate_right(x)),
+                    ] {
+                        let kind = Kind::VariableShift { width, shift };
+                        assert_eq!(
+                            run(kind, target, value, count),
+                            expected,
+                            "{kind:?} {value:#x} {count} {target:?}"
+                        );
+                    }
+                }
             }
         }
     }

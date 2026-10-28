@@ -230,6 +230,17 @@ pub(crate) enum Pp {
     Pf2 = 3,
 }
 
+/// The fields of a VEX prefix besides its registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Vex {
+    pub(crate) map: Map,
+    pub(crate) pp: Pp,
+    /// VEX.W: a 64-bit general-purpose operand size.
+    pub(crate) w: bool,
+    /// VEX.L: 256-bit vectors.
+    pub(crate) l: bool,
+}
+
 /// The displacement field of a rel32 branch, resolved by [`Asm::bind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
@@ -365,18 +376,8 @@ impl<'a> Asm<'a> {
 
     /// A VEX-encoded instruction: two-byte C5 when the fields allow it,
     /// otherwise three-byte C4.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn vex(
-        &mut self,
-        map: Map,
-        pp: Pp,
-        w: bool,
-        l: bool,
-        opcode: u8,
-        reg: u8,
-        vvvv: u8,
-        rm: Rm,
-    ) {
+    pub(crate) fn vex(&mut self, prefix: Vex, opcode: u8, reg: u8, vvvv: u8, rm: Rm) {
+        let Vex { map, pp, w, l } = prefix;
         let (x, b) = rm.extensions();
         let r = reg & 8 != 0;
         let tail = u8::from(l) << 2 | pp as u8 | (!vvvv & 15) << 3;
@@ -766,10 +767,12 @@ impl<'a> Asm<'a> {
             _ => unreachable!("SHLX, SHRX and SARX only"),
         };
         self.vex(
-            Map::M0f38,
-            pp,
-            size == Size::Qword,
-            false,
+            Vex {
+                map: Map::M0f38,
+                pp,
+                w: size == Size::Qword,
+                l: false,
+            },
             0xf7,
             destination.number(),
             count.number(),
@@ -779,10 +782,12 @@ impl<'a> Asm<'a> {
     /// `rorx dst, rm, imm8`: rotate right without flags (BMI2).
     pub(crate) fn rorx(&mut self, size: Size, destination: Gpr, rm: impl Into<Rm>, amount: u8) {
         self.vex(
-            Map::M0f3a,
-            Pp::Pf2,
-            size == Size::Qword,
-            false,
+            Vex {
+                map: Map::M0f3a,
+                pp: Pp::Pf2,
+                w: size == Size::Qword,
+                l: false,
+            },
             0xf0,
             destination.number(),
             0,
