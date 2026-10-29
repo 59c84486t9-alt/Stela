@@ -108,6 +108,19 @@ pub(in crate::engine) unsafe fn check(
     // SAFETY: this is the separately selected genuine raw reservation, never
     // a reinterpretation of production's16-stack pool or unowned metadata.
     let work = unsafe { KernelWork::prepare_plan(handoff, owner, Plan::prototype(handoff)?) }?;
+    let stack_pages = work.task_pages()?;
+    let described = stack_pages.count();
+    if described != cases.iter().filter(|case| case.kernel).count() {
+        return Err(Error::Qualification);
+    }
+    // SAFETY: original UP process-only diagnostic, before producers, with
+    // immutable actual heap/slot allocations and all-root WB mappings retained.
+    let mut catalog = unsafe { stack_pages.register() }?;
+    catalog.verify().map_err(Error::Pages)?;
+    catalog.try_retire().map_err(Error::Pages)?;
+    crate::output::arguments(format_args!(
+        "CHECK native-stack-inventory PASS slots={described} catalog=retired backing=firmware-owned; no C stack or current grant\n"
+    ));
     let retained = work._cpu.reservation.clone();
     let pointer = work.executor.runtime().get_ref() as *const _ as usize;
     for case in &mut cases {

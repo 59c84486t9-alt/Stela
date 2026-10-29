@@ -25,6 +25,8 @@ use stela_drivers::{
 };
 const SLOTS: usize = 64;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
+#[cfg(feature = "diagnostics")]
+mod pages;
 mod pin;
 mod plan;
 use plan::Plan;
@@ -44,6 +46,10 @@ pub(super) enum Error {
     Cache(MemoryError),
     Work(WorkError),
     Qualification,
+    #[cfg(feature = "diagnostics")]
+    NoKernelStacks,
+    #[cfg(feature = "diagnostics")]
+    Pages(stela_drivers::gpu::linux::pages::Error),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -60,6 +66,12 @@ impl core::fmt::Display for Error {
             }
             Self::Work(error) => write!(f, "native continuation admission: {error:?}"),
             Self::Qualification => f.write_str("native continuation identity or stack differs"),
+            #[cfg(feature = "diagnostics")]
+            Self::NoKernelStacks => {
+                f.write_str("actual work pool has no Linux-compatible stack slots")
+            }
+            #[cfg(feature = "diagnostics")]
+            Self::Pages(error) => write!(f, "Linux page catalog: {error:?}"),
         }
     }
 }
@@ -162,6 +174,8 @@ pub(super) struct KernelWork {
     foreground: Range<usize>,
     root: u64,
     busy: Cell<bool>,
+    #[cfg(feature = "diagnostics")]
+    stack_pages: pages::TaskPageInventory,
 }
 /// Owned closure/result storage. It is never made Send/Sync or exposed to an
 /// AP; the real queue checks its BSP before the callback can touch these cells.
@@ -328,6 +342,8 @@ impl KernelWork {
             reservation: reservation.clone(),
             clock,
         });
+        #[cfg(feature = "diagnostics")]
+        let stack_pages = pages::TaskPageInventory::from_spans(reservation.clone(), &spans)?;
         let foreground = spans[0].0.clone();
         let mut stacks = Vec::new();
         stacks
@@ -367,6 +383,8 @@ impl KernelWork {
             foreground,
             root: handoff.root,
             busy: Cell::new(false),
+            #[cfg(feature = "diagnostics")]
+            stack_pages,
         };
         // Qualification enters the owned-call boundary, which acquires the
         // global driver/root guard itself. No mapping walk or table borrower

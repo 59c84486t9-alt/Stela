@@ -144,7 +144,24 @@ pub unsafe fn linux_pages() -> Result<
     stela_drivers::gpu::linux::pages::Catalog<LinuxPages>,
     stela_drivers::gpu::linux::pages::Error,
 > {
-    use stela_drivers::gpu::linux::pages::{Catalog, Error, Reservation};
+    // SAFETY: the original caller supplies the actual initialized heap and
+    // serialized process/root lifetime contract through retirement.
+    let (provider, reservation) = unsafe { linux_page_source() }?;
+    // SAFETY: the same returned provider owns the real source-generation guard.
+    unsafe { stela_drivers::gpu::linux::pages::Catalog::register(provider, reservation) }
+}
+
+/// Retain the actual ordinary heap generation for a composed single catalog.
+///
+/// # Safety
+/// Same actual heap/process/root/IRQ/retirement contract as linux_pages.
+/// Returning coverage alone does not allocate or grant its payload pages.
+#[cfg(not(test))]
+pub(crate) unsafe fn linux_page_source() -> Result<
+    (LinuxPages, stela_drivers::gpu::linux::pages::Reservation),
+    stela_drivers::gpu::linux::pages::Error,
+> {
+    use stela_drivers::gpu::linux::pages::{Error, Reservation};
     let generation = SOURCE.generation.load(Ordering::Acquire);
     let bytes = SOURCE.bytes.load(Ordering::Acquire);
     if generation == 0 || bytes == 0 {
@@ -162,9 +179,7 @@ pub unsafe fn linux_pages() -> Result<
         })
         .map_err(|_| Error::OutOfMemory)?;
     let provider = LinuxPages { generation };
-    // SAFETY: inherited exclusive context/mapping contract; provider owns the
-    // source-generation count through success, failure and quarantine.
-    unsafe { Catalog::register(provider, reservation) }
+    Ok((provider, reservation))
 }
 
 /// Qualify an existing loader reservation through the SAME current mapping
