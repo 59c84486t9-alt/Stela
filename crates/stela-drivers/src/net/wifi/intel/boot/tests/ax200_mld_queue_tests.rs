@@ -41,9 +41,13 @@ fn peer_ready<'a>(
     // SAFETY: original genuine finite-rate provider and native owner model.
     let mut peer =
         unsafe { link.begin_mld_peer(parameters()) }.unwrap_or_else(|_| panic!("MLD peer"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { peer.advance(source) }.unwrap();
     for command in peer.commands().to_vec() {
         complete_mld_peer(&peer, native, &command);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { peer.advance(source) }.unwrap();
         peer.replenish_completed_receive().unwrap();
     }
@@ -145,6 +149,8 @@ fn exercise(bytes: &[u8]) {
         assert_eq!(at_sync.transmit_rates.load(Ordering::SeqCst), 0xfff);
     }));
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) }.unwrap(),
         Ax200ManagementQueuePhase::WaitingAdd
     );
@@ -185,6 +191,8 @@ fn exercise(bytes: &[u8]) {
     records.cpu_sync_fail = Some(records.cpu_syncs + 1);
     drop(records);
     assert!(matches!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) },
         Err(Ax200ManagementQueueError::Boot(Error::CommandReclaim(_)))
     ));
@@ -192,6 +200,8 @@ fn exercise(bytes: &[u8]) {
     assert_eq!(queue.queue_id(), None);
     native.domain.records.lock().unwrap().cpu_sync_fail = None;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) }.unwrap(),
         Ax200ManagementQueuePhase::ManagementFramesRequired
     );
@@ -205,9 +215,13 @@ fn exercise(bytes: &[u8]) {
     let acquired = policy.acquired.load(Ordering::SeqCst);
     native.revoked.store(true, Ordering::SeqCst);
     queue.begin_remove_station().unwrap();
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { queue.advance(&source) }.unwrap();
     emitted(&queue, &native, FLUSH, &[0, 0, 0, 0, 255, 255, 0, 0]);
     completion(&queue, &native, FLUSH, &flush(511));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { queue.advance(&source) }.unwrap();
     queue.replenish_completed_receive().unwrap();
     assert_eq!(queue.phase(), Ax200ManagementQueuePhase::WaitingRemove);
@@ -223,6 +237,8 @@ fn exercise(bytes: &[u8]) {
     emitted(&queue, &native, SCHEDULER, &remove);
     completion(&queue, &native, SCHEDULER, &[]);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) }.unwrap(),
         Ax200ManagementQueuePhase::WaitingStationRemove
     );
@@ -240,6 +256,8 @@ fn exercise(bytes: &[u8]) {
     emitted(&queue, &native, station_remove, &[0; 4]);
     completion(&queue, &native, station_remove, &[]);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) }.unwrap(),
         Ax200ManagementQueuePhase::Removed
     );
@@ -250,10 +268,14 @@ fn exercise(bytes: &[u8]) {
     binding.replenish_completed_receive().unwrap();
     assert_eq!(binding.phase(), Ax200BindingPhase::AuthenticationRequired);
     binding.begin_remove().unwrap();
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { binding.advance(&source) }.unwrap();
     for index in 3..binding.commands().len() {
         let command = binding.commands()[index].clone();
         complete_mld_link(&binding, &native, &command);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(&source) }.unwrap();
         binding.replenish_completed_receive().unwrap();
     }
@@ -284,6 +306,8 @@ fn unknown_scheduler_schema_and_denied_actual_rate_never_allocate_or_publish_que
         let syncs = native.domain.records.lock().unwrap().syncs;
         let bell = native.state.lock().unwrap().registers[&0x460];
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { queue.advance(&source) },
             Err(if version == 3 {
                 Ax200ManagementQueueError::Binding(Ax200BindingError::Regulatory(
@@ -316,12 +340,16 @@ fn reserved_hcmd_queue_and_failed_scheduler_reply_never_grant_queue_ownership() 
         // SAFETY: same original native/provider model.
         let mut queue =
             unsafe { peer.begin_mld_management_queue() }.unwrap_or_else(|_| panic!("queue"));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) }.unwrap();
         let mut bytes = reply(if reserved { 0 } else { 1 });
         if !reserved {
             bytes[2] = 1;
         }
         completion(&queue, &native, SCHEDULER, &bytes);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert!(unsafe { queue.advance(&source) }.is_err());
         assert_eq!(queue.queue_id(), None);
         assert_eq!(queue.phase(), Ax200ManagementQueuePhase::Failed);
@@ -332,6 +360,8 @@ fn reserved_hcmd_queue_and_failed_scheduler_reply_never_grant_queue_ownership() 
         let error = queue.first_error().unwrap().clone();
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { queue.advance(&source) }, Err(error.clone()));
         assert_eq!(queue.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);
@@ -352,8 +382,12 @@ fn scheduler_map_invalidation_failure_after_successful_stop_retains_original_pee
     // SAFETY: same exclusive native/policy epoch.
     let mut queue =
         unsafe { peer.begin_mld_management_queue() }.unwrap_or_else(|_| panic!("queue"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { queue.advance(&source) }.unwrap();
     completion(&queue, &native, SCHEDULER, &reply(1));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { queue.advance(&source) }.unwrap();
     queue.replenish_completed_receive().unwrap();
     let mut records = native.domain.records.lock().unwrap();
@@ -384,14 +418,22 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
         // SAFETY: original exclusive requester and finite actual-policy model.
         let mut queue =
             unsafe { peer.begin_mld_management_queue() }.unwrap_or_else(|_| panic!("queue"));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { queue.advance(&source) }.unwrap();
         if remove {
             completion(&queue, &native, SCHEDULER, &reply(1));
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { queue.advance(&source) }.unwrap();
             queue.replenish_completed_receive().unwrap();
             queue.begin_remove_station().unwrap();
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { queue.advance(&source) }.unwrap();
             completion(&queue, &native, FLUSH, &flush(1));
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { queue.advance(&source) }.unwrap();
             queue.replenish_completed_receive().unwrap();
         }
@@ -409,6 +451,8 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
         }
         .delay(20);
         let error = Ax200ManagementQueueError::Deadline(phase);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { queue.advance(&source) }, Err(error.clone()));
         assert!(queue.memory.as_ref().unwrap().uncertain());
         queue = match queue.into_binding() {
@@ -417,6 +461,8 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
         };
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { queue.advance(&source) }, Err(error.clone()));
         assert_eq!(queue.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);

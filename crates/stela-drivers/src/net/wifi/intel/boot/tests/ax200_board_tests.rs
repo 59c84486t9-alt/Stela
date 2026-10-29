@@ -119,6 +119,8 @@ fn exercise(actual: bool) {
         let mut scan = mcc
             .begin_scan_configuration()
             .unwrap_or_else(|_| panic!("scan"));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         complete(
             &scan.mcc.setup.lari.radio.initialized.boot,
@@ -135,6 +137,8 @@ fn exercise(actual: bool) {
                 &[],
             ),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         sequence += 1;
         entry += 1;
@@ -150,6 +154,8 @@ fn exercise(actual: bool) {
             let mut r = domain.records.lock().unwrap();
             r.sync_fail = Some(r.syncs + 2);
         }
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { board.advance(&source) };
         if case == 1 {
             assert_eq!(result.unwrap(), Ax200BoardPolicyPhase::CountryRequired);
@@ -233,6 +239,8 @@ fn exercise(actual: bool) {
                 if case == 9 {
                     options.clock.delay(20);
                     assert_eq!(
+                        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its
+                        // sole simulated requester domain.
                         unsafe { board.advance(&source) },
                         Err(Ax200BoardPolicyError::Deadline(command.kind()))
                     );
@@ -266,6 +274,8 @@ fn exercise(actual: bool) {
                 if case == 10 {
                     options.clock.delay(20);
                     assert_eq!(
+                        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its
+                        // sole simulated requester domain.
                         unsafe { board.advance(&source) },
                         Err(Ax200BoardPolicyError::Deadline(command.kind()))
                     );
@@ -273,12 +283,16 @@ fn exercise(actual: bool) {
                     break;
                 }
                 assert!(matches!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { board.advance(&source) },
                     Err(Ax200BoardPolicyError::Boot(Error::CommandReclaim(_)))
                 ));
                 assert_eq!(board.ticket(), Some(&original));
                 assert!(board.first_error().is_none());
                 domain.records.lock().unwrap().cpu_sync_fail = None;
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 let result = unsafe { board.advance(&source) };
                 if case == 5 {
                     assert!(matches!(
@@ -316,6 +330,8 @@ fn exercise(actual: bool) {
         if board.first_error().is_some() {
             let original = board.first_error().unwrap().clone();
             let ops = state.lock().unwrap().ops.len();
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             assert_eq!(unsafe { board.advance(&source) }, Err(original));
             assert_eq!(state.lock().unwrap().ops.len(), ops);
         }

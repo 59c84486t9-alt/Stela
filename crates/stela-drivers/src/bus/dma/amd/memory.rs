@@ -350,8 +350,8 @@ mod tests {
             table.clear();
             if source.bytes > TABLE_BYTES {
                 for offset in TABLE_BYTES..source.bytes {
-                    // SAFETY: only the unused tail of this live complete pin.
                     assert_eq!(
+                        // SAFETY: only the unused tail of this live complete pin.
                         unsafe { source.live_cpu().as_ptr().add(offset).read_volatile() },
                         0xa7
                     );
@@ -398,8 +398,8 @@ mod tests {
             assert_eq!(table.read(index), Ok(0));
         }
         for offset in 0..TABLE_BYTES {
-            // SAFETY: bounded actual live CPU storage, with no concurrent writer.
             assert_eq!(
+                // SAFETY: bounded actual live CPU storage, with no concurrent writer.
                 unsafe { source.live_cpu().as_ptr().add(offset).read_volatile() },
                 0
             );
@@ -442,6 +442,8 @@ mod tests {
         // inferred 4K allocation profile merely because allocation exists.
         // SAFETY: Unknown never supplies an allocation or a table alias.
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { TablePage::allocate(&unknown, 48) },
             Err(TableError::Memory(MemoryError::Unavailable))
         ));
@@ -517,9 +519,9 @@ mod tests {
             assert!((cpu.as_ptr() as usize).is_multiple_of(TABLE_BYTES));
             for index in [0, TABLE_ENTRIES - 1] {
                 for (byte, expected) in entry(index).bits().to_le_bytes().into_iter().enumerate() {
-                    // SAFETY: callback borrows this checked live table span;
-                    // no writer runs until it returns, including failure.
                     assert_eq!(
+                        // SAFETY: callback borrows this checked live table span; no writer runs
+                        // until it returns, including failure.
                         unsafe { cpu.as_ptr().add(index * 8 + byte).read_volatile() },
                         expected
                     );

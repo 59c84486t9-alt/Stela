@@ -338,6 +338,8 @@ mod tests {
         // PCI claim passed through NativeIo's public unsafe constructor.
         // There are no concurrent accesses, including atomic operations.
         let mut io = NativeIo {
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             registers: unsafe { Mmio::new(address) },
             clock: Clock {
                 ticks_per_microsecond: 1,

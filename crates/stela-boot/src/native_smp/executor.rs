@@ -176,6 +176,8 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             .expect("AP descriptors")
     };
     let tables_pointer = tables as *const interrupts::Tables;
+    // SAFETY: this AP alone owns `tables`, taken once above, and installs them before any interrupt
+    // or native call.
     unsafe {
         interrupts::install_on(tables, interrupts::interrupt);
     }
@@ -232,12 +234,16 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         // Retain the actual installed private root/control state, not the
         // earlier loader root observed before Host initialization.
         let installed =
+            // SAFETY: CPL0 on the selected AP, after its private descriptors were installed.
             unsafe { firmware::observe() }.map_err(|_| "AP installed-control capture refused")?;
         if installed.cr3 == loader_root || !installed.matches(argument.processor) {
             return Err("AP private root or physical identity differs");
         }
+        // SAFETY: reads this CPU's descriptor registers and RSP and changes nothing.
         let descriptors = unsafe { interrupts::observe() };
         if !(argument.stack_bottom..argument.stack_top).contains(&descriptors.rsp)
+                // SAFETY: `tables` were installed on this AP and live for the rest of its
+                // execution.
             || !unsafe { &*tables_pointer }.matches(descriptors)
         {
             return Err("AP private descriptor or stack differs");
@@ -264,7 +270,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                 if argument.mailbox.poll(&mut owner, &mut worker) {
                     continue;
                 }
-                // STI's interrupt shadow includes HLT: a pending 0x60 wakes
+                // SAFETY: STI's interrupt shadow includes HLT: a pending 0x60 wakes
                 // this AP without a poll-to-sleep lost-notification window.
                 unsafe {
                     asm!("sti", "hlt", "cli", options(nomem, nostack));
@@ -279,6 +285,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             // Host state may not exist after refusal, so keep maskable IRQs
             // disabled rather than route a doorbell into an uninstalled Host.
             loop {
+                // SAFETY: halts this refused AP with maskable interrupts off; it touches no memory.
                 unsafe {
                     asm!("cli", "hlt", options(nomem, nostack));
                 }
@@ -554,8 +561,10 @@ pub(crate) unsafe fn start(
             // timeout or a synthetic READY. Return without reusing any owned
             // AP/low-page resource whose execution remains uncertain.
             if let Some(cause) =
+                // SAFETY: the low startup page stays owned by this bringup until the AP leaves it
+                // or fails.
                 unsafe { bootstrap::failure(layout::physical(physical) as *const u8) }
-                    .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
+                        .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
             {
                 return Err(StartupFailure::EarlyException { slot, cause });
             }

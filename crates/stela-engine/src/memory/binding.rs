@@ -481,6 +481,7 @@ pub(crate) mod tests {
         };
         assert_ne!(ptr, libc::MAP_FAILED);
         let address = ptr as usize as u64;
+        // SAFETY: `ptr` is the reservation `mmap` returned above, released once.
         unsafe { libc::munmap(ptr, bytes) };
         address
     }
@@ -509,6 +510,8 @@ pub(crate) mod tests {
     fn bind_retains_actual_storage_after_facade_drop() {
         let (mut memory, base) = owned();
         memory.write(base, &[42]).unwrap();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 9), &mut [])
         }
@@ -548,6 +551,8 @@ pub(crate) mod tests {
     fn bound_exact_write_preserves_neighbors_and_supports_lifecycle() {
         let (mut memory, base) = owned();
         memory.write(base, &[0xa5; 32]).unwrap();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut []) }
             .unwrap();
         memory.write(base + 7, &[1, 2, 3, 4, 5]).unwrap();
@@ -586,6 +591,8 @@ pub(crate) mod tests {
                 .is_ok()
         );
         assert_eq!(
+            // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+            // reference reaches it.
             unsafe {
                 memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 2), &mut [])
             }
@@ -599,6 +606,8 @@ pub(crate) mod tests {
     fn guest_ro_publisher_uses_same_group_and_retains_both_aliases() {
         let (mut memory, _) = owned();
         let mut owner = published();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             memory.bind_shared_memory(
                 config(MemorySystem::new(16, 8).unwrap(), 3),
@@ -625,6 +634,8 @@ pub(crate) mod tests {
     #[test]
     fn whole_range_bounds_failure_has_no_prefix_effect() {
         let (mut memory, base) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 4), &mut []) }
             .unwrap();
         let end = base + host_page_size().unwrap() as u64;
@@ -651,6 +662,8 @@ pub(crate) mod tests {
         memory.regions[0].virtual_bytes = 16;
         memory.regions.push(second);
         assert_eq!(
+            // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+            // reference reaches it.
             unsafe {
                 memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 5), &mut [])
             }
@@ -670,6 +683,8 @@ pub(crate) mod tests {
         let mut last_mapping_error = None;
         let mut mapped = (0..MAX_MAPPING_ATTEMPTS)
             .find_map(|_| {
+                // SAFETY: each test file is private to this test and stays open for the mapping's
+                // life.
                 let mapped = unsafe {
                     OwnedMemory::map_files(vec![crate::memory::FileMemoryRegionSpec {
                         guest_address: free_address(page),
@@ -696,6 +711,8 @@ pub(crate) mod tests {
                 )
             });
         assert_eq!(
+            // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+            // reference reaches it.
             unsafe {
                 mapped.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 5), &mut [])
             }
@@ -712,6 +729,8 @@ pub(crate) mod tests {
         memory
             .protect_data(base, host_page_size().unwrap() as u64, true, false)
             .unwrap();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 6), &mut []) }
             .unwrap();
         assert!(memory.allocations[0].maximum_writable);
@@ -741,12 +760,16 @@ pub(crate) mod tests {
             }
         }
         let (mut memory, base) = memory.unwrap();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 7), &mut []) }
             .unwrap();
         // Inject an unexpected second-span coherence mismatch into private metadata.
         // Both pages remain live/valid; first span really executes native publication.
         let original_second = Arc::clone(memory.allocations[1].shared_backing.as_ref().unwrap());
         let (mut rival, _) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let other = unsafe {
             rival.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 8), &mut [])
         }
@@ -789,6 +812,8 @@ pub(crate) mod tests {
         let first = 0x5555_5555_aaaa_aaaa_u64;
         let second = !first;
         memory.write(base, &first.to_le_bytes()).unwrap();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 9), &mut []) }
             .unwrap();
         let backing = Arc::clone(memory.allocations[0].shared_backing.as_ref().unwrap());
@@ -931,6 +956,8 @@ pub(crate) mod tests {
             MemoryRequirements, host_caps, profile_requirements,
         };
         let (mut memory, base) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 10), &mut [])
         }

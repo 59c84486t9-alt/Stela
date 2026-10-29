@@ -1684,8 +1684,14 @@ pub(crate) mod tests {
         f.install().unwrap();
         f.boot(Chip::Mt7925);
         f.policy(Chip::Mt7925);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { f.controller.initialize_mac() }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
         f.model.lock().unwrap().client_execution = true;
         f.model.lock().unwrap().key_execution = true;
@@ -1698,6 +1704,8 @@ pub(crate) mod tests {
             drops,
             ..
         } = f;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let driver = unsafe { Client::new(controller, interface) }.unwrap();
         (
             driver,
@@ -1728,6 +1736,8 @@ pub(crate) mod tests {
         let queue = model.queues[&0xd4300].lock().unwrap();
         assert_ne!(queue.index, queue.head);
         let memory = model.memory.lock().unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let desc = unsafe {
             core::slice::from_raw_parts(
                 pointer(&memory, queue.base + u64::from(queue.index) * 16, 16),
@@ -1735,6 +1745,8 @@ pub(crate) mod tests {
             )
         };
         let address = u32::from_le_bytes(desc[..4].try_into().unwrap()) as u64;
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) }.to_vec()
     }
     pub(crate) fn finish_tx_on(model: &Model, channel: u8) -> Vec<Vec<u8>> {
@@ -1746,6 +1758,8 @@ pub(crate) mod tests {
                 assert_eq!(r.roc_channel.or(r.home_channel), Some(channel));
             }
             let memory = model.memory.lock().unwrap();
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             let desc = unsafe {
                 core::slice::from_raw_parts(
                     pointer(&memory, queue.base + u64::from(queue.index) * 16, 16),
@@ -1757,6 +1771,8 @@ pub(crate) mod tests {
                 u32::from_le_bytes(desc[4..8].try_into().unwrap()),
                 (64 << 16) | (1 << 30)
             );
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             let txwi = unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) };
             let token = u16::from_le_bytes(txwi[32..34].try_into().unwrap()) & 0x7fff;
             let wcid = u32::from_le_bytes(txwi[4..8].try_into().unwrap()) & 0xfff;
@@ -1771,6 +1787,8 @@ pub(crate) mod tests {
             let payload_addr = u32::from_le_bytes(txwi[40..44].try_into().unwrap()) as u64;
             let length = u16::from_le_bytes(txwi[44..46].try_into().unwrap());
             assert_ne!(length & 0x8000, 0);
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             let payload = unsafe {
                 core::slice::from_raw_parts(
                     pointer(&memory, payload_addr, usize::from(length & 0xfff)),
@@ -1986,6 +2004,8 @@ pub(crate) mod tests {
             .poll(frontend_tick(2), &Source, &mut Policy(true))
             .unwrap();
         assert_eq!(driver.phase(), ClientPhase::ScanCompleted);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_scan_after_drain() }.unwrap();
         associated(&mut driver, &model, 10);
         let epoch = driver.station().association_epoch().unwrap();
@@ -2056,6 +2076,8 @@ pub(crate) mod tests {
         ));
         driver.disconnect().unwrap();
         assert_eq!(driver.phase(), ClientPhase::NeedsDrain);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         associated(&mut driver, &model, 30);
         assert_ne!(driver.station().association_epoch().unwrap(), epoch);
@@ -2100,11 +2122,15 @@ pub(crate) mod tests {
             Err(ClientError::Data(station::data::Error::Stale))
         ));
         driver.disconnect().unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         driver.stop().unwrap();
         assert_eq!(driver.phase(), ClientPhase::ControllerDrain);
         model.response.lock().unwrap().clc_processing = false;
         model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.stop_after_quiesce() }.unwrap();
         assert_eq!(driver.phase(), ClientPhase::Stopped);
         drop(driver);
@@ -2206,6 +2232,8 @@ pub(crate) mod tests {
             .unwrap();
         driver.disconnect().unwrap();
         assert!(matches!(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { driver.retire_peer_after_drain() },
             Err(ClientError::NeedsDrain)
         ));
@@ -2216,10 +2244,14 @@ pub(crate) mod tests {
             .poll(frontend_tick(10), &Source, &mut Policy(true))
             .unwrap();
         driver.poll_released().unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         driver.stop().unwrap();
         model.response.lock().unwrap().clc_processing = false;
         model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.stop_after_quiesce() }.unwrap();
         drop(driver);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
@@ -2242,6 +2274,8 @@ pub(crate) mod tests {
             .unwrap();
         driver.disconnect().unwrap();
         assert!(matches!(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { driver.retire_peer_after_drain() },
             Err(ClientError::NeedsDrain)
         ));
@@ -2253,10 +2287,14 @@ pub(crate) mod tests {
                 .poll(frontend_tick(11), &Source, &mut Policy(true))
                 .is_err()
         );
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         driver.stop().unwrap();
         model.response.lock().unwrap().clc_processing = false;
         model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.stop_after_quiesce() }.unwrap();
         drop(driver);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
@@ -2328,6 +2366,8 @@ pub(crate) mod tests {
             .poll(frontend_tick(12), &Source, &mut Policy(true))
             .unwrap();
         driver.disconnect().unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         associated(&mut driver, &model, 30);
         driver
@@ -2364,10 +2404,14 @@ pub(crate) mod tests {
                 [Event::Ingress(station::data::Ingress::Data(_))]
             ));
             driver.disconnect().unwrap();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { driver.retire_peer_after_drain() }.unwrap();
             driver.stop().unwrap();
             model.response.lock().unwrap().clc_processing = false;
             model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { driver.stop_after_quiesce() }.unwrap();
             drop(driver);
             assert_eq!(model.drops.load(Ordering::Relaxed), 1);

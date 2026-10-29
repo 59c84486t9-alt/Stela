@@ -1474,6 +1474,8 @@ pub(crate) mod tests {
             ..State::default()
         }));
         let alloc_tx = |state: Arc<Mutex<State>>, is_fwdl| {
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 TxRing::install(
                     DeviceIo {
@@ -1498,6 +1500,8 @@ pub(crate) mod tests {
         let wmring = alloc_tx(wm.clone(), false);
         let fwring = alloc_tx(fwdl.clone(), true);
         let rxring =
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { RxRing::install(Io(rx.clone()), &Source, domain.clone(), 8) }.unwrap();
         {
             let bases = [
@@ -1820,6 +1824,8 @@ pub(crate) mod tests {
             assert!(mailbox.events().is_empty());
             assert_eq!(mailbox.event_bytes, 0);
         }
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { mailbox.release_after_quiesce() }.unwrap();
     }
     #[test]
@@ -1995,6 +2001,8 @@ pub(crate) mod tests {
             }
             // This constructor must reject known pending TX before assuming
             // the caller's otherwise-required fresh firmware-epoch proof.
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let result = unsafe { Mailbox::from_rings(identity, wm, fwdl, rx, clock) };
             assert!(matches!(result, Err(Cause::PendingTransmit)));
             assert_eq!(
@@ -2250,6 +2258,8 @@ pub(crate) mod tests {
         let mut first =
             unsafe { HardwareKey::claim(&a, 7, key_context(), key_scope(false), ()) }.unwrap();
         let mut second =
+            // SAFETY: the test's model owns this key slot alone; no other worker programs the
+            // hardware key.
             unsafe { HardwareKey::claim(&a, 8, key_context(), key_scope(false), ()) }.unwrap();
         assert_eq!(
             first.install(&mut b, 0, Cipher::Ccmp128, &[1; 16], ReplaySeed::ZERO),
@@ -2265,9 +2275,9 @@ pub(crate) mod tests {
             .unwrap();
         let one = first.remove(&mut a).unwrap();
         let two = second.remove(&mut a).unwrap();
-        // SAFETY: old modeled users drained, but deliberately wrong receipt
-        // must still be rejected rather than allowing another key to retire.
         assert_eq!(
+            // SAFETY: old modeled users drained, but deliberately wrong receipt must still be
+            // rejected rather than allowing another key to retire.
             unsafe { first.retire_after_drain(two) },
             Err(KeyError::WrongRemoval)
         );
@@ -2279,6 +2289,8 @@ pub(crate) mod tests {
         // until its own old-user drain proof, never infer drain from the ACK.
         // SAFETY: both independent modeled requester queues actually stopped.
         unsafe { a.release_after_quiesce() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { b.release_after_quiesce() }.unwrap();
     }
     #[test]
@@ -2575,6 +2587,8 @@ pub(crate) mod tests {
             )
         }
         .unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut second = unsafe {
             Interface::claim(
                 &b,
@@ -2590,9 +2604,9 @@ pub(crate) mod tests {
         second.activate(&mut b).unwrap();
         let own = first.deactivate(&mut a).unwrap();
         let other = second.deactivate(&mut b).unwrap();
-        // SAFETY: actual modeled old users drained, but wrong requester receipt
-        // must still be rejected rather than retiring a different actual owner.
         assert_eq!(
+            // SAFETY: actual modeled old users drained, but wrong requester receipt must still be
+            // rejected rather than retiring a different actual owner.
             unsafe { first.retire_after_drain(other) },
             Err(Dev::WrongReceipt)
         );
@@ -2605,6 +2619,8 @@ pub(crate) mod tests {
         assert_eq!(bdrops.load(core::sync::atomic::Ordering::Relaxed), 0);
         // SAFETY: actual modeled requesters/firmware/queues now stopped.
         unsafe { a.release_after_quiesce() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { b.release_after_quiesce() }.unwrap();
         assert_eq!(bdrops.load(core::sync::atomic::Ordering::Relaxed), 0);
     }
@@ -2666,6 +2682,8 @@ pub(crate) mod tests {
             }
             // SAFETY: both actual modeled requesters and queues now stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { other.release_after_quiesce() }.unwrap();
         }
     }
@@ -2922,6 +2940,8 @@ pub(crate) mod tests {
             assert_eq!(wm.lock().unwrap().completed.len(), 768);
             // SAFETY: actual modeled controllers/firmware/all queue users stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { other.release_after_quiesce() }.unwrap();
         }
     }

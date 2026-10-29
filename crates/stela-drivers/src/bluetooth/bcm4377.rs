@@ -509,7 +509,10 @@ mod tests {
     // SAFETY: single-threaded coherent model access is serialized through Model's
     // mutex. This owner retains the actual aligned allocation until its last pin.
     unsafe impl Send for Pages {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Pages {}
+    // SAFETY: `cpu_base` and `physical` describe the one retained, aligned test allocation for its
+    // whole life.
     unsafe impl PageBacking for Pages {
         fn cpu_base(&self) -> NonNull<u8> {
             self.pointer

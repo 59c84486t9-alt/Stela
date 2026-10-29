@@ -181,8 +181,11 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable);
     }
+    // SAFETY: the caller's contract makes this the post-EBS handoff whose sealed capture this
+    // diagnostic owns.
     let wire = stage("capture", unsafe { captured(handoff) })?;
     let root = owner.enter_root().map_err(failed)?;
+    // SAFETY: this BSP's root execution is entered and `wire` is that handoff's sealed capture.
     let (source, session) = stage("authority-activate", unsafe {
         ScopedSource::activate(wire, &root)
     })?;
@@ -208,9 +211,12 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         "CHECK native-stack finite=4 actual_rsp={:#x},{:#x} source=retired parent=clear+TLB; no Linux owner or CPU-time grant\n",
         stacks.rsp[0], stacks.rsp[1]
     ));
+    // SAFETY: the caller's contract gives this diagnostic every IOAPIC; no firmware, SMM or other
+    // CPU touches them.
     let ioapics = stage("ioapic-claim", unsafe { source.claim_ioapics() })?;
     let irq = stage(
         "irq-root-attach",
+        // SAFETY: the driver execution owns interrupt delivery and the claimed IOAPICs.
         unsafe {
             crate::native_irq::root::Root::attach(&execution, source.authority(), source.madt())
         }
@@ -221,7 +227,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
             failed(error)
         }),
     )?;
-    // Actual original MCFG and RootBridge bus membership bind this resource;
+    // SAFETY: Actual original MCFG and RootBridge bus membership bind this resource;
     // read one vendor word through the newly installed UC leaf, then retire.
     let (window, ecam) = stage("ecam-claim", unsafe { source.claim_ecam(0, 0..=0) })?;
     let mut mapping = stage(
@@ -235,6 +241,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         ),
     )?;
     let cpu = mapping.address(0, 4)?;
+    // SAFETY: `cpu` maps the claimed ECAM page uncached and readable for `mapping`'s lifetime.
     let vendor = unsafe { cpu.cast::<u32>().as_ptr().read_volatile() };
     if vendor == 0 || vendor == u32::MAX {
         return Err(Error::MappingFailed);
@@ -249,6 +256,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         asm!("mov cr3, {}", in(reg) handoff.root, options(nostack, preserves_flags));
     }
     let foreign_root_refused = mapping.address(0, 4).is_err();
+    // SAFETY: restores this CPU's own root and the flags saved before the switch.
     unsafe {
         asm!("mov cr3, {}", in(reg) previous, options(nostack, preserves_flags));
         cpu_view.restore(saved);
@@ -268,6 +276,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
     ) {
         return Err(Error::InvalidPlatformReply);
     }
+    // SAFETY: no pointer from `mapping` is used after its retirement.
     unsafe { mapping.retire() }?;
     if mapping.address(0, 4) != Err(Error::Retired) {
         return Err(Error::InvalidPlatformReply);
@@ -281,10 +290,12 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         CacheAttribute::Uncached,
         Protection::ReadOnly,
     )?;
+    // SAFETY: `reused` maps the claimed ECAM page uncached and readable while it lives.
     let repeated = unsafe { reused.address(0, 4)?.cast::<u32>().as_ptr().read_volatile() };
     if repeated != vendor {
         return Err(Error::MappingFailed);
     }
+    // SAFETY: no pointer from `reused` is used after its retirement.
     unsafe { reused.retire() }?;
     source.verify_only_hpet(counter.owner().map_err(failed)?)?;
     let status = source.authority().status()?;

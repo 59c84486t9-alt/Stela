@@ -254,6 +254,8 @@ mod tests {
     fn enablement_transitions_are_explicit() {
         let mut thread = Thread::new();
         let none = GuestState::default();
+        // SAFETY: the guest operands address this test's own live buffers, which are host memory of
+        // this process.
         unsafe {
             assert_eq!(
                 thread.complete(&instruction(Fma32, 0), &none, None),
@@ -291,6 +293,8 @@ mod tests {
         let mut thread = Thread::new();
         let source: [u8; 64] = core::array::from_fn(|index| index as u8);
         let mut destination = [0u8; 64];
+        // SAFETY: the guest operands address this test's own live buffers, which are host memory of
+        // this process.
         unsafe {
             thread
                 .complete(&instruction(Set, 0), &GuestState::default(), None)
@@ -339,6 +343,8 @@ mod tests {
         for kernel in Kernel::ALL {
             let mut native = Thread::new();
             let mut model = Thread::new();
+            // SAFETY: the guest operands address this test's own live buffers, which are host
+            // memory of this process.
             unsafe {
                 native
                     .complete(&instruction(Set, 0), &GuestState::default(), None)
@@ -360,6 +366,8 @@ mod tests {
                     | u64::from(kernel.product_only) << 27
                     | u64::from(kernel.shape == stela_compiler::x86_64::amx::Shape::Vector) << 63;
                 let operation = instruction(kernel.operation(), 0);
+                // SAFETY: the guest operands address this test's own live buffers, which are host
+                // memory of this process.
                 unsafe {
                     assert_eq!(
                         native.complete(&operation, &state(operand), Some(&kernels)),

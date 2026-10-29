@@ -137,6 +137,7 @@ mod tests {
 
     fn installed(seed: TransmitSeed) -> (KeySlot, KeyIdentity) {
         // Pure model: no physical slot, DMA or deferred users exist.
+        // SAFETY: this test owns the key slot number alone.
         let mut slot = unsafe { KeySlot::new(7).unwrap() };
         let ticket = slot
             .begin_install(
@@ -276,6 +277,7 @@ mod tests {
 
     #[test]
     fn unacknowledged_key_cannot_reserve_a_nonce() {
+        // SAFETY: this test owns the key slot number alone.
         let mut slot = unsafe { KeySlot::new(7).unwrap() };
         let ticket = slot
             .begin_install(

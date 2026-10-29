@@ -244,8 +244,8 @@ fn failed_visibility_or_invalidation_retains_exact_mapping_for_retry() {
     model.sync_failure.store(false, Ordering::Relaxed);
     backing.publish().unwrap();
     model.unmap_failure.store(true, Ordering::Relaxed);
-    // SAFETY: no actual hardware/GGTT/user exists in this synchronous model.
     assert_eq!(
+        // SAFETY: no actual hardware/GGTT/user exists in this synchronous model.
         unsafe { backing.retire() },
         Err(Error::Dma(DmaError::InvalidationFailed))
     );

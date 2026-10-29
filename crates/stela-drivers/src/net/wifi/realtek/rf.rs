@@ -356,6 +356,8 @@ mod tests {
     #[test]
     fn masks_paths_and_values_reject_before_io_without_poisoning_valid_state() {
         let (m, mut io, report) = setup(true);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
         let before = m.lock().unwrap().calls;
         assert_eq!(rf.read(Path::B, 0, RF_MASK), Err(Error::UnsupportedPath));
@@ -384,11 +386,15 @@ mod tests {
         ] {
             let (m, mut io, report) = setup(false);
             m.lock().unwrap().set(register, width, value);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { Registers::new(&mut io, &report) }.is_err());
             assert_eq!(m.lock().unwrap().quarantined, 1);
         }
         for op in 0..3 {
             let (m, mut io, report) = setup(false);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             m.lock().unwrap().set(BASE[1], 4, u32::MAX);
             let failed = match op {
@@ -422,6 +428,8 @@ mod tests {
             m.set(REG_RF_CTRL, 1, 255);
             m.set(REG_WLRF1, 4, u32::MAX);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         drop(unsafe { Registers::new(&mut io, &report) }.unwrap());
         assert_eq!(m.lock().unwrap().quarantined, 0);
     }
@@ -429,6 +437,8 @@ mod tests {
     fn every_io_failure_and_late_identity_loss_quarantines_real_control_borrow() {
         let (m, mut io, report) = setup(false);
         {
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             rf.read(Path::A, 0x18, RF_MASK).unwrap();
             rf.write(Path::A, 0, RF_MASK, 0x12345).unwrap();
@@ -440,6 +450,8 @@ mod tests {
             let (m, mut io, report) = setup(false);
             m.lock().unwrap().fail = Some(at);
             let result = (|| {
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 let mut rf = unsafe { Registers::new(&mut io, &report) }?;
                 rf.read(Path::A, 0x18, RF_MASK)?;
                 rf.write(Path::A, 0, RF_MASK, 0x12345)?;
@@ -450,6 +462,8 @@ mod tests {
             assert!(m.lock().unwrap().quarantined >= 1, "operation {at}");
         }
         let (m, mut io, report) = setup(false);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
         let calls = m.lock().unwrap().calls;
         // Five pre-read guard observations + actual RF read, then the final
@@ -536,6 +550,8 @@ mod tests {
         let report = super::super::features::read(&mut io).unwrap();
         bar.set(BASE[1] + 0x18 * 4, 0xf1234567);
         {
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             rf.write(Path::B, 0x18, 0x3f0, 0x2a).unwrap();
             assert_eq!(
@@ -552,6 +568,8 @@ mod tests {
         assert!(!quarantined.load(Ordering::SeqCst));
         bar.set(BASE[1], u32::MAX);
         {
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             assert!(matches!(
                 rf.read(Path::B, 0, RF_MASK),
@@ -586,6 +604,8 @@ mod tests {
                 m.set(BASE[p as usize] + a * 4, 4, old);
                 m.events.clear();
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
             let before = rf.read(path, a as u8, mask).unwrap();
             rf.write(path, a as u8, RF_MASK, full).unwrap();

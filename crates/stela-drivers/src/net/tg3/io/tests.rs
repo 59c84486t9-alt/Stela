@@ -132,6 +132,8 @@ fn invalid_first_or_second_window_returns_both_exact_original_owners_without_eff
             .lock()
             .unwrap();
         for cell in actual.mac.iter().chain(actual.ape.iter()) {
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             assert_eq!(unsafe { cell.get().read_volatile() }, 0);
         }
         drop(actual);

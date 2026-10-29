@@ -103,8 +103,8 @@ impl Remappers {
         let (dmar, ivrs, inventories) = {
             // SAFETY: forwarded; the loader root maps the tables and ECAM.
             let _root = unsafe { RestoreRoot::enter(root) };
-            // SAFETY: the firmware's RSDP, whose tables the loader root maps.
             let find = |signature| {
+                // SAFETY: the firmware's RSDP, whose tables the loader root maps.
                 unsafe { acpi::find(rsdp, signature) }
                     .ok()
                     .map(<[u8]>::to_vec)

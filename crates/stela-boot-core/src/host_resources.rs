@@ -396,8 +396,8 @@ mod tests {
                 physical: RAW.as_ptr() as u64,
                 bytes: RAW.len() as u64,
             };
-            // SAFETY: these immutable static fixture aliases cover every byte.
             assert_eq!(
+                // SAFETY: these immutable static fixture aliases cover every byte.
                 unsafe { resources.catalog(|address| address, None, |_| {}) }
                     .err()
                     .unwrap(),
@@ -464,8 +464,8 @@ mod tests {
         );
         assert_eq!(catalog.inventory(), (1, raw.len()));
         resources.smbios.region.bytes = (host::MAX_ENTRY_BYTES + host::MAX_TABLE_BYTES + 1) as u64;
-        // SAFETY: invalid wire must refuse before invoking any mapper.
         assert_eq!(
+            // SAFETY: invalid wire must refuse before invoking any mapper.
             unsafe {
                 resources.catalog(|_| panic!("over-bound SMBIOS must not map"), None, |_| {})
             }
@@ -474,8 +474,8 @@ mod tests {
         );
         resources = copied;
         resources.smbios.sha256[0] ^= 1;
-        // SAFETY: same complete static fixture with intentionally wrong digest.
         assert_eq!(
+            // SAFETY: same complete static fixture with intentionally wrong digest.
             unsafe {
                 resources.catalog(
                     |address| address - 0x1000 + raw.as_ptr() as u64,
@@ -506,8 +506,8 @@ mod tests {
                     bytes: over,
                 },
             };
-            // SAFETY: invalid bounds must be rejected before creating a view.
             assert_eq!(
+                // SAFETY: invalid bounds must be rejected before creating a view.
                 unsafe {
                     resources.catalog(|_| panic!("over-limit wire must not map"), None, |_| {})
                 }
@@ -586,8 +586,8 @@ mod tests {
         );
         assert_eq!(catalog.inventory(), (1, 14));
         resources.wifi[0].region.bytes = 13;
-        // SAFETY: the same static mapping; invalid wire length must be rejected.
         assert!(
+            // SAFETY: the same static mapping; invalid wire length must be rejected.
             unsafe {
                 resources.catalog(
                     |address| address - 0x1000 + RAW.as_ptr() as u64,
@@ -603,8 +603,8 @@ mod tests {
             status: 0,
             reported_bytes: Some(15),
         };
-        // SAFETY: invalid failed-with-region metadata is rejected before mapping.
         assert!(
+            // SAFETY: invalid failed-with-region metadata is rejected before mapping.
             unsafe { resources.catalog(|_| panic!("failed resources must not map"), None, |_| {}) }
                 .is_err()
         );
@@ -615,8 +615,8 @@ mod tests {
             probe_reported_bytes: Some(u64::MAX),
         };
         resources.wifi[0].region.bytes = u64::MAX;
-        // SAFETY: the wire budget is checked before any slice/map operation.
         assert!(
+            // SAFETY: the wire budget is checked before any slice/map operation.
             unsafe { resources.catalog(|_| panic!("oversized wire must not map"), None, |_| {}) }
                 .is_err()
         );

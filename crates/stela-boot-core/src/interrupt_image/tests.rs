@@ -30,7 +30,9 @@ fn hardware_frame_copy_and_return_are_disjoint_from_the_retained_image() {
     let location = location(&backing);
     // SAFETY: isolated initialized test allocation and complete test save.
     unsafe { initialize(&backing, location) };
+    // SAFETY: the backing was initialized above and holds a complete test save.
     let mut captured = unsafe { backing.capture(location) }.unwrap();
+    // SAFETY: `location` addresses the frame slot inside this test's live backing.
     let frame = unsafe {
         backing
             .as_mut_ptr()
@@ -39,6 +41,7 @@ fn hardware_frame_copy_and_return_are_disjoint_from_the_retained_image() {
     };
     // A same-slot terminal hardware overwrite touches only the original Frame.
     // This test proves memory separation, not resumable nested IRQ handling.
+    // SAFETY: `frame` points at the backing's saved frame, which outlives this write.
     unsafe {
         frame.write(Frame {
             rip: 0xdead,
@@ -49,6 +52,7 @@ fn hardware_frame_copy_and_return_are_disjoint_from_the_retained_image() {
     assert!(captured.image.iter().all(|byte| *byte == 0x5a));
     captured.frame.rip = 0x5678;
     captured.writeback();
+    // SAFETY: `frame` points at the backing's saved frame, which outlives this read.
     assert_eq!(unsafe { frame.read() }.rip, 0x5678);
 }
 #[test]
@@ -103,11 +107,14 @@ fn terminal_backing_never_reuses_an_ordinary_saved_image() {
     let terminal = Backing::<BYTES>::new();
     let first = location(&ordinary);
     let second = location(&terminal);
+    // SAFETY: each backing is this test's isolated allocation, initialized once.
     unsafe {
         initialize(&ordinary, first);
         initialize(&terminal, second)
     };
+    // SAFETY: the backing was initialized above and holds a complete test save.
     let retained = unsafe { ordinary.capture(first) }.unwrap();
+    // SAFETY: the backing was initialized above and holds a complete test save.
     let stopped = unsafe { terminal.capture(second) }.unwrap();
     assert_ne!(retained.image.as_ptr(), stopped.image.as_ptr());
     assert!(retained.image.iter().all(|byte| *byte == 0x5a));

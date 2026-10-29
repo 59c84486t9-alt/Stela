@@ -95,6 +95,8 @@ pub(super) fn parts_5761(
 }
 pub(super) fn attach_5761() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
     let (hardware, pages, domain, peer) = parts_5761(0x1680);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Ok(packet) => packet,
         Err((e, _)) => panic!("5761 attach {e:?}"),
@@ -139,6 +141,8 @@ fn actual_5761_all_source_flash_straps_and_device_ids_use_direct_mac_offset() {
             p.nvram.insert(0x7c, 0x0211);
             p.nvram.insert(0x80, 0x2233_4455);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(packet) => packet,
             Err((e, _)) => panic!("strap {strap:x} {e:?}"),
@@ -214,6 +218,8 @@ fn actual_5761_unsupported_board_media_management_clock_or_nvram_never_publish_d
                 }
             }
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (_, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Err(value) => value,
             Ok(_) => panic!("fault {fault} admitted"),
@@ -307,6 +313,8 @@ fn actual_5761_required_clock_and_fifo_readback_failures_never_allow_packet_io()
     for at in [0x360c, 0x4900, 0x245c] {
         let (hardware, pages, domain, peer) = parts_5761(0x1680);
         peer.lock().unwrap().ignore_write = Some(at);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
         {
             Err(value) => value,
@@ -333,6 +341,8 @@ fn actual_5761_required_clock_and_fifo_readback_failures_never_allow_packet_io()
 fn actual_5761_changed_postreset_profile_and_unmap_failure_keep_original_owner() {
     let (hardware, pages, domain, peer) = parts_5761(0x1680);
     peer.lock().unwrap().reset_nvram = Some(0x0080_0000);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let (error, packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Err(value) => value,
         Ok(_) => panic!("changed source NVM profile attached"),
@@ -384,6 +394,8 @@ fn actual_phy_reset_uncertainty_poison_retains_original_owner_before_any_allocat
             _ => parts_5761(0x1680),
         };
         peer.lock().unwrap().phy_stuck = true;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
         {
             Err(value) => value,
@@ -429,6 +441,8 @@ fn unchanged_linux_5761_initialization_selections_match_actual_retained_packet_o
             p.mac.insert(0x4900, reserve);
             p.mac.insert(0x360c, clock);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(packet) => packet,
             Err((e, _)) => panic!("source case {strap:x}/{reserve:x}/{clock:x}: {e:?}"),

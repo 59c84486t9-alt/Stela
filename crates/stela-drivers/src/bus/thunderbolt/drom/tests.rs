@@ -598,8 +598,9 @@ fn native_drom_clock_admission_precedes_uid_or_any_router_operation() {
             cursor,
             ..
         } = f;
-        // SAFETY: same actual isolated native CM; invalid native clock budget must refuse before I/O.
         assert!(matches!(
+            // SAFETY: same actual isolated native CM; invalid native clock budget must refuse
+            // before I/O.
             unsafe { Read::new(channel, owner, cursor.now) },
             Err(Error::TimerBudget {
                 microseconds: MAX_DURATION_US

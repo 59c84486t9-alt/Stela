@@ -668,6 +668,8 @@ mod tests {
     }
     impl Drop for Page {
         fn drop(&mut self) {
+            // SAFETY: the pointer came from the matching allocation with this layout and is freed
+            // once.
             unsafe { dealloc(self.pointer.as_ptr(), self.layout) }
         }
     }
@@ -697,6 +699,7 @@ mod tests {
             );
             let layout = Layout::from_size_align(4096, 4096).unwrap();
             let pointer =
+                // SAFETY: the layout has a nonzero size.
                 NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
             PinnedPages::new(
                 Box::new(Page {
@@ -825,6 +828,8 @@ mod tests {
     fn original_state_identity_owned_pinning_and_known_retirement() {
         let (config, owner, source, domain, c) = inputs();
         let id = owner.identity;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut d = unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }
             .unwrap();
         assert_eq!(d.identity(), Some(id));
@@ -857,6 +862,8 @@ mod tests {
                 _ => unreachable!(),
             }
             let result =
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) };
             BUDGET.with(|b| b.set(None));
             assert!(result.is_err());
@@ -894,11 +901,14 @@ mod tests {
     #[test]
     fn real_allocation_counter_refusal_retains_every_owner_and_can_retry() {
         let (config, owner, source, domain, c) = inputs();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut d = unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }
             .unwrap();
         let state = d.bundle.as_ref().unwrap().state.raw();
         let (mut pa, mut allocation) = (0, core::ptr::null_mut());
         assert_eq!(
+            // SAFETY: `state` is this test's prepared device, and the out pointers are live locals.
             unsafe { nv_alloc_pages(state, 1, 4096, 0, 0, 1, 0, -1, &mut pa, &mut allocation) },
             0
         );
@@ -906,6 +916,8 @@ mod tests {
         assert!(matches!(d.retire(), Err(Error::Services(_))));
         assert_eq!(c.values(), [0; 5]);
         assert!(d.identity().is_some());
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         assert_eq!(unsafe { nv_free_pages(state, 1, 0, 0, allocation) }, 0);
         d.retire().unwrap();
         assert_eq!(c.values(), [1, 1, 1, 1, 3]);
@@ -913,6 +925,8 @@ mod tests {
     #[test]
     fn drop_uncertainty_retains_whole_owned_bundle_without_extending_borrows() {
         let (config, owner, source, domain, c) = inputs();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut d = unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }
             .unwrap();
         c.context.store(false, Ordering::SeqCst);
@@ -928,17 +942,22 @@ mod tests {
         let (config, owner, source, domain, c) = inputs();
         c.lose_context.store(true, Ordering::SeqCst);
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) },
             Err(Error::Context(-77))
         ));
         assert_eq!(c.reads.load(Ordering::SeqCst), 16);
         assert_eq!(c.values(), [0; 5]);
         let (config, owner, source, domain, c) = inputs();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut d = unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }
             .unwrap();
         let state = d.bundle.as_ref().unwrap().state.raw();
         let (mut pa, mut allocation) = (0, core::ptr::null_mut());
         assert_eq!(
+            // SAFETY: `state` is this test's prepared device, and the out pointers are live locals.
             unsafe { nv_alloc_pages(state, 1, 4096, 0, 0, 1, 0, -1, &mut pa, &mut allocation) },
             0
         );
@@ -948,6 +967,8 @@ mod tests {
         // This test-only retained token is the actual allocation produced above.
         // Its successful real free after Drop exercises still-live State/services,
         // source and domain, rather than merely observing leaked bookkeeping.
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         assert_eq!(unsafe { nv_free_pages(state, 1, 0, 0, allocation) }, 0);
         assert_eq!(c.values(), [0; 5]);
     }
@@ -955,6 +976,8 @@ mod tests {
     fn actual_configured_geometry_refusal_precedes_allocation_and_binding() {
         let (config, owner, source, domain, c) = inputs();
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { PreparedDevice::prepare(config, owner, source, domain, 13, u64::MAX) },
             Err(Error::Services(_))
         ));
@@ -968,6 +991,8 @@ mod tests {
         config.words[0] ^= 1;
         c.lose_context.store(true, Ordering::SeqCst);
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) },
             Err(Error::Context(-77))
         ));
@@ -978,6 +1003,8 @@ mod tests {
             c.geometry_failure.store(failure, Ordering::SeqCst);
             BUDGET.with(|b| b.set(Some(2)));
             let result =
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) };
             BUDGET.with(|b| {
                 assert_eq!(
@@ -1005,6 +1032,8 @@ mod tests {
             c.metadata_loss.store(loss, Ordering::SeqCst);
             BUDGET.with(|b| b.set(Some(2)));
             assert!(matches!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) },
                 Err(Error::Context(-77))
             ));
@@ -1032,6 +1061,8 @@ mod tests {
                 c.lose_at.store(word * 4, Ordering::SeqCst);
                 c.recover_on_check.store(transient, Ordering::SeqCst);
                 assert!(matches!(
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) },
                     Err(Error::Context(-77))
                 ));
@@ -1049,12 +1080,18 @@ mod tests {
     }
     // Test-only projection; the public PreparedDevice exposes no C pointer.
     fn handle(d: &mut PreparedDevice<Config>) -> *mut c_void {
+        // SAFETY: the test only reads fields through this reference and never moves the pinned
+        // bundle.
         let this = unsafe { d.bundle.as_mut().unwrap().as_mut().get_unchecked_mut() };
+        // SAFETY: the PCI owner stays pinned inside the bundle, and this test holds the only
+        // reference to it.
         unsafe { Pin::new_unchecked((&mut *this.pci.get()).as_mut().unwrap()).as_raw() }
     }
     #[test]
     fn actual_pci_callback_failures_widths_and_latched_uncertainty() {
         let (config, owner, source, domain, c) = inputs();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut d = unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }
             .unwrap();
         // A context refusal before any effect can be retried in the valid context.
@@ -1066,9 +1103,12 @@ mod tests {
         for failure in 0..=2 {
             let (config, owner, source, domain, c) = inputs();
             let mut d =
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }
                     .unwrap();
             let h = handle(&mut d);
+            // SAFETY: `h` is this test's model PCI handle, and `out` is a live local.
             assert_eq!(unsafe { os_pci_write_byte(h, 0x40, 0xa5) }, 0);
             assert_eq!(
                 (
@@ -1077,6 +1117,7 @@ mod tests {
                 ),
                 (1, 0xa5)
             );
+            // SAFETY: `h` is this test's model PCI handle, and `out` is a live local.
             assert_eq!(unsafe { os_pci_write_word(h, 0x42, 0x8abc) }, 0);
             assert_eq!(
                 (
@@ -1085,6 +1126,7 @@ mod tests {
                 ),
                 (2, 0x8abc)
             );
+            // SAFETY: `h` is this test's model PCI handle, and `out` is a live local.
             assert_eq!(unsafe { os_pci_write_dword(h, 0x44, 0x81234567) }, 0);
             assert_eq!(
                 (
@@ -1104,14 +1146,17 @@ mod tests {
                 c.write_loss.store(true, Ordering::SeqCst);
                 c.recover_on_check.store(true, Ordering::SeqCst);
             }
+            // SAFETY: `h` is this test's model PCI handle, and `out` is a live local.
             assert_ne!(unsafe { os_pci_write_dword(h, 0x48, 0xabcdef01) }, 0);
             let reads = c.reads.load(Ordering::SeqCst);
             let writes = c.writes.load(Ordering::SeqCst);
             assert_eq!(writes, if failure == 1 { 3 } else { 4 });
             c.context.store(true, Ordering::SeqCst);
             let mut out = 0x12345678;
+            // SAFETY: `h` is this test's model PCI handle, and `out` is a live local.
             assert_ne!(unsafe { os_pci_read_dword(h, 0, &mut out) }, 0);
             assert_eq!(out, u32::MAX); // Original C shim's explicit failed-read output.
+            // SAFETY: `h` is this test's model PCI handle, and `out` is a live local.
             assert_ne!(unsafe { os_pci_write_dword(h, 0x48, 0) }, 0);
             assert_eq!(c.reads.load(Ordering::SeqCst), reads);
             assert_eq!(c.writes.load(Ordering::SeqCst), writes);

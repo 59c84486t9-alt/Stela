@@ -958,9 +958,9 @@ mod tests {
             let td = self.active.remove(&(dci, stream)).unwrap();
             if matches!(code, SUCCESS | SHORT_PACKET) && residual <= td.bytes {
                 let n = td.bytes - residual;
-                // SAFETY: the exact real submitted DMA range is retained;
-                // only device model accesses it before the event below.
                 if dci & 1 != 0 {
+                    // SAFETY: the exact real submitted DMA range is retained; only device model
+                    // accesses it before the event below.
                     unsafe { core::ptr::write_bytes(td.buffer as *mut u8, stream as u8, n) };
                 }
             }

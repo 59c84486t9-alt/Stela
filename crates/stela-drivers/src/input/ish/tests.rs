@@ -350,10 +350,14 @@ struct Peer {
 impl Peer {
     fn raw_read(&self, at: u32) -> u32 {
         let p = self.view.address(at as usize, 4).unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { p.as_ptr().cast::<u32>().read_volatile() }
     }
     fn raw_write(&self, at: u32, v: u32) {
         let p = self.view.address(at as usize, 4).unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { p.as_ptr().cast::<u32>().write_volatile(v) }
     }
     fn deliver(&self) {
@@ -370,6 +374,8 @@ impl Peer {
             return;
         }
         self.callbacks.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert!(unsafe { &*r }.dispatch(self.vector.load(Ordering::Acquire)));
         self.in_callback.store(false, Ordering::Release);
         if !self.state.lock().unwrap().ignore_pimr {
@@ -743,6 +749,8 @@ fn inputs() -> Parts {
         peer: peer.clone(),
     };
     let function = Function::new(address, config).unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let registers = unsafe { MappedRegisters::new(mapping) }
         .map_err(|(e, _)| e)
         .unwrap();
@@ -767,6 +775,8 @@ fn inputs() -> Parts {
 }
 fn prepared() -> Fixture {
     let (i, peer, config_counts, bar_counts) = inputs();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let driver = unsafe { Native::new(i) }.map_err(|(e, _)| e).unwrap();
     Fixture {
         driver,
@@ -928,6 +938,8 @@ fn actual_profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dm
             _ => peer.raw_write(FWSTS, 0x4000 | IN_DMA),
         }
         let before = peer.state.lock().unwrap().events.len();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut original) = match unsafe { Native::new(i) } {
             Err(v) => v,
             Ok(_) => panic!("invalid profile admitted"),

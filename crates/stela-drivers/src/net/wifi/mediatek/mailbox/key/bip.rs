@@ -631,8 +631,9 @@ mod tests {
             Err(security::Error::Replay)
         ));
         key.authorize(&key_packet(gtk, 10)).unwrap();
-        // SAFETY: unchanged actual drained namespace; identical retry must preserve advanced management IPN.
         assert_eq!(
+            // SAFETY: unchanged actual drained namespace; identical retry must preserve advanced
+            // management IPN.
             unsafe {
                 key.install_igtk(
                     &mut mailbox,
@@ -735,8 +736,9 @@ mod tests {
         .unwrap();
         assert_eq!(retry, installed);
         assert_eq!(key.igtk_receive_floor().unwrap().value(), 100);
-        // SAFETY: no external model key users; different live initial-batch material is refused.
         assert!(matches!(
+            // SAFETY: no external model key users; different live initial-batch material is
+            // refused.
             unsafe {
                 key.install_igtk(
                     &mut mailbox,
@@ -785,8 +787,8 @@ mod tests {
             }
             .unwrap();
             let empty = wm.lock().unwrap().completed.len();
-            // SAFETY: no model key users; absence of a GTK must fail before publication.
             assert!(
+                // SAFETY: no model key users; absence of a GTK must fail before publication.
                 unsafe {
                     key.install_igtk(
                         &mut mailbox,
@@ -825,8 +827,8 @@ mod tests {
                         crate::net::wifi::mediatek::mcu::key::Error::InvalidKeyLength,
                     )
                 };
-                // SAFETY: every actual initial descriptor/ACK drained, no external model users.
                 assert_eq!(
+                    // SAFETY: every actual initial descriptor/ACK drained, no external model users.
                     unsafe {
                         key.install_igtk(
                             &mut mailbox,
@@ -918,8 +920,9 @@ mod tests {
                 2 => response.lock().unwrap().unsolicited = true,
                 _ => response.lock().unwrap().drop = true,
             }
-            // SAFETY: actual model initial key request is drained; late/invalid ACK must quarantine.
             assert!(
+                // SAFETY: actual model initial key request is drained; late/invalid ACK must
+                // quarantine.
                 unsafe {
                     key.install_igtk(
                         &mut mailbox,

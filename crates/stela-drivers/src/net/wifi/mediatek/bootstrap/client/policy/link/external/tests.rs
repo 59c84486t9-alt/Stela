@@ -118,8 +118,8 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
         let memory = model.memory.lock().unwrap();
         let offset = usize::from((queue.index + queue.count - 1) % queue.count) * 16;
         let pointer = (memory.mappings[&queue.base].1 + offset) as *const u8;
-        // SAFETY: same retained actual model descriptor as the snapshot above.
         assert_eq!(
+            // SAFETY: same retained actual model descriptor as the snapshot above.
             unsafe { core::slice::from_raw_parts(pointer, 16) },
             before.2
         );

@@ -165,6 +165,8 @@ pub(super) unsafe fn check(
             source::BYTES,
         )
     };
+    // SAFETY: the loader reserved this scratch range for the boot and zeroed it above; nothing else
+    // reaches it.
     let ram = unsafe { super::super::canonical::reserve(handoff, &[range]) }?;
     // SAFETY: before any frame, guest entry or other publisher; this exact
     // registered allocation is retained by the following Machine.
@@ -291,8 +293,11 @@ pub(super) unsafe fn check(
     {
         return Err("cold complete frame/data/writeback/retirement mismatch");
     }
+    // SAFETY: no device read is pending, so this only checks that a completion is refused.
     if unsafe { machine.complete_device_read() }.is_ok()
         || machine.devices.reads != 3
+            // SAFETY: this machine alone owns the registered RAM, with no DMA or other writer
+            // admitted.
         || unsafe { machine.native_round() }.is_ok()
         || machine
             .devices

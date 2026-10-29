@@ -380,7 +380,7 @@ mod tests {
                 .as_ref()?
                 .resolve(address, 1, AccessKind::Read)
                 .ok()?;
-            // No native execution or other writer exists in this test owner;
+            // SAFETY: No native execution or other writer exists in this test owner;
             // resolution retains the actual view/backing for the access.
             Some(unsafe { access.host_ptr().as_ptr().read() })
         }
@@ -391,7 +391,7 @@ mod tests {
                 .unwrap()
                 .resolve(address, 1, AccessKind::Write)
                 .unwrap();
-            // This test exclusively owns the backing and no access overlaps
+            // SAFETY: This test exclusively owns the backing and no access overlaps
             // mutation, remapping or retirement. No executable view exists.
             unsafe {
                 access.host_ptr().as_ptr().write(value);
@@ -846,7 +846,7 @@ mod tests {
                     })
                     .expect("patch is inside an installed native image");
                 let entry = mapping.entry();
-                // Machine requests patches only outside native invocation.
+                // SAFETY: Machine requests patches only outside native invocation.
                 // This mapping owns the complete page-rounded OS extent; no
                 // Rust byte reference or concurrent code execution exists.
                 unsafe {
@@ -873,7 +873,7 @@ mod tests {
                         self.output_prefix,
                         self.patches
                     ));
-                    // This exact installed RX image remains owned and idle.
+                    // SAFETY: This exact installed RX image remains owned and idle.
                     let image = unsafe { core::slice::from_raw_parts(entry as *const u8, *length) };
                     std::fs::OpenOptions::new()
                         .write(true)
@@ -888,7 +888,7 @@ mod tests {
                 self.code.clear();
             }
             unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
-                // Machine installed this immutable mapping with its block ABI.
+                // SAFETY: Machine installed this immutable mapping with its block ABI.
                 match unsafe { self.runner.run(code.0, state) } {
                     Ok(exit) => NativeExit::Exit {
                         next_pc: exit.next_pc,
@@ -1153,7 +1153,7 @@ mod tests {
         struct EntryGuard(*mut libc::c_void);
         impl EntryGuard {
             fn new() -> Self {
-                // Reserve only; never replace host mappings or expose guest RAM
+                // SAFETY: Reserve only; never replace host mappings or expose guest RAM
                 // directly to native code. Actual accesses use the canonical view.
                 let pointer = unsafe {
                     libc::mmap(
@@ -1167,6 +1167,8 @@ mod tests {
                 };
                 assert_ne!(pointer, libc::MAP_FAILED);
                 if pointer as u64 != APERTURE {
+                    // SAFETY: the reservation at `pointer` is not the requested aperture and is
+                    // released once.
                     unsafe {
                         libc::munmap(pointer, GUARD_BYTES);
                     }
@@ -1177,6 +1179,7 @@ mod tests {
         }
         impl Drop for EntryGuard {
             fn drop(&mut self) {
+                // SAFETY: `self.0` is the guard reservation this value owns, unmapped once.
                 unsafe {
                     libc::munmap(self.0, GUARD_BYTES);
                 }
@@ -1218,7 +1221,7 @@ mod tests {
                 let Ok(access) = view.resolve(address, out.len(), AccessKind::Read) else {
                     return false;
                 };
-                // One thread owns this live canonical backing; native accesses
+                // SAFETY: One thread owns this live canonical backing; native accesses
                 // always fault and no remap/retirement overlaps this host copy.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -1240,7 +1243,7 @@ mod tests {
                 let Ok(access) = view.resolve(address, bytes.len(), AccessKind::Write) else {
                     return false;
                 };
-                // Same exclusive canonical route as source loading. No second
+                // SAFETY: Same exclusive canonical route as source loading. No second
                 // RAM image or successful byte initialization is substituted.
                 unsafe {
                     core::ptr::copy_nonoverlapping(

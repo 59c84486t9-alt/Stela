@@ -176,19 +176,27 @@ mod tests {
         const LEAF: u64 = 0x13020;
         const DATA: u64 = 0x14000;
         const GP: u64 = 1 << 50;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &0xd503_245fu32.to_le_bytes()) }.unwrap();
         assert_eq!(
             instruction(memory, &controls, 0x4000),
             Ok((0xd503_245f, false))
         );
         let mut bytes = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(LEAF, &mut bytes) }.unwrap();
         let descriptor = u64::from_le_bytes(bytes);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &(descriptor | GP).to_le_bytes()) }.unwrap();
         assert_eq!(
             instruction(memory, &controls, 0x4000),
             Ok((0xd503_245f, true))
         );
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
         assert!(matches!(
             instruction(memory, &controls, 0x4000),
@@ -210,10 +218,16 @@ mod tests {
         const DATA: u64 = 0x14000;
         const GP: u64 = 1 << 50;
         let mut descriptor = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
         let descriptor = u64::from_le_bytes(descriptor) | GP;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
         let word = 0xd503_245fu32;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &word.to_le_bytes()) }.unwrap();
         // S1TreatAsNormalNC also converts a Device descriptor's instruction
         // fetch to effective Normal NC. Data Device admission is unchanged.
@@ -284,6 +298,8 @@ mod tests {
         let memory = machine.cpu.canonical_memory.as_ref().unwrap();
         const LEAF: u64 = 0x13020;
         const DATA: u64 = 0x14000;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &0xd503201fu32.to_le_bytes()) }.unwrap();
         assert_eq!(
             instruction(memory, &controls, 0x4000),
@@ -309,6 +325,8 @@ mod tests {
             (8, 8, 0)
         );
         assert!(first.descriptor_reads > 0);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
         assert!(matches!(
             instruction(memory, &controls, 0x4000),

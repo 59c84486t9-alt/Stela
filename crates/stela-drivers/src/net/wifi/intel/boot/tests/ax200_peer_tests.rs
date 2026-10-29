@@ -191,6 +191,8 @@ fn mld_or_old_station_layout_and_missing_tlc_refuse_before_peer_dma() {
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { peer.advance(&source) },
             Err(Ax200LegacyPeerError::MissingApi)
         );
@@ -219,6 +221,8 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
         assert_eq!(at_sync.transmit_rates.load(Ordering::SeqCst), 0xfff);
     }));
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { peer.advance(&source) }.unwrap(),
         Ax200LegacyPeerPhase::Waiting(PeerCommandKind::Add)
     );
@@ -246,11 +250,15 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
         records.cpu_sync_fail = Some(records.cpu_syncs + 1);
         drop(records);
         assert!(matches!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { peer.advance(&source) },
             Err(Ax200LegacyPeerError::Boot(Error::CommandReclaim(_)))
         ));
         assert!(peer.first_error().is_none());
         native.domain.records.lock().unwrap().cpu_sync_fail = None;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { peer.advance(&source) }.unwrap();
         peer.replenish_completed_receive().unwrap();
         entry += 1;
@@ -259,6 +267,8 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
     let acquired = policy.acquired.load(Ordering::SeqCst);
     native.revoked.store(true, Ordering::SeqCst);
     peer.begin_remove().unwrap();
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { peer.advance(&source) }.unwrap();
     let commands = peer.commands()[2..].to_vec();
     assert_eq!(
@@ -279,6 +289,8 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
             &command,
             &payload(command.kind(), flush != 0),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { peer.advance(&source) }.unwrap();
         peer.replenish_completed_receive().unwrap();
         entry += 1;
@@ -333,6 +345,8 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
             params.beacon_interval_tu = 15;
         }
         let mut peer =
+            // SAFETY: the simulated device and its providers belong to this fixture alone; no other
+            // worker touches them.
             unsafe { binding.begin_legacy_peer(params) }.unwrap_or_else(|_| panic!("peer"));
         let allocations = source.calls.load(Ordering::Relaxed);
         let bell = native.state.lock().unwrap().registers[&0x460];
@@ -343,6 +357,8 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
         }
         if case < 2 {
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { peer.advance(&source) },
                 Err(if case == 0 {
                     Ax200LegacyPeerError::Peer
@@ -359,6 +375,8 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
                 continue;
             } // before-effects denial stays retryable
         } else {
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { peer.advance(&source) }.unwrap();
             for command in peer.commands().to_vec() {
                 completion(
@@ -372,6 +390,8 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
                 if case == 2 && command.kind() == PeerCommandKind::Add {
                     policy.unavailable.store(true, Ordering::SeqCst);
                     assert!(matches!(
+                        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its
+                        // sole simulated requester domain.
                         unsafe { peer.advance(&source) },
                         Err(Ax200LegacyPeerError::Binding(
                             Ax200BindingError::Regulatory(regulatory::Error::OsUnavailable)
@@ -379,15 +399,21 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
                     ));
                     break;
                 }
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { peer.advance(&source) }.unwrap();
                 peer.replenish_completed_receive().unwrap();
             }
             if case >= 3 {
                 peer.begin_remove().unwrap();
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { peer.advance(&source) }.unwrap();
                 let drain = peer.commands()[2].clone();
                 completion(&peer, &native, entry, &drain, &[1, 0, 0, 0]);
                 entry += 1;
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { peer.advance(&source) }.unwrap();
                 peer.replenish_completed_receive().unwrap();
                 let flush = peer.commands()[3].clone();
@@ -399,6 +425,8 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
                 }
                 completion(&peer, &native, entry, &flush, &reply);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { peer.advance(&source) },
                     Err(if case == 3 {
                         Ax200LegacyPeerError::UnexpectedQueues(1)
@@ -412,6 +440,8 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
         let error = peer.first_error().unwrap().clone();
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { peer.advance(&source) }, Err(error.clone()));
         assert_eq!(peer.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);
@@ -441,6 +471,8 @@ fn peer_rejected_or_malformed_add_and_missing_ack_never_publish_tlc() {
         // SAFETY: original synchronous finite-rate model; no queue exists.
         let mut peer =
             unsafe { binding.begin_legacy_peer(parameters()) }.unwrap_or_else(|_| panic!("peer"));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { peer.advance(&source) }.unwrap();
         let add = peer.commands()[0].clone();
         if case == 2 {
@@ -458,6 +490,8 @@ fn peer_rejected_or_malformed_add_and_missing_ack_never_publish_tlc() {
             );
         }
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { peer.advance(&source) },
             Err(match case {
                 0 => Ax200LegacyPeerError::Status(2),
@@ -475,6 +509,8 @@ fn peer_rejected_or_malformed_add_and_missing_ack_never_publish_tlc() {
         let error = peer.first_error().unwrap().clone();
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { peer.advance(&source) }, Err(error.clone()));
         assert_eq!(peer.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);

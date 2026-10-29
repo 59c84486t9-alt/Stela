@@ -1107,6 +1107,8 @@ mod tests {
         let heap = Heap::new();
         let mut ram = backing();
         let layout = Layout::from_size_align(4097, 4096).unwrap();
+        // SAFETY: `ram` is this test's own backing, handed to the heap once and outliving every
+        // block.
         unsafe {
             assert!(heap.alloc(layout).is_null());
             heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
@@ -1140,6 +1142,8 @@ mod tests {
         let heap = Heap::new();
         let mut ram = backing();
         let layout = Layout::from_size_align(17, 16).unwrap();
+        // SAFETY: `ram` is this test's own backing, handed to the heap once and outliving every
+        // block.
         unsafe {
             heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
             let a = heap.alloc(layout);
@@ -1372,6 +1376,8 @@ mod tests {
     fn concurrent_allocations_preserve_data_and_reclaim_live_bytes() {
         let heap = Heap::new();
         let mut ram = backing();
+        // SAFETY: `ram` is this test's own backing, handed to the heap once and outliving every
+        // block.
         unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
         let barrier = Barrier::new(8);
         thread::scope(|scope| {
@@ -1381,6 +1387,8 @@ mod tests {
                 scope.spawn(move || {
                     let layout = Layout::from_size_align(257, 64).unwrap();
                     for _ in 0..64 {
+                        // SAFETY: `ram` is this test's own backing, handed to the heap once and
+                        // outliving every block.
                         unsafe {
                             let block = heap.alloc(layout);
                             assert!(!block.is_null() && (block as usize).is_multiple_of(64));

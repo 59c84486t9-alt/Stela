@@ -73,12 +73,13 @@ impl Drop for Registers {
         // abandoned Pin permanently retains it. No register user remains.
         if unsafe { self.mapping.retire() }.is_err() {
             quarantine_mapping();
-            // Process context is qualified. Mapping::drop records native
+            // SAFETY: Process context is qualified. Mapping::drop records native
             // quarantine while retaining its actual resource/table provider;
             // keep the separate descriptor/CPU lease pinned as well.
             unsafe { ManuallyDrop::drop(&mut self.mapping) };
             return;
         }
+        // SAFETY: each field is dropped once, here, and never used again.
         unsafe {
             ManuallyDrop::drop(&mut self.mapping);
             ManuallyDrop::drop(&mut self.cpu);
@@ -161,7 +162,7 @@ impl Root {
             let address = match mapping.address(0, 32) {
                 Ok(address) => address.as_ptr() as usize,
                 Err(error) => {
-                    // No IOAPIC access or published source has occurred.
+                    // SAFETY: No IOAPIC access or published source has occurred.
                     let _ = unsafe { mapping.retire() };
                     return Err(Error::Mapping(error));
                 }
@@ -283,7 +284,7 @@ impl ResolvedLine<'_, '_, '_> {
         if self.root.cpu.in_interrupt() {
             return Err(Error::Cpu(WorkError::InterruptContext));
         }
-        // Remaining refusals occur on the qualified process CPU before any
+        // SAFETY: Remaining refusals occur on the qualified process CPU before any
         // programming; ordinary final release is safe for this stopped group.
         let devices = unsafe { ManuallyDrop::take(&mut devices) };
         if Sha256::digest(self.root.madt).as_slice() != self.root.madt_hash {

@@ -708,8 +708,8 @@ impl Hardware {
         };
         assert_eq!(attributes, 0x23);
         if v4 && wide {
-            // SAFETY: same live 16-byte descriptor allocated by the driver.
             assert_eq!(
+                // SAFETY: same live 16-byte descriptor allocated by the driver.
                 unsafe { ((table + 12) as *const u32).read_volatile() },
                 0,
                 "reserved v4 descriptor high word"

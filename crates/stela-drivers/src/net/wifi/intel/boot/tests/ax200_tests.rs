@@ -126,6 +126,8 @@ pub(super) fn finish_lari<'a>(
     clock_error: Option<IoError>,
 ) -> (LariRadio<'a, Model, ClockBios>, u16, u16) {
     let (cold, mut sequence, mut entry) = drive_cold_prefix(init, source, domain);
+    // SAFETY: the simulated device and its providers belong to this fixture alone; no other worker
+    // touches them.
     let mut lari = unsafe {
         cold.begin_lari(ClockBios {
             inner: RadioBios {
@@ -139,6 +141,8 @@ pub(super) fn finish_lari<'a>(
         })
     }
     .unwrap_or_else(|_| panic!("real cold prefix"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { lari.advance(source) }.unwrap();
     let commands: Vec<_> = lari.plan().unwrap().commands().map(|(id, _)| id).collect();
     for id in commands {
@@ -149,6 +153,8 @@ pub(super) fn finish_lari<'a>(
             entry + 1,
             &command_packet(id, sequence, &[]),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { lari.advance(source) }.unwrap();
         sequence += 1;
         entry += 1;
@@ -183,7 +189,10 @@ pub(super) fn finish_setup_with_options<'a>(
     options: Ax200SetupOptions,
 ) -> (Ax200Setup<'a, Model, ClockBios>, u16, u16) {
     let mut setup =
+        // SAFETY: the fixture clock is monotonic and advances for the whole device epoch.
         unsafe { lari.begin_ax200_setup(options) }.unwrap_or_else(|_| panic!("AX200 setup"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { setup.advance(source) }.unwrap();
     for (group, opcode) in [(4, 4), (1, 0x77)] {
         complete(
@@ -201,6 +210,8 @@ pub(super) fn finish_setup_with_options<'a>(
                 &[],
             ),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { setup.advance(source) }.unwrap();
         sequence += 1;
         entry += 1;

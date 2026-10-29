@@ -331,6 +331,8 @@ mod tests {
     }
     fn cycle(model: &Arc<Mutex<Model>>) -> Result<(), Error> {
         let mut c = Controller::new(Registers(model.clone()))?;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             c.enable(false)?;
         }
@@ -343,11 +345,15 @@ mod tests {
                 first.raw[2] & MASK3
             ]
         );
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             c.enable(true)?;
         }
         let second = c.capture()?;
         assert_eq!(second.owned, [0; 3]);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             c.enable(false)?;
             let _stopped = c.into_stopped()?;
@@ -369,6 +375,8 @@ mod tests {
             for case in 0..32 {
                 let model = Arc::new(Mutex::new(Model::new(case)));
                 let mut c = Controller::new(Registers(model.clone())).unwrap();
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { c.enable(false) }.unwrap();
                 let causes = c.capture().unwrap();
                 let bit = match q {
@@ -393,6 +401,8 @@ mod tests {
                 assert_eq!(causes.beacon_dma(), case == 14);
                 assert_eq!(c.state(), State::Disabled);
                 assert_eq!(c.capture().unwrap().owned, [0; 3]);
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { c.enable(true) }.unwrap();
                 assert_eq!(c.state(), State::RxMasked);
                 {
@@ -402,6 +412,8 @@ mod tests {
                         0
                     );
                 }
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 unsafe { c.into_stopped() }.unwrap();
                 assert_eq!(model.lock().unwrap().owner_drops, 1);
             }
@@ -428,7 +440,11 @@ mod tests {
         }
         let m = Arc::new(Mutex::new(Model::new(0)));
         let mut c = Controller::new(Registers(m.clone())).unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.enable(false) }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { c.enable(false) }, Err(Error::InvalidState));
         drop(c);
         assert!(m.lock().unwrap().quarantined);
@@ -448,6 +464,8 @@ mod tests {
             let m = Arc::new(Mutex::new(Model::new(0)));
             let mut c = Controller::new(Registers(m.clone())).unwrap();
             m.lock().unwrap().wrong = Some(reg);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert_eq!(unsafe { c.enable(false) }, Err(Error::Readback));
             assert_eq!(c.state(), State::Quarantined);
             assert_eq!(c.capture(), Err(Error::Quarantined));

@@ -185,6 +185,7 @@ impl Prepared {
         // QEMU's FADT builder emits SMI_CMD and ACPI enable/disable only when
         // SMM is enabled. This is a source-bound fixture check, not a general
         // proof about physical SMM ownership.
+        // SAFETY: `rsdp` is the firmware's ACPI root, which the identity map covers after EBS.
         let fadt = unsafe { acpi::find(rsdp, b"FACP") }
             .map_err(|error| format!("fixture FADT: {error:?}"))?;
         if fadt.get(48..54) != Some(&[0; 6]) {
@@ -544,12 +545,14 @@ impl Prepared<Function> {
                 }
             }
         }
-        // Reset the actual firmware boot virtio device and observe status zero
+        // SAFETY: Reset the actual firmware boot virtio device and observe status zero
         // before clearing bus mastering. Its reset acknowledgement, not the
         // command bit alone, proves virtio has stopped accessing its queues.
         unsafe { (self.virtio_status as *mut u8).write_volatile(0) };
         if !self.clock.wait(
             TIMEOUT_US,
+            // SAFETY: `virtio_status` is the boot virtio function's mapped device status
+            // register.
             || unsafe { (self.virtio_status as *const u8).read_volatile() } == 0,
         ) {
             return Err(String::from("virtio reset did not quiesce DMA"));
@@ -642,6 +645,8 @@ impl Prepared<Function> {
         // SAFETY: same actual exclusive, idle fixture function and retained root.
         let claim = unsafe { super::requester::RequesterClaim::from_stopped_pci(function) }
             .map_err(|error| format!("requester claim: {error:?}"))?;
+        // SAFETY: the unit window is this fixture's matched DMAR unit and every listed requester
+        // was reset and stopped above.
         let unit = unsafe {
             Unit::take_over(
                 registers,
@@ -683,6 +688,8 @@ impl Prepared<Function> {
             .map_err(|error| format!("receive bounds: {error:?}"))?
             .as_ptr();
         for index in 0..BYTES {
+            // SAFETY: both pointers map `BYTES` owned write-back bytes and `index` is below
+            // `BYTES`.
             unsafe {
                 send_pointer
                     .add(index)
@@ -719,6 +726,8 @@ impl Prepared<Function> {
         receive_dma
             .sync_for_device(0..BYTES)
             .map_err(|error| format!("receive visibility: {error:?}"))?;
+        // SAFETY: the requester is attached to its translated domain, and every mapping it may
+        // reach is live.
         unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
         device.transfer(send_iova, DEVICE_BUFFER, false)?;
         device.transfer(DEVICE_BUFFER, receive_iova, true)?;
@@ -727,6 +736,8 @@ impl Prepared<Function> {
         unsafe { receive_dma.sync_for_cpu(0..BYTES) }
             .map_err(|error| format!("CPU DMA visibility: {error:?}"))?;
         for index in 0..BYTES {
+            // SAFETY: `receive_pointer` maps `BYTES` owned write-back bytes and `index` is below
+            // `BYTES`.
             if unsafe { receive_pointer.add(index).read_volatile() }
                 != (index.wrapping_mul(37) + 11) as u8
             {
@@ -740,20 +751,27 @@ impl Prepared<Function> {
         {
             return Err(String::from("unexpected VT-d roundtrip fault"));
         }
+        // SAFETY: stopping bus mastering only revokes the requester's DMA.
         unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
         // SAFETY: both actual transfers completed and submission is stopped;
         // no ISR/worker exists. Unmap awaits actual IOTLB acknowledgement.
         unsafe { send_dma.unmap() }.map_err(|error| format!("send unmap: {error:?}"))?;
+        // SAFETY: the same completed transfers and stopped bus mastering cover this mapping.
         unsafe { receive_dma.unmap() }.map_err(|error| format!("receive unmap: {error:?}"))?;
         for index in 0..BYTES {
+            // SAFETY: `receive_pointer` maps `BYTES` owned write-back bytes and `index` is below
+            // `BYTES`.
             unsafe { receive_pointer.add(index).write_volatile(0xd3) };
         }
         vtd::publish();
         // Controlled stale-IOVA transaction before any IOVA reuse. The CPU
         // mapping still pins the target RAM; a stale hardware translation
         // would corrupt the sentinel and fail the test.
+        // SAFETY: the requester is attached to its translated domain, and every mapping it may
+        // reach is live.
         unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
         device.transfer(DEVICE_BUFFER, receive_iova, true)?;
+        // SAFETY: stopping bus mastering only revokes the requester's DMA.
         unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
         let faults = unit
             .pending_faults()
@@ -768,6 +786,8 @@ impl Prepared<Function> {
             })
             .ok_or_else(|| format!("missing matching VT-d stale IOVA fault: {faults:?}"))?;
         for index in 0..BYTES {
+            // SAFETY: `receive_pointer` maps `BYTES` owned write-back bytes and `index` is below
+            // `BYTES`.
             if unsafe { receive_pointer.add(index).read_volatile() } != 0xd3 {
                 return Err(format!("stale IOVA modified retained CPU RAM at {index}"));
             }
@@ -781,6 +801,8 @@ impl Prepared<Function> {
         let function = claim
             .into_function()
             .map_err(|e| format!("retired PCI owner: {e:?}"))?;
+        // SAFETY: the only requester was detached and every mapping removed with an IOTLB
+        // acknowledgement.
         unsafe { unit.shut_down() }
             .map_err(|error| format!("VT-d TE-off acknowledgement failed: {error:?}"))?;
         let dma = format!(

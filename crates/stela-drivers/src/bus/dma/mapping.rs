@@ -438,9 +438,9 @@ mod tests {
     #[test]
     fn legacy_visibility_does_not_grant_continuous_reads_or_posted_write_drain() {
         let domain = Arc::new(ModelDomain);
-        // SAFETY: this synchronous model has no hardware, but its legacy
-        // visibility methods must not imply the new independent capabilities.
         assert_eq!(
+            // SAFETY: this synchronous model has no hardware, but its legacy visibility methods
+            // must not imply the new independent capabilities.
             unsafe { domain.drain_posted_writes() },
             Err(DmaError::DrainUnavailable)
         );

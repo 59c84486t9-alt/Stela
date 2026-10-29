@@ -35,9 +35,15 @@ fn queue_ready<'a>(
 ) -> Ax200ManagementQueue<'a, Model, ClockBios, ScanOs> {
     let peer = peer_ready(catalog, empty, source, native, policy, short);
     let mut queue =
+        // SAFETY: the simulated device and its providers belong to this fixture alone; no other
+        // worker touches them.
         unsafe { peer.begin_mld_management_queue() }.unwrap_or_else(|_| panic!("queue"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { queue.advance(source) }.unwrap();
     completion(&queue, native, SCHEDULER, &reply(511));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { queue.advance(source) }.unwrap();
     queue.replenish_completed_receive().unwrap();
     queue
@@ -110,6 +116,8 @@ fn exercise(bytes: &[u8]) {
     assert_eq!(original.coexistence.check(), Ok(())); // real prefix BT_CONFIG ACK/reclaim.
     assert_eq!(original.coexistence.applied_ci, [0; 24]);
     let mut owner =
+        // SAFETY: the simulated device and its providers belong to this fixture alone; no other
+        // worker touches them.
         unsafe { queue.begin_mld_coexistence() }.unwrap_or_else(|_| panic!("coexistence"));
     let mut profile = [0; 40];
     profile[32..36].copy_from_slice(&3u32.to_le_bytes());
@@ -130,6 +138,8 @@ fn exercise(bytes: &[u8]) {
         assert_eq!(at_sync.transmit_rates.load(Ordering::SeqCst), 0xfff);
     }));
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) }.unwrap(),
         Ax200CoexistencePhase::WaitingChannelInhibition
     );
@@ -150,6 +160,8 @@ fn exercise(bytes: &[u8]) {
     records.cpu_sync_fail = Some(records.cpu_syncs + 1);
     drop(records);
     assert!(matches!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) },
         Err(Ax200CoexistenceError::Boot(Error::CommandReclaim(_)))
     ));
@@ -162,6 +174,8 @@ fn exercise(bytes: &[u8]) {
     );
     native.domain.records.lock().unwrap().cpu_sync_fail = None;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) }.unwrap(),
         Ax200CoexistencePhase::ManagementFramesRequired
     );
@@ -188,6 +202,8 @@ fn exercise(bytes: &[u8]) {
     assert_eq!(owner.responses().len(), 1);
     let syncs = native.domain.records.lock().unwrap().syncs;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) }.unwrap(),
         Ax200CoexistencePhase::ManagementFramesRequired
     );
@@ -211,6 +227,8 @@ fn malformed_canonical_profile_and_future_ci_schema_refuse_before_publication() 
         let policy = Arc::new(PolicyState::default());
         let queue = queue_ready(&catalog, &empty, &source, &native, &policy, false);
         let mut owner =
+            // SAFETY: the simulated device and its providers belong to this fixture alone; no other
+            // worker touches them.
             unsafe { queue.begin_mld_coexistence() }.unwrap_or_else(|_| panic!("coexistence"));
         if malformed {
             inject(
@@ -232,11 +250,15 @@ fn malformed_canonical_profile_and_future_ci_schema_refuse_before_publication() 
         } else {
             CoexistenceError::Version
         });
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { owner.advance(&source) }, Err(error.clone()));
         assert!(owner.ticket().is_none());
         assert_eq!(native.domain.records.lock().unwrap().live.len(), live);
         assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);
         let ops = native.state.lock().unwrap().ops.len();
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { owner.advance(&source) }, Err(error.clone()));
         assert_eq!(owner.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);
@@ -256,11 +278,15 @@ fn ci_publication_checks_every_original_rate_under_real_policy_before_dma_or_doo
         .deny_rate
         .store(LegacyRate::Ofdm54 as usize + 1, Ordering::SeqCst);
     let mut owner =
+        // SAFETY: the simulated device and its providers belong to this fixture alone; no other
+        // worker touches them.
         unsafe { queue.begin_mld_coexistence() }.unwrap_or_else(|_| panic!("coexistence"));
     let calls = source.calls.load(Ordering::Relaxed);
     let syncs = native.domain.records.lock().unwrap().syncs;
     let bell = native.state.lock().unwrap().registers[&0x460];
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) },
         Err(Ax200CoexistenceError::Binding(
             Ax200BindingError::Regulatory(regulatory::Error::OsDenied)
@@ -274,6 +300,8 @@ fn ci_publication_checks_every_original_rate_under_real_policy_before_dma_or_doo
     assert_eq!(native.state.lock().unwrap().registers[&0x460], bell);
     policy.deny_rate.store(0, Ordering::SeqCst);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) }.unwrap(),
         Ax200CoexistencePhase::WaitingChannelInhibition
     );
@@ -289,7 +317,11 @@ fn missing_ci_ack_does_not_apply_cache_or_release_original_queue_through_failed_
     let policy = Arc::new(PolicyState::default());
     let queue = queue_ready(&catalog, &empty, &source, &native, &policy, true);
     let mut owner =
+        // SAFETY: the simulated device and its providers belong to this fixture alone; no other
+        // worker touches them.
         unsafe { queue.begin_mld_coexistence() }.unwrap_or_else(|_| panic!("coexistence"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { owner.advance(&source) }.unwrap();
     assert!(owner.ticket().is_some());
     Clock {
@@ -297,6 +329,8 @@ fn missing_ci_ack_does_not_apply_cache_or_release_original_queue_through_failed_
     }
     .delay(20);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { owner.advance(&source) },
         Err(Ax200CoexistenceError::Deadline)
     );

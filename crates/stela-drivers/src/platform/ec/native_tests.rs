@@ -120,6 +120,8 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
         match function {
             0 => match controller.read_region(address, width) {
                 Ok(data) => {
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe {
                         value.write(data);
                     }
@@ -127,6 +129,7 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
                 }
                 Err(_) => SUPPORT.0,
             },
+            // SAFETY: ACPICA passes a valid pointer to the value being written.
             1 => match controller.write_region(address, width, unsafe { value.read() }) {
                 Ok(()) => 0,
                 Err(_) => SUPPORT.0,
@@ -179,6 +182,8 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
     dsdt[36..].copy_from_slice(&aml);
     checksum(&mut dsdt, 9);
     let (provider, counts) = fixture_dsdt(dsdt);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handles = session.devices("PNP0C09").unwrap();
     assert_eq!(handles.len(), 4);
@@ -247,6 +252,7 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
     // exception; evaluating its old consumed event was never automatically retried.
     let mut value = 0;
     assert_eq!(
+        // SAFETY: `value` is a live local, and the handler ignores the null context for this read.
         unsafe {
             region(
                 0,
@@ -260,6 +266,8 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
         0
     );
     assert_eq!(value, 0xa5);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     unsafe { handle.remove_region(3, region) }.unwrap();
     drop(controller);
     session.shutdown().unwrap();

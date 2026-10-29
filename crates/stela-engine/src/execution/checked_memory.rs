@@ -488,9 +488,11 @@ mod tests {
     // SAFETY: only raw storage is shared, never Rust byte references. Every access
     // participates in the one MemorySystem through checked native callbacks.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
     impl Drop for Storage {
         fn drop(&mut self) {
+            // SAFETY: `pointer` came from `alloc_zeroed` with this layout and is freed once.
             unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
         }
     }
@@ -500,6 +502,7 @@ mod tests {
     }
     fn domain_storage() -> (Arc<MemoryDomain>, Arc<MemorySystem>, Arc<MemoryBacking>) {
         let layout = Layout::from_size_align(128, 64).unwrap();
+        // SAFETY: `layout` has a nonzero size.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let storage = Arc::new(Storage { pointer, layout });
         // SAFETY: the retained owner pins coherent raw RAM and rights. One backing
@@ -1323,6 +1326,8 @@ mod tests {
         };
         let before = registers.registers.clone();
         assert!(
+            // SAFETY: the worker and its memory are this test's own; the private storage has no
+            // other writer.
             unsafe {
                 load.run(
                     &worker.controls,
@@ -1337,6 +1342,8 @@ mod tests {
             .is_err()
         );
         assert!(
+            // SAFETY: the worker and its memory are this test's own; the private storage has no
+            // other writer.
             unsafe {
                 load.run(
                     &worker.controls,
@@ -1352,6 +1359,8 @@ mod tests {
         );
         let el1 = SystemState::new(5, 0, El1Registers::new(0, 0, 0, 0, 0)).unwrap();
         assert!(
+            // SAFETY: the worker and its memory are this test's own; the private storage has no
+            // other writer.
             unsafe {
                 load.run(
                     &worker.controls,
@@ -2132,9 +2141,9 @@ mod tests {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        // SAFETY: initialized output belongs to this host thread. This clock counts
-        // its native plus runtime/service CPU time, not exclusively guest code.
         assert_eq!(
+            // SAFETY: initialized output belongs to this host thread. This clock counts its native
+            // plus runtime/service CPU time, not exclusively guest code.
             unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) },
             0
         );

@@ -22,6 +22,8 @@ fn all_actual_asic_modes_match_source_and_keep_plain_transmit_and_receive_descri
         let (hardware, pages, domain, peer) = parts_for(chip);
         // These are firmware-observed control bits, with RESET/ENABLE clear.
         peer.lock().unwrap().mac.insert(0x4800, 0x3fff_fffc);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(packet) => packet,
             Err((e, _)) => panic!("source mode {chip:x}: {e:?}"),
@@ -47,6 +49,8 @@ fn all_actual_asic_modes_match_source_and_keep_plain_transmit_and_receive_descri
 fn independent_peer_rejects_deleted_source_lso_mode_before_any_dma_effect() {
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let (hardware, pages, domain, peer) = parts_for(chip);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(packet) => packet,
             Err((e, _)) => panic!("source mode {chip:x}: {e:?}"),
@@ -93,6 +97,8 @@ fn unchanged_linux_complete_rdma_mode_matches_actual_register_and_raw_traffic() 
         assert_eq!(lines.next(), Some("END"));
         let (hardware, pages, domain, peer) = parts_for(chip);
         peer.lock().unwrap().mac.insert(0x4800, initial);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(packet) => packet,
             Err((e, _)) => panic!("source mode {chip:x}/{initial:x}: {e:?}"),

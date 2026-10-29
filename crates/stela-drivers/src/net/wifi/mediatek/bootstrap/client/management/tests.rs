@@ -102,8 +102,8 @@ fn actual_initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry(
         model.response.lock().unwrap().client_commands.len(),
         commands + 1
     );
-    // SAFETY: unchanged actual drained namespace; stale OS epoch must not publish.
     assert!(matches!(
+        // SAFETY: unchanged actual drained namespace; stale OS epoch must not publish.
         unsafe {
             driver.install_management_key(epoch + 1, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
         },
@@ -263,6 +263,8 @@ fn actual_protected_tx_retains_session_until_descriptor_free_and_unmap_before_pe
         .unwrap();
     let queue = model.queues[&0xd4300].lock().unwrap();
     let memory = model.memory.lock().unwrap();
+    // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+    // accesses it concurrently.
     let desc = unsafe {
         core::slice::from_raw_parts(
             super::super::tests::pointer(
@@ -274,6 +276,8 @@ fn actual_protected_tx_retains_session_until_descriptor_free_and_unmap_before_pe
         )
     };
     let address = u32::from_le_bytes(desc[..4].try_into().unwrap()) as u64;
+    // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+    // accesses it concurrently.
     let txwi = unsafe {
         core::slice::from_raw_parts(super::super::tests::pointer(&memory, address, 32), 32)
     };
@@ -286,9 +290,9 @@ fn actual_protected_tx_retains_session_until_descriptor_free_and_unmap_before_pe
     assert_eq!(word(4), 0);
     drop(memory);
     drop(queue);
-    // SAFETY: the independently required external drain has not occurred;
-    // the actual queued descriptor/token must refuse even a same-key retry.
     assert!(matches!(
+        // SAFETY: the independently required external drain has not occurred; the actual queued
+        // descriptor/token must refuse even a same-key retry.
         unsafe {
             driver.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
         },
@@ -408,9 +412,9 @@ fn uncertain_actual_igtk_publication_quarantines_complete_owner_without_transpor
         } else {
             model.response.lock().unwrap().status = 9;
         }
-        // SAFETY: actual initial model GTK drain; genuine firmware failure/late
-        // ACK must retain the entire native namespace, never mint a Session.
         assert!(
+            // SAFETY: actual initial model GTK drain; genuine firmware failure/late ACK must retain
+            // the entire native namespace, never mint a Session.
             unsafe {
                 driver.install_management_key(
                     epoch,
@@ -517,9 +521,9 @@ fn foreign_native_session_and_current_modern_owner_are_refused_without_hardware_
     let commands = modern.model.response.lock().unwrap().client_commands.len();
     let log = modern.model.bar.0.lock().unwrap().log.len();
     let head = modern.model.queues[&0xd4300].lock().unwrap().head;
-    // SAFETY: the actual current model is drained. This API lacks the modern
-    // canonical management admission, so no initial batch may be published.
     assert!(matches!(
+        // SAFETY: the actual current model is drained. This API lacks the modern canonical
+        // management admission, so no initial batch may be published.
         unsafe {
             modern.driver.install_management_key(
                 epoch,

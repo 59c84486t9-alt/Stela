@@ -542,7 +542,11 @@ mod tests {
         machine.cpu.clear_exclusive().unwrap();
         assert!(!machine.cpu.event_is_set());
         // The independent global mark still opens and signals on canonical ABA.
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(PA, &1u64.to_le_bytes()) }.unwrap();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(PA, &0u64.to_le_bytes()) }.unwrap();
         assert!(machine.cpu.consume_event());
         assert!(!machine.cpu.consume_event());
@@ -551,6 +555,8 @@ mod tests {
             1
         );
         let mut value = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(PA, &mut value) }.unwrap();
         assert_eq!(value, [0; 8]);
     }
@@ -579,6 +585,7 @@ mod tests {
             .unwrap();
         let memory = machine.cpu.canonical_memory.as_mut().unwrap();
         // Corrupt finalization is a terminal domain failure, not a source fault.
+        // SAFETY: the callback runs once on this thread and touches only the checked view.
         let result = unsafe { memory.memory.with_checked_view(|view| view.version = 0) };
         assert_eq!(result, Err(MemoryStatus::Domain));
         let before = (
@@ -703,6 +710,7 @@ mod tests {
         let active = clock_domain(&mut machine);
         let memory = machine.cpu.canonical_memory.as_mut().unwrap();
         assert_eq!(
+            // SAFETY: the callback runs once on this thread and touches only the checked view.
             unsafe { memory.memory.with_checked_view(|view| view.version = 0) },
             Err(MemoryStatus::Domain)
         );

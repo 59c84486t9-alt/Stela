@@ -24,8 +24,8 @@ struct Critical<'a> {
 impl Drop for Critical<'_> {
     fn drop(&mut self) {
         self.platform.held.store(false, Ordering::Release);
-        // SAFETY: same non-migrating admitted BSP; restore exact incoming IF.
         if self.flags & (1 << 9) != 0 {
+            // SAFETY: same non-migrating admitted BSP; restore exact incoming IF.
             unsafe {
                 asm!("sti", options(nomem, nostack));
             }
@@ -129,9 +129,9 @@ impl Platform {
         self.check()?;
         let _critical = self.critical().map_err(Error::Mapping)?;
         for slot in 0..SLOTS {
-            // SAFETY: actual privately owned leaf, bounded slot, IRQ excluded;
-            // this checks hardware table storage, not just registry metadata.
             if self.tokens[slot].load(Ordering::Acquire) != 0
+                    // SAFETY: actual privately owned leaf, bounded slot, IRQ excluded; this checks
+                    // hardware table storage, not just registry metadata.
                 || unsafe { self.leaf(slot).read_volatile() } != 0
             {
                 return Err(Error::Mapping(owned::Error::UnmapFailed));
@@ -175,6 +175,8 @@ impl Platform {
             .is_err()
         {
             if flags & (1 << 9) != 0 {
+                // SAFETY: these leaf entries belong to the retiring request, and `Critical`
+                // serializes the owned leaf table.
                 unsafe {
                     asm!("sti", options(nomem, nostack));
                 }
@@ -348,6 +350,8 @@ unsafe impl MappingPlatform for Platform {
             })
             .ok_or(unchanged(owned::Error::Exhausted))?;
         for slot in first..first + pages {
+            // SAFETY: `Critical` serializes the owned leaf table and `slot` is inside the
+            // allocator's range.
             if unsafe { self.leaf(slot).read_volatile() } != 0 {
                 return Err(unchanged(owned::Error::MappingFailed));
             }
@@ -400,6 +404,8 @@ unsafe impl MappingPlatform for Platform {
         }
         for offset in 0..pages {
             if self.tokens[first + offset].load(Ordering::Acquire) != request.id
+                    // SAFETY: `Critical` serializes the owned leaf table and these slots belong to
+                    // this request.
                 || unsafe { self.leaf(first + offset).read_volatile() } & !0x60
                     != ((request.physical.start() + offset as u64 * PAGE as u64) | rights(request))
             {
@@ -407,6 +413,8 @@ unsafe impl MappingPlatform for Platform {
             }
         }
         for offset in 0..pages {
+            // SAFETY: these leaf entries belong to the retiring request, and `Critical` serializes
+            // the owned leaf table.
             unsafe {
                 self.leaf(first + offset).write_volatile(0);
             }

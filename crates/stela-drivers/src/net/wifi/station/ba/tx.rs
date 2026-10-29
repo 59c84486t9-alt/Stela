@@ -842,8 +842,8 @@ mod tests {
         s.validate_tx_block_ack_transmit(wire, &session, &bytes)
             .unwrap();
         assert_eq!(&bytes[31..33], &0xfff0u16.to_le_bytes());
-        // SAFETY: modeled exact frame actually admitted/queued, without air-ACK claim.
         assert!(matches!(
+            // SAFETY: modeled exact frame actually admitted/queued, without air-ACK claim.
             unsafe { s.complete_tx_block_ack_transmit(wire, Completion::Accepted, s.now + 1) }
                 .unwrap(),
             TxAction::None
@@ -935,8 +935,8 @@ mod tests {
         assert!(matches!(receive_tx(&mut s, &frame), TxAction::None));
         s.validate_tx_block_ack_program(program, &session, agreement)
             .unwrap();
-        // SAFETY: actual matching firmware install ACK modeled.
         assert!(matches!(
+            // SAFETY: actual matching firmware install ACK modeled.
             unsafe { s.complete_tx_block_ack_program(program, Completion::Accepted) }.unwrap(),
             TxAction::Operational { .. }
         ));
@@ -964,6 +964,7 @@ mod tests {
         // before reading this real canonical cursor; independent TIDs keep working.
         let snapshot = s.next_qos_sequence(&context, 3).unwrap();
         let (wire, _, bytes) = transmit(
+            // SAFETY: the ticket is this station's own outstanding completion, reported once.
             unsafe {
                 s.complete_tx_block_ack_prepare(
                     prepare,
@@ -1041,8 +1042,8 @@ mod tests {
             let (ticket, _, agreement) = programming(receive_tx(&mut s, &frame), false);
             s.validate_tx_block_ack_program(ticket, &session, agreement)
                 .unwrap();
-            // SAFETY: completed actual disable/retirement before legacy queue release.
             assert!(matches!(
+                // SAFETY: completed actual disable/retirement before legacy queue release.
                 unsafe { s.complete_tx_block_ack_program(ticket, Completion::Accepted) }.unwrap(),
                 TxAction::ResumeLegacy { .. }
             ));
@@ -1139,8 +1140,8 @@ mod tests {
         ));
         s.validate_tx_block_ack_transmit(wire, &session, &bytes)
             .unwrap();
-        // SAFETY: queued old DELBA cannot be published after a future request.
         assert!(matches!(
+            // SAFETY: queued old DELBA cannot be published after a future request.
             unsafe { s.complete_tx_block_ack_transmit(wire, Completion::Accepted, s.now + 1) }
                 .unwrap(),
             TxAction::ResumeLegacy { .. }
@@ -1213,8 +1214,8 @@ mod tests {
             }
             .unwrap();
             let (stop, _, _) = programming(action, false);
-            // SAFETY: only an actual completed stop now releases retained pending TX.
             assert!(matches!(
+                // SAFETY: only an actual completed stop now releases retained pending TX.
                 unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
                 TxAction::ResumeLegacy { .. }
             ));
@@ -1311,8 +1312,8 @@ mod tests {
     fn uncertain_prepare_and_rejected_stop_hold_identity_and_never_release_pending_tx() {
         let mut s = station(1024);
         let (ticket, session) = prepare(&mut s, 3, 0);
-        // SAFETY: model explicitly uncertain real preparation; no idle proof.
         assert!(matches!(
+            // SAFETY: model explicitly uncertain real preparation; no idle proof.
             unsafe {
                 s.complete_tx_block_ack_prepare(ticket, Completion::Uncertain, None, s.now + 1)
             }
@@ -1324,8 +1325,8 @@ mod tests {
             Err(BaError::Busy)
         ));
         let (stop, _, _) = programming(s.stop_tx_block_ack(3, false).unwrap(), false);
-        // SAFETY: rejected disable is deliberately insufficient for actual retirement.
         assert!(matches!(
+            // SAFETY: rejected disable is deliberately insufficient for actual retirement.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::RejectedAndIdle) }.unwrap(),
             TxAction::None
         ));
@@ -1342,8 +1343,8 @@ mod tests {
         let session = request_sent(&mut s, 3);
         let frame = peer_response(&session, session.dialog(), 0, 64, 0, true);
         let (enable, _, _) = programming(receive_tx(&mut s, &frame), true);
-        // SAFETY: transport cannot establish the actual terminal command result.
         assert!(matches!(
+            // SAFETY: transport cannot establish the actual terminal command result.
             unsafe { s.complete_tx_block_ack_program(enable, Completion::Uncertain) }.unwrap(),
             TxAction::None
         ));
@@ -1355,9 +1356,9 @@ mod tests {
             Err(BaError::Busy)
         ));
         let (stop, _, _) = programming(s.stop_tx_block_ack(3, false).unwrap(), false);
-        // SAFETY: independently completed actual disable includes retirement of the
-        // old uncertain command callback and every old-session TX user.
         assert!(matches!(
+            // SAFETY: independently completed actual disable includes retirement of the old
+            // uncertain command callback and every old-session TX user.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
             TxAction::ResumeLegacy { .. }
         ));
@@ -1378,8 +1379,8 @@ mod tests {
         );
         s.validate_tx_block_ack_program(stop, &session, agreement)
             .unwrap();
-        // SAFETY: independently acknowledged native stop under retained old ownership.
         assert!(matches!(
+            // SAFETY: independently acknowledged native stop under retained old ownership.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
             TxAction::ResumeLegacy { .. }
         ));

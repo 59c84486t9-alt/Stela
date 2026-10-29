@@ -653,6 +653,8 @@ mod tests {
         // SAFETY: the original isolated resources have no remaining register,
         // device or worker users after the synchronous owner was consumed.
         unsafe { mapping.retire() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { config.retire() }.unwrap();
         for counts in [config_counts, bar_counts] {
             assert_eq!(counts.unmaps.load(Ordering::Relaxed), 1);
@@ -690,8 +692,8 @@ mod tests {
             );
             let resources = failure.unmodified.expect("original unchanged owners");
             let pointer = resources.1.address(0, WINDOW_BYTES).unwrap();
-            // SAFETY: these exact original owners still retain the aperture.
             assert_eq!(
+                // SAFETY: these exact original owners still retain the aperture.
                 unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) },
                 before
             );

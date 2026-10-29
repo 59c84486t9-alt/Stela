@@ -633,6 +633,8 @@ mod tests {
             let (_, base) = &m.mappings[&u64::from(d.bases[6])];
             let slot = usize::from(d.indices[6].0);
             let bytes =
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { core::slice::from_raw_parts((*base + slot * 16) as *const u8, 16) };
             let descriptor: [u8; 16] = bytes.try_into().unwrap();
             let address = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
@@ -643,6 +645,8 @@ mod tests {
             assert_eq!(m.directions[&u64::from(address)], Direction::ToDevice);
             let (_, packet) = &m.mappings[&u64::from(address)];
             d.packets
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 .push(unsafe { core::slice::from_raw_parts(*packet as *const u8, 80) }.to_vec());
             if d.packets.last().unwrap()[50] == 0x0e
                 && let Some(trigger) = &d.iqk_trigger
@@ -674,6 +678,8 @@ mod tests {
         device: &Arc<Mutex<Device>>,
         profile: Profile,
     ) -> Result<Rings<Io>, Error> {
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             Rings::install(
                 Io {
@@ -691,6 +697,8 @@ mod tests {
         use super::super::firmware_control::{Control, tests::bus};
         let (phy, report) = super::super::phy::control_fixture();
         let (io, fw, _, _) = bus(report.profile());
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut control = unsafe { Control::new(io, &report) }.unwrap();
         let memory = Arc::new(Mutex::new(Model::default()));
         let device = Arc::new(Mutex::new(Device::default()));
@@ -699,8 +707,12 @@ mod tests {
         rings
             .general_info(&Source, Geometry::for_profile(report.profile()).unwrap())
             .unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { rings.phydm_info(&Source, &phy, &report) }.unwrap();
         fw.lock().unwrap().iqk_after = Some(16);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let observed = unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap();
         assert_eq!(observed.baseline(), 0);
         assert_eq!(observed.status(), 0xaa);
@@ -717,6 +729,8 @@ mod tests {
         assert_eq!(fw.lock().unwrap().get(REG_IQKSTAT, 1), 0);
         assert_eq!(fw.lock().unwrap().now, 320000);
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap_err(),
             super::super::firmware_control::Error::InvalidState
         );
@@ -725,7 +739,11 @@ mod tests {
         let producer = device.lock().unwrap().indices[6].0;
         device.lock().unwrap().indices[6].1 = producer;
         assert_eq!(rings.reclaim_h2c().unwrap(), 3);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { rings.release_after_stop() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         let io = unsafe { control.release_after_stop() }.unwrap();
         drop(io);
     }
@@ -735,6 +753,8 @@ mod tests {
         for mode in 0..4 {
             let (_, report) = super::super::phy::control_fixture();
             let (io, fw, owner, _) = bus(report.profile());
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));
             let device = Arc::new(Mutex::new(Device::default()));
@@ -747,6 +767,8 @@ mod tests {
                 2 => device.lock().unwrap().fail_publish = true,
                 _ => fw.lock().unwrap().panic_at = Some(6),
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                 control.initial_iqk(&mut rings, &Source)
             }));
@@ -790,6 +812,8 @@ mod tests {
             }
             let (_, report) = super::super::phy::control_fixture();
             let (io, fw, owner, _) = bus(report.profile());
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));
             let device = Arc::new(Mutex::new(Device::default()));
@@ -801,12 +825,18 @@ mod tests {
                 f.iqk_after = Some(1);
                 f.fail = (fault != 0).then_some(fault);
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let result = unsafe { control.initial_iqk(&mut rings, &Source) };
             if fault == 0 {
                 result.unwrap();
                 total = fw.lock().unwrap().calls;
                 assert!(total > 10);
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 unsafe { rings.release_after_stop() }.unwrap();
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 drop(unsafe { control.release_after_stop() }.unwrap());
             } else {
                 assert!(result.is_err(), "operation {fault}");
@@ -824,6 +854,8 @@ mod tests {
             if mode == 2 {
                 fw.lock().unwrap().now = 100;
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));
             let device = Arc::new(Mutex::new(Device::default()));
@@ -840,6 +872,8 @@ mod tests {
                     _ => f.mutate_at = Some((9, 0x80, 2, 0)),
                 }
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { control.initial_iqk(&mut rings, &Source) }.is_err());
             assert!(control.quarantined());
             assert!(rings.quarantined());
@@ -885,6 +919,8 @@ mod tests {
             offset += source.len();
             let (_, report) = super::super::phy::control_fixture();
             let (io, fw, _, _) = bus(report.profile());
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut control = unsafe { Control::new(io, &report) }.unwrap();
             let memory = Arc::new(Mutex::new(Model::default()));
             let device = Arc::new(Mutex::new(Device::default()));
@@ -896,6 +932,8 @@ mod tests {
                 f.clear_log();
                 f.iqk_after = Some(h[0] as usize);
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let result = unsafe { control.initial_iqk(&mut rings, &Source) };
             assert_eq!(result.is_ok(), h[0] <= 16, "IQK {}", h[0]);
             if h[0] > 16 {
@@ -933,6 +971,8 @@ mod tests {
             let (pages, pointer) = &m.mappings[&u64::from(d.bases[index(q)])];
             assert_eq!(pages.bytes(), 4096);
             assert!(
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { core::slice::from_raw_parts(*pointer as *const u8, pages.bytes()) }
                     .iter()
                     .all(|b| *b == 0)
@@ -979,6 +1019,8 @@ mod tests {
             &device.lock().unwrap().packets[382][54..56],
             &0u16.to_le_bytes()
         );
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { rings.release_after_stop() }.unwrap();
         drop(rings);
         assert!(memory.lock().unwrap().mappings.is_empty());
@@ -1085,6 +1127,8 @@ mod tests {
             }
             if mode == 2 {
                 memory.lock().unwrap().fail_unmap = true;
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 assert!(unsafe { rings.release_after_stop() }.is_err());
             }
             assert!(rings.quarantined());

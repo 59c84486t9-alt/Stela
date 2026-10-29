@@ -5,9 +5,13 @@ mod ec_binding_tests {
     fn native_installed_ec_unlock_preserves_exact_original_native_io_cause() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         EC.lock().unwrap().as_mut().unwrap().read_error = Some(9);
         REJECT_SIGNAL.store(binding.semaphore_for_test() as usize, Ordering::Release);
@@ -43,9 +47,13 @@ mod ec_binding_tests {
         // Historical observations remain diagnostic history, but a subsequent
         // successful operation must not attribute them as its current cause.
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         EC.lock().unwrap().as_mut().unwrap().read_error = Some(9);
         assert!(matches!(
@@ -79,9 +87,13 @@ mod ec_binding_tests {
         use ec::binding::{Completion, Operation};
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         NESTED_SEMAPHORE.store(binding.semaphore_for_test() as usize, Ordering::Release);
         NESTED_CONTEXT.store(binding.context_for_test() as usize, Ordering::Release);
@@ -129,9 +141,13 @@ mod ec_binding_tests {
     fn native_installed_ec_dependency_cannot_reopen_after_actual_callback_unlock_failure() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         NESTED_SEMAPHORE.store(binding.semaphore_for_test() as usize, Ordering::Release);
         NESTED_CONTEXT.store(binding.context_for_test() as usize, Ordering::Release);
@@ -176,9 +192,13 @@ mod ec_binding_tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         if std::env::var_os("STELA_EC_DEPENDENCY_SHUTDOWN_CHILD").is_some() {
             let (provider, counts) = fixture_ec_legacy(true);
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
             let binding =
+                // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+                // process context.
                 unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
             session.enable_hardware().unwrap();
             let context = binding.context_for_test();
@@ -189,9 +209,12 @@ mod ec_binding_tests {
             assert_eq!(FACS[4].load(Ordering::Acquire) & 3, 0);
             assert_eq!(session.shutdown(), Err(SUPPORT));
             assert!(!counts.destroyed.load(Ordering::Acquire));
+            // SAFETY: reads the namespace flag and changes nothing.
             assert!(unsafe { stela_acpi_namespace_valid() } != 0);
             let before = EC.lock().unwrap().as_ref().unwrap().commands.len();
             assert_eq!(
+                // SAFETY: `context` is the installed binding's live context, and quiescence left
+                // this the only EC actor.
                 unsafe { ec::binding::read_after_quiescence_for_test(context) },
                 Err(Failure::Removed)
             );
@@ -199,6 +222,8 @@ mod ec_binding_tests {
             drop(consumer);
             let (other, _) = fixture();
             assert!(matches!(
+                // SAFETY: the fixture provider's tables and callbacks are valid, and the serial
+                // lock keeps this the only interpreter.
                 unsafe { Session::start(other, Mode::InterpreterOnly) },
                 Err(ALREADY_EXISTS)
             ));
@@ -213,9 +238,13 @@ mod ec_binding_tests {
     fn native_ec_capability_requires_activation_and_pins_actual_binding() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec_legacy(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         assert!(matches!(
             ec::capability::Installed::from_binding(&binding),
@@ -242,6 +271,8 @@ mod ec_binding_tests {
         use ec::discovery::{Ecdt, Ports, Register};
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(true);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let handle = session.devices("PNP0C09").unwrap()[0];
         assert_eq!(Device::discover(handle).unwrap().ports.data, 0x72);
@@ -273,9 +304,13 @@ mod ec_binding_tests {
     fn native_installed_ec_dependency_requires_actual_activation_and_retains_owner() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec_legacy(true);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         assert!(matches!(
             binding.supplier(),
@@ -299,9 +334,13 @@ mod ec_binding_tests {
         assert_eq!(SEMAPHORES.load(Ordering::Acquire), 0);
 
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         drop(binding.supplier().unwrap());
         LATE_DATA.store(true, Ordering::Release);
@@ -321,9 +360,13 @@ mod ec_binding_tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         if std::env::var_os("STELA_EC_QUIESCENCE_OWNER_CHILD").is_some() {
             let (provider, counts) = fixture_ec_legacy(true);
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
             let binding =
+                // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+                // process context.
                 unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
             session.enable_hardware().unwrap();
             let context = binding.context_for_test();
@@ -333,6 +376,8 @@ mod ec_binding_tests {
             // It acquires/retains the real ACPICA token + namespace lease only
             // when shutdown quiescence drains it after Session's initial check.
             assert_eq!(
+                // SAFETY: the provider context is live and the queued callback takes the binding's
+                // live context.
                 unsafe {
                     (provider.execute)(
                         provider.context,
@@ -358,11 +403,14 @@ mod ec_binding_tests {
             );
             assert!(!counts.destroyed.load(Ordering::Acquire));
             assert!(
+                // SAFETY: reads the namespace flag and changes nothing.
                 unsafe { stela_acpi_namespace_valid() } != 0,
                 "live namespace/core retained with actual outstanding lease"
             );
             let commands = EC.lock().unwrap().as_ref().unwrap().commands.len();
             assert_eq!(
+                // SAFETY: `context` is the installed binding's live context, and quiescence left
+                // this the only EC actor.
                 unsafe { ec::binding::read_after_quiescence_for_test(context) },
                 Err(Failure::Removed)
             );
@@ -395,9 +443,13 @@ mod ec_binding_tests {
         // Reduced-hardware fixture genuinely needs no legacy SCI/PM register
         // callbacks; unsupported legacy requests still fail in the provider.
         provider.capabilities = FULL_CAPABILITIES;
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::FirstController) }
                 .unwrap();
         assert_eq!(
@@ -443,9 +495,13 @@ mod ec_binding_tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec_legacy(true);
         LEGACY.lock().unwrap().as_mut().unwrap().refuse_sci = true;
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         assert_eq!(session.enable_hardware(), Err(SUPPORT));
         assert!(!session.hardware_enabled());
@@ -469,9 +525,13 @@ mod ec_binding_tests {
     fn native_installed_ec_primary_late_byte_and_unlock_error_both_survive() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         LATE_DATA.store(true, Ordering::Release);
         REJECT_SIGNAL.store(binding.semaphore_for_test() as usize, Ordering::Release);
@@ -503,12 +563,16 @@ mod ec_binding_tests {
     fn native_installed_ec_subtracts_actual_raw_timer_before_unit_conversion() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let config = ec::Config {
             polling_guard_us: 0,
             ..ec::Config::default()
         };
+        // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in process
+        // context.
         let binding = unsafe { Binding::install(device, config, Scope::Device) }.unwrap();
         RAW_TIME.store(u64::MAX - 50, Ordering::Release);
         assert_eq!(binding.read_region(0, 32), Ok(0x44));
@@ -518,6 +582,8 @@ mod ec_binding_tests {
         );
         let before = CREATED.load(Ordering::Acquire);
         assert!(matches!(
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe {
                 Binding::install(
                     device,
@@ -548,6 +614,8 @@ mod ec_binding_tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         if std::env::var_os("STELA_EC_REGISTRATION_FAILURE_CHILD").is_some() {
             let (provider, counts) = fixture_ec(false);
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
             // Target-validation and registration namespace leases succeed;
@@ -555,6 +623,8 @@ mod ec_binding_tests {
             ALLOCATION_ATTEMPTS.store(0, Ordering::Release);
             FAIL_ALLOCATION.store(3, Ordering::Release);
             REJECT_NEW_SEMAPHORE_DELETE.store(true, Ordering::Release);
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             let result = unsafe { Binding::install(device, ec::Config::default(), Scope::Device) };
             assert_eq!(
                 result.err(),
@@ -570,6 +640,8 @@ mod ec_binding_tests {
             assert!(SEMAPHORES.load(Ordering::SeqCst) > 0);
             let (other, _) = fixture();
             assert!(matches!(
+                // SAFETY: the fixture provider's tables and callbacks are valid, and the serial
+                // lock keeps this the only interpreter.
                 unsafe { Session::start(other, Mode::InterpreterOnly) },
                 Err(ALREADY_EXISTS)
             ));
@@ -586,9 +658,13 @@ mod ec_binding_tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         for operation in [Operation::Query, Operation::Read, Operation::Write] {
             let (provider, counts) = fixture_ec(false);
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
             let binding =
+                // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+                // process context.
                 unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
             EC.lock().unwrap().as_mut().unwrap().queries.push_back(0xae);
             REJECT_SIGNAL.store(binding.semaphore_for_test() as usize, Ordering::Release);
@@ -710,11 +786,14 @@ mod ec_binding_tests {
     static LEGACY: Mutex<Option<Legacy>> = Mutex::new(None);
     unsafe extern "C" fn legacy_map(p: *mut c_void, address: u64, length: u64) -> *mut c_void {
         if address < 0x5000 || address.checked_add(length).is_none_or(|end| end > 0x5040) {
+            // SAFETY: forwards this callback's own arguments under the same provider contract.
             return unsafe { map(p, address, length) };
         }
+        // SAFETY: the range check keeps the offset within the 64-byte `FACS`.
         let raw = unsafe { FACS.as_ptr().cast::<u8>().add((address - 0x5000) as usize) }
             .cast_mut()
             .cast();
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         let platform = unsafe { platform(p) };
         *platform
             .leases
@@ -795,6 +874,7 @@ mod ec_binding_tests {
         if failure != 0 && ALLOCATION_ATTEMPTS.fetch_add(1, Ordering::AcqRel) + 1 == failure {
             return ptr::null_mut();
         }
+        // SAFETY: forwards this callback's own arguments under the same provider contract.
         unsafe { allocate(p, bytes) }
     }
     unsafe extern "C" fn ec_signal_semaphore(
@@ -806,6 +886,7 @@ mod ec_binding_tests {
         if rejected && !REJECT_AFTER_SIGNAL.load(Ordering::Acquire) {
             return SUPPORT.0;
         }
+        // SAFETY: forwards this callback's own arguments under the same provider contract.
         let status = unsafe { signal_semaphore(p, semaphore, units) };
         if status == 0 && rejected {
             return SUPPORT.0; // The actual release applied before its error.
@@ -824,6 +905,8 @@ mod ec_binding_tests {
             }
             REJECT_SIGNAL.store(semaphore as usize, Ordering::Release);
             let result =
+                // SAFETY: `context` is the installed binding's live context, and quiescence left
+                // this the only EC actor.
                 unsafe { ec::binding::read_after_quiescence_for_test(context as *mut c_void) };
             *NESTED_FAILURE.lock().unwrap() = result.err();
             REJECT_SIGNAL.store(0, Ordering::Release);
@@ -842,9 +925,11 @@ mod ec_binding_tests {
     ) -> Status {
         if width != 8 || !matches!(port, 0x72 | 0x76) {
             if let Some(value) = legacy_port(port, width, None) {
+                // SAFETY: ACPICA passes a valid out pointer.
                 unsafe { out.write(value) };
                 return 0;
             }
+            // SAFETY: forwards this callback's own arguments under the same provider contract.
             return unsafe { read_port(p, port, out, width) };
         }
         let mut ec = EC.lock().unwrap();
@@ -881,6 +966,7 @@ mod ec_binding_tests {
         if port == 0x72 && LATE_DATA.swap(false, Ordering::AcqRel) {
             RAW_TIME.fetch_add(5_000_000, Ordering::AcqRel);
         }
+        // SAFETY: ACPICA passes a valid out pointer.
         unsafe { out.write(u32::from(value)) };
         0
     }
@@ -894,6 +980,7 @@ mod ec_binding_tests {
             if legacy_port(port, width, Some(value)).is_some() {
                 return 0;
             }
+            // SAFETY: forwards this callback's own arguments under the same provider contract.
             return unsafe { write_port(p, port, value, width) };
         }
         let value = u8::try_from(value).unwrap();
@@ -948,9 +1035,12 @@ mod ec_binding_tests {
         initial: u32,
         out: *mut *mut c_void,
     ) -> Status {
+        // SAFETY: forwards this callback's own arguments under the same provider contract.
         let status = unsafe { create_semaphore(p, max, initial, out) };
         if status == 0 {
             if REJECT_NEW_SEMAPHORE_DELETE.swap(false, Ordering::AcqRel) {
+                // SAFETY: `create_semaphore` succeeded, so it wrote the new semaphore through
+                // `out`.
                 REJECT_DELETE.store(unsafe { *out } as usize, Ordering::Release);
             }
             SEMAPHORES.fetch_add(1, Ordering::SeqCst);
@@ -960,6 +1050,8 @@ mod ec_binding_tests {
     }
     unsafe extern "C" fn ec_delete_semaphore(p: *mut c_void, semaphore: *mut c_void) -> Status {
         assert!(
+            // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until
+            // `destroy`.
             !unsafe { platform(p) }
                 .counts
                 .destroyed
@@ -968,6 +1060,7 @@ mod ec_binding_tests {
         if REJECT_DELETE.load(Ordering::Acquire) == semaphore as usize {
             return SUPPORT.0;
         }
+        // SAFETY: forwards this callback's own arguments under the same provider contract.
         let status = unsafe { delete_semaphore(p, semaphore) };
         if status == 0 {
             SEMAPHORES.fetch_sub(1, Ordering::SeqCst);
@@ -1115,6 +1208,8 @@ mod ec_binding_tests {
             } else {
                 fixture_ec(false)
             };
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let handle = session.devices("PNP0C09").unwrap()[0];
             let found = Device::discover(handle).unwrap();
@@ -1130,6 +1225,8 @@ mod ec_binding_tests {
                 ..ec::Config::default()
             };
             let binding =
+                // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+                // process context.
                 unsafe { Binding::install(found, config, Scope::FirstController) }.unwrap();
             if global_lock {
                 assert_eq!(
@@ -1226,6 +1323,8 @@ mod ec_binding_tests {
             assert!(binding.poll_query().unwrap().is_none());
             let before = SEMAPHORES.load(Ordering::SeqCst);
             assert_eq!(
+                // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+                // process context.
                 unsafe { Binding::install(found, config, Scope::FirstController) }.err(),
                 Some(Failure::Firmware(Error(0x19))), // actual ACPICA AE_SAME_HANDLER
             );
@@ -1268,8 +1367,12 @@ mod ec_binding_tests {
     fn native_installed_ec_failed_io_keeps_exact_controller_and_osl_errors() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let found = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
+        // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in process
+        // context.
         let binding = unsafe {
             Binding::install(
                 found,
@@ -1310,9 +1413,13 @@ mod ec_binding_tests {
     fn native_installed_ec_failed_removal_retains_context_until_real_termination() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
         let binding =
+            // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+            // process context.
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         binding.remove_from_core_for_test().unwrap();
         let before = SEMAPHORES.load(Ordering::SeqCst);
@@ -1328,9 +1435,13 @@ mod ec_binding_tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         if std::env::var_os("STELA_EC_RETIREMENT_FAILURE_CHILD").is_some() {
             let (provider, counts) = fixture_ec(false);
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
             let binding =
+                // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
+                // process context.
                 unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
             REJECT_DELETE.store(binding.semaphore_for_test() as usize, Ordering::Release);
             binding.remove().unwrap();
@@ -1340,6 +1451,8 @@ mod ec_binding_tests {
             assert!(counts.allocations.load(Ordering::SeqCst) > 0);
             let (other, _) = fixture();
             assert!(matches!(
+                // SAFETY: the fixture provider's tables and callbacks are valid, and the serial
+                // lock keeps this the only interpreter.
                 unsafe { Session::start(other, Mode::InterpreterOnly) },
                 Err(ALREADY_EXISTS)
             ));

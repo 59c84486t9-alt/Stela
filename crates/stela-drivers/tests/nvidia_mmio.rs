@@ -40,6 +40,7 @@ struct Window(UnsafeCell<Pages>);
 // lease is live. Mutex-protected model bookkeeping does not create references
 // to mapped bytes. The test drains all uses before acknowledged unmap.
 unsafe impl Send for Window {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl Sync for Window {}
 struct Backing {
     span: PhysicalSpan,
@@ -393,6 +394,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
         address.cast::<u8>(),
         actual.window.0.get().cast::<u8>().wrapping_add(17)
     );
+    // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+    // accesses it concurrently.
     unsafe {
         address.cast::<u8>().write_volatile(0x19);
         address.cast::<u8>().add(99).write_volatile(0xe7);
@@ -405,6 +408,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     );
     assert_eq!(services.status().live, 1);
     assert_eq!(
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { services.as_mut().uninstall() },
         Err(Error::LiveMappings)
     );
@@ -430,6 +435,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
         assert_eq!(model.calls(), calls);
     }
     // Default is original UC, including a compatible imported raw UC alias.
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let default = unsafe { os_map_kernel_space(BASE + 6 * PAGE, PAGE, 6) };
     assert!(!default.is_null());
     assert_eq!(
@@ -438,14 +445,20 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     );
     model.state.lock().unwrap().reenter = Some((BASE + 2 * PAGE, address as usize, 100));
     let refused = services.status().refused_calls;
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let third = unsafe { os_map_kernel_space(BASE + PAGE, PAGE, 1) };
     assert!(!third.is_null());
     assert_eq!(services.status().refused_calls, refused + 2);
     assert_eq!(services.status().live, 3);
     model.state.lock().unwrap().reenter = Some((BASE + 2 * PAGE, address as usize, 100));
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(third, PAGE) };
     assert_eq!(services.status().refused_calls, refused + 4);
     assert_eq!(services.status().live, 2);
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe {
         os_unmap_kernel_space(default, PAGE);
         os_unmap_kernel_space(address, 100);
@@ -453,6 +466,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     assert_eq!(model.calls().2, 0);
     assert_eq!(services.status().live, 0);
     let calls = model.calls();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(address, 100) };
     assert_eq!(services.status().last_failure, Some(Error::UnknownMapping));
     assert_eq!(model.calls(), calls);
@@ -468,12 +483,16 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
         true,
     );
     model.mode(Mode::Normal);
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let wc = unsafe { os_map_kernel_space(PREFETCH, PAGE, 2) };
     assert!(!wc.is_null());
     assert_eq!(
         model.state.lock().unwrap().installed[0].request.attribute,
         CacheAttribute::WriteCombining
     );
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(wc, PAGE) };
     model.mode(Mode::Unchanged);
     rejected(
@@ -487,8 +506,12 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     );
     assert_eq!(services.authority_status().unwrap().uncertain, 0);
     model.mode(Mode::Normal);
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let restored = unsafe { os_map_kernel_space(BASE + 7 * PAGE, PAGE, 1) };
     assert!(!restored.is_null());
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(restored, PAGE) };
 
     // A canonical independent view keeps its actual backing alive; NVIDIA gets
@@ -502,13 +525,17 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
         .unwrap();
     let view = parent.view(17..117).unwrap();
     assert_eq!(view.bytes(), 100);
+    // SAFETY: the model device is stopped and drained, so nothing still uses what this releases.
     assert_eq!(unsafe { parent.retire() }, Err(MappingError::Busy));
     drop(view);
+    // SAFETY: the model device is stopped and drained, so nothing still uses what this releases.
     unsafe { parent.retire() }.unwrap();
 
     // Another real canonical consumer may have a platform map in flight.
     // Original void unmap ends raw access now, retaining the same ledger slot
     // and Mapping until the native owner reaches a true quiescent retry point.
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let busy = unsafe { os_map_kernel_space(BASE + 12 * PAGE, PAGE, 1) };
     assert!(!busy.is_null());
     let ready = Arc::new(Barrier::new(2));
@@ -527,6 +554,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     ready.wait();
     let before = services.status();
     let calls = model.calls();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(busy, PAGE) };
     assert_eq!(services.status().live, 0);
     assert_eq!(services.status().pending, 1);
@@ -541,22 +570,30 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     );
     assert_eq!(services.authority_status().unwrap().quarantined, 0);
     assert_eq!(
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { services.as_mut().uninstall() },
         Err(Error::LiveMappings)
     );
     for _ in 0..3 {
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { services.as_mut().drain_pending_retirements() },
             Err(Error::Mapping(MappingError::Busy))
         );
         assert_eq!(services.status().pending, 1);
         assert_eq!(model.calls(), calls); // no native unmap or new mapping
     }
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(busy, PAGE - 1) };
     assert_eq!(services.status().last_failure, Some(Error::UnknownMapping));
     assert_eq!(services.status().pending, 1);
     assert_eq!(model.calls(), calls);
     let before_duplicate = services.status();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(busy, PAGE) };
     assert_eq!(services.status().last_failure, Some(Error::UnknownMapping));
     assert_eq!(services.status().pending, 1);
@@ -574,6 +611,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     model.state.lock().unwrap().reenter = Some((BASE + 2 * PAGE, busy as usize, PAGE));
     let refused = services.status().refused_calls;
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { services.as_mut().drain_pending_retirements() },
         Ok(1)
     );
@@ -581,16 +620,21 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     assert_eq!(services.status().pending, 0);
     assert_eq!(services.authority_status().unwrap().quarantined, 0);
     assert_eq!(model.calls().1, calls.1 + 1); // one actual acknowledged retire
+    // SAFETY: the model device is stopped and drained, so nothing still uses what this releases.
     unsafe { other.retire() }.unwrap();
 
     // Busy returned AFTER entering native unmap makes canonical state uncertain.
     // Do not infer that Busy means unchanged: retain/block access and retry the
     // exact token. The model verifies the same token/request on every attempt.
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let busy = unsafe { os_map_kernel_space(BASE + 13 * PAGE, PAGE, 1) };
     assert!(!busy.is_null());
     let before = services.status();
     let calls = model.calls();
     model.state.lock().unwrap().busy_unmap = true;
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(busy, PAGE) };
     assert_eq!(services.status().pending, 1);
     assert_eq!(services.status().live, 0);
@@ -598,12 +642,16 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     assert_eq!(services.authority_status().unwrap().quarantined, 0);
     assert_eq!(model.calls().1, calls.1 + 1);
     let duplicate_calls = model.calls();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(busy, PAGE) };
     assert_eq!(services.status().last_failure, Some(Error::UnknownMapping));
     assert_eq!(services.status().pending, 1);
     assert_eq!(services.authority_status().unwrap().uncertain, 1);
     assert_eq!(model.calls(), duplicate_calls); // owner drain is sole retry seam
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { services.as_mut().drain_pending_retirements() },
         Err(Error::Mapping(MappingError::Busy))
     );
@@ -620,6 +668,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     );
     model.state.lock().unwrap().busy_unmap = false;
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { services.as_mut().drain_pending_retirements() },
         Ok(1)
     );
@@ -636,16 +686,22 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     assert_eq!(services.authority_status().unwrap().uncertain, 0);
     assert_eq!(model.calls().1, calls.1 + 3);
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { services.as_mut().drain_pending_retirements() },
         Ok(0)
     );
 
     // Failed retirement consumes the void native ABI into actual canonical
     // quarantine. The provider's allocation/token and resource stay retained.
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     let failed = unsafe { os_map_kernel_space(BASE + 9 * PAGE, PAGE, 1) };
     assert!(!failed.is_null());
     model.state.lock().unwrap().ack = false;
     let before = services.status();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(failed, PAGE) };
     assert_eq!(services.status().live, 0);
     assert_eq!(services.status().failed_unmaps, before.failed_unmaps + 1);
@@ -664,6 +720,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
         Err(MappingError::Busy)
     );
     let calls = model.calls();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe { os_unmap_kernel_space(failed, PAGE) };
     assert_eq!(model.calls(), calls); // no guessed retry/double unmap
     model.state.lock().unwrap().ack = true;
@@ -701,16 +759,23 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     assert_eq!(services.authority_status().unwrap().quarantined, 3);
     assert_eq!(model.calls().2, 3);
 
+    // SAFETY: the model device is stopped and drained, so nothing still uses what this releases.
     unsafe { services.as_mut().uninstall() }.unwrap();
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { services.as_mut().drain_pending_retirements() },
         Err(Error::NotInstalled)
     );
     assert_eq!(
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { services.as_mut().uninstall() },
         Err(Error::NotInstalled)
     );
     let calls = model.calls();
+    // SAFETY: the installed test services own the model BAR and refuse any address or length they
+    // did not map.
     unsafe {
         assert!(os_map_kernel_space(PREFETCH, PAGE, 1).is_null());
         os_unmap_kernel_space(failed, PAGE);

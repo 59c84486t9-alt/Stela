@@ -2,12 +2,14 @@
 use core::{arch::asm, fmt};
 const UART: u16 = 0x3f8;
 unsafe fn out(port: u16, value: u8) {
+    // SAFETY: the caller guarantees CPL0 and that `port` is a COM1 register.
     unsafe {
         asm!("out dx, al", in("dx") port, in("al") value, options(nostack, preserves_flags));
     }
 }
 unsafe fn input(port: u16) -> u8 {
     let value;
+    // SAFETY: the caller guarantees CPL0 and that `port` is a COM1 register.
     unsafe {
         asm!("in al, dx", in("dx") port, out("al") value, options(nostack, preserves_flags));
     }
@@ -61,11 +63,13 @@ fn send(byte: u8) {
     // Bounded polling has no allocator/runtime callback or lock. A broken
     // UART cannot convert panic into deadlock or resumed execution.
     for _ in 0..100_000 {
+        // SAFETY: the line status register is a COM1 register, read at CPL0.
         if unsafe { input(UART + 5) } & 0x20 != 0 {
             break;
         }
         core::hint::spin_loop();
     }
+    // SAFETY: the transmit holding register is a COM1 register, written at CPL0.
     unsafe {
         out(UART, byte);
     }

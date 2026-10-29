@@ -76,6 +76,8 @@ mod tests {
         unavailable: bool,
         clock: crate::Clock,
     }
+    // SAFETY: the model answers only for this test's simulated device; nothing else reaches its
+    // state.
     unsafe impl BarIo for Model {
         fn read32(&mut self, offset: u32) -> Result<u32, registers::Error> {
             let value = if offset == 0xe0010 {
@@ -133,9 +135,13 @@ mod tests {
             unavailable: false,
             clock,
         };
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { Control::new(Registers::new(chip, m), clock) }.unwrap()
     }
     fn run(c: &mut Control<Model>) -> Result<Observation, Error> {
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.initial_wfsys_reset() }
     }
     #[test]

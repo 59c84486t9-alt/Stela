@@ -964,12 +964,15 @@ mod tests {
             self.inner.route()
         }
         unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+            // SAFETY: forwards the wrapped source's own call under the same contract.
             unsafe { self.inner.program(route) }
         }
         unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+            // SAFETY: forwards the wrapped source's own call under the same contract.
             unsafe { self.inner.unmask() }
         }
         unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+            // SAFETY: forwards the wrapped source's own call under the same contract.
             unsafe { self.inner.synchronize() }?;
             if self.inner.0.migrate_on_sync.load(Ordering::Relaxed) {
                 self.inner.0.wrong_cpu.store(true, Ordering::Relaxed);

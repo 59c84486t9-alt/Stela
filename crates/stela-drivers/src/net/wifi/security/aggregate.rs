@@ -294,6 +294,7 @@ mod tests {
         // Full unchanged C helper/flags are emitted by wifi_group_replay_oracle.py.
         // The complete unchanged helper ASan/UBSan trace covers 1,048,576 cases.
         // This does not establish grouping, BA, integrity or hardware authority.
+        // SAFETY: this test owns the key slot number alone.
         let mut slot = unsafe { KeySlot::new(8).unwrap() };
         let mut digest = Sha256::new();
         for tid in 0..16 {

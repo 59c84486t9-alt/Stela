@@ -340,8 +340,8 @@ fn canonical_amd_attachment() {
     // SAFETY: deliberately duplicate original reservation, rejected pre-map.
     assert!(unsafe { staged.attach_kernel_doorbells(&authority, doors(0x1a0000, false)) }.is_err());
     assert_eq!(model.0.lock().unwrap().calls, before);
-    // SAFETY: model accesses stopped, but retained C view still pins its lease.
     assert_eq!(
+        // SAFETY: model accesses stopped, but retained C view still pins its lease.
         unsafe { staged.retire() },
         Err(Error::Mapping(MmioError::Busy))
     );
@@ -381,8 +381,8 @@ fn canonical_amd_attachment() {
     // Failed teardown blocks new views and retains exact canonical token for
     // acknowledged retry rather than freeing or manufacturing completion.
     model.0.lock().unwrap().fail_unmaps = 1;
-    // SAFETY: no real consumers or active views in this model.
     assert_eq!(
+        // SAFETY: no real consumers or active views in this model.
         unsafe { modern.retire() },
         Err(Error::Mapping(MmioError::UnmapFailed))
     );
@@ -421,8 +421,8 @@ fn canonical_amd_attachment() {
             7 => door.reserved_bytes = usize::MAX,
             _ => unreachable!(),
         }
-        // SAFETY: deliberately malformed isolated-owner input.
         assert!(
+            // SAFETY: deliberately malformed isolated-owner input.
             unsafe {
                 AttachedBars::attach(
                     &authority,
@@ -436,8 +436,8 @@ fn canonical_amd_attachment() {
             .is_err()
         );
     }
-    // SAFETY: unaligned backing deliberately fails complete-page ownership.
     assert!(
+        // SAFETY: unaligned backing deliberately fails complete-page ownership.
         unsafe {
             AttachedBars::attach(
                 &authority,

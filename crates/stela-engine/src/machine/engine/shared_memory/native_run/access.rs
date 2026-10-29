@@ -316,6 +316,8 @@ mod tests {
         cpu.state.sp = base;
         let mut source = word.to_le_bytes().to_vec();
         source.extend_from_slice(&0x14000000u32.to_le_bytes());
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(PC, &source) }.unwrap();
         let native_host = ServiceHost::new(Local, OneWorker(None), Arc::clone(&ram));
         let mut machine = Machine::new(
@@ -454,6 +456,8 @@ mod tests {
                 let (mut machine, ram) = pending(word, fail);
                 let before = machine.cpu.state.clone();
                 let retired = machine.cpu.retired;
+                // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+                // device worker or other writer admitted.
                 let result = unsafe { machine.complete_device_read() };
                 assert_eq!(result.is_err(), fail);
                 assert_eq!(machine.devices.reads, 1);
@@ -466,6 +470,8 @@ mod tests {
                     expected.x[2] = DEVICE + 16;
                 }
                 assert_eq!(machine.cpu.state, expected);
+                // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+                // device worker or other writer admitted.
                 assert!(unsafe { machine.complete_device_read() }.is_err());
                 assert_eq!(machine.devices.reads, 1);
                 assert!(matches!(machine.run(1), Stop::Unsupported(_)));
@@ -512,6 +518,8 @@ mod tests {
             if let Some((register, value)) = writeback {
                 expected.x[register] = value;
             }
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             unsafe { machine.complete_device_read() }.unwrap();
             assert_eq!(machine.cpu.state, expected, "word={word:#x}");
             assert_eq!(machine.cpu.pc, PC + 4);
@@ -534,6 +542,8 @@ mod tests {
                         .set_raw(crate::machine::system::Register::SCTLR_EL2, 0, 1)
                 }
                 _ => {
+                    // SAFETY: the buffers are private locals, disjoint from the registered RAM,
+                    // which stays registered.
                     unsafe { ram.publish_physical(PC, &0xd503201fu32.to_le_bytes()) }.unwrap();
                 }
             }
@@ -542,6 +552,8 @@ mod tests {
                 machine.cpu.pc,
                 machine.cpu.retired,
             );
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert!(unsafe { machine.complete_device_read() }.is_err());
             assert_eq!(machine.devices.reads, 0);
             assert_eq!(
@@ -552,6 +564,8 @@ mod tests {
                 ),
                 before
             );
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert!(unsafe { machine.native_round() }.is_err());
             assert_eq!(machine.devices.reads, 0);
         }
@@ -575,6 +589,8 @@ mod tests {
                 if let Some((base, value)) = writeback {
                     expected.x[base] = value;
                 }
+                // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+                // device worker or other writer admitted.
                 let result = unsafe { machine.complete_device_write() };
                 assert_eq!(result.is_ok(), !fail);
                 assert_eq!(machine.cpu.state, expected);
@@ -599,6 +615,8 @@ mod tests {
                     machine.devices.committed.len(),
                     usize::from(bytes) * if pair { 2 } else { 1 }
                 );
+                // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+                // device worker or other writer admitted.
                 assert!(unsafe { machine.complete_device_write() }.is_err());
                 assert_eq!(machine.devices.writes.len(), 1);
                 if fail {
@@ -616,14 +634,20 @@ mod tests {
             machine.set_traces(&[PC]);
             // These points cannot retroactively replace this already entered
             // instruction's linear continuation. No native frame is executed.
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert_eq!(unsafe { machine.native_round() }, Err(queued));
             assert!(machine.take_trace_hits().is_empty());
             assert_eq!(machine.pending_native_device_access_count(), 1);
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             unsafe { machine.complete_native_device_access() }.unwrap();
             assert_eq!((machine.cpu.pc, machine.cpu.retired), (PC + 4, 1));
             assert_eq!(machine.devices.reads + machine.devices.writes.len(), 1);
             assert_eq!(machine.pending_native_device_access_count(), 0);
             assert!(machine.take_trace_hits().is_empty());
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert!(unsafe { machine.complete_native_device_access() }.is_err());
             assert_eq!(machine.devices.reads + machine.devices.writes.len(), 1);
         }
@@ -632,6 +656,8 @@ mod tests {
     fn sequential_memory_and_actual_processor_leases_complete_under_one_stop() {
         let (mut machine, _) = pending(0xf9000020, false);
         machine.devices.clock = true;
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         unsafe { machine.complete_device_write() }.unwrap();
         assert_eq!(machine.devices.clock_commits, 2);
         assert_eq!(machine.processors().paused(0), Some(false));
@@ -653,8 +679,12 @@ mod tests {
             let (mut machine, ram) = pending(0xf8008420, false);
             machine.devices.write_result = Some(result.clone());
             let before = machine.cpu.state.clone();
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             let first = unsafe { machine.complete_native_device_access() }.unwrap_err();
             assert_eq!(
+                // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+                // device worker or other writer admitted.
                 unsafe { machine.complete_native_device_access() },
                 Err(first)
             );
@@ -662,7 +692,11 @@ mod tests {
             assert_eq!((machine.cpu.pc, machine.cpu.retired), (PC, 0));
             assert_eq!(machine.devices.writes.len(), usize::from(result.is_ok()));
             assert!(ram.try_service().is_err());
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert!(unsafe { machine.native_round() }.is_err());
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert!(unsafe { machine.complete_native_device_access() }.is_err());
             assert_eq!(machine.devices.writes.len(), usize::from(result.is_ok()));
         }
@@ -680,6 +714,8 @@ mod tests {
                         .registers
                         .set_raw(crate::machine::system::Register::SCTLR_EL2, 0, 1)
                 }
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 _ => unsafe { ram.publish_physical(PC, &0xd503201fu32.to_le_bytes()) }.unwrap(),
             }
             let before = (
@@ -687,6 +723,8 @@ mod tests {
                 machine.cpu.pc,
                 machine.cpu.retired,
             );
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert!(unsafe { machine.complete_device_write() }.is_err());
             assert!(machine.devices.writes.is_empty() && machine.devices.committed.is_empty());
             assert_eq!(
@@ -703,12 +741,16 @@ mod tests {
     fn store_zero_register_and_preindexed_sp_use_original_values_and_success_writeback() {
         let (mut zero, _) = pending(0xf900003f, false);
         let before = zero.cpu.state.clone();
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         unsafe { zero.complete_device_write() }.unwrap();
         assert_eq!(zero.cpu.state, before);
         assert_eq!(zero.devices.committed, [0; 8]);
         let (mut sp, _) = pending_at(0xf8008fe0, false, DEVICE - 8);
         let mut expected = sp.cpu.state.clone();
         expected.sp = DEVICE;
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         unsafe { sp.complete_device_write() }.unwrap();
         assert_eq!(sp.cpu.state, expected);
         assert_eq!(sp.devices.committed, 0x8877665544332211u64.to_le_bytes());

@@ -91,6 +91,8 @@ impl Peer {
                             );
                         }
                         // The hardware endpoint is Running after Configure ACK.
+                        // SAFETY: the pointer addresses live memory this test's model owns, in
+                        // bounds, and nothing accesses it concurrently.
                         unsafe {
                             (to as *mut u32).write_volatile(Self::word(to) & !7 | 1);
                         }

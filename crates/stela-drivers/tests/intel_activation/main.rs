@@ -370,8 +370,8 @@ fn owner_with_registers(
     wopcm_size: u32,
 ) -> (Box<dyn ProbeOwner>, Arc<Counts>) {
     let layout = Layout::from_size_align(BYTES, 4096).unwrap();
-    // SAFETY: nonzero validated layout, actual host RAM test allocation.
     let memory = Arc::new(Memory {
+        // SAFETY: nonzero validated layout, actual host RAM test allocation.
         pointer: NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap(),
         layout,
     });

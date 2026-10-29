@@ -448,6 +448,8 @@ mod tests {
     fn real_read_trigger_polling_preserves_raw_otp_ldo_bank_and_exact_identity() {
         for case in 0..4 {
             let model = Arc::new(Mutex::new(Model::new(case)));
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let physical = unsafe { read(&mut Registers(model.clone())) }.unwrap();
             let m = model.lock().unwrap();
             assert_eq!(physical.bytes(), &m.physical);
@@ -469,6 +471,8 @@ mod tests {
                     m.corrupt_completion = Some((address, value));
                 }
                 assert!(matches!(
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe { read(&mut Registers(model.clone())) },
                     Err(Error::CompletionAddress { requested, observed })
                         if requested == address as u16 && observed == ((value >> 8) & 1023) as u16
@@ -481,6 +485,8 @@ mod tests {
         }
         let model = Arc::new(Mutex::new(Model::new(0)));
         model.lock().unwrap().physical = [0xff; PHYSICAL];
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let physical = unsafe { read(&mut Registers(model.clone())) }.unwrap();
         assert_eq!(physical.bytes(), &[0xff; PHYSICAL]);
         let m = model.lock().unwrap();
@@ -492,6 +498,8 @@ mod tests {
     #[test]
     fn each_uncertain_read_trigger_identity_and_timeout_is_explicit_and_quarantined() {
         let normal = Arc::new(Mutex::new(Model::new(0)));
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { read(&mut Registers(normal.clone())) }.unwrap();
         let calls = normal.lock().unwrap().calls;
         for call in 1..=calls {
@@ -502,6 +510,8 @@ mod tests {
                 m.record = false;
             }
             assert!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { read(&mut Registers(model.clone())) }.is_err(),
                 "operation {call}"
             );
@@ -511,6 +521,8 @@ mod tests {
             let model = Arc::new(Mutex::new(Model::new(0)));
             model.lock().unwrap().change_identity_at = Some(identity);
             assert!(matches!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { read(&mut Registers(model.clone())) },
                 Err(Error::IdentityChanged)
             ));
@@ -519,6 +531,8 @@ mod tests {
         for ready in [0, 65535] {
             let model = Arc::new(Mutex::new(Model::new(0)));
             model.lock().unwrap().ready = ready;
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { read(&mut Registers(model.clone())) }.is_err());
             assert!(model.lock().unwrap().quarantined);
             assert!(model.lock().unwrap().events.is_empty());
@@ -531,6 +545,8 @@ mod tests {
                 m.record = false;
             }
             assert!(matches!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { read(&mut Registers(model.clone())) },
                 Err(Error::Timeout { address: 0 })
             ));
@@ -540,6 +556,8 @@ mod tests {
         let model = Arc::new(Mutex::new(Model::new(0)));
         model.lock().unwrap().sys = u32::MAX;
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { read(&mut Registers(model.clone())) },
             Err(Error::Removed)
         ));
@@ -646,6 +664,8 @@ mod tests {
         }
         for case in 0..4 {
             let model = Arc::new(Mutex::new(Model::new(case)));
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let native = unsafe { read(&mut Registers(model.clone())) }.unwrap();
             assert_eq!(native.bytes(), &trace[offset..offset + 512]);
             offset += 512;
@@ -669,6 +689,8 @@ mod tests {
                 m.record = false;
             }
             assert!(matches!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { read(&mut Registers(model.clone())) },
                 Err(Error::Timeout { address: 0 })
             ));

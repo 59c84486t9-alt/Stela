@@ -811,9 +811,9 @@ mod tests {
                     _ => state.values[(TX_DESCRIPTOR + 8) / 4] = 1 << 16,
                 }
             }
-            // SAFETY: exclusively owned synthetic mapping; tests deliberately
-            // supply invalid reported bounds/state to exercise preflight.
             assert!(
+                // SAFETY: exclusively owned synthetic mapping; tests deliberately supply invalid
+                // reported bounds/state to exercise preflight.
                 unsafe {
                     Ring::new(
                         model.clone(),
@@ -842,8 +842,8 @@ mod tests {
             source.fail_at.store(fail, Ordering::Relaxed);
             let domain = Arc::new(Domain::new());
             let model = Arc::new(Model::new(domain.clone()));
-            // SAFETY: same exclusive stopped synthetic NHI contract.
             assert!(
+                // SAFETY: same exclusive stopped synthetic NHI contract.
                 unsafe {
                     Ring::new(
                         model.clone(),
@@ -932,8 +932,8 @@ mod tests {
         ring.start().unwrap();
         ring.disable().unwrap();
         domain.fail_unmap_at.store(2, Ordering::Relaxed);
-        // SAFETY: stopped empty synthetic device; no outstanding DMA/IRQ/work.
         assert_eq!(
+            // SAFETY: stopped empty synthetic device; no outstanding DMA/IRQ/work.
             unsafe { ring.release() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );

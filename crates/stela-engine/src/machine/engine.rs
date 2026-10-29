@@ -3758,9 +3758,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn execute(&mut self, index: usize, budget: u64) -> Step {
         let entry = self.blocks[index].code;
         self.chain.begin(index, budget);
-        // SAFETY: installed by this machine since the last discard, for the
-        // system-mode block ABI; chained blocks and thunks too.
         let entered = self.timing_start();
+        // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
+        // chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
         let remaining = self.chain.budget().load(Ordering::Relaxed);

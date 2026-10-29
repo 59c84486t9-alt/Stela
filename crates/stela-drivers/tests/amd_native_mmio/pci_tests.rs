@@ -105,9 +105,9 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
         let invalid = Clock {
             ticks_per_microsecond: rate,
         };
-        // SAFETY: canonical model resources, no physical hardware; invalid
-        // calibration must fail before any register operation.
         assert_eq!(
+            // SAFETY: canonical model resources, no physical hardware; invalid calibration must
+            // fail before any register operation.
             unsafe { crate::discovery::discover(&bars, &invalid, &empty) }.err(),
             Some(crate::discovery::Error::Clock(error))
         );
@@ -126,6 +126,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     // Failed matched attachment keeps attach's rollback behavior.
     let calls = model.0.lock().unwrap().calls;
     let error =
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { AttachedBars::attach_matched(authority, &matched, registers(0x1200000, 2), None) }
             .err()
             .unwrap();
@@ -155,6 +157,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
         // SAFETY: immutable synthetic config.
         let matched = unsafe { crate::pci::identify(&mut function, Policy::default()) }.unwrap();
         assert_eq!(matched.ip_path(), path);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut bars = unsafe {
             AttachedBars::attach_matched(authority, &matched, registers(0x1300000, 5), None)
         }
@@ -167,6 +171,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
                 Error::StaticInitializationRequired
             ))
         );
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { bars.retire() }.unwrap();
     }
 
@@ -180,6 +186,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     };
     // SAFETY: immutable synthetic config.
     let matched = unsafe { crate::pci::identify(&mut function, file) }.unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let mut bars = unsafe {
         AttachedBars::attach_matched(authority, &matched, full_registers(0x1400000), None)
     }
@@ -244,14 +252,16 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     // class Linux does not claim, and SI, which Stela builds without.
     let mut changed = observed(0xffff, 0x120000, 0);
     changed.device = 0x6780;
-    // SAFETY: the model corrupts the public labels; config refuses it.
     assert_eq!(
+        // SAFETY: the model corrupts the public labels; config refuses it.
         unsafe { crate::pci::identify(&mut changed, Policy::default()) }.err(),
         Some(MatchError::IdentityChanged)
     );
     let mut bridge = observed(0xffff, 0x120000, 0);
     bridge.config().words[3] = 1 << 16;
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { crate::pci::identify(&mut bridge, Policy::default()) }.err(),
         Some(MatchError::UnsupportedHeader)
     );
@@ -259,6 +269,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     let mut absent = observed(0xffff, 0x120000, 0);
     absent.config().words[0] = u32::MAX;
     assert_eq!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { crate::pci::identify(&mut absent, Policy::default()) }.err(),
         Some(MatchError::Absent)
     );
@@ -266,6 +278,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     for (device, class) in [(0xffff, 0x020000), (0x6780, 0x030000)] {
         let mut refused = observed(device, class, 0);
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { crate::pci::identify(&mut refused, Policy::default()) }.err(),
             Some(MatchError::Native(-ENODEV))
         );

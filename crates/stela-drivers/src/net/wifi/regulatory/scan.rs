@@ -350,6 +350,8 @@ mod tests {
             assert!(!model.hardware_held.get() && !model.os_held.get());
             assert_eq!(model.hardware_acquires.get(), 1);
             assert_eq!(model.os_acquires.get(), 1);
+            // SAFETY: the admission belongs to this test, and the callback runs synchronously on
+            // this thread.
             let result = unsafe {
                 owner.publish_scan(admission, |guard, operation| {
                     assert_eq!(guard.context(), NATIVE);
@@ -408,6 +410,8 @@ mod tests {
                 model.os_denied.set(Some(SECOND.number));
             }
             assert_eq!(
+                // SAFETY: the admission belongs to this test, and the callback runs synchronously
+                // on this thread.
                 unsafe {
                     owner.publish_scan(admission, |_, _| -> () {
                         panic!("partial request publication")
@@ -490,6 +494,8 @@ mod tests {
             let mut other = owner(&model);
             let target = if case == 4 { &mut other } else { &mut original };
             assert_eq!(
+                // SAFETY: the admission belongs to this test, and the callback runs synchronously
+                // on this thread.
                 unsafe {
                     target.publish_scan(admission, |_, _| -> () { panic!("revoked publication") })
                 },
@@ -542,6 +548,8 @@ mod tests {
             let original = request(false);
             owner.admit_scan(&original, None).unwrap()
         };
+        // SAFETY: the admission belongs to this test, and the callback runs synchronously on this
+        // thread.
         unsafe {
             owner.publish_scan(admission, |_, operation| {
                 assert_eq!(operation.request().channels(), [FIRST, SECOND])
@@ -621,12 +629,16 @@ mod tests {
         let admission = owner.admit_scan(scanner.request().unwrap(), None).unwrap();
         model.os_denied.set(Some(SECOND.number));
         assert_eq!(
+            // SAFETY: the admission belongs to this test, and the callback runs synchronously on
+            // this thread.
             unsafe { owner.publish_scan(admission, |_, _| -> () { panic!("partial scan") }) },
             Err(Error::OsDenied)
         );
         assert_eq!(scanner.phase(), protocol::Phase::Starting);
         model.os_denied.set(None);
         let admission = owner.admit_scan(scanner.request().unwrap(), None).unwrap();
+        // SAFETY: the admission belongs to this test, and the callback runs synchronously on this
+        // thread.
         let actual = unsafe {
             owner.publish_scan(admission, |_, operation| {
                 assert!(model.hardware_held.get() && model.os_held.get());

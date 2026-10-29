@@ -10,9 +10,13 @@ fn complete_scan(
     sequence: u16,
     entry: u16,
 ) {
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { scan.start(request(false), 30_000_000, source) }.unwrap();
     ack(scan, native, entry, sequence, false);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(source) }.unwrap(),
         Ax200ScanPhase::Scanning
     );
@@ -24,6 +28,8 @@ fn complete_scan(
         &completion(0, 1, 0),
     );
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(source) }.unwrap(),
         Ax200ScanPhase::DrainRequired
     );
@@ -109,11 +115,15 @@ fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completio
     let mut histories = Vec::new();
     for turn in 0..2 {
         let maps = native.domain.records.lock().unwrap().live.len();
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
         let command = scan.command_ticket().unwrap().clone();
         assert_eq!(command.sequence(), sequence);
         ack(&scan, &native, entry, sequence, false);
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { scan.advance(&source) }.unwrap(),
             Ax200ScanPhase::Scanning
         );
@@ -141,6 +151,8 @@ fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completio
             &completion(0, 1, 0),
         );
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { scan.advance(&source) }.unwrap(),
             Ax200ScanPhase::DrainRequired
         );
@@ -194,8 +206,12 @@ fn every_scan_result_variant_pins_retirement_until_real_consumer_drop() {
         let source = Source::default();
         let policy = Arc::new(PolicyState::default());
         let (mut scan, sequence, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
         ack(&scan, &native, entry, sequence, false);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         let mut packet = beacon_packet();
         match case {
@@ -221,6 +237,8 @@ fn every_scan_result_variant_pins_retirement_until_real_consumer_drop() {
             entry + 3,
             &completion(0, 1, 0),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         assert!(matches!(
             scan.retire(),
@@ -232,6 +250,8 @@ fn every_scan_result_variant_pins_retirement_until_real_consumer_drop() {
         if case == 2 {
             let allocations = source.calls.load(Ordering::Relaxed);
             assert!(matches!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { scan.start(request(false), 30_000_000, &source) },
                 Err(Ax200ScanError::Country(Ax200CountryError::Revoked))
             ));
@@ -287,9 +307,13 @@ fn late_completed_rb_is_raw_only_and_its_observer_must_finish_before_uid_reuse()
         ));
         drop(raw);
         scan.retire().unwrap();
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
         ack(&scan, &native, entry + 3, sequence + 1, false);
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { scan.advance(&source) }.unwrap(),
             Ax200ScanPhase::Scanning
         );
@@ -300,6 +324,8 @@ fn late_completed_rb_is_raw_only_and_its_observer_must_finish_before_uid_reuse()
             entry + 5,
             &completion(0, 1, 0),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         scan.retire().unwrap();
         scan.stop().unwrap();
@@ -366,6 +392,8 @@ fn stale_first_request_completion_after_retirement_cannot_complete_second_reques
     let acquired = policy.acquired.load(Ordering::SeqCst);
     let bell = native.state.lock().unwrap().registers[&0x460];
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.start(request(false), 30_000_000, &source) },
         Err(Ax200ScanError::StaleNotification)
     );
@@ -416,8 +444,12 @@ fn abort_ack_and_actual_aborted_completion_retire_without_repairing_revoked_coun
         let source = Source::default();
         let policy = Arc::new(PolicyState::default());
         let (mut scan, sequence, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
         ack(&scan, &native, entry, sequence, false);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         if revoked {
             native.revoked.store(true, Ordering::SeqCst);
@@ -425,12 +457,16 @@ fn abort_ack_and_actual_aborted_completion_retire_without_repairing_revoked_coun
             scan.cancel().unwrap();
         }
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { scan.advance(&source) }.unwrap(),
             Ax200ScanPhase::WaitingAbort
         );
         assert!(matches!(scan.retire(), Err(Ax200ScanError::State)));
         ack(&scan, &native, entry + 1, sequence + 1, true);
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { scan.advance(&source) }.unwrap(),
             Ax200ScanPhase::Cancelling
         );
@@ -442,6 +478,8 @@ fn abort_ack_and_actual_aborted_completion_retire_without_repairing_revoked_coun
             entry + 3,
             &completion(0, 2, 0),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap();
         let retired = scan.retire().unwrap();
         assert_eq!(retired.outcome(), scan::Outcome::Aborted);
@@ -450,10 +488,14 @@ fn abort_ack_and_actual_aborted_completion_retire_without_repairing_revoked_coun
         if revoked {
             let error = scan.first_error().unwrap().clone();
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { scan.start(request(false), 30_000_000, &source) },
                 Err(error)
             );
         } else {
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
         }
         scan.stop().unwrap();
@@ -537,6 +579,8 @@ fn command_reclaim_failure_cannot_retire_even_with_terminal_packet_already_in_sa
     let source = Source::default();
     let policy = Arc::new(PolicyState::default());
     let (mut scan, sequence, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
     let mut packet = command_packet(
         super::super::super::super::command::Id {
@@ -556,6 +600,8 @@ fn command_reclaim_failure_cannot_retire_even_with_terminal_packet_already_in_sa
         records.cpu_sync_fail = Some(records.cpu_syncs + 1);
     }
     assert!(matches!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) },
         Err(Ax200ScanError::Boot(Error::CommandReclaim(_)))
     ));
@@ -565,6 +611,8 @@ fn command_reclaim_failure_cannot_retire_even_with_terminal_packet_already_in_sa
     assert!(scan.start_response().is_none());
     native.domain.records.lock().unwrap().cpu_sync_fail = None;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap(),
         Ax200ScanPhase::DrainRequired
     );

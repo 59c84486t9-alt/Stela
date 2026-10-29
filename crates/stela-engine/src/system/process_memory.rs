@@ -1063,8 +1063,8 @@ mod tests {
             )
             .unwrap();
         registers.x[0] = 0x53c7;
-        // SAFETY: synchronous component callback neither keeps raw pointers nor reenters.
         assert_eq!(
+            // SAFETY: synchronous component callback neither keeps raw pointers nor reenters.
             unsafe { entry.with_view(|view| view.has_supported_header()) },
             Ok(true)
         );
@@ -1124,6 +1124,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
+            // SAFETY: the entry was prepared for this body, which touches only the view.
             unsafe { entry.with_view(|_| Err::<(), _>("callback")) },
             Ok(Err("callback"))
         );
@@ -1142,6 +1143,7 @@ mod tests {
             )
             .unwrap();
         assert!(
+            // SAFETY: the entry was prepared for this body, which touches only the view.
             unsafe { entry.with_view::<()>(|_| panic!("declined body must not run")) }.is_err()
         );
         assert_eq!(*thread.policy_mut(), previous);
@@ -1156,6 +1158,7 @@ mod tests {
             )
             .unwrap();
         assert!(
+            // SAFETY: the entry was prepared for this body, which touches only the view.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                 entry.with_view(|_| panic!("fixture unwind"))
             }))
@@ -1324,6 +1327,8 @@ mod tests {
                                 None,
                             )
                             .unwrap();
+                        // SAFETY: the entry was prepared for this body, which touches only the
+                        // view.
                         assert_eq!(unsafe { entry.with_view(|_| ()) }, Ok(()));
                     }
                     Completion::CallbackError => {
@@ -1338,6 +1343,8 @@ mod tests {
                             )
                             .unwrap();
                         assert_eq!(
+                            // SAFETY: the entry was prepared for this body, which touches only the
+                            // view.
                             unsafe { entry.with_view(|_| Err::<(), _>("callback")) },
                             Ok(Err("callback"))
                         );
@@ -1358,6 +1365,8 @@ mod tests {
                             )
                             .unwrap();
                         assert_eq!(
+                            // SAFETY: the entry was prepared for this body, which touches only the
+                            // view.
                             unsafe { entry.with_view::<()>(|_| panic!("preflight must decline")) },
                             Err(MemoryStatus::InvalidRequest)
                         );
@@ -1374,6 +1383,8 @@ mod tests {
                                     None,
                                 )
                                 .unwrap();
+                            // SAFETY: the entry was prepared for this body, which touches only the
+                            // view.
                             let _ = unsafe { entry.with_view(|_| panic!("outer callback unwind")) };
                         }));
                         assert!(result.is_err());
@@ -1396,6 +1407,7 @@ mod tests {
                             Some(&endpoint),
                         )
                         .unwrap();
+                    // SAFETY: the entry was prepared for this body, which touches only the view.
                     let stored = unsafe {
                         entry.with_view(|view| transfer(view, ExclusiveOperation::Store))
                     }

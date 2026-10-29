@@ -514,6 +514,7 @@ mod tests {
         }
     }
 
+    // SAFETY: the fake registers model one unit's window and are owned by one test.
     unsafe impl Window for Fake {
         fn read32(&self, offset: usize) -> u32 {
             self.clock.set(self.clock.get() + 1);
@@ -562,6 +563,7 @@ mod tests {
                 (PMEN, u64::from(PROTECT_ENABLE | PROTECT_STATUS)),
             ],
         );
+        // SAFETY: the fake window stands in for the unit, and this test is its only owner.
         let found = unsafe { release(Kind::Vtd, &fake) }.unwrap();
         assert!(found.active());
         assert_eq!(inspect(Kind::Vtd, &fake), Found::Inactive);
@@ -587,10 +589,12 @@ mod tests {
     #[test]
     fn vtd_inactive_and_all_ones_units_are_left_unchanged() {
         let idle = Fake::new(Kind::Vtd, &[(GSTS, 1 << 30)]);
+        // SAFETY: the fake window stands in for the unit, and this test is its only owner.
         assert_eq!(unsafe { release(Kind::Vtd, &idle) }, Ok(Found::Inactive));
         assert!(idle.writes.borrow().is_empty());
         let absent = Fake::new(Kind::Vtd, &[(GSTS, u64::MAX), (PMEN, u64::MAX)]);
         assert_eq!(
+            // SAFETY: the fake window stands in for the unit, and this test is its only owner.
             unsafe { release(Kind::Vtd, &absent) },
             Ok(Found::Unreadable)
         );
@@ -602,6 +606,7 @@ mod tests {
         let mut fake = Fake::new(Kind::Vtd, &[(GSTS, u64::from(TRANSLATION))]);
         fake.stuck = u64::from(TRANSLATION);
         assert_eq!(
+            // SAFETY: the fake window stands in for the unit, and this test is its only owner.
             unsafe { release(Kind::Vtd, &fake) },
             Err(Failure::Timeout("DMA translation"))
         );
@@ -611,6 +616,7 @@ mod tests {
     fn amd_vi_turns_off_engines_before_translation() {
         let control = IOMMU_ENABLE | COMMAND_BUFFER | EVENT_LOG | (1 << 10);
         let fake = Fake::new(Kind::AmdVi, &[(CONTROL, control), (STATUS, 1 << 4)]);
+        // SAFETY: the fake window stands in for the unit, and this test is its only owner.
         let found = unsafe { release(Kind::AmdVi, &fake) }.unwrap();
         assert_eq!(found, Found::AmdVi { control });
         let writes: Vec<_> = fake
@@ -629,6 +635,7 @@ mod tests {
         );
         assert_eq!(inspect(Kind::AmdVi, &fake), Found::Inactive);
         let idle = Fake::new(Kind::AmdVi, &[(CONTROL, 1 << 10)]);
+        // SAFETY: the fake window stands in for the unit, and this test is its only owner.
         assert_eq!(unsafe { release(Kind::AmdVi, &idle) }, Ok(Found::Inactive));
     }
 }

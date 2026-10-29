@@ -230,6 +230,8 @@ mod tests {
         // The original per-allocation CPU view still retains only its own pin.
         // SAFETY: retained mapping owns this initialized byte; no DMA exists.
         assert_eq!(
+            // SAFETY: the pointer addresses this test's own live pages, and the stopped model
+            // writes nothing concurrently.
             unsafe { retained_cpu.address(8191, 1).unwrap().as_ptr().read() },
             0
         );

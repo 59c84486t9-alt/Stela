@@ -67,6 +67,8 @@ fn parts_5762() -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>
 }
 pub(super) fn attach_5762() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
     let (hardware, pages, domain, peer) = parts_5762();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Ok(packet) => packet,
         Err((e, _)) => panic!("5762 attach: {e:?}"),
@@ -123,6 +125,8 @@ fn actual_5762_all_admitted_nvm_straps_require_real_magic_and_fixed_mac_offset()
             p.nvram.insert(0x258, 0xdead_beef);
             p.nvram.insert(0x25c, 0xdead_beef);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(packet) => packet,
             Err((e, _)) => panic!("strap {strap:x}: {e:?}"),
@@ -165,6 +169,8 @@ fn actual_5762_static_revision_and_dell_denials_precede_any_mmio_effect() {
                 }
             }
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (_, packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Err(value) => value,
             Ok(_) => panic!("unsupported profile admitted"),
@@ -228,6 +234,8 @@ fn actual_5762_unknown_managed_lom_nvm_and_phy_never_publish_dma() {
                 }
             }
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
         {
             Err(value) => value,
@@ -248,6 +256,8 @@ fn actual_5762_unknown_managed_lom_nvm_and_phy_never_publish_dma() {
 fn actual_5762_changed_postreset_nvm_profile_is_not_reused() {
     let (hardware, pages, domain, peer) = parts_5762();
     peer.lock().unwrap().reset_nvram = Some(0x0080_0002);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let (error, packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Err(value) => value,
         Ok(_) => panic!("changed NVM admitted"),
@@ -263,6 +273,8 @@ fn actual_5762_ignored_required_register_writes_cannot_advertise_attachment() {
     for at in [0x3628, 0x6808, 0x245c, 0x4890, 0x48a0, 0x468] {
         let (hardware, pages, domain, peer) = parts_5762();
         peer.lock().unwrap().ignore_write = Some(at);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
         {
             Err(value) => value,
@@ -424,6 +436,8 @@ fn unchanged_linux_5720_5762_selected_packet_setup_matches_actual_registers() {
             p.mac.insert(rr, reserve);
             p.mac.insert(cr, corruption);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Ok(p) => p,
             Err((e, _)) => panic!("actual profile: {e:?}"),
@@ -492,6 +506,8 @@ fn actual_5762_register_access_removal_and_nvm_read_failures_retain_owners() {
                 }
             }
             let (error, mut packet) =
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
                     Err(value) => value,
                     Ok(_) => panic!("access fault {at:x}/{fault} admitted"),

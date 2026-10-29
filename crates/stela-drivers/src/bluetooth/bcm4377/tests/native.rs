@@ -5,9 +5,9 @@ use super::*;
 #[test]
 fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_attachment() {
     for rate in [0, u64::MAX, u64::MAX / 2 / 120_000_000 + 1] {
-        // SAFETY: constructor receives deliberately invalid negative metadata;
-        // it must refuse before exposing a native time/attachment authority.
         assert!(
+            // SAFETY: constructor receives deliberately invalid negative metadata; it must refuse
+            // before exposing a native time/attachment authority.
             unsafe {
                 crate::bluetooth::bcm4377::native::NativeClock::new(crate::Clock {
                     ticks_per_microsecond: rate,

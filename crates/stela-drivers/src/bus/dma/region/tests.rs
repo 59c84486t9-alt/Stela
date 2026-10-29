@@ -441,8 +441,8 @@ fn nonidentity_aligned_view_uses_same_pin_offset_and_whole_original_retirement()
     p.domain.device_write(0x2004, &[0xa1, 0xa2, 0xa3, 0xa4]);
     // SAFETY: modeled device transfer completed; exact range is now CPU-owned.
     unsafe { r.sync_for_cpu(4..8) }.unwrap();
-    // SAFETY: exact completed CPU-owned word from the same view.
     assert_eq!(
+        // SAFETY: exact completed CPU-owned word from the same view.
         unsafe { cpu.as_ptr().add(4).cast::<u32>().read_unaligned() }.to_le(),
         0xa4a3_a2a1
     );
@@ -623,8 +623,8 @@ fn whole_token_failed_unmap_retries_without_reuse_or_early_pin_release() {
     let p = Peer::new(0x1000);
     let mut r = p.allocate(8192, 8192).unwrap();
     p.state.lock().unwrap().fail_unmap = true;
-    // SAFETY: peer engines/IRQ/work stopped; inject actual invalidation failure.
     assert_eq!(
+        // SAFETY: peer engines/IRQ/work stopped; inject actual invalidation failure.
         unsafe { r.unmap() },
         Err(Error::Dma(DmaError::InvalidationFailed))
     );
@@ -751,8 +751,8 @@ fn original_cache_and_nonzero_content_survive_direct_pin_mapping() {
         8192,
         "already aligned IOVA needs no hidden allocation"
     );
-    // SAFETY: original fresh CPU-owned storage; mapping performs no payload write.
     assert_eq!(
+        // SAFETY: original fresh CPU-owned storage; mapping performs no payload write.
         unsafe { r.cpu_address(0, 1).unwrap().as_ptr().read() },
         0x5a
     );

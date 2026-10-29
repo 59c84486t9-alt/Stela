@@ -284,6 +284,7 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
     ) -> Result<RunOutcome> {
+        // SAFETY: the caller upholds `run`'s direct-RAM contract, which is `run_inner`'s.
         unsafe { self.run_inner(state, stop_pc, block_budget, RuntimeServices::direct(None)) }
     }
 
@@ -308,6 +309,7 @@ impl BlockRuntime {
             context.address_space() == self.address_space,
             "PAuth context belongs to another guest address space"
         );
+        // SAFETY: the caller upholds this method's direct-RAM contract, which is `run_inner`'s.
         unsafe {
             self.run_inner(
                 state,
@@ -354,6 +356,7 @@ impl BlockRuntime {
             .map_err(|status| {
                 anyhow::anyhow!("LDRA memory privilege profile unavailable: {status:?}")
             })?;
+        // SAFETY: the caller upholds this method's direct-RAM contract, which is `run_inner`'s.
         unsafe {
             self.run_inner(
                 state,
@@ -386,6 +389,7 @@ impl BlockRuntime {
             dispatcher.address_space() == self.address_space,
             "System dispatcher belongs to another guest address space"
         );
+        // SAFETY: the caller upholds this method's direct-RAM contract, which is `run_inner`'s.
         unsafe {
             self.run_inner(
                 state,
@@ -538,6 +542,8 @@ impl BlockRuntime {
                     .context("invalid resident-block budget accounting")?;
                 returned
             } else {
+                // SAFETY: the generation check above shows this mapping and source are current, and
+                // the caller's direct-RAM contract covers the call.
                 unsafe { block.mapping.call_block(&mut state.registers)? }
             };
             let BlockExit { next_pc, kind } = native_exit;

@@ -378,14 +378,18 @@ mod tests {
     unsafe impl Sync for Storage {}
     impl Drop for Storage {
         fn drop(&mut self) {
+            // SAFETY: the pointer came from `alloc_zeroed` with this layout and is freed once.
             unsafe { dealloc(self.0.as_ptr(), self.1) }
         }
     }
     fn domain(host_residue: usize, backing_offset: usize, tagged: bool) -> Arc<MemoryDomain> {
         let layout = Layout::from_size_align(80, 16).unwrap();
+        // SAFETY: `layout` has a nonzero size.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let owner = Arc::new(Storage(pointer, layout));
         let backing =
+            // SAFETY: `owner` keeps this zeroed write-back allocation alive, and nothing else
+            // aliases it.
             unsafe { MemoryBacking::new(pointer.add(host_residue), 64, RIGHTS, owner) }.unwrap();
         let view = MemoryView::new(backing, 0x1000, backing_offset, 16, RIGHTS).unwrap();
         MemoryDomain::new_for_address_space(
@@ -530,8 +534,11 @@ mod tests {
             (31, RIGHTS, profile_requirements::TAG_GRANULES, 0, 0),
         ] {
             let layout = Layout::from_size_align(64, 16).unwrap();
+            // SAFETY: `layout` has a nonzero size.
             let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
             let owner = Arc::new(Storage(pointer, layout));
+            // SAFETY: `owner` keeps this zeroed write-back allocation alive, and nothing else
+            // aliases it.
             let backing = unsafe { MemoryBacking::new(pointer, bytes, rights, owner) }.unwrap();
             let view = MemoryView::new(backing, 0x1000, 0, bytes, rights).unwrap();
             let domain = MemoryDomain::new(
@@ -552,8 +559,11 @@ mod tests {
     fn partial_quantity_boundaries_cache_physical_layout_without_permission_prevalidation() {
         fn physical() -> Arc<MemoryBacking> {
             let layout = Layout::from_size_align(64, 16).unwrap();
+            // SAFETY: `layout` has a nonzero size.
             let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
             let owner = Arc::new(Storage(pointer, layout));
+            // SAFETY: `owner` keeps this zeroed write-back allocation alive, and nothing else
+            // aliases it.
             unsafe { MemoryBacking::new(pointer, 64, RIGHTS, owner) }.unwrap()
         }
         for (same_backing, boundary, gap, same_attributes, expected) in [

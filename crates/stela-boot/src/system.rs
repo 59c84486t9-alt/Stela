@@ -742,10 +742,12 @@ fn load(
         },
         None => Region::default(),
     };
-    // Stop every enabled firmware AP before offering its former code/data to
+    // SAFETY: Stop every enabled firmware AP before offering its former code/data to
     // guest RAM, including workers that will later receive their owned SIPI.
     // The BSP alone sends ICR commands, with firmware IRQ handlers excluded.
     unsafe { asm!("cli", options(nomem, nostack)) };
+    // SAFETY: interrupts are masked, the BSP alone sends ICR commands, and `capture` lists the
+    // enabled firmware APs.
     let deliveries = match unsafe {
         crate::native_smp::executor::quiesce_firmware_aps(capture, &sender, tsc_hz)
     } {

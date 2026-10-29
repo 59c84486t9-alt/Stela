@@ -518,6 +518,8 @@ impl CancelModel {
                     let flags = unsafe { ((parameter + 4) as *const u32).read_volatile() };
                     for index in 2..32 {
                         if flags & (1 << index) != 0 {
+                            // SAFETY: the model device, its pages and its domain belong to this
+                            // test alone; no other driver, worker or DMA touches them.
                             self.rings[index] = unsafe {
                                 ((parameter + (index as u64 + 1) * self.context_bytes as u64 + 8)
                                     as *const u64)
@@ -673,6 +675,8 @@ impl CancelModel {
                 // synchronous modeled control completion.
                 let next =
                     self.rings[dci] + (((self.indices[dci] + 1) % (RING_TRBS - 1)) * TRB) as u64;
+                // SAFETY: the pointer addresses this test's own live pages, and the stopped model
+                // writes nothing concurrently.
                 let buffer = unsafe { (next as *const u64).read_volatile() };
                 if matches!(request[0], 0x80 | 0x81)
                     && request[1] == GET_DESCRIPTOR
@@ -740,6 +744,8 @@ impl CancelModel {
                 if request[0] & 0x80 == 0 && self.short_control_out {
                     received = length - 1;
                 }
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { core::slice::from_raw_parts(buffer as *const u8, length).to_vec() }
             };
             if request[0] & 0x80 == 0 && request[1] != SET_CONFIGURATION {

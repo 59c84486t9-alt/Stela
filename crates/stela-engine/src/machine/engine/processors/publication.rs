@@ -1060,7 +1060,7 @@ mod tests {
         type Returned = FrameReturn<'a>;
         fn execute(self, host: &mut dyn Host) -> Self::Returned {
             let code = host.install(&[0xc3]).unwrap();
-            // The test host recognizes exactly this installed test image.
+            // SAFETY: The test host recognizes exactly this installed test image.
             let exit = unsafe { host.execute(code, self.state) };
             *self.retired += 7;
             FrameReturn {

@@ -421,6 +421,8 @@ mod tests {
     fn actual_save_restore_commands_preserve_dma_cursors_and_block_suspended_mutation() {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let model = Rc::new(RefCell::new(Model::new()));
         let mut c = Controller::new(
@@ -497,6 +499,8 @@ mod tests {
             let quirks = quirks::Profile::pci(&mut function).unwrap();
             let mut backing = vec![0u64; 32 * 1024];
             let base = backing.as_mut_ptr() as u64;
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
             let model = Rc::new(RefCell::new(Model::new()));
             let mut c = Controller::with_hardware_profile(
@@ -555,6 +559,8 @@ mod tests {
         for save in [true, false] {
             let mut backing = vec![0u64; 32 * 1024];
             let base = backing.as_mut_ptr() as u64;
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
             let model = Rc::new(RefCell::new(Model::new()));
             let mut c = Controller::new(

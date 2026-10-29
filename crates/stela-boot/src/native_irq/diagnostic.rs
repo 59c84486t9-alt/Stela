@@ -254,11 +254,14 @@ pub(crate) fn run(
     let vector = registration.vector();
     // No heap/resource lock is held. The real IDT handler acknowledges the
     // EDU cause and the registry EOIs before its inflight reference ends.
+    // SAFETY: no heap or resource lock is held, the IDT handler is installed and interrupts are
+    // masked again right after the wait.
     unsafe {
         asm!("sti", options(nostack));
     }
     edu.write(0x60, 1);
     let completed = clock.wait(2_000_000, || edu.received.load(Ordering::Acquire) != 0);
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }
@@ -302,10 +305,13 @@ pub(crate) fn run(
     // Trigger a new device cause after acknowledged MSI disable/detach. The
     // retained observer must see no callback before the cause is cleared.
     edu.write(0x60, 2);
+    // SAFETY: no heap or resource lock is held, the IDT handler is installed and interrupts are
+    // masked again right after the wait.
     unsafe {
         asm!("sti", options(nostack));
     }
     let late = clock.wait(1_000, || edu.received.load(Ordering::Acquire) != 1);
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }

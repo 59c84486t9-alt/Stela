@@ -133,8 +133,8 @@ fn ignored_recovered_fault_observation_cannot_readmit_the_actual_frame() {
         machine.native_failure.is_none(),
         "dispatcher diagnostic still lazy"
     );
-    // SAFETY: identical owned frame; quarantine must reject before execution.
     assert!(matches!(
+        // SAFETY: identical owned frame; quarantine must reject before execution.
         unsafe { machine.shared_native_run(binding) },
         Err(MemoryStatus::Domain)
     ));

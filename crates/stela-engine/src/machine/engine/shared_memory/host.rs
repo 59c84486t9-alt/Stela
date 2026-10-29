@@ -1006,6 +1006,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             machine.cpu.pc,
             machine.cpu.retired,
         );
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         let (devices, mut service) = unsafe { machine.prepare_native_ram_service_parts() }.unwrap();
         assert_eq!(devices.calls, 1); // actual disjoint receiver, not a clone
         assert!(service.memory().belongs_to(&ram));
@@ -1067,6 +1069,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             crate::memory::domain::ExecutionLoanAttempt::ServiceBusy
         ));
         let mut bytes = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(0x14080, &mut bytes) }.unwrap();
         assert_eq!(bytes, 0x12345678u64.to_le_bytes());
         service.finish(); // model has no pending controller effect or ACK
@@ -1093,6 +1097,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     #[test]
     fn abandoned_ram_service_fails_owner_and_never_releases_actual_workers() {
         let (mut machine, ram) = memory_service_machine(false);
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         let service = unsafe { machine.prepare_native_ram_service() }.unwrap();
         drop(service);
         assert_eq!(
@@ -1109,6 +1115,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         );
         assert_eq!(machine.host.services.len(), 1);
         let mut bytes = [0xa5; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         assert!(unsafe { ram.read_physical(0x14080, &mut bytes) }.is_err());
         assert_eq!(bytes, [0xa5; 8]);
     }
@@ -1120,6 +1128,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             machine.cpu.pc,
             machine.cpu.retired,
         );
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         assert!(unsafe { machine.prepare_native_ram_service() }.is_err());
         assert_eq!(machine.devices.calls, 1);
         assert_eq!(
@@ -1140,6 +1150,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         );
         assert_eq!(machine.host.services.len(), 1);
         let mut bytes = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(0x14080, &mut bytes) }.unwrap();
         assert_eq!(bytes, 0x12345678u64.to_le_bytes());
     }
@@ -1149,6 +1161,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         cpu.pc = 0x4000;
         const SOURCE_PA: u64 = 0x14000;
         const B_SELF: u32 = 0x14000000;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(SOURCE_PA, &B_SELF.to_le_bytes()) }.unwrap();
         let host = ServiceHost::new(Local, OneWorker(None), Arc::clone(&ram));
         let mut machine = Machine::new(cpu, host, NoDevices, profile, ram.target());
@@ -1210,6 +1224,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         for _ in 0..8 {
             // Every call opens/closes actual generation-bound sessions, then
             // releases the owner before the next breakpoint entry.
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             assert_eq!(unsafe { machine.native_round() }, Err(Stop::Breakpoint(pc)));
             assert_empty_scratch(&machine.host.round_scratch);
             assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
@@ -1218,6 +1234,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         // A prior roster is never a substitute for the actual current binding.
         let inventory = machine.native_publication.take().unwrap();
         assert!(matches!(
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             unsafe { machine.native_round() },
             Err(Stop::Unsupported(_))
         ));
@@ -1228,6 +1246,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         // absent; retain capacity even though this round did collect bindings.
         let memory = machine.cpu.canonical_memory.take().unwrap();
         assert!(matches!(
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             unsafe { machine.native_round() },
             Err(Stop::Unsupported(_))
         ));
@@ -1243,6 +1263,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         // The genuine native admission refusal retains the held owner/session.
         // It still restores empty metadata instead of caching that authority.
         assert!(matches!(
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             unsafe { machine.native_round() },
             Err(Stop::Unsupported(_))
         ));
@@ -1283,6 +1305,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         // Reenter the actual released owner. The host's CPL0 refusal follows
         // the trace, and cannot stand in for successful native execution.
         assert!(matches!(
+            // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
+            // device worker or other writer admitted.
             unsafe { machine.native_round() },
             Err(Stop::Unsupported(_))
         ));

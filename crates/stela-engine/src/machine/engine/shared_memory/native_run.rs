@@ -556,11 +556,11 @@ impl NativeRun<'_> {
         let mut context = ExecutionContext::default();
         let mut raw = None;
         let mut malformed = false;
-        // SAFETY: the source-bound artifact, exact real frame, effective policy,
-        // canonical RAM, current physical target and local installed arena all
-        // stay exclusively borrowed through native return, fault and settlement.
         #[cfg(feature = "native-profile")]
         let measured = host.native_timing_work_start(Work::CheckedBody);
+        // SAFETY: the source-bound artifact, exact real frame, effective policy, canonical RAM,
+        // current physical target and local installed arena all stay exclusively borrowed through
+        // native return, fault and settlement.
         let entered = unsafe {
             entry.with_checked_view(|view| {
                 let mut context_loan = ContextLoan::memory(&mut context, view);
@@ -1351,6 +1351,8 @@ mod artifact_tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &source) }.unwrap();
         (machine, ram)
     }
@@ -1425,6 +1427,8 @@ mod artifact_tests {
         assert!(!detail.contains("first_word="));
 
         // A genuine failed executable walk must retain the original MMU cause.
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
         let failure = prepare_failure(&mut machine, BINDING);
         let rendered = match failure.into_stop(0, 3) {
@@ -1591,6 +1595,8 @@ mod artifact_tests {
         let third = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(Arc::ptr_eq(&first, &third));
         assert_eq!(machine.cpu.state.x[0], 0x1234);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &0x91000800u32.to_le_bytes()) }.unwrap();
         let changed = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&first, &changed));
@@ -1635,6 +1641,8 @@ mod artifact_tests {
         assert!(Arc::ptr_eq(&identity, &observation.identity));
         let retained = Arc::clone(&observation.identity);
         drop(returned);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &0x91000800u32.to_le_bytes()) }.unwrap();
         let changed = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&retained, &changed.identity));
@@ -1650,6 +1658,8 @@ mod artifact_tests {
         let mut words = [0xd503201fu32; stela_compiler::block::MAX_BLOCK_INSTRUCTIONS];
         *words.last_mut().unwrap() = 0x14000000;
         let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &source) }.unwrap();
         let first = prepare_artifact(&mut machine, BINDING).unwrap();
         assert_eq!(
@@ -1661,6 +1671,8 @@ mod artifact_tests {
             &prepare_artifact(&mut machine, BINDING).unwrap()
         ));
         let changed_offset = source.len() - 8;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA + changed_offset as u64, &0x91000400u32.to_le_bytes()) }
             .unwrap();
         let changed = prepare_artifact(&mut machine, BINDING).unwrap();
@@ -1736,6 +1748,8 @@ mod artifact_tests {
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(DATA, &source) }.unwrap();
             let enabled = prepare_artifact(&mut machine, BINDING).unwrap();
             assert!(enabled.key.admission.asimd);
@@ -1769,6 +1783,8 @@ mod artifact_tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &source) }.unwrap();
         let first = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(Arc::ptr_eq(
@@ -1777,6 +1793,8 @@ mod artifact_tests {
         ));
         // An unallocated nonzero top-level group is denied by AdmitTable,
         // rather than being mistaken for the existing artifact's admitted word.
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA + 4, &0x02000000u32.to_le_bytes()) }.unwrap();
         let changed = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&first, &changed));
@@ -1836,8 +1854,12 @@ mod artifact_tests {
         );
         machine.cpu.registers.set_raw(Register::SCTLR_EL1, 0, sctlr);
         let mut bytes = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(LEAF, &mut bytes) }.unwrap();
         let descriptor = u64::from_le_bytes(bytes);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &(descriptor | (1 << 50)).to_le_bytes()) }.unwrap();
         let guarded = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&first, &guarded));
@@ -1858,15 +1880,21 @@ mod artifact_tests {
         let (mut machine, ram) = fixture();
         let first = prepare_artifact(&mut machine, BINDING).unwrap();
         let mut bytes = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(LEAF, &mut bytes) }.unwrap();
         let descriptor = u64::from_le_bytes(bytes);
         for denied in [0, descriptor | (1 << 53) | (1 << 54)] {
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(LEAF, &denied.to_le_bytes()) }.unwrap();
             assert!(matches!(
                 prepare_artifact(&mut machine, BINDING),
                 Err(MemoryStatus::Unsupported)
             ));
         }
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
         assert!(Arc::ptr_eq(
             &first,
@@ -1945,6 +1973,8 @@ mod artifact_tests {
         let source: Vec<_> = core::iter::repeat_n(0x14000000u32, count + 1)
             .flat_map(u32::to_le_bytes)
             .collect();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &source) }.unwrap();
         let artifacts = (0..count)
             .map(|index| {
@@ -2003,7 +2033,11 @@ mod artifact_tests {
         assert!(Arc::ptr_eq(cache.recency_order()[0], &artifacts[0]));
         machine.cpu.pc = PC;
         let mut descriptor = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
         assert_eq!(
             prepare_artifact(&mut machine, BINDING).err(),
@@ -2016,7 +2050,11 @@ mod artifact_tests {
         }
         // The first fetch now succeeds and finds the old key, but exact bytes
         // differ and the newly fetched instruction cannot pass admission.
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &descriptor) }.unwrap();
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &0x02000000u32.to_le_bytes()) }.unwrap();
         assert_eq!(
             prepare_artifact(&mut machine, BINDING).err(),
@@ -2039,6 +2077,8 @@ mod artifact_tests {
             .unwrap()
             .native_artifact_stats();
         machine.cpu.pc = PC;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA, &0x91000400u32.to_le_bytes()) }.unwrap();
         let changed = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&changed, &artifacts[0]));
@@ -2467,6 +2507,8 @@ mod artifact_tests {
     fn warm_epoch_probe_checks_reached_source_without_compiling_or_changing_identity() {
         let (mut machine, ram, artifacts) = branch_artifacts(3);
         machine.cpu.pc = PC;
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         let run = unsafe { machine.shared_native_run(BINDING) }.unwrap();
         let before = run.memory.artifacts.stats();
         let execution = run.memory.memory.execution_session().unwrap();
@@ -2482,6 +2524,8 @@ mod artifact_tests {
         ));
         assert_eq!(run.memory.artifacts.stats(), before);
         // Source bytes can change through the real shared publication owner.
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(DATA + 4, &0x14000001u32.to_le_bytes()) }.unwrap();
         *run.pc = PC + 4;
         assert!(matches!(
@@ -2497,13 +2541,19 @@ mod artifact_tests {
     fn warm_epoch_probe_rewalks_permissions_mapping_and_guarded_entry() {
         let (mut machine, ram, _) = branch_artifacts(2);
         machine.cpu.pc = PC;
+        // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+        // worker or other writer admitted.
         let run = unsafe { machine.shared_native_run(BINDING) }.unwrap();
         let execution = run.memory.memory.execution_session().unwrap();
         let mut descriptor = [0; 8];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
         let descriptor = u64::from_le_bytes(descriptor);
         // Guarded BR target requires a compatible actual landing instruction.
         *run.btype = 3;
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &(descriptor | (1 << 50)).to_le_bytes()) }.unwrap();
         assert!(matches!(
             run.warm_successor(&execution),
@@ -2511,11 +2561,15 @@ mod artifact_tests {
         ));
         *run.btype = 0;
         // Same virtual PC and old cached bytes cannot confer execute rights.
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
         assert!(matches!(
             run.warm_successor(&execution),
             Ok(Err(NativeEpochEnd::Source))
         ));
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
         assert!(matches!(run.warm_successor(&execution), Ok(Ok(_))));
     }

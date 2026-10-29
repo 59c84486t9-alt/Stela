@@ -50,9 +50,13 @@ fn ready_phy<'a>(
     let mut phy = scan
         .begin_phy_context(channel(1))
         .unwrap_or_else(|_| panic!("PHY"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { phy.advance(source) }.unwrap();
     for command in phy.commands().to_vec() {
         complete_phy(&phy, native, entry, sequence, command.id());
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { phy.advance(source) }.unwrap();
         sequence += 1;
         entry += 1;
@@ -154,6 +158,8 @@ fn exercise_power(bytes: &[u8], requested: u8, effective: u8, length: usize) {
         assert_eq!(policy_at_sync.held.load(Ordering::SeqCst), 1);
     }));
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { power.advance(&source) }.unwrap(),
         Ax200TransmitPowerPhase::Waiting
     );
@@ -172,6 +178,8 @@ fn exercise_power(bytes: &[u8], requested: u8, effective: u8, length: usize) {
     records.cpu_sync_fail = Some(records.cpu_syncs + 1);
     drop(records);
     assert!(matches!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { power.advance(&source) },
         Err(Ax200TransmitPowerError::Boot(Error::CommandReclaim(_)))
     ));
@@ -179,6 +187,8 @@ fn exercise_power(bytes: &[u8], requested: u8, effective: u8, length: usize) {
     assert!(power.first_error().is_none());
     native.domain.records.lock().unwrap().cpu_sync_fail = None;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { power.advance(&source) }.unwrap(),
         Ax200TransmitPowerPhase::BindingRequired
     );
@@ -216,6 +226,8 @@ fn power_denial_and_unknown_abi_have_no_command_effects() {
         let allocations = source.calls.load(Ordering::Relaxed);
         let bell = native.state.lock().unwrap().registers[&0x460];
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { power.advance(&source) },
             Err(match case {
                 0 => Ax200TransmitPowerError::Regulatory(regulatory::Error::OsDenied),
@@ -249,6 +261,8 @@ fn power_uncertain_publication_wrong_response_and_deadline_preserve_owners_and_f
             let mut records = native.domain.records.lock().unwrap();
             records.sync_fail = Some(records.syncs + 2);
         }
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { power.advance(&source) };
         match case {
             0 => assert!(matches!(
@@ -259,6 +273,8 @@ fn power_uncertain_publication_wrong_response_and_deadline_preserve_owners_and_f
                 result.unwrap();
                 complete_power(&power, &native, entry, sequence, true);
                 assert!(matches!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { power.advance(&source) },
                     Err(Ax200TransmitPowerError::Boot(
                         Error::InitializationResponse { .. }
@@ -273,6 +289,8 @@ fn power_uncertain_publication_wrong_response_and_deadline_preserve_owners_and_f
                 }
                 .delay(20);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { power.advance(&source) },
                     Err(Ax200TransmitPowerError::Deadline)
                 );
@@ -284,6 +302,8 @@ fn power_uncertain_publication_wrong_response_and_deadline_preserve_owners_and_f
         let error = power.first_error().unwrap().clone();
         let operations = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { power.advance(&source) }, Err(error.clone()));
         assert_eq!(power.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), operations);

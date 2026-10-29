@@ -651,6 +651,8 @@ pub(crate) mod tests {
                     assert_eq!(drops.load(Ordering::Relaxed), 0);
                 } else {
                     fixture.drain();
+                    // SAFETY: the model device is stopped and drained, so nothing still uses what
+                    // this releases.
                     unsafe { owner.retire_after_quiesce() };
                     drop(owner);
                     assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -825,6 +827,8 @@ pub(crate) mod tests {
                 assert_eq!(model.regulatory_power.len(), expected);
                 drop(model);
                 fixture.drain();
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 unsafe { owner.retire_after_quiesce() };
                 drop(owner);
                 assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -855,6 +859,8 @@ pub(crate) mod tests {
             assert!(owner.remaining_completed());
             assert!(!owner.auxiliary().release_information().is_empty());
             fixture.drain();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { owner.retire_after_quiesce() };
             drop(owner);
             assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -959,6 +965,8 @@ pub(crate) mod tests {
                     );
                     drop(model);
                     fixture.drain();
+                    // SAFETY: the model device is stopped and drained, so nothing still uses what
+                    // this releases.
                     unsafe { owner.retire_after_quiesce() };
                     drop(owner);
                     assert_eq!(drops.load(Ordering::Relaxed), 1);

@@ -303,8 +303,8 @@ mod tests {
 
     #[test]
     fn null_native_info_is_rejected_before_ffi() {
-        // SAFETY: the null pointer is rejected without dereferencing it.
         assert!(matches!(
+            // SAFETY: the null pointer is rejected without dereferencing it.
             unsafe { ComputeEncoder::borrow_initialized(core::ptr::null()) },
             Err(CommandError::Invalid)
         ));

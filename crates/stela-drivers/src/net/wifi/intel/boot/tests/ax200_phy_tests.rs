@@ -122,6 +122,8 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
                     .push(at_sync.held.load(Ordering::SeqCst));
             }));
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { phy.advance(&source) }.unwrap(),
                 Ax200PhyPhase::Waiting(PhyCommandKind::Add)
             );
@@ -152,6 +154,8 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
                 records.cpu_sync_fail = Some(records.cpu_syncs + 1);
                 drop(records);
                 assert!(matches!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { phy.advance(&source) },
                     Err(Ax200PhyError::Boot(Error::CommandReclaim(_)))
                 ));
@@ -159,6 +163,8 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
                 assert_eq!(phy.phy_id_and_color(), None);
                 assert!(phy.first_error().is_none());
                 native.domain.records.lock().unwrap().cpu_sync_fail = None;
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { phy.advance(&source) }.unwrap();
                 entry += 1;
                 sequence += 1;
@@ -205,6 +211,8 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
             native.revoked.store(true, Ordering::SeqCst);
             phy.begin_remove().unwrap();
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { phy.advance(&source) }.unwrap(),
                 Ax200PhyPhase::Waiting(PhyCommandKind::Remove)
             );
@@ -213,6 +221,8 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
             assert_eq!(&command.bytes()[4..8], &3u32.to_le_bytes());
             complete_phy(&phy, &native, entry, sequence, command.id());
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { phy.advance(&source) }.unwrap(),
                 Ax200PhyPhase::Removed
             );
@@ -268,6 +278,8 @@ fn phy_prepublication_denial_and_unknown_schema_have_no_native_effects() {
         }
         let bell = native.state.lock().unwrap().registers[&0x460];
         let allocations = source.calls.load(Ordering::Relaxed);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { phy.advance(&source) };
         assert_eq!(
             result,
@@ -295,12 +307,16 @@ fn phy_cannot_consume_pending_or_completed_but_unretired_scan() {
     let source = Source::default();
     let policy = Arc::new(PolicyState::default());
     let (mut scan, sequence, entry) = ready(&catalog, &empty, &source, &native, &policy, false);
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { scan.start(request(false), 30_000_000, &source) }.unwrap();
     scan = *scan
         .begin_phy_context(channel(1))
         .err()
         .expect("pending scan preserved");
     ack(&scan, &native, entry, sequence, false);
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { scan.advance(&source) }.unwrap();
     complete(
         boot(&scan),
@@ -310,6 +326,8 @@ fn phy_cannot_consume_pending_or_completed_but_unretired_scan() {
         &completion(0, 1, 0),
     );
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { scan.advance(&source) }.unwrap(),
         Ax200ScanPhase::DrainRequired
     );
@@ -323,6 +341,8 @@ fn phy_cannot_consume_pending_or_completed_but_unretired_scan() {
         .unwrap_or_else(|_| panic!("retired original PHY"));
     assert_eq!(history.outcome(), scan::Outcome::Completed);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { phy.advance(&source) }.unwrap(),
         Ax200PhyPhase::Waiting(PhyCommandKind::Add)
     );
@@ -341,6 +361,8 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
         let mut phy = scan
             .begin_phy_context(channel(1))
             .unwrap_or_else(|_| panic!("PHY"));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { phy.advance(&source) }.unwrap();
         let add = phy.commands()[0].id();
         complete_phy(&phy, &native, entry, sequence, add);
@@ -352,6 +374,8 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
             }
             _ => (),
         }
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { phy.advance(&source) };
         match case {
             0 => assert_eq!(
@@ -366,6 +390,8 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
                 }
                 .delay(20);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { phy.advance(&source) },
                     Err(Ax200PhyError::Deadline(PhyCommandKind::ReceiveChains))
                 );
@@ -376,6 +402,8 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
                 id.opcode ^= 1;
                 complete_phy(&phy, &native, entry + 1, sequence + 1, id);
                 assert!(matches!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { phy.advance(&source) },
                     Err(Ax200PhyError::Boot(Error::InitializationResponse { .. }))
                 ));
@@ -391,6 +419,8 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
                 ));
                 let operations = native.state.lock().unwrap().ops.len();
                 let error = phy.first_error().unwrap().clone();
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 assert_eq!(unsafe { phy.advance(&source) }, Err(error));
                 assert_eq!(native.state.lock().unwrap().ops.len(), operations);
             }
@@ -398,6 +428,8 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
         assert_eq!(phy.phase(), Ax200PhyPhase::Failed);
         assert_eq!(phy.phy_id_and_color(), None);
         let error = phy.first_error().unwrap().clone();
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { phy.advance(&source) }, Err(error));
         let operations = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
@@ -460,6 +492,8 @@ fn phy_rearm_visibility_and_producer_failures_preserve_first_error_and_original_
         let operations = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
         assert_eq!(phy.replenish_completed_receive(), Err(error.clone()));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { phy.advance(&source) }, Err(error.clone()));
         assert_eq!(native.state.lock().unwrap().ops.len(), operations);
         assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);

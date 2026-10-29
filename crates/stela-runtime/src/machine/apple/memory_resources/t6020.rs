@@ -575,13 +575,15 @@ pub(in crate::machine::apple) mod tests {
         // SAFETY: complete single-thread fixture producer set is stopped.
         assert!(unsafe { owner.read_ram_drain(offset, Width::Word, &foreign) }.is_err());
         let service = ram.try_service().unwrap().unwrap();
-        // SAFETY: this exact joined fixture has no frames/independent producer.
         assert_eq!(
+            // SAFETY: this exact joined fixture has no frames/independent producer.
             unsafe { owner.read_ram_drain(offset, Width::Word, &service) },
             Ok(0)
         );
+        // SAFETY: this joined fixture has no other producer or native frame.
         assert!(unsafe { owner.write_ram_drain(offset, Width::Word, 1, 7, &service) }.is_err());
         assert!(owner.controller().drain_receipts().is_empty());
+        // SAFETY: this joined fixture has no other producer or native frame.
         assert!(unsafe { owner.write_ram_drain(offset, Width::Word, 0, 7, &service) }.is_ok());
         assert_eq!(owner.controller().drain_receipts()[0].aperture, 15);
         drop(service);
@@ -711,8 +713,8 @@ pub(in crate::machine::apple) mod tests {
         let (_, offset) = devices.bus.route(drain, Width::Word).unwrap();
         let resource = super::super::resource_for(&devices.bus, id).unwrap();
         let service = ram.try_service().unwrap().unwrap();
-        // SAFETY: this joined fixture has no other producer or native frame.
         assert_eq!(
+            // SAFETY: this joined fixture has no other producer or native frame.
             unsafe { resource.read_ram_drain(offset, Width::Word, &service) },
             Ok(0)
         );

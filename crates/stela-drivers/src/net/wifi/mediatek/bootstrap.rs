@@ -806,6 +806,8 @@ pub(crate) mod tests {
     }
     #[derive(Clone)]
     pub(crate) struct Bar(pub(crate) Arc<Mutex<DeviceBar>>);
+    // SAFETY: the model answers only for this test's simulated device; nothing else reaches its
+    // state.
     unsafe impl BarIo for Bar {
         fn read32(&mut self, offset: u32) -> Result<u32, registers::Error> {
             let mut b = self.0.lock().unwrap();
@@ -868,6 +870,8 @@ pub(crate) mod tests {
         Tx(DeviceIo),
         Rx(Io),
     }
+    // SAFETY: the model answers only for this test's simulated device; nothing else reaches its
+    // state.
     unsafe impl QueueIo for Q {
         fn configure(&mut self, address: u32, count: u16) -> Result<(), ring::Error> {
             {
@@ -959,6 +963,8 @@ pub(crate) mod tests {
             })));
             let clock = model_clock();
             let control =
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { Control::new(Registers::new(chip, bar.clone()), clock) }.unwrap();
             let drops = Arc::new(AtomicUsize::new(0));
             let guard = Arc::new(NativeGuard {
@@ -1000,6 +1006,8 @@ pub(crate) mod tests {
             let states = self.queues.clone();
             let chip = self.chip;
             let is_c3 = chip == Chip::Mt7925;
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 self.controller
                     .install_with(&Source, domain, false, move |offset| {
@@ -1072,6 +1080,8 @@ pub(crate) mod tests {
                 .unwrap()
                 .observed()
                 .chip_flags();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { self.controller.execute_clc(inputs(flags)) }.unwrap();
             let bands: [Vec<power::Channel>; 3] = core::array::from_fn(|i| {
                 if enabled[i] {
@@ -1110,6 +1120,8 @@ pub(crate) mod tests {
                     }
                 }
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 self.controller.execute_remaining(
                     crate::net::wifi::mediatek::mailbox::clc::remaining::Inputs {
@@ -1133,6 +1145,8 @@ pub(crate) mod tests {
         pub(crate) fn retire(&mut self) {
             self.model.lock().unwrap().clc_processing = false;
             self.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { self.controller.retire_after_quiesce() }.unwrap();
         }
     }
@@ -1263,6 +1277,8 @@ pub(crate) mod tests {
             }
             f.policy(chip);
             assert_eq!(f.controller.phase(), Phase::Policy);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { f.controller.initialize_mac() }.unwrap();
             let mac = f.controller.mac_observations().unwrap();
             assert_eq!(mac.wtbl.len(), 20);
@@ -1272,6 +1288,8 @@ pub(crate) mod tests {
                 if chip == Chip::Mt7925 { 12 } else { 0 }
             );
             let n = f.model.lock().unwrap().clc_commands.len();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
             assert_eq!(f.controller.phase(), Phase::StartFacts);
             assert_eq!(f.model.lock().unwrap().clc_commands.len(), n);
@@ -1339,6 +1357,8 @@ pub(crate) mod tests {
                         && leds[0] < leds[1]
                 );
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.is_err());
             f.retire();
             let drops = f.drops.clone();
@@ -1360,6 +1380,8 @@ pub(crate) mod tests {
                     let mut m = f.model.lock().unwrap();
                     m.initial_fail_at = Some(m.initial_commands.len() + 1);
                 }
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 assert!(unsafe { f.controller.initialize_mac() }.is_err());
                 assert_eq!(f.controller.phase(), Phase::Quarantined);
                 let drops = f.drops.clone();
@@ -1395,6 +1417,8 @@ pub(crate) mod tests {
             f.install().unwrap();
             f.boot(chip);
             f.policy(chip);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { f.controller.initialize_mac() }.unwrap();
             let context = Context {
                 bss_index: 0,
@@ -1412,7 +1436,11 @@ pub(crate) mod tests {
             if chip == Chip::Mt7925 {
                 f.model.lock().unwrap().status = 0xdeadbeef;
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let interface = unsafe { f.controller.register_interface(context) }.unwrap();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let disabled = unsafe { f.controller.disable_peer_translation(&interface, 1, true) };
             if chip == Chip::Mt7925 {
                 assert!(matches!(
@@ -1524,6 +1552,8 @@ pub(crate) mod tests {
                     }
                     bar.log.clear();
                 }
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { f.controller.initialize_mac() }.unwrap();
                 let mut native = f.bar.0.lock().unwrap().log.clone();
                 let global = if chip == Chip::Mt7925 { 0xe800 } else { 0xf000 };
@@ -1545,6 +1575,8 @@ pub(crate) mod tests {
                 }
                 assert_eq!(native, source, "complete source MAC {chip:?} seed{seed}");
                 f.bar.0.lock().unwrap().log.clear();
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
                 assert_eq!(f.bar.0.lock().unwrap().log, counters);
                 let trace =
@@ -1601,7 +1633,11 @@ pub(crate) mod tests {
                     .firmware_start_acknowledged
             );
             f.policy(chip);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { f.controller.initialize_mac() }.unwrap();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
             f.retire();
         }
@@ -1634,10 +1670,14 @@ pub(crate) mod tests {
             f.install().unwrap();
             f.boot(chip);
             f.policy(chip);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { f.controller.initialize_mac() }.unwrap();
             let count = f.model.lock().unwrap().initial_commands.len();
             let reg = f.model.lock().unwrap().regulatory_commands.len();
             assert!(matches!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { f.controller.start(Band::Ghz5, 36, 5180) },
                 Err(BootError::RequiredRfkill)
             ));

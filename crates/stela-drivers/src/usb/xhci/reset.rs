@@ -576,17 +576,25 @@ pub(crate) mod tests {
         _clock: crate::test_clock::Guard,
     }
     fn read<T: Copy>(address: u64) -> T {
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { (address as *const T).read_volatile() }
     }
     fn put<T>(address: u64, value: T) {
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe {
             (address as *mut T).write_volatile(value);
         }
     }
     fn bytes(address: u64, length: usize) -> Vec<u8> {
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { core::slice::from_raw_parts(address as *const u8, length) }.to_vec()
     }
     fn copy(address: u64, data: &[u8]) {
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len());
         }
@@ -1337,6 +1345,8 @@ pub(crate) mod tests {
         let (bot, iso, profile) = profile;
         let range = memory.as_mut_ptr() as u64
             ..memory.as_mut_ptr() as u64 + core::mem::size_of_val(memory) as u64;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut dma = unsafe { RegionAllocator::new(range) };
         let commands = Ring::with_profile(&mut dma, profile).unwrap();
         let events = dma.allocate(RING_TRBS * 16, 64).unwrap();
@@ -1513,6 +1523,8 @@ pub(crate) mod tests {
                     .unwrap()
                     ._output
                     .physical();
+                // SAFETY: the model controller is stopped, and its old slot's endpoints are drained
+                // before the reset.
                 let fresh = unsafe {
                     shared
                         .borrow_mut()
@@ -1543,6 +1555,8 @@ pub(crate) mod tests {
                             .is_err()
                     );
                 }
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 assert!(unsafe { c.reset_and_identify(&old, &endpoints, &mut dma) }.is_err());
                 assert!(c.clear(old.slot, &endpoints[0]).is_err());
                 assert!(c.string(old.slot, 0x0409, 1).is_none());
@@ -1584,6 +1598,8 @@ pub(crate) mod tests {
                         ._output
                         .physical();
                     assert!(
+                        // SAFETY: the model controller is stopped, and its old slot's endpoints are
+                        // drained before the reset.
                         unsafe {
                             shared
                                 .borrow_mut()
@@ -1622,6 +1638,8 @@ pub(crate) mod tests {
                 prepared(&mut memory, SUPER_SPEED, 32, 3);
             hardware.borrow_mut().fault = fault;
             assert!(
+                // SAFETY: the model controller is stopped, and its old slot's endpoints are drained
+                // before the reset.
                 unsafe {
                     shared
                         .borrow_mut()
@@ -1663,6 +1681,8 @@ pub(crate) mod tests {
         let (shared, old, endpoints, hardware, mut dma) = prepared(&mut memory, HIGH_SPEED, 32, 1);
         // One slot is enough: the reset retires the old device's grant and
         // its slot goes to the fresh one.
+        // SAFETY: the model controller is stopped, and its old slot's endpoints are drained before
+        // the reset.
         let fresh = unsafe {
             shared
                 .borrow_mut()
@@ -1703,6 +1723,8 @@ pub(crate) mod tests {
                 allocations: Vec::new(),
             };
             assert!(
+                // SAFETY: the model controller is stopped, and its old slot's endpoints are drained
+                // before the reset.
                 unsafe {
                     shared
                         .borrow_mut()
@@ -1733,6 +1755,8 @@ pub(crate) mod tests {
         let (shared, old, endpoints, hardware, mut dma) = prepared(&mut memory, HIGH_SPEED, 32, 3);
         let before = hardware.borrow().accesses;
         assert!(
+            // SAFETY: the model controller is stopped, and its old slot's endpoints are drained
+            // before the reset.
             unsafe {
                 shared
                     .borrow_mut()
@@ -1743,6 +1767,8 @@ pub(crate) mod tests {
         assert_eq!(hardware.borrow().accesses, before);
         shared.borrow_mut().slot(old.slot).unwrap().attachment.tier = 1;
         assert!(
+            // SAFETY: the model controller is stopped, and its old slot's endpoints are drained
+            // before the reset.
             unsafe {
                 shared
                     .borrow_mut()
@@ -1799,6 +1825,8 @@ pub(crate) mod tests {
                 assert!(shared.borrow().slots[usize::from(other)].is_none());
             }
             let before = hardware.borrow().accesses;
+            // SAFETY: the model controller is stopped, and its old slot's endpoints are drained
+            // before the reset.
             let error = unsafe {
                 shared
                     .borrow_mut()

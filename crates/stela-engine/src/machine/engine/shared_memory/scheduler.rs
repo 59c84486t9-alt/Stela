@@ -959,6 +959,7 @@ mod tests {
         let memory = machine.cpu.canonical_memory.as_mut().unwrap();
         // Terminal corrupted-owner finalization is an implementation refusal,
         // never an ARM source fault or a completed CLREX.
+        // SAFETY: the callback runs once on this thread and touches only the checked view.
         let failed = unsafe { memory.memory.with_checked_view(|view| view.version = 0) };
         assert_eq!(failed, Err(MemoryStatus::Domain));
         let before = (

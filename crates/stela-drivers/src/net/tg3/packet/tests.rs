@@ -51,6 +51,7 @@ unsafe impl PageBacking for Ram {
 impl Drop for Ram {
     fn drop(&mut self) {
         self.drops.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the pointer came from the matching allocation with this layout and is freed once.
         unsafe { dealloc(self.address.as_ptr(), self.layout) };
     }
 }
@@ -76,6 +77,7 @@ impl PageSource for Pages {
         let bytes = bytes.div_ceil(4096) * 4096;
         let layout = Layout::from_size_align(bytes, alignment).unwrap();
         let address =
+            // SAFETY: the layout has a nonzero size.
             NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
         let base = self.next.get();
         self.next.set(base + bytes as u64);
@@ -325,6 +327,8 @@ unsafe impl DmaDomain for Domain {
         let maps = self.maps.lock().unwrap();
         let map = maps.get(&mapping.address).unwrap();
         let pointer = map.cpu.address(offset, 4).unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         Ok(u32::from_le(unsafe {
             pointer.as_ptr().cast::<u32>().read_volatile()
         }))
@@ -970,6 +974,8 @@ fn parts() -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
 }
 fn attach() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
     let (hardware, pages, domain, peer) = parts();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Ok(packet) => packet,
         Err((e, _)) => panic!("attach: {e:?}"),
@@ -1129,6 +1135,8 @@ fn reset_phy_nvm_and_coherence_failures_never_advertise_attachment() {
                 _ => domain.incoherent.store(true, Ordering::Relaxed),
             }
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut packet) = match unsafe { Packet::attach(hardware, &pages, domain.clone()) }
         {
             Err(failed) => failed,
@@ -1160,6 +1168,8 @@ fn nvm_fallback_uses_actual_internal_port_and_exact_read_protocol() {
         p.nvram.insert(0x208, 0x0212);
         p.nvram.insert(0x20c, 0x3456_789a);
     }
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let packet = match unsafe { Packet::attach(hardware, &pages, domain) } {
         Ok(p) => p,
         Err((e, _)) => panic!("{e:?}"),
@@ -1244,6 +1254,8 @@ fn peer_reads_published_device_snapshot_instead_of_unsynchronized_cpu_bytes() {
     )
     .unwrap();
     let pointer = cpu.address(0, 4).unwrap();
+    // SAFETY: the pointer addresses this test's own live pages, and the model writes nothing
+    // concurrently.
     unsafe {
         pointer
             .as_ptr()
@@ -1251,6 +1263,8 @@ fn peer_reads_published_device_snapshot_instead_of_unsynchronized_cpu_bytes() {
             .write_volatile(0x11223344u32.to_le());
     }
     mapping.sync_for_device(0..4).unwrap();
+    // SAFETY: the pointer addresses this test's own live pages, and the model writes nothing
+    // concurrently.
     unsafe {
         pointer
             .as_ptr()
@@ -1301,6 +1315,8 @@ fn partial_page_allocation_keeps_every_mapping_handle_for_explicit_retirement() 
     for allocated in 0..6 {
         let (hardware, mut pages, domain, peer) = parts();
         pages.fail_after = Some(allocated);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Err((Error::Memory(MemoryError::OutOfMemory), packet)) => packet,
             _ => panic!("allocation failure must be returned"),
@@ -1355,6 +1371,8 @@ fn rdma_fix_access_or_readback_failure_never_enables_read_dma() {
                 _ => p.ignore_reserve_fix = true,
             }
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Err((error, packet)) => {
                 assert_eq!(

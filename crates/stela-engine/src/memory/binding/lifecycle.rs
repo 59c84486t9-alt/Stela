@@ -366,6 +366,8 @@ mod tests {
         let (mut main, base) = owned();
         let (mut facade, other) = owned();
         main.write(base, &[42]).unwrap();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory_group(
                 config(MemorySystem::new(16, 8).unwrap(), 42),
@@ -413,6 +415,8 @@ mod tests {
         let page = host_page_size().unwrap() as u64;
         let (mut main, base) = owned();
         let mut publisher = published();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory(
                 config(MemorySystem::new(16, 8).unwrap(), 1),
@@ -438,6 +442,8 @@ mod tests {
     #[test]
     fn pending_allocation_excludes_entry_and_publishes_actual_128k_storage_once() {
         let (mut main, _) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut [])
         }
@@ -459,6 +465,8 @@ mod tests {
     #[test]
     fn pending_drop_preserves_generation_and_existing_views() {
         let (mut main, base) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut [])
         }
@@ -474,6 +482,8 @@ mod tests {
     #[test]
     fn rollback_rebuilds_generation_and_failed_rollback_poisons_same_system() {
         let (mut main, base) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut [])
         }
@@ -528,6 +538,8 @@ mod tests {
         let page = host_page_size().unwrap() as u64;
         let mut main = OwnedMemory::map(vec![]).unwrap();
         let base = main.allocate_data(request(page * 3)).unwrap().guest_address;
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut [])
         }
@@ -548,6 +560,8 @@ mod tests {
     #[test]
     fn public_retirement_fences_native_loans_and_invalidates_generation() {
         let (mut main, _) = owned();
+        // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
+        // reference reaches it.
         let domain = unsafe {
             main.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut [])
         }

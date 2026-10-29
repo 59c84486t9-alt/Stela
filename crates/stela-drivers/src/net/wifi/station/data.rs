@@ -979,6 +979,7 @@ mod tests {
 
     fn key(slot: u16, scope: KeyScope, seed: TransmitSeed) -> KeySlot {
         // Pure model has no physical slots, DMA, or deferred users.
+        // SAFETY: this test owns the key slot number alone.
         let mut result = unsafe { KeySlot::new(slot).unwrap() };
         let index = if matches!(scope, KeyScope::Pairwise(_)) {
             0
@@ -1601,6 +1602,7 @@ mod tests {
         for (index, cipher) in [(1, Cipher::Ccmp128), (0, Cipher::Gcmp128)] {
             let (mut station, mut keys) = station(PortPolicy::Controlled, true);
             // Isolated model; this synthetic physical slot has no DMA/work users.
+            // SAFETY: this test owns the key slot number alone.
             let mut alternate = unsafe { KeySlot::new(34).unwrap() };
             let ticket = alternate
                 .begin_install(

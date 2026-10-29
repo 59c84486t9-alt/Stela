@@ -458,6 +458,7 @@ pub(super) mod tests {
     // SAFETY: tests never create racing Rust references; the canonical owner
     // retains these exact bytes and every writer uses its physical system.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
     pub(in crate::machine::engine::shared_memory) fn fixture() -> (
         crate::machine::Cpu,
@@ -480,6 +481,8 @@ pub(super) mod tests {
             (BASE + 2 * PAGE as u64, (BASE + 3 * PAGE as u64) | 3),
             (LEAF, DESCRIPTOR),
         ] {
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(address, &descriptor.to_le_bytes()) }.unwrap();
         }
         let (mut cpu, profile, missing) = super::super::controls::tests::captured();
@@ -521,6 +524,8 @@ pub(super) mod tests {
             pc: 0x8000,
         };
         let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+        // SAFETY: the request's buffers are live locals for the whole call, and the callback runs
+        // once on this thread.
         let (status, completed) = unsafe {
             entry.with_checked_view(|view| {
                 let status = (view.callback)(view, &request);
@@ -530,6 +535,8 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!((status, completed), (MemoryStatus::Success as u32, 32));
         let mut actual = [0; 32];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(DATA, &mut actual) }.unwrap();
         assert_eq!(actual, bytes);
     }
@@ -558,6 +565,8 @@ pub(super) mod tests {
             pc: 0x18000,
         };
         let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+        // SAFETY: the request's buffers are live locals for the whole call, and the callback runs
+        // once on this thread.
         unsafe {
             entry.with_checked_view(|view| {
                 let code = (view.callback)(view, &request);
@@ -587,6 +596,8 @@ pub(super) mod tests {
                     policy.controls.translation.mair = u64::from(attribute);
                     let descriptor = (DESCRIPTOR & !(3 << 8)) | u64::from(shareability) << 8;
                     let ram = Arc::clone(&policy.ram);
+                    // SAFETY: the buffers are private locals, disjoint from the registered RAM,
+                    // which stays registered.
                     unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
                     let mut thread = ram.domain().thread(policy);
                     let expected = [attribute, shareability, 0x31, 0x42, 0x53, 0x64, 0x75, 0x86];
@@ -603,6 +614,8 @@ pub(super) mod tests {
                     );
                     assert_eq!(data, expected);
                     let mut physical = [0; 8];
+                    // SAFETY: the buffers are private locals, disjoint from the registered RAM,
+                    // which stays registered.
                     unsafe { ram.read_physical(DATA, &mut physical) }.unwrap();
                     assert_eq!(physical, expected);
                     assert!(!thread.policy_mut().device_ram_ordering());
@@ -619,6 +632,8 @@ pub(super) mod tests {
                 let mut policy = ordinary_policy();
                 policy.controls.translation.mair = attribute;
                 let ram = Arc::clone(&policy.ram);
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { ram.publish_physical(LEAF + 8, &descriptor.to_le_bytes()) }.unwrap();
                 let mut thread = ram.domain().thread(policy);
                 assert_eq!(
@@ -634,6 +649,8 @@ pub(super) mod tests {
                     )
                 );
                 let mut physical = [0; 8];
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { ram.read_physical(DATA + PAGE as u64 - 3, &mut physical) }.unwrap();
                 assert_eq!(physical, [0x39, 0x39, 0x39, 0, 0, 0, 0, 0]);
             }
@@ -641,6 +658,8 @@ pub(super) mod tests {
             policy.controls.translation.mair = attribute;
             let ram = Arc::clone(&policy.ram);
             let unowned = (DESCRIPTOR & !0x0000_ffff_ffff_f000) | 0x999000;
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(LEAF, &unowned.to_le_bytes()) }.unwrap();
             let mut thread = ram.domain().thread(policy);
             assert_eq!(
@@ -655,6 +674,8 @@ pub(super) mod tests {
                 })
             ));
             let mut physical = [0; 8];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(DATA, &mut physical) }.unwrap();
             assert_eq!(physical, [0; 8]);
         }
@@ -712,9 +733,13 @@ pub(super) mod tests {
             second.bind_events(&second_endpoint.producer()).unwrap();
             first.check_event_endpoint(&first_endpoint).unwrap();
             second.check_event_endpoint(&second_endpoint).unwrap();
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(DATA, &5u64.to_le_bytes()) }.unwrap();
             let mut load = ExclusiveData::default();
             assert_eq!(
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { transfer(&mut first, &mut load, flags::EXCLUSIVE) },
                 (0, 8)
             );
@@ -726,6 +751,8 @@ pub(super) mod tests {
                 ..Default::default()
             };
             assert_eq!(
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { transfer(&mut second, &mut ordered, flags::ORDERED | flags::WRITE) },
                 (0, 8)
             );
@@ -735,18 +762,24 @@ pub(super) mod tests {
                 ..Default::default()
             };
             assert_eq!(
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { transfer(&mut first, &mut store, flags::EXCLUSIVE | flags::WRITE) },
                 (0, 0)
             );
             assert_eq!(store.status, EXCLUSIVE_FAILED);
             load = ExclusiveData::default();
             assert_eq!(
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { transfer(&mut first, &mut load, flags::EXCLUSIVE) },
                 (0, 8)
             );
             assert_eq!(load.value, [9, 0]);
             store.status = EXCLUSIVE_STORED;
             assert_eq!(
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { transfer(&mut first, &mut store, flags::EXCLUSIVE | flags::WRITE) },
                 (0, 8)
             );
@@ -758,11 +791,15 @@ pub(super) mod tests {
                 ..Default::default()
             };
             assert_eq!(
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { transfer(&mut first, &mut atomic, flags::ATOMIC | flags::WRITE) },
                 (0, 8)
             );
             assert_eq!(atomic.result, [7, 0]);
             let mut physical = [0; 8];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(DATA, &mut physical) }.unwrap();
             assert_eq!(u64::from_le_bytes(physical), 10);
         }
@@ -780,6 +817,8 @@ pub(super) mod tests {
             for residue in 0..16 {
                 let policy = ordinary_policy();
                 let ram = Arc::clone(&policy.ram);
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { ram.publish_physical(DATA, &[0x5a; 64]) }.unwrap();
                 let mut thread = ram.domain().thread(policy);
                 let address = 0x4010 + residue;
@@ -790,6 +829,8 @@ pub(super) mod tests {
                     "width={bytes} residue={residue}"
                 );
                 let mut actual = [0; 64];
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { ram.read_physical(DATA, &mut actual) }.unwrap();
                 assert_eq!(
                     &actual[16 + residue as usize..16 + residue as usize + bytes],
@@ -827,6 +868,8 @@ pub(super) mod tests {
             for descriptor in [0, (DESCRIPTOR + PAGE as u64) | (2 << 6)] {
                 let policy = ordinary_policy();
                 let ram = Arc::clone(&policy.ram);
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { ram.publish_physical(LEAF + 8, &descriptor.to_le_bytes()) }.unwrap();
                 let mut thread = ram.domain().thread(policy);
                 let mut data = alloc::vec![0x39; bytes];
@@ -839,6 +882,8 @@ pub(super) mod tests {
                 };
                 assert_eq!(result, (status, prefix, 0x5000));
                 let mut actual = [0; 32];
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { ram.read_physical(DATA + PAGE as u64 - prefix, &mut actual) }.unwrap();
                 assert!(actual[..prefix as usize].iter().all(|b| *b == 0x39));
                 assert!(actual[prefix as usize..].iter().all(|b| *b == 0));
@@ -882,6 +927,8 @@ pub(super) mod tests {
         // Device alignment must win before that permission fault, even though
         // its individual reached byte at 0x5000 is naturally aligned.
         let device_readonly = (DESCRIPTOR + PAGE as u64) | (1 << 2) | (2 << 6);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF + 8, &device_readonly.to_le_bytes()) }.unwrap();
         policy.controls.translation.mair = 0xff;
         let mut thread = ram.domain().thread(policy);
@@ -1004,6 +1051,8 @@ pub(super) mod tests {
             };
             let entry = thread.prepare(MemoryRequirements::default()).unwrap();
             let result =
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { entry.with_checked_view(|view| (view.callback)(view, &request)) }.unwrap();
             assert_eq!(result, MemoryStatus::Success as u32);
             staging.fill(0xa5);
@@ -1013,11 +1062,15 @@ pub(super) mod tests {
             };
             let entry = thread.prepare(MemoryRequirements::default()).unwrap();
             let result =
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 unsafe { entry.with_checked_view(|view| (view.callback)(view, &request)) }.unwrap();
             assert_eq!(result, MemoryStatus::Success as u32);
             assert_eq!(&staging[..bytes], &expected[..bytes]);
             assert!(staging[bytes..].iter().all(|byte| *byte == 0xa5));
             let mut around = [0xa5; 16];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(address, &mut around) }.unwrap();
             assert_eq!(&around[..bytes], &expected[..bytes]);
             assert!(around[bytes..].iter().all(|byte| *byte == 0));
@@ -1076,6 +1129,8 @@ pub(super) mod tests {
                 pc: 0x18000,
             };
             let entry = thread.prepare(requirements).unwrap();
+            // SAFETY: the request's buffers are live locals for the whole call, and the callback
+            // runs once on this thread.
             let (status, completed) = unsafe {
                 entry.with_checked_view(|view| {
                     let status = (view.callback)(view, &request);
@@ -1104,6 +1159,8 @@ pub(super) mod tests {
                     ..request
                 };
                 let entry = thread.prepare(requirements).unwrap();
+                // SAFETY: the request's buffers are live locals for the whole call, and the
+                // callback runs once on this thread.
                 let (status, completed) = unsafe {
                     entry.with_checked_view(|view| {
                         let status = (view.callback)(view, &request);
@@ -1118,6 +1175,8 @@ pub(super) mod tests {
                 assert_eq!(data.value, [value, 0]);
             }
             let mut actual = [0; 16];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(address, &mut actual) }.unwrap();
             assert_eq!(
                 &actual[..bytes as usize],
@@ -1153,6 +1212,8 @@ pub(super) mod tests {
                     ..Default::default()
                 })
                 .unwrap();
+            // SAFETY: the request's buffers are live locals for the whole call, and the callback
+            // runs once on this thread.
             let (status, completed) = unsafe {
                 entry.with_checked_view(|view| {
                     let status = (view.callback)(view, &request);
@@ -1202,6 +1263,8 @@ pub(super) mod tests {
             pc: 0x18000,
         };
         let entry = thread.prepare(MemoryRequirements::default()).unwrap();
+        // SAFETY: the request's buffers are live locals for the whole call, and the callback runs
+        // once on this thread.
         let (status, completed, pc) = unsafe {
             entry.with_checked_view(|view| {
                 let status = (view.callback)(view, &request);
@@ -1261,6 +1324,8 @@ pub(super) mod tests {
             policy.translate_part(request, part(0x4000, AccessKind::Write)),
             Ok(DATA)
         );
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe {
             policy
                 .ram
@@ -1341,6 +1406,8 @@ pub(super) mod tests {
             ),
         ] {
             policy.failure = None;
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { policy.ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
             assert_eq!(
                 policy.translate_part(request, part(0x4000, AccessKind::Read)),
@@ -1350,6 +1417,8 @@ pub(super) mod tests {
                 matches!(policy.failure, Some(Failure::Unsupported { reason: found, .. }) if found == reason)
             );
         }
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { policy.ram.publish_physical(LEAF, &DESCRIPTOR.to_le_bytes()) }.unwrap();
         policy.controls.translation.mair = 0;
         policy.failure = None;

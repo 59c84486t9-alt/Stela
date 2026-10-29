@@ -669,6 +669,7 @@ mod tests {
         // Public construction cannot use the modeled observations on a POSIX
         // process, even with a baseline artifact and plausible numeric IDs.
         assert_eq!(
+            // SAFETY: the mismatched worker is refused before any CPU state is touched.
             unsafe { NativeCpuOwner::new(WorkerId(17), actual.controls.apic_id) }.unwrap_err(),
             Refusal::UnsupportedHost
         );

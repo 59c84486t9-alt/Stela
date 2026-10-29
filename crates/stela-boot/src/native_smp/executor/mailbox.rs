@@ -63,8 +63,10 @@ unsafe fn invoke<C: Command>(
     // SAFETY: send<C> publishes this exact heap allocation, retained by Pending
     // until Acquire DONE. There is no concurrent access to its typed fields.
     let job = unsafe { &*(pointer as *const Job<C>) };
+    // SAFETY: the job is this AP's alone until it publishes DONE, so nothing else reaches `input`.
     let input = unsafe { (&mut *job.input.get()).take().expect("unconsumed AP job") };
     let output = input.execute(host, owner);
+    // SAFETY: nothing else reaches `output` until this AP publishes DONE.
     unsafe { *job.output.get() = Some(output) };
 }
 struct Pending<C: Command> {
@@ -87,6 +89,7 @@ impl<C: Command> Pending<C> {
                 // A timeout is not quiescence. Never unwind/free guest frames,
                 // services, descriptors, stack or this job while the AP can run.
                 loop {
+                    // SAFETY: halts this AP with maskable interrupts off; it touches no memory.
                     unsafe {
                         asm!("cli", "hlt", options(nomem, nostack));
                     }

@@ -112,9 +112,9 @@ impl Mapping {
         } else {
             libc::PROT_NONE
         };
-        // SAFETY: a page-aligned extent of this retained mapping; tests call
-        // only after native return and restore rights before reading RAM.
         ensure!(
+            // SAFETY: a page-aligned extent of this retained mapping; tests call only after native
+            // return and restore rights before reading RAM.
             unsafe { libc::mprotect((self.0 + offset as u64) as *mut _, bytes, flags) } == 0,
             "protect test RAM: {}",
             std::io::Error::last_os_error()
@@ -202,8 +202,8 @@ struct Executable {
 }
 impl Drop for Executable {
     fn drop(&mut self) {
-        // SAFETY: uniquely owns this complete page-rounded executable mapping.
         assert_eq!(
+            // SAFETY: uniquely owns this complete page-rounded executable mapping.
             unsafe { libc::munmap(self.address as *mut _, self.bytes) },
             0
         );

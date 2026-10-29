@@ -607,6 +607,8 @@ pub(super) fn inputs_hardware(
     });
     registers.write(0x30, features);
     let authority =
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { Authority::isolated_model(registers.clone(), SPACE, Vec::new()) }.unwrap();
     let mapping = authority
         .map(
@@ -643,6 +645,8 @@ pub(super) fn inputs_hardware(
     bytes.extend_from_slice(entries);
     checksum(&mut bytes);
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let inspection = match unsafe {
         FunctionInspection::inspect(
             registers::Inputs {

@@ -57,10 +57,12 @@ impl Probe {
             // Guard/root authority comes from Source, not these observations.
             for (at, value) in local.iter_mut().enumerate() {
                 if turn != 0
+                        // SAFETY: `value` is an element of this frame's own local array.
                     && unsafe { ptr::read_volatile(value) } != (index * 100 + at + turn - 1) as u64
                 {
                     self.cpu.fatal(WorkError::CorruptContext);
                 }
+                // SAFETY: `value` is an element of this frame's own local array.
                 unsafe { ptr::write_volatile(value, (index * 100 + at + turn) as u64) };
             }
             if turn != 2 {
@@ -71,9 +73,11 @@ impl Probe {
     }
 }
 unsafe extern "C" fn first(opaque: *mut c_void) {
+    // SAFETY: `opaque` is the `Probe` queued with this job, which outlives every job.
     unsafe { &*opaque.cast::<Probe>() }.exercise(0);
 }
 unsafe extern "C" fn second(opaque: *mut c_void) {
+    // SAFETY: `opaque` is the `Probe` queued with this job, which outlives every job.
     unsafe { &*opaque.cast::<Probe>() }.exercise(1);
 }
 
@@ -123,6 +127,7 @@ fn run_stacks(source: Arc<Source>, cpu: Arc<dyn Cpu>) -> Result<Observation, Wor
         rsp: core::array::from_fn(|_| AtomicUsize::new(0)),
         resumed: core::array::from_fn(|_| AtomicUsize::new(0)),
     });
+    // SAFETY: `probe` is the queue's retained owner, and only this CPU produces work.
     let queue = unsafe { Queue::<JOBS>::new(cpu, probe.clone()) }?;
     let executor = Executor::new(queue.clone(), stacks)?;
     let runtime = executor.runtime();
@@ -132,6 +137,8 @@ fn run_stacks(source: Arc<Source>, cpu: Arc<dyn Cpu>) -> Result<Observation, Wor
     );
     let opaque = Arc::as_ptr(&probe).cast_mut().cast();
     let jobs =
+        // SAFETY: the callbacks are static, take the `Probe` that `probe` retains through
+        // completion, and never unwind.
         [first, second].map(|callback| unsafe { queue.execute(Kind::General, callback, opaque) });
     let [a, b] = jobs;
     let tickets = [a?, b?];

@@ -1410,6 +1410,7 @@ pub(crate) mod tests {
         fail_quiesce: AtomicBool,
     }
     unsafe fn platform<'a>(p: *mut c_void) -> &'a TestPlatform {
+        // SAFETY: callers pass the provider context, a live `TestPlatform` until `destroy`.
         unsafe { &*p.cast::<TestPlatform>() }
     }
     unsafe extern "C" fn allocate(p: *mut c_void, bytes: u64) -> *mut c_void {
@@ -1422,18 +1423,23 @@ pub(crate) mod tests {
         let Ok(layout) = Layout::from_size_align(total, 16) else {
             return ptr::null_mut();
         };
+        // SAFETY: `layout` has a nonzero size.
         let raw = unsafe { alloc(layout) };
         if raw.is_null() {
             return ptr::null_mut();
         }
+        // SAFETY: `raw` is a fresh 16-aligned block of at least 16 bytes.
         unsafe {
             raw.cast::<usize>().write(total);
         }
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .counts
             .allocations
             .fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the block spans `16 + bytes` bytes.
         let result = unsafe { raw.add(16).cast() };
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .counts
             .ledger
@@ -1443,6 +1449,7 @@ pub(crate) mod tests {
         result
     }
     unsafe extern "C" fn free(p: *mut c_void, allocation: *mut c_void) {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .counts
             .ledger
@@ -1450,20 +1457,26 @@ pub(crate) mod tests {
             .unwrap()
             .remove(&(allocation as usize))
             .unwrap();
+        // SAFETY: `allocation` came from `allocate`, 16 bytes past its block's start.
         let raw = unsafe { allocation.cast::<u8>().sub(16) };
+        // SAFETY: `allocate` stored the block's size in its first word.
         let total = unsafe { raw.cast::<usize>().read() };
+        // SAFETY: `raw` came from `alloc` with this size and alignment and is freed once.
         unsafe { dealloc(raw, Layout::from_size_align(total, 16).unwrap()) };
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .counts
             .allocations
             .fetch_sub(1, Ordering::SeqCst);
     }
     unsafe extern "C" fn map(p: *mut c_void, address: u64, length: u64) -> *mut c_void {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         let platform = unsafe { platform(p) };
         let Some(end) = address.checked_add(length) else {
             return ptr::null_mut();
         };
         let mapped = if address >= 0x9000 && end <= 0x9008 {
+            // SAFETY: the address check keeps the offset within the eight-byte memory word.
             unsafe {
                 platform
                     .counts
@@ -1481,6 +1494,7 @@ pub(crate) mod tests {
             else {
                 return ptr::null_mut();
             };
+            // SAFETY: the table lookup keeps the mapped range within `bytes`.
             (unsafe { bytes.as_ptr().add((address - base) as usize) }) as *mut c_void
         };
         *platform
@@ -1493,6 +1507,7 @@ pub(crate) mod tests {
         mapped
     }
     unsafe extern "C" fn unmap(p: *mut c_void, pointer: *mut c_void, length: u64) {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         let platform = unsafe { platform(p) };
         let mut leases = platform.leases.lock().unwrap();
         let entry = leases
@@ -1505,15 +1520,18 @@ pub(crate) mod tests {
         platform.counts.mappings.fetch_sub(1, Ordering::SeqCst);
     }
     unsafe extern "C" fn create_lock(_: *mut c_void, out: *mut *mut c_void) -> Status {
+        // SAFETY: ACPICA passes a valid out pointer.
         unsafe { out.write(Box::into_raw(Box::new(AtomicBool::new(false))).cast()) };
         0
     }
     unsafe extern "C" fn delete_lock(_: *mut c_void, lock: *mut c_void) {
+        // SAFETY: `lock` came from `create_lock` and ACPICA deletes it once.
         unsafe {
             drop(Box::from_raw(lock.cast::<AtomicBool>()));
         }
     }
     unsafe extern "C" fn acquire_lock(_: *mut c_void, lock: *mut c_void) -> u64 {
+        // SAFETY: `lock` came from `create_lock` and lives until `delete_lock`.
         let lock = unsafe { &*lock.cast::<AtomicBool>() };
         while lock
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -1525,6 +1543,7 @@ pub(crate) mod tests {
     }
     unsafe extern "C" fn release_lock(_: *mut c_void, lock: *mut c_void, flags: u64) {
         assert_eq!(flags, 0);
+        // SAFETY: `lock` came from `create_lock` and lives until `delete_lock`.
         unsafe { &*lock.cast::<AtomicBool>() }.store(false, Ordering::Release);
     }
     unsafe extern "C" fn create_semaphore(
@@ -1536,6 +1555,7 @@ pub(crate) mod tests {
         if initial > max || max == 0 {
             return BAD_PARAMETER.0;
         }
+        // SAFETY: ACPICA passes a valid out pointer.
         unsafe {
             out.write(
                 Box::into_raw(Box::new(Semaphore {
@@ -1548,6 +1568,7 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn delete_semaphore(_: *mut c_void, s: *mut c_void) -> Status {
+        // SAFETY: `s` came from `create_semaphore` and ACPICA deletes it once.
         unsafe {
             drop(Box::from_raw(s.cast::<Semaphore>()));
         }
@@ -1559,6 +1580,7 @@ pub(crate) mod tests {
         units: u32,
         timeout: u16,
     ) -> Status {
+        // SAFETY: `s` came from `create_semaphore` and lives until `delete_semaphore`.
         let s = unsafe { &*s.cast::<Semaphore>() };
         let start = Instant::now();
         if units == 0 || units > s.max {
@@ -1585,6 +1607,7 @@ pub(crate) mod tests {
         }
     }
     unsafe extern "C" fn signal_semaphore(_: *mut c_void, s: *mut c_void, units: u32) -> Status {
+        // SAFETY: `s` came from `create_semaphore` and lives until `delete_semaphore`.
         let s = unsafe { &*s.cast::<Semaphore>() };
         let mut current = s.units.load(Ordering::Acquire);
         loop {
@@ -1621,9 +1644,11 @@ pub(crate) mod tests {
         callback: Work,
         context: *mut c_void,
     ) -> Status {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         if unsafe { platform(p) }.quiescing.load(Ordering::Acquire) {
             return 6;
         }
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .work
             .lock()
@@ -1640,10 +1665,13 @@ pub(crate) mod tests {
             return failure;
         }
         loop {
+            // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until
+            // `destroy`.
             let next = unsafe { platform(p) }.work.lock().unwrap().pop_front();
             let Some((callback, context)) = next else {
                 return 0;
             };
+            // SAFETY: ACPICA queued this callback with its own context.
             unsafe { callback(context as *mut c_void) };
         }
     }
@@ -1660,6 +1688,7 @@ pub(crate) mod tests {
         SUPPORT.0
     }
     unsafe extern "C" fn write_port(p: *mut c_void, _: u64, _: u32, _: u32) -> Status {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .counts
             .port_writes
@@ -1675,6 +1704,8 @@ pub(crate) mod tests {
         if address != 0x9000 || width != 32 {
             return SUPPORT.0;
         }
+        // SAFETY: ACPICA passes a valid out pointer and the provider context, a live
+        // `TestPlatform`.
         unsafe { value.write(platform(p).counts.memory.load(Ordering::Acquire)) };
         0
     }
@@ -1687,6 +1718,7 @@ pub(crate) mod tests {
         if address != 0x9000 || width != 32 {
             return SUPPORT.0;
         }
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .counts
             .memory
@@ -1712,12 +1744,14 @@ pub(crate) mod tests {
         SUPPORT.0
     }
     unsafe extern "C" fn timer(p: *mut c_void) -> u64 {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }.origin.elapsed().as_nanos() as u64 / 100
     }
     unsafe extern "C" fn signal(_: *mut c_void, _: u32, _: *mut c_void) -> Status {
         SUPPORT.0
     }
     unsafe extern "C" fn log(_: *mut c_void, text: *const c_char, length: u64) {
+        // SAFETY: ACPICA passes `length` valid bytes at `text`.
         let bytes = unsafe { core::slice::from_raw_parts(text.cast::<u8>(), length as usize) };
         std::eprint!("{}", std::string::String::from_utf8_lossy(bytes));
     }
@@ -1725,12 +1759,15 @@ pub(crate) mod tests {
         panic!("no hardware cache flush permitted by fixture");
     }
     unsafe extern "C" fn quiesce(p: *mut c_void) -> Status {
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         if unsafe { platform(p) }.fail_quiesce.load(Ordering::Acquire) {
             return SUPPORT.0;
         }
+        // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until `destroy`.
         unsafe { platform(p) }
             .quiescing
             .store(true, Ordering::Release);
+        // SAFETY: `p` is this provider's context.
         unsafe { drain_work(p) }
     }
     unsafe extern "C" fn preflight_wait_events(p: *mut c_void) -> Status {
@@ -1741,6 +1778,8 @@ pub(crate) mod tests {
             .load(Ordering::Acquire)
     }
     unsafe extern "C" fn destroy(p: *mut c_void) {
+        // SAFETY: `p` is the boxed `TestPlatform` the fixture leaked into the provider; ACPICA
+        // destroys it once.
         let p = unsafe { Box::from_raw(p.cast::<TestPlatform>()) };
         p.counts.destroyed.store(true, Ordering::SeqCst);
     }
@@ -2005,9 +2044,9 @@ pub(crate) mod tests {
             let (mut provider, counts) = fixture();
             provider.abi_version = version;
             provider.abi_bytes = bytes;
-            // SAFETY: complete fixture allocation is valid even with deliberately
-            // mismatched format metadata; Rust must retire it without entering C.
             assert!(matches!(
+                // SAFETY: complete fixture allocation is valid even with deliberately mismatched
+                // format metadata; Rust must retire it without entering C.
                 unsafe { Session::start(provider, Mode::InterpreterOnly) },
                 Err(BAD_PARAMETER)
             ));
@@ -2083,8 +2122,8 @@ pub(crate) mod tests {
             .unwrap();
         let flushes = counts.flush_calls.load(Ordering::Acquire);
         counts.preflight_status.store(SUPPORT.0, Ordering::Release);
-        // SAFETY: exact retained registration; failed preflight must not remove it.
         assert_eq!(
+            // SAFETY: exact retained registration; failed preflight must not remove it.
             unsafe { session.root().remove_region(3, read) },
             Err(SUPPORT)
         );
@@ -2230,8 +2269,8 @@ pub(crate) mod tests {
             fn acpi_unload_parent_table(handle: *mut c_void) -> Status;
         }
         let mut index = 0;
-        // SAFETY: actual complete owned SSDT, retained through global teardown.
         assert_eq!(
+            // SAFETY: actual complete owned SSDT, retained through global teardown.
             unsafe { acpi_load_table(ssdt.as_mut_ptr().cast(), &mut index) },
             0
         );
@@ -2256,6 +2295,8 @@ pub(crate) mod tests {
         if std::env::var_os("STELA_ACPI_EC_LOCK_CHILD").is_some() {
             use super::super::ec::FirmwareLock;
             let (provider, counts) = fixture();
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let mut lock = session.ec_global_lock();
             lock.acquire(1_000).unwrap();
@@ -2271,6 +2312,8 @@ pub(crate) mod tests {
             }
             let (mut provider, counts) = fixture();
             provider.quiesce = reject_quiescence;
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let observed = Arc::new(AtomicU32::new(0));
             let target = observed.clone();
@@ -2285,6 +2328,8 @@ pub(crate) mod tests {
                 .unwrap();
             core::mem::forget(notification); // retained callback tests quarantine, not normal removal
             assert_eq!(session.shutdown(), Err(SUPPORT));
+            // SAFETY: the quarantined provider context stays alive, and its callbacks are still
+            // valid.
             assert_eq!(unsafe { (provider.drain_work)(provider.context) }, 0);
             assert_eq!(
                 observed.load(Ordering::SeqCst),
@@ -2296,10 +2341,13 @@ pub(crate) mod tests {
             assert!(counts.mappings.load(Ordering::SeqCst) > 0);
             let (other, other_counts) = fixture();
             assert!(matches!(
+                // SAFETY: the fixture provider's tables and callbacks are valid, and the serial
+                // lock keeps this the only interpreter.
                 unsafe { Session::start(other, Mode::InterpreterOnly) },
                 Err(ALREADY_EXISTS)
             ));
             assert!(!other_counts.destroyed.load(Ordering::SeqCst));
+            // SAFETY: the refused start never took `other`, so its context is destroyed once here.
             unsafe { (other.destroy)(other.context) }; // reservation rejection never transfers ownership
             return;
         }
@@ -2308,12 +2356,16 @@ pub(crate) mod tests {
             fn stela_acpi_global_release(lock: *mut u32) -> u8;
         }
         let mut lock = 0x10u32;
+        // SAFETY: `lock` is a local FACS global-lock word.
         assert_eq!(unsafe { stela_acpi_global_acquire(&mut lock) }, 1);
         assert_eq!(lock, 0x12);
+        // SAFETY: `lock` is a local FACS global-lock word.
         assert_eq!(unsafe { stela_acpi_global_acquire(&mut lock) }, 0);
         assert_eq!(lock, 0x13);
+        // SAFETY: `lock` is a local FACS global-lock word.
         assert_eq!(unsafe { stela_acpi_global_release(&mut lock) }, 1);
         assert_eq!(lock, 0x10);
+        // SAFETY: `lock` is a local FACS global-lock word.
         assert_eq!(unsafe { stela_acpi_global_release(&mut lock) }, 0);
         assert_eq!(lock, 0x10);
         let expected = [
@@ -2336,6 +2388,7 @@ pub(crate) mod tests {
         ];
         for (field, expected) in expected.into_iter().enumerate() {
             assert_eq!(
+                // SAFETY: reads a constant ABI layout value.
                 unsafe { stela_acpi_layout(field as u32) },
                 expected as u64,
                 "ABI field {field}"
@@ -2348,12 +2401,16 @@ pub(crate) mod tests {
         let (mut provider, counts) = fixture();
         provider.create_lock = reject_lock;
         assert!(matches!(
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             unsafe { Session::start(provider, Mode::InterpreterOnly) },
             Err(Error(4))
         ));
         assert!(counts.destroyed.load(Ordering::SeqCst));
         let (mut provider, counts) = fixture();
         provider.root = 0xdead;
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         assert!(unsafe { Session::start(provider, Mode::InterpreterOnly) }.is_err());
         assert!(counts.destroyed.load(Ordering::SeqCst));
         assert_eq!(counts.allocations.load(Ordering::SeqCst), 0);
@@ -2361,12 +2418,16 @@ pub(crate) mod tests {
         // Real hardware activation must be rejected before touching SCI or mode regs.
         let (provider, counts) = fixture();
         assert!(matches!(
+            // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock
+            // keeps this the only interpreter.
             unsafe { Session::start(provider, Mode::Hardware) },
             Err(SUPPORT)
         ));
         assert!(counts.destroyed.load(Ordering::SeqCst));
         assert_eq!(counts.port_writes.load(Ordering::SeqCst), 0);
         let (provider, counts) = fixture();
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         assert!(!session.hardware_enabled());
         assert!(!session.root().hardware_active());
@@ -2416,6 +2477,7 @@ pub(crate) mod tests {
             context: *mut c_void,
             out: *mut *mut c_void,
         ) -> Status {
+            // SAFETY: ACPICA passes a valid out pointer.
             unsafe {
                 out.write(if action == 0 {
                     context
@@ -2436,10 +2498,13 @@ pub(crate) mod tests {
             if function != 0 || address != 0 || width != 8 || context.is_null() {
                 return SUPPORT.0;
             }
+            // SAFETY: ACPICA passes a valid out pointer.
             unsafe { value.write(0xab) };
             0
         }
         let region_context = Box::into_raw(Box::new(1u8)).cast();
+        // SAFETY: `region_context` lives until after `remove_region`, and both callbacks implement
+        // the region contract.
         unsafe {
             session
                 .root()
@@ -2450,7 +2515,9 @@ pub(crate) mod tests {
             ucsi.evaluate(Some("ECRD"), &[]).unwrap(),
             Some(Value::Integer(0xab))
         );
+        // SAFETY: this handler was installed above and its context is still alive.
         unsafe { session.root().remove_region(3, region) }.unwrap();
+        // SAFETY: the region was removed, so nothing else holds `region_context`.
         unsafe {
             drop(Box::from_raw(region_context.cast::<u8>()));
         }
@@ -2519,6 +2586,7 @@ pub(crate) mod tests {
             0,
             "Notify must actually be deferred"
         );
+        // SAFETY: the session is live and this thread holds no ACPICA lock.
         unsafe { acpi_os_wait_events_complete() };
         assert_eq!(
             notified.load(Ordering::SeqCst),
@@ -2528,6 +2596,7 @@ pub(crate) mod tests {
         notification.remove().unwrap();
         ucsi.evaluate(Some("FIRE"), &[Argument::Integer(0x80)])
             .unwrap();
+        // SAFETY: the session is live and this thread holds no ACPICA lock.
         unsafe { acpi_os_wait_events_complete() };
         session.shutdown().unwrap();
         assert!(counts.destroyed.load(Ordering::SeqCst));
@@ -2547,6 +2616,8 @@ pub(crate) mod tests {
         );
         // Reopening proves successful cleanup releases the singleton reservation.
         let (provider, counts) = fixture();
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         unsafe { Session::start(provider, Mode::InterpreterOnly) }
             .unwrap()
             .shutdown()
@@ -2560,6 +2631,8 @@ pub(crate) mod tests {
         let (provider, counts) =
             fixture_dsdt(include_bytes!("acpi/fixtures/dynamic-host.aml").to_vec());
         let fatal_child = std::env::var_os("STELA_ACPI_UNLOAD_FATAL_CHILD").is_some();
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         assert!(matches!(
             session.root().evaluate(
@@ -2611,6 +2684,8 @@ pub(crate) mod tests {
         if fatal_child {
             // Swap only the actual provider callback used inside C's immutable
             // transferred vtable through a fixture flag; no production bypass.
+            // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until
+            // `destroy`.
             unsafe { platform(provider.context) }
                 .fail_quiesce
                 .store(true, Ordering::Release);
@@ -2628,6 +2703,7 @@ pub(crate) mod tests {
         unsafe extern "C" {
             fn acpi_purge_cached_objects() -> Status;
         }
+        // SAFETY: the interpreter is idle on this thread.
         assert_eq!(unsafe { acpi_purge_cached_objects() }, 0);
         assert_eq!(device.path(), Err(SUPPORT));
         assert_eq!(device.child("TEST").err(), Some(SUPPORT));
@@ -2652,6 +2728,8 @@ pub(crate) mod tests {
         let mut gone = ptr::null_mut();
         let name = CString::new("\\_SB.DYN0").unwrap();
         assert_ne!(
+            // SAFETY: `name` and `gone` are live locals, and the interpreter is idle on this
+            // thread.
             unsafe { acpi_get_handle(usize::MAX as *mut c_void, name.as_ptr(), &mut gone) },
             0
         );
@@ -2661,6 +2739,8 @@ pub(crate) mod tests {
             pointer: ptr::null_mut(),
         };
         assert_eq!(
+            // SAFETY: `name` and `result` are live locals, and the interpreter is idle on this
+            // thread.
             unsafe {
                 stela_acpi_evaluate(
                     usize::MAX as *mut c_void,
@@ -2672,8 +2752,10 @@ pub(crate) mod tests {
             },
             0
         );
+        // SAFETY: a successful evaluation returns one allocated `RawObject` at `pointer`.
         let raw = unsafe { result.pointer.cast::<RawObject>().read_unaligned() };
         assert_eq!((raw.kind, raw.payload), (1, 0));
+        // SAFETY: ACPICA allocated `pointer` for this result, freed once.
         unsafe { acpi_os_free(result.pointer) };
         session.shutdown().unwrap();
         assert_eq!(Arc::strong_count(&observed), 1);
@@ -2712,6 +2794,8 @@ pub(crate) mod tests {
             dsdt.len()
         );
         let (provider, counts) = fixture_dsdt(dsdt);
+        // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
+        // this the only interpreter.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         if let Ok(method) = std::env::var("STELA_ACPI_METHOD") {
             let value = std::env::var("STELA_ACPI_INTEGER")

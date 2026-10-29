@@ -551,6 +551,8 @@ mod tests {
         // SAFETY: exclusive model register file, rejected before any access.
         let registers = unsafe { Registers::new(Chip::Mt7921, Model::default()) };
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 Control::new(
                     registers,
@@ -618,9 +620,13 @@ mod tests {
             // SAFETY: isolated register-algorithm fixture, no DMA hardware.
             assert_eq!(unsafe { c.start_dma_polling() }, Err(Error::NotDriverOwned));
             c.driver_own(false).unwrap();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert_eq!(unsafe { c.start_dma_polling() }, Err(Error::DmaNotStopped));
             c.stop_dma(true).unwrap();
             let start = c.registers.test_io().operations.len();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let enabled = unsafe { c.start_dma_polling() }.unwrap();
             assert_eq!(enabled.global_config & 5, 5);
             assert!(enabled.polling_interrupts_masked);
@@ -649,6 +655,8 @@ mod tests {
                 assert_eq!(io.registers[&0xd4644], 0x03800004);
             }
             let writes = io.operations.len();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert_eq!(unsafe { c.start_dma_polling() }, Err(Error::DmaNotStopped));
             assert_eq!(c.registers.test_io().operations.len(), writes);
         }
@@ -678,6 +686,8 @@ mod tests {
                 c.registers.test_io().ignore_write = Some(address);
             }
             assert!(matches!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe { c.start_dma_polling() },
                 Err(Error::UnsupportedDmaMode(_)) | Err(Error::Readback { .. })
             ));
@@ -712,6 +722,8 @@ mod tests {
         c.stop_dma(true).unwrap();
         c.registers.test_io().ignore_write = Some(MT_WFDMA0_GLO_CFG);
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { c.start_dma_polling() },
             Err(Error::Readback {
                 address: MT_WFDMA0_GLO_CFG,
@@ -727,6 +739,8 @@ mod tests {
             c.driver_own(false).unwrap();
             c.stop_dma(true).unwrap();
             let initial = c.registers.test_io().operations.len();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { c.start_dma_polling() }.unwrap();
             let end = c.registers.test_io().operations.len();
             for fail_at in initial + 1..=end {
@@ -735,12 +749,16 @@ mod tests {
                 c.stop_dma(true).unwrap();
                 c.registers.test_io().fail_at = Some(fail_at);
                 assert_eq!(
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe { c.start_dma_polling() },
                     Err(Error::Register(registers::Error::AccessFailed)),
                     "chip {chip:?} access {fail_at}"
                 );
                 assert!(c.is_poisoned());
                 let count = c.registers.test_io().operations.len();
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 assert_eq!(unsafe { c.start_dma_polling() }, Err(Error::Poisoned));
                 assert_eq!(c.stop_dma(true), Err(Error::Poisoned));
                 assert_eq!(c.registers.test_io().operations.len(), count);
@@ -785,6 +803,8 @@ mod tests {
             c.driver_own(false).unwrap();
             c.stop_dma(true).unwrap();
             let initial = c.registers.test_io().operations.len();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let receipt = unsafe { c.start_dma_polling() }.unwrap();
             let actual = &c.registers.test_io().operations[initial..];
             assert_eq!(

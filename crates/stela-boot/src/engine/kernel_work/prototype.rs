@@ -71,9 +71,9 @@ pub(in crate::engine) unsafe fn check(
     } else {
         return Err(Error::Geometry);
     }
-    // SAFETY: actual handoff/owner remain genuine; the bad Plan supplies no
-    // authority and must fail their pre-effect exact-inventory comparison.
     if !matches!(
+        // SAFETY: actual handoff/owner remain genuine; the bad Plan supplies no authority and must
+        // fail their pre-effect exact-inventory comparison.
         unsafe { KernelWork::prepare_plan(handoff, owner, wrong) },
         Err(Error::Inventory)
     ) || handoff

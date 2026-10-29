@@ -1472,6 +1472,8 @@ mod tests {
         );
         // SAFETY: actual modeled completed bootstrap, source policy and owner.
         unsafe { f.controller.initialize_mac() }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             f.controller.start(
                 channel.band,
@@ -1480,6 +1482,8 @@ mod tests {
             )
         }
         .unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
         f.model.lock().unwrap().client_execution = true;
         f.model.lock().unwrap().key_execution = true;
@@ -1492,6 +1496,8 @@ mod tests {
             drops,
             ..
         } = f;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let client = unsafe { Client::new(controller, interface) }.unwrap();
         (
             client,
@@ -1591,6 +1597,8 @@ mod tests {
         let handle = driver.bss().next().expect("real DMA-observed AP").0;
         done(&model);
         driver.poll(2, &Source).unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_scan_after_drain() }.unwrap();
         driver
             .join_modern(handle, join, profile(), 100, &Source)
@@ -1638,6 +1646,8 @@ mod tests {
             driver.transmit(epoch, &eth(0x0800), TxClass::Data, Some(5), &Source),
             Err(PolicyError::Revoked)
         ));
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         assert_eq!(driver.phase(), Phase::ControllerDrain);
         finish_stop(&mut driver, &model);
@@ -1673,6 +1683,8 @@ mod tests {
             assert_eq!(before, model.response.lock().unwrap().client_commands.len());
             assert_eq!(driver.phase(), Phase::AwaitingModernAdmission);
             driver.revoke().unwrap();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { driver.retire_peer_after_drain() }.unwrap();
             finish_stop(&mut driver, &model);
         }
@@ -1712,6 +1724,8 @@ mod tests {
         ));
         assert_eq!(before, model.response.lock().unwrap().client_commands.len());
         driver.revoke().unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         finish_stop(&mut driver, &model);
     }
@@ -1806,6 +1820,8 @@ mod tests {
             driver.poll(106, &Source).unwrap();
             driver.poll_released().unwrap();
             driver.revoke().unwrap();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { driver.retire_peer_after_drain() }.unwrap();
             finish_stop(&mut driver, &model);
         }
@@ -1851,8 +1867,14 @@ mod tests {
                 ],
             ],
         );
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { f.controller.initialize_mac() }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
         f.model.lock().unwrap().client_execution = true;
         let NativeFixture {
@@ -1864,6 +1886,8 @@ mod tests {
             drops,
             ..
         } = f;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let client = unsafe { Client::new(controller, interface) }.unwrap();
         let model = Model {
             response: model,
@@ -2019,6 +2043,8 @@ mod tests {
         done(&model);
         driver.poll(4, &Source).unwrap();
         driver.revoke().unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_scan_after_drain() }.unwrap();
         finish_stop(&mut driver, &model);
         drop(driver);

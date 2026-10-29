@@ -219,6 +219,8 @@ mod tests {
             Span::new(&mapping, 0, 4096),
             Err(Error::InvalidSegmentLength)
         ));
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { mapping.unmap() }.unwrap();
         assert!(matches!(
             Span::new(&mapping, 0, 1),

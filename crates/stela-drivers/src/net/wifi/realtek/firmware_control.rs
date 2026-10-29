@@ -656,6 +656,8 @@ pub(super) mod tests {
     ) {
         let (_, report) = super::super::phy::control_fixture();
         let (io, m, o, d) = bus(report.profile());
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let c = unsafe { Control::new(io, &report) }.unwrap();
         m.lock().unwrap().clear_log();
         (c, m, o, d)
@@ -729,6 +731,8 @@ pub(super) mod tests {
                 s.bt_idle_after = h[0] as usize;
                 s.rfk_after = Some(h[1] as usize);
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { c.begin_rfk() }.unwrap();
             assert_eq!(u32::from(c.next_mailbox()), h[3]);
             assert_eq!(h[4], 0);
@@ -750,6 +754,8 @@ pub(super) mod tests {
             });
             offset += 8;
             m.lock().unwrap().clear_log();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let observed = unsafe { c.finish_rfk() }.unwrap();
             assert_eq!(observed.raw_status() & 1, 1);
             assert_eq!(u32::from(c.next_mailbox()), h[1]);
@@ -826,16 +832,22 @@ pub(super) mod tests {
             s.bt_idle_after = 3;
             s.rfk_after = Some(2);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let start = unsafe { c.begin_rfk() }.unwrap();
         assert_eq!(start.mailbox(), 0);
         assert_eq!(c.next_mailbox(), 1);
         // Real source finish reports bit1 even if the new finish request's
         // responder never runs. Preserve that fact without minting a new ACK.
         m.lock().unwrap().rfk_after = None;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let finish = unsafe { c.finish_rfk() }.unwrap();
         assert_eq!(finish.raw_status() & 1, 1);
         assert_eq!(finish.publication().mailbox(), 1);
         assert_eq!(c.next_mailbox(), 2);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { c.begin_rfk() }.unwrap_err(), Error::StaleRfk);
         assert!(c.quarantined());
     }
@@ -845,12 +857,16 @@ pub(super) mod tests {
         let (io, m, _, _) = bus(report.profile());
         m.lock().unwrap().clock_available = false;
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { Control::new(io, &report) },
             Err(Error::Hardware(io::Error::InvalidClock))
         ));
         assert!(m.lock().unwrap().quarantine >= 1);
         let (mut c, m, _, _) = fixture();
         m.lock().unwrap().set(REG_ARFR4, 1, 1);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { c.begin_rfk() }.unwrap_err(), Error::StaleRfk);
         assert!(!m.lock().unwrap().events.iter().any(|e| e[0] == 1));
         let (mut c, m, _, _) = fixture();
@@ -859,11 +875,15 @@ pub(super) mod tests {
             s.bt_idle_after = usize::MAX;
             s.frozen = true;
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { c.begin_rfk() }.unwrap_err(), Error::Clock);
         assert!(!m.lock().unwrap().events.iter().any(|e| e[0] == 1));
         let (mut c, m, _, _) = fixture();
         m.lock().unwrap().bt_idle_after = usize::MAX;
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { c.begin_rfk() }.unwrap_err(),
             Error::Timeout { register: 0xa8 }
         );
@@ -871,6 +891,8 @@ pub(super) mod tests {
         let (mut c, m, _, _) = fixture();
         m.lock().unwrap().rfk_after = None;
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { c.begin_rfk() }.unwrap_err(),
             Error::Timeout { register: 0x49c }
         );
@@ -880,31 +902,45 @@ pub(super) mod tests {
     #[test]
     fn every_start_finish_io_error_unwind_and_shutdown_retains_actual_control_owner() {
         let (mut c, m, _, _) = fixture();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.begin_rfk() }.unwrap();
         let start_total = m.lock().unwrap().calls;
         for at in 1..=start_total {
             let (mut c, m, _, _) = fixture();
             m.lock().unwrap().fail = Some(at);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { c.begin_rfk() }.is_err(), "start{at}");
             assert!(c.quarantined());
             assert!(m.lock().unwrap().quarantine >= 1);
         }
         let (mut c, m, _, _) = fixture();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.begin_rfk() }.unwrap();
         m.lock().unwrap().clear_log();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.finish_rfk() }.unwrap();
         let end_total = m.lock().unwrap().calls;
         for at in 1..=end_total {
             let (mut c, m, _, _) = fixture();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { c.begin_rfk() }.unwrap();
             m.lock().unwrap().clear_log();
             m.lock().unwrap().fail = Some(at);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { c.finish_rfk() }.is_err(), "finish{at}");
             assert!(c.quarantined());
         }
         let (mut c, m, _, _) = fixture();
         m.lock().unwrap().panic_at = Some(8);
         assert!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { c.begin_rfk() }))
                 .is_err()
         );
@@ -912,8 +948,14 @@ pub(super) mod tests {
         drop(c);
         assert!(m.lock().unwrap_or_else(|e| e.into_inner()).quarantine >= 1);
         let (mut c, m, owner, dropped) = fixture();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.begin_rfk() }.unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { c.finish_rfk() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         let io = unsafe { c.release_after_stop() }.unwrap();
         drop(c);
         assert_eq!(m.lock().unwrap().quarantine, 0);

@@ -174,9 +174,9 @@ fn translated_buffers_use_owned_cpu_mapping() {
     buffer.write(4096, 0x12345678u32);
     assert_eq!(buffer.read::<u32>(4096), 0x12345678);
     assert_eq!(source.0.load(Ordering::Relaxed), 0);
-    // SAFETY: this model has no device accesses, but a live buffer still must
-    // refuse teardown before any modeled translation or CPU backing is freed.
     assert_eq!(
+        // SAFETY: this model has no device accesses, but a live buffer still must refuse teardown
+        // before any modeled translation or CPU backing is freed.
         unsafe { allocator.retire() },
         Err(AllocationError::LiveBuffers)
     );
@@ -237,8 +237,8 @@ fn failed_unmap_keeps_pin_until_acknowledged_retry() {
     let mut allocator = unsafe { DomainAllocator::new(&source, domain.clone(), u32::MAX.into()) };
     drop(allocator.allocate(4096, 4096).unwrap());
     domain.fail_unmap.store(true, Ordering::Relaxed);
-    // SAFETY: no modeled device or CPU user remains, in the same owner context.
     assert_eq!(
+        // SAFETY: no modeled device or CPU user remains, in the same owner context.
         unsafe { allocator.retire() },
         Err(AllocationError::Region(region::Error::Dma(
             DmaError::InvalidationFailed

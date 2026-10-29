@@ -1730,9 +1730,9 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         placement: handoff.placement,
         bounce: Some((layout::bounce(), handoff.bounce)),
     };
-    // SAFETY: once on the BSP, with interrupts off and owned native resources.
-    // Retain the processor-local state through every native call and handler.
     crate::status::begin("Installing the host processor state");
+    // SAFETY: once on the BSP, with interrupts off and owned native resources. Retain the
+    // processor-local state through every native call and handler.
     let host_owner = unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     #[cfg(feature = "diagnostics")]
     let mut host_owner = host_owner;

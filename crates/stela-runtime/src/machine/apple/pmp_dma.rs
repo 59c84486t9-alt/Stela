@@ -584,13 +584,16 @@ mod tests {
     // SAFETY: this authored ownership test has no native executor or racing
     // direct writer. All RAM accesses belong to the actual registered domain.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
     fn coherence() -> WriteBackCoherence {
         let storage = Arc::new(Storage(UnsafeCell::new(Box::new([0; 256]))));
-        // SAFETY: stable retained aligned allocation; no references to its
-        // bytes survive registration and the fixture starts no native worker.
         let pointer =
+            // SAFETY: stable retained aligned allocation; no references to its bytes survive
+            // registration and the fixture starts no native worker.
             unsafe { NonNull::new_unchecked((*storage.0.get()).as_mut_ptr().cast::<u8>()) };
+        // SAFETY: `storage` keeps these 256 bytes alive with the registration, and nothing else
+        // writes them.
         let ram = Arc::new(unsafe {
             stela_engine::memory::system_ram::fixture(
                 &[ReservedSystemRamRange {

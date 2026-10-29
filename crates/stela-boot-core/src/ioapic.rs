@@ -46,16 +46,18 @@ impl Mmio {
         Ok(Self(base))
     }
 }
-// SAFETY: constructor qualifies actual retained UC MMIO; Unit serializes every
-// selector/window pair with same-CPU IRQ-save, never across an interrupt window.
+// SAFETY: `new` admits only the aligned uncached IOAPIC window, kept mapped for the unit's
+// life, and `Unit` serializes each selector/window pair with interrupts saved and disabled.
 unsafe impl Registers for Mmio {
     fn read(&self, index: u8) -> u32 {
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
         unsafe {
             (self.0 as *mut u32).write_volatile(u32::from(index));
             ((self.0 + 16) as *const u32).read_volatile()
         }
     }
     fn write(&self, index: u8, value: u32) {
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
         unsafe {
             (self.0 as *mut u32).write_volatile(u32::from(index));
             ((self.0 + 16) as *mut u32).write_volatile(value);
@@ -119,6 +121,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         platform.check_cpu()?;
         let saved = platform.save_and_disable();
         let version = registers.read(1);
+        // SAFETY: `saved` came from `save_and_disable` on this CPU above.
         unsafe { platform.restore(saved) };
         if version == u32::MAX {
             return Err(IrqError::FailedRead);
@@ -239,15 +242,18 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         if low & MASK == 0 || low & (REMOTE_IRR | DELIVERY) != 0 {
             return Err(IrqError::Drain);
         }
+        // SAFETY: the unit lock held above serializes the claim table.
         let claims = unsafe { &mut *self.claims.get() };
         if claims[usize::from(pin)] {
             return Err(IrqError::Exhausted);
         }
         // Selector lock also owns the fixed pin metadata. Never wrap and make
         // an old handler's parent-mask endpoint valid for a later claim.
+        // SAFETY: the unit lock held above serializes the epoch counter.
         let next_epoch = unsafe { &mut *self.next_epoch.get() };
         let epoch = *next_epoch;
         *next_epoch = next_epoch.checked_add(1).ok_or(IrqError::Exhausted)?;
+        // SAFETY: the unit lock held above serializes the epoch table.
         unsafe { (*self.epochs.get())[usize::from(pin)] = epoch };
         claims[usize::from(pin)] = true;
         Ok(Pin {
@@ -268,6 +274,7 @@ struct Guard<'a, R: Registers, P: Platform> {
 impl<R: Registers, P: Platform> Drop for Guard<'_, R, P> {
     fn drop(&mut self) {
         self.unit.held.store(false, Ordering::Release);
+        // SAFETY: `saved` came from `save_and_disable` when this guard locked the unit.
         unsafe { self.unit.platform.restore(self.saved) };
     }
 }
@@ -290,6 +297,7 @@ impl<R: Registers, P: Platform> Pin<R, P> {
     pub fn parent_mask(&self) -> Result<ParentMask<R, P>, IrqError> {
         self.unit.platform.check_cpu()?;
         let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
         if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
             return Err(IrqError::Unregistered);
         }
@@ -351,6 +359,7 @@ unsafe impl<R: Registers, P: Platform> stela_drivers::bus::irq::ParentMask for P
     fn mask(&self) -> Result<(), IrqError> {
         self.unit.platform.check_cpu()?;
         let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
         if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
             return Err(IrqError::Unregistered);
         }
@@ -401,6 +410,7 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
             return Err(IrqError::Route);
         }
         let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
         if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
             return Err(IrqError::Unregistered);
         }
@@ -448,6 +458,7 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
         }
         // Contributors may assert while IOAPIC is still masked; enabling the
         // final route observes an already asserted level and delivers it.
+        // SAFETY: `program` published the route and every retained callback before unmask.
         unsafe { self.devices.enable() }?;
         let _guard = self.unit.lock();
         let low = self.unit.low(self.pin)?;
@@ -490,6 +501,7 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
         // Controller and callback retirement completed. Keep the physical pin
         // claim until Source Drop, while refusing every old handler endpoint.
         let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
         unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] = 0 };
         Ok(())
     }
@@ -502,6 +514,8 @@ impl<R: Registers, P: Platform> Drop for Pin<R, P> {
         }
         {
             let _guard = self.unit.lock();
+            // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning
+            // CPU.
             unsafe {
                 (*self.unit.claims.get())[usize::from(self.pin)] = false;
                 (*self.unit.epochs.get())[usize::from(self.pin)] = 0;
@@ -509,6 +523,7 @@ impl<R: Registers, P: Platform> Drop for Pin<R, P> {
         }
         // Actual registry retirement proved callback lifetime + CPU/IOAPIC
         // drain; only this process-context final release frees contributors.
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
         unsafe {
             ManuallyDrop::drop(&mut self.devices);
             ManuallyDrop::drop(&mut self.unit);
@@ -589,6 +604,7 @@ mod tests {
         }
     }
     struct Io(Arc<Board>);
+    // SAFETY: the board model is the only selector/window this test unit uses.
     unsafe impl Registers for Io {
         fn read(&self, i: u8) -> u32 {
             let h = self.0.hw.lock().unwrap();
@@ -631,6 +647,7 @@ mod tests {
         }
     }
     struct Cpu(Arc<Board>);
+    // SAFETY: the board model is the single CPU this test unit runs on.
     unsafe impl Platform for Cpu {
         fn check_cpu(&self) -> Result<(), IrqError> {
             Ok(())
@@ -661,11 +678,15 @@ mod tests {
             8
         }
         unsafe fn interrupt_window(&self) {
+            // SAFETY: the fixture publishes its registry before any interrupt window and keeps it
+            // alive.
             let r = unsafe { &*self.0.registry.load(Ordering::Relaxed) };
             assert!(r.dispatch(self.0.vector.load(Ordering::Relaxed)));
         }
     }
     struct Contributors(Arc<Board>);
+    // SAFETY: the board model owns the line's only contributor, which masks and quiesces in the
+    // model.
     unsafe impl Devices for Contributors {
         fn mask(&mut self) -> Result<(), IrqError> {
             self.0.hw.lock().unwrap().events.push("device_mask");
@@ -710,6 +731,7 @@ mod tests {
     );
     fn fixture() -> Fixture {
         let b = Board::new();
+        // SAFETY: the model board is this unit's only selector/window owner.
         let u = unsafe { Unit::attach(Io(b.clone()), Cpu(b.clone()), 0, 0) }.unwrap();
         let r = Box::leak(Box::new(Registry::new(Cpu(b.clone()))));
         b.registry.store(r, Ordering::Relaxed);
@@ -736,6 +758,7 @@ mod tests {
             }
         }
         let (b, u, r, line) = fixture();
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         let endpoint = Arc::new(pin.parent_mask().unwrap());
         let mut registration = r
@@ -762,6 +785,7 @@ mod tests {
             stela_drivers::bus::irq::ParentMask::mask(&*endpoint),
             Err(IrqError::Unregistered)
         );
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let replacement = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         let replacement_mask = replacement.parent_mask().unwrap();
         let mut replacement = r
@@ -800,6 +824,7 @@ mod tests {
             .request(Box::new(pin), Arc::new(Deferred(parent.clone())))
             .unwrap();
         // A still-live unmasked route cannot be rearmed as if it was drained.
+        // SAFETY: the test is the parent mask's only caller, in process context.
         assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Route));
         {
             let mut hw = board.hw.lock().unwrap();
@@ -812,12 +837,14 @@ mod tests {
             hw.asserted = 0;
             hw.regs[0x22] |= REMOTE_IRR;
         }
+        // SAFETY: the test is the parent mask's only caller, in process context.
         assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Drain));
         {
             let mut hw = board.hw.lock().unwrap();
             hw.regs[0x22] &= !REMOTE_IRR;
             hw.pending = true;
         }
+        // SAFETY: the test is the parent mask's only caller, in process context.
         assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Drain));
         board.hw.lock().unwrap().pending = false;
         // SAFETY: the modeled child is acknowledged, EOI/IRR are drained,
@@ -825,12 +852,14 @@ mod tests {
         unsafe { parent.rearm() }.unwrap();
         assert_eq!(board.hw.lock().unwrap().regs[0x22] & MASK, 0);
         route.retire().unwrap();
+        // SAFETY: the test is the parent mask's only caller, in process context.
         assert_eq!(unsafe { parent.rearm() }, Err(IrqError::Unregistered));
     }
 
     #[test]
     fn parent_mask_readback_failures_are_errors_and_claim_epochs_never_wrap() {
         let (b, u, r, line) = fixture();
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         let endpoint = pin.parent_mask().unwrap();
         let mut registration = r
@@ -854,9 +883,11 @@ mod tests {
         registration.retire().unwrap();
         {
             let _guard = u.lock();
+            // SAFETY: the unit lock held above serializes the epoch counter.
             unsafe { *u.next_epoch.get() = u64::MAX };
         }
         assert!(matches!(
+            // SAFETY: the fixture owns the stopped line and its contributors.
             unsafe { u.claim(line, Box::new(Contributors(b.clone()))) },
             Err(IrqError::Exhausted)
         ));
@@ -869,6 +900,7 @@ mod tests {
     #[test]
     fn true_level_retriggers_after_eoi_until_cause_ack_then_shared_group_retires() {
         let (b, u, r, line) = fixture();
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         let first: Arc<dyn Handler> = Arc::new(Member(b.clone(), 1, false));
         let second: Arc<dyn Handler> = Arc::new(Member(b.clone(), 2, true));
@@ -908,12 +940,14 @@ mod tests {
         drop(h);
         assert_eq!(b.drops.load(Ordering::Relaxed), 1);
         assert_eq!(Arc::strong_count(&group), 1);
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let reused = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         drop(reused);
     }
     #[test]
     fn failed_controller_eoi_or_read_retains_route_and_contributors_for_real_retry() {
         let (b, u, r, line) = fixture();
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         let mut registration = r
             .request(Box::new(pin), Arc::new(Member(b.clone(), 1, true)))
@@ -927,6 +961,7 @@ mod tests {
         assert_eq!(registration.retire(), Err(IrqError::Drain));
         assert_eq!(b.drops.load(Ordering::Relaxed), 0);
         assert!(matches!(
+            // SAFETY: the fixture owns the stopped line and its contributors.
             unsafe { u.claim(line, Box::new(Contributors(b.clone()))) },
             Err(IrqError::Drain)
         ));
@@ -948,6 +983,8 @@ mod tests {
     fn electrical_route_mismatch_duplicate_claim_mask_failure_and_abandoned_pin_are_retained() {
         let (b, u, r, line) = fixture();
         assert!(matches!(
+            // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning
+            // CPU.
             unsafe {
                 u.claim(
                     LineRoute {
@@ -959,13 +996,17 @@ mod tests {
             },
             Err(IrqError::Unsupported)
         ));
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let mut pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
         assert!(matches!(
+            // SAFETY: the fixture owns the stopped line and its contributors.
             unsafe { u.claim(line, Box::new(Contributors(b.clone()))) },
             Err(IrqError::Exhausted)
         ));
         let mismatch = LineRoute { gsi: 8, ..line };
         assert_eq!(
+            // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning
+            // CPU.
             unsafe {
                 pin.program(Route::Line {
                     target: Target {
@@ -990,7 +1031,9 @@ mod tests {
         // the unsafe completed-synchronization proof supplied by Registry.
         b.hw.lock().unwrap().refuse_mask = false;
         let other = LineRoute { gsi: 10, ..line };
+        // SAFETY: the fixture owns the stopped line and its contributors.
         let mut pin = unsafe { u.claim(other, Box::new(Contributors(b.clone()))) }.unwrap();
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
         unsafe {
             pin.program(Route::Line {
                 target: Target {

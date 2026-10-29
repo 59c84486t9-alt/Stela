@@ -143,8 +143,8 @@ fn native_live_igtk_requires_actual_tx_descriptor_free_and_unmap_drain() {
         )
         .unwrap();
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: deliberately incomplete model native drain must refuse before firmware effects.
     assert!(matches!(
+        // SAFETY: deliberately incomplete model native drain must refuse before firmware effects.
         unsafe {
             driver.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },
@@ -153,8 +153,8 @@ fn native_live_igtk_requires_actual_tx_descriptor_free_and_unmap_drain() {
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
     assert_eq!(finish_tx(&model).len(), 1);
     assert!(driver.poll_released().unwrap().is_empty());
-    // SAFETY: descriptor consumption alone is insufficient while TX-free/token remains.
     assert!(matches!(
+        // SAFETY: descriptor consumption alone is insufficient while TX-free/token remains.
         unsafe {
             driver.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },
@@ -205,8 +205,9 @@ fn native_live_igtk_uncertain_firmware_quarantines_old_new_keys_and_requester() 
             1 => model.response.lock().unwrap().command_delta = 1,
             _ => model.response.lock().unwrap().drop = true,
         }
-        // SAFETY: native and independent actual model users drained; inject real peer ACK failure.
         assert!(
+            // SAFETY: native and independent actual model users drained; inject real peer ACK
+            // failure.
             unsafe {
                 driver.rotate_management_key(
                     &first,
@@ -225,8 +226,8 @@ fn native_live_igtk_uncertain_firmware_quarantines_old_new_keys_and_requester() 
                 .is_err()
         );
         let before = model.response.lock().unwrap().client_commands.len();
-        // SAFETY: quarantine must remain closed to retries regardless of input.
         assert!(
+            // SAFETY: quarantine must remain closed to retries regardless of input.
             unsafe {
                 driver.rotate_management_key(
                     &first,

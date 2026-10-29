@@ -360,6 +360,8 @@ mod tests {
     fn source_sram_reservations_and_actual_empty_h2c_preserve_unrelated_bits() {
         let mut m = Model::new(0xa5);
         let head_upper = m.get(REG_H2C_HEAD, 4) & 0xfffc_0000;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let g = unsafe { configure(&mut m) }.unwrap();
         assert_eq!(g.pages(), 2048);
         assert_eq!(g.reserved(), 110);
@@ -381,10 +383,14 @@ mod tests {
     #[test]
     fn every_uncertain_register_operation_quarantines_without_later_success() {
         let mut baseline = Model::new(11);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { configure(&mut baseline) }.unwrap();
         for at in 0..baseline.operations {
             let mut m = Model::new(11);
             m.fail_at = Some(at);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { configure(&mut m) }.is_err(), "op={at}");
             assert_eq!(m.operations, at + 1);
             assert_eq!(m.quarantines, 1);
@@ -402,6 +408,8 @@ mod tests {
                 4 => m.set(REG_H2C_PKT_READADDR, 4, u32::MAX),
                 _ => m.removed_register = Some(0x208),
             }
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let error = unsafe { configure(&mut m) }.unwrap_err();
             assert_eq!(
                 error,
@@ -423,6 +431,8 @@ mod tests {
         let mut observation = m.profile.observed();
         observation.device = 0xb852;
         m.profile = Profile::select(observation).unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { configure(&mut m) }, Err(Error::UnsupportedChip));
         assert_eq!(m.operations, 0);
         assert_eq!(m.quarantines, 0);
@@ -430,6 +440,8 @@ mod tests {
         m.set(REG_H2C_PKT_WRITEADDR, 4, 0x3ffff);
         m.set(REG_H2C_PKT_READADDR, 4, 0);
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { configure(&mut m) },
             Err(Error::H2cMismatch {
                 write: 0x3ffff,
@@ -446,6 +458,8 @@ mod tests {
         let mut offset = 0;
         for seed in 0..16 {
             let mut m = Model::new(seed);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let g = unsafe { configure(&mut m) }.unwrap();
             for value in [
                 16,

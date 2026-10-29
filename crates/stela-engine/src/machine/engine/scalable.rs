@@ -255,6 +255,8 @@ unsafe extern "sysv64" fn serve<H: Host, D: Devices>(
     // SAFETY: `opaque` is the Service of this call, and its machine is not
     // otherwise borrowed while the leaf runs.
     let service = unsafe { &mut *view.opaque.cast::<Service<H, D>>() };
+    // SAFETY: `machine` belongs to this call's service and is not otherwise borrowed while the leaf
+    // runs.
     let machine = unsafe { &mut *service.machine };
     let word = service.word;
     let result = crate::platform::unwind::invoke(core::panic::AssertUnwindSafe(|| {

@@ -119,8 +119,8 @@ fn post_write_context_uncertainty_retains_effect_and_all_original_owners() {
     counters.fail_after_word.store(0x41, Ordering::Relaxed);
     let error = Error::Config(ConfigError::Mapping(MappingError::Unavailable));
     assert_eq!(owner.write(0x40, 4, 0x7654_3210), Err(error));
-    // SAFETY: isolated sequential fixture pointer, no device/reference aliases.
     assert_eq!(
+        // SAFETY: isolated sequential fixture pointer, no device/reference aliases.
         unsafe { pointer.cast::<u32>().as_ptr().read_volatile() },
         0x7654_3210
     );
@@ -344,14 +344,16 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
                 Err((Error::AlreadyClaimed, _))
             ));
             owner.borrow_mut().write(4, 2, 0x406).unwrap();
-            // SAFETY: observe exact actual model native-width store; Status is
-            // not widened/replayed by the production Command word write.
             assert_eq!(
+                // SAFETY: observe exact actual model native-width store; Status is not
+                // widened/replayed by the production Command word write.
                 unsafe { command.cast::<u32>().as_ptr().read_volatile() },
                 0xa5c3_0406
             );
             owner.borrow_mut().write(4, 1, 1).unwrap();
             assert_eq!(
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { command.cast::<u32>().as_ptr().read_volatile() },
                 0xa5c3_0401
             );
@@ -383,6 +385,8 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
                 Err(Error::UnsupportedPolicy)
             );
         }
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         assert_eq!(unsafe { policy.cast::<u16>().as_ptr().read_volatile() }, 0);
         assert_eq!(owner.borrow().failure(), None);
         assert_eq!(owner.borrow().check_current(), Ok(()));
@@ -397,6 +401,8 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
             // authorize enabling gates again or renew degraded readiness.
             owner.borrow_mut().write(4, 2, 0x400).unwrap();
             assert_eq!(
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { command.cast::<u32>().as_ptr().read_volatile() },
                 0xa5c3_0400
             );

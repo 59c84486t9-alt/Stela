@@ -46,12 +46,14 @@ unsafe impl Cpu for BspCpu {
     fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
         let flags;
+        // SAFETY: saves RFLAGS and masks interrupts on this CPU; `restore` undoes it.
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
         Ok(flags)
     }
     unsafe fn restore(&self, flags: u64) {
+        // SAFETY: the caller passes flags `save_disable` read on this CPU.
         unsafe {
             asm!("push {}", "popfq", in(reg) flags);
         }
@@ -84,6 +86,8 @@ struct Events {
 }
 impl Events {
     unsafe fn queue(&self) -> &Queue<16> {
+        // SAFETY: callers run only while the published queue is retained by its executor and
+        // handler.
         unsafe { &*self.queue.load(Ordering::Acquire) }
     }
     fn bad(&self, bits: u64) {
@@ -98,6 +102,7 @@ impl Handler for WorkHandler {
     fn handle(&self) -> Disposition {
         // Actual asynchronous IRQ mutation: the common entry, not a promise
         // about inspected Rust code avoiding SIMD, must restore the caller.
+        // SAFETY: the IRQ entry saved the interrupted FP state and restores it on return.
         unsafe { poison_irq_fp() };
         // Reuse the existing actual cause/W1C/readback handler. Registry emits
         // EOI after this whole callback and its genuine context scope finish.
@@ -163,9 +168,11 @@ unsafe impl Source for WorkSource {
         self.inner.route()
     }
     unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+        // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.program(route) }
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+        // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.unmask() }
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
@@ -179,6 +186,7 @@ unsafe impl Source for WorkSource {
             .map_err(|_| IrqError::Drain)
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+        // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.synchronize() }?;
         self.executor
             .runtime()
@@ -203,6 +211,7 @@ fn deadline(clock: Clock) -> Result<u64, String> {
 }
 fn stack_pointer() -> usize {
     let sp;
+    // SAFETY: reads RSP and changes nothing.
     unsafe {
         asm!("mov {}, rsp",out(reg) sp, options(nomem,nostack,preserves_flags));
     }
@@ -210,6 +219,7 @@ fn stack_pointer() -> usize {
 }
 fn interrupt_flags() -> u64 {
     let flags;
+    // SAFETY: reads RFLAGS through the stack and changes nothing.
     unsafe {
         asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
     }
@@ -237,14 +247,19 @@ fn heap_probe(expected_if: u64) -> bool {
         let mut valid =
             (block as usize).is_multiple_of(alignment) && interrupt_flags() & IF == expected_if;
         for offset in 0..size {
+            // SAFETY: `block` is this function's live allocation of `size` bytes and `offset` is
+            // below `size`.
             unsafe {
                 valid &= block.add(offset).read_volatile() == 0;
                 block.add(offset).write_volatile(0xa5);
             }
         }
         for offset in 0..size {
+            // SAFETY: `block` is this function's live allocation of `size` bytes and `offset` is
+            // below `size`.
             valid &= unsafe { block.add(offset).read_volatile() } == 0xa5;
         }
+        // SAFETY: `block` came from `alloc_zeroed` with this layout and is freed once.
         unsafe { crate::ALLOCATOR.dealloc(block, layout) };
         valid &= crate::ALLOCATOR.usage().live == before && interrupt_flags() & IF == expected_if;
         if !valid {
@@ -254,10 +269,13 @@ fn heap_probe(expected_if: u64) -> bool {
     true
 }
 unsafe fn events<'a>(ctx: *mut c_void) -> &'a Events {
+    // SAFETY: callers pass the `Events` context they queued, which outlives every job.
     unsafe { &*ctx.cast::<Events>() }
 }
 unsafe extern "C" fn deferred(ctx: *mut c_void) {
+    // SAFETY: `ctx` is the `Events` context this job was queued with.
     let state = unsafe { events(ctx) };
+    // SAFETY: the queue stays retained while any job it admitted runs.
     let queue = unsafe { state.queue() };
     let sp = stack_pointer();
     match queue.current_id() {
@@ -292,10 +310,12 @@ const _: () = {
     assert!(core::mem::offset_of!(AsyncCall, preflight) == 32);
 };
 unsafe extern "C" fn foreground(ctx: *mut c_void) {
+    // SAFETY: `ctx` is the `Events` context this job was queued with.
     let state = unsafe { events(ctx) };
     if !heap_probe(IF) {
         state.bad(BAD_IRQ_HEAP);
     }
+    // SAFETY: the queue stays retained while any job it admitted runs.
     match unsafe { state.queue() }.current_id() {
         Ok(id) => state.foreground.store(id.get(), Ordering::Release),
         Err(_) => {
@@ -312,6 +332,8 @@ unsafe extern "C" fn foreground(ctx: *mut c_void) {
         result: u64::MAX,
         preflight: [0; 3],
     };
+    // SAFETY: `call` lives on this stack for the whole call, and its trigger is the EDU's mapped
+    // interrupt register.
     unsafe { msi_with_fp_sentinel(&mut call) };
     for (destination, value) in state.async_observation.iter().zip([
         call.result,
@@ -380,9 +402,12 @@ pub(crate) fn run(
     let vector = registration.vector();
     // Dispatcher deliberately permits actual MSI progress. All callbacks run
     // on retained real task stacks; no resource/queue lock spans this window.
+    // SAFETY: the handler is registered and the runtime's stacks are owned; interrupts are masked
+    // again right after.
     unsafe {
         asm!("sti", options(nostack));
     }
+    // SAFETY: `foreground` and `events` stay retained until the call completes or times out.
     let result = unsafe {
         executor.runtime().call_foreground(
             foreground,
@@ -390,6 +415,7 @@ pub(crate) fn run(
             events.deadline.load(Ordering::Acquire),
         )
     };
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }
@@ -443,10 +469,13 @@ pub(crate) fn run(
     }
     // Actual late device cause must not submit into the now closed queue.
     parts.edu.write(0x60, 2);
+    // SAFETY: the handler is registered and the runtime's stacks are owned; interrupts are masked
+    // again right after.
     unsafe {
         asm!("sti", options(nostack));
     }
     let late = clock.wait(1_000, || events.delivered.load(Ordering::Acquire) != 1);
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }

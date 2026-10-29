@@ -318,8 +318,12 @@ mod tests {
                     // SAFETY: real nonoverlapping CPU arrays cover the complete
                     // ranges; zero-byte calls also use valid array pointers.
                     let pointer = unsafe { destination.as_mut_ptr().add(destination_offset) };
+                    // SAFETY: the pointer addresses this test's own live pages, and the stopped
+                    // model writes nothing concurrently.
                     let input = unsafe { source.as_ptr().add(source_offset) };
                     assert_eq!(
+                        // SAFETY: the arguments are live locals sized for the call, and the test
+                        // owns any state it touches.
                         unsafe { os_mem_copy(pointer.cast(), input.cast(), size as u32) },
                         pointer.cast()
                     );
@@ -346,6 +350,8 @@ mod tests {
                     // SAFETY: actual writable CPU array covers this complete span.
                     let pointer = unsafe { destination.as_mut_ptr().add(offset) };
                     assert_eq!(
+                        // SAFETY: the arguments are live locals sized for the call, and the test
+                        // owns any state it touches.
                         unsafe { os_mem_set(pointer.cast(), value, size as u32) },
                         pointer.cast()
                     );
@@ -377,16 +383,19 @@ mod tests {
                     left[size] = 0xff;
                     right[size] = 0;
                     let expected = (i32::from(left_byte) - i32::from(right_byte)).signum();
-                    // SAFETY: both arrays cover the exact requested CPU byte range.
                     assert_eq!(
+                        // SAFETY: both arrays cover the exact requested CPU byte range.
                         unsafe { os_mem_cmp(left.as_ptr(), right.as_ptr(), size as u32) }.signum(),
                         expected
                     );
                     assert_eq!(
+                        // SAFETY: the arguments are live locals sized for the call, and the test
+                        // owns any state it touches.
                         unsafe { os_mem_cmp(right.as_ptr(), left.as_ptr(), size as u32) }.signum(),
                         -expected
                     );
                     assert_eq!(
+                        // SAFETY: both slices are live locals at least `mismatch` bytes long.
                         unsafe { os_mem_cmp(left.as_ptr(), right.as_ptr(), mismatch as u32) },
                         0
                     );
@@ -404,6 +413,7 @@ mod tests {
                 string[offset + length] = 0;
                 // SAFETY: readable real CPU array, bounded terminated C string.
                 let pointer = unsafe { string.as_ptr().add(offset) };
+                // SAFETY: `pointer` addresses a NUL-terminated string inside the local array.
                 assert_eq!(unsafe { os_string_length(pointer.cast()) }, length as u32);
             }
         }
@@ -452,7 +462,9 @@ mod tests {
                         let mut destination = [0xa5u8; 4096 + 32];
                         // SAFETY: real nonoverlapping CPU arrays cover both spans.
                         let pointer = unsafe { destination.as_mut_ptr().add(destination_offset) };
+                        // SAFETY: `source` is a local array long enough for every offset and size.
                         let input = unsafe { source.as_ptr().add(source_offset) };
+                        // SAFETY: `pointer` and `input` cover `size` bytes of two local arrays.
                         let returned = unsafe {
                             match variant {
                                 0 => nvkms_memcpy(pointer.cast(), input.cast(), size),
@@ -481,6 +493,7 @@ mod tests {
                         let mut destination = [0xa5u8; 4096 + 32];
                         // SAFETY: actual CPU storage covers the complete span.
                         let pointer = unsafe { destination.as_mut_ptr().add(offset) };
+                        // SAFETY: `pointer` covers `size` bytes of the local array.
                         let returned = unsafe {
                             match variant {
                                 0 => nvkms_memset(pointer.cast(), value as u8, size),
@@ -516,8 +529,10 @@ mod tests {
                 // SAFETY: one real CPU allocation covers both full possibly
                 // overlapping ranges, which original memmove explicitly permits.
                 let source = unsafe { bytes.as_ptr().add(source_offset) };
+                // SAFETY: `bytes` is long enough for every offset and size.
                 let destination = unsafe { bytes.as_mut_ptr().add(destination_offset) };
                 assert_eq!(
+                    // SAFETY: both ranges lie inside the one local array; memmove permits overlap.
                     unsafe { nvkms_memmove(destination.cast(), source.cast(), size) },
                     destination.cast()
                 );
@@ -568,6 +583,7 @@ mod tests {
                 string[offset + length] = 0;
                 // SAFETY: actual readable CPU bytes include their terminating NUL.
                 let pointer = unsafe { string.as_ptr().add(offset) };
+                // SAFETY: `pointer` addresses a NUL-terminated string inside the local array.
                 unsafe {
                     assert_eq!(nvkms_strlen(pointer.cast()), length);
                     assert_eq!(nvlink_strlen(pointer.cast()), length as u64);

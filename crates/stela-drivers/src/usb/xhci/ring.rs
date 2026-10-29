@@ -180,6 +180,8 @@ mod tests {
         ));
         // Alignment padding is part of the allocation budget, not permission
         // to return a truncated or boundary-crossing ring.
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut short = unsafe { RegionAllocator::new(boundary - 64..boundary + 2048) };
         assert!(matches!(
             Ring::new(&mut short),

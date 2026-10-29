@@ -244,9 +244,9 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
     for _ in 0..35 {
         disk.flush().unwrap();
     }
-    // SAFETY: intentional negative model probe. The original domain observes
-    // actual enabled BM bits and must refuse before any drain acknowledgement.
     assert_eq!(
+        // SAFETY: intentional negative model probe. The original domain observes actual enabled BM
+        // bits and must refuse before any drain acknowledgement.
         unsafe { f.domain.as_ref().unwrap().drain_posted_writes() },
         Err(DmaError::DrainUnavailable)
     );

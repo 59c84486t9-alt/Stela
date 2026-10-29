@@ -17,7 +17,6 @@
 //! derived from probe admission and actual dispatch, with per-route limits;
 //! an ID match or library implementation grants no operational support claim.
 #![no_std]
-#![cfg_attr(not(test), warn(clippy::undocumented_unsafe_blocks))]
 #[macro_use]
 extern crate alloc;
 

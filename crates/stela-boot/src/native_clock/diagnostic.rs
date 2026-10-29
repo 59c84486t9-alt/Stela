@@ -18,8 +18,8 @@ pub(crate) unsafe fn check(
 ) -> Result<(), WorkError> {
     // SAFETY: caller's explicit short-root profile, not an IRQ-count inference.
     let source = unsafe { prepared.qualify_bounded(pm::NS)? };
-    // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
     let root_execution = owner.enter_root()?;
+    // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
     let installed = unsafe { Installed::attach(owner, &root_execution, source)? };
     run(installed, None)
 }
@@ -115,11 +115,13 @@ fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkErro
         u32::try_from((installed.state.apic_hz / 100).max(1)).map_err(|_| WorkError::Exhausted)?;
     let saved = flags_disable();
     if !arm_guest(Some(guest_ticks)) {
+        // SAFETY: `saved` came from `flags_disable` on this CPU above.
         unsafe {
             restore(saved);
         }
         return Err(WorkError::CorruptContext);
     }
+    // SAFETY: `saved` came from `flags_disable` on this CPU above.
     unsafe {
         restore(saved);
     }

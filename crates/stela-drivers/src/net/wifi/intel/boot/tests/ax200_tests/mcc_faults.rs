@@ -26,6 +26,8 @@ fn mcc_rejected_responses_and_missing_bios_service_keep_original_evidence_and_ow
             let mut r = domain.records.lock().unwrap();
             r.sync_fail = Some(r.syncs + 2);
         }
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { mcc.advance(&source) };
         if case == 4 {
             assert!(matches!(result, Err(Ax200MccError::Boot(Error::Dma(_)))));
@@ -51,6 +53,8 @@ fn mcc_rejected_responses_and_missing_bios_service_keep_original_evidence_and_ow
                     &raw,
                 ),
             );
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             let result = unsafe { mcc.advance(&source) };
             match case {
                 0 => assert!(matches!(result, Err(Ax200MccError::Schema(_)))),
@@ -72,6 +76,8 @@ fn mcc_rejected_responses_and_missing_bios_service_keep_original_evidence_and_ow
         }
         let original = mcc.first_error().unwrap().clone();
         let ops = state.lock().unwrap().ops.len();
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { mcc.advance(&source) }, Err(original));
         assert_eq!(state.lock().unwrap().ops.len(), ops);
         if case == 4 {

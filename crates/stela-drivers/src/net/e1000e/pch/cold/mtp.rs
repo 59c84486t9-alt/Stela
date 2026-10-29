@@ -317,8 +317,8 @@ pub(super) mod tests {
                 },
             ] {
                 let (state, released, io, timer) = spt::tests::fixture_spt();
-                // SAFETY: actual modeled identity observation, deliberately incomplete.
                 assert!(matches!(
+                    // SAFETY: actual modeled identity observation, deliberately incomplete.
                     unsafe { Controller::new_mtp(id, io, timer, h) },
                     Err(Error::HostIdentityNotObserved)
                 ));

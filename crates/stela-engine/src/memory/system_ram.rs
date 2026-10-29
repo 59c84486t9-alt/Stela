@@ -531,6 +531,7 @@ mod tests {
     // freestanding/AP execution, which has its own boot qualification.
     unsafe fn model(ranges: &[ReservedSystemRamRange], owner: Arc<Storage>) -> RegisteredSystemRam {
         validate(ranges).unwrap();
+        // SAFETY: the caller validated these ranges and `owner` retains their storage.
         let (regions, views, system) = unsafe { bindings(ranges, owner, 64, 8) }.unwrap();
         let domain = MemoryDomain::new(Arc::clone(&system), views, TargetCpu::Baseline).unwrap();
         RegisteredSystemRam {
@@ -546,8 +547,12 @@ mod tests {
     fn canonical_service_excludes_native_and_mapping_publication_until_drop() {
         let storage = Storage::new();
         let ranges = [range(&storage, 0x4000, 0, 128)];
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let ram = unsafe { model(&ranges, storage) };
         let other_storage = Storage::new();
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let other = unsafe { model(&[range(&other_storage, 0x4000, 0, 128)], other_storage) };
         let native = ram.domain.execution_loan().unwrap();
         assert!(ram.try_service().unwrap().is_none());
@@ -568,6 +573,8 @@ mod tests {
         drop(ram.domain.execution_loan().unwrap());
         drop(ram.try_service().unwrap().unwrap());
         let mut bytes = [0; 128];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(0x4000, &mut bytes) }.unwrap();
         assert_eq!(bytes, [0x53; 128]);
     }
@@ -576,6 +583,8 @@ mod tests {
     fn canonical_service_blocks_real_alias_copyout_and_descriptor_writers() {
         use std::{sync::mpsc, time::Duration};
         let storage = Storage::new();
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let ram = Arc::new(unsafe { model(&[range(&storage, 0x4000, 0, 128)], storage) });
         let service = ram.try_service().unwrap().unwrap();
         let (started, ready) = mpsc::channel();
@@ -594,6 +603,8 @@ mod tests {
                         );
                     } else {
                         // Same retained physical backing through the host writer.
+                        // SAFETY: physical-system writes go through the registered owner, which
+                        // retains these bytes.
                         unsafe { ram.system.publish(&ram.regions[0].backing, 0, &[9; 8]) }.unwrap();
                     }
                     finished.send(()).unwrap();
@@ -605,6 +616,8 @@ mod tests {
             service.validate_current().unwrap();
             assert!(done.try_recv().is_err());
             let mut before = [0; 128];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(0x4000, &mut before) }.unwrap();
             assert_eq!(before, [0x53; 128]);
             drop(service);
@@ -613,6 +626,8 @@ mod tests {
             }
         });
         let mut after = [0; 128];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(0x4000, &mut after) }.unwrap();
         assert_eq!(&after[..8], &[9; 8]);
         assert_eq!(&after[64..72], &7u64.to_le_bytes());
@@ -627,17 +642,27 @@ mod tests {
     #[test]
     fn compare_exchange_stores_only_while_ram_holds_the_expected_bytes() {
         let storage = Storage::new();
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let ram = unsafe { model(&[range(&storage, 0x4000, 0, 128)], storage) };
         // Two bytes inside a four-byte quantity whose other bytes stay.
         let mut expected = [0x53; 2];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         assert!(unsafe { ram.compare_exchange_physical(0x4001, &mut expected, &[1, 2]) }.unwrap());
         let mut expected = [0x53; 2];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         assert!(!unsafe { ram.compare_exchange_physical(0x4001, &mut expected, &[3, 4]) }.unwrap());
         assert_eq!(expected, [1, 2], "RAM's bytes");
         let mut bytes = [0; 4];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(0x4000, &mut bytes) }.unwrap();
         assert_eq!(bytes, [0x53, 1, 2, 0x53]);
         assert!(matches!(
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.compare_exchange_physical(0x400e, &mut [0; 4], &[0; 4]) },
             Err(MemoryStatus::Alignment)
         ));
@@ -648,9 +673,13 @@ mod tests {
                 scope.spawn(move || {
                     for _ in 0..1000 {
                         let mut current = [0; 4];
+                        // SAFETY: the buffers are private locals, disjoint from the registered RAM,
+                        // which stays registered.
                         unsafe { ram.read_physical(0x4024, &mut current) }.unwrap();
                         loop {
                             let next = (u32::from_le_bytes(current) + 1).to_le_bytes();
+                            // SAFETY: the buffers are private locals, disjoint from the registered
+                            // RAM, which stays registered.
                             if unsafe { ram.compare_exchange_physical(0x4024, &mut current, &next) }
                                 .unwrap()
                             {
@@ -662,6 +691,8 @@ mod tests {
             }
         });
         let mut counter = [0; 4];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(0x4024, &mut counter) }.unwrap();
         assert_eq!(u32::from_le_bytes(counter), 0x5353_5353 + 4000);
     }
@@ -671,10 +702,14 @@ mod tests {
         let storage = Storage::new();
         let weak = Arc::downgrade(&storage);
         let ranges = [range(&storage, 0x4000, 0, 128)];
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe { model(&ranges, Arc::clone(&storage)) };
         drop(storage);
         assert!(weak.upgrade().is_some());
         let mut bytes = [0; 128];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { registered.read_physical(0x4000, &mut bytes) }.unwrap();
         assert_eq!(bytes, [0x53; 128]);
         drop(registered);
@@ -716,10 +751,14 @@ mod tests {
             range(&storage, 0x4000, 0, 64),
             range(&storage, 0x4080, 64, 64),
         ];
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe { model(&ranges, storage) };
         for physical in [0x3ff0, 0x4038, 0x40b8, u64::MAX - 7] {
             let mut bytes = [0xa5; 16];
             let fault =
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe { registered.read_physical_progress(physical, &mut bytes) }.unwrap_err();
             assert_eq!(fault.status, MemoryStatus::Translation);
             assert_eq!(fault.completed, 0);
@@ -728,6 +767,8 @@ mod tests {
         // Empty reads still perform the existing domain-health preflight but
         // need no region or backing, even at a hole or the address-space end.
         for physical in [0x3ff0, 0x4040, 0x4080, u64::MAX] {
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { registered.read_physical_progress(physical, &mut []) }.unwrap();
         }
     }
@@ -735,12 +776,18 @@ mod tests {
     #[test]
     fn unaligned_physical_reads_preserve_all_reached_scalar_tails() {
         let storage = Storage::new();
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe { model(&[range(&storage, 0x4000, 0, 128)], storage) };
         let expected: [u8; 128] = core::array::from_fn(|index| u8::try_from(index).unwrap() ^ 0xa5);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { registered.publish_physical(0x4000, &expected) }.unwrap();
         for start in 0..16 {
             for bytes in 0..=expected.len() - start {
                 let mut output = [0x3c; 128];
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe {
                     registered.read_physical_progress(0x4000 + start as u64, &mut output[..bytes])
                 }
@@ -761,6 +808,8 @@ mod tests {
         // These source-adjacent regions retain different actual allocations,
         // host offsets and physical placements; pointer arithmetic cannot cross
         // their boundary even though the requested source range is contiguous.
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe {
             fixture(
                 &[second_range, first_range],
@@ -768,6 +817,8 @@ mod tests {
             )
         };
         let expected: [u8; 128] = core::array::from_fn(|index| u8::try_from(index).unwrap() ^ 0x69);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { registered.publish_physical(0x4000, &expected) }.unwrap();
         for start in 0..expected.len() {
             for bytes in [
@@ -777,6 +828,8 @@ mod tests {
                     continue;
                 }
                 let mut output = [0xc3; 128];
+                // SAFETY: the buffers are private locals, disjoint from the registered RAM, which
+                // stays registered.
                 unsafe {
                     registered.read_physical_progress(0x4000 + start as u64, &mut output[..bytes])
                 }
@@ -794,10 +847,13 @@ mod tests {
             range(&storage, 0x4000, 0, 64),
             range(&storage, 0x4040, 64, 64),
         ];
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let mut registered = unsafe { model(&ranges, Arc::clone(&storage)) };
         // Deliberately inconsistent private metadata models a later envelope
         // refusal. Production registration never changes a backing's rights.
         // No failed read may expose bytes from that backing or erase the prefix.
+        // SAFETY: the replacement backing covers the same retained storage bytes.
         registered.regions[1].backing = unsafe {
             MemoryBacking::new(
                 ranges[1].host_base,
@@ -814,6 +870,8 @@ mod tests {
         for start in 0..64 {
             let mut output = [0xa5; 128];
             let bytes = 128 - start;
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             let refused = unsafe {
                 registered.read_physical_progress(0x4000 + start as u64, &mut output[..bytes])
             }
@@ -839,10 +897,16 @@ mod tests {
             host_base: NonNull::new(storage.0.get().cast::<u8>()).unwrap(),
             bytes: 1024,
         };
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe { fixture(&[range], storage) };
         let expected: [u8; 1024] = core::array::from_fn(|index| u8::try_from(index % 251).unwrap());
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { registered.publish_physical(0x4000, &expected) }.unwrap();
         let mut output = [0; 1024];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { registered.read_physical_progress(0x4000, &mut output) }.unwrap();
         assert_eq!(output, expected);
     }
@@ -852,12 +916,16 @@ mod tests {
     fn actual_native_scalar_fetches_are_coherent_with_the_same_host_writer_system() {
         let storage = Storage::new();
         let ranges = [range(&storage, 0x4000, 0, 128)];
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe { model(&ranges, storage) };
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 for value in
                     (0..10_000).map(|iteration| if iteration & 1 == 0 { 0x55 } else { 0xaa })
                 {
+                    // SAFETY: physical-system writes go through the registered owner, which retains
+                    // these bytes.
                     unsafe {
                         registered
                             .system
@@ -873,6 +941,8 @@ mod tests {
                     // the joined writer changes it. Later scalar reads are
                     // independent observations, not an atomic snapshot.
                     let mut value = [0; 128];
+                    // SAFETY: the buffers are private locals, disjoint from the registered RAM,
+                    // which stays registered.
                     unsafe { registered.read_physical(0x4000, &mut value[..bytes]) }.unwrap();
                     assert!(matches!(value[0], 0x53 | 0x55 | 0xaa));
                     assert!(value[..8].iter().all(|byte| *byte == value[0]));
@@ -889,7 +959,11 @@ mod tests {
             range(&storage, 0x4000, 0, 64),
             range(&storage, 0x4080, 64, 64),
         ];
+        // SAFETY: the test's storage backs every range, stays alive with the registration and has
+        // no other writer.
         let registered = unsafe { model(&ranges, storage) };
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         let refused = unsafe { registered.publish_physical(0x4038, &[0; 16]) }.unwrap_err();
         assert_eq!(refused.completed, 0);
         assert_eq!(refused.status, MemoryStatus::Translation);
@@ -918,6 +992,8 @@ mod tests {
             registered.read_descriptor(0x4008),
             Ok(0x5353_5353_5353_5353)
         );
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { registered.publish_physical(0x4080, &42u64.to_le_bytes()) }.unwrap();
         assert_eq!(registered.read_descriptor(0x4080), Ok(42));
     }
@@ -927,6 +1003,8 @@ mod tests {
         let storage = Storage::new();
         let ranges = [range(&storage, 0x4000, 0, 128)];
         assert!(matches!(
+            // SAFETY: the test's storage backs every range, stays alive with the registration and
+            // has no other writer.
             unsafe { RegisteredSystemRam::register(&ranges, storage, 64, 8) },
             Err(RegistrationError::NativeTarget)
         ));

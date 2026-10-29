@@ -137,8 +137,8 @@ mod tests {
         const NV_ERR_INVALID_ARGUMENT: u32 = 0x1f;
         for bytes in [u64::MAX, isize::MAX as u64] {
             let mut out = ptr::dangling_mut::<c_void>();
-            // SAFETY: writable output; invalid sizes fail before allocation.
             assert_eq!(
+                // SAFETY: writable output; invalid sizes fail before allocation.
                 unsafe { os_alloc_mem(&mut out, bytes) },
                 NV_ERR_INVALID_ARGUMENT
             );

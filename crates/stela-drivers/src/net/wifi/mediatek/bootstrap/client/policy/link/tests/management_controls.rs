@@ -15,6 +15,8 @@ fn prepared() -> (TestLink, Model, Arc<Session>, Arc<AtomicUsize>) {
     // owning frontend must refuse initial installation until they are consumed.
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(matches!(
+        // SAFETY: the test's model owns this key slot alone; no other worker programs the hardware
+        // key.
         unsafe {
             link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap())
         },

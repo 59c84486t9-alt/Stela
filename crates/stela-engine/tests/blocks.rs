@@ -99,6 +99,8 @@ mod numerical {
                     prefix.x[0] += 1;
                     publish(&mut prefix, 0, 1, 0x40400000, 32);
                     publish(&mut prefix, 3, 4, 0x3c00, 16);
+                    // SAFETY: the test program reads and writes only its own registered guest data,
+                    // and nothing else mutates it.
                     let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
                     assert_eq!(first.reason, StopReason::BudgetExhausted);
                     assert_eq!(first.floating_point_helpers, 1);
@@ -106,6 +108,8 @@ mod numerical {
                     assert_eq!(thread.registers, prefix);
                     let mut expected = prefix;
                     publish(&mut expected, 6, 7, 0x4018000000000000, 64);
+                    // SAFETY: the test program reads and writes only its own registered guest data,
+                    // and nothing else mutates it.
                     let rest = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
                     assert_eq!(rest.reason, StopReason::StopAddress);
                     assert_eq!(rest.blocks_executed, 1);
@@ -140,6 +144,8 @@ mod numerical {
                     publish(&mut expected, 0, 1, 0x40400000, 32);
                     publish(&mut expected, 3, 4, 0x4200, 16);
                     publish(&mut expected, 6, 7, 0x4018000000000000, 64);
+                    // SAFETY: the test program reads and writes only its own registered guest data,
+                    // and nothing else mutates it.
                     let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
                     assert_eq!(report.reason, StopReason::StopAddress);
                     assert_eq!(report.blocks_executed, 1);
@@ -172,6 +178,8 @@ mod numerical {
         thread.registers.fpcr |= INVALID << EXCEPTION_ENABLE_SHIFT;
         let mut prefix = thread.registers.clone();
         prefix.x[0] += 1;
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let stop = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(
             stop.reason,
@@ -184,6 +192,8 @@ mod numerical {
         assert_eq!(stop.floating_point_helpers, 0);
         assert_eq!(thread.registers, prefix);
         assert_eq!(thread.pc, GuestAddress(BASE + 4));
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let zero = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 0)? };
         assert_eq!(zero.blocks_executed, 0);
         assert_eq!(thread.registers, prefix);
@@ -191,6 +201,8 @@ mod numerical {
         let mut expected = thread.registers.clone();
         expected.x[0] += 1;
         publish(&mut expected, 0, 1, 0x40400000, 32);
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(done.reason, StopReason::StopAddress);
         assert_eq!(done.floating_point_helpers, 0);
@@ -225,6 +237,8 @@ mod numerical {
                 32,
             );
             expected.fpsr |= INEXACT;
+            // SAFETY: the test program reads and writes only its own registered guest data, and
+            // nothing else mutates it.
             let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
             assert_eq!(done.reason, StopReason::StopAddress);
             assert_eq!(done.blocks_executed, 1);

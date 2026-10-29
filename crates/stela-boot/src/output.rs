@@ -409,9 +409,9 @@ pub fn raw_screen() {
 /// Write `text` to the firmware's console while boot services run and the
 /// firmware has one.
 fn firmware_console(text: &str) {
-    // SAFETY: the firmware's system table, valid while boot services run.
     let console = || {
         uefi::table::system_table_raw()
+            // SAFETY: the firmware's system table, valid while boot services run.
             .is_some_and(|table| unsafe { !table.as_ref().stdout.is_null() })
     };
     if FIRMWARE_CONSOLE.load(Ordering::Relaxed) && console() {

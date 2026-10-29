@@ -320,6 +320,7 @@ mod tests {
     // SAFETY: raw bytes are used only under the same monitor writer gate; no
     // reference to a shared RAM element is created by either candidate.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
     #[inline(never)]
     unsafe fn generic_candidate(
@@ -428,6 +429,8 @@ mod tests {
                                                 &range,
                                                 monitor::Invalidation::BeforeAttempt,
                                                 || {
+                                                    // SAFETY: the writer scope owns this slot, and
+                                                    // `pointer` addresses it inside the storage.
                                                     Ok::<_, ()>(unsafe {
                                                         if direct {
                                                             direct_candidate(

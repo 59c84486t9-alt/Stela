@@ -111,8 +111,8 @@ mod tests {
         let session = thread.execution_session().unwrap();
         for value in [19, 37] {
             assert_eq!(domain.state.lock().unwrap().native_loans, 1);
-            // SAFETY: no retained pointers or guest accesses in this callback.
             assert_eq!(
+                // SAFETY: no retained pointers or guest accesses in this callback.
                 unsafe { thread.with_checked_view_in(&session, |_| value) },
                 Ok(value)
             );
@@ -130,6 +130,7 @@ mod tests {
         ));
         // Existing invocation still acquires and drops its own pin.
         assert_eq!(
+            // SAFETY: the callback runs once on this thread and borrows only live locals.
             unsafe { thread.with_checked_view(|_| domain.state.lock().unwrap().native_loans) },
             Ok(1)
         );
@@ -147,6 +148,7 @@ mod tests {
         for thread in [&mut second, &mut third] {
             let called = Cell::new(false);
             assert_eq!(
+                // SAFETY: the callback runs once on this thread and borrows only live locals.
                 unsafe { thread.with_checked_view_in(&session, |_| called.set(true)) },
                 Err(MemoryStatus::Domain)
             );
@@ -186,6 +188,7 @@ mod tests {
         let system = MemorySystem::new(16, 8).unwrap();
         let (_, mut thread) = fixture(&system);
         let session = thread.execution_session().unwrap();
+        // SAFETY: the callback runs once on this thread and borrows only live locals.
         let result = unsafe {
             thread.with_checked_view_in(&session, |_| {
                 system.failed.store(true, Ordering::Release);
@@ -195,6 +198,7 @@ mod tests {
         assert_eq!(result, Err(MemoryStatus::Domain));
         let called = Cell::new(false);
         assert_eq!(
+            // SAFETY: the callback runs once on this thread and borrows only live locals.
             unsafe { thread.with_checked_view_in(&session, |_| called.set(true)) },
             Err(MemoryStatus::Domain)
         );
@@ -207,6 +211,7 @@ mod tests {
         let (_, mut thread) = fixture(&system);
         let session = thread.execution_session().unwrap();
         assert_eq!(
+            // SAFETY: the callback runs once on this thread and borrows only live locals.
             unsafe {
                 thread.with_checked_view_in(&session, |view| {
                     view.version ^= 1;

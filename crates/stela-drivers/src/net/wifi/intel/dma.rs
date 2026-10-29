@@ -672,8 +672,8 @@ pub(in crate::net::wifi::intel) mod tests {
             }
         }
         let source = Source::default();
-        // SAFETY: unique fixture allocations; absent domain is refused first.
         assert!(matches!(
+            // SAFETY: unique fixture allocations; absent domain is refused first.
             unsafe { MappedFirmware::prepare(&plan, &source, None) },
             Err(Error::Dma(DmaError::IommuUnavailable))
         ));
@@ -724,8 +724,8 @@ pub(in crate::net::wifi::intel) mod tests {
         });
         let mut mapped = prepare(&plan, &source, &domain).unwrap();
         mapped.expose_for_context().unwrap();
-        // SAFETY: no real device exists; this deliberately fails invalidation.
         assert_eq!(
+            // SAFETY: no real device exists; this deliberately fails invalidation.
             unsafe { mapped.release_after_alive() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );

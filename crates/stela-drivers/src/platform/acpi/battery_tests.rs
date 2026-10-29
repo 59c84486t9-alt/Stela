@@ -85,6 +85,8 @@ fn native_control_method_battery_refresh_alarm_fallback_and_removal() {
     dsdt[36..].copy_from_slice(&aml);
     checksum(&mut dsdt, 9);
     let (provider, counts) = fixture_dsdt(dsdt);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handles = session.devices("PNP0C0A").unwrap();
     assert_eq!(handles.len(), 1);

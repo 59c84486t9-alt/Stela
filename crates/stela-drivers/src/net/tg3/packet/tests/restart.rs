@@ -166,6 +166,8 @@ fn incomplete_attach_allocations_cannot_enter_restart() {
     for fail_after in [0, 3, 5] {
         let (hardware, mut pages, domain, peer) = parts();
         pages.fail_after = Some(fail_after);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
             Err((Error::Memory(MemoryError::OutOfMemory), packet)) => packet,
             _ => panic!("partial allocation must fail attachment"),

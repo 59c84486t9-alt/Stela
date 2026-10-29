@@ -10,6 +10,8 @@ pub(super) fn finish_mcc<'a>(
     domain: &Domain,
 ) -> (Ax200Mcc<'a, Model, ClockBios>, u16, u16) {
     let mut mcc = setup.begin_mcc().unwrap_or_else(|_| panic!("actual setup"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { mcc.advance(source) }.unwrap();
     for (country, source_id) in [(*b"US", 0x10), (*b"CN", 2)] {
         complete(
@@ -27,6 +29,8 @@ pub(super) fn finish_mcc<'a>(
                 &mcc_payload(country, source_id, 51),
             ),
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { mcc.advance(source) }.unwrap();
         sequence += 1;
         entry += 1;
@@ -117,6 +121,8 @@ fn exercise(actual: bool) {
             r.sync_fail = Some(r.syncs + 1);
         }
         let bell_before = state.lock().unwrap().registers[&0x460];
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { scan.advance(&source) };
         if case >= 7 {
             let expected = match case {
@@ -194,6 +200,8 @@ fn exercise(actual: bool) {
             // Do not expect an extra pending poll to beat that elapsed deadline.
             if case < 5 {
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { scan.advance(&source) }.unwrap(),
                     Ax200ScanConfigurationPhase::Waiting
                 );
@@ -202,6 +210,8 @@ fn exercise(actual: bool) {
             if case == 5 {
                 options.clock.delay(20);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { scan.advance(&source) },
                     Err(Ax200ScanConfigurationError::Deadline)
                 );
@@ -233,6 +243,8 @@ fn exercise(actual: bool) {
                 if case == 6 {
                     options.clock.delay(20);
                     assert_eq!(
+                        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its
+                        // sole simulated requester domain.
                         unsafe { scan.advance(&source) },
                         Err(Ax200ScanConfigurationError::Deadline)
                     );
@@ -240,6 +252,8 @@ fn exercise(actual: bool) {
                     assert!(scan.response().is_none());
                     let original = scan.first_error().unwrap().clone();
                     let ops = state.lock().unwrap().ops.len();
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     assert_eq!(unsafe { scan.advance(&source) }, Err(original));
                     assert_eq!(state.lock().unwrap().ops.len(), ops);
                     scan.stop().unwrap();
@@ -248,12 +262,16 @@ fn exercise(actual: bool) {
                     continue;
                 }
                 assert!(matches!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { scan.advance(&source) },
                     Err(Ax200ScanConfigurationError::Boot(Error::CommandReclaim(_)))
                 ));
                 assert!(scan.first_error().is_none());
                 assert!(scan.response().is_none());
                 domain.records.lock().unwrap().cpu_sync_fail = None;
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 let result = unsafe { scan.advance(&source) };
                 if case == 1 {
                     assert_eq!(
@@ -277,6 +295,8 @@ fn exercise(actual: bool) {
         if case != 0 {
             let original = scan.first_error().unwrap().clone();
             let ops = state.lock().unwrap().ops.len();
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             assert_eq!(unsafe { scan.advance(&source) }, Err(original));
             assert_eq!(state.lock().unwrap().ops.len(), ops);
         }

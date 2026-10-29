@@ -41,6 +41,8 @@ fn exercise_mcc(actual: bool) {
     // The source explicitly sends MCC in RF-kill. It is not an RF grant.
     *state.lock().unwrap().registers.get_mut(&0x24).unwrap() &= !0x08000000;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { mcc.advance(&source) }.unwrap(),
         Ax200MccPhase::WaitingCurrent
     );
@@ -77,6 +79,8 @@ fn exercise_mcc(actual: bool) {
         emitted.extend(device_read(&domain, rest, 0, encoded.bytes().len() - 20));
         assert_eq!(emitted, encoded.bytes());
         let bell = state.lock().unwrap().registers[&0x460];
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { mcc.advance(&source) }.unwrap();
         assert_eq!(state.lock().unwrap().registers[&0x460], bell);
         complete(
@@ -98,6 +102,8 @@ fn exercise_mcc(actual: bool) {
         r.cpu_sync_fail = Some(r.cpu_syncs + 1);
         drop(r);
         assert!(matches!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { mcc.advance(&source) },
             Err(Ax200MccError::Boot(Error::CommandReclaim(_)))
         ));
@@ -105,6 +111,8 @@ fn exercise_mcc(actual: bool) {
         assert!(mcc.first_error().is_none());
         domain.records.lock().unwrap().cpu_sync_fail = None;
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { mcc.advance(&source) }.unwrap(),
             if i == 0 {
                 Ax200MccPhase::WaitingBios

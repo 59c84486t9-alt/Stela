@@ -295,6 +295,7 @@ mod tests {
         assert!(mapped(base));
         // SAFETY: retained private RW raw storage; no guest execution or references.
         unsafe { base.as_ptr().write(0x5a) };
+        // SAFETY: the retained storage is still mapped, and nothing writes it concurrently.
         assert_eq!(unsafe { retained.primary_base().as_ptr().read() }, 0x5a);
         drop(retained);
     }
@@ -328,6 +329,8 @@ mod tests {
         drop(memory);
         assert!(mapped(base));
         let pointer = backing.host_pointer(0, 1, AccessKind::Read).unwrap();
+        // SAFETY: `pointer` is a checked readable byte of this test's private storage, with no
+        // concurrent writer.
         assert_eq!(unsafe { pointer.as_ptr().read() }, 0x31);
         drop(backing);
     }
@@ -371,9 +374,12 @@ mod tests {
         drop(region);
         assert!(retained_storage.upgrade().is_some());
         assert!(mapped(guest) && mapped(publisher));
+        // SAFETY: querying descriptor flags only reads process state.
         assert_ne!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
         let pointer = backing.host_pointer(0, 1, AccessKind::Write).unwrap();
+        // SAFETY: `pointer` is a checked writable byte of this test's private storage.
         unsafe { pointer.as_ptr().write(0x42) };
+        // SAFETY: `guest` maps the same retained storage, with no concurrent writer.
         assert_eq!(unsafe { guest.as_ptr().read() }, 0x42);
         drop(first);
         drop(alias);

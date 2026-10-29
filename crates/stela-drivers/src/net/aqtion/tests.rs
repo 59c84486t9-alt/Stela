@@ -59,6 +59,7 @@ unsafe impl PageBacking for Ram {
 impl Drop for Ram {
     fn drop(&mut self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the pointer came from the matching allocation with this layout and is freed once.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) }
     }
 }
@@ -76,6 +77,7 @@ impl PageSource for Pages {
         assert_eq!(attribute, CacheAttribute::WriteBack);
         let bytes = bytes.div_ceil(4096) * 4096;
         let layout = Layout::from_size_align(bytes, alignment).unwrap();
+        // SAFETY: the layout has a nonzero size.
         let p = NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
         let base = self.next.get();
         self.next.set(base + bytes as u64);
@@ -165,6 +167,8 @@ impl Domain {
         let mut published = self.published.lock().unwrap();
         for n in 0..bytes {
             let at = address + n as u64;
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             let actual = unsafe { self.raw(at, 1).as_ptr().read_volatile() };
             assert_eq!(
                 published.remove(&at),
@@ -175,10 +179,14 @@ impl Domain {
     }
     fn read32(&self, address: u64) -> u32 {
         self.visible(address, 4);
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { self.raw(address, 4).as_ptr().cast::<u32>().read_volatile() }
     }
     fn read64(&self, address: u64) -> u64 {
         self.visible(address, 8);
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { self.raw(address, 8).as_ptr().cast::<u64>().read_volatile() }
     }
     fn writeback(&self, address: u64, bytes: &[u8]) {
@@ -190,6 +198,8 @@ impl Domain {
     }
     fn store(&self, address: u64, bytes: &[u8]) {
         for (i, b) in bytes.iter().enumerate() {
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             unsafe { self.raw(address + i as u64, 1).as_ptr().write_volatile(*b) }
         }
     }
@@ -204,6 +214,8 @@ impl Domain {
     fn packet(&self, address: u64, length: usize) -> Vec<u8> {
         self.visible(address, length);
         (0..length)
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             .map(|n| unsafe { self.raw(address + n as u64, 1).as_ptr().read_volatile() })
             .collect()
     }
@@ -271,6 +283,8 @@ unsafe impl DmaDomain for Domain {
         let mut published = self.published.lock().unwrap();
         for n in r.clone() {
             let address = m.address + n as u64;
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             let byte = unsafe { self.raw(address, 1).as_ptr().read_volatile() };
             published.insert(address, byte);
         }
@@ -296,6 +310,8 @@ unsafe impl DmaDomain for Domain {
         if self.incoherent.load(Ordering::Relaxed) {
             return Err(DmaError::CoherenceUnavailable);
         }
+        // SAFETY: the mapping's range lies inside this test's live pages, and the model writes
+        // nothing concurrently.
         Ok(unsafe {
             self.raw(m.address + offset as u64, 4)
                 .as_ptr()
@@ -908,6 +924,8 @@ unsafe impl Send for NativePm {}
 unsafe impl Sync for NativePm {}
 impl NativePm {
     fn pointer(&self) -> NonNull<u8> {
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.page.get()).0).cast()) }
     }
     fn pm_accesses_since(&self, start: usize) -> Vec<ConfigAccess> {
@@ -1090,6 +1108,8 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
         virtual_bits: 48,
     };
     let authority =
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { owned::Authority::isolated_model(model.clone(), space, Vec::new()) }.unwrap();
     let mapping = authority
         .map(
@@ -1106,6 +1126,8 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
         start_bus: 1,
         end_bus: 1,
     };
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let mut config = match unsafe { OwnedConfig::attach(address, window, mapping) } {
         Ok(config) => config,
         Err((error, _)) => panic!("native PM fixture: {error:?}"),
@@ -1526,6 +1548,8 @@ fn model_rejects_dma_drain_before_native_bus_master_clear_and_retains_pending_wr
 
         // Wrong order: queue shutdown alone must not admit the drain. Catch
         // rejection so this control also proves all DMA evidence is retained.
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         assert_bus_master_rejection(|| unsafe { domain.drain_posted_writes().unwrap() });
         assert_eq!(domain.drain_count.load(Ordering::Relaxed), 0);
         assert_eq!(domain.drained_epoch.load(Ordering::Relaxed), 0);
@@ -1577,6 +1601,8 @@ fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
                 if unmap {
                     net.memory.as_mut().unwrap().retire().unwrap();
                 } else {
+                    // SAFETY: the model device is stopped and drained, so nothing still uses what
+                    // this releases.
                     unsafe { domain.drain_posted_writes().unwrap() };
                 }
             }))
@@ -1663,6 +1689,8 @@ fn omit_visibility_before_tx(payload: bool) {
     let descriptor = peer.address(0x7c00);
     let address = if payload {
         // Inspect native fixture storage without performing a modeled DMA read.
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             domain
                 .raw(descriptor, 8)

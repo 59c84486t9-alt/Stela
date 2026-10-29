@@ -377,8 +377,8 @@ mod tests {
             (0x1b0, 11, 12, "gb20y", "ga10x"),
             (0x1b0, 12, 12, "gb20y", "ga10x"),
         ] {
-            // SAFETY: pure selector on scalar fixture values.
             assert_eq!(
+                // SAFETY: pure selector on scalar fixture values.
                 unsafe { stela_nvidia_firmware_family(arch, implementation) },
                 family
             );
@@ -392,8 +392,8 @@ mod tests {
                 assert_eq!(buffer, DATA.0.as_ptr().cast());
                 assert_eq!(bytes, 32);
                 assert_eq!(owner.firmware_tokens.get(), 1);
-                // SAFETY: a token is still live, so refusal preserves installed slots.
                 assert_eq!(
+                    // SAFETY: a token is still live, so refusal preserves installed slots.
                     unsafe { owner.as_mut().unbind() },
                     Err(ServiceError::Native(0x40))
                 );
@@ -464,8 +464,8 @@ mod tests {
             nv_put_firmware(first);
             assert_eq!(owner.as_mut().unbind(), Err(ServiceError::Native(0x40)));
         }
-        // SAFETY: second immutable CPU view remains retained by its real token.
         assert_eq!(
+            // SAFETY: second immutable CPU view remains retained by its real token.
             unsafe { core::slice::from_raw_parts(again.cast::<u8>(), 32) },
             &DATA.0
         );

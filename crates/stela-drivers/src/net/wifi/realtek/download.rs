@@ -855,6 +855,8 @@ mod tests {
                 self.control.submit_beacon(data)
             }
             unsafe fn beacon_consumed(&mut self) -> Result<(), Error> {
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 unsafe { self.queue.consumed() }
             }
             fn quarantine(&mut self) {

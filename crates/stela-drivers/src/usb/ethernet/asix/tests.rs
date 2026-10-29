@@ -567,6 +567,8 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
                             };
                             assert!(link.transmit(&[0x88; 60]).is_err());
                             assert_eq!(
+                                // SAFETY: the pointer addresses this test's own live pages, and the
+                                // stopped model writes nothing concurrently.
                                 unsafe { core::slice::from_raw_parts(buffer as *const u8, n) },
                                 before
                             );
@@ -805,6 +807,8 @@ fn ax179_native_all_aliases_and_speeds_use_shared_dma_and_quarantine() {
                         };
                         assert!(link.transmit(&[0x88; 60]).is_err());
                         assert_eq!(
+                            // SAFETY: the pointer addresses this test's own live pages, and the
+                            // stopped model writes nothing concurrently.
                             unsafe { core::slice::from_raw_parts(buffer as *const u8, length) },
                             before
                         );

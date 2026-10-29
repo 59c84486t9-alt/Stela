@@ -355,6 +355,8 @@ impl<R: Registers> Allocate<R> {
         unsafe fn refuse(_: Layout) -> *mut u8 {
             core::ptr::null_mut()
         }
+        // SAFETY: `refuse` follows `alloc`'s contract, and the caller upholds this constructor's,
+        // which is `new_inner`'s.
         unsafe { Self::new_inner(channel, link, reservation, now, refuse) }
     }
     unsafe fn new_inner(
@@ -961,9 +963,12 @@ impl<R: Registers> ActivateTunnel<R> {
             if layout == Layout::new::<ActiveTunnel>() {
                 core::ptr::null_mut()
             } else {
+                // SAFETY: the caller passes a nonzero-size layout, as `alloc` requires.
                 unsafe { alloc(layout) }
             }
         }
+        // SAFETY: `refuse_receipt` follows `alloc`'s contract, and the caller upholds this
+        // constructor's, which is `new_inner`'s.
         unsafe {
             Self::new_inner(
                 channel,
@@ -1614,6 +1619,8 @@ impl<R: Registers> StopTunnel<R> {
         unsafe fn refuse(_: Layout) -> *mut u8 {
             core::ptr::null_mut()
         }
+        // SAFETY: `refuse` follows `alloc`'s contract, and the caller upholds this constructor's,
+        // which is `new_inner`'s.
         unsafe { Self::new_inner(channel, active, now, refuse) }
     }
     unsafe fn new_inner(
@@ -2392,8 +2399,8 @@ mod tests {
         });
         drop(reservation);
         let writes = model.state.lock().unwrap().writes.len();
-        // SAFETY: metadata mismatch is a negative actual-model pairing; no request permitted.
         assert!(
+            // SAFETY: metadata mismatch is a negative actual-model pairing; no request permitted.
             unsafe { Activate::with_bandwidth(channel, allocated, replacement, cursor.now) }
                 .is_err()
         );

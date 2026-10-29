@@ -511,10 +511,10 @@ mod tests {
             model.allocations.remove(at);
             if model.expect_zero_release {
                 for word in 0..self.layout.size() / 8 {
-                    // SAFETY: this still-owned aligned buffer has not been
-                    // deallocated. Preflight rejection must leave every byte at
-                    // its real alloc_zeroed image, not merely avoid publishing.
                     assert_eq!(
+                        // SAFETY: this still-owned aligned buffer has not been deallocated.
+                        // Preflight rejection must leave every byte at its real alloc_zeroed image,
+                        // not merely avoid publishing.
                         unsafe { self.cpu.as_ptr().cast::<u64>().add(word).read_volatile() },
                         0
                     );
@@ -787,10 +787,10 @@ mod tests {
             assert_eq!(table.snapshot(second).unwrap(), blocked(flags));
         }
         table.register_for_publication().unwrap();
-        // SAFETY: the model has no active device/ATC/worker. These independent
-        // RIDs use the same retained symbolic root/domain; no native alias or
-        // integrated-device admission is inferred from the permission metadata.
         for requester in [0u16, 8, 0xffff] {
+            // SAFETY: the model has no active device/ATC/worker. These independent RIDs use the
+            // same retained symbolic root/domain; no native alias or integrated-device admission is
+            // inferred from the permission metadata.
             unsafe {
                 table.translate(
                     requester,
@@ -803,6 +803,8 @@ mod tests {
             let words = table.snapshot(requester).unwrap();
             assert_eq!(words, translated(requester as u8, root().value(), 4, 7));
             assert_eq!((words[0] & 8, words[1] & (1 << 32)), (0, 0));
+            // SAFETY: the model requester is stopped, so blocking its table entry interrupts no
+            // DMA.
             unsafe { table.block(requester) }.unwrap();
             assert_eq!(table.snapshot(requester).unwrap(), blocked(requester as u8));
         }
@@ -952,8 +954,8 @@ mod tests {
             (vec![0; REQUESTERS - 1], 48, DeviceTableError::PolicyCount),
         ] {
             let monitor = Monitor::new();
-            // SAFETY: malformed numeric/profile admission is rejected before effects.
             assert!(
+                // SAFETY: malformed numeric/profile admission is rejected before effects.
                 matches!(unsafe { DeviceTable::new(Hardware(monitor.clone()), &flags, bits) }, Err(error) if error == expected)
             );
             assert!(monitor.model.lock().unwrap().events.is_empty());
@@ -1016,8 +1018,8 @@ mod tests {
                     }
                 }
             };
-            // SAFETY: isolated deliberately unsuitable provider output; no live base.
             assert!(
+                // SAFETY: isolated deliberately unsuitable provider output; no live base.
                 matches!(unsafe { DeviceTable::new(Hardware(monitor.clone()), &policies(), 48) }, Err(error) if error == expected)
             );
             let model = monitor.model.lock().unwrap();
@@ -1059,9 +1061,9 @@ mod tests {
             if expected > DEVICE_TABLE_BYTES {
                 let cpu = monitor.cpu();
                 for offset in [DEVICE_TABLE_BYTES, expected - 8] {
-                    // SAFETY: the original larger native pin is fully retained.
-                    // Its unused tail must not receive DTE initialization stores.
                     assert_eq!(
+                        // SAFETY: the original larger native pin is fully retained. Its unused tail
+                        // must not receive DTE initialization stores.
                         unsafe { (cpu as *const u8).add(offset).cast::<u64>().read_volatile() },
                         0
                     );
@@ -1127,8 +1129,8 @@ mod tests {
             table.snapshot(0xffff),
             Err(DeviceTableError::Context(DmaError::MappingFailed))
         );
-        // SAFETY: fixture owns stopped requester; context refusal precedes CPU stores.
         assert_eq!(
+            // SAFETY: fixture owns stopped requester; context refusal precedes CPU stores.
             unsafe { table.block(0xffff) },
             Err(DeviceTableError::Context(DmaError::MappingFailed))
         );
@@ -1161,9 +1163,9 @@ mod tests {
             ),
         ] {
             let before = monitor.model.lock().unwrap().events.len();
-            // SAFETY: only unsuitable new numeric root metadata is being tested;
-            // it must be rejected before entering the mutation-capable context.
             assert_eq!(
+                // SAFETY: only unsuitable new numeric root metadata is being tested; it must be
+                // rejected before entering the mutation-capable context.
                 unsafe {
                     table.translate(
                         0xffff,
@@ -1189,9 +1191,9 @@ mod tests {
         };
         let old = monitor.raw(cpu, 0xffff);
         let before = monitor.model.lock().unwrap().events.len();
-        // SAFETY: the stopped fixture exercises malformed-old-profile refusal;
-        // no store or visibility/invalidation may run under the unknown image.
         assert_eq!(
+            // SAFETY: the stopped fixture exercises malformed-old-profile refusal; no store or
+            // visibility/invalidation may run under the unknown image.
             unsafe { table.block(0xffff) },
             Err(DeviceTableError::Profile)
         );
@@ -1255,8 +1257,8 @@ mod tests {
             // Poisoned reads remain useful under the actual context guard.
             assert_eq!(table.snapshot(0xffff), Ok(blocked(0xc7)));
             let before = monitor.model.lock().unwrap().events.len();
-            // SAFETY: only poisoned-owner refusal; no second store may happen.
             assert_eq!(
+                // SAFETY: only poisoned-owner refusal; no second store may happen.
                 unsafe { table.block(0xffff) },
                 Err(DeviceTableError::Poisoned)
             );
@@ -1296,16 +1298,16 @@ mod tests {
                 }
             }
             if panic {
-                // SAFETY: the new table is unreachable by any modeled remapper.
                 assert!(
+                    // SAFETY: the new table is unreachable by any modeled remapper.
                     catch_unwind(AssertUnwindSafe(|| unsafe {
                         DeviceTable::new(Hardware(monitor.clone()), &policies(), 48)
                     }))
                     .is_err()
                 );
             } else {
-                // SAFETY: initial visibility fails before a base image escapes.
                 assert!(matches!(
+                    // SAFETY: initial visibility fails before a base image escapes.
                     unsafe { DeviceTable::new(Hardware(monitor.clone()), &policies(), 48) },
                     Err(DeviceTableError::Memory(MemoryError::Unavailable))
                 ));

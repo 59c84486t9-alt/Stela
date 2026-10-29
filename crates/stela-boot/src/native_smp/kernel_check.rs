@@ -196,10 +196,14 @@ fn reservation() -> Result<Arc<RegisteredSystemRam>, &'static str> {
         .map_err(|_| "native kernel canonical RAM registration refused")?,
     );
     for (address, descriptor) in source::tables() {
+        // SAFETY: the source bytes are private locals, disjoint from the registered RAM, and `ram`
+        // keeps its registration live.
         unsafe { ram.publish_physical(address, &descriptor.to_le_bytes()) }
             .map_err(|_| "native kernel table publication failed")?;
     }
     let (program, _) = source::warmup();
+    // SAFETY: the source bytes are private locals, disjoint from the registered RAM, and `ram`
+    // keeps its registration live.
     unsafe { ram.publish_physical(source::CODE, &program) }
         .map_err(|_| "native kernel source publication failed")?;
     Ok(ram)
@@ -360,10 +364,14 @@ pub(crate) unsafe fn check(
         crate::output::arguments(format_args!(
             "NATIVE SCHEDULER source pc={address:#x} bytes={code:02x?}\n"
         ));
+        // SAFETY: the source bytes are private locals, disjoint from the registered RAM, and `ram`
+        // keeps its registration live.
         unsafe { ram.publish_physical(address, &code) }
             .map_err(|_| "native scheduler vector publication refused")?;
     }
     let (alias, descriptor) = source::read_only_alias();
+    // SAFETY: the source bytes are private locals, disjoint from the registered RAM, and `ram`
+    // keeps its registration live.
     unsafe { ram.publish_physical(alias, &descriptor.to_le_bytes()) }
         .map_err(|_| "native scheduler source alias publication refused")?;
     let mut rounds = 0;
@@ -463,6 +471,8 @@ pub(crate) unsafe fn check(
         }
     }
     let mut value = [0; 8];
+    // SAFETY: `value` is a private local, disjoint from the registered RAM, and `ram` keeps its
+    // registration live.
     unsafe { ram.read_physical(source::DATA, &mut value) }
         .map_err(|_| "native scheduler canonical read refused")?;
     if u64::from_le_bytes(value) != (cores * source::INCREMENTS) as u64 {
@@ -470,6 +480,8 @@ pub(crate) unsafe fn check(
             "native scheduler lost actual concurrent LSE updates or permission fault changed RAM",
         );
     }
+    // SAFETY: `value` is a private local, disjoint from the registered RAM, and `ram` keeps its
+    // registration live.
     unsafe { ram.read_physical(source::DATA + 128, &mut value) }
         .map_err(|_| "native scheduler canonical store read refused")?;
     if u64::from_le_bytes(value) != 0x1122334455667788 {

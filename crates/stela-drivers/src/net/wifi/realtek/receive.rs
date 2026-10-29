@@ -504,6 +504,8 @@ mod tests {
             let d = self.device.lock().unwrap();
             let m = self.memory.lock().unwrap();
             let (_, base) = &m.mappings[&u64::from(d.base)];
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             unsafe { core::slice::from_raw_parts((*base + index * 8) as *const u8, 8) }
                 .try_into()
                 .unwrap()
@@ -518,12 +520,16 @@ mod tests {
             for i in 0..packets {
                 let index = (usize::from(d.producer) + i) % COUNT;
                 let desc = *base + index * 8;
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 let bytes = unsafe { core::slice::from_raw_parts(desc as *const u8, 8) };
                 assert_eq!(&bytes[..4], &[214, 44, 0, 0]);
                 let address = u32::from_le_bytes(bytes[4..].try_into().unwrap());
                 let (_, buffer) = &m.mappings[&u64::from(address)];
                 assert_eq!(m.directions[&u64::from(address)], Direction::FromDevice);
                 assert!(packet.len() <= BUFFER);
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe {
                     (*buffer as *mut u8).copy_from_nonoverlapping(packet.as_ptr(), packet.len());
                     ((desc + 2) as *mut u16)
@@ -678,6 +684,8 @@ mod tests {
             ..Device::default()
         }));
         assert!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 Ring::install(
                     Io(device.clone()),
@@ -699,6 +707,8 @@ mod tests {
                 }
                 1 => {
                     h.memory.lock().unwrap().fail_unmap = true;
+                    // SAFETY: the model device is stopped and drained, so nothing still uses what
+                    // this releases.
                     assert!(unsafe { h.ring.release_after_stop() }.is_err());
                 }
                 _ => {
@@ -729,6 +739,8 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 unsafe {
                     Ring::install(
                         Io(device.clone()),

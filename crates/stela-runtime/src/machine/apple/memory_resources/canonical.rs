@@ -232,6 +232,8 @@ mod tests {
         }
         drop(other);
         let memory = ram.try_service().unwrap().unwrap();
+        // SAFETY: the fixture's memory service is the canonical RAM's only user, with no frame or
+        // independent producer.
         unsafe {
             assert!(
                 owner
@@ -265,6 +267,8 @@ mod tests {
             .write(mcc::DCS_BASE + 0x13cc, Width::Word, 0xffff0000, &mut access)
             .unwrap();
         let memory = ram.try_service().unwrap().unwrap();
+        // SAFETY: the fixture's memory service is the canonical RAM's only user, with no frame or
+        // independent producer.
         unsafe {
             assert!(
                 owner

@@ -85,6 +85,8 @@ fn native_battery_linux_status_default_information_fallback_and_trip_failures() 
     dsdt[36..].copy_from_slice(&aml);
     checksum(&mut dsdt, 9);
     let (provider, counts) = fixture_dsdt(dsdt);
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     fn get<'a>(handle: Handle<'a>, name: &str) -> Value<'a> {
         handle.evaluate(Some(name), &[]).unwrap().unwrap()

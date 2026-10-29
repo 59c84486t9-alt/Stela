@@ -219,6 +219,7 @@ pub(super) fn run(
     // SAFETY: all ordinary DMA targets mapped in this exact context. The
     // controlled wrong-domain probe also retains the possible target backing.
     unsafe { da.set_bus_master(true) }.map_err(|e| format!("A BM: {e:?}"))?;
+    // SAFETY: every ordinary DMA target of B's context is mapped in it as well.
     unsafe { db.set_bus_master(true) }.map_err(|e| format!("B BM: {e:?}"))?;
     roundtrip(&a, &send_a, &receive_a, 0x31)?;
     roundtrip(&b, &send_b, &receive_b, 0x97)?;
@@ -248,6 +249,7 @@ pub(super) fn run(
     a.transfer(BUFFER, protected_a.address()?, true)?;
     protected_a.complete()?;
     protected_a.check(0x31)?;
+    // SAFETY: stopping bus mastering only revokes the requester's DMA.
     unsafe { da.set_bus_master(false) }.map_err(|e| format!("A stop BM: {e:?}"))?;
     send_a.unmap()?;
     receive_a.unmap()?;
@@ -263,6 +265,7 @@ pub(super) fn run(
     {
         return Err(String::from("B affected by A context removal"));
     }
+    // SAFETY: stopping bus mastering only revokes the requester's DMA.
     unsafe { db.set_bus_master(false) }.map_err(|e| format!("B stop BM: {e:?}"))?;
     send_b.unmap()?;
     receive_b.unmap()?;

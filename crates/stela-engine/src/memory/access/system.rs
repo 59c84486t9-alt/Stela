@@ -90,6 +90,7 @@ mod tests {
     // SAFETY: private test storage has no racing Rust references; native
     // accesses use the monitor's actual physical writer/observer gates.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
 
     #[test]
@@ -124,6 +125,7 @@ mod tests {
                     let mut expected = [0; 16];
                     expected[..bytes].copy_from_slice(&original[offset..offset + bytes]);
                     assert_eq!(actual, u128::from_le_bytes(expected));
+                    // SAFETY: no access is in flight, so reading the storage races nothing.
                     assert_eq!(unsafe { *storage.0.get() }, original);
                 }
             }

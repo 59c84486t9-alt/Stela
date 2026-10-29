@@ -464,6 +464,8 @@ fn a_six_ghz_sae_exchange_associates_like_ieee80211_mgd_assoc() {
         // ieee80211_mgd_assoc refuses until the exchange authenticates.
         // SAFETY: as above.
         assert!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 driver.associate_six_ghz_external(&mut owner, &session, join.clone(), now, &Source)
             }

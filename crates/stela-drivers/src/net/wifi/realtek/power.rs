@@ -380,6 +380,8 @@ mod tests {
     fn unsupported_cut_and_chip_have_no_successful_skipped_sequence() {
         for cut in 7..16 {
             let mut m = Model::new(cut, false, false);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert_eq!(unsafe { on(&mut m) }, Err(Error::UnsupportedCut(cut)));
             assert_eq!(m.operations, 0);
             assert_eq!(m.quarantines, 0);
@@ -388,6 +390,8 @@ mod tests {
         let mut o = m.profile.observed();
         o.device = 0xb852;
         m.profile = Profile::select(o).unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { on(&mut m) }, Err(Error::UnsupportedChip));
         assert_eq!(m.operations, 0);
     }
@@ -395,16 +399,22 @@ mod tests {
     fn every_uncertain_operation_quarantines_and_identity_change_precedes_mutation() {
         for powered in [false, true] {
             let mut baseline = Model::new(1, powered, true);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { on(&mut baseline) }.unwrap();
             for at in 0..baseline.operations {
                 let mut m = Model::new(1, powered, true);
                 m.fail_at = Some(at);
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 assert!(unsafe { on(&mut m) }.is_err(), "on={powered} op={at}");
                 assert_eq!(m.quarantines, 1);
             }
         }
         let mut m = Model::new(1, false, false);
         m.set(REG_SYS_CFG1, 4, u32::MAX);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert_eq!(unsafe { on(&mut m) }, Err(Error::IdentityChanged));
         assert_eq!(m.operations, 1);
         assert_eq!(m.quarantines, 1);
@@ -413,12 +423,16 @@ mod tests {
     fn bounded_power_poll_retries_real_pfm_toggle_and_terminal_failure() {
         let mut m = Model::new(1, false, false);
         m.recover = true;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { on(&mut m) }.unwrap();
         assert!(m.toggled);
         assert_eq!(m.quarantines, 0);
         let mut m = Model::new(1, false, false);
         m.stuck = true;
         assert_eq!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { on(&mut m) },
             Err(Error::PollTimeout {
                 register: 6,
@@ -464,6 +478,8 @@ mod tests {
             for powered in [false, true] {
                 for flash in [false, true] {
                     let mut m = Model::new(cut, powered, flash);
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe { on(&mut m) }.unwrap();
                     let length =
                         u32::from_le_bytes(trace[offset..offset + 4].try_into().unwrap()) as usize;

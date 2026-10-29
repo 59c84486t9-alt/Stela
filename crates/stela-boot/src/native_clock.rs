@@ -799,6 +799,7 @@ impl Installed {
         let scope_leases = Arc::new(());
         let flags = flags_disable();
         if self.state.executing.load(Ordering::Acquire) {
+            // SAFETY: `flags` came from `flags_disable` on this CPU above.
             unsafe {
                 restore(flags);
             }
@@ -812,6 +813,7 @@ impl Installed {
         {
             Some(generation) => generation,
             None => {
+                // SAFETY: `flags` came from `flags_disable` on this CPU above.
                 unsafe {
                     restore(flags);
                 }
@@ -950,6 +952,7 @@ impl Installed {
         self.state.process()?;
         let flags = flags_disable();
         if self.state.executing.load(Ordering::Acquire) {
+            // SAFETY: `flags` came from `flags_disable` on this CPU above.
             unsafe {
                 restore(flags);
             }
@@ -959,6 +962,7 @@ impl Installed {
         if unsafe {
             (&*self.state.counter.get()).is_some() || (&*self.state.raised.get()).is_some()
         } {
+            // SAFETY: `flags` came from `flags_disable` on this CPU above.
             unsafe {
                 restore(flags);
             }
@@ -1137,6 +1141,7 @@ pub(crate) fn interrupt() {
             if let Some(counter) = unsafe { &*state.counter.get() } {
                 counter.publish(now)?;
             }
+            // SAFETY: same-CPU actual entry, no process mutation while IF=0.
             if let Some(raised) = unsafe { &*state.raised.get() } {
                 raised.raise()?;
             }

@@ -442,15 +442,15 @@ fn real_bridge_path_and_posted_command_order_precede_payload_drain_and_unmap() {
     life.prepare().unwrap();
     assert!(!state.lock().unwrap().any_master());
     life.enable_dma().unwrap();
-    // SAFETY: intentional negative probe against the isolated provider; it
-    // refuses because the actual configuration still permits new requests.
     assert_eq!(
+        // SAFETY: intentional negative probe against the isolated provider; it refuses because the
+        // actual configuration still permits new requests.
         unsafe { domain.drain_posted_writes() },
         Err(DmaError::DrainUnavailable)
     );
     life.disable_dma().unwrap();
-    // SAFETY: the model intentionally verifies missing-domain-drain refusal.
     assert_eq!(
+        // SAFETY: the model intentionally verifies missing-domain-drain refusal.
         unsafe { mapping.unmap() },
         Err(DmaError::InvalidationFailed)
     );
@@ -583,8 +583,8 @@ fn failed_posted_bus_master_ack_retains_original_hierarchy_and_domain() {
         state.lock().unwrap().child(BRIDGE + 4, 2) & u32::from(BUS_MASTER),
         0
     );
-    // SAFETY: negative model probe; original domain observes actual BM state.
     assert_eq!(
+        // SAFETY: negative model probe; original domain observes actual BM state.
         unsafe { domain.drain_posted_writes() },
         Err(DmaError::DrainUnavailable)
     );
@@ -940,8 +940,8 @@ fn original_resource_identity_and_epoch_gate_real_registry_maps_and_platform_ret
     // NVMe Lifecycle.release. No model device/CPU users were ever started.
     // SAFETY: exact isolated tokens with no consumers, callbacks or writes.
     unsafe { first.retire() }.unwrap();
-    // SAFETY: same actual model-owner exclusion; failure preserves its token.
     assert_eq!(
+        // SAFETY: same actual model-owner exclusion; failure preserves its token.
         unsafe { second.retire() },
         Err(crate::bus::mmio::owned::Error::UnmapFailed)
     );

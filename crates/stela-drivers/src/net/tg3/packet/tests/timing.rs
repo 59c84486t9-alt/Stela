@@ -26,6 +26,8 @@ fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_
                     },
                 )
             };
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
                 Ok(_) => panic!("unavailable timer admitted {chip:x} rate {rate}"),
                 Err((error, packet)) => {

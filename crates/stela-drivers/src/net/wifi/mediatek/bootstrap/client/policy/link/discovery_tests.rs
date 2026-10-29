@@ -53,7 +53,11 @@ fn setup(six_capability: bool, six_programmed: bool, flags: u32) -> (TestLink, M
     );
     // SAFETY: actual model bootstrap and source policy programming completed.
     unsafe { f.controller.initialize_mac() }.unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let interface = unsafe { f.controller.register_interface(profile().interface) }.unwrap();
     f.model.lock().unwrap().client_execution = true;
     let NativeFixture {
@@ -65,6 +69,8 @@ fn setup(six_capability: bool, six_programmed: bool, flags: u32) -> (TestLink, M
         drops,
         ..
     } = f;
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let client = unsafe { Client::new(controller, interface) }.unwrap();
     let model = Model {
         response: model,
@@ -280,6 +286,8 @@ fn six_ghz_notice_backpressure_preserves_next_native_rx_descriptor() {
         let offset = usize::from((q.index + q.count - 1) % q.count) * 16;
         let pointer = (memory.mappings[&q.base].1 + offset) as *const u8;
         // The actual mapped device descriptor retains DDONE and the buffer PA.
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let descriptor = unsafe { core::slice::from_raw_parts(pointer, 16) }.to_vec();
         assert_ne!(
             u32::from_le_bytes(descriptor[4..8].try_into().unwrap()) & (1 << 31),
@@ -295,6 +303,8 @@ fn six_ghz_notice_backpressure_preserves_next_native_rx_descriptor() {
         let offset = usize::from((index + q.count - 1) % q.count) * 16;
         let pointer = (memory.mappings[&q.base].1 + offset) as *const u8;
         assert_eq!(
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             unsafe { core::slice::from_raw_parts(pointer, 16) },
             descriptor
         );

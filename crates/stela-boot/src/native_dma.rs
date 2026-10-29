@@ -127,8 +127,8 @@ pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
                 ));
             }
         }
-        // SAFETY: forwarded post-EBS exclusivity; no Stela driver runs yet.
         if let Err(firmware_state::Failure::Timeout(feature)) =
+            // SAFETY: forwarded post-EBS exclusivity; no Stela driver runs yet.
             unsafe { firmware_state::release(unit.kind, &window) }
         {
             output::arguments(format_args!(

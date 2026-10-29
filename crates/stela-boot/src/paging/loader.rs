@@ -173,8 +173,8 @@ impl LoaderTables {
         if index >= super::ENTRIES {
             return None;
         }
-        // SAFETY: enclosing checked HostOwner scope retains these exact aliases.
         if !(0..self.catalog.count)
+            // SAFETY: enclosing checked HostOwner scope retains these exact aliases.
             .any(|slot| unsafe { self.catalog.physical_alias(slot, true) } == Some(table))
         {
             return None;

@@ -709,8 +709,8 @@ mod tests {
         assert!(owner.check_lifecycle(paused).is_err());
         assert_eq!(owner.publication_bank().lifecycle_state(), LIVE);
         let service = ram.try_service().unwrap().unwrap();
-        // SAFETY: actual fixture RAM gates held, no independently running publisher.
         assert!(
+            // SAFETY: actual fixture RAM gates held, no independently running publisher.
             unsafe { owner.read_ram_drain(CHANNEL_STRIDE + DRAIN, Width::Word, &service) }.is_err()
         );
         assert!(owner.read(0xec8, Width::Word, &mut access).is_err());

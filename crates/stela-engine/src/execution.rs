@@ -193,18 +193,23 @@ mod tests {
         dispatcher.register(entry, source(43))?;
         assert!(ExecutableLeaf::load(&dispatcher, &first).is_err());
         state.x[0] = 777;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { executable.execute(&dispatcher, &mut state) }.is_err());
         assert_eq!(state.x[0], 777);
         let replacement = ExecutableLeaf::load(&dispatcher, &dispatcher.resolve(entry)?)?;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         unsafe { replacement.execute(&dispatcher, &mut state)? };
         assert_eq!(state.x[0], 43);
         assert!(dispatcher.unregister(entry));
         state.x[0] = 888;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { replacement.execute(&dispatcher, &mut state) }.is_err());
         assert_eq!(state.x[0], 888);
         dispatcher.register(entry, source(42))?;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { executable.execute(&dispatcher, &mut state) }.is_err());
         let reloaded = ExecutableLeaf::load(&dispatcher, &dispatcher.resolve(entry)?)?;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         unsafe { reloaded.execute(&dispatcher, &mut state)? };
         assert_eq!(state.x[0], 42);
         Ok(())
@@ -222,10 +227,12 @@ mod tests {
         let executable = ExecutableLeaf::load(&dispatcher, &resolved)?;
         assert!(ExecutableLeaf::load(&other, &resolved).is_err());
         let mut state = GuestState::default();
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { executable.execute(&other, &mut state) }.is_err());
         std::fs::write(resolved.prepared().directory.join("native.bin"), b"corrupt")?;
         assert!(ExecutableLeaf::load(&dispatcher, &resolved).is_err());
         // Own RX bytes are independent of the now-corrupt disk artifact.
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         unsafe { executable.execute(&dispatcher, &mut state)? };
         assert_eq!(state.x[0], 42);
         Ok(())
@@ -334,6 +341,7 @@ mod tests {
             )
         };
         if object != 0 {
+            // SAFETY: `object` is a send right this function obtained above and releases once.
             unsafe { mach_port_deallocate(mach_task_self_, object) };
         }
         assert_eq!(result, libc::KERN_SUCCESS);

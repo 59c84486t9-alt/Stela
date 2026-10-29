@@ -357,6 +357,8 @@ fn native_scalar_mmio_checks_alignment_bounds_and_actual_words() {
     // SAFETY: offset remains inside allocation; constructor must reject it.
     let unaligned = unsafe { core::ptr::NonNull::new_unchecked(base.as_ptr().add(1)) };
     assert!(matches!(
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { scu::Mmio::new(unaligned, 0x90) },
         Err(RegisterError::Mapping)
     ));

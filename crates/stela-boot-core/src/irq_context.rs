@@ -81,6 +81,8 @@ mod tests {
     fn actual_entry_scopes_balance_nested_saved_frames_and_wrong_cpu_refuses() {
         let c = Context::new();
         assert_eq!(c.current(Ok(())), Ok(None));
+        // SAFETY: test entries model one CPU's interrupt nesting; each guard drops before its outer
+        // one.
         let first = unsafe { c.enter(Ok(()), Some(0x1230)) }.unwrap();
         assert_eq!(
             c.current(Ok(())),
@@ -90,11 +92,15 @@ mod tests {
             }))
         );
         assert!(matches!(
+            // SAFETY: test entries model one CPU's interrupt nesting; each guard drops before its
+            // outer one.
             unsafe { c.enter(Err(IrqError::WrongCpu), Some(0x4440)) },
             Err(IrqError::WrongCpu)
         ));
         assert_eq!(c.current(Err(IrqError::WrongCpu)), Err(IrqError::WrongCpu));
         {
+            // SAFETY: test entries model one CPU's interrupt nesting; each guard drops before its
+            // outer one.
             let _second = unsafe { c.enter(Ok(()), Some(0x4560)) }.unwrap();
             assert_eq!(c.current(Ok(())).unwrap().unwrap().depth, 2);
         }
@@ -109,11 +115,15 @@ mod tests {
     #[test]
     fn overflow_and_missing_saved_frame_never_invent_an_interrupted_pointer() {
         let c = Context::new();
+        // SAFETY: test entries model one CPU's interrupt nesting; each guard drops before its outer
+        // one.
         let guard = unsafe { c.enter(Ok(()), None) }.unwrap();
         assert_eq!(c.current(Ok(())).unwrap().unwrap().interrupted_rsp, None);
         drop(guard);
         c.depth.store(u32::MAX, Ordering::Relaxed);
         assert!(matches!(
+            // SAFETY: test entries model one CPU's interrupt nesting; each guard drops before its
+            // outer one.
             unsafe { c.enter(Ok(()), Some(0x1000)) },
             Err(IrqError::Exhausted)
         ));

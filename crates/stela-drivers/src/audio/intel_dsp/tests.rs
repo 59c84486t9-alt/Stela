@@ -27,10 +27,12 @@ struct Backing {
 unsafe impl Send for Backing {}
 // SAFETY: no CPU references escape its UnsafeCell; accesses are serialized.
 unsafe impl Sync for Backing {}
-// SAFETY: real aligned RAM, immutable scattered symbolic physical labels;
-// those labels are resolved only by the model and never CPU-dereferenced.
+// SAFETY: `cpu_base` and `physical_pages` describe the one boxed, page-aligned model RAM for its
+// whole life.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
+        // SAFETY: real aligned RAM, immutable scattered symbolic physical labels; those labels are
+        // resolved only by the model and never CPU-dereferenced.
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
     }
     fn physical_pages(&self) -> &[u64] {
@@ -320,6 +322,8 @@ impl Model {
                 let mut payload = Vec::new();
                 for (address, bytes) in chunks {
                     let pointer = self.translate(address, bytes, false);
+                    // SAFETY: the pointer addresses live memory this test's model owns, in bounds,
+                    // and nothing accesses it concurrently.
                     unsafe {
                         payload.extend_from_slice(core::slice::from_raw_parts(
                             pointer.as_ptr(),

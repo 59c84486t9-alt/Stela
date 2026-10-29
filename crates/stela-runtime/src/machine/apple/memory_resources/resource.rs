@@ -37,8 +37,11 @@ impl Resource<'_> {
         memory: &CanonicalRamService<'_>,
     ) -> Result<u64, &'static str> {
         match self {
+            // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::Direct(owner) => unsafe { owner.read_ram_drain(offset, width, memory) },
+            // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::T8112(owner) => unsafe { owner.read_ram_drain(offset, width, memory) },
+            // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::T6020(owner) => unsafe { owner.read_ram_drain(offset, width, memory) },
         }
     }
@@ -54,12 +57,15 @@ impl Resource<'_> {
         memory: &CanonicalRamService<'_>,
     ) -> Result<(), &'static str> {
         match self {
+            // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::Direct(owner) => unsafe {
                 owner.write_ram_drain(offset, width, value, now, memory)
             },
+            // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::T8112(owner) => unsafe {
                 owner.write_ram_drain(offset, width, value, now, memory)
             },
+            // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::T6020(owner) => unsafe {
                 owner.write_ram_drain(offset, width, value, now, memory)
             },

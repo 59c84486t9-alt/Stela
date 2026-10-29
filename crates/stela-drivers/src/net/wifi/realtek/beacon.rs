@@ -392,6 +392,8 @@ pub(super) mod tests {
     unsafe impl Send for Pages {}
     // SAFETY: no safe byte references or concurrent device access are exposed.
     unsafe impl Sync for Pages {}
+    // SAFETY: `cpu_base` and `physical` describe the one retained, aligned test allocation for its
+    // whole life.
     unsafe impl PageBacking for Pages {
         fn cpu_base(&self) -> NonNull<u8> {
             self.pointer
@@ -408,6 +410,8 @@ pub(super) mod tests {
     }
     impl Drop for Pages {
         fn drop(&mut self) {
+            // SAFETY: the pointer came from the matching allocation with this layout and is freed
+            // once.
             unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
         }
     }
@@ -423,6 +427,7 @@ pub(super) mod tests {
             let bytes_rounded = bytes.next_multiple_of(4096);
             let layout = Layout::from_size_align(bytes_rounded, alignment).unwrap();
             let pointer =
+                // SAFETY: the layout has a nonzero size.
                 NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
             let physical = (0..bytes_rounded / 4096)
                 .map(|i| pointer.as_ptr() as u64 + i as u64 * 4096)
@@ -569,6 +574,8 @@ pub(super) mod tests {
             let data_iova = u32::from_le_bytes(bd[12..16].try_into().unwrap());
             assert_eq!(data_iova, packet_iova + 48);
             let packet =
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { core::slice::from_raw_parts(*packet_base as *const u8, length + 48) }
                     .to_vec();
             m.packets.push(packet);
@@ -577,6 +584,8 @@ pub(super) mod tests {
             // Model a permitted device OWN writeback. The native slot must
             // return descriptor ownership through bidirectional visibility
             // before CPU reuse, even though it never reads the OWN field.
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             unsafe { ((base + 2) as *mut u16).write_volatile(updated_psb.to_le()) };
             if m.fail_kick {
                 Err(Error::Register)
@@ -624,6 +633,8 @@ pub(super) mod tests {
             self.queue.pending()
         }
         pub(in crate::net::wifi::realtek) unsafe fn stop(&mut self) {
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { self.queue.release_after_stop() }.unwrap();
         }
     }
@@ -634,6 +645,8 @@ pub(super) mod tests {
             self.queue.submit(data)
         }
         unsafe fn consumed(&mut self) -> Result<(), io::Error> {
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { self.queue.consumed() }
         }
         fn quarantine(&mut self) {
@@ -660,6 +673,8 @@ pub(super) mod tests {
         unsafe { queue.consumed() }.unwrap();
         assert_eq!(m.lock().unwrap().cpu_syncs, 1);
         assert!(!queue.pending());
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         assert_eq!(unsafe { queue.consumed() }, Err(io::Error::Queue));
         queue.enqueue(&[0xff; 8]).unwrap();
         assert_eq!(m.lock().unwrap().packets.len(), 2);
@@ -699,8 +714,8 @@ pub(super) mod tests {
                 } else {
                     queue.enqueue(&[1; 128]).unwrap();
                     if mode == 4 {
-                        // SAFETY: modeled device stopped; IOTLB removal fails.
                         assert_eq!(
+                            // SAFETY: modeled device stopped; IOTLB removal fails.
                             unsafe { queue.release_after_stop() },
                             Err(Error::Dma(DmaError::InvalidationFailed))
                         );

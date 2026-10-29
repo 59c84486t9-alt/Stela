@@ -294,6 +294,8 @@ mod tests {
         // This fixture exercises only transport/software/no-buffer branches;
         // no DMA grant retires and no canonical memory/fence is fabricated.
         let (services, endpoints) =
+            // SAFETY: the fixture's broker and clock are its own, and these branches retire no DMA
+            // grant.
             unsafe { Services::t8112(broker, Clock::new(ticks, 24_000_000, 0).unwrap()).unwrap() };
         (services, endpoints, dispatcher)
     }

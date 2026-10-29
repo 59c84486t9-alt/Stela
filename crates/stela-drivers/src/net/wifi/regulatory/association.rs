@@ -639,6 +639,8 @@ mod tests {
         // Uses admitted on the old channel are stale; new ones run on the new.
         // SAFETY: no model publication is permitted on a stale admission.
         assert_eq!(
+            // SAFETY: the admission belongs to this test, and the callback runs synchronously on
+            // this thread.
             unsafe { owner.publish_association::<()>(old, &s, Use::Management, |_, _| panic!()) }
                 .unwrap_err(),
             reg::Error::Stale
@@ -693,8 +695,8 @@ mod tests {
         let admission = owner
             .admit_association(&s, Arc::clone(&c), Use::Configure)
             .unwrap();
-        // SAFETY: no model publication is permitted on a mismatched request.
         assert_eq!(
+            // SAFETY: no model publication is permitted on a mismatched request.
             unsafe {
                 owner.publish_association::<()>(admission, &s, Use::Management, |_, _| panic!())
             }
@@ -705,8 +707,8 @@ mod tests {
             .admit_association(&s, Arc::clone(&c), Use::Configure)
             .unwrap();
         associated(&mut s, &c);
-        // SAFETY: a phase change must reject before the closure.
         assert_eq!(
+            // SAFETY: a phase change must reject before the closure.
             unsafe {
                 owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!())
             }
@@ -760,8 +762,8 @@ mod tests {
                     ));
                 }
             }
-            // SAFETY: stale modeled identity is rejected before native publication.
             assert_eq!(
+                // SAFETY: stale modeled identity is rejected before native publication.
                 unsafe {
                     owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!())
                 }
@@ -790,8 +792,8 @@ mod tests {
                 }
             }
             m.native.set(n);
-            // SAFETY: changed authority must reject before modeled publication.
             assert_eq!(
+                // SAFETY: changed authority must reject before modeled publication.
                 unsafe {
                     owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!())
                 }
@@ -858,8 +860,8 @@ mod tests {
                     reg::Error::HardwareDenied
                 }
             };
-            // SAFETY: revoked modeled authority cannot execute this publication.
             assert_eq!(
+                // SAFETY: revoked modeled authority cannot execute this publication.
                 unsafe {
                     owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!())
                 }
@@ -984,8 +986,8 @@ mod tests {
                 _ => model.applied_power.set(false),
             }
             let phase = station.phase();
-            // SAFETY: each rejected actual provider boundary must avoid the effect.
             assert!(
+                // SAFETY: each rejected actual provider boundary must avoid the effect.
                 unsafe {
                     owner.consume_association::<()>(permit, &mut station, |_, _| {
                         panic!("denied management consumer reached canonical state")

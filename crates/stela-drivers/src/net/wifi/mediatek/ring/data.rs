@@ -621,6 +621,8 @@ mod tests {
         let ring =
             unsafe { DataRing::install(Io(tx.clone()), &Source, domain.clone(), count, chip) }
                 .unwrap();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let rx_ring = unsafe { RxRing::install(Io(rx.clone()), &Source, domain, 8) }.unwrap();
         (
             ring,
@@ -686,6 +688,8 @@ mod tests {
         let mut tx = model.tx.lock().unwrap();
         assert_ne!(tx.index, tx.head);
         let memory = model.memory.lock().unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let descriptor = unsafe {
             core::slice::from_raw_parts(
                 pointer(&memory, tx.base + u64::from(tx.index) * 16, 16).cast::<u32>(),
@@ -695,6 +699,8 @@ mod tests {
         assert_eq!(u32::from_le(descriptor[1]), LAST | (64 << 16));
         assert_eq!(descriptor[2..], [0, 0]);
         let address = u64::from(u32::from_le(descriptor[0]));
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let txwi = unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) };
         assert_eq!(&txwi[..32], expected_txd);
         assert_eq!(
@@ -736,6 +742,8 @@ mod tests {
     }
     fn finish(model: &Model, packet: &DevicePacket) -> Vec<u8> {
         let memory = model.memory.lock().unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let txwi = unsafe { core::slice::from_raw_parts(pointer(&memory, packet.address, 64), 64) };
         assert_eq!(
             u16::from_le_bytes(txwi[32..34].try_into().unwrap()) & 0x7fff,
@@ -743,6 +751,8 @@ mod tests {
         );
         let mut payload = Vec::new();
         for &(address, bytes) in &packet.segments {
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             payload.extend_from_slice(unsafe {
                 core::slice::from_raw_parts(pointer(&memory, address, bytes), bytes)
             });
@@ -781,6 +791,8 @@ mod tests {
     fn quiesce(ring: &mut DataRing<Io, Context>, model: &mut Model) -> Vec<Context> {
         // SAFETY: modeled requester no longer accesses any queue/token buffer.
         let contexts = unsafe { ring.release_after_quiesce() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { model.rx_ring.release_after_quiesce() }.unwrap();
         assert!(model.memory.lock().unwrap().mappings.is_empty());
         contexts
@@ -908,9 +920,13 @@ mod tests {
                 };
                 if case == 4 {
                     let one = notification(chip, &[b.token], 7);
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe { ring.apply_tx_free(epoch, &one) }.unwrap();
                 }
                 let before: Vec<_> = ring.tokens.iter().flatten().map(|p| p.free).collect();
+                // SAFETY: the model device, its pages and its domain belong to this test alone; no
+                // other driver, worker or DMA touches them.
                 assert!(unsafe { ring.apply_tx_free(epoch, &wire) }.is_err());
                 assert!(ring.is_poisoned());
                 assert_eq!(
@@ -1019,6 +1035,8 @@ mod tests {
             assert_eq!(model.tx.lock().unwrap().queue_drops, 0);
             assert_eq!(model.drops.load(Ordering::Relaxed), 0);
             assert_eq!(model.memory.lock().unwrap().mappings.len(), before);
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { model.rx_ring.release_after_quiesce() }.unwrap();
             assert_eq!(model.rx.lock().unwrap().queue_drops, 0);
             drop(model.rx_ring);
@@ -1040,6 +1058,8 @@ mod tests {
             let packet = fetch(&model, txwi::encode(config(chip, 5000)).unwrap());
             assert_eq!(finish(&model, &packet), [0; 5000]);
             let complete = deliver(&mut model, &notification(chip, &[packet.token], 7));
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { ring.apply_tx_free(ring.epoch(), &complete) }.unwrap();
             assert!(ring.poll_consumed().unwrap().is_some());
             {
@@ -1120,6 +1140,8 @@ mod tests {
             ..State::default()
         }));
         let domain: Arc<dyn DmaDomain> = Arc::new(Domain(memory.clone()));
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let result = unsafe {
             DataRing::<_, Context>::install(Io(state.clone()), &Source, domain, 2048, Chip::Mt7925)
         };
@@ -1145,6 +1167,8 @@ mod tests {
             let mut memory = model.memory.lock().unwrap();
             memory.fail_unmap_at = Some(memory.unmaps + 2);
         }
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         assert!(unsafe { ring.release_after_quiesce() }.is_err());
         assert_eq!(model.drops.load(Ordering::Relaxed), 0);
         let remaining = model.memory.lock().unwrap().mappings.len();
@@ -1153,6 +1177,8 @@ mod tests {
         assert_eq!(model.tx.lock().unwrap().queue_drops, 0);
         assert_eq!(model.drops.load(Ordering::Relaxed), 0);
         model.memory.lock().unwrap().fail_unmap_at = None;
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { model.rx_ring.release_after_quiesce() }.unwrap();
     }
 
@@ -1182,6 +1208,8 @@ mod tests {
                 .unwrap();
                 let memory = model.memory.lock().unwrap();
                 let descriptor = ring.descriptors.pointer(head * 16, 16).unwrap();
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 let bytes = unsafe { core::slice::from_raw_parts(descriptor, 16) };
                 expected.extend_from_slice(bytes);
                 for value in [

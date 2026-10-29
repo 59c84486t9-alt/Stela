@@ -549,6 +549,7 @@ mod tests {
     // SAFETY: immutable metadata and independently owned model RAM; CPU access is
     // raw and externally serialized. No physical hardware uses these test labels.
     unsafe impl Send for Backing {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Backing {}
     // SAFETY: same zeroed allocation/mapping/cache metadata is retained through
     // the last real pin; physical labels are independent of CPU VA and IOVA.
@@ -1299,6 +1300,8 @@ mod tests {
             }
             .unwrap(),
         );
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             assert_eq!(
                 wrong.as_mut().bind(state.raw()),

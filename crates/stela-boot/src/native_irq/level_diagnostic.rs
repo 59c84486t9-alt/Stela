@@ -106,6 +106,8 @@ impl Prepared {
         if address == 0 {
             return Err(String::from("fixture DSDT missing"));
         }
+        // SAFETY: `address` is the FADT's DSDT pointer, which the firmware identity map covers
+        // after EBS.
         let dsdt = unsafe { acpi::table(address) }.map_err(|e| format!("fixture DSDT: {e:?}"))?;
         let dsdt_hash = Sha256::digest(dsdt).into();
         if dsdt.len() != 8098
@@ -151,6 +153,8 @@ impl Prepared {
         if svr == u32::MAX || svr & (1 << 12) != 0 {
             return Err(String::from("level fixture requires actual EOI broadcast"));
         }
+        // SAFETY: the fixture's IOAPIC page is mapped uncached for this boot and owned by this
+        // diagnostic.
         let registers = unsafe { ioapic::Mmio::new(self.unit.base as usize) }
             .map_err(|e| format!("IOAPIC mapping: {e:?}"))?;
         // SAFETY: exact previously qualified Q35 single-BSP fixture, retained
@@ -212,6 +216,8 @@ impl Prepared {
             .request(Box::new(pin), handlers.clone())
             .map_err(|e| format!("level request: {e:?}"))?;
         let vector = registration.vector();
+        // SAFETY: the level handler group is registered and interrupts are masked again right after
+        // the wait.
         unsafe {
             asm!("sti", options(nostack));
         }
@@ -221,6 +227,7 @@ impl Prepared {
                 && edu.second.load(Ordering::Acquire) == 1
                 && edu.read(0x24) == 0
         });
+        // SAFETY: masks interrupts on this CPU.
         unsafe {
             asm!("cli", options(nostack));
         }
@@ -263,12 +270,15 @@ impl Prepared {
             return Err(String::from("shared members retained after group release"));
         }
         edu.write(0x60, 3);
+        // SAFETY: the level handler group is registered and interrupts are masked again right after
+        // the wait.
         unsafe {
             asm!("sti", options(nostack));
         }
         let late = clock.wait(1000, || {
             edu.first.load(Ordering::Acquire) != 2 || edu.second.load(Ordering::Acquire) != 1
         });
+        // SAFETY: masks interrupts on this CPU.
         unsafe {
             asm!("cli", options(nostack));
         }
@@ -297,9 +307,11 @@ struct Edu {
 }
 impl Edu {
     fn read(&self, o: usize) -> u32 {
+        // SAFETY: `base` maps the EDU register BAR and callers pass in-range register offsets.
         unsafe { ((self.base + o) as *const u32).read_volatile() }
     }
     fn write(&self, o: usize, v: u32) {
+        // SAFETY: `base` maps the EDU register BAR and callers pass in-range register offsets.
         unsafe { ((self.base + o) as *mut u32).write_volatile(v) };
     }
 }
@@ -382,6 +394,7 @@ unsafe impl Devices for Contributors {
         Ok(())
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
+        // SAFETY: `base` maps the EDU register BAR, which holds its DMA command at 0x98.
         let dma = unsafe { ((self.edu.base + 0x98) as *const u64).read_volatile() };
         let command = self
             .function

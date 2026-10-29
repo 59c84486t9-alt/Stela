@@ -1320,6 +1320,7 @@ impl<D: Devices> Drop for Held<'_, D> {
 // share through `Rc` or `RefCell` is never touched by two cores at once, and
 // no reference into them outlives the guard.
 unsafe impl<D> Send for Board<D> {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl<D> Sync for Board<D> {}
 
 /// The board's devices, shared by every PE's machine.

@@ -188,6 +188,7 @@ mod tests {
             NonNull::new(self.words.get().cast()).unwrap()
         }
         fn get(&self, reg: u32) -> u32 {
+            // SAFETY: `reg` indexes inside the modeled register words this bar owns.
             unsafe {
                 self.pointer()
                     .as_ptr()
@@ -197,6 +198,7 @@ mod tests {
             }
         }
         fn set(&self, reg: u32, value: u32) {
+            // SAFETY: `reg` indexes inside the modeled register words this bar owns.
             unsafe {
                 self.pointer()
                     .as_ptr()
@@ -274,6 +276,8 @@ mod tests {
         for reg in [0x380, 0x384, 0x388, 0x38c, 0x1328] {
             bar.set(reg, 0);
         }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { setup(&mut io, &mut rx, &mut tx) }.unwrap();
         assert_eq!(
             regs.iter().map(|r| bar.get(*r)).collect::<Vec<_>>(),
@@ -288,9 +292,17 @@ mod tests {
         assert_eq!(memory.lock().unwrap().mappings.len(), 522);
         // Repeated initial source setup is allowed while no RX/command has
         // been admitted. This exercises post-power and post-download phases.
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { setup(&mut io, &mut rx, &mut tx) }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { rx.release_after_stop() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { tx.release_after_stop() }.unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { io.beacon_queue().unwrap().release_after_stop() }.unwrap();
         drop(io);
         drop(rx);
@@ -316,6 +328,8 @@ mod tests {
                 io.beacon_queue().unwrap().enqueue(&[0; 8]).unwrap();
             }
             let ptr_clear = bar.get(0x39c);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { setup(&mut io, &mut rx, &mut tx) }.is_err());
             assert_eq!(bar.get(0x39c), ptr_clear);
             assert!(io.beacon_queue().is_err());
@@ -333,6 +347,8 @@ mod tests {
         for fail in [1, 2, 3, 9] {
             let (mut io, mut rx, mut tx, bar, memory) = native();
             memory.lock().unwrap().fail_cpu_sync_at = Some(fail);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { setup(&mut io, &mut rx, &mut tx) }.is_err());
             assert_eq!(bar.get(0x39c), 0);
             assert!(io.beacon_queue().is_err());
@@ -471,6 +487,8 @@ mod tests {
             let (mut io, mut rx, mut tx, bar, memory) = native();
             // Model a reset store that never produces actual zero indices.
             bar.set(reg, 1 << 16);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             assert!(unsafe { setup(&mut io, &mut rx, &mut tx) }.is_err());
             assert!(rx.quarantined() && tx.quarantined());
             assert!(io.beacon_queue().is_err());

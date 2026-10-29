@@ -469,7 +469,10 @@ struct Backing {
 // SAFETY: test allocation is exclusively pinned, bytewise synchronized through
 // the modeled domain. It never purports to reserve actual physical hardware.
 unsafe impl Send for Backing {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl Sync for Backing {}
+// SAFETY: `cpu_base` and `physical` describe the one retained, aligned test allocation for its
+// whole life.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
         self.cpu

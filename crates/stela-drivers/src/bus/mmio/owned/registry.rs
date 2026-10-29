@@ -1049,9 +1049,9 @@ mod tests {
                     Err(Error::ResourceConflict)
                 ));
                 assert_eq!(authority.status().unwrap().installing, 1);
-                // SAFETY: model attempts a conflicting outside alias before
-                // any table publication; rejection must precede effects.
                 assert!(matches!(
+                    // SAFETY: model attempts a conflicting outside alias before any table
+                    // publication; rejection must precede effects.
                     unsafe {
                         authority.reserve_alias(ExistingAlias {
                             physical: request.physical,
@@ -1814,6 +1814,8 @@ mod tests {
             let mut mapped = map(&authority, resource);
             // SAFETY: no model device/CPU users remain.
             unsafe { mapped.retire() }.unwrap();
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             assert_eq!(unsafe { authority.retire_alias(id) }, Err(Error::Retired));
         }
     }
@@ -1864,6 +1866,8 @@ mod tests {
         unsafe { authority.retire_alias(id) }.unwrap();
         let mut mapping = map(&authority, resource);
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 authority.reserve_alias(ExistingAlias {
                     physical: PhysicalSpan::new(BASE, 1).unwrap(),
@@ -2127,6 +2131,8 @@ mod tests {
         // machine/root set. Other fixtures are cfg(test) simulated machines.
         let authority = unsafe { Authority::activate(model.clone(), SPACE, Vec::new()) }.unwrap();
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { Authority::activate(model.clone(), SPACE, Vec::new()) },
             Err(Error::AlreadyActive)
         ));
@@ -2150,6 +2156,8 @@ mod tests {
         ));
         drop(authority);
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { Authority::activate(model.clone(), SPACE, Vec::new()) },
             Err(Error::AlreadyActive)
         ));
@@ -2403,8 +2411,8 @@ mod tests {
                 Err(Error::InvalidPlatformReply)
             ));
             if let Some(mapping) = &mut first {
-                // SAFETY: stopped model users; duplicate identity cannot retry.
                 assert_eq!(
+                    // SAFETY: stopped model users; duplicate identity cannot retry.
                     unsafe { mapping.retire() },
                     Err(Error::InvalidPlatformReply)
                 );

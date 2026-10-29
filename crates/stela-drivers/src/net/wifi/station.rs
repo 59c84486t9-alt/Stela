@@ -1176,6 +1176,7 @@ pub(crate) mod tests {
     }
     pub(crate) fn key(slot: u16, scope: KeyScope) -> KeySlot {
         // Independent protocol fixture has no real slots, DMA or deferred RX.
+        // SAFETY: this test owns the key slot number alone.
         let mut key = unsafe { KeySlot::new(slot).unwrap() };
         let index = if matches!(scope, KeyScope::Pairwise(_)) {
             0
@@ -1895,6 +1896,7 @@ pub(crate) mod tests {
         station
             .complete_configuration(config, Completion::Accepted, 4)
             .unwrap();
+        // SAFETY: this test owns the key slot number alone.
         let mut ptk = unsafe { KeySlot::new(1).unwrap() };
         let ticket = ptk
             .begin_install(
@@ -1928,6 +1930,7 @@ pub(crate) mod tests {
         station
             .complete_configuration(config, Completion::Accepted, 4)
             .unwrap();
+        // SAFETY: this test owns the key slot number alone.
         let mut ptk = unsafe { KeySlot::new(1).unwrap() };
         let ticket = ptk
             .begin_install(

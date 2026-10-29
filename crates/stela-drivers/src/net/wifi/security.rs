@@ -621,6 +621,7 @@ mod tests {
 
     fn slot(number: u16) -> KeySlot {
         // Independent pure model: no physical slot, DMA or deferred users exist.
+        // SAFETY: this test owns the key slot number alone.
         unsafe { KeySlot::new(number).unwrap() }
     }
 
@@ -745,6 +746,8 @@ mod tests {
         );
         slot.invalidate();
         // Fixture has no physical key, RX or deferred users.
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe {
             slot.retire_after_drain();
         }
@@ -815,6 +818,8 @@ mod tests {
             Err(Error::Quarantined)
         );
         // Fixture has no hardware or queued RX users.
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe {
             slot.retire_after_drain();
         }
@@ -848,6 +853,8 @@ mod tests {
     fn drain_model(slot: &mut KeySlot) {
         // Pure slot fixture has no physical key, DMA or old deferred users.
         // A real caller must prove the documented independent remove/drain.
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe {
             slot.retire_after_drain();
         }
@@ -1173,6 +1180,8 @@ mod tests {
             assert!(previous.authorize(&packet(old, 10, None)).is_ok());
             previous.invalidate();
             // Pure model has no hardware, queued RX, or outstanding key users.
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe {
                 previous.retire_after_drain();
             }

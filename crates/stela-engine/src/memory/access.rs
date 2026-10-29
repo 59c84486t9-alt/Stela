@@ -442,6 +442,8 @@ mod tests {
         );
         // Declines occur before touching a deliberately inaccessible pointer.
         assert_eq!(
+            // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in bounds and
+            // no other access.
             unsafe {
                 write_part(
                     std::ptr::null_mut(),
@@ -474,6 +476,8 @@ mod tests {
                     let mut expected = [0u8; QUADWORD_BYTES];
                     expected[..bytes].copy_from_slice(&original[offset..offset + bytes]);
                     assert_eq!(
+                        // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in
+                        // bounds and no other access.
                         unsafe { read_part(pointer, bytes, target) }.unwrap(),
                         u128::from_le_bytes(expected)
                     );
@@ -483,6 +487,8 @@ mod tests {
                 if bytes == QUADWORD_BYTES && !target.supports(TargetCpu::Cx16) {
                     continue;
                 }
+                // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in bounds
+                // and no other access.
                 unsafe { write_part(pointer, bytes, value, target) }.unwrap();
                 let mut expected = original;
                 expected[offset..offset + bytes].copy_from_slice(&value.to_le_bytes()[..bytes]);
@@ -490,6 +496,8 @@ mod tests {
                 if footprint.is_ok() {
                     let mask = u128::MAX >> ((QUADWORD_BYTES - bytes) * BITS_PER_BYTE);
                     assert_eq!(
+                        // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in
+                        // bounds and no other access.
                         unsafe { read_part(pointer, bytes, target) }.unwrap(),
                         value & mask
                     );
@@ -502,11 +510,13 @@ mod tests {
         for bytes in [0, 3, 5, QUADWORD_BYTES, usize::MAX] {
             // Invalid shape must decline without reaching native memory.
             assert_eq!(
+                // SAFETY: the call refuses this address before any access.
                 unsafe { exchange_part(std::ptr::null_mut(), bytes, 0) },
                 Err(AccessError::InvalidWidth)
             );
         }
         assert_eq!(
+            // SAFETY: the call refuses this address before any access.
             unsafe { exchange_part((SCA_BYTES - 1) as *mut u8, HALFWORD_BYTES, 0) },
             Err(AccessError::CrossesScaQuantity)
         );
@@ -549,9 +559,9 @@ mod tests {
                 let mut value = [0; 16];
                 value[..bytes].copy_from_slice(&original[offset..offset + bytes]);
                 let old = u128::from_le_bytes(value);
-                // SAFETY: private exact raw storage; no simultaneous observer or
-                // writer exists, and the selected host capabilities are actual.
                 assert_eq!(
+                    // SAFETY: private exact raw storage; no simultaneous observer or writer exists,
+                    // and the selected host capabilities are actual.
                     unsafe { compare_exchange_part(pointer, bytes, old, 3, target) }.unwrap(),
                     old
                 );
@@ -559,11 +569,15 @@ mod tests {
                 expected[offset..offset + bytes].copy_from_slice(&3u128.to_le_bytes()[..bytes]);
                 assert_eq!(storage.0, expected);
                 assert_eq!(
+                    // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in
+                    // bounds and no other access.
                     unsafe { compare_exchange_part(pointer, bytes, 9, 5, target) }.unwrap(),
                     3
                 );
                 assert_eq!(storage.0, expected);
                 if bytes < 16 {
+                    // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in
+                    // bounds and no other access.
                     assert_eq!(unsafe { add_part(pointer, bytes, u128::MAX) }.unwrap(), 3);
                     expected[offset..offset + bytes].copy_from_slice(&2u128.to_le_bytes()[..bytes]);
                     assert_eq!(storage.0, expected);
@@ -572,15 +586,18 @@ mod tests {
         }
         for bytes in [0, 3, 5, 17] {
             assert_eq!(
+                // SAFETY: the call refuses this address before any access.
                 unsafe { add_part(std::ptr::null_mut(), bytes, 0) },
                 Err(AccessError::InvalidWidth)
             );
             assert_eq!(
+                // SAFETY: the call refuses this address before any access.
                 unsafe { compare_exchange_part(std::ptr::null_mut(), bytes, 0, 0, target) },
                 Err(AccessError::InvalidWidth)
             );
         }
         assert_eq!(
+            // SAFETY: the call refuses this address before any access.
             unsafe { compare_exchange_part(std::ptr::null_mut(), 16, 0, 0, TargetCpu::Baseline) },
             Err(AccessError::MissingCx16)
         );

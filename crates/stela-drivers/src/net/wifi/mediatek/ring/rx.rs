@@ -293,7 +293,11 @@ pub(crate) mod tests {
         let descriptor =
             s.memory.lock().unwrap().mappings[&s.base].1 + s.index as usize * DESC_BYTES;
         let ptr = descriptor as *mut u32;
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let address = u64::from(u32::from_le(unsafe { ptr.read_volatile() }));
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let control = u32::from_le(unsafe { ptr.add(1).read_volatile() });
         assert_eq!(control & DONE, 0);
         assert_eq!(control >> 16, BUFFER_BYTES as u32);
@@ -301,6 +305,8 @@ pub(crate) mod tests {
         assert_ne!(payload as u64, address);
         assert!(bytes.len() <= BUFFER_BYTES);
         // Device writes the actual IOVA-backed payload before publishing DDONE.
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), payload, bytes.len());
             ptr.add(2).write_volatile(0x4321u32.to_le());
@@ -381,6 +387,8 @@ pub(crate) mod tests {
                 let s = state.lock().unwrap();
                 s.memory.lock().unwrap().mappings[&s.base].1 + 4
             };
+            // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+            // nothing accesses it concurrently.
             unsafe { (pointer as *mut u32).write_volatile(ctrl.to_le()) };
             let expected = if ctrl & 128 != 0 {
                 Error::UnsupportedDescriptor

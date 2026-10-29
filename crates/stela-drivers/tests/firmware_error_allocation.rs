@@ -22,6 +22,7 @@ unsafe impl GlobalAlloc for FailingAllocator {
             DENIED.fetch_add(1, Ordering::Relaxed);
             core::ptr::null_mut()
         } else {
+            // SAFETY: the layout has a nonzero size.
             unsafe { System.alloc(layout) }
         }
     }
@@ -30,6 +31,7 @@ unsafe impl GlobalAlloc for FailingAllocator {
             DENIED.fetch_add(1, Ordering::Relaxed);
             core::ptr::null_mut()
         } else {
+            // SAFETY: the layout has a nonzero size.
             unsafe { System.alloc_zeroed(layout) }
         }
     }
@@ -38,10 +40,13 @@ unsafe impl GlobalAlloc for FailingAllocator {
             DENIED.fetch_add(1, Ordering::Relaxed);
             core::ptr::null_mut()
         } else {
+            // SAFETY: the caller passes a live block allocated with `layout`, as `realloc`
+            // requires.
             unsafe { System.realloc(ptr, layout, size) }
         }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: the pointer came from the matching allocation with this layout and is freed once.
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -174,9 +179,11 @@ fn global_allocator_failure_child() {
     // All setup and test-harness work is complete. Every global allocation now
     // returns null. A direct probe verifies the allocator is actually armed.
     FAIL.store(true, Ordering::SeqCst);
+    // SAFETY: the layout has a nonzero size.
     let probe = unsafe { std::alloc::alloc(Layout::new::<u64>()) };
     let armed = probe.is_null();
     if !probe.is_null() {
+        // SAFETY: the pointer came from the matching allocation with this layout and is freed once.
         unsafe { std::alloc::dealloc(probe, Layout::new::<u64>()) };
     }
     let success = provider.load(requirement()).unwrap();

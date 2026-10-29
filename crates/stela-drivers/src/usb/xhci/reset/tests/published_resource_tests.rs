@@ -224,6 +224,8 @@ fn published_iso_pool_reuses_real_queued_service_and_rejects_old_tickets_for_96_
                 // stopped event must precede Stop ACK; Disable checks full ERDP.
                 assert!(hardware.borrow().pending.contains_key(&(old.slot, 3, 0)));
                 let fresh = selected(
+                    // SAFETY: the model device is stopped and drained, so nothing still uses what
+                    // this releases.
                     unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.unwrap(),
                     &old,
                 );
@@ -313,6 +315,8 @@ fn uncertain_published_retirement_or_settled_reset_keeps_original_storage_quaran
         hardware.borrow_mut().fault = fault;
         let mut c = shared.borrow_mut();
         assert!(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.is_err(),
             "{fault:?}"
         );
@@ -339,6 +343,8 @@ fn changed_published_stream_geometry_refuses_before_allocation_or_context_public
     let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
     let mut c = shared.borrow_mut();
     let fresh = selected(
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.unwrap(),
         &old,
     );
@@ -394,6 +400,8 @@ fn published_pool_keeps_unused_dropped_rings_through_96_resets_and_real_reconfig
         for cycle in 0..96 {
             let mut c = shared.borrow_mut();
             let fresh = selected(
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 unsafe { c.reset_and_reuse_root(&old, &active, &mut dma) }.unwrap(),
                 &old,
             );
@@ -465,6 +473,8 @@ fn fatal_health_after_taking_published_endpoint_storage_keeps_every_owner() {
     let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
     let mut c = shared.borrow_mut();
     let fresh = selected(
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.unwrap(),
         &old,
     );
@@ -515,6 +525,8 @@ fn failed_fresh_enable_address_or_identity_keeps_the_entire_published_pool() {
         hardware.borrow_mut().fault = fault;
         let mut c = shared.borrow_mut();
         assert!(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.is_err(),
             "{fault:?}"
         );
@@ -570,6 +582,8 @@ fn old_stream_ticket_cannot_consume_actual_unread_completion_at_identical_reused
         let (old_command, old_stream, _) =
             unread_stream_read(&mut c, old.id, &mut command, &data, &status);
         let fresh = selected(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.unwrap(),
             &old,
         );
@@ -751,6 +765,8 @@ fn published_return_erases_all_context_stream_and_overfetch_bytes_only_after_rea
                     arrays,
                     observed: observed.clone(),
                 });
+                // SAFETY: the model device is stopped and drained, so nothing still uses what this
+                // releases.
                 let fresh = unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.unwrap();
                 assert_eq!(*observed.borrow(), 1);
                 assert_ne!(old.id, fresh.id);

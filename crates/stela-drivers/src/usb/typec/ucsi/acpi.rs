@@ -282,6 +282,8 @@ mod tests {
             controls: Vec::new(),
         };
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { Mailbox::new(base, 48, firmware) },
             Err(TransportError::Mapping)
         ));

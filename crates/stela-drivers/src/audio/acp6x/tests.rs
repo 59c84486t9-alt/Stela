@@ -637,8 +637,8 @@ fn source_presence_ownership_exact_identity_and_pin_mode_are_not_inferred() {
         },
     ] {
         let device = Arc::new(Mutex::new(Device::new(0x60)));
-        // SAFETY: same isolated model as fixture; deliberately invalid grant.
         assert!(
+            // SAFETY: same isolated model as fixture; deliberately invalid grant.
             unsafe {
                 Controller::claim(
                     Model(device.clone()),

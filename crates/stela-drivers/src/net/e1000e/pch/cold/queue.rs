@@ -1237,8 +1237,8 @@ pub(super) mod tests {
             let mut memory = Memory::new();
             let (state, released, controller) = setup();
             state.borrow_mut().fail_at = Some(at);
-            // SAFETY: the same isolated actual native-RAM model grant.
             assert!(
+                // SAFETY: the same isolated actual native-RAM model grant.
                 unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                 "lost queue fault at {at}"
             );
@@ -1393,8 +1393,8 @@ pub(super) mod tests {
             let (state, released, controller) = setup_lpt(0x153a, 0);
             if at < configured {
                 state.borrow_mut().fail_at = Some(at);
-                // SAFETY: isolated same-function model's actual native RAM.
                 assert!(
+                    // SAFETY: isolated same-function model's actual native RAM.
                     unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                     "lost LPT queue fault at{at}"
                 );
@@ -1610,6 +1610,8 @@ pub(super) mod tests {
             if at < configured {
                 state.borrow_mut().fail_at = Some(at); /* SAFETY: actual isolated native RAM grant. */
                 assert!(
+                    // SAFETY: the model device, its pages and its domain belong to this test alone;
+                    // no other driver, worker or DMA touches them.
                     unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                     "lost SPT config{at}"
                 );
@@ -2004,8 +2006,8 @@ pub(super) mod tests {
                     }
                     if at < configured {
                         state.borrow_mut().fail_at = Some(at);
-                        // SAFETY: the same isolated model's actual native RAM.
                         assert!(
+                            // SAFETY: the same isolated model's actual native RAM.
                             unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                             "lost config{family:?}:{at}"
                         );
@@ -2264,8 +2266,8 @@ pub(super) mod tests {
                     let mut memory = Memory::new();
                     if at < cold {
                         state.borrow_mut().fail_at = Some(at);
-                        // SAFETY: fresh same-host model; failure never retried as a new owner.
                         assert!(
+                            // SAFETY: fresh same-host model; failure never retried as a new owner.
                             unsafe {
                                 Controller::new_mtp(device, io, timer, mtp::tests::host(disable))
                             }
@@ -2286,8 +2288,8 @@ pub(super) mod tests {
                         }
                         if at < configured {
                             state.borrow_mut().fail_at = Some(at);
-                            // SAFETY: actual live model requester and owned coherent model RAM.
                             assert!(
+                                // SAFETY: actual live model requester and owned coherent model RAM.
                                 unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                                 "queue{device:x}/{disable}/{at}"
                             );

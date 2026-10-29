@@ -470,9 +470,9 @@ fn digest_and_hmac_match_independent_vectors_and_wipe_all_backend_allocations() 
         hmac.update(b"Hi ").unwrap();
         hmac.update(b"There").unwrap();
         let mut sentinel = [0xa5; 64];
-        // SAFETY: exact live affine context and writable sentinel, deliberately
-        // mismatched output length is rejected before any output write.
         assert_ne!(
+            // SAFETY: exact live affine context and writable sentinel, deliberately mismatched
+            // output length is rejected before any output write.
             unsafe { stela_mbed_md_finish(hmac.state.as_ptr(), sentinel.as_mut_ptr(), 64) },
             0
         );

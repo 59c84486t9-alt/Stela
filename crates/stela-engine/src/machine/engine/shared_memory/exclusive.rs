@@ -281,6 +281,8 @@ mod tests {
                 .install_shared_memory_for_processors(Arc::clone(&ram), &events)
                 .unwrap();
             let original = core::array::from_fn::<_, 64, _>(|i| i as u8 ^ 0xa5);
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(PA, &original) }.unwrap();
             let memory = machine.cpu.canonical_memory.as_mut().unwrap();
             // This is the actual POSIX model's prepared authority, not a
@@ -314,6 +316,8 @@ mod tests {
             assert!(stored.fault.is_none());
             assert_eq!(stored.data.status, 0);
             let mut actual = [0; 64];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(PA, &mut actual) }.unwrap();
             let mut expected = original;
             expected[..bytes as usize].copy_from_slice(&value.to_le_bytes()[..bytes as usize]);
@@ -328,6 +332,8 @@ mod tests {
             .unwrap();
         const LEAF: u64 = 0x10000 + 3 * 4096 + 4 * 8;
         const READ_ONLY: u64 = PA | 3 | (1 << 10) | (3 << 8) | (1 << 7);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &READ_ONLY.to_le_bytes()) }.unwrap();
         let memory = machine.cpu.canonical_memory.as_mut().unwrap();
         let input = payload(ExclusiveOperation::Store, false, 0x1234);
@@ -365,6 +371,8 @@ mod tests {
             })
         ));
         let mut actual = [0; 64];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(PA, &mut actual) }.unwrap();
         assert_eq!(actual, [0; 64]);
     }

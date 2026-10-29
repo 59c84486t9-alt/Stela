@@ -101,6 +101,8 @@ fn model(topology: Topology, pec: bool) -> (Sbs<Model>, Rc<RefCell<Peripheral>>)
     peripheral.words.insert((MANAGER, SYSTEM_INFO), 3);
     peripheral.words.insert((CHARGER, 0x13), 0x8010);
     let m = Rc::new(RefCell::new(peripheral));
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let sbs = unsafe { Sbs::claim(Model(m.clone()), topology, pec) }.unwrap();
     (sbs, m)
 }
@@ -261,6 +263,8 @@ fn failed_manager_discovery_never_falls_back_to_a_direct_battery() {
         fail: Some(1),
         ..Peripheral::default()
     }));
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let result = unsafe { Sbs::claim(Model(peripheral.clone()), Topology::Managed, false) };
     assert!(matches!(
         result,

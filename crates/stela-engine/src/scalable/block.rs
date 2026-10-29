@@ -1175,9 +1175,9 @@ mod tests {
                 }
                 let before = fixture.snapshot()?;
                 let pointers = context_pointers(&context);
-                // SAFETY: These rejection cases never enter native code; the existing
-                // API checks metadata before borrowing or dereferencing any view.
                 assert!(
+                    // SAFETY: these rejection cases never enter native code; `invoke` checks
+                    // metadata before borrowing or dereferencing any view.
                     unsafe {
                         prepared.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)
                     }
@@ -1339,8 +1339,8 @@ mod tests {
                     )?;
                 }
                 let before = mismatch.snapshot()?;
-                // SAFETY: Invoke must decline the mismatching owner before native entry.
                 assert!(
+                    // SAFETY: `invoke` declines the mismatching owner before native entry.
                     unsafe {
                         entry.invoke(&mut mismatch.thread, &mut mismatch.scalable, &mut context)
                     }

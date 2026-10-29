@@ -477,6 +477,7 @@ mod tests {
         gmc.overrides += 1;
         gmc.last_address = address;
         // Test marker, not a claim of generation coherency or NUMA policy.
+        // SAFETY: `flags` is the model's live out-parameter for this synchronous call.
         unsafe { *flags ^= 0x80 };
     }
     unsafe extern "C" fn model_set(
@@ -491,6 +492,8 @@ mod tests {
         gmc.writes += 1;
         // amdgpu_gmc_set_pte_pde's encoding.
         let value = (address & 0x0000_ffff_ffff_f000) | flags;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             mapping
                 .cast::<u64>()
@@ -548,6 +551,8 @@ mod tests {
                 model_set,
             )
         };
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { table.write_system_pages(source, request, &mut callbacks) }
     }
     fn clear(
@@ -563,6 +568,8 @@ mod tests {
                 model_set,
             )
         };
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { table.clear_system_pages(request, &mut callbacks) }
     }
     fn entry(table: &RamPageTable, offset: usize) -> u64 {
@@ -681,8 +688,8 @@ mod tests {
         let mut table = table(&pages, domain.clone(), 24);
         let mut source = source_mapping(&pages, domain.clone());
         domain.fail_unmap.store(true, Ordering::Relaxed);
-        // SAFETY: the model has no hardware users; backend injects invalidation failure.
         assert_eq!(
+            // SAFETY: the model has no hardware users; backend injects invalidation failure.
             unsafe { table.unmap() },
             Err(StorageError::Dma(DmaError::InvalidationFailed))
         );

@@ -276,6 +276,8 @@ impl Registers for InvalidDescriptor {
             if self.stall {
                 self.hardware.borrow_mut().stall_completed_control(1);
             } else {
+                // SAFETY: the pointer addresses this test's own live pages, and the stopped model
+                // writes nothing concurrently.
                 unsafe { (buffer as *mut u8).write_volatile(0) };
             }
             self.hardware.borrow_mut().fault = self.cleanup_fault;

@@ -166,11 +166,15 @@ mod tests {
     fn same_pc_prefix_rereads_canonical_bytes_with_one_actual_resolution() {
         fixture(|memory, controls, ram| {
             let expected = [0xd503201fu32.to_le_bytes(), 0x14000001u32.to_le_bytes()].concat();
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x14000, &expected) }.unwrap();
             #[cfg(feature = "native-profile")]
             let before = memory.source.statistics();
             let loan = memory.memory.execution_loan().unwrap();
             {
+                // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                // writer while this witness lives.
                 let source = unsafe { first(memory, controls, &loan, 0x4000) }.unwrap();
                 assert_eq!(source.first_word(), 0xd503201f);
                 let mut output = [0; 8];
@@ -190,9 +194,13 @@ mod tests {
             drop(loan);
             assert!(ram.try_service().unwrap().is_some());
             // A new scope must observe changed permissions, never old rights.
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x13020, &0u64.to_le_bytes()) }.unwrap();
             let loan = memory.memory.execution_loan().unwrap();
             assert!(matches!(
+                // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                // writer while this witness lives.
                 unsafe { first(memory, controls, &loan, 0x4000) },
                 Err(FetchFailure::Fault(_))
             ));
@@ -202,8 +210,12 @@ mod tests {
     #[test]
     fn page_extent_and_instruction_size_refuse_before_staging() {
         fixture(|memory, controls, ram| {
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x14ffc, &0xd503201fu32.to_le_bytes()) }.unwrap();
             let loan = memory.memory.execution_loan().unwrap();
+            // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA writer
+            // while this witness lives.
             let source = unsafe { first(memory, controls, &loan, 0x4ffc) }.unwrap();
             let mut good = [0; 4];
             source.read_into(&mut good).unwrap();
@@ -227,6 +239,8 @@ mod tests {
                 #[cfg(feature = "native-profile")]
                 let before = memory.source.statistics();
                 assert!(matches!(
+                    // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                    // writer while this witness lives.
                     unsafe { first(memory, controls, &loan, 0x4000) },
                     Err(FetchFailure::Refused(MemoryStatus::Domain))
                 ));
@@ -246,10 +260,14 @@ mod tests {
         fixture(|memory, controls, ram| {
             let mut controls = controls.clone();
             controls.translation.sctlr &= !1;
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x14000, &0xd503201fu32.to_le_bytes()) }.unwrap();
             let loan = memory.memory.execution_loan().unwrap();
             #[cfg(feature = "native-profile")]
             let before = memory.source.statistics();
+            // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA writer
+            // while this witness lives.
             let source = unsafe { first(memory, &controls, &loan, 0x14000) }.unwrap();
             let mut bytes = [0; 4];
             source.read_into(&mut bytes).unwrap();
@@ -268,10 +286,13 @@ mod tests {
         fixture(|memory, controls, _| {
             let loan = memory.memory.execution_loan().unwrap();
             assert_eq!(
+                // SAFETY: the callback runs once on this thread and touches only the checked view.
                 unsafe { memory.memory.with_checked_view(|view| view.version ^= 1) },
                 Err(MemoryStatus::Domain)
             );
             assert!(matches!(
+                // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                // writer while this witness lives.
                 unsafe { first(memory, controls, &loan, 0x4000) },
                 Err(FetchFailure::Refused(MemoryStatus::Domain))
             ));

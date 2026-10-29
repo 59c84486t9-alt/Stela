@@ -35,7 +35,7 @@ impl Mapping {
             return Err(std::io::Error::last_os_error()).context("allocate RW native code");
         }
         let Some(pointer) = NonNull::new(pointer.cast::<u8>()) else {
-            // Address zero cannot back a Rust NonNull mapping, even if an OS
+            // SAFETY: Address zero cannot back a Rust NonNull mapping, even if an OS
             // were to honor it. Release the successful OS allocation first.
             unsafe { libc::munmap(pointer, bytes.len()) };
             anyhow::bail!("OS returned an unusable null native mapping");
@@ -129,6 +129,7 @@ impl Mapping {
             *mut GuestState,
             *mut stela_compiler::context::ExecutionContext,
         ) = unsafe { core::mem::transmute(self.pointer.as_ptr()) };
+        // SAFETY: the caller upholds `call_context`'s contract above.
         unsafe { function(state, context) };
         Ok(())
     }

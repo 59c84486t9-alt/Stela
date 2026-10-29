@@ -350,6 +350,7 @@ pub unsafe extern "C" fn stela_metal_input_open(
             {
                 return Err(failure(LIMIT));
             }
+            // SAFETY: the caller supplies a complete, writable output slot.
             if !unsafe { *output }.is_null() {
                 return Err(failure(INVALID));
             }
@@ -359,6 +360,7 @@ pub unsafe extern "C" fn stela_metal_input_open(
                 limits,
             )?;
             // A process OOM/panic never unwinds through C: the isolated helper fails.
+            // SAFETY: the caller supplies a complete, writable output slot, checked empty above.
             unsafe { output.write(Box::into_raw(Box::new(input))) };
             Ok(())
         })(),
@@ -383,6 +385,7 @@ pub unsafe extern "C" fn stela_metal_input_info(
             // SAFETY: complete caller-owned output header, retained immutable input.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<Info>(o.size, o.abi)?;
+            // SAFETY: `out` is the caller's complete record, whose header was checked above.
             unsafe { out.write(i.info) };
             Ok(())
         })(),
@@ -403,9 +406,12 @@ pub unsafe extern "C" fn stela_metal_input_entry(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
+            // SAFETY: `input` is a live retained handle and `out` a complete caller-owned record,
+            // per this function's contract.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<Entry>(o.size, o.abi)?;
             let value = i.entry(index)?.info;
+            // SAFETY: `out` is the caller's complete record, whose header was checked above.
             unsafe { out.write(value) };
             Ok(())
         })(),
@@ -427,9 +433,12 @@ pub unsafe extern "C" fn stela_metal_input_entry_metadata(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
+            // SAFETY: `input` is a live retained handle and `out` a complete caller-owned record,
+            // per this function's contract.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<EntryMetadata>(o.size, o.abi)?;
             let value = i.entry(index)?.metadata;
+            // SAFETY: `out` is the caller's complete record, whose header was checked above.
             unsafe { out.write(value) };
             Ok(())
         })(),
@@ -454,6 +463,8 @@ unsafe fn view(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
+            // SAFETY: `input` is a live retained handle and `out` a complete caller-owned record,
+            // per this function's contract.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<View>(o.size, o.abi)?;
             let bytes = match kind {
@@ -461,6 +472,7 @@ unsafe fn view(
                 ViewKind::Air => i.air(index)?,
                 ViewKind::Original => &i.bytes,
             };
+            // SAFETY: `out` is the caller's complete record, whose header was checked above.
             unsafe {
                 out.write(View {
                     size: mem::size_of::<View>() as u32,
@@ -488,6 +500,7 @@ pub unsafe extern "C" fn stela_metal_input_name(
     out: *mut View,
     error: *mut Error,
 ) -> u32 {
+    // SAFETY: the caller upholds `stela_metal_input_info`'s contract, which is `view`'s.
     unsafe { view(input, index, out, error, ViewKind::Name) }
 }
 /// # Safety
@@ -500,6 +513,7 @@ pub unsafe extern "C" fn stela_metal_input_air(
     out: *mut View,
     error: *mut Error,
 ) -> u32 {
+    // SAFETY: the caller upholds `stela_metal_input_info`'s contract, which is `view`'s.
     unsafe { view(input, index, out, error, ViewKind::Air) }
 }
 /// # Safety
@@ -511,6 +525,7 @@ pub unsafe extern "C" fn stela_metal_input_original(
     out: *mut View,
     error: *mut Error,
 ) -> u32 {
+    // SAFETY: the caller upholds `stela_metal_input_info`'s contract, which is `view`'s.
     unsafe { view(input, 0, out, error, ViewKind::Original) }
 }
 /// # Safety
@@ -519,8 +534,11 @@ pub unsafe extern "C" fn stela_metal_input_original(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stela_metal_input_destroy(slot: *mut *mut Input) {
     if !slot.is_null() {
+        // SAFETY: the caller passes a writable slot that uniquely owns its handle.
         let input = unsafe { slot.replace(ptr::null_mut()) };
         if !input.is_null() {
+            // SAFETY: the slot held the handle `stela_metal_input_open` boxed; no borrowed view
+            // outlives it.
             unsafe { drop(Box::from_raw(input)) };
         }
     }
@@ -790,6 +808,7 @@ mod tests {
         let parsed = Library::parse(&bytes).unwrap();
         let input = snapshot(&bytes, limits(MTLB)).unwrap();
         let mut facts = empty_metadata();
+        // SAFETY: `input` is a live local handle and `facts` a complete local record.
         unsafe {
             assert_eq!(
                 stela_metal_input_entry_metadata(&input, 0, &mut facts, ptr::null_mut()),
@@ -832,6 +851,7 @@ mod tests {
             assert_eq!(&input.bytes[range.end - 4..range.end], b"ENDT");
         }
         let prior = facts;
+        // SAFETY: `input` is a live local handle and `facts` a complete local record.
         unsafe {
             assert_eq!(
                 stela_metal_input_entry_metadata(&input, 1, &mut facts, ptr::null_mut()),
@@ -891,15 +911,18 @@ mod tests {
     }
     #[global_allocator]
     static ALLOCATOR: TestAllocator = TestAllocator;
+    // SAFETY: every call forwards to `System`, or returns null to refuse.
     unsafe impl std::alloc::GlobalAlloc for TestAllocator {
         unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
             if layout.size() >= 1024 * 1024 && DENY_LARGE.try_with(|v| v.get()).unwrap_or(false) {
                 let _ = DENIED.try_with(|v| v.set(v.get() + 1));
                 return ptr::null_mut();
             }
+            // SAFETY: the caller guarantees a nonzero size, as `GlobalAlloc::alloc` requires.
             unsafe { std::alloc::System.alloc(layout) }
         }
         unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+            // SAFETY: the caller passes a block from this allocator with `layout`, as `dealloc` requires.
             unsafe {
                 std::alloc::System.dealloc(pointer, layout);
             }
@@ -914,6 +937,8 @@ mod tests {
                 let _ = DENIED.try_with(|v| v.set(v.get() + 1));
                 return ptr::null_mut();
             }
+            // SAFETY: the caller passes a block from this allocator with `layout`, as `realloc`
+            // requires.
             unsafe { std::alloc::System.realloc(pointer, layout, size) }
         }
     }

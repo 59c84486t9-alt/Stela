@@ -783,8 +783,8 @@ mod tests {
         let (mut other, _, _) = fixture();
         let op = operation(Purpose::Data);
         let admission = owner.admit(op).unwrap();
-        // SAFETY: closure would use only the synthetic guard and exact operation.
         assert_eq!(
+            // SAFETY: closure would use only the synthetic guard and exact operation.
             unsafe { other.publish(admission, op, |_| panic!("stale publish")) },
             Err::<(), _>(Error::Stale)
         );
@@ -801,6 +801,8 @@ mod tests {
         ] {
             let admission = owner.admit(op).unwrap();
             assert_eq!(
+                // SAFETY: the admission belongs to this test, and the callback runs synchronously
+                // on this thread.
                 unsafe { owner.publish(admission, changed, |_| panic!("changed publish")) },
                 Err::<(), _>(Error::Mismatch)
             );
@@ -818,6 +820,8 @@ mod tests {
             hardware.native.set(context);
             os.native.set(context);
             assert_eq!(
+                // SAFETY: the admission belongs to this test, and the callback runs synchronously
+                // on this thread.
                 unsafe { owner.publish(admission, op, |_| panic!("context publish")) },
                 Err::<(), _>(Error::Stale)
             );
@@ -831,6 +835,8 @@ mod tests {
         let admission = owner.admit(op).unwrap();
         os.revision.set(2);
         assert_eq!(
+            // SAFETY: the admission belongs to this test, and the callback runs synchronously on
+            // this thread.
             unsafe { owner.publish(admission, op, |_| panic!("old OS revision")) },
             Err::<(), _>(Error::Stale)
         );
@@ -838,6 +844,8 @@ mod tests {
         // Even an incorrectly unchanged source revision cannot bypass live denial.
         hardware.permissions.set(1);
         assert_eq!(
+            // SAFETY: the admission belongs to this test, and the callback runs synchronously on
+            // this thread.
             unsafe { owner.publish(admission, op, |_| panic!("hardware revoked")) },
             Err::<(), _>(Error::HardwareDenied)
         );
@@ -845,6 +853,8 @@ mod tests {
         let admission = owner.admit(op).unwrap();
         assert!(os.revoke());
         assert_eq!(
+            // SAFETY: the admission belongs to this test, and the callback runs synchronously on
+            // this thread.
             unsafe { owner.publish(admission, op, |_| panic!("OS revoked")) },
             Err::<(), _>(Error::OsUnavailable)
         );

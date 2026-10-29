@@ -192,8 +192,8 @@ fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
     ));
     key.authorize(&key_packet(gtk, 10)).unwrap();
     for (index, material, identity) in [(4, 0x55, old), (5, 0x66, new)] {
-        // SAFETY: no actual model old users; exact retries cannot reset either IPN.
         assert_eq!(
+            // SAFETY: no actual model old users; exact retries cannot reset either IPN.
             unsafe {
                 key.rotate_igtk(
                     &mut mailbox,
@@ -288,8 +288,8 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
             ),
         ),
     ] {
-        // SAFETY: no actual model users; invalid input must not publish.
         assert_eq!(
+            // SAFETY: no actual model users; invalid input must not publish.
             unsafe {
                 key.rotate_igtk(
                     &mut mailbox,
@@ -316,8 +316,8 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
     )
     .unwrap();
     let before = wm.lock().unwrap().completed.len();
-    // SAFETY: new authentic model GTK namespace with no old users; reuse must still refuse.
     assert_eq!(
+        // SAFETY: new authentic model GTK namespace with no old users; reuse must still refuse.
         unsafe {
             key.install_igtk(
                 &mut mailbox,
@@ -349,8 +349,8 @@ fn live_igtk_history_exhaustion_preserves_current_and_other_receive_windows() {
     }
     let windows = key.installed_igtks();
     let before = wm.lock().unwrap().completed.len();
-    // SAFETY: same fully drained model namespace; capacity refusal must be effect-free.
     assert_eq!(
+        // SAFETY: same fully drained model namespace; capacity refusal must be effect-free.
         unsafe { key.rotate_igtk(&mut mailbox, 5, &[0xfe; 16], PacketNumber::new(0).unwrap()) },
         Err(super::super::Error::Bip(Error::HistoryExhausted))
     );
@@ -379,8 +379,9 @@ fn actual_negative_late_or_missing_live_igtk_ack_quarantines_every_key_owner() {
             2 => response.lock().unwrap().unsolicited = true,
             _ => response.lock().unwrap().drop = true,
         }
-        // SAFETY: no modeled old users; firmware/ACK faults are intentionally real peer outcomes.
         assert!(
+            // SAFETY: no modeled old users; firmware/ACK faults are intentionally real peer
+            // outcomes.
             unsafe {
                 key.rotate_igtk(
                     &mut mailbox,

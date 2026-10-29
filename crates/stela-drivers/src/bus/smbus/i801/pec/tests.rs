@@ -510,6 +510,8 @@ fn fixture(device: u16, buffer: bool) -> Fixture {
         unsafe { OwnedConfiguration::claim(function, Lease(configuration_drop.clone())) }
             .ok()
             .unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let host = unsafe { Controller::claim(host, configuration) }
         .ok()
         .unwrap();

@@ -20,8 +20,8 @@ fn owning_live_igtk_rotation_preserves_buffered_notice_then_revokes_taken_envelo
     link.service().unwrap();
     assert_eq!(link.queues().notices, 1);
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: deliberate pending frontend user must refuse before actual publication.
     assert!(matches!(
+        // SAFETY: deliberate pending frontend user must refuse before actual publication.
         unsafe {
             link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },
@@ -71,8 +71,8 @@ fn owning_live_igtk_rotation_waits_for_released_tx_notice_and_exact_retry_is_eff
     link.transmit_management(&first, Transmit::SaQueryRequest([1, 2]))
         .unwrap();
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: pending real native TX makes the supposedly drained update refuse.
     assert!(
+        // SAFETY: pending real native TX makes the supposedly drained update refuse.
         unsafe {
             link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         }
@@ -82,8 +82,8 @@ fn owning_live_igtk_rotation_waits_for_released_tx_notice_and_exact_retry_is_eff
     assert_eq!(finish_tx(&model).len(), 1);
     link.service().unwrap();
     assert_ne!(link.queues().notices, 0);
-    // SAFETY: completed but retained frontend TX notice is still an old-key user.
     assert!(matches!(
+        // SAFETY: completed but retained frontend TX notice is still an old-key user.
         unsafe {
             link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },

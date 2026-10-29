@@ -76,8 +76,12 @@ fn powered<'a>(
     let mut power = phy
         .begin_transmit_power(20)
         .unwrap_or_else(|_| panic!("power"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { power.advance(source) }.unwrap();
     complete_power(&power, native, entry, sequence, false);
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { power.advance(source) }.unwrap();
     // Publish real completed-buffer replenishment. The initial fixed pool's
     // credits are nearly exhausted by the actual cold command prefix; never
@@ -148,6 +152,8 @@ fn finish_add(
     sequence: &mut u16,
     entry: &mut u16,
 ) {
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { binding.advance(source) }.unwrap();
     for command in binding.commands().to_vec() {
         complete_binding(
@@ -162,6 +168,8 @@ fn finish_add(
                 &[]
             },
         );
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(source) }.unwrap();
         *entry += 1;
         *sequence += 1;
@@ -184,6 +192,8 @@ fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebi
     let mut binding = unsafe { power.begin_binding() }.unwrap_or_else(|_| panic!("binding"));
     finish_add(&mut binding, &source, &native, &mut sequence, &mut entry);
     binding.begin_remove().unwrap();
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { binding.advance(&source) }.unwrap();
     let commands = binding.commands()[2..].to_vec();
     assert_eq!(commands[0].kind(), BindingCommandKind::ClearQuotas);
@@ -205,6 +215,8 @@ fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebi
             records.cpu_sync_fail = Some(records.cpu_syncs + 1);
             drop(records);
             assert!(matches!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { binding.advance(&source) },
                 Err(Ax200BindingError::Boot(Error::CommandReclaim(_)))
             ));
@@ -215,6 +227,8 @@ fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebi
             );
             native.domain.records.lock().unwrap().cpu_sync_fail = None;
         }
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(&source) }.unwrap();
         entry += 1;
         sequence += 1;
@@ -223,6 +237,8 @@ fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebi
         .into_transmit_power()
         .unwrap_or_else(|_| panic!("unbound"));
     power.replenish_completed_receive().unwrap();
+    // SAFETY: the simulated device and its providers belong to this fixture alone; no other worker
+    // touches them.
     let mut rebound = unsafe { power.begin_binding() }.unwrap_or_else(|_| panic!("rebind"));
     finish_add(&mut rebound, &source, &native, &mut sequence, &mut entry);
     rebound.begin_remove().unwrap();
@@ -263,6 +279,8 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
             let allocations = source.calls.load(Ordering::Relaxed);
             let bell = native.state.lock().unwrap().registers[&0x460];
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { binding.advance(&source) },
                 Err(if case == 0 {
                     Ax200BindingError::MissingApi
@@ -283,8 +301,12 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
                 let mut records = native.domain.records.lock().unwrap();
                 records.sync_fail = Some(records.syncs + 2);
                 drop(records);
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 assert!(unsafe { binding.advance(&source) }.is_err());
             } else {
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { binding.advance(&source) }.unwrap();
                 assert_eq!(
                     binding.phase(),
@@ -295,6 +317,8 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
                 }
                 .delay(20);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { binding.advance(&source) },
                     Err(Ax200BindingError::Deadline(BindingCommandKind::ClearQuotas))
                 );
@@ -309,6 +333,8 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
         let error = binding.first_error().unwrap().clone();
         let operations = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { binding.advance(&source) }, Err(error.clone()));
         assert_eq!(binding.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), operations);
@@ -375,6 +401,8 @@ fn exercise(bytes: &[u8], layout: bool) {
         );
     }));
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(&source) }.unwrap(),
         Ax200BindingPhase::Waiting(BindingCommandKind::Add)
     );
@@ -402,11 +430,15 @@ fn exercise(bytes: &[u8], layout: bool) {
         records.cpu_sync_fail = Some(records.cpu_syncs + 1);
         drop(records);
         assert!(matches!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { binding.advance(&source) },
             Err(Ax200BindingError::Boot(Error::CommandReclaim(_)))
         ));
         assert!(binding.first_error().is_none());
         native.domain.records.lock().unwrap().cpu_sync_fail = None;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(&source) }.unwrap();
         entry += 1;
         sequence += 1;
@@ -417,6 +449,8 @@ fn exercise(bytes: &[u8], layout: bool) {
     let acquired = policy.acquired.load(Ordering::SeqCst);
     native.revoked.store(true, Ordering::SeqCst);
     binding.begin_remove().unwrap();
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { binding.advance(&source) }.unwrap();
     let commands = binding.commands()[2..].to_vec();
     let firmware = crate::net::wifi::intel::firmware::Firmware::parse(bytes).unwrap();
@@ -457,6 +491,8 @@ fn exercise(bytes: &[u8], layout: bool) {
             &[][..]
         };
         complete_binding(&binding, &native, entry, sequence, &command, payload);
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(&source) }.unwrap();
         entry += 1;
         sequence += 1;
@@ -499,6 +535,8 @@ fn binding_requires_entire_os_envelope_and_ceiling_before_any_dma_publication() 
         let allocations = source.calls.load(Ordering::Relaxed);
         let bell = native.state.lock().unwrap().registers[&0x460];
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { binding.advance(&source) },
             Err(match case {
                 0..=2 => Ax200BindingError::Regulatory(regulatory::Error::OsDenied),
@@ -526,6 +564,8 @@ fn binding_status_failure_partial_power_failure_and_missing_ack_retain_original_
         authorize(&policy);
         // SAFETY: scoped authored service as in exercise above.
         let mut binding = unsafe { power.begin_binding() }.unwrap_or_else(|_| panic!("binding"));
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { binding.advance(&source) }.unwrap();
         let command = binding.commands()[0].clone();
         let payload = match case {
@@ -539,6 +579,8 @@ fn binding_status_failure_partial_power_failure_and_missing_ack_retain_original_
             }
             .delay(20);
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { binding.advance(&source) },
                 Err(Ax200BindingError::Deadline(BindingCommandKind::Add))
             );
@@ -548,6 +590,8 @@ fn binding_status_failure_partial_power_failure_and_missing_ack_retain_original_
                 policy.unavailable.store(true, Ordering::SeqCst);
             }
             assert_eq!(
+                // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                // simulated requester domain.
                 unsafe { binding.advance(&source) },
                 Err(match case {
                     0 => Ax200BindingError::Status(1),
@@ -560,6 +604,8 @@ fn binding_status_failure_partial_power_failure_and_missing_ack_retain_original_
         let error = binding.first_error().unwrap().clone();
         let operations = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { binding.advance(&source) }, Err(error.clone()));
         assert_eq!(binding.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), operations);

@@ -891,6 +891,8 @@ mod tests {
         );
         // Pure protocol fixture has no physical radio, DMA or old event users.
         assert_eq!(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { scanner.reset_drained(ticket) }.unwrap(),
             Outcome::Aborted
         );

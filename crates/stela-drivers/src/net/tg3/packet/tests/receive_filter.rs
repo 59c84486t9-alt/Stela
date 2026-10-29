@@ -98,6 +98,8 @@ fn fixture(chip: u32) -> Fixture {
             },
         )
     };
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Ok(packet) => packet,
         Err((error, _)) => panic!("filter attach {chip:x}: {error:?}"),

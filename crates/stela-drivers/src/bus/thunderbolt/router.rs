@@ -1010,9 +1010,9 @@ mod tests {
                 _ => unreachable!(),
             }
             let dropped = owner.dropped.clone();
-            // SAFETY: this exact synthetic requester/epoch represents negative
-            // metadata/prerequisites. No actual authority or write is fabricated.
             assert!(
+                // SAFETY: this exact synthetic requester/epoch represents negative
+                // metadata/prerequisites. No actual authority or write is fabricated.
                 unsafe {
                     Setup::new(
                         channel,

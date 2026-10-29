@@ -536,6 +536,8 @@ fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes).to_vec() };
                 assert!(link.transmit(&[0x88; 60]).is_err());
                 assert_eq!(
+                    // SAFETY: the pointer addresses this test's own live pages, and the stopped
+                    // model writes nothing concurrently.
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes) },
                     before
                 );

@@ -394,8 +394,8 @@ fn uncertain_table_effect_and_abandoned_live_host_retain_actual_owner() {
     let drops = model.drops.clone();
     let mut host = start(model);
     host.io().fail_table = true;
-    // SAFETY: isolated failure-injection model only.
     assert_eq!(
+        // SAFETY: isolated failure-injection model only.
         unsafe {
             host.program_parent_vectors(&[crate::bus::irq::MsiMessage {
                 address: 0xfee0_0000,
@@ -526,6 +526,8 @@ fn actual_child_providers_gate_parent_owner_return_and_uncertain_stop_retention(
             2,
             u32::from(MEMORY | BUS_MASTER | INTX_DISABLE),
         );
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (mut source, handler, mut returned) = match unsafe { ParentSource::new(host, children) }
         {
             Ok(value) => value,

@@ -187,7 +187,7 @@ pub unsafe fn initialize(base: u64, registers: u64, timeout_ticks: u64) -> Resul
 }
 
 pub fn dispatch(vector: u8) -> bool {
-    // Existing CPU entry calls this with local IRQs off. It does not supply
+    // SAFETY: Existing CPU entry calls this with local IRQs off. It does not supply
     // an interrupted-SP witness, so no such frame proof may be claimed.
     unsafe { dispatch_entry(vector, None) }
 }
@@ -198,6 +198,7 @@ pub fn dispatch(vector: u8) -> bool {
 /// `interrupted_rsp` is Frame.rsp from that entry, not the ISR's current RSP.
 #[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn dispatch_frame(vector: u8, interrupted_rsp: usize) -> bool {
+    // SAFETY: the caller passes the interrupted RSP from its own CPU entry frame.
     unsafe { dispatch_entry(vector, Some(interrupted_rsp)) }
 }
 unsafe fn dispatch_entry(vector: u8, interrupted_rsp: Option<usize>) -> bool {

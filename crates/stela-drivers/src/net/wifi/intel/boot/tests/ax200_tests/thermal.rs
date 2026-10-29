@@ -37,6 +37,7 @@ fn exercise_setup(actual: bool) {
     let init = drive_nvm(boot, &source, &domain, &state);
     let (lari, sequence, entry) = finish_lari(init, &source, &domain, &bios_drops, None);
     let before = state.lock().unwrap().ops.len();
+    // SAFETY: the fixture clock is monotonic and advances for the whole device epoch.
     let lari = *unsafe {
         lari.begin_ax200_setup(Ax200SetupOptions::new(Clock {
             ticks_per_microsecond: 0,
@@ -46,6 +47,7 @@ fn exercise_setup(actual: bool) {
     .unwrap();
     assert_eq!(state.lock().unwrap().ops.len(), before);
     assert_eq!(bios_drops.load(Ordering::Relaxed), 0);
+    // SAFETY: the fixture clock is monotonic and advances for the whole device epoch.
     let mut setup = unsafe {
         lari.begin_ax200_setup(Ax200SetupOptions::new(Clock {
             ticks_per_microsecond: 1_000_000,
@@ -53,6 +55,8 @@ fn exercise_setup(actual: bool) {
     }
     .unwrap_or_else(|_| panic!("AX200 source continuation"));
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { setup.advance(&source) }.unwrap(),
         Ax200SetupPhase::Waiting(Kind::TemperatureThresholds)
     );
@@ -99,6 +103,8 @@ fn exercise_setup(actual: bool) {
         }
         assert_eq!(emitted, encoded.bytes());
         let bell = state.lock().unwrap().registers[&0x460];
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { setup.advance(&source) }.unwrap();
         assert_eq!(state.lock().unwrap().registers[&0x460], bell);
         let mut response_id = *id;
@@ -116,6 +122,8 @@ fn exercise_setup(actual: bool) {
         r.cpu_sync_fail = Some(r.cpu_syncs + 1);
         drop(r);
         assert!(matches!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { setup.advance(&source) },
             Err(Ax200SetupError::Boot(Error::CommandReclaim(_)))
         ));
@@ -123,6 +131,8 @@ fn exercise_setup(actual: bool) {
         assert_eq!(state.lock().unwrap().registers[&0x460], bell);
         domain.records.lock().unwrap().cpu_sync_fail = None;
         assert_eq!(
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             unsafe { setup.advance(&source) }.unwrap(),
             if index == 0 {
                 Ax200SetupPhase::Waiting(Kind::DevicePower)
@@ -143,10 +153,14 @@ fn exercise_setup(actual: bool) {
     // Completed setup must still surface a new real device failure.
     state.lock().unwrap().registers.insert(8, 1 << 29);
     assert!(matches!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { setup.advance(&source) },
         Err(Ax200SetupError::Boot(Error::DeviceError(_)))
     ));
     let first = setup.first_error().cloned();
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     assert_eq!(unsafe { setup.advance(&source) }.err(), first);
     setup.stop().unwrap();
     drop(setup);

@@ -180,6 +180,7 @@ mod tests {
     // mapping metadata and independent physical labels. No hardware uses it.
     // Only unsafe, externally serialized test accesses dereference CPU views.
     unsafe impl Send for Backing {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Backing {}
     // SAFETY: the model retains the same allocation/layout/cache metadata
     // until the last pin ends; physical labels deliberately differ from VA.

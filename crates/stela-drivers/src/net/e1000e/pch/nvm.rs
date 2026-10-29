@@ -856,8 +856,8 @@ mod tests {
                 state: state.clone(),
                 released: released.clone(),
             };
-            // SAFETY: sole actual model reservation, with the chosen layout.
             assert!(matches!(
+                // SAFETY: sole actual model reservation, with the chosen layout.
                 unsafe { Nvm::new(layout, io, Timer(state.clone())) },
                 Err(Error::FirmwareOwned)
             ));

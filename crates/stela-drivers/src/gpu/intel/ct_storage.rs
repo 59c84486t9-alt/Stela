@@ -466,9 +466,9 @@ mod tests {
             let cpu = storage.cpu_region(region);
             assert_eq!(cpu.range(), range);
             assert_eq!(cpu.address(cpu.bytes(), 1), Err(MemoryError::InvalidSize));
-            // SAFETY: unpublished model allocation, exclusive CPU ownership,
-            // aligned live pointer; no device has received any IOVA.
             assert_eq!(
+                // SAFETY: unpublished model allocation, exclusive CPU ownership, aligned live
+                // pointer; no device has received any IOVA.
                 unsafe { cpu.address(0, 4).unwrap().cast::<u32>().as_ptr().read() },
                 0
             );
@@ -573,8 +573,8 @@ mod tests {
         let model = Arc::new(Model::default());
         let mut published = allocate(&model).unwrap().publish().unwrap();
         model.fail_unmap_id.store(1, Ordering::Relaxed);
-        // SAFETY: synchronous model, no hardware or asynchronous users.
         assert_eq!(
+            // SAFETY: synchronous model, no hardware or asynchronous users.
             unsafe { published.unmap_after_quiescence() },
             Err(DmaError::InvalidationFailed)
         );

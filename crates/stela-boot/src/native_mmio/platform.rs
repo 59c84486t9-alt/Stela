@@ -63,6 +63,7 @@ struct Platform {
 // time-free RootContext check before touching the affine scope pointer. Mappings are accessed
 // under held on the sole admitted CPU; scope publication/removal masks IRQs.
 unsafe impl Send for Platform {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl Sync for Platform {}
 
 fn msr(index: u32) -> u64 {
@@ -112,7 +113,7 @@ impl Platform {
         Ok(self.table(self.resources.wire.leaf)?.wrapping_add(index))
     }
     fn flush(&self, first: usize, pages: usize) {
-        // The admitted processor has PGE and PCIDE clear. INVLPG removes the
+        // SAFETY: The admitted processor has PGE and PCIDE clear. INVLPG removes the
         // current host translation; every other retained root reload flushes
         // before use, and all share these same actual aperture leaves.
         unsafe {
@@ -333,12 +334,16 @@ unsafe impl MappingPlatform for Platform {
         for offset in 0..allocation.pages {
             let expected = (request.physical.start() + offset as u64 * PAGE) | rights;
             // A/D are hardware-owned. Every other bit must still be ours.
+            // SAFETY: the guard serializes the owned leaf table, mapped by the firmware identity
+            // map.
             if unsafe { self.leaf(allocation.first + offset)?.read_volatile() } & !0x60 != expected
             {
                 return Err(Error::UnmapFailed);
             }
         }
         for offset in 0..allocation.pages {
+            // SAFETY: the guard serializes the owned leaf table, and these entries belong to the
+            // retiring allocation.
             unsafe { self.leaf(allocation.first + offset)?.write_volatile(0) };
         }
         self.flush(allocation.first, allocation.pages);
@@ -383,6 +388,7 @@ impl Drop for Session {
                 .fatal(stela_drivers::platform::work::WorkError::Busy);
         }
         self.source.scope.store(ptr::null_mut(), Ordering::Release);
+        // SAFETY: `saved` came from `save_disable` on this CPU above.
         unsafe { self.source.context.restore(saved) };
     }
 }
@@ -450,6 +456,8 @@ impl ScopedSource {
         .map_err(failed)?;
         let aliases = inventory(&platform, None)?;
         for index in 0..ENTRIES {
+            // SAFETY: `leaf` checks the index against the owned leaf table, which the firmware
+            // identity map covers.
             if unsafe { platform.leaf(index)?.read_volatile() } != 0 {
                 return Err(Error::Unavailable);
             }
@@ -490,6 +498,7 @@ impl ScopedSource {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        // SAFETY: `saved` came from `save_disable` on this CPU above.
         unsafe { context.restore(saved) };
         published.map_err(|_| Error::Busy)?;
         Ok(Session {
@@ -506,6 +515,8 @@ impl ScopedSource {
             return Err(Error::Busy);
         }
         for index in 0..ENTRIES {
+            // SAFETY: `leaf` checks the index against the owned leaf table, which the firmware
+            // identity map covers.
             if unsafe { self.platform.leaf(index)?.read_volatile() } != 0 {
                 return Err(Error::UnmapFailed);
             }
@@ -681,6 +692,7 @@ pub(super) fn aliases(
         p.image.writeback_ram(table, PAGE).map_err(failed)?;
         let address = owned_table(p.wire, table)?;
         for index in 0..ENTRIES {
+            // SAFETY: `owned_table` admitted this table page and `index` is below `ENTRIES`.
             let entry = unsafe { address.add(index).read_volatile() };
             if entry & PRESENT == 0 {
                 continue;
@@ -755,6 +767,7 @@ pub(super) fn aliases(
         let mut table = *root;
         for level in (1..wire.levels).rev() {
             let slot = ((wire.virtual_base >> (12 + 9 * level)) & 511) as usize;
+            // SAFETY: `owned_table` admitted this table page and `slot` is below 512.
             let entry = unsafe { owned_table(wire, table)?.add(slot).read_volatile() };
             if entry & (PRESENT | WRITABLE | HUGE) != (PRESENT | WRITABLE) {
                 return Err(Error::Unavailable);

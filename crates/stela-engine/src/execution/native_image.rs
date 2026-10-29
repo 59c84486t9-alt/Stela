@@ -67,7 +67,9 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
     ) -> Result<ReachedCall<(), S::Error>, S::Error> {
         self.revalidate()?;
         let function: unsafe extern "sysv64" fn(*mut GuestState) =
+            // SAFETY: `entry` starts this storage's revalidated code, compiled for this signature.
             unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
+        // SAFETY: the caller upholds this ABI's contract, documented above.
         unsafe { function(state) };
         Ok(ReachedCall {
             returned: (),
@@ -89,7 +91,9 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         let function: unsafe extern "sysv64" fn(
             *mut GuestState,
             *mut ExecutionContext,
+            // SAFETY: `entry` starts this storage's revalidated code, compiled for this signature.
         ) -> BlockExit = unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
+        // SAFETY: the caller upholds this ABI's contract, documented above.
         let returned = unsafe { function(state, context) };
         Ok(ReachedCall {
             returned,
@@ -113,7 +117,9 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         let function: unsafe extern "sysv64" fn(
             *mut GuestState,
             *mut stela_compiler::block::loop_budget::LoopBudget,
+            // SAFETY: `entry` starts this storage's revalidated code, compiled for this signature.
         ) -> BlockExit = unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
+        // SAFETY: the caller upholds this ABI's contract, documented above.
         let returned = unsafe { function(state, budget) };
         Ok(ReachedCall {
             returned,
@@ -139,7 +145,10 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
     ) -> Result<ReachedCall<(), S::Error>, S::Error> {
         self.revalidate()?;
         let function: unsafe extern "sysv64" fn(*mut u8, *const u8, *const u8, u64) =
+            // SAFETY: the caller guarantees `offset` starts a kernel of this image, compiled for
+            // this signature.
             unsafe { core::mem::transmute(self.storage.entry().as_ptr().add(offset)) };
+        // SAFETY: the caller upholds this ABI's contract, documented above.
         unsafe { function(z, x, y, row) };
         Ok(ReachedCall {
             returned: (),
@@ -156,7 +165,9 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
     ) -> Result<ReachedCall<BlockExit, S::Error>, S::Error> {
         self.revalidate()?;
         let function: unsafe extern "sysv64" fn(*mut GuestState) -> BlockExit =
+            // SAFETY: `entry` starts this storage's revalidated code, compiled for this signature.
             unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
+        // SAFETY: the caller upholds this ABI's contract, documented above.
         let returned = unsafe { function(state) };
         Ok(ReachedCall {
             returned,

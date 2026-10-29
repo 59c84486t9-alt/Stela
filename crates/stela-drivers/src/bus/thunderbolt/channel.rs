@@ -536,8 +536,8 @@ mod tests {
         channel.start(0).unwrap();
         channel.disable().unwrap();
         domain.fail_unmap_at.store(12, Ordering::Relaxed);
-        // SAFETY: no synthetic activity survives the containing final drain.
         assert_eq!(
+            // SAFETY: no synthetic activity survives the containing final drain.
             unsafe { channel.release() },
             Err(super::super::channel::Error::Ring(ring::Error::Dma(
                 DmaError::InvalidationFailed

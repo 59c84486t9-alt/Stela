@@ -446,6 +446,8 @@ pub(crate) mod tests {
     }
     impl Drop for Pages {
         fn drop(&mut self) {
+            // SAFETY: the pointer came from the matching allocation with this layout and is freed
+            // once.
             unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
         }
     }
@@ -461,6 +463,7 @@ pub(crate) mod tests {
             let n = bytes.next_multiple_of(4096);
             let layout = Layout::from_size_align(n, alignment).unwrap();
             let ptr =
+                // SAFETY: the layout has a nonzero size.
                 NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
             let pages = (0..n / 4096)
                 .map(|i| ptr.as_ptr() as u64 + i as u64 * 4096)
@@ -604,6 +607,8 @@ pub(crate) mod tests {
         let mut s = state.lock().unwrap();
         assert_ne!(s.index, s.head);
         let ptr = s.memory.lock().unwrap().mappings[&s.base].1 + s.index as usize * DESC_BYTES;
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let descriptor = unsafe { core::slice::from_raw_parts(ptr as *const u32, 4) };
         let address = u64::from(u32::from_le(descriptor[0]));
         let ctrl = u32::from_le(descriptor[1]);
@@ -613,6 +618,8 @@ pub(crate) mod tests {
         let len = (ctrl >> 16 & 0x3fff) as usize;
         let payload = s.memory.lock().unwrap().mappings[&address].1;
         assert_ne!(address, payload as u64);
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         let bytes = unsafe { core::slice::from_raw_parts(payload as *const u8, len) }.to_vec();
         s.completed.push(bytes);
         s.index = (s.index + 1) % s.count;
@@ -690,6 +697,8 @@ pub(crate) mod tests {
         // SAFETY: device model explicitly stopped before attempting teardown.
         state.lock().unwrap().memory.lock().unwrap().fail_unmap = true;
         assert_eq!(
+            // SAFETY: the model device is stopped and drained, so nothing still uses what this
+            // releases.
             unsafe { ring.release_after_quiesce() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );
@@ -698,6 +707,8 @@ pub(crate) mod tests {
             5
         );
         state.lock().unwrap().memory.lock().unwrap().fail_unmap = false;
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { ring.release_after_quiesce() }.unwrap();
         assert!(
             state
@@ -764,9 +775,9 @@ pub(crate) mod tests {
         let (mut ring, state) = setup(4);
         ring.submit(20, &[20]).unwrap();
         state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);
-        // SAFETY: hardware model stopped; injected invalidation error retains
-        // the still-mapped resources for the explicit later retry.
         assert_eq!(
+            // SAFETY: hardware model stopped; injected invalidation error retains the still-mapped
+            // resources for the explicit later retry.
             unsafe { ring.release_after_quiesce() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );
@@ -774,6 +785,8 @@ pub(crate) mod tests {
             state.lock().unwrap().memory.lock().unwrap().mappings.len(),
             4
         );
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { ring.release_after_quiesce() }.unwrap();
         assert_eq!(ring.pending(), 0);
         assert!(
@@ -794,9 +807,9 @@ pub(crate) mod tests {
             ..State::default()
         }));
         let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.lock().unwrap().memory.clone()));
-        // SAFETY: exclusive brand-new idle model. Configure fails after base
-        // publication, making its descriptor mapping conservatively uncertain.
         assert!(matches!(
+            // SAFETY: exclusive brand-new idle model. Configure fails after base publication,
+            // making its descriptor mapping conservatively uncertain.
             unsafe { TxRing::install(Io(state.clone()), &Source, domain, 4) },
             Err(Error::RegisterFailure)
         ));
@@ -811,12 +824,14 @@ pub(crate) mod tests {
         let (mut ring, state) = setup(4);
         ring.submit(1, &[1]).unwrap();
         state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);
-        // SAFETY: stopped model; partial invalidation fails and keeps Q alive.
         assert_eq!(
+            // SAFETY: stopped model; partial invalidation fails and keeps Q alive.
             unsafe { ring.release_after_quiesce() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );
         assert_eq!(state.lock().unwrap().queue_drops, 0);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { ring.release_after_quiesce() }.unwrap();
         assert_eq!(state.lock().unwrap().queue_drops, 0);
         drop(ring);

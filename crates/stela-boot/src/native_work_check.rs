@@ -228,15 +228,20 @@ impl Prepared {
             let deadline = next_deadline(self.clock, TIMEOUT_US)?;
             state.deadline.store(deadline, Ordering::Release);
             if phase == 1 {
+                // SAFETY: phase 1 dispatches with interrupts on; the BSP's IDT and APIC timer are
+                // installed and `original` flags are restored after the phase.
                 unsafe {
                     asm!("sti", options(nostack));
                 }
             }
             let expected = flags();
+            // SAFETY: `state` outlives the call and its runtime pointer is published; the
+            // dispatcher runs only this BSP's queued callbacks.
             unsafe { abi_probe_dispatch(Arc::as_ptr(&state) as *mut c_void) };
             if flags() & IF != expected & IF {
                 return Err(String::from("dispatcher IF changed across real contexts"));
             }
+            // SAFETY: `original` holds the flags this CPU had before the phases.
             unsafe { cpu.restore(original) };
             verify(&state, self.reservation.arena, phase)?;
         }
@@ -249,6 +254,8 @@ impl Prepared {
             (Kind::General, cyclic_drain),
             (Kind::General, cyclic_drain),
         ] {
+            // SAFETY: the callbacks are static and `state` stays alive through `retire` below; none
+            // unwinds or frees the executor.
             unsafe { runtime.queue().execute(kind, callback, context) }.map_err(error)?;
         }
         runtime.drain(deadline).map_err(error)?;
@@ -268,15 +275,20 @@ impl Prepared {
         }
         // Timeout leaves a genuine foreground continuation on the other four
         // owned stacks. Abandonment must retain the entire runtime allocation.
+        // SAFETY: `state` is the queue's retained owner, and only this BSP produces work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), state.clone()) }.map_err(error)?;
         let executor = Executor::new(queue, make_stacks(4)?).map_err(error)?;
         let runtime = executor.runtime();
         let raw = runtime.get_ref() as *const Runtime<16>;
         state.runtime.store(raw as usize, Ordering::Release);
         let deadline = next_deadline(self.clock, 1000)?;
+        // SAFETY: `suspended` and `state` stay retained after the timeout: the pending runtime is
+        // quarantined, never freed.
         if unsafe {
             runtime.call_foreground(suspended, Arc::as_ptr(&state) as *mut c_void, deadline)
         } != Err(WorkError::TimedOut)
+                // SAFETY: retirement only inspects the suspended job and refuses; it releases
+                // nothing.
             || unsafe { runtime.retire() } != Err(WorkError::Pending)
         {
             return Err(String::from("suspended work falsely retired"));
@@ -285,19 +297,29 @@ impl Prepared {
         drop(executor);
         if self.reservation.released.load(Ordering::Acquire) != 4
             || work::quarantined_owners() <= quarantined
+                // SAFETY: the quarantined runtime at `raw` is retained and never moved or freed.
             || unsafe { Pin::new_unchecked(&*raw) }.step() != Err(WorkError::Closed)
         {
             return Err(String::from("pending runtime/stack quarantine failed"));
         }
+        // SAFETY: `state` is the queue's retained owner, and only this BSP produces work.
         let queue = unsafe { Queue::<2>::new(cpu, state.clone()) }.map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         unsafe { queue.execute(Kind::General, no_op, core::ptr::null_mut()) }.map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         unsafe { queue.execute(Kind::General, no_op, core::ptr::null_mut()) }.map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         if unsafe { queue.execute(Kind::General, no_op, core::ptr::null_mut()) }
             != Err(WorkError::Full)
         {
             return Err(String::from("overflow was accepted"));
         }
         queue.close().map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         if unsafe { queue.execute(Kind::Notify, no_op, core::ptr::null_mut()) }
             != Err(WorkError::Closed)
         {
@@ -322,6 +344,7 @@ fn error(e: WorkError) -> String {
 }
 fn flags() -> u64 {
     let f: u64;
+    // SAFETY: reads RFLAGS through the stack and changes nothing.
     unsafe {
         asm!("pushfq","pop {}",out(reg)f,options(preserves_flags));
     }
@@ -362,12 +385,14 @@ unsafe impl Cpu for NativeCpu {
     fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
         let f: u64;
+        // SAFETY: saves RFLAGS and masks interrupts on this CPU; `restore` undoes it.
         unsafe {
             asm!("pushfq","pop {}","cli",out(reg)f);
         }
         Ok(f)
     }
     unsafe fn restore(&self, f: u64) {
+        // SAFETY: the caller passes flags `save_disable` read on this CPU.
         unsafe {
             asm!("push {}","popfq",in(reg)f);
         }
@@ -383,6 +408,7 @@ unsafe impl Cpu for NativeCpu {
 fn leaf(address: usize) -> Option<u64> {
     let root: u64;
     let cr4: u64;
+    // SAFETY: reads CR3 and CR4 at ring 0 and changes nothing.
     unsafe {
         asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr4",out(reg)cr4,options(nomem,nostack,preserves_flags));
@@ -391,6 +417,7 @@ fn leaf(address: usize) -> Option<u64> {
     let levels = if cr4 & (1 << 12) != 0 { 5 } else { 4 };
     for level in (0..levels).rev() {
         let index = (address >> (12 + level * 9)) & 511;
+        // SAFETY: the firmware identity map covers every paging structure this walk reads.
         let value = unsafe { ((table as *const u64).add(index)).read_volatile() };
         if value & 1 == 0 {
             return None;
@@ -416,6 +443,8 @@ struct Probe {
 }
 impl Probe {
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
+        // SAFETY: the caller ensures the published runtime is still alive; it is pinned in its
+        // executor.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>))
         }
@@ -427,6 +456,7 @@ impl Probe {
         }
     }
     fn event(&self, n: u64) {
+        // SAFETY: the published runtime outlives every job it runs.
         let r = unsafe { self.runtime() };
         let id = self.require(r.current_id());
         let i = self.next.fetch_add(1, Ordering::AcqRel);
@@ -434,6 +464,7 @@ impl Probe {
             self.cpu.fatal(WorkError::Full);
         }
         let rsp: usize;
+        // SAFETY: reads RSP and changes nothing.
         unsafe {
             asm!("mov {}, rsp",out(reg)rsp,options(nomem,nostack,preserves_flags));
         }
@@ -443,18 +474,24 @@ impl Probe {
     }
 }
 unsafe fn probe<'a>(p: *mut c_void) -> &'a Probe {
+    // SAFETY: callers pass the `Probe` context they queued, which outlives every job.
     unsafe { &*p.cast::<Probe>() }
 }
 unsafe extern "C" fn abi_dispatch_body(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
+    // SAFETY: the published runtime is alive and `foreground` and `p` stay retained through
+    // completion.
     f.require(unsafe {
         f.runtime()
             .call_foreground(foreground, p, f.deadline.load(Ordering::Acquire))
     });
 }
 unsafe extern "C" fn foreground(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     f.event(10);
+    // SAFETY: the published runtime outlives every job it runs.
     let r = unsafe { f.runtime() };
     for (kind, callback) in [
         (Kind::Notify, notify_one as Callback),
@@ -462,6 +499,7 @@ unsafe extern "C" fn foreground(p: *mut c_void) {
         (Kind::General, abi_probe),
         (Kind::General, abi_probe_b),
     ] {
+        // SAFETY: the callbacks are static and the probe context outlives them; none unwinds.
         f.require(unsafe { r.queue().execute(kind, callback, p) });
     }
     if f.next.load(Ordering::Acquire) != 1 {
@@ -471,20 +509,25 @@ unsafe extern "C" fn foreground(p: *mut c_void) {
     f.event(11);
 }
 unsafe extern "C" fn notify_one(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     f.event(20);
+    // SAFETY: the published runtime outlives every job it runs.
     f.require(unsafe { f.runtime() }.yield_now());
     f.event(21);
 }
 unsafe extern "C" fn notify_two(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     unsafe { probe(p) }.event(22);
 }
 unsafe extern "C" fn abi_yield_b(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     if controls() != f.baseline {
         f.cpu.fatal(WorkError::CorruptContext);
     }
     f.event(40);
+    // SAFETY: the published runtime outlives every job it runs.
     f.require(unsafe { f.runtime() }.yield_now());
     if controls() != f.baseline {
         f.cpu.fatal(WorkError::CorruptContext);
@@ -492,11 +535,14 @@ unsafe extern "C" fn abi_yield_b(p: *mut c_void) {
     f.event(41);
 }
 unsafe extern "C" fn abi_yield(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     f.event(30);
     let (mxcsr, fcw) = controls();
     let changed_mx = (mxcsr & !(3 << 13)) | 2 << 13;
     let changed_cw = (fcw & !(3 << 10)) | 2 << 10;
+    // SAFETY: loads valid MXCSR and x87 control words that change only the rounding mode; the
+    // originals are restored below.
     unsafe {
         asm!("ldmxcsr [{}]",in(reg)&changed_mx,options(nostack));
         asm!("fldcw [{}]",in(reg)&changed_cw,options(nostack));
@@ -505,14 +551,17 @@ unsafe extern "C" fn abi_yield(p: *mut c_void) {
     // IF state in phase 1. Resumption must restore the task's saved IF=0;
     // another task may still execute with IF=1 in between.
     let saved_flags = f.require(f.cpu.save_disable());
+    // SAFETY: the published runtime outlives every job it runs.
     f.require(unsafe { f.runtime() }.yield_now());
     if flags() & IF != 0 {
         f.cpu.fatal(WorkError::CorruptContext);
     }
+    // SAFETY: `saved_flags` came from `save_disable` on this CPU in this job.
     unsafe { f.cpu.restore(saved_flags) };
     if controls() != (changed_mx, changed_cw) {
         f.cpu.fatal(WorkError::CorruptContext);
     }
+    // SAFETY: restores the control words read on entry.
     unsafe {
         asm!("ldmxcsr [{}]",in(reg)&mxcsr,options(nostack));
         asm!("fldcw [{}]",in(reg)&fcw,options(nostack));
@@ -522,6 +571,7 @@ unsafe extern "C" fn abi_yield(p: *mut c_void) {
 fn controls() -> (u32, u16) {
     let mut mxcsr = 0;
     let mut fcw = 0;
+    // SAFETY: stores the control words into locals and changes nothing.
     unsafe {
         asm!("stmxcsr [{}]",in(reg)&mut mxcsr,options(nostack,preserves_flags));
         asm!("fnstcw [{}]",in(reg)&mut fcw,options(nostack,preserves_flags));
@@ -824,8 +874,11 @@ abi_callback!(abi_probe, abi_yield, 0x3132333435363738u64);
 abi_callback!(abi_probe_b, abi_yield_b, 0x4142434445464748u64);
 abi_callback!(abi_probe_dispatch, abi_dispatch_body, 0x5152535455565758u64);
 unsafe extern "C" fn serial_drain(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
+    // SAFETY: the published runtime outlives every job it runs.
     let r = unsafe { f.runtime() };
+    // SAFETY: the callbacks are static and the probe context outlives them; none unwinds.
     f.require(unsafe { r.queue().execute(Kind::Notify, notify_two, p) });
     if r.drain(f.deadline.load(Ordering::Acquire)) != Err(WorkError::WouldDeadlock) {
         f.cpu.fatal(WorkError::CorruptContext);
@@ -833,7 +886,9 @@ unsafe extern "C" fn serial_drain(p: *mut c_void) {
     f.event(50);
 }
 unsafe extern "C" fn cyclic_drain(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
+    // SAFETY: the published runtime outlives every job it runs.
     match unsafe { f.runtime() }.drain(f.deadline.load(Ordering::Acquire)) {
         Ok(()) => f.event(60),
         Err(WorkError::WouldDeadlock) => f.event(61),
@@ -841,8 +896,10 @@ unsafe extern "C" fn cyclic_drain(p: *mut c_void) {
     }
 }
 unsafe extern "C" fn suspended(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     while !f.released.load(Ordering::Acquire) {
+        // SAFETY: the published runtime outlives every job it runs.
         f.require(unsafe { f.runtime() }.yield_now());
     }
 }

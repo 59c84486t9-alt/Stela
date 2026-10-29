@@ -192,6 +192,7 @@ impl Prepared {
             (b"MCFG", &mut wire.mcfg[..], &mut wire.mcfg_bytes),
             (b"FACP", &mut wire.fadt[..], &mut wire.fadt_bytes),
         ] {
+            // SAFETY: `rsdp` is the firmware's ACPI root, which the identity map covers after EBS.
             let source = unsafe { acpi::find(rsdp, signature) }
                 .map_err(|_| "MMIO ACPI inventory unavailable")?;
             if source.len() > destination.len() {

@@ -539,6 +539,7 @@ fn descriptor_bounds_clock_wrap_and_read_side_ec_uncertainty_are_explicit() {
     // An EC read command itself can have uncertain native byte effects even
     // before the SMBus host has published a mailbox write.
     struct UncertainRead(Space);
+    // SAFETY: forwards to the test's modeled EC space, the only owner of its bytes.
     unsafe impl EcAccess for UncertainRead {
         fn read(&mut self, address: u8) -> Result<u8, ec::Error> {
             self.0.read(address).map_err(|mut e| {

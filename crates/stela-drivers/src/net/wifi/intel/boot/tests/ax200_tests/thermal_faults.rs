@@ -32,6 +32,7 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
             options.command_timeout_us = 1;
         }
         let mut setup =
+            // SAFETY: the fixture clock is monotonic and advances for the whole device epoch.
             unsafe { lari.begin_ax200_setup(options) }.unwrap_or_else(|_| panic!("AX200"));
         if case == 1 {
             *state.lock().unwrap().registers.get_mut(&0x24).unwrap() &= !0x08000000;
@@ -40,6 +41,8 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
             let mut r = domain.records.lock().unwrap();
             r.sync_fail = Some(r.syncs + 2);
         }
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { setup.advance(&source) };
         match case {
             0 => {
@@ -65,6 +68,8 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
                     ),
                 );
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { setup.advance(&source) },
                     Err(Ax200SetupError::Boot(Error::InitializationResponse {
                         command: 3,
@@ -78,6 +83,8 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
                 result.unwrap();
                 options.clock.delay(20);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { setup.advance(&source) },
                     Err(Ax200SetupError::Deadline(Kind::TemperatureThresholds))
                 );
@@ -112,6 +119,8 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
                 drop(r);
                 options.clock.delay(20);
                 assert_eq!(
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { setup.advance(&source) },
                     Err(Ax200SetupError::Deadline(Kind::TemperatureThresholds))
                 );
@@ -122,6 +131,8 @@ fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
         }
         let original = setup.first_error().unwrap().clone();
         let ops = state.lock().unwrap().ops.len();
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         assert_eq!(unsafe { setup.advance(&source) }, Err(original.clone()));
         assert_eq!(setup.first_error(), Some(&original));
         assert_eq!(state.lock().unwrap().ops.len(), ops);

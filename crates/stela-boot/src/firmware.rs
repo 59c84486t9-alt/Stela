@@ -283,8 +283,8 @@ pub fn take_over(
     if !crate::storage::split(text)?.2.is_empty() {
         return Err("stela.cfg names options that need --system");
     }
-    // SAFETY: standalone mount retains identity mappings and this allocator.
     let wifi_platform = host_firmware.wifi_observations();
+    // SAFETY: standalone mount retains identity mappings and this allocator.
     let host_firmware = unsafe { crate::host_firmware::identity_catalog(&host_firmware) }?;
     let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(
         "stela.cfg starts with neither --system nor --host-check and names no install or \

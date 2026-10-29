@@ -122,6 +122,7 @@ struct Platform {
 }
 // SAFETY: the metadata is immutable; `mappings` is reached only under `held`.
 unsafe impl Send for Platform {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl Sync for Platform {}
 
 /// Present, NX, and PWT and PCD for PAT entry 3, uncached.
@@ -334,6 +335,8 @@ unsafe impl MappingPlatform for Platform {
         for offset in 0..count {
             let physical = request.physical.start() + offset as u64 * size.bytes();
             let expected = Self::value(size, physical, request.protection);
+            // SAFETY: `entry` checks the slot against the owned table, and the held guard
+            // serializes it.
             if unsafe { self.entry(size, first + offset)?.read_volatile() } & !ACCESSED_DIRTY
                 != expected
             {
@@ -341,6 +344,8 @@ unsafe impl MappingPlatform for Platform {
             }
         }
         for offset in 0..count {
+            // SAFETY: `entry` checks the slot against the owned table, and these entries belong to
+            // the retiring request.
             unsafe { self.entry(size, first + offset)?.write_volatile(0) };
         }
         self.invalidate(size, first, count);

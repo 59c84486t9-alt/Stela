@@ -711,6 +711,8 @@ pub(super) mod tests {
         let revoked = admit(&mut authority, &driver, AssociationUse::Configure);
         state.allowed.set(false);
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { driver.configure_modern(&mut authority, revoked, 105) },
             Err(ClientError::Regulatory(_))
         ));
@@ -718,6 +720,8 @@ pub(super) mod tests {
         assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
         state.allowed.set(true);
         let permit = admit(&mut authority, &driver, AssociationUse::Configure);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { driver.configure_modern(&mut authority, permit, 106) }.unwrap();
         assert_eq!(driver.phase(), ClientPhase::Associated);
         assert_eq!(driver.station().phase(), station::Phase::Associated);
@@ -743,6 +747,8 @@ pub(super) mod tests {
         let head = model.queues[&0xd4300].lock().unwrap().head;
         let allocations = state.allocations.get();
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 driver.transmit_modern(
                     &mut authority,
@@ -762,6 +768,8 @@ pub(super) mod tests {
         assert_eq!(state.allocations.get(), allocations);
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
         let permit = admit(&mut authority, &driver, AssociationUse::Data);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let receipt = unsafe {
             driver.transmit_modern(
                 &mut authority,
@@ -821,11 +829,15 @@ pub(super) mod tests {
         driver.disconnect().unwrap();
         assert_eq!(driver.phase(), ClientPhase::NeedsDrain);
         assert!(Arc::ptr_eq(driver.modern_context().unwrap(), &context));
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         assert!(driver.modern_context().is_none());
         driver.stop().unwrap();
         model.response.lock().unwrap().clc_processing = false;
         model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.stop_after_quiesce() }.unwrap();
         drop(driver);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
@@ -845,6 +857,8 @@ pub(super) mod tests {
             &driver,
             wifi::regulatory::AssociationUse::Configure,
         );
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe { driver.configure_modern(&mut authority, permit, 105) }.unwrap();
         modern_keys(&mut driver, &mut authority);
         driver
@@ -942,6 +956,8 @@ pub(super) mod tests {
                 driver,
                 wifi::regulatory::AssociationUse::Management,
             );
+            // SAFETY: the test's model owns this key slot alone; no other worker programs the
+            // hardware key.
             unsafe {
                 driver.install_key_modern(
                     authority,
@@ -1007,10 +1023,14 @@ pub(super) mod tests {
             }
         }
         driver.disconnect().unwrap();
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.retire_peer_after_drain() }.unwrap();
         driver.stop().unwrap();
         model.response.lock().unwrap().clc_processing = false;
         model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+        // SAFETY: the model device is stopped and drained, so nothing still uses what this
+        // releases.
         unsafe { driver.stop_after_quiesce() }.unwrap();
         drop(driver);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
@@ -1151,6 +1171,8 @@ pub(super) mod tests {
                 .contains_key(&(1, 6))
         );
         let permit = admit(&mut authority, &driver, AssociationUse::Management);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             driver.progress_block_ack(
                 &mut authority,
@@ -1172,6 +1194,8 @@ pub(super) mod tests {
         );
         assert!(driver.pending_block_ack());
         let permit = admit(&mut authority, &driver, AssociationUse::Management);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         unsafe {
             driver.progress_block_ack(
                 &mut authority,
@@ -1264,6 +1288,8 @@ pub(super) mod tests {
             let (mut driver, model, _) = awaiting_cipher(suite);
             let (mut authority, state) = authority(&driver, &model);
             let permit = admit(&mut authority, &driver, AssociationUse::Configure);
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { driver.configure_modern(&mut authority, permit, 105) }.unwrap();
             assert!(matches!(
                 driver.install_key(true, 0, &[1; 16], ReplaySeed::ZERO),
@@ -1272,6 +1298,8 @@ pub(super) mod tests {
             for (pairwise, index, value) in [(true, 0, 1), (false, 2, 2)] {
                 let material = vec![value; length];
                 let permit = admit(&mut authority, &driver, AssociationUse::Management);
+                // SAFETY: the test's model owns this key slot alone; no other worker programs the
+                // hardware key.
                 let key = unsafe {
                     driver.install_key_modern(
                         &mut authority,
@@ -1290,6 +1318,8 @@ pub(super) mod tests {
                 .unwrap();
             let permit = admit(&mut authority, &driver, AssociationUse::Data);
             let epoch = driver.station().association_epoch().unwrap();
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe {
                 driver.transmit_modern(
                     &mut authority,
@@ -1379,6 +1409,8 @@ pub(super) mod tests {
         let (mut authority, _) = authority(&driver, &model);
         let permit = admit(&mut authority, &driver, AssociationUse::Configure);
         model.response.lock().unwrap().bss_status = 0xdead;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert!(unsafe { driver.configure_modern(&mut authority, permit, 105) }.is_err());
         assert_eq!(driver.phase(), ClientPhase::Quarantined);
         assert_eq!(driver.station().phase(), station::Phase::Configuring);
@@ -1415,6 +1447,8 @@ pub(super) mod tests {
         // nevertheless exceed the independent canonical500ms Configure lifetime.
         model.response.lock().unwrap().pause_next_index_us = 600_000;
         assert!(matches!(
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             unsafe { driver.configure_modern(&mut authority, permit, 105) },
             Err(ClientError::Station(station::Error::Timeout))
         ));

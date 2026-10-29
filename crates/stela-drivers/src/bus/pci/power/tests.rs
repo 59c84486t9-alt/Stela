@@ -362,8 +362,8 @@ fn inaccessible_states_refuse_function_access_and_release_without_effects() {
     let (mut power, d) = owner(true);
     suspend(&mut power).unwrap();
     let reads = d.borrow().reads;
-    // SAFETY: action does nothing; it must never run outside D0.
     assert_eq!(
+        // SAFETY: action does nothing; it must never run outside D0.
         unsafe { power.with_d0(|_| panic!("must refuse")) },
         Err::<(), _>(Error::State)
     );

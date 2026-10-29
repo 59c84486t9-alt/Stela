@@ -85,9 +85,11 @@ impl FixedVisibility {
     /// this processor. No SNP/encryption owner may lock the visibility control.
     unsafe fn open(fixed: bool) -> Result<Self, Error> {
         let flags: u64;
+        // SAFETY: saves RFLAGS and masks interrupts on this CPU; the guard's drop restores IF.
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
+        // SAFETY: the caller guarantees CPL0 on AMD64, where SYSCFG exists.
         let original = unsafe { msr::AMD_SYSCFG.read() };
         let mut guard = Self {
             syscfg: original,
@@ -99,10 +101,13 @@ impl FixedVisibility {
         }
         if fixed && original & amd::FIXED_MODIFY == 0 {
             guard.changed = true;
+            // SAFETY: the caller guarantees CPL0 on AMD64; only the fixed-MTRR modify enable
+            // changes, and the guard restores it.
             unsafe {
                 msr::AMD_SYSCFG.write(original | amd::FIXED_MODIFY);
             }
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            // SAFETY: the caller guarantees CPL0 on AMD64, where SYSCFG exists.
             if unsafe { msr::AMD_SYSCFG.read() } != original | amd::FIXED_MODIFY {
                 // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem
                 // bits have no effect (AMD APM Vol. 2 7.7.4), so the type
@@ -111,6 +116,8 @@ impl FixedVisibility {
                     return Err(Error::AmdMemoryControls);
                 }
                 guard.changed = false;
+                // SAFETY: the caller guarantees CPL0 on AMD64; only the fixed-MTRR modify enable
+                // changes, and the guard restores it.
                 unsafe {
                     msr::AMD_SYSCFG.write(original);
                 }

@@ -1048,8 +1048,8 @@ mod tests {
             );
         }
         let (_, released, io, timer) = fixture();
-        // SAFETY: deliberately test exact-cohort refusal with a fresh model.
         assert!(matches!(
+            // SAFETY: deliberately test exact-cohort refusal with a fresh model.
             unsafe { Controller::new(0x153a, io, timer) },
             Err(Error::UnsupportedDevice(0x153a))
         ));

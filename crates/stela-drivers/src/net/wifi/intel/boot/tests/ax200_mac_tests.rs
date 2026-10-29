@@ -93,6 +93,8 @@ pub(super) fn country_ready_with_os<'a, O: CountryIo>(
     let mut scan = mcc
         .begin_scan_configuration()
         .unwrap_or_else(|_| panic!("scan"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { scan.advance(source) }.unwrap();
     complete(
         &scan.mcc.setup.lari.radio.initialized.boot,
@@ -109,6 +111,8 @@ pub(super) fn country_ready_with_os<'a, O: CountryIo>(
             &[],
         ),
     );
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { scan.advance(source) }.unwrap();
     sequence += 1;
     entry += 1;
@@ -116,8 +120,14 @@ pub(super) fn country_ready_with_os<'a, O: CountryIo>(
     let mut board = scan
         .begin_board_policy()
         .unwrap_or_else(|_| panic!("board"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { board.advance(source) }.unwrap();
+    // SAFETY: the simulated device and its providers belong to this fixture alone; no other worker
+    // touches them.
     let mut country = unsafe { board.begin_country(os) }.unwrap_or_else(|_| panic!("country"));
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { country.advance(source) }.unwrap();
     let mut payload = mcc_payload(*b"US", 9, 51);
     if second_channel {
@@ -134,6 +144,8 @@ pub(super) fn country_ready_with_os<'a, O: CountryIo>(
             &payload,
         ),
     );
+    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+    // requester domain.
     unsafe { country.advance(source) }.unwrap();
     sequence += 1;
     entry += 1;
@@ -202,6 +214,8 @@ fn exercise(actual: bool) {
         }
         assert!(mac.mac_id_and_color().is_none());
         let bell = native.state.lock().unwrap().registers[&0x460];
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         let result = unsafe { mac.advance(&source) };
         match case {
             2 => assert_eq!(result, Err(Ax200MacError::Boot(Error::RfKilled))),
@@ -280,6 +294,8 @@ fn exercise(actual: bool) {
                     if case == 5 {
                         options.clock.delay(20);
                         assert_eq!(
+                            // SAFETY: the fixture's `source` hands out fresh exclusive pages for
+                            // its sole simulated requester domain.
                             unsafe { mac.advance(&source) },
                             Err(Ax200MacError::Deadline(command.kind()))
                         );
@@ -303,6 +319,8 @@ fn exercise(actual: bool) {
                     if case == 6 {
                         options.clock.delay(20);
                         assert_eq!(
+                            // SAFETY: the fixture's `source` hands out fresh exclusive pages for
+                            // its sole simulated requester domain.
                             unsafe { mac.advance(&source) },
                             Err(Ax200MacError::Deadline(command.kind()))
                         );
@@ -310,12 +328,16 @@ fn exercise(actual: bool) {
                         break;
                     }
                     assert!(matches!(
+                        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its
+                        // sole simulated requester domain.
                         unsafe { mac.advance(&source) },
                         Err(Ax200MacError::Boot(Error::CommandReclaim(_)))
                     ));
                     assert_eq!(mac.ticket(), Some(&ticket));
                     assert!(mac.first_error().is_none());
                     native.domain.records.lock().unwrap().cpu_sync_fail = None;
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     let result = unsafe { mac.advance(&source) };
                     if case == 1 {
                         assert!(matches!(
@@ -339,6 +361,8 @@ fn exercise(actual: bool) {
                     native.revoked.store(true, Ordering::Relaxed);
                     mac.begin_remove().unwrap();
                     assert_eq!(mac.begin_remove(), Err(Ax200MacError::State));
+                    // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole
+                    // simulated requester domain.
                     unsafe { mac.advance(&source) }.unwrap();
                     let remove = mac.commands().last().unwrap();
                     assert_eq!(&remove.bytes()[4..8], &3u32.to_le_bytes());
@@ -350,6 +374,8 @@ fn exercise(actual: bool) {
                         &command_packet(remove.id().wire(), sequence, &[]),
                     );
                     assert_eq!(
+                        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its
+                        // sole simulated requester domain.
                         unsafe { mac.advance(&source) }.unwrap(),
                         Ax200MacPhase::Removed
                     );
@@ -359,6 +385,8 @@ fn exercise(actual: bool) {
         }
         if let Some(error) = mac.first_error().cloned() {
             let operations = native.state.lock().unwrap().ops.len();
+            // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+            // requester domain.
             assert_eq!(unsafe { mac.advance(&source) }, Err(error));
             assert_eq!(native.state.lock().unwrap().ops.len(), operations);
         }
@@ -403,6 +431,8 @@ pub(super) fn assert_mld_mac_refusal(bytes: &[u8]) {
     let operations = native.state.lock().unwrap().ops.len();
     let syncs = native.domain.records.lock().unwrap().syncs;
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { mac.advance(&source) },
         Err(Ax200MacError::MldContinuationRequired)
     );
@@ -412,6 +442,8 @@ pub(super) fn assert_mld_mac_refusal(bytes: &[u8]) {
     assert_eq!(native.state.lock().unwrap().ops.len(), operations);
     assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);
     assert_eq!(
+        // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
+        // requester domain.
         unsafe { mac.advance(&source) },
         Err(Ax200MacError::MldContinuationRequired)
     );

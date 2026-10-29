@@ -796,8 +796,8 @@ pub(crate) mod tests {
         assert!(Arc::ptr_eq(&installed, &session));
         assert!(s.validate_rx_block_ack_program(t, &session, true).is_err());
         assert!(s.validate_rx_block_ack(&session).is_ok());
-        // SAFETY: duplicate completion must not mutate or return another positive reply.
         assert!(matches!(
+            // SAFETY: duplicate completion must not mutate or return another positive reply.
             unsafe { s.complete_rx_block_ack(t, Completion::Accepted) },
             Err(BaError::Stale)
         ));
@@ -923,8 +923,8 @@ pub(crate) mod tests {
                 );
                 let (stop, held) = program(s.stop_rx_block_ack(0, None).unwrap(), false);
                 assert!(Arc::ptr_eq(&held, &old));
-                // SAFETY: only subsequent actual stop/drain can retire this owner.
                 assert!(matches!(
+                    // SAFETY: only subsequent actual stop/drain can retire this owner.
                     unsafe { s.complete_rx_block_ack(stop, Completion::Accepted) }.unwrap(),
                     BaAction::None
                 ));
@@ -938,8 +938,8 @@ pub(crate) mod tests {
         let mut s = associated(1024, true);
         let old = active(&mut s, 1, 0);
         let (ticket, _) = program(s.stop_rx_block_ack(0, Some(37)).unwrap(), false);
-        // SAFETY: a rejected disable is not actual retirement and stays quarantined.
         assert!(matches!(
+            // SAFETY: a rejected disable is not actual retirement and stays quarantined.
             unsafe { s.complete_rx_block_ack(ticket, Completion::RejectedAndIdle) }.unwrap(),
             BaAction::None
         ));
@@ -977,8 +977,8 @@ pub(crate) mod tests {
         active(&mut s, 1, 3);
         let frame = response(0xd0, &[3, 2, 0, 0x38, 37, 0]);
         let (ticket, _) = program(receive(&mut s, &frame).unwrap(), false);
-        // SAFETY: actual native stop/drain completed in the fixture.
         assert!(matches!(
+            // SAFETY: actual native stop/drain completed in the fixture.
             unsafe { s.complete_rx_block_ack(ticket, Completion::Accepted) }.unwrap(),
             BaAction::None
         ));
@@ -1008,8 +1008,8 @@ pub(crate) mod tests {
             if result == Completion::Accepted {
                 let (stop, held) = program(next, false);
                 assert!(Arc::ptr_eq(&held, &session));
-                // SAFETY: only stop/drain of the late successful install retires it.
                 assert!(matches!(
+                    // SAFETY: only stop/drain of the late successful install retires it.
                     unsafe { s.complete_rx_block_ack(stop, Completion::Accepted) }.unwrap(),
                     BaAction::None
                 ));
@@ -1031,8 +1031,8 @@ pub(crate) mod tests {
         let delba = response(0xd0, &[3, 2, 0, 0x38, 37, 0]);
         assert!(matches!(receive(&mut s, &delba).unwrap(), BaAction::None));
         s.validate_rx_block_ack_program(stop, &old, false).unwrap();
-        // SAFETY: completing this old stop cannot trigger the cancelled new install.
         assert!(matches!(
+            // SAFETY: completing this old stop cannot trigger the cancelled new install.
             unsafe { s.complete_rx_block_ack(stop, Completion::Accepted) }.unwrap(),
             BaAction::None
         ));
@@ -1116,15 +1116,15 @@ pub(crate) mod tests {
             s.validate_rx_block_ack_program(pending, &plan, true)
                 .is_err()
         );
-        // SAFETY: late ACK is rejected; it cannot revive a disconnected association.
         assert!(matches!(
+            // SAFETY: late ACK is rejected; it cannot revive a disconnected association.
             unsafe { s.complete_rx_block_ack(pending, Completion::Accepted) },
             Err(BaError::Stale)
         ));
         let (stop, old) = program(s.stop_rx_block_ack(3, Some(37)).unwrap(), false);
         s.validate_rx_block_ack_program(stop, &old, false).unwrap();
-        // SAFETY: acknowledged stop during disconnect cannot send a new management frame.
         assert!(matches!(
+            // SAFETY: acknowledged stop during disconnect cannot send a new management frame.
             unsafe { s.complete_rx_block_ack(stop, Completion::Accepted) }.unwrap(),
             BaAction::None
         ));

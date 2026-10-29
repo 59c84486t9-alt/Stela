@@ -520,6 +520,8 @@ mod tests {
             // SAFETY: isolated synchronous model, no concurrent writer.
             let count = self.bytes / size_of::<u64>();
             (0..count)
+                // SAFETY: the pointer addresses this test's own live pages, and the stopped model
+                // writes nothing concurrently.
                 .map(|i| unsafe { self.pointer().as_ptr().cast::<u64>().add(i).read_volatile() })
                 .collect()
         }
