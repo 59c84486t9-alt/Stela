@@ -252,6 +252,7 @@ pub struct Capabilities {
     pub supports_function_pointers_from_render: bool,
     pub supports_dynamic_libraries: bool,
     pub supports_render_dynamic_libraries: bool,
+    /// `supportsPlacementSparse`: a Metal 4 capability, never claimed.
     pub supports_placement_sparse: bool,
     pub supports_mesh_shaders: bool,
     pub supports_tessellation: bool,
@@ -699,7 +700,8 @@ impl Derivation<'_> {
             ShaderFeatures::MESH,
         ));
         let tessellation = self.check(tessellation(features));
-        self.gap("placement sparse heaps", Cause::Api);
+        // Placement sparse resources map only through `MTL4CommandQueue`.
+        self.gap("placement sparse resources", Cause::AppleArchitecture);
 
         let timestamps = self.check(api(
             "timestamp counters",
