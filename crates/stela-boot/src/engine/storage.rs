@@ -312,6 +312,15 @@ impl HostDisks {
     /// disk owner, changes roots or accesses an active driver's registers.
     pub fn report_callbacks(&self, tsc_hz: u64) {
         for (serial, disk) in &self.disks {
+            if let Some(activity) = disk.callback_activity() {
+                output::arguments(format_args!(
+                    "HOST DISK ACTIVITY serial={serial} counter_hz={tsc_hz} observed_before={} observed_after={} advance={:?} direct={:?} none=idle-or-raced coherent=false authority=none\n",
+                    activity.observed_before_ticks,
+                    activity.observed_after_ticks,
+                    activity.advance,
+                    activity.direct,
+                ));
+            }
             match disk.callback_stats() {
                 Some(callbacks) => Self::report_callback(serial, callbacks, tsc_hz, "guest-stop"),
                 None => output::arguments(format_args!(

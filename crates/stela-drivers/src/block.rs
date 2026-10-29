@@ -15,7 +15,7 @@ use core::{
 };
 
 mod profile;
-pub use profile::{CallbackCounts, CallbackStats};
+pub use profile::{ActiveCallback, CallbackActivity, CallbackCounts, CallbackStats};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockError {
@@ -981,6 +981,7 @@ pub struct Shared(Arc<Disk>);
 struct Disk {
     held: AtomicBool,
     profile_callbacks: AtomicBool,
+    activity: profile::Activity,
     device: UnsafeCell<Box<dyn BlockDevice>>,
     requests: UnsafeCell<Requests>,
 }
@@ -1125,6 +1126,8 @@ impl Held<'_> {
     ) -> T {
         let observing = self.0.profile_callbacks.load(Ordering::Relaxed);
         let started = crate::Clock::ticks();
+        let disk = self.0;
+        let _active = observing.then(|| disk.activity.direct.enter(started));
         let result = run(self);
         let now = crate::Clock::ticks();
         let stats = &mut self.requests().stats;
@@ -1159,6 +1162,8 @@ impl Held<'_> {
     fn advance(&mut self) {
         let observing = self.0.profile_callbacks.load(Ordering::Relaxed);
         let started = observing.then(crate::Clock::ticks);
+        let disk = self.0;
+        let _active = started.map(|ticks| disk.activity.advance.enter(ticks));
         let mut work = profile::Work::default();
         self.advance_inner(&mut work);
         if let Some(started) = started {
@@ -1267,6 +1272,7 @@ impl Shared {
         Self(Arc::new(Disk {
             held: AtomicBool::new(false),
             profile_callbacks: AtomicBool::new(false),
+            activity: profile::Activity::default(),
             device: UnsafeCell::new(device),
             requests: UnsafeCell::new(Requests::default()),
         }))
@@ -1276,6 +1282,26 @@ impl Shared {
     /// disabling keeps earlier observations and adds no timing reads.
     pub fn set_callback_profile(&self, enabled: bool) {
         self.0.profile_callbacks.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Bounded observations without taking the disk's lock or touching a driver.
+    /// Enabled samples bracket independent generation/start reads with counters;
+    /// disabling adds no counter reads. None means profiling is disabled.
+    /// Activity never grants completion, DMA or quiescence authority.
+    pub fn callback_activity(&self) -> Option<CallbackActivity> {
+        if !self.0.profile_callbacks.load(Ordering::Relaxed) {
+            return None;
+        }
+        let observed_before_ticks = crate::Clock::ticks();
+        let advance = self.0.activity.advance.snapshot();
+        let direct = self.0.activity.direct.snapshot();
+        let observed_after_ticks = crate::Clock::ticks();
+        Some(CallbackActivity {
+            observed_before_ticks,
+            observed_after_ticks,
+            advance,
+            direct,
+        })
     }
 
     /// Retained callback observations with one try-lock and no counter read.
