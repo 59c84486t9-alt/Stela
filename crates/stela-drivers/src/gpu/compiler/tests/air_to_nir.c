@@ -1793,7 +1793,6 @@ shared_contracts(void)
    shared_refusal("call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent [\"deopt\"(i32 1)]\nret void\n",
       shared_declaration, STELA_AIR_INSTRUCTION);
    const char *globals[] = {
-      "@s = internal addrspace(3) global i32 0, align 4\n",
       "@s = internal addrspace(3) global i32 poison, align 4\n",
       "@s = external addrspace(3) global i32\n",
       "@s = internal addrspace(3) constant i32 undef, align 4\n",
@@ -2641,6 +2640,8 @@ shared_reflection_tests(void)
       "@s = internal addrspace(3) global i64 undef\n", /* Original ABI alignment. */
       "@s = internal addrspace(3) global {i32,i32} undef, align 4\n",
       "@s = internal addrspace(3) global half undef, align 2\n",
+      /* Apple's compiler zeroes atomics, which Metal leaves undefined. */
+      "@s = internal addrspace(3) global [2 x {i32}] zeroinitializer, align 4\n",
    };
    for (unsigned i = 0; i < ARRAY_SIZE(good); i++)
       shared_reflection_case(good[i], true);
@@ -2650,7 +2651,7 @@ shared_reflection_tests(void)
       "@s = external addrspace(3) global i32\n",
       "@s = internal thread_local addrspace(3) global i32 undef, align 4\n",
       "@s = internal addrspace(3) externally_initialized global i32 undef, align 4\n",
-      "@s = internal addrspace(3) global i32 0, align 4\n",
+      "@s = internal addrspace(3) global i32 1, align 4\n",
       "@s = internal addrspace(3) global i32 poison, align 4\n",
       "@s = internal addrspace(3) global i32 undef, section \"unqualified\", align 4\n",
       "@s = internal addrspace(3) global i32 undef, align 4, !custom !77\n!77 = !{!\"unqualified\"}\n",

@@ -180,9 +180,10 @@ stela_air_metadata_constructed(LLVMValueRef global)
           LLVMGetLinkage(global) == LLVMInternalLinkage && LLVMGetInitializer(global);
 }
 
-/* Threadgroup memory is an undefined internal AS3 global; constant data is an
- * initialized internal or private AS2 constant, or a global constructors
- * compute. */
+/* Threadgroup memory is an internal AS3 global, undefined or zeroed as
+ * Apple's compiler gives atomics, which Metal never initializes; constant
+ * data is an initialized internal or private AS2 constant, or a global
+ * constructors compute. */
 bool
 stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
                           struct stela_air_global *info)
@@ -193,7 +194,8 @@ stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
    LLVMLinkage linkage = LLVMGetLinkage(global);
    bool constant = LLVMIsGlobalConstant(global);
    bool threadgroup = space == 3 && !constant && linkage == LLVMInternalLinkage && initializer &&
-                      LLVMIsUndef(initializer) && !LLVMIsPoison(initializer);
+                      ((LLVMIsUndef(initializer) && !LLVMIsPoison(initializer)) ||
+                       LLVMIsNull(initializer));
    bool data = (space == 2 && constant && initializer &&
                 (linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage)) ||
                (t->constructed && stela_air_metadata_constructed(global));
