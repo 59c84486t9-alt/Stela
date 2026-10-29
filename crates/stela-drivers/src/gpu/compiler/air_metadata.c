@@ -906,6 +906,9 @@ output_reflection(struct stela_air_metadata *m, const LLVMValueRef *fields, unsi
       } else if (stela_air_md_string(key, "air.arg_name")) {
          if (io->name || f == n || !metadata_text(m, fields[f++], &io->name, &io->name_bytes))
             return fail(m, STELA_AIR_METADATA, "invalid output name");
+      } else if (stela_air_md_string(key, "air.shared")) {
+         /* The output is the same in every amplified view. Each view runs
+          * the function, so the hint changes nothing. */
       } else if (io->semantic == STELA_AIR_POSITION && stela_air_md_string(key, "air.invariant")) {
          if (io->invariant) return fail(m, STELA_AIR_METADATA, "duplicate invariant qualifier");
          io->invariant = true;
