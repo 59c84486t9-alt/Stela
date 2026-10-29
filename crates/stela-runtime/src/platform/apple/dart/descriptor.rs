@@ -17,7 +17,7 @@ const DART2_ADDRESS: u64 = 0x0000_00ff_ffff_fc00;
 const DART2_PERMISSIONS: u64 = 1 << 3 | 1 << 2;
 
 #[derive(Clone, Copy)]
-pub(super) enum Format {
+pub(crate) enum Format {
     Dart1,
     Dart2,
 }
@@ -26,7 +26,7 @@ impl Format {
     /// Validate a valid descriptor before extracting its address. Bounds and
     /// permissions are leaf fields; accepting them on an intermediate entry
     /// would discard effects whose table-level meaning is not recovered.
-    pub(super) fn target(
+    pub(crate) fn target(
         self,
         entry: u64,
         pa_bits: u32,

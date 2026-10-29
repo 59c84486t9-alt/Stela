@@ -132,6 +132,7 @@ pub struct Record {
 impl Record {
     /// Only the recovered class/level fields. This is an internal DMA error
     /// identifier, never a complete hardware fault header or its access type.
+    #[cfg(test)]
     pub const fn class(self) -> u32 {
         match self.code {
             Code::Invalid => (self.level as u32) << 12,

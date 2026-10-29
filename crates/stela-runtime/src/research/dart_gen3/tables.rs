@@ -7,9 +7,9 @@
 //! recovered bounds/geometry; native out-of-context faults remain unqualified.
 use super::context::{Context, Geometry, PAGE_BYTES as PAGE};
 use super::descriptor::Encoding;
-use super::fault::{Capture, Code, Level, Record};
 use super::handoff::Handoff;
 use super::streams::{self, Command, Snapshot};
+use crate::platform::apple::dart::gen3::fault::{Capture, Code, Level, Record};
 use alloc::{vec, vec::Vec};
 use {
     stela_contracts::bus::Access, stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,

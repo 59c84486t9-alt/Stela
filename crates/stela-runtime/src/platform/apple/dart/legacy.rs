@@ -363,12 +363,14 @@ impl Dart {
         Ok(target + offset)
     }
 
+    #[cfg(test)]
     pub(super) fn context_route_geometry(&self) -> bool {
         self.profile == Profile::T6000 && self.streams == 16 && self.page_shift == 14 && !self.apf
     }
 
     /// Check every current incoming preimage without producing a fault.
     /// Successful walks have no cache, counter, descriptor or IRQ effects.
+    #[cfg(test)]
     pub(super) fn checked_context_translation(
         &self,
         memory: &mut dyn Memory,

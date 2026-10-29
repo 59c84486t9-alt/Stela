@@ -3880,7 +3880,7 @@
   {
     "package": "stela-runtime",
     "test": "original_ap_mailbox_and_rtpc_producers_are_source_pinned",
-    "source": "crates/stela-runtime/src/platform/apple/hpm/spmi.rs",
+    "source": "crates/stela-runtime/src/research/hpm_spmi.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_HPM_SPMI_KC_ROOT"
@@ -3900,7 +3900,7 @@
   {
     "package": "stela-runtime",
     "test": "original_msi_vector_delegation_and_port_decoder_are_pinned",
-    "source": "crates/stela-runtime/src/platform/apple/pcie.rs",
+    "source": "crates/stela-runtime/src/research/pcie.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_PCIE_KERNELCACHE"
@@ -4389,7 +4389,7 @@
   {
     "package": "stela-runtime",
     "test": "original_firmware_proves_typed_tunable_rows_and_conditional_physical_writes",
-    "source": "crates/stela-runtime/src/platform/apple/sio_dma/setup.rs",
+    "source": "crates/stela-runtime/src/research/sio_dma/setup.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_SIO_FIRMWARE"
@@ -4399,7 +4399,7 @@
   {
     "package": "stela-runtime",
     "test": "original_controller_proves_pool_header_segments_and_terminal_report_layout",
-    "source": "crates/stela-runtime/src/platform/apple/sio_dma.rs",
+    "source": "crates/stela-runtime/src/research/sio_dma.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_SIO_KERNELCACHE"
@@ -4409,7 +4409,7 @@
   {
     "package": "stela-runtime",
     "test": "original_firmware_excludes_undelivered_fifo_bytes_from_tx_stop_report",
-    "source": "crates/stela-runtime/src/platform/apple/sio_dma.rs",
+    "source": "crates/stela-runtime/src/research/sio_dma.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_SIO_FIRMWARE"

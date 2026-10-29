@@ -20,11 +20,6 @@ mod der;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;
-#[expect(
-    dead_code,
-    reason = "wired when the SEP's sks service installs ANS keys"
-)]
-pub mod inline_key;
 pub mod keys;
 pub mod keystore;
 pub mod message;

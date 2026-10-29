@@ -357,7 +357,7 @@ impl FirmwarePower {
     fn target(
         &self,
         port: &mut stela_contracts::dma::Port<'_, '_>,
-        region: &super::pio::Region,
+        region: &crate::research::agx_pio::Region,
         offset: u32,
         write: bool,
     ) -> Result<u64, &'static str> {
@@ -366,7 +366,7 @@ impl FirmwarePower {
         }
         if !matches!(
             region.kind,
-            super::pio::Kind::GFender | super::pio::Kind::GmGifaf
+            crate::research::agx_pio::Kind::GFender | crate::research::agx_pio::Kind::GmGifaf
         ) {
             return Err("GFX native callback PIO region is not modeled");
         }
@@ -384,10 +384,10 @@ impl FirmwarePower {
         }
         let logical = self.logical(physical)?;
         let kind_matches = match region.kind {
-            super::pio::Kind::GFender => {
+            crate::research::agx_pio::Kind::GFender => {
                 matches!(logical, GATING_CONTROL | FENDER_SLEEP | FENDER_WAKE)
             }
-            super::pio::Kind::GmGifaf => gifaf_status(self.family) == Some(logical),
+            crate::research::agx_pio::Kind::GmGifaf => gifaf_status(self.family) == Some(logical),
             _ => false,
         };
         if !kind_matches {
@@ -402,7 +402,7 @@ impl FirmwarePower {
     pub fn read(
         &self,
         port: &mut stela_contracts::dma::Port<'_, '_>,
-        region: &super::pio::Region,
+        region: &crate::research::agx_pio::Region,
         offset: u32,
     ) -> Result<u32, &'static str> {
         let logical = self.target(port, region, offset, false)?;
@@ -412,7 +412,7 @@ impl FirmwarePower {
     pub fn write(
         &self,
         port: &mut stela_contracts::dma::Port<'_, '_>,
-        region: &super::pio::Region,
+        region: &crate::research::agx_pio::Region,
         offset: u32,
         value: u32,
     ) -> Result<(), &'static str> {
@@ -743,12 +743,12 @@ mod tests {
     }
 
     fn firmware_region_at(
-        kind: super::super::pio::Kind,
+        kind: crate::research::agx_pio::Kind,
         physical: u64,
         va: u64,
-    ) -> super::super::pio::Region {
-        use super::super::pio::Region;
+    ) -> crate::research::agx_pio::Region {
         use super::super::ring::tests::Flat;
+        use crate::research::agx_pio::Region;
         let mut flat = Flat::new(0x1000, 0x2000);
         let descriptor = 0x1000 + 0x640 + kind as u64 * 0x28;
         flat.put_u64(descriptor, physical);
@@ -780,7 +780,7 @@ mod tests {
             sgx.model = family.model().unwrap();
             let power = sgx.firmware_power(&[(physical, 0x4000000, 0)]).unwrap();
             let region = firmware_region_at(
-                super::super::pio::Kind::GFender,
+                crate::research::agx_pio::Kind::GFender,
                 physical + 0xd04000,
                 0x10000,
             );
@@ -922,7 +922,7 @@ mod tests {
             // physical range and must survive the source mapping unchanged.
             let subpage = (status & !0xfff) & 0x3fff;
             let gifaf = firmware_region_at(
-                super::super::pio::Kind::GmGifaf,
+                crate::research::agx_pio::Kind::GmGifaf,
                 physical + (status & !0xfff),
                 0x20000 + subpage,
             );

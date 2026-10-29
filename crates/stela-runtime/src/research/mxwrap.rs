@@ -18,7 +18,7 @@
 //! CPU halt/resume requires the firmware's explicit lifecycle hooks; it never
 //! repeats cold start or resets the mailboxes. CPU idle remains unsupported,
 //! never inferred from FIFO emptiness.
-use super::asc::{Firmware, Lines, Message};
+use crate::platform::apple::asc::{Firmware, Lines, Message};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::any::Any;
 use stela_contracts::dma::Port;

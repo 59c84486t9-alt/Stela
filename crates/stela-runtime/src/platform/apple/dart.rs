@@ -3,19 +3,13 @@
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
 //! See `docs/research/dart-iommu.md` for evidence and qualification limits.
 use stela_soc_data::dart::{DAPF_BYTES, TRANSLATION_WINDOW_LIMIT};
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired when T6000's USB DART contexts are assigned"
-    )
-)]
-pub mod context_route;
-mod descriptor;
+pub(crate) mod descriptor;
 pub mod gen3;
 mod irq;
 mod legacy;
 mod legacy_umms;
+#[cfg(test)]
+pub mod research;
 pub mod smmu;
 mod t8110;
 

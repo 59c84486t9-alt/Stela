@@ -415,14 +415,14 @@ impl Port {
 // Only a private cloned preview uses this sink. A successful real commit
 // publishes the resulting IRQ level after every actual endpoint is checked.
 struct Silent;
-impl super::super::interrupt::InterruptSink for Silent {
+impl stela_contracts::interrupt::InterruptSink for Silent {
     fn set_level(&mut self, _: Wire, _: bool) {}
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::interrupt::InterruptLatch;
     use super::*;
+    use stela_contracts::interrupt::InterruptLatch;
     fn port(layout: Layout) -> Port {
         Port::new(
             layout,

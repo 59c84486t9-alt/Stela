@@ -15,3 +15,6 @@ pub use platform::net;
 /// PC storage and firmware services used by the native UEFI mount.
 #[cfg(target_arch = "x86_64")]
 pub use platform::pc;
+
+#[cfg(test)]
+pub mod research;

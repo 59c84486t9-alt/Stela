@@ -1,7 +1,7 @@
 //! Native ownership of the recovered wrapper/ICU tunable SET_PARAM requests.
 //! This is a setup component, not a complete SIO firmware or version handshake.
 use super::{Effect, EffectResult, FinishError, Request, TunableProgram};
-use crate::platform::apple::sio_dma::Error;
+use crate::research::sio_dma::Error;
 use stela_contracts::dma::Port;
 
 /// A physical map range qualified by the actual owner. Geometry alone does

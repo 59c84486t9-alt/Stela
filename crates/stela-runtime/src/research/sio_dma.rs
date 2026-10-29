@@ -528,7 +528,7 @@ mod tests {
         descriptor(&mut ram, 8, &[(BUFFER, 3), (BUFFER + 3, 5)]);
         let mut channel = Channel::transmit(100, 4).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut physical = Physical;
         let mut port = Port {
             iommu: &mut physical,
@@ -580,7 +580,7 @@ mod tests {
         descriptor(&mut ram, 1, &[(BUFFER, 4)]);
         let mut channel = Channel::transmit(102, 2).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut physical = Physical;
         let mut port = Port {
             iommu: &mut physical,
@@ -644,7 +644,7 @@ mod tests {
         descriptor(&mut ram, 1, &[(BUFFER, 4), (RAM + 0x3000, 4)]);
         let mut channel = Channel::transmit(100, 8).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut physical = Physical;
         let mut port = Port {
             iommu: &mut physical,
@@ -685,7 +685,7 @@ mod tests {
         descriptor(&mut ram, 8, &[(BUFFER, 4)]);
         let mut channel = Channel::transmit(100, 8).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut physical = Physical;
         let configure = 100 | 7 << 8 | 5 << 16;
         let issue = 100 | 9 << 8 | 6 << 16 | 8 << 32;
@@ -757,7 +757,7 @@ mod tests {
         descriptor(&mut ram, 1, &[(BUFFER, 8)]);
         let mut channel = Channel::transmit(100, 4).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut physical = Physical;
         let mut port = Port {
             iommu: &mut physical,
@@ -972,7 +972,7 @@ mod tests {
         let mut ram = Ram::new(RAM, 0x8000);
         let mut channel = Channel::transmit(100, 8).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut physical = Physical;
         for segments in [
             vec![],

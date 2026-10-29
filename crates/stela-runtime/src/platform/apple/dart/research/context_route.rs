@@ -11,7 +11,7 @@
 //! LLT/BLK classifier: all banks and every current remap preimage of the
 //! assigned context must agree. A fault cannot identify its physical bank
 //! or incoming SID here and therefore refuses without latching metadata.
-use super::{Dart, Model};
+use super::super::{Dart, Model};
 use {
     stela_contracts::bus::Access, stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
     stela_contracts::dma::Memory,

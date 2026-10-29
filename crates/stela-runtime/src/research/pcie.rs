@@ -664,12 +664,12 @@ impl MmioDevice for RootComplex {
 
 #[cfg(test)]
 mod tests {
-    use super::super::interrupt::{AicInput, InterruptLatch};
     use super::config::{MemoryBar, Register};
     use super::port::{APP_CLOCK, LTSSM, Layout, REF_CLOCK};
     use super::*;
     use alloc::rc::Rc;
     use core::cell::RefCell;
+    use stela_contracts::interrupt::{AicInput, InterruptLatch};
     use {
         stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
         stela_contracts::dma::test_support::Ram,
@@ -1290,7 +1290,7 @@ mod tests {
                 & 1,
             1
         );
-        assert!(latch.is_asserted(super::super::interrupt::Wire::Aic(AicInput::new(0, 1))));
+        assert!(latch.is_asserted(stela_contracts::interrupt::Wire::Aic(AicInput::new(0, 1))));
     }
     #[test]
     fn peer_presence_requires_actual_complete_bar_and_lifecycle_ownership() {

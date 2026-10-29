@@ -742,7 +742,7 @@ mod tests {
         sleeping: bool,
         outputs: [bool; 3],
     }
-    impl crate::platform::apple::hpm::spmi::Registers for MailboxBody {
+    impl crate::research::hpm_spmi::Registers for MailboxBody {
         fn select(&mut self, register: u8, _: u64) -> Result<(), SlaveError> {
             if self.sleeping {
                 return Err(SlaveError::Nack);
@@ -756,8 +756,8 @@ mod tests {
             &mut self,
             _: u8,
             _: u64,
-        ) -> Result<crate::platform::apple::hpm::spmi::Register, SlaveError> {
-            crate::platform::apple::hpm::spmi::Register::new(&self.data, 4)
+        ) -> Result<crate::research::hpm_spmi::Register, SlaveError> {
+            crate::research::hpm_spmi::Register::new(&self.data, 4)
         }
         fn write(&mut self, _: u8, data: &[u8], _: u64) -> Result<(), SlaveError> {
             let bytes: [u8; 4] = data
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn mailbox_commands_share_queue_backpressure_and_three_independent_input_edges() {
-        use crate::platform::apple::hpm::spmi::Mailbox;
+        use crate::research::hpm_spmi::Mailbox;
         for profile in [Profile::Gen1, Profile::Gen2, Profile::Gen3, Profile::Gen4] {
             let mut c = Spmi::with_configuration(
                 AicInput::new(0, 0x180),

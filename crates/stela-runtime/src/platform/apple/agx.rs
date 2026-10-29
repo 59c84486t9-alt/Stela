@@ -18,7 +18,7 @@
 //! - [`uat`]: the GPU address translator (16 KiB pages, three levels, paired
 //!   TTBRs per context), its page-table encodings and faults, and the stream
 //!   IOMMU the firmware and GPU reach memory through.
-//! - [`pio`]: the AP-authored firmware PIO descriptors.
+//! - `pio`: test-owned AP-authored firmware PIO descriptor research.
 //! - [`initdata`]: the initdata root, the objects it names and the ring
 //!   directory.
 //! - [`ring`]: the shared-memory ring layout (state block, 256 entries,
@@ -38,11 +38,6 @@ pub mod firmware;
 pub mod firmware_image;
 pub mod generation;
 pub mod initdata;
-#[expect(
-    dead_code,
-    reason = "wired when the AGX firmware's initdata publishes PIO descriptors"
-)]
-pub mod pio;
 pub mod ring;
 pub mod sgx;
 pub mod signal;
