@@ -1360,7 +1360,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_ax200_thermal_power_versions_and_capability_branches",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests/thermal.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1370,7 +1370,7 @@
   {
     "package": "stela-drivers",
     "test": "mcc_actual_ax200_v5_response_is_retained_with_original_dma_epoch",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests/mcc.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
