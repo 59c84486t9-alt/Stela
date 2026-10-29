@@ -1257,11 +1257,8 @@ impl<D: Devices> Board<D> {
                 self.hub.wake(self.hub.home.load(Ordering::Acquire));
             }
         }
-        for (pe, pins) in self.pins.iter().enumerate() {
-            let packed = pack(devices.pins(pe));
-            if pins.load(Ordering::Relaxed) != packed {
-                pins.store(packed, Ordering::Release);
-            }
+        for pe in 0..self.pins.len() {
+            self.publish_pins(pe, devices.pins(pe));
         }
         let asleep = devices.waits_on_host();
         if self.asleep.load(Ordering::Relaxed) != asleep {
@@ -1269,6 +1266,15 @@ impl<D: Devices> Board<D> {
         }
         if devices.take_host_service() {
             self.hub.request_service();
+        }
+    }
+
+    /// Publish the snapshot a remote PE reads without the devices' lock.
+    fn publish_pins(&self, pe: usize, lines: Option<Lines>) {
+        let pins = &self.pins[pe];
+        let packed = pack(lines);
+        if pins.load(Ordering::Relaxed) != packed {
+            pins.store(packed, Ordering::Release);
         }
     }
 
@@ -1429,10 +1435,14 @@ impl<D: Devices> SharedDevices<D> {
             *own = lines;
         }
         for pe in self.board.hub.others(cpu) {
-            let lines = match devices.pins(pe) {
+            let pins = devices.pins(pe);
+            let lines = match pins {
                 Some(lines) => lines,
                 None => devices.lines(pe, now),
             };
+            // The receiver may read its pins as soon as the epoch changes,
+            // before this call releases the devices' lock.
+            self.board.publish_pins(pe, pins);
             if lines != seen[pe] {
                 seen[pe] = lines;
                 self.board.hub.lines_changed(pe);
@@ -2155,6 +2165,79 @@ mod tests {
         assert!(hub.applied(&mut posted));
         // Serials keep counting after a take.
         assert_eq!(hub.broadcast(0, Maintenance::Code(None)), [(1, 3)]);
+    }
+
+    #[test]
+    fn a_line_notification_observes_pins_before_the_producer_unlocks() {
+        #[derive(Default)]
+        struct Latched(Lines);
+        impl Devices for Latched {
+            fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+                Ok(0)
+            }
+            fn write(
+                &mut self,
+                _: usize,
+                _: u64,
+                _: u8,
+                _: u64,
+                _: u64,
+            ) -> Result<(), DeviceError> {
+                Ok(())
+            }
+            fn lines(&mut self, pe: usize, _: u64) -> Lines {
+                if pe == 1 { self.0 } else { Lines::default() }
+            }
+            fn pins(&mut self, pe: usize) -> Option<Lines> {
+                Some(self.lines(pe, 0))
+            }
+        }
+        struct ReadPins {
+            worker: Arc<Mutex<Option<SharedDevices<Latched>>>>,
+            observed: Arc<Mutex<Vec<Lines>>>,
+        }
+        impl Kick for ReadPins {
+            fn kick(&self, pe: usize) {
+                // A receiver may run as soon as it is notified, before the
+                // producer releases the board lock. Latched pins are lockless.
+                let mut worker = self.worker.lock().unwrap();
+                let worker = worker.as_mut().unwrap();
+                assert!(worker.board.devices.try_lock().is_err());
+                let lines = worker.lines(pe, 0);
+                self.observed.lock().unwrap().push(lines);
+            }
+        }
+        let worker = Arc::new(Mutex::new(None));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let hub = Hub::new(
+            2,
+            ReadPins {
+                worker: Arc::clone(&worker),
+                observed: Arc::clone(&observed),
+            },
+        );
+        for pe in 0..2 {
+            hub.set_live(pe, true);
+        }
+        let home = SharedDevices::new(Latched::default(), Arc::clone(&hub));
+        *worker.lock().unwrap() = Some(home.worker());
+        let changes = [
+            Lines {
+                irq: true,
+                fiq: false,
+            },
+            Lines {
+                irq: false,
+                fiq: true,
+            },
+            Lines::default(),
+        ];
+        for lines in changes {
+            hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+            home.serve(|devices| devices.0 = lines);
+        }
+        worker.lock().unwrap().take();
+        assert_eq!(*observed.lock().unwrap(), changes);
     }
 
     /// A write of 1 requests a restart, of 2 starts PE 1 at 0x800 and of 3
