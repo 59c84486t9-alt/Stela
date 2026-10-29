@@ -2201,8 +2201,9 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       .ident = m.ident, .ident_bytes = m.ident_bytes,
    };
    if (render_name) {
-      struct stela_air_render render;
-      if (!stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, render_name), stage, &render)) goto done;
+      struct stela_air_render render = {.entry = {.stage = stage}};
+      if (stage != STELA_AIR_VISIBLE &&
+          !stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, render_name), stage, &render)) goto done;
       success = render_visit(&info, &render.entry, data);
       if (!success) fail(&m, STELA_AIR_LIMIT, "AIR stage receiver refused entry");
       goto done;
@@ -2296,7 +2297,7 @@ stela_air_inspect_stage(const void *bitcode, size_t size, const char *entry,
                          enum stela_air_stage stage, stela_air_visit_stage visit,
                          void *data, struct stela_air_error *error)
 {
-   if (!entry || stage < STELA_AIR_VERTEX || stage > STELA_AIR_MESH) {
+   if (!entry || stage < STELA_AIR_VERTEX || stage > STELA_AIR_VISIBLE) {
       if (error) *error = (struct stela_air_error){.kind = STELA_AIR_INPUT};
       return false;
    }
@@ -2328,7 +2329,8 @@ stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsig
    }
    LLVMValueRef fn = LLVMGetNamedFunction(m.module, entry);
    /* In enum stela_air_stage order after the kernels. */
-   const char *lists[] = {"air.kernel", "air.vertex", "air.fragment", "air.object", "air.mesh"};
+   const char *lists[] = {"air.kernel", "air.vertex", "air.fragment", "air.object", "air.mesh",
+                          "air.visible"};
    for (unsigned list = 0; fn && list < ARRAY_SIZE(lists); list++) {
       LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
       unsigned count;

@@ -43,7 +43,7 @@ fail(struct stela_air_error *error, enum stela_air_error_kind kind, const char *
  * enum stela_air_stage. */
 static const enum stela_metal_function_stage function_stages[] = {
    STELA_METAL_KERNEL, STELA_METAL_VERTEX, STELA_METAL_FRAGMENT, STELA_METAL_OBJECT,
-   STELA_METAL_MESH,
+   STELA_METAL_MESH, STELA_METAL_VISIBLE,
 };
 
 static uint32_t
@@ -424,6 +424,10 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
    if (!reflect(air, size, entry, &r))
       goto done;
    enum stela_metal_function_stage stage = reflection->stage;
+   if (stage == STELA_METAL_VISIBLE) {
+      fail(error, STELA_AIR_ARGUMENT, "visible functions compile into the functions that link them");
+      goto done;
+   }
    bool compute = stage == STELA_METAL_KERNEL || stage == STELA_METAL_OBJECT ||
                   stage == STELA_METAL_MESH;
    /* A post-tessellation vertex function is its pipeline's evaluation

@@ -191,6 +191,11 @@ pub struct Header {
     pub minimum_os: Version,
 }
 
+impl Header {
+    /// The kind of a dynamic library (`MTLLibraryTypeDynamic`).
+    pub const DYNAMIC: u8 = 2;
+}
+
 /// A structurally validated library. AIR digests are checked by [`Function::air`]
 /// when selected for compilation, avoiding hashing every unused shader.
 #[derive(Debug)]
@@ -488,8 +493,18 @@ pub(crate) mod tests {
     /// An original synthetic container. Its payload is only LLVM framing, not a
     /// valid shader; AIR semantics are the LLVM reader/compiler's responsibility.
     pub(crate) fn fixture(duplicate: bool) -> Vec<u8> {
+        container(duplicate, 0, u32::MAX)
+    }
+
+    /// A dynamic library of [`fixture`]'s function, with another module.
+    pub(crate) fn dynamic_fixture() -> Vec<u8> {
+        container(false, Header::DYNAMIC, 0)
+    }
+
+    /// A library of `kind` whose module's wrapper names `cpu_type`.
+    fn container(duplicate: bool, kind: u8, cpu_type: u32) -> Vec<u8> {
         let mut module = vec![];
-        for word in [LLVM_WRAPPER_MAGIC, 0, 20, 8, u32::MAX] {
+        for word in [LLVM_WRAPPER_MAGIC, 0, 20, 8, cpu_type] {
             module.extend_from_slice(&word.to_le_bytes());
         }
         module.extend_from_slice(b"BC\xc0\xde\0\0\0\0");
@@ -513,6 +528,7 @@ pub(crate) mod tests {
         data[4..6].copy_from_slice(&0x8001u16.to_le_bytes());
         data[6..8].copy_from_slice(&2u16.to_le_bytes());
         data[8..10].copy_from_slice(&9u16.to_le_bytes());
+        data[10] = kind;
         data[11] = 0x81;
         data[12] = 26;
         u64_field(&mut data, 24, HEADER_BYTES);

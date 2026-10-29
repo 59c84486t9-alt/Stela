@@ -758,6 +758,11 @@ linked_functions_resolve_tables_and_externals(void)
    struct stela_air_error error;
    assert(reflect(tables, "tables", &reflection, &error));
    assert(reflection.function_tables == 1 && reflection.buffer_count == 2);
+   /* A visible function reflects as no stage, and compiles only linked. */
+   assert(reflect(tables, "doubled", &reflection, &error));
+   assert(reflection.stage == STELA_METAL_VISIBLE && !reflection.buffer_count);
+   const struct stela_metal_specialization none = {0};
+   assert(!compile(tables, "doubled", &none, &error) && error.kind == STELA_AIR_ARGUMENT);
 
    const char *functions[] = {"doubled", "negated", "wide"};
    nir_shader *shader = compile_linked(tables, "tables", &linked, 1, functions, 3, &error);

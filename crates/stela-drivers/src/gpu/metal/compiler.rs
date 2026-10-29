@@ -14,20 +14,25 @@
 //! before it runs. A post-tessellation vertex function compiles with its
 //! pipeline's tessellation and stage-in layout into the evaluation stage,
 //! and the service synthesizes the stages ahead of it.
+//!
+//! A stage's [`Linking`] reaches the service as the AIR modules of its
+//! functions and of every function of its dynamic libraries, each module
+//! once and none that is the function's own, with the names of the
+//! functions visible function tables call.
 pub mod ffi;
 #[cfg(test)]
 mod tests;
 
 use super::{
-    abi::{DataType, IndexType, TessellationControlPointIndexType, TextureType},
+    abi::{DataType, FunctionType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
-    error::{Error, Result},
-    library::{Air, Library},
+    error::{Error, Result, ensure},
+    library::{Air, Header, Library},
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, FunctionConstant,
-        Interface, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch, PatchDomain, Provenance, Scalar,
-        Specialization, Stage, Tessellation, TessellationStages, TextureUse, ThreadgroupUse,
-        Varying,
+        Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch, PatchDomain, Provenance,
+        Reflection, Scalar, Specialization, Stage, Tessellation, TessellationStages, TextureUse,
+        ThreadgroupUse, Varying,
     },
     vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
@@ -64,7 +69,9 @@ const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::TESSELLATION)
     .union(ShaderFeatures::BARYCENTRICS)
     .union(ShaderFeatures::PULL_MODEL_INTERPOLATION)
-    .union(ShaderFeatures::SPARSE_FEEDBACK);
+    .union(ShaderFeatures::SPARSE_FEEDBACK)
+    .union(ShaderFeatures::FUNCTION_POINTERS)
+    .union(ShaderFeatures::DYNAMIC_LIBRARIES);
 
 /// LLVM instructions one compilation may lower, legalization included. Far
 /// beyond the functions Metal compiles, it bounds the work of hostile input.
@@ -189,10 +196,10 @@ impl Compiler for AirCompiler {
         FEATURES
     }
 
-    fn reflect(&mut self, library: u64, entry: &str, _: &Specialization) -> Result<Interface> {
+    fn reflect(&mut self, library: u64, entry: &str, _: &Specialization) -> Result<Reflection> {
         let selected = select(&self.libraries, library, entry)?;
-        let (interface, _) = selected.reflect(&self.service, &mut self.refusal)?;
-        Ok(interface)
+        let (reflection, _) = selected.reflect(&self.service, &mut self.refusal)?;
+        Ok(reflection)
     }
 
     fn compile(
@@ -266,7 +273,26 @@ impl AirCompiler {
         stage_in: Option<&ffi::StageIn>,
     ) -> Result<CompiledShader> {
         let selected = select(&self.libraries, library, entry)?;
-        let (interface, provenance) = selected.reflect(&self.service, &mut self.refusal)?;
+        let (reflection, provenance) = selected.reflect(&self.service, &mut self.refusal)?;
+        let Reflection::Stage(interface) = reflection else {
+            return Err(Error::Invalid("a visible function is not a pipeline stage"));
+        };
+        let linking = &specialization.linking;
+        let modules: Vec<_> = linked_modules(&self.libraries, linking, &selected.slice_hash)?
+            .into_iter()
+            .map(|air| ffi::Module {
+                bitcode: air.as_ptr().cast(),
+                size: air.len(),
+            })
+            .collect();
+        let functions: Vec<_> = linking
+            .functions
+            .iter()
+            .map(|(_, name)| ffi::LinkedFunction {
+                name: name.as_ptr().cast(),
+                name_bytes: name.len(),
+            })
+            .collect();
         let lengths = specialization
             .threadgroup_lengths
             .iter()
@@ -307,16 +333,16 @@ impl AirCompiler {
             constants: constants.as_ptr(),
             tessellation: tessellation.map_or(ptr::null(), ptr::from_ref),
             stage_in: stage_in.map_or(ptr::null(), ptr::from_ref),
-            modules: ptr::null(),
-            linked_functions: ptr::null(),
-            module_count: 0,
-            linked_function_count: 0,
+            modules: modules.as_ptr(),
+            linked_functions: functions.as_ptr(),
+            module_count: count(modules.len())?,
+            linked_function_count: count(functions.len())?,
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
-        // identifiers, values and layouts it points to, outlive the call,
-        // which writes only the error.
+        // identifiers, values, layouts, modules and names it points to,
+        // outlive the call, which writes only the error.
         let shader = unsafe {
             (self.service.compile)(
                 air.as_ptr().cast(),
@@ -332,7 +358,7 @@ impl AirCompiler {
         }
         Ok(CompiledShader {
             code: ShaderCode(shader as usize as u64),
-            interface,
+            interface: *interface,
             provenance,
         })
     }
@@ -425,6 +451,42 @@ impl ffi::StageIn {
     }
 }
 
+/// The AIR modules `linking` adds to the function whose module has
+/// `own`: each once, by digest.
+fn linked_modules<'a>(
+    libraries: &'a BTreeMap<u64, Vec<u8>>,
+    linking: &Linking,
+    own: &[u8; 32],
+) -> Result<Vec<&'a [u8]>> {
+    let mut digests = alloc::vec![*own];
+    let mut modules = Vec::new();
+    let mut add = |digest: [u8; 32], air: Air<'a>| {
+        if !digests.contains(&digest) {
+            digests.push(digest);
+            modules.push(air.bitcode);
+        }
+    };
+    for (library, entry) in linking.functions.iter().chain(&linking.private_functions) {
+        let selected = select(libraries, *library, entry)?;
+        add(selected.slice_hash, selected.air);
+    }
+    let invalid = |_| Error::Invalid("Metal library");
+    for library in &linking.libraries {
+        let data = libraries
+            .get(library)
+            .ok_or(Error::Invalid("unknown library"))?;
+        let parsed = Library::parse(data).map_err(invalid)?;
+        ensure(
+            parsed.header.kind == Header::DYNAMIC,
+            "a preloaded library that is not dynamic",
+        )?;
+        for function in parsed.functions() {
+            add(*function.digest, function.air().map_err(invalid)?);
+        }
+    }
+    Ok(modules)
+}
+
 /// A library function selected for the service.
 struct Selected<'a> {
     air: Air<'a>,
@@ -458,12 +520,12 @@ fn select<'a>(
 }
 
 impl Selected<'_> {
-    /// The service's reflection, as the function's interface and provenance.
+    /// The service's reflection, with the function's provenance.
     fn reflect(
         &self,
         service: &Service,
         refusal: &mut Option<Refusal>,
-    ) -> Result<(Interface, Provenance)> {
+    ) -> Result<(Reflection, Provenance)> {
         let mut reflection = Box::new(ffi::Reflection::ZERO);
         let mut error = ffi::AirError::NONE;
         let air = self.air.bitcode;
@@ -481,14 +543,18 @@ impl Selected<'_> {
         if !reflected {
             return Err(refuse(refusal, self.name, &error));
         }
-        let interface = interface(&reflection)?;
         let provenance = Provenance {
             build_id: name(&reflection, reflection.ident, reflection.ident_bytes)?.to_vec(),
             slice_hash: self.slice_hash,
             source_map: None,
             entry: self.name.to_string(),
         };
-        Ok((interface, provenance))
+        let reflection = if u64::from(reflection.stage) == FunctionType::Visible.raw() {
+            Reflection::Visible(constants(&reflection)?)
+        } else {
+            Reflection::Stage(Box::new(interface(&reflection)?))
+        };
+        Ok((reflection, provenance))
     }
 }
 
@@ -635,6 +701,21 @@ fn texture_type(raw: u32) -> Result<TextureType> {
     TYPES.get(index as usize).copied().ok_or(MALFORMED)
 }
 
+fn constants(r: &ffi::Reflection) -> Result<Vec<FunctionConstant>> {
+    rows(&r.function_constants, r.function_constant_count)?
+        .iter()
+        .map(|constant| {
+            let constant_name = name(r, constant.name, constant.name_bytes)?;
+            Ok(FunctionConstant {
+                name: String::from(str::from_utf8(constant_name).map_err(|_| MALFORMED)?),
+                data_type: data_type(name(r, constant.type_name, constant.type_bytes)?)?,
+                index: constant.index,
+                required: constant.required != 0,
+            })
+        })
+        .collect()
+}
+
 fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
     let r = reflection;
     let stage = Stage::from_raw(r.stage.into()).ok_or(MALFORMED)?;
@@ -699,18 +780,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let constants = rows(&r.function_constants, r.function_constant_count)?
-        .iter()
-        .map(|constant| {
-            let constant_name = name(r, constant.name, constant.name_bytes)?;
-            Ok(FunctionConstant {
-                name: String::from(str::from_utf8(constant_name).map_err(|_| MALFORMED)?),
-                data_type: data_type(name(r, constant.type_name, constant.type_bytes)?)?,
-                index: constant.index,
-                required: constant.required != 0,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let constants = constants(r)?;
     let features = match stage {
         Stage::Kernel => ShaderFeatures::COMPUTE,
         Stage::Vertex | Stage::Fragment => ShaderFeatures::VERTEX_FRAGMENT,

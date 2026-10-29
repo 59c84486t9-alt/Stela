@@ -1,15 +1,18 @@
 use super::{
-    pipelines::{ComputePipelineRequest, MeshPipelineRequest, RenderPipelineRequest},
+    pipelines::{
+        ComputePipelineRequest, FunctionHandle, LinkedFunctions, MeshPipelineRequest,
+        RenderPipelineRequest,
+    },
     queue::{AttachmentRequest, CounterSet, RenderPassRequest},
     *,
 };
 use crate::gpu::metal::{
     abi::{
-        CpuCacheMode, DataType, DispatchType, HazardTrackingMode, HeapType, IndirectCommandType,
-        LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
-        PrimitiveTopologyClass, PrimitiveType, ResourceOptions, SparsePageSize,
-        SparseTextureMappingMode, StorageMode, StoreAction, StoreActionOptions, SwizzleChannels,
-        TessellationPartitionMode, TextureType, TextureUsage,
+        CpuCacheMode, DataType, DispatchType, FunctionType, HazardTrackingMode, HeapType,
+        IndirectCommandType, LoadAction, MultisampleDepthResolveFilter,
+        MultisampleStencilResolveFilter, PrimitiveTopologyClass, PrimitiveType, ResourceOptions,
+        SparsePageSize, SparseTextureMappingMode, StorageMode, StoreAction, StoreActionOptions,
+        SwizzleChannels, TessellationPartitionMode, TextureType, TextureUsage,
     },
     capabilities::{ShaderFeatures, Size},
     command_buffer::{
@@ -27,9 +30,9 @@ use crate::gpu::metal::{
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
     shader::{
-        Access, BufferUse, CompiledShader, FunctionConstant, Interface, Patch, PatchDomain,
-        Provenance, Scalar, Specialization, Stage, Tessellation, TessellationStages, Varying,
-        tests::interface,
+        Access, BufferUse, CompiledShader, FunctionConstant, Interface, Linking, Patch,
+        PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
+        TessellationStages, Varying, tests::interface,
     },
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
@@ -45,7 +48,7 @@ use crate::gpu::metal::{
         physical::PhysicalDevice,
     },
 };
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 
 #[derive(Default)]
 struct MockBackend {
@@ -238,8 +241,10 @@ impl Backend for MockBackend {
 
 /// Reflects functions by name: `"kernel"`, `"vertex"`, `"fragment"`,
 /// `"object"`, `"mesh"`, the post-tessellation `"patch"`, `"unlinked"`, a
-/// fragment function reading a varying nothing outputs, and `"constants"`, a
-/// kernel with a required and an optional function constant.
+/// fragment function reading a varying nothing outputs, `"constants"`, a
+/// kernel with a required and an optional function constant, and the
+/// visible functions `"visible"` and `"tinted"`, whose module has a
+/// function constant.
 #[derive(Default)]
 struct MockCompiler {
     compiled: Vec<Specialization>,
@@ -302,8 +307,17 @@ impl Compiler for MockCompiler {
     fn features(&self) -> ShaderFeatures {
         ShaderFeatures::KNOWN
     }
-    fn reflect(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Interface> {
-        reflected(entry)
+    fn reflect(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Reflection> {
+        match entry {
+            "visible" => Ok(Reflection::Visible(Vec::new())),
+            "tinted" => Ok(Reflection::Visible(alloc::vec![FunctionConstant {
+                name: String::from("tint"),
+                data_type: DataType::Float,
+                index: 0,
+                required: false,
+            }])),
+            _ => reflected(entry).map(|interface| Reflection::Stage(Box::new(interface))),
+        }
     }
     fn compile(
         &mut self,
@@ -685,6 +699,8 @@ fn amplified_pipelines_compile_amplified_vertex_functions() {
         input_primitive_topology: PrimitiveTopologyClass::Triangle,
         max_vertex_amplification_count: 2,
         tessellation: Default::default(),
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
     };
     device.new_render_pipeline(&request).unwrap();
     let amplified: Vec<bool> = device
@@ -727,6 +743,118 @@ fn functions_take_values_for_their_function_constants() {
 }
 
 #[test]
+fn stages_link_visible_functions_and_name_them_by_handle() {
+    let mut device = device();
+    let kernel = device.new_function(1, "kernel", Vec::new()).unwrap();
+    let visible = device.new_function(1, "visible", Vec::new()).unwrap();
+    let tinted = device.new_function(1, "tinted", Vec::new()).unwrap();
+    assert_eq!(device.function_type(visible), Ok(FunctionType::Visible));
+    assert_eq!(device.function_type(kernel), Ok(FunctionType::Kernel));
+    assert!(device.function_interface(visible).is_err());
+
+    let request = |functions: Vec<FunctionId>| ComputePipelineRequest {
+        compute_function: kernel,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+        linked_functions: LinkedFunctions {
+            functions,
+            private_functions: Vec::new(),
+            libraries: alloc::vec![7],
+        },
+    };
+    let pipeline = device
+        .new_compute_pipeline(&request(alloc::vec![visible]))
+        .unwrap();
+    assert_eq!(
+        device.compute_function_handle(pipeline, visible),
+        Ok(Some(FunctionHandle(1)))
+    );
+    assert_eq!(device.compute_function_handle(pipeline, kernel), Ok(None));
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    assert_eq!(
+        device.compiler.compiled.last().unwrap().linking,
+        Linking {
+            functions: alloc::vec![(1, String::from("visible"))],
+            private_functions: Vec::new(),
+            libraries: alloc::vec![7],
+        }
+    );
+    assert_eq!(
+        device.new_compute_pipeline(&request(alloc::vec![kernel])),
+        Err(Error::Invalid("linked functions are visible functions"))
+    );
+    assert_eq!(
+        device.new_compute_pipeline(&request(alloc::vec![tinted])),
+        Err(Error::Unsupported(
+            "linked functions with function constants"
+        ))
+    );
+
+    let vertex = device.new_function(1, "vertex", Vec::new()).unwrap();
+    let fragment = device.new_function(1, "fragment", Vec::new()).unwrap();
+    let render = RenderPipelineRequest {
+        vertex_function: vertex,
+        fragment_function: Some(fragment),
+        vertex_descriptor: None,
+        targets: color_targets(),
+        input_primitive_topology: PrimitiveTopologyClass::Triangle,
+        max_vertex_amplification_count: 1,
+        tessellation: Default::default(),
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions {
+            functions: alloc::vec![visible],
+            ..LinkedFunctions::default()
+        },
+    };
+    let pipeline = device.new_render_pipeline(&render).unwrap();
+    let handle =
+        |device: &TestDevice, stage| device.render_function_handle(pipeline, stage, visible);
+    assert_eq!(
+        handle(&device, Stage::Fragment),
+        Ok(Some(FunctionHandle(1)))
+    );
+    assert_eq!(handle(&device, Stage::Vertex), Ok(None));
+    let linked: Vec<_> = device.compiler.compiled[device.compiler.compiled.len() - 2..]
+        .iter()
+        .map(|specialization| specialization.linking.functions.len())
+        .collect();
+    assert_eq!(linked, [0, 1], "only the fragment stage links");
+}
+
+#[test]
+fn visible_function_tables_hold_handles() {
+    let mut device = device();
+    assert!(device.new_visible_function_table(0).is_err());
+    let table = device.new_visible_function_table(4).unwrap();
+    let (memory, offset, length) = device.buffer_memory(table).unwrap();
+    assert_eq!(length, 32);
+    device
+        .set_visible_functions(table, 2, &[Some(FunctionHandle(3)), None])
+        .unwrap();
+    assert_eq!(
+        device.set_visible_functions(table, 3, &[None, None]),
+        Err(Error::Invalid("functions past the table's end"))
+    );
+    let mut bytes = [0xff; 32];
+    device
+        .backend()
+        .read_memory(memory, offset, &mut bytes)
+        .unwrap();
+    let handles: Vec<u64> = bytes
+        .chunks(8)
+        .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+        .collect();
+    assert_eq!(handles, [0, 0, 3, 0], "tables start with no functions");
+}
+
+#[test]
 fn render_pipelines_compile_their_functions_once() {
     let mut device = device();
     let vertex = device
@@ -742,6 +870,8 @@ fn render_pipelines_compile_their_functions_once() {
         input_primitive_topology: PrimitiveTopologyClass::Triangle,
         max_vertex_amplification_count: 1,
         tessellation: Default::default(),
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
     };
     let pipeline = device.new_render_pipeline(&request).unwrap();
     assert_eq!(
@@ -888,6 +1018,8 @@ fn post_tessellation_functions_compile_with_their_feeding_stages() {
             max_tessellation_factor: 64,
             ..TessellationDescriptor::default()
         },
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
     };
     let pipeline = device.new_render_pipeline(&request).unwrap();
     let tessellation = &device.compiler.tessellations[0];
@@ -958,6 +1090,7 @@ fn compute_and_mesh_variants_compile_per_shape() {
             threadgroup_size_is_multiple_of_thread_execution_width: false,
             max_total_threads_per_threadgroup: 0,
             stage_input: None,
+            linked_functions: LinkedFunctions::default(),
         })
         .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();
@@ -1005,6 +1138,9 @@ fn compute_and_mesh_variants_compile_per_shape() {
         fragment_function: Some(fragment),
         targets: color_targets(),
         max_vertex_amplification_count: 1,
+        object_linked_functions: LinkedFunctions::default(),
+        mesh_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
     };
     let compiled = device.compiler.compiled.len();
     let id = device.new_mesh_render_pipeline(&request).unwrap();
@@ -1473,6 +1609,7 @@ fn indirect_commands_execute_snapshots_of_their_buffer() {
             threadgroup_size_is_multiple_of_thread_execution_width: false,
             max_total_threads_per_threadgroup: 0,
             stage_input: None,
+            linked_functions: LinkedFunctions::default(),
         })
         .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();

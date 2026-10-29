@@ -13,6 +13,7 @@ enum stela_metal_function_stage {
    STELA_METAL_VERTEX = 1,
    STELA_METAL_FRAGMENT = 2,
    STELA_METAL_KERNEL = 3,
+   STELA_METAL_VISIBLE = 5,
    STELA_METAL_MESH = 7,
    STELA_METAL_OBJECT = 8,
 };
@@ -60,7 +61,8 @@ struct stela_metal_function_constant {
    uint32_t index, name, name_bytes, type, type_bytes, required;
 };
 
-/* One function's reflection. names holds the varying identifiers, the
+/* One function's reflection; a visible function's holds only its stage and
+ * the module's facts. names holds the varying identifiers, the
  * function constants' names and types and the module's llvm.ident, whose
  * bytes are zero when it records none. */
 struct stela_metal_reflection {
@@ -145,7 +147,8 @@ bool stela_metal_reflect(const void *air, size_t size, const char *entry,
                          struct stela_air_error *error);
 
 /* Compiles entry against the specialization: NIR whose entry point is
- * main, which stela_metal_release frees, or NULL after reporting why. */
+ * main, which stela_metal_release frees, or NULL after reporting why. A
+ * visible function compiles only into the functions that link it. */
 nir_shader *stela_metal_compile(const void *air, size_t size, const char *entry,
                                 const struct stela_metal_target *target,
                                 const struct stela_metal_specialization *specialization,

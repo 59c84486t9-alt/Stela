@@ -6,9 +6,9 @@ use crate::gpu::metal::{
         IndexType, TessellationControlPointIndexType, TessellationFactorStepFunction,
         TessellationPartitionMode, Winding,
     },
-    library::tests::fixture,
+    library::tests::{dynamic_fixture, fixture},
     nvidia::{CHIPS, fixture::nvk},
-    shader::{Patch, PatchDomain},
+    shader::{Linking, Patch, PatchDomain},
     vertex::{STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
 };
 use alloc::vec;
@@ -29,6 +29,9 @@ struct Compiled {
     stage_in: Vec<[u32; 7]>,
     /// The stage-in's index bytes and buffer.
     stage_in_indices: Option<(u32, u32)>,
+    /// The bytes of each linked module.
+    modules: Vec<usize>,
+    linked_functions: Vec<String>,
 }
 
 /// A refusal's kind, instruction and detail.
@@ -155,6 +158,34 @@ unsafe extern "C" fn compile(
             })
             .collect()
     });
+    // SAFETY: as above.
+    let (modules, linked_functions) = unsafe {
+        (
+            slice::from_raw_parts(specialization.modules, specialization.module_count as usize),
+            slice::from_raw_parts(
+                specialization.linked_functions,
+                specialization.linked_function_count as usize,
+            ),
+        )
+    };
+    let modules = modules
+        .iter()
+        .map(|module| {
+            // SAFETY: as above.
+            let air = unsafe { slice::from_raw_parts(module.bitcode.cast::<u8>(), module.size) };
+            assert!(air.starts_with(b"BC\xc0\xde"), "modules are bitcode");
+            air.len()
+        })
+        .collect();
+    let linked_functions = linked_functions
+        .iter()
+        .map(|function| {
+            // SAFETY: as above.
+            let name =
+                unsafe { slice::from_raw_parts(function.name.cast::<u8>(), function.name_bytes) };
+            String::from(str::from_utf8(name).unwrap())
+        })
+        .collect();
     let constants = constants
         .iter()
         .map(|constant| {
@@ -194,6 +225,8 @@ unsafe extern "C" fn compile(
             tessellation,
             stage_in,
             stage_in_indices,
+            modules,
+            linked_functions,
         });
         ptr::without_provenance_mut(0x1000 * fake.compiled.len())
     })
@@ -232,6 +265,14 @@ fn with_library() -> (AirCompiler, u64) {
     let mut compiler = compiler(&nvk(&CHIPS[0], 8 << 30));
     let library = compiler.add_library(fixture(false)).unwrap();
     (compiler, library)
+}
+
+/// The fixture kernel's reflection, as a stage.
+fn reflect_stage(compiler: &mut AirCompiler, library: u64) -> Interface {
+    match compiler.reflect(library, "kernel", &Specialization::default()) {
+        Ok(Reflection::Stage(interface)) => *interface,
+        other => panic!("{other:?}"),
+    }
 }
 
 /// Appends `bytes` to the reflection's names, returning their offset.
@@ -319,9 +360,7 @@ fn reflections_become_interfaces_with_their_provenance() {
         r.function_constant_count = 1;
     });
     let (mut compiler, library) = with_library();
-    let interface = compiler
-        .reflect(library, "kernel", &Specialization::default())
-        .unwrap();
+    let interface = reflect_stage(&mut compiler, library);
     assert_eq!(interface.stage, Stage::Vertex);
     assert_eq!(
         interface.buffers,
@@ -409,9 +448,7 @@ fn fragment_interpolation_is_a_feature_of_its_function() {
         r.interpolants = 1;
     });
     let (mut compiler, library) = with_library();
-    let interface = compiler
-        .reflect(library, "kernel", &Specialization::default())
-        .unwrap();
+    let interface = reflect_stage(&mut compiler, library);
     assert!(
         interface
             .features
@@ -580,6 +617,87 @@ fn refusals_name_their_kind_and_keep_their_detail() {
 }
 
 #[test]
+fn visible_functions_reflect_their_constants_and_only_link() {
+    reflecting(|r| {
+        r.stage = 5;
+        let name = add_name(r, b"tint");
+        let type_name = add_name(r, b"float");
+        r.function_constants[0] = ffi::FunctionConstant {
+            index: 2,
+            name,
+            name_bytes: 4,
+            type_name,
+            type_bytes: 5,
+            required: 0,
+        };
+        r.function_constant_count = 1;
+    });
+    let (mut compiler, library) = with_library();
+    let specialization = Specialization::default();
+    assert_eq!(
+        compiler.reflect(library, "kernel", &specialization),
+        Ok(Reflection::Visible(vec![FunctionConstant {
+            name: String::from("tint"),
+            data_type: DataType::Float,
+            index: 2,
+            required: false,
+        }]))
+    );
+    assert_eq!(
+        compiler.compile(library, "kernel", &specialization),
+        Err(Error::Invalid("a visible function is not a pipeline stage"))
+    );
+}
+
+#[test]
+fn linked_modules_reach_the_service_once_each() {
+    reflecting(|r| r.stage = 3);
+    let (mut compiler, library) = with_library();
+    let dynamic = compiler.add_library(dynamic_fixture()).unwrap();
+    let kernel = || (library, String::from("kernel"));
+    let linked = |linking| Specialization {
+        linking,
+        ..Specialization::default()
+    };
+    // The function's own module and the dynamic library's, linked twice.
+    let specialization = linked(Linking {
+        functions: vec![kernel(), kernel()],
+        private_functions: vec![(dynamic, String::from("kernel"))],
+        libraries: vec![dynamic],
+    });
+    compiler
+        .compile(library, "kernel", &specialization)
+        .unwrap();
+    FAKE.with_borrow(|fake| {
+        let compiled = fake.compiled.last().unwrap();
+        assert_eq!(compiled.modules.len(), 1);
+        assert_eq!(compiled.linked_functions, ["kernel", "kernel"]);
+    });
+    assert_eq!(
+        compiler.compile(
+            library,
+            "kernel",
+            &linked(Linking {
+                libraries: vec![library],
+                ..Linking::default()
+            })
+        ),
+        Err(Error::Invalid("a preloaded library that is not dynamic"))
+    );
+    assert_eq!(
+        compiler.compile(
+            library,
+            "kernel",
+            &linked(Linking {
+                private_functions: vec![(dynamic, String::from("missing"))],
+                ..Linking::default()
+            })
+        ),
+        Err(Error::Invalid("no function of that name"))
+    );
+}
+
+#[test]
 fn what_the_service_cannot_take_is_refused_before_it_runs() {
     let (mut compiler, library) = with_library();
     let specialization = Specialization::default();
@@ -693,9 +811,7 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
         domain: PatchDomain::Quad,
         control_points: Some(4),
     };
-    let interface = compiler
-        .reflect(library, "kernel", &Specialization::default())
-        .unwrap();
+    let interface = reflect_stage(&mut compiler, library);
     assert_eq!(interface.patch, Some(patch));
     assert!(interface.features.contains(ShaderFeatures::TESSELLATION));
     let tessellation = Tessellation {

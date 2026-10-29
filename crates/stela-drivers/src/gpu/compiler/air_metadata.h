@@ -219,9 +219,10 @@ bool stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
  * This validates selected entry ABI/reflection, not body execution or hardware.
  * Legacy stela_air_inspect continues its original compute-only acceptance. */
 /* Object and mesh functions are compute-like: they take kernel builtins,
- * threadgroup memory and barriers. */
+ * threadgroup memory and barriers. A visible function is no stage: its
+ * inspection visits an empty entry with the module's facts. */
 enum stela_air_stage {
-   STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT, STELA_AIR_OBJECT, STELA_AIR_MESH,
+   STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT, STELA_AIR_OBJECT, STELA_AIR_MESH, STELA_AIR_VISIBLE,
 };
 enum stela_air_stage_semantic {
    STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_STAGE_BUILTIN, STELA_AIR_POSITION,

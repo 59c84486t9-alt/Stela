@@ -20,7 +20,7 @@ use super::{
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{ShaderStages, object::ShaderCode},
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 
 raw_enum! {
     /// The Metal function types that become pipeline stages.
@@ -302,14 +302,7 @@ impl Interface {
             }),
             "varyings",
         )?;
-        ensure(
-            self.constants.iter().enumerate().all(|(n, constant)| {
-                self.constants[n + 1..]
-                    .iter()
-                    .all(|other| other.index != constant.index && other.name != constant.name)
-            }),
-            "function constants",
-        )?;
+        validate_constants(&self.constants)?;
         if let Some(patch) = self.patch {
             ensure(
                 self.stage == Stage::Vertex,
@@ -337,6 +330,54 @@ impl Interface {
 
     pub fn uses_dual_source(&self) -> bool {
         self.color_outputs.iter().any(|output| output.dual_source)
+    }
+}
+
+/// Checks that each constant has its own index and name.
+fn validate_constants(constants: &[FunctionConstant]) -> Result<()> {
+    ensure(
+        constants.iter().enumerate().all(|(n, constant)| {
+            constants[n + 1..]
+                .iter()
+                .all(|other| other.index != constant.index && other.name != constant.name)
+        }),
+        "function constants",
+    )
+}
+
+/// The compiler's reflection of a library function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Reflection {
+    /// A function that becomes a pipeline stage.
+    Stage(Box<Interface>),
+    /// A `[[visible]]` function, with its module's function constants:
+    /// pipelines link it into their stages, which call it directly or
+    /// through visible function tables.
+    Visible(Vec<FunctionConstant>),
+}
+
+impl Reflection {
+    pub fn function_type(&self) -> FunctionType {
+        match self {
+            Self::Stage(interface) => {
+                FunctionType::from_raw(interface.stage.raw()).expect("stages are function types")
+            }
+            Self::Visible(_) => FunctionType::Visible,
+        }
+    }
+
+    pub fn constants(&self) -> &[FunctionConstant] {
+        match self {
+            Self::Stage(interface) => &interface.constants,
+            Self::Visible(constants) => constants,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Stage(interface) => interface.validate(),
+            Self::Visible(constants) => validate_constants(constants),
+        }
     }
 }
 
@@ -386,6 +427,27 @@ pub struct Specialization {
     /// has none: the stage mesh draws launch, whose threads outside a
     /// `drawMeshThreads` grid skip the function.
     pub launched_by_grid: bool,
+    /// The functions and libraries the stage links.
+    pub linking: Linking,
+}
+
+/// What a pipeline stage links into its function (`MTLLinkedFunctions` and
+/// `preloadedLibraries`): visible functions as (library, entry), and
+/// dynamic libraries. Calls of external functions resolve to any of them.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Linking {
+    /// The functions visible function tables call: handle `i + 1` calls
+    /// the `i`-th, and handle zero none.
+    pub functions: Vec<(u64, String)>,
+    /// Functions only external calls reach (`privateFunctions`).
+    pub private_functions: Vec<(u64, String)>,
+    pub libraries: Vec<u64>,
+}
+
+impl Linking {
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty() && self.private_functions.is_empty() && self.libraries.is_empty()
+    }
 }
 
 /// What a post-tessellation vertex function compiles against: its
@@ -444,7 +506,7 @@ pub trait Compiler {
         library: u64,
         entry: &str,
         specialization: &Specialization,
-    ) -> Result<Interface>;
+    ) -> Result<Reflection>;
 
     /// Compiles `entry` of `library`, registering its NIR with the backend.
     fn compile(

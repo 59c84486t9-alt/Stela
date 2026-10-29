@@ -1,16 +1,23 @@
 //! Functions and pipeline states, with their compiled variants.
-use super::{ComputePipelineId, Device, FunctionId, RenderPipelineId, Slab};
+//!
+//! A pipeline stage compiles its linked functions into its function
+//! ([`Linking`]). A visible function table is a buffer of 64-bit
+//! [`FunctionHandle`]s, which the compiler's dispatch reads.
+use super::{BufferId, ComputePipelineId, Device, FunctionId, RenderPipelineId, Slab};
 use crate::gpu::metal::{
-    abi::PrimitiveTopologyClass,
+    abi::{
+        CpuCacheMode, FunctionType, HazardTrackingMode, PrimitiveTopologyClass, ResourceOptions,
+        StorageMode,
+    },
     command_buffer::{ComputePipelineState, RenderPipelineState},
-    error::{Error, Result, ensure},
+    error::{Error, Result, ensure, require},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, TessellatedVertex, TessellationDescriptor,
     },
     shader::{
-        CompiledShader, Compiler, Interface, Specialization, Stage, Tessellation,
-        TessellationStages, Varying,
+        CompiledShader, Compiler, Interface, Linking, Reflection, Specialization, Stage,
+        Tessellation, TessellationStages, Varying,
     },
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
@@ -26,12 +33,48 @@ struct FunctionObject {
     library: u64,
     entry: String,
     constants: Vec<(u32, Vec<u8>)>,
-    interface: Interface,
+    reflection: Reflection,
+}
+
+impl FunctionObject {
+    /// The interface of a function that becomes a pipeline stage.
+    fn interface(&self) -> Result<&Interface> {
+        match &self.reflection {
+            Reflection::Stage(interface) => Ok(interface.as_ref()),
+            Reflection::Visible(_) => Err(Error::Invalid("a visible function is not a stage")),
+        }
+    }
+}
+
+/// `MTLFunctionHandle`: the value a visible function table holds to call a
+/// function its stage links.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FunctionHandle(pub u64);
+
+/// A stage's linked functions: `functions` are those its handles name, in
+/// order, and `linking` what its function compiles with.
+#[derive(Debug, Default)]
+struct Linked {
+    functions: Vec<FunctionId>,
+    linking: Linking,
+}
+
+impl Linked {
+    /// Handle `i + 1` calls the `i`-th function; zero calls none.
+    fn handle(&self, function: FunctionId) -> Option<FunctionHandle> {
+        let index = self
+            .functions
+            .iter()
+            .position(|&linked| linked == function)?;
+        Some(FunctionHandle(index as u64 + 1))
+    }
 }
 
 #[derive(Debug)]
 struct RenderObject {
     state: RenderPipelineState,
+    /// Each stage's linked functions.
+    linked: Vec<(Stage, Linked)>,
     /// A mesh pipeline's compiled fragment function, which every variant
     /// links.
     fragment: Option<ShaderCode>,
@@ -57,6 +100,7 @@ type MeshShape = ([u32; 3], [u32; 3]);
 struct ComputeObject {
     state: ComputePipelineState,
     function: FunctionId,
+    linked: Linked,
     variants: Vec<(Specialization, Pipeline)>,
 }
 
@@ -65,6 +109,35 @@ pub(super) struct Pipelines {
     functions: Slab<FunctionObject>,
     render: Slab<RenderObject>,
     compute: Slab<ComputeObject>,
+}
+
+impl Pipelines {
+    fn interface(&self, id: FunctionId) -> Result<&Interface> {
+        self.functions.get(id.0)?.interface()
+    }
+}
+
+impl RenderObject {
+    fn linked(&self, stage: Stage) -> Option<&Linked> {
+        self.linked
+            .iter()
+            .find(|(linked, _)| *linked == stage)
+            .map(|(_, linked)| linked)
+    }
+}
+
+/// `MTLLinkedFunctions` and the `preloadedLibraries` of a pipeline stage,
+/// with the device's function ids and the compiler's library ids. Every
+/// function compiles into the stage, so `binaryFunctions` join
+/// `functions`.
+#[derive(Clone, Debug, Default)]
+pub struct LinkedFunctions {
+    /// The visible functions the stage's function tables call.
+    pub functions: Vec<FunctionId>,
+    /// Visible functions only external calls reach.
+    pub private_functions: Vec<FunctionId>,
+    /// Dynamic libraries resolving external calls.
+    pub libraries: Vec<u64>,
 }
 
 /// `MTLRenderPipelineDescriptor` with the device's function ids.
@@ -77,6 +150,8 @@ pub struct RenderPipelineRequest {
     pub input_primitive_topology: PrimitiveTopologyClass,
     pub max_vertex_amplification_count: u64,
     pub tessellation: TessellationDescriptor,
+    pub vertex_linked_functions: LinkedFunctions,
+    pub fragment_linked_functions: LinkedFunctions,
 }
 
 /// `MTLComputePipelineDescriptor` with the device's function id.
@@ -87,6 +162,7 @@ pub struct ComputePipelineRequest {
     /// Zero leaves the device's limit.
     pub max_total_threads_per_threadgroup: u64,
     pub stage_input: Option<StageInputDescriptor>,
+    pub linked_functions: LinkedFunctions,
 }
 
 /// `MTLMeshRenderPipelineDescriptor` with the device's function ids.
@@ -97,6 +173,9 @@ pub struct MeshPipelineRequest {
     pub fragment_function: Option<FunctionId>,
     pub targets: RenderTargets,
     pub max_vertex_amplification_count: u64,
+    pub object_linked_functions: LinkedFunctions,
+    pub mesh_linked_functions: LinkedFunctions,
+    pub fragment_linked_functions: LinkedFunctions,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -112,8 +191,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             constants: constants.clone(),
             ..Specialization::default()
         };
-        let interface = self.compiler.reflect(library, entry, &specialization)?;
-        interface.validate()?;
+        let reflection = self.compiler.reflect(library, entry, &specialization)?;
+        reflection.validate()?;
         ensure(
             constants
                 .iter()
@@ -121,7 +200,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 .all(|(n, (index, _))| constants[n + 1..].iter().all(|(other, _)| other != index)),
             "a function constant has two values",
         )?;
-        for constant in &interface.constants {
+        for constant in reflection.constants() {
             match constants.iter().find(|(index, _)| *index == constant.index) {
                 Some((_, value)) => ensure(
                     constant.accepts(value),
@@ -137,13 +216,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             library,
             entry: String::from(entry),
             constants,
-            interface,
+            reflection,
         };
         Ok(FunctionId(self.pipelines.functions.insert(function)))
     }
 
+    /// The interface of a function that becomes a pipeline stage.
     pub fn function_interface(&self, id: FunctionId) -> Result<&Interface> {
-        Ok(&self.pipelines.functions.get(id.0)?.interface)
+        self.pipelines.interface(id)
+    }
+
+    pub fn function_type(&self, id: FunctionId) -> Result<FunctionType> {
+        Ok(self
+            .pipelines
+            .functions
+            .get(id.0)?
+            .reflection
+            .function_type())
     }
 
     pub fn destroy_function(&mut self, id: FunctionId) -> Result<()> {
@@ -156,6 +245,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         specialization: Specialization,
     ) -> Result<CompiledShader> {
         let function = self.pipelines.functions.get(id.0)?;
+        let stage = function.interface()?.stage;
         let specialization = Specialization {
             constants: function.constants.clone(),
             ..specialization
@@ -163,7 +253,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let compiled = self
             .compiler
             .compile(function.library, &function.entry, &specialization)?;
-        if compiled.interface.stage != function.interface.stage {
+        if compiled.interface.stage != stage {
             self.compiler.release(compiled.code);
             return Err(Error::Invalid("the compiler changed the function's stage"));
         }
@@ -177,6 +267,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         tessellation: &Tessellation,
     ) -> Result<TessellationStages> {
         let function = self.pipelines.functions.get(id.0)?;
+        let expected = function
+            .interface()
+            .map(|interface| (interface.stage, interface.patch))?;
         let specialization = Specialization {
             constants: function.constants.clone(),
             ..specialization
@@ -188,9 +281,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             tessellation,
         )?;
         let interface = &stages.evaluation.interface;
-        if (interface.stage, interface.patch)
-            != (function.interface.stage, function.interface.patch)
-        {
+        if (interface.stage, interface.patch) != expected {
             for code in [stages.vertex, stages.control, stages.evaluation.code] {
                 self.compiler.release(code);
             }
@@ -205,11 +296,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &RenderPipelineRequest,
     ) -> Result<RenderPipelineId> {
-        let functions = &self.pipelines.functions;
-        let function = &functions.get(request.vertex_function.0)?.interface;
+        let vertex_linked = self.link(&request.vertex_linked_functions, true)?;
+        let fragment_linked = self.link(&request.fragment_linked_functions, true)?;
+        let pipelines = &self.pipelines;
+        let function = pipelines.interface(request.vertex_function)?;
         let fragment_function = request
             .fragment_function
-            .map(|id| functions.get(id.0).map(|fragment| &fragment.interface))
+            .map(|id| pipelines.interface(id))
             .transpose()?;
         let varyings = pipeline::link_varyings(function, fragment_function)?;
         let tessellation = pipeline::tessellation(
@@ -221,6 +314,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let specialization = Specialization {
             amplified: request.max_vertex_amplification_count > 1,
             varyings: varyings.clone(),
+            linking: vertex_linked.linking.clone(),
             ..Specialization::default()
         };
         let (vertex, feeding) = match &tessellation {
@@ -238,6 +332,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         codes.push(vertex.code);
         let linked = Specialization {
             varyings,
+            linking: fragment_linked.linking.clone(),
             ..Specialization::default()
         };
         let fragment = match request.fragment_function {
@@ -281,6 +376,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 plan,
                 interfaces,
             },
+            linked: alloc::vec![
+                (Stage::Vertex, vertex_linked),
+                (Stage::Fragment, fragment_linked)
+            ],
             fragment: None,
             mesh: None,
             variants: Vec::new(),
@@ -295,31 +394,40 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &MeshPipelineRequest,
     ) -> Result<RenderPipelineId> {
-        let functions = &self.pipelines.functions;
+        let linked = [
+            (Stage::Object, &request.object_linked_functions),
+            (Stage::Mesh, &request.mesh_linked_functions),
+            (Stage::Fragment, &request.fragment_linked_functions),
+        ]
+        .into_iter()
+        .map(|(stage, functions)| Ok((stage, self.link(functions, true)?)))
+        .collect::<Result<Vec<_>>>()?;
+        let pipelines = &self.pipelines;
         let fragment_function = request
             .fragment_function
-            .map(|id| functions.get(id.0).map(|fragment| &fragment.interface))
+            .map(|id| pipelines.interface(id))
             .transpose()?;
         let varyings = pipeline::link_varyings(
-            &functions.get(request.mesh_function.0)?.interface,
+            pipelines.interface(request.mesh_function)?,
             fragment_function,
         )?;
         let fragment = match request.fragment_function {
             Some(id) => {
                 let specialization = Specialization {
                     varyings: varyings.clone(),
+                    linking: linked[2].1.linking.clone(),
                     ..Specialization::default()
                 };
                 Some(self.compile(id, specialization)?)
             }
             None => None,
         };
-        let functions = &self.pipelines.functions;
+        let pipelines = &self.pipelines;
         let object = request
             .object_function
-            .map(|id| functions.get(id.0).map(|function| &function.interface))
+            .map(|id| pipelines.interface(id))
             .transpose()?;
-        let mesh = &functions.get(request.mesh_function.0)?.interface;
+        let mesh = pipelines.interface(request.mesh_function)?;
         let descriptor = MeshRenderPipelineDescriptor {
             object_function: object,
             mesh_function: mesh,
@@ -349,6 +457,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 plan,
                 interfaces,
             },
+            linked,
             fragment: fragment.map(|shader| shader.code),
             mesh: Some(MeshFunctions {
                 object: request.object_function,
@@ -384,6 +493,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .ok_or(Error::Invalid("not a mesh pipeline"))?;
         let (object, mesh, varyings) =
             (functions.object, functions.mesh, functions.varyings.clone());
+        let linking = |stage| {
+            render
+                .linked(stage)
+                .map(|linked| linked.linking.clone())
+                .unwrap_or_default()
+        };
+        let linkings = [linking(Stage::Object), linking(Stage::Mesh)];
         let mut info = render.state.plan.info.clone();
         let limits = &self.capabilities.limits;
         let total =
@@ -400,15 +516,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let mut codes = Vec::new();
         // The first stage is the one mesh draws launch; the mesh function
         // links to the fragment function.
-        for (function, threads, stage, varyings) in [
-            (object, object_threads, Stage::Object, Vec::new()),
-            (Some(mesh), mesh_threads, Stage::Mesh, varyings),
+        let [object_linking, mesh_linking] = linkings;
+        for (function, threads, stage, varyings, linking) in [
+            (
+                object,
+                object_threads,
+                Stage::Object,
+                Vec::new(),
+                object_linking,
+            ),
+            (
+                Some(mesh),
+                mesh_threads,
+                Stage::Mesh,
+                varyings,
+                mesh_linking,
+            ),
         ] {
             let Some(function) = function else { continue };
             let specialization = Specialization {
                 workgroup_size: Some(threads),
                 varyings,
                 launched_by_grid: stage == Stage::Object || object.is_none(),
+                linking,
                 ..Specialization::default()
             };
             match self.compile(function, specialization) {
@@ -456,7 +586,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         request: &ComputePipelineRequest,
     ) -> Result<ComputePipelineId> {
         let function = request.compute_function;
-        let interface = self.pipelines.functions.get(function.0)?.interface.clone();
+        let linked = self.link(&request.linked_functions, false)?;
+        let interface = self.pipelines.interface(function)?.clone();
         let descriptor = ComputePipelineDescriptor {
             compute_function: &interface,
             threadgroup_size_is_multiple_of_thread_execution_width: request
@@ -473,6 +604,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let index = self.pipelines.compute.insert(ComputeObject {
             state,
             function,
+            linked,
             variants: Vec::new(),
         });
         self.pipelines.compute.get_mut(index)?.state.id = u64::from(index);
@@ -504,7 +636,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             plan.thread_execution_width as u32,
             plan.full_subgroups,
         );
-        let compiled = self.compile(function, specialization.clone())?;
+        let linked = Specialization {
+            linking: compute.linked.linking.clone(),
+            ..specialization.clone()
+        };
+        let compiled = self.compile(function, linked)?;
         let info = ComputePipelineInfo {
             code: compiled.code,
             required_subgroup_size: width,
@@ -519,6 +655,132 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .variants
             .push((specialization.clone(), pipeline));
         Ok(pipeline)
+    }
+
+    /// `functionHandleWithFunction:` of a compute pipeline: `None` when it
+    /// does not link the function.
+    pub fn compute_function_handle(
+        &self,
+        id: ComputePipelineId,
+        function: FunctionId,
+    ) -> Result<Option<FunctionHandle>> {
+        Ok(self.pipelines.compute.get(id.0)?.linked.handle(function))
+    }
+
+    /// `functionHandleWithFunction:stage:` of a render pipeline: `None`
+    /// when the stage does not link the function.
+    pub fn render_function_handle(
+        &self,
+        id: RenderPipelineId,
+        stage: Stage,
+        function: FunctionId,
+    ) -> Result<Option<FunctionHandle>> {
+        let render = self.pipelines.render.get(id.0)?;
+        Ok(render
+            .linked(stage)
+            .and_then(|linked| linked.handle(function)))
+    }
+
+    /// `newVisibleFunctionTableWithDescriptor:`: a shared buffer of `count`
+    /// function handles, each calling no function. It binds as the buffer
+    /// at a table argument's index, and its address is its
+    /// `gpuResourceID`.
+    pub fn new_visible_function_table(&mut self, count: u64) -> Result<BufferId> {
+        const INVALID: Error = Error::Invalid("visible function table size");
+        let bytes = count
+            .checked_mul(8)
+            .filter(|&bytes| bytes != 0)
+            .ok_or(INVALID)?;
+        let zeros = alloc::vec![0; usize::try_from(bytes).map_err(|_| INVALID)?];
+        let options = ResourceOptions {
+            cpu_cache_mode: CpuCacheMode::DefaultCache,
+            storage_mode: StorageMode::Shared,
+            hazard_tracking_mode: HazardTrackingMode::Default,
+        };
+        let table = self.new_buffer(bytes, options)?;
+        let (memory, offset, _) = self.buffer_memory(table)?;
+        if let Err(error) = self.backend.write_memory(memory, offset, &zeros) {
+            self.destroy_buffer(table)?;
+            return Err(error);
+        }
+        Ok(table)
+    }
+
+    /// `setFunction:atIndex:` and `setFunctions:withRange:`: writes
+    /// `handles` from entry `index` of a table; `None` calls no function.
+    pub fn set_visible_functions(
+        &mut self,
+        table: BufferId,
+        index: u64,
+        handles: &[Option<FunctionHandle>],
+    ) -> Result<()> {
+        let (memory, offset, length) = self.buffer_memory(table)?;
+        let start = index.checked_mul(8);
+        let end = start.and_then(|start| start.checked_add(handles.len() as u64 * 8));
+        ensure(
+            end.is_some_and(|end| end <= length),
+            "functions past the table's end",
+        )?;
+        let bytes: Vec<u8> = handles
+            .iter()
+            .flat_map(|handle| handle.map_or(0, |handle| handle.0).to_le_bytes())
+            .collect();
+        self.backend
+            .write_memory(memory, offset + index * 8, &bytes)
+    }
+
+    /// Resolves a stage's linked functions, which must be visible
+    /// functions; `render` stages are those of render pipelines.
+    fn link(&self, linked: &LinkedFunctions, render: bool) -> Result<Linked> {
+        let capabilities = &self.capabilities;
+        let (function_pointers, dynamic_libraries) = if render {
+            (
+                capabilities.supports_function_pointers_from_render,
+                capabilities.supports_render_dynamic_libraries,
+            )
+        } else {
+            (
+                capabilities.supports_function_pointers,
+                capabilities.supports_dynamic_libraries,
+            )
+        };
+        let functions = || linked.functions.iter().chain(&linked.private_functions);
+        require(
+            function_pointers || functions().next().is_none(),
+            "function pointers",
+        )?;
+        require(
+            dynamic_libraries || linked.libraries.is_empty(),
+            "dynamic libraries",
+        )?;
+        for &id in functions() {
+            let function = self.pipelines.functions.get(id.0)?;
+            ensure(
+                matches!(function.reflection, Reflection::Visible(_)),
+                "linked functions are visible functions",
+            )?;
+            // The compiler links a module without its library's values.
+            require(
+                function.reflection.constants().is_empty(),
+                "linked functions with function constants",
+            )?;
+        }
+        let entries = |ids: &[FunctionId]| -> Result<Vec<(u64, String)>> {
+            ids.iter()
+                .map(|id| {
+                    let function = self.pipelines.functions.get(id.0)?;
+                    Ok((function.library, function.entry.clone()))
+                })
+                .collect()
+        };
+        Ok(Linked {
+            functions: linked.functions.clone(),
+            linking: Linking {
+                functions: entries(&linked.functions)?,
+                private_functions: entries(&linked.private_functions)?,
+                libraries: linked.libraries.clone(),
+            },
+        })
     }
 
     pub fn destroy_compute_pipeline(&mut self, id: ComputePipelineId) -> Result<()> {
