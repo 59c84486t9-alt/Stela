@@ -29,14 +29,16 @@ pub struct GeneratedCommands {
     /// The sequences, `size` bytes from `address`.
     pub address: u64,
     pub size: u64,
-    /// Memory of `preprocess_size` bytes the driver generates into, at least
-    /// [`Backend::generated_commands_size`] for the sequences, in a buffer
-    /// with `PREPROCESS_BUFFER` usage.
+    /// Memory of `preprocess_size` bytes the driver generates into, as
+    /// [`Backend::generated_commands_requirements`] asks for the sequences,
+    /// in a buffer with `PREPROCESS_BUFFER` usage.
     ///
-    /// [`Backend::generated_commands_size`]: super::backend::Backend::generated_commands_size
+    /// [`Backend::generated_commands_requirements`]: super::backend::Backend::generated_commands_requirements
     pub preprocess: u64,
     pub preprocess_size: u64,
     pub sequences: u32,
+    /// The address of a `u32` that limits the sequences, if any.
+    pub count: Option<u64>,
 }
 
 /// `VkMemoryBarrier2` in a `vkCmdPipelineBarrier2` without buffer or image
@@ -335,6 +337,14 @@ pub enum Command {
     /// upload) in the push constants, like
     /// [`AccumulateResults`](Self::AccumulateResults).
     SelectCommands {
+        arguments: u64,
+        count: u32,
+    },
+    /// The backend's resolve kernel over `count` commands, with a
+    /// [`ResolveArguments`](crate::gpu::metal::binding::ResolveArguments)
+    /// upload's address in the push constants, like
+    /// [`AccumulateResults`](Self::AccumulateResults).
+    ResolveCommands {
         arguments: u64,
         count: u32,
     },

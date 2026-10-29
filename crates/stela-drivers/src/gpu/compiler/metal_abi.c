@@ -258,6 +258,216 @@ nir_shader *stela_metal_select_kernel(const nir_shader_compiler_options *options
    return finish(&b);
 }
 
+static void store(nir_builder *b, nir_def *value, nir_def *address, unsigned offset)
+{
+   nir_store_global(b, value, nir_iadd_imm(b, address, offset), .align_mul = value->bit_size / 8);
+}
+
+/* address + index * size. */
+static nir_def *element(nir_builder *b, nir_def *address, nir_def *index, unsigned size)
+{
+   return nir_iadd(b, address, nir_u2u64(b, nir_imul_imm(b, index, size)));
+}
+
+/* Opens for (index = 0; index < count; index++) over counter. */
+static nir_def *push_count(nir_builder *b, nir_variable *counter, nir_def *count)
+{
+   nir_store_var(b, counter, nir_imm_int(b, 0), 1);
+   nir_push_loop(b);
+   nir_def *index = nir_load_var(b, counter);
+   nir_break_if(b, nir_uge(b, index, count));
+   return index;
+}
+
+static void pop_count(nir_builder *b, nir_variable *counter, nir_def *index)
+{
+   nir_store_var(b, counter, nir_iadd_imm(b, index, 1), 1);
+   nir_pop_loop(b, NULL);
+}
+
+/* Writes a thread's argument table of stage (vertex or fragment): the
+ * encoder's, with the record's buffer slots. */
+static nir_def *resolve_table(nir_builder *b, nir_def *arguments, nir_def *header,
+                              nir_def *record, nir_def *thread, unsigned stage,
+                              nir_variable *counter)
+{
+   nir_def *tables = load(b, arguments, STELA_METAL_RESOLVE_TABLES, 64);
+   nir_def *table = element(b, tables, nir_iadd_imm(b, nir_imul_imm(b, thread, 2), stage),
+                            STELA_METAL_TABLE_BYTES);
+   nir_def *source = load(b, arguments, STELA_METAL_RESOLVE_PUSH + 8u * stage, 64);
+   nir_def *word = push_count(b, counter, nir_imm_int(b, STELA_METAL_TABLE_BYTES / 16));
+   {
+      nir_def *value = nir_load_global(b, 4, 32, element(b, source, word, 16),
+                                       .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER,
+                                       .align_mul = 16);
+      nir_store_global(b, value, element(b, table, word, 16), .align_mul = 16);
+   }
+   pop_count(b, counter, word);
+   nir_def *offset = load(b, header, STELA_METAL_INDIRECT_TABLES + 4u * stage, 32);
+   nir_def *slots = load(b, header, STELA_METAL_INDIRECT_TABLE_SLOTS + 4u * stage, 32);
+   nir_def *addresses = nir_iadd(b, record, nir_u2u64(b, offset));
+   nir_def *lengths = element(b, addresses, slots, 8);
+   nir_def *slot = push_count(b, counter, slots);
+   {
+      nir_def *at = element(b, table, slot, 8);
+      store(b, load(b, element(b, addresses, slot, 8), 0, 64), at,
+            STELA_METAL_TABLE_BUFFER_ADDRESSES);
+      store(b, load(b, element(b, lengths, slot, 8), 0, 64), at, STELA_METAL_TABLE_BUFFER_LENGTHS);
+   }
+   pop_count(b, counter, slot);
+   return table;
+}
+
+/* Writes a thread's vertex buffer bindings: the encoder's when the buffer
+ * inherits buffers, else the vertex table's, each of its own stride or else
+ * the class's. */
+static void resolve_vertex_buffers(nir_builder *b, nir_def *arguments, nir_def *header,
+                                   nir_def *record, nir_def *sequence, nir_def *class,
+                                   nir_def *inherit_buffers, nir_variable *counter)
+{
+   nir_def *table =
+      nir_iadd(b, record, nir_u2u64(b, load(b, header, STELA_METAL_INDIRECT_TABLES, 32)));
+   nir_def *slots = load(b, header, STELA_METAL_INDIRECT_TABLE_SLOTS, 32);
+   nir_def *lengths = element(b, table, slots, 8);
+   nir_def *words =
+      nir_iadd(b, record, nir_u2u64(b, load(b, header, STELA_METAL_INDIRECT_WORDS, 32)));
+   nir_def *word_count = load(b, header, STELA_METAL_INDIRECT_WORD_COUNT, 32);
+   nir_def *known = nir_ult(b, class, load(b, arguments, STELA_METAL_RESOLVE_CLASS_COUNT, 32));
+   nir_def *strides = element(b, load(b, arguments, STELA_METAL_RESOLVE_STRIDES, 64),
+                              nir_bcsel(b, known, class, nir_imm_int(b, 0)),
+                              4 * STELA_METAL_BUFFERS);
+   nir_def *index = push_count(b, counter, nir_imm_int(b, STELA_METAL_BUFFERS));
+   {
+      nir_def *encoder =
+         nir_load_global(b, 4, 32,
+                         element(b, nir_iadd_imm(b, arguments, STELA_METAL_RESOLVE_VERTEX_BUFFERS),
+                                 index, STELA_METAL_SEQUENCE_VERTEX_BUFFER_BYTES),
+                         .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+      /* An inheriting buffer's records hold no slots or strides. */
+      nir_def *bound = nir_ult(b, index, slots);
+      nir_def *zero = nir_imm_int64(b, 0);
+      nir_def *address = nir_bcsel(b, bound, load(b, element(b, table, index, 8), 0, 64),
+                                   nir_bcsel(b, inherit_buffers,
+                                             nir_pack_64_2x32(b, nir_channels(b, encoder, 0x3)),
+                                             zero));
+      nir_def *length =
+         nir_bcsel(b, bound, load(b, element(b, lengths, index, 8), 0, 64),
+                   nir_bcsel(b, inherit_buffers, nir_u2u64(b, nir_channel(b, encoder, 2)), zero));
+      nir_def *own = nir_bcsel(b, nir_ult(b, index, word_count),
+                               load(b, element(b, words, index, 4), 0, 32),
+                               nir_bcsel(b, inherit_buffers, nir_channel(b, encoder, 3),
+                                         nir_imm_int(b, 0)));
+      nir_def *pipeline = nir_bcsel(b, known, load(b, element(b, strides, index, 4), 0, 32),
+                                    nir_imm_int(b, 0));
+      nir_def *target =
+         element(b, nir_iadd_imm(b, sequence, STELA_METAL_SEQUENCE_VERTEX_BUFFERS), index,
+                 STELA_METAL_SEQUENCE_VERTEX_BUFFER_BYTES);
+      store(b, address, target, 0);
+      store(b, nir_u2u32(b, nir_umin(b, length, nir_imm_int64(b, UINT32_MAX))), target, 8);
+      store(b, nir_bcsel(b, nir_ine_imm(b, own, 0), own, pipeline), target, 12);
+   }
+   pop_count(b, counter, index);
+}
+
+nir_shader *stela_metal_resolve_kernel(const nir_shader_compiler_options *options)
+{
+   nir_def *arguments, *thread;
+   nir_builder b = kernel(options, "stela_metal_resolve", STELA_METAL_RESOLVE_COUNT, &arguments,
+                          &thread);
+   nir_variable *counter = nir_local_variable_create(b.impl, glsl_uint_type(), "counter");
+   nir_def *header = load(&b, arguments, STELA_METAL_RESOLVE_HEADER, 64);
+   nir_def *command = nir_iadd(&b, thread, load(&b, arguments, STELA_METAL_RESOLVE_FIRST, 32));
+   nir_def *stride = load(&b, header, STELA_METAL_INDIRECT_STRIDE, 32);
+   nir_def *record = nir_iadd(&b, nir_iadd_imm(&b, header, STELA_METAL_INDIRECT_HEADER_BYTES),
+                              nir_imul(&b, nir_u2u64(&b, command), nir_u2u64(&b, stride)));
+   nir_def *range = load(&b, arguments, STELA_METAL_RESOLVE_RANGE, 64);
+   nir_def *location = load(&b, range, 0, 32);
+   /* location <= command < location + length, without the sum's overflow,
+    * and within the buffer. */
+   nir_def *in_range = nir_iand(&b, nir_uge(&b, command, location),
+                                nir_ult(&b, nir_isub(&b, command, location), load(&b, range, 4, 32)));
+   nir_def *selected = nir_iand(&b, in_range,
+                                nir_ult(&b, command, load(&b, header, STELA_METAL_INDIRECT_COUNT, 32)));
+   nir_def *flags = load(&b, arguments, STELA_METAL_RESOLVE_FLAGS, 32);
+   nir_def *inherit_pipeline = nir_test_mask(&b, flags, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
+   nir_def *inherit_buffers = nir_test_mask(&b, flags, STELA_METAL_RESOLVE_INHERIT_BUFFERS);
+   nir_def *sequence = element(&b, load(&b, arguments, STELA_METAL_RESOLVE_SEQUENCES, 64), thread,
+                               STELA_METAL_SEQUENCE_BYTES);
+
+   /* The command's class, action and primitive type; commands outside the
+    * range take no action and write only zero counts. */
+   nir_variable *matched[3];
+   for (unsigned field = 0; field < ARRAY_SIZE(matched); field++) {
+      matched[field] = nir_local_variable_create(b.impl, glsl_uint_type(), "matched");
+      nir_store_var(&b, matched[field], nir_imm_int(&b, 0), 1);
+   }
+   nir_push_if(&b, selected);
+   nir_def *handle = load(&b, record, STELA_METAL_RECORD_PIPELINE, 64);
+   /* Without a pipeline handle, a command is no class. */
+   nir_def *class = nir_bcsel(&b, inherit_pipeline, nir_imm_int(&b, 0),
+                              nir_iadd_imm(&b, nir_unpack_64_2x32_split_y(&b, handle), -1));
+   nir_store_var(&b, matched[0], class, 1);
+   nir_store_var(&b, matched[1], load(&b, record, STELA_METAL_RECORD_ACTION, 32), 1);
+   nir_store_var(&b, matched[2], load(&b, record, STELA_METAL_RECORD_PRIMITIVE, 32), 1);
+   store(&b, nir_unpack_64_2x32_split_x(&b, handle), sequence, STELA_METAL_SEQUENCE_PIPELINE);
+
+   /* The encoder's push constants, with the command's argument tables. */
+   for (unsigned word = 0; word < STELA_METAL_PUSH_BYTES / 4; word++)
+      store(&b, load(&b, arguments, STELA_METAL_RESOLVE_PUSH + 4 * word, 32), sequence,
+            STELA_METAL_SEQUENCE_PUSH + 4 * word);
+   nir_push_if(&b, nir_inot(&b, inherit_buffers));
+   for (unsigned stage = 0; stage < 2; stage++) {
+      nir_def *table = resolve_table(&b, arguments, header, record, thread, stage, counter);
+      store(&b, table, sequence, STELA_METAL_SEQUENCE_PUSH + STELA_METAL_PUSH_TABLES + 8 * stage);
+   }
+   nir_pop_if(&b, NULL);
+
+   /* The index buffer's address, byte length and VkIndexType, which numbers
+    * the index types as MTLIndexType does. */
+   store(&b, load(&b, record, STELA_METAL_RECORD_INDEX_ADDRESS, 64), sequence,
+         STELA_METAL_SEQUENCE_INDEX_BUFFER);
+   store(&b, load(&b, record, STELA_METAL_RECORD_INDEX_LENGTH, 32), sequence,
+         STELA_METAL_SEQUENCE_INDEX_BUFFER + 8);
+   store(&b, load(&b, record, STELA_METAL_RECORD_INDEX_TYPE, 32), sequence,
+         STELA_METAL_SEQUENCE_INDEX_BUFFER + 12);
+   resolve_vertex_buffers(&b, arguments, header, record, sequence, class, inherit_buffers,
+                          counter);
+
+   /* (vertex count, instance count, first vertex, base instance), and
+    * (index count, instance count, first index, base vertex, base instance)
+    * with the offset in the index buffer's address. */
+   nir_def *vertices = load(&b, record, STELA_METAL_RECORD_VERTICES, 32);
+   nir_def *instances = load(&b, record, STELA_METAL_RECORD_INSTANCES, 32);
+   nir_def *base_instance = load(&b, record, STELA_METAL_RECORD_BASE_INSTANCE, 32);
+   nir_def *first_vertex = load(&b, record, STELA_METAL_RECORD_FIRST_VERTEX, 32);
+   store(&b, nir_vec4(&b, vertices, instances, first_vertex, base_instance), sequence,
+         STELA_METAL_SEQUENCE_DRAW);
+   nir_def *indexed[] = {vertices, instances, nir_imm_int(&b, 0),
+                         load(&b, record, STELA_METAL_RECORD_BASE_VERTEX, 32), base_instance};
+   for (unsigned field = 0; field < ARRAY_SIZE(indexed); field++)
+      store(&b, indexed[field], sequence, STELA_METAL_SEQUENCE_DRAW_INDEXED + 4 * field);
+   nir_pop_if(&b, NULL);
+   class = nir_load_var(&b, matched[0]);
+   nir_def *action = nir_load_var(&b, matched[1]);
+   nir_def *primitive = nir_load_var(&b, matched[2]);
+
+   nir_def *counts = load(&b, arguments, STELA_METAL_RESOLVE_COUNTS, 64);
+   nir_def *slot_count = load(&b, arguments, STELA_METAL_RESOLVE_SLOT_COUNT, 32);
+   nir_def *slot = push_count(&b, counter, slot_count);
+   {
+      nir_def *entry = element(&b, nir_iadd_imm(&b, arguments, STELA_METAL_RESOLVE_SLOTS), slot,
+                               STELA_METAL_RESOLVE_SLOT_BYTES);
+      nir_def *matches =
+         nir_iand(&b, nir_iand(&b, nir_ine_imm(&b, action, 0), nir_ieq(&b, class, load(&b, entry, 0, 32))),
+                  nir_iand(&b, nir_ieq(&b, action, load(&b, entry, 4, 32)),
+                           nir_ieq(&b, primitive, load(&b, entry, 8, 32))));
+      nir_def *at = nir_iadd(&b, nir_imul(&b, thread, slot_count), slot);
+      store(&b, nir_b2i32(&b, matches), element(&b, counts, at, 4), 0);
+   }
+   pop_count(&b, counter, slot);
+   return finish(&b);
+}
+
 nir_shader *stela_metal_tessellation_vertex(const nir_shader_compiler_options *options)
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, options,

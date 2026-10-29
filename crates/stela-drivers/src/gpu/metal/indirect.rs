@@ -263,6 +263,8 @@ pub struct IndirectCommand {
 struct Records {
     layout: RecordLayout,
     writes: Vec<(u64, Vec<u8>)>,
+    /// Whether a command may have its barrier set.
+    barriers: bool,
 }
 
 /// `MTLIndirectCommandBuffer`'s contents.
@@ -329,6 +331,7 @@ impl IndirectCommandBuffer {
         self.records = Some(Records {
             layout,
             writes: Vec::new(),
+            barriers: self.commands.iter().any(|command| command.barrier),
         });
     }
 
@@ -338,6 +341,22 @@ impl IndirectCommandBuffer {
         self.records
             .as_mut()
             .map_or_else(Vec::new, |records| core::mem::take(&mut records.writes))
+    }
+
+    /// Whether a command of a GPU-resident buffer may have its barrier set,
+    /// so executions order every command after the ones before it.
+    pub fn has_barriers(&self) -> bool {
+        self.records
+            .as_ref()
+            .is_some_and(|records| records.barriers)
+    }
+
+    /// Notes that a GPU-resident buffer's commands may have barriers set,
+    /// once a blit copies commands that may.
+    pub fn note_barriers(&mut self) {
+        if let Some(records) = &mut self.records {
+            records.barriers = true;
+        }
     }
 
     pub fn has_writes(&self) -> bool {
@@ -369,6 +388,7 @@ impl IndirectCommandBuffer {
                 record: records.layout.record(index),
                 writes: &mut records.writes,
             },
+            barriers: &mut records.barriers,
         });
         Ok(Target { command, record })
     }
@@ -487,6 +507,7 @@ impl IndirectCommandBufferDescriptor {
 struct Record<'a> {
     layout: RecordLayout,
     writes: Writes<'a>,
+    barriers: &'a mut bool,
 }
 
 /// The command an encoding call changes.
@@ -580,7 +601,11 @@ impl Target<'_> {
         self.edit(Field::Barrier, |command| {
             command.barrier = barrier;
             Ok(())
-        })
+        })?;
+        if let Some(record) = &mut self.record {
+            *record.barriers |= barrier;
+        }
+        Ok(())
     }
 
     fn reset(&mut self) -> Result<()> {

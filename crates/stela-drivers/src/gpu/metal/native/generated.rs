@@ -351,7 +351,12 @@ impl Fns {
         unsafe { (self.update_set)(self.device, set, 1, &write) }
     }
 
-    pub(super) fn memory_size(&self, layout: u64, set: Option<u64>, sequences: u32) -> u64 {
+    pub(super) fn memory_requirements(
+        &self,
+        layout: u64,
+        set: Option<u64>,
+        sequences: u32,
+    ) -> vk::MemoryRequirements {
         let info = MemoryRequirementsInfo {
             s_type: s_type(2),
             p_next: ptr::null(),
@@ -364,7 +369,7 @@ impl Fns {
         // SAFETY: the info outlives the call, which writes only the
         // requirements.
         unsafe { (self.get_memory_requirements)(self.device, &info, &mut requirements) };
-        requirements.memory_requirements.size
+        requirements.memory_requirements
     }
 
     /// # Safety
@@ -382,7 +387,7 @@ impl Fns {
             preprocess_address: commands.preprocess,
             preprocess_size: commands.preprocess_size,
             max_sequence_count: commands.sequences,
-            sequence_count_address: 0,
+            sequence_count_address: commands.count.unwrap_or(0),
             max_draw_count: 0,
         };
         // SAFETY: the caller guarantees the recording state; the info

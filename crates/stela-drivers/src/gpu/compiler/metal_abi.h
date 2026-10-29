@@ -45,6 +45,47 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
+/* ResolveArguments, which the resolve kernel reads at the push constants'
+ * arguments address: the 64-bit addresses of an indirect command buffer
+ * (its header), of its execution range (uint location, length), of the
+ * sequences, counts and argument tables the kernel writes, and of the
+ * pipeline classes' static vertex strides (uint [classes][buffers], zero
+ * for none); the uint thread count, command of thread 0, slot count, flags
+ * and class count; the encoder's push constants, and its vertex buffers as
+ * a sequence binds them; then the slots (uint class, action and
+ * MTLPrimitiveType, and padding). */
+#define STELA_METAL_RESOLVE_HEADER 0u
+#define STELA_METAL_RESOLVE_RANGE 8u
+#define STELA_METAL_RESOLVE_SEQUENCES 16u
+#define STELA_METAL_RESOLVE_COUNTS 24u
+#define STELA_METAL_RESOLVE_TABLES 32u
+#define STELA_METAL_RESOLVE_STRIDES 40u
+#define STELA_METAL_RESOLVE_COUNT 48u
+#define STELA_METAL_RESOLVE_FIRST 52u
+#define STELA_METAL_RESOLVE_SLOT_COUNT 56u
+#define STELA_METAL_RESOLVE_FLAGS 60u
+#define STELA_METAL_RESOLVE_CLASS_COUNT 64u
+#define STELA_METAL_RESOLVE_PUSH 72u
+#define STELA_METAL_RESOLVE_VERTEX_BUFFERS 128u
+#define STELA_METAL_RESOLVE_SLOTS 624u
+#define STELA_METAL_RESOLVE_SLOT_BYTES 16u
+#define STELA_METAL_RESOLVE_INHERIT_PIPELINE 1u
+#define STELA_METAL_RESOLVE_INHERIT_BUFFERS 2u
+
+/* One command's device-generated sequence, which each indirect commands
+ * layout reads at its own token offsets: the uint execution set index, the
+ * push constants, a VkBindIndexBufferIndirectCommandEXT, a
+ * VkBindVertexBufferIndirectCommandEXT per vertex buffer index, then a
+ * VkDrawIndirectCommand and a VkDrawIndexedIndirectCommand. */
+#define STELA_METAL_SEQUENCE_PIPELINE 0u
+#define STELA_METAL_SEQUENCE_PUSH 8u
+#define STELA_METAL_SEQUENCE_INDEX_BUFFER 64u
+#define STELA_METAL_SEQUENCE_VERTEX_BUFFERS 80u
+#define STELA_METAL_SEQUENCE_VERTEX_BUFFER_BYTES 16u
+#define STELA_METAL_SEQUENCE_DRAW 576u
+#define STELA_METAL_SEQUENCE_DRAW_INDEXED 592u
+#define STELA_METAL_SEQUENCE_BYTES 624u
+
 /* indirect/record.rs RecordLayout: a GPU-resident indirect command buffer
  * at its gpuResourceID. A header of uint words leads: the record stride and
  * count, the record offsets of the two buffer tables (vertex and fragment,
@@ -184,6 +225,17 @@ nir_shader *stela_metal_accumulate_kernel(const nir_shader_compiler_options *opt
 /* Thread n below count writes the 32-bit flags[n]: 1 when the execution range
  * (uint location, length) at range holds command n, else 0. */
 nir_shader *stela_metal_select_kernel(const nir_shader_compiler_options *options);
+
+/* Thread n resolves command first + n of a GPU-resident render indirect
+ * command buffer per the ResolveArguments. When the execution range holds
+ * the command, it writes the command's sequence n, whose argument tables
+ * are tables 2n and 2n + 1 (the encoder's, with the record's buffers)
+ * unless the buffer inherits buffers. Its count per slot,
+ * counts[n * slots + slot], is 1 when the range holds the command and the
+ * slot is the command's pipeline class, action and primitive type, else 0.
+ * Commands of a buffer that inherits pipeline state are class 0; others
+ * are their pipeline handle's. */
+nir_shader *stela_metal_resolve_kernel(const nir_shader_compiler_options *options);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

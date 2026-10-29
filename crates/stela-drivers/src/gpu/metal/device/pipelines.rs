@@ -378,7 +378,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .chain(fragment.map(|shader| shader.interface))
             .collect();
         let indirect = if plan.info.indirect_bindable {
-            match self.add_indirect_render(&plan.info, &interfaces, vulkan) {
+            match self.add_indirect_render(&plan, &interfaces, vulkan) {
                 Ok(indirect) => Some(indirect),
                 Err(error) => {
                     self.defer(Object::Pipeline(vulkan));
@@ -597,11 +597,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     pub fn destroy_render_pipeline(&mut self, id: RenderPipelineId) -> Result<()> {
         let render = self.pipelines.render.remove(id.0)?;
-        if let Some(indirect) = render.state.indirect {
-            self.remove_indirect_render(indirect)?;
-        }
+        let pipeline = match (render.state.indirect, render.state.pipeline) {
+            (Some(indirect), Some(pipeline)) => self.remove_indirect_render(indirect, pipeline)?,
+            (_, pipeline) => pipeline,
+        };
         let variants = render.variants.into_iter().map(|(_, pipeline)| pipeline);
-        for pipeline in render.state.pipeline.into_iter().chain(variants) {
+        for pipeline in pipeline.into_iter().chain(variants) {
             self.defer(Object::Pipeline(pipeline));
         }
         if let Some(code) = render.fragment {

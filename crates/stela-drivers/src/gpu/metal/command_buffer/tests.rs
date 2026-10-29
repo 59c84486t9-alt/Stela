@@ -1,6 +1,7 @@
 use super::{
     blit::{BlitTexture, BufferLayout, Region},
     counters::{CounterRange, CounterSample},
+    generated::{GeneratedLayoutKey, IndirectRenderClass},
     indirect::ExecutionRange,
     render::{PassBoundary, PatchSource, Viewport},
     *,
@@ -14,7 +15,8 @@ use crate::gpu::metal::{
         VisibilityResultMode,
     },
     binding::{
-        AccumulateArguments, ArgumentTable, BufferBinding, PushConstants, TessellationArguments,
+        AccumulateArguments, ArgumentTable, BufferBinding, GeneratedSequence, PushConstants,
+        ResolveArguments, TessellationArguments,
     },
     capabilities::Size,
     error::Error,
@@ -43,8 +45,13 @@ use crate::gpu::metal::{
     },
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, PipelineBindPoint, PipelineStages,
-        command::{Barrier, BufferCopy},
-        object::{Image, ImageView, QueryType, ShaderCode},
+        ShaderStages,
+        backend::Requirements,
+        command::{Barrier, BufferCopy, GeneratedCommands},
+        object::{
+            ExecutionSet, Image, ImageView, IndirectCommandsLayout, IndirectToken, QueryType,
+            ShaderCode,
+        },
     },
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -58,6 +65,8 @@ struct MockResolver {
     render_states: Vec<RenderPipelineState>,
     compute_states: Vec<ComputePipelineState>,
     indirect: Vec<Arc<IndirectCommandBuffer>>,
+    classes: Vec<IndirectRenderClass>,
+    layouts: Vec<GeneratedLayoutKey>,
 }
 
 impl ChunkSource for MockResolver {
@@ -125,6 +134,32 @@ impl Resolver for MockResolver {
     ) -> Result<Arc<IndirectCommandBuffer>> {
         let known = self.indirect.get(id.0 as usize);
         known.cloned().ok_or(Error::Invalid("unknown object"))
+    }
+
+    fn indirect_render_classes(&mut self) -> Vec<IndirectRenderClass> {
+        self.classes.clone()
+    }
+
+    /// Layout `n` is the `n`th key asked for; each sequence preprocesses
+    /// into 96 bytes at 64-byte alignment.
+    fn generated_layout(
+        &mut self,
+        key: &GeneratedLayoutKey,
+        _: Option<ExecutionSet>,
+    ) -> Result<(IndirectCommandsLayout, Requirements)> {
+        let index = match self.layouts.iter().position(|known| known == key) {
+            Some(index) => index,
+            None => {
+                self.layouts.push(key.clone());
+                self.layouts.len() - 1
+            }
+        };
+        let requirements = Requirements {
+            size: 96,
+            alignment: 64,
+            memory_types: u32::MAX,
+        };
+        Ok((IndirectCommandsLayout(index as u64), requirements))
     }
 
     /// Places records in buffer `2000 + id` at address `id << 44`.
@@ -2115,5 +2150,302 @@ fn blits_copy_records_of_resident_buffers_in_order() {
     assert_eq!(
         (copies[1].0, copies[1].2.src_offset, copies[1].2.size),
         (records.buffer, layout.record(0), 3 * stride)
+    );
+}
+
+/// A GPU-resident buffer of `count` triangle draws under `descriptor`, in
+/// a resolver of its own.
+fn resident_icb(descriptor: IndirectCommandBufferDescriptor, count: u64) -> MockResolver {
+    let mut icb = IndirectCommandBuffer::new(&capabilities(), &descriptor, count).unwrap();
+    for index in 0..count as usize {
+        icb.render_command(index)
+            .unwrap()
+            .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap();
+    }
+    let mut resolver = MockResolver {
+        indirect: alloc::vec![Arc::new(icb)],
+        ..MockResolver::default()
+    };
+    resolver
+        .indirect_records(IndirectCommandBufferId(0))
+        .unwrap();
+    resolver
+}
+
+fn generated(commands: &[Command]) -> Vec<GeneratedCommands> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::ExecuteGeneratedCommands(generated) => Some(*generated),
+            _ => None,
+        })
+        .collect()
+}
+
+fn u64_at(bytes: &[u8], at: u32) -> u64 {
+    u64::from_le_bytes(bytes[at as usize..at as usize + 8].try_into().unwrap())
+}
+
+#[test]
+fn resident_draws_execute_one_generated_sequence_per_slot() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        inherit_cull_mode: true,
+        ..icb_descriptor(IndirectCommandType::DRAW)
+    };
+    let mut resolver = resident_icb(descriptor, 3);
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let id = IndirectCommandBufferId(0);
+    assert_eq!(
+        commands.execute_commands(&mut resolver, id, ExecutionRange::Direct(0..2)),
+        Err(Error::Invalid("no render pipeline state is set"))
+    );
+    commands
+        .set_render_pipeline_state(&render_state(1))
+        .unwrap();
+    commands
+        .execute_commands(&mut resolver, id, ExecutionRange::Direct(1..3))
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    assert_eq!(
+        resolver.layouts,
+        [GeneratedLayoutKey {
+            stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+            execution_set: false,
+            indexed: false,
+            vertex_buffers: alloc::vec![2],
+        }]
+    );
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    let resolve = commands
+        .iter()
+        .position(|command| matches!(command, Command::ResolveCommands { count: 2, .. }))
+        .unwrap();
+    let Command::ResolveCommands { arguments, .. } = commands[resolve] else {
+        unreachable!()
+    };
+    let arguments = uploaded(&recording, arguments);
+    assert_eq!(word(arguments, ResolveArguments::FIRST_OFFSET as usize), 1);
+    assert_eq!(
+        word(arguments, ResolveArguments::FLAGS_OFFSET as usize),
+        ResolveArguments::INHERIT_PIPELINE
+    );
+    assert_eq!(
+        word(arguments, ResolveArguments::SLOT_COUNT_OFFSET as usize),
+        2,
+        "the triangle primitive types"
+    );
+    let range = u64_at(arguments, ResolveArguments::RANGE_OFFSET);
+    assert_eq!(&uploaded(&recording, range)[..8], [1, 0, 0, 0, 2, 0, 0, 0]);
+    assert!(
+        commands[resolve..]
+            .iter()
+            .any(|command| matches!(command, Command::Barrier(barrier)
+            if barrier.dst_stages.contains(PipelineStages::COMMAND_PREPROCESS))),
+        "the sequences are visible to preprocessing"
+    );
+
+    // Each command runs once per primitive type, in order.
+    let executions = generated(commands);
+    assert_eq!(executions.len(), 2 * 2);
+    let counts: Vec<u64> = executions
+        .iter()
+        .map(|execution| execution.count.unwrap())
+        .collect();
+    assert!(counts.windows(2).all(|pair| pair[1] == pair[0] + 4));
+    assert_eq!(
+        executions[1].address + u64::from(GeneratedSequence::BYTES),
+        executions[2].address
+    );
+    assert!(executions.iter().all(|execution| execution.set.is_none()
+        && execution.sequences == 1
+        && execution.preprocess % 64 == 0
+        && execution.preprocess_size == 96));
+    let topologies = commands
+        .iter()
+        .filter(|command| matches!(command, Command::SetPrimitiveTopology(_)))
+        .count();
+    assert_eq!(topologies, 2 * 2, "one per execution");
+    let last = commands
+        .iter()
+        .rposition(|command| matches!(command, Command::ExecuteGeneratedCommands(_)))
+        .unwrap();
+    assert!(
+        commands[last..].contains(&Command::BindPipeline {
+            bind_point: PipelineBindPoint::Graphics,
+            pipeline: Pipeline(42),
+        }),
+        "the encoder pipeline returns"
+    );
+}
+
+#[test]
+fn resident_draws_switch_pipelines_through_execution_sets() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_cull_mode: true,
+        support_dynamic_attribute_stride: true,
+        ..icb_descriptor(IndirectCommandType::DRAW | IndirectCommandType::DRAW_INDEXED)
+    };
+    let mut resolver = resident_icb(descriptor, 1);
+    let class = |index, pipeline| IndirectRenderClass {
+        index,
+        set: Some(ExecutionSet(10 + u64::from(index))),
+        pipeline: Pipeline(pipeline),
+        stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+        rasterization: true,
+        topology: PrimitiveTopologyClass::Triangle,
+        vertex_buffers: alloc::vec![(0, Some(16)), (3, None)],
+    };
+    resolver.classes = alloc::vec![class(0, 70), class(2, 71)];
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    commands
+        .execute_commands(
+            &mut resolver,
+            IndirectCommandBufferId(0),
+            ExecutionRange::Direct(0..1),
+        )
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    assert_eq!(resolver.layouts.len(), 2, "draws and indexed draws");
+    assert!(resolver.layouts.iter().all(|key| key.execution_set));
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    // Two classes, two draw kinds, two triangle primitive types.
+    let executions = generated(commands);
+    assert_eq!(executions.len(), 8);
+    assert_eq!(executions[0].set, Some(ExecutionSet(10)));
+    assert_eq!(executions[7].set, Some(ExecutionSet(12)));
+    let binds = commands
+        .iter()
+        .filter(|command| matches!(command, Command::BindPipeline { .. }))
+        .count();
+    assert_eq!(binds, 8, "every execution binds a pipeline of its class");
+    let arguments = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::ResolveCommands { arguments, .. } => Some(*arguments),
+            _ => None,
+        })
+        .unwrap();
+    let arguments = uploaded(&recording, arguments);
+    assert_eq!(
+        word(arguments, ResolveArguments::CLASS_COUNT_OFFSET as usize),
+        3
+    );
+    assert_eq!(word(arguments, ResolveArguments::FLAGS_OFFSET as usize), 0);
+    let strides = uploaded(
+        &recording,
+        u64_at(arguments, ResolveArguments::STRIDES_OFFSET),
+    );
+    assert_eq!(word(strides, 0), 16, "buffer 0 of class 0");
+    assert_eq!(word(strides, 4 * (2 * 31)), 16, "buffer 0 of class 2");
+    assert_eq!(word(strides, 4 * (2 * 31 + 3)), 0, "a dynamic stride");
+    let slot = ResolveArguments::SLOTS_OFFSET as usize + 7 * 16;
+    assert_eq!(
+        [
+            word(arguments, slot),
+            word(arguments, slot + 4),
+            word(arguments, slot + 8)
+        ],
+        [
+            2,
+            RecordLayout::DRAW_INDEXED,
+            PrimitiveType::TriangleStrip.raw() as u32
+        ]
+    );
+}
+
+#[test]
+fn resident_barriers_order_every_command() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        inherit_cull_mode: true,
+        ..icb_descriptor(IndirectCommandType::DRAW)
+    };
+    let mut resolver = resident_icb(descriptor, 2);
+    let contents = Arc::make_mut(&mut resolver.indirect[0]);
+    assert!(!contents.has_barriers());
+    contents.render_command(1).unwrap().set_barrier().unwrap();
+    assert!(contents.has_barriers());
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    commands
+        .set_render_pipeline_state(&render_state(1))
+        .unwrap();
+    commands
+        .execute_commands(
+            &mut resolver,
+            IndirectCommandBufferId(0),
+            ExecutionRange::Direct(0..2),
+        )
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    // The resolve and each command end the pass instance, as does the
+    // encoder.
+    let ends = recording.segments[0]
+        .commands
+        .iter()
+        .filter(|command| matches!(command, Command::EndRendering))
+        .count();
+    assert_eq!(ends, 1 + 2 + 1);
+}
+
+#[test]
+fn generated_layouts_read_the_sequence_at_token_offsets() {
+    let key = GeneratedLayoutKey {
+        stages: ShaderStages::VERTEX,
+        execution_set: true,
+        indexed: true,
+        vertex_buffers: alloc::vec![1, 30],
+    };
+    let info = key.info();
+    assert_eq!(info.stride, GeneratedSequence::BYTES);
+    assert_eq!(
+        info.tokens,
+        [
+            (0, IndirectToken::ExecutionSet(ShaderStages::VERTEX)),
+            (
+                8,
+                IndirectToken::PushConstants {
+                    offset: 0,
+                    size: 52
+                }
+            ),
+            (64, IndirectToken::IndexBuffer),
+            (96, IndirectToken::VertexBuffer(1)),
+            (560, IndirectToken::VertexBuffer(30)),
+            (592, IndirectToken::DrawIndexed),
+        ]
     );
 }

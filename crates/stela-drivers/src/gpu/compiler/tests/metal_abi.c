@@ -270,6 +270,23 @@ static void select_flags_each_command(void)
    ralloc_free(shader);
 }
 
+static void resolve_writes_each_command_sequence(void)
+{
+   nir_shader *shader = stela_metal_resolve_kernel(NULL);
+   check_kernel(shader);
+   struct census census = count(shader);
+   assert(census.push_constants == 1 && census.push_base == STELA_METAL_PUSH_ARGUMENTS);
+   /* Each stage's table copy and buffer slots, the vertex buffers and the
+    * slots. */
+   assert(census.loops == 6);
+   /* The execution set index, 13 push constant words, per stage a table
+    * word, its two slot fields and its address, the index buffer's three
+    * fields, a vertex buffer's three, the draws' one and five, and a
+    * count. */
+   assert(census.stores == 1 + 13 + 2 * 4 + 3 + 3 + 1 + 5 + 1);
+   ralloc_free(shader);
+}
+
 /* The folded factor of factor * scale. */
 static float fold_factor(enum stela_metal_partition partition, unsigned max, float factor,
                          float scale)
@@ -610,6 +627,7 @@ int main(void)
    storage_levels_index_their_run();
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();
+   resolve_writes_each_command_sequence();
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();
    evaluation_stages_read_their_patch_ids();

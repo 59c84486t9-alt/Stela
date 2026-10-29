@@ -139,14 +139,17 @@ pub trait Backend {
     /// `vkUpdateIndirectExecutionSetPipelineEXT` of one index, which no
     /// pending submission uses.
     fn write_execution_set(&mut self, set: ExecutionSet, index: u32, pipeline: Pipeline);
-    /// Preprocess bytes `sequences` of `layout` need
-    /// (`vkGetGeneratedCommandsMemoryRequirementsEXT`).
-    fn generated_commands_size(
+    /// The size and alignment of the preprocess memory `sequences` of
+    /// `layout` need (`vkGetGeneratedCommandsMemoryRequirementsEXT`), in
+    /// memory of `request`; refused when no memory `request` allows can
+    /// hold it.
+    fn generated_commands_requirements(
         &mut self,
         layout: IndirectCommandsLayout,
         set: Option<ExecutionSet>,
         sequences: u32,
-    ) -> u64;
+        request: MemoryRequest,
+    ) -> Result<Requirements>;
     fn destroy(&mut self, object: Object);
 
     /// `vkUpdateDescriptorSets` into heap slot `index`.

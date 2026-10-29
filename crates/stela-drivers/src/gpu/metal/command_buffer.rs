@@ -19,8 +19,11 @@ use super::{
     sparse::Mapping,
     upload::{Chunk, ChunkSource, Upload, UploadArena},
     vulkan::{
+        backend::Requirements,
         command::{Command, SparseBind},
-        object::{Buffer, Pipeline, QueryPool, QueryType, Semaphore},
+        object::{
+            Buffer, ExecutionSet, IndirectCommandsLayout, Pipeline, QueryPool, QueryType, Semaphore,
+        },
     },
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -28,6 +31,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 pub mod blit;
 pub mod compute;
 pub mod counters;
+pub mod generated;
 pub mod indirect;
 pub mod render;
 pub mod resource_state;
@@ -121,6 +125,18 @@ pub trait Resolver: ChunkSource {
         &mut self,
         id: IndirectCommandBufferId,
     ) -> Result<Arc<IndirectCommandBuffer>>;
+
+    /// The live state classes of indirect-bindable render pipelines.
+    fn indirect_render_classes(&mut self) -> Vec<generated::IndirectRenderClass>;
+
+    /// The indirect commands layout of `key`, created on first use, and the
+    /// preprocess memory one sequence of it needs with `set` in upload
+    /// memory.
+    fn generated_layout(
+        &mut self,
+        key: &generated::GeneratedLayoutKey,
+        set: Option<ExecutionSet>,
+    ) -> Result<(IndirectCommandsLayout, Requirements)>;
 
     /// The layout and buffer of an indirect command buffer's records,
     /// making it GPU-resident.

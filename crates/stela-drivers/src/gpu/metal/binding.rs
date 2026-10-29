@@ -334,6 +334,167 @@ impl SelectArguments {
     }
 }
 
+/// What the backend's internal resolve kernel reads at the push constants'
+/// `arguments` (`stela_metal_resolve_kernel`): it turns each command of a
+/// GPU-resident render indirect command buffer into a [`GeneratedSequence`]
+/// and its counts per [`ResolveSlot`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResolveArguments {
+    /// The buffer's header (its `gpuResourceID`).
+    pub header: u64,
+    /// The execution range: `uint` location and length.
+    pub range: u64,
+    /// Where thread `n` writes its sequence, at `n * GeneratedSequence::BYTES`.
+    pub sequences: u64,
+    /// Where thread `n` writes its `u32` count of each slot.
+    pub counts: u64,
+    /// Where thread `n` writes its vertex and fragment argument tables,
+    /// unless the buffer inherits buffers.
+    pub tables: u64,
+    /// The pipeline classes' static vertex strides: `u32` per class and
+    /// buffer index, zero for none.
+    pub strides: u64,
+    pub count: u32,
+    /// The command of thread 0.
+    pub first: u32,
+    pub inherit_pipeline: bool,
+    pub inherit_buffers: bool,
+    pub class_count: u32,
+    /// The encoder's push constants, whose tables the commands' tables
+    /// copy.
+    pub constants: PushConstants,
+    /// The encoder's vertex buffers by index, for buffers that inherit them.
+    pub vertex_buffers: [SequenceVertexBuffer; MAX_BUFFER_BINDINGS as usize],
+    pub slots: Vec<ResolveSlot>,
+}
+
+/// A vertex buffer as a [`GeneratedSequence`] binds it
+/// (`VkBindVertexBufferIndirectCommandEXT`); a zero stride is the
+/// pipeline's.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SequenceVertexBuffer {
+    pub address: u64,
+    pub size: u32,
+    pub stride: u32,
+}
+
+/// One execution of a resolved command: its pipeline class (zero when the
+/// buffer inherits pipeline state), its action and its `MTLPrimitiveType`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ResolveSlot {
+    pub class: u32,
+    pub action: u32,
+    pub primitive: u32,
+}
+
+impl ResolveArguments {
+    pub const HEADER_OFFSET: u32 = 0;
+    pub const RANGE_OFFSET: u32 = 8;
+    pub const SEQUENCES_OFFSET: u32 = 16;
+    pub const COUNTS_OFFSET: u32 = 24;
+    pub const TABLES_OFFSET: u32 = 32;
+    pub const STRIDES_OFFSET: u32 = 40;
+    pub const COUNT_OFFSET: u32 = 48;
+    pub const FIRST_OFFSET: u32 = 52;
+    pub const SLOT_COUNT_OFFSET: u32 = 56;
+    pub const FLAGS_OFFSET: u32 = 60;
+    pub const CLASS_COUNT_OFFSET: u32 = 64;
+    pub const PUSH_OFFSET: u32 = 72;
+    pub const VERTEX_BUFFERS_OFFSET: u32 = 128;
+    pub const SLOTS_OFFSET: u32 = 624;
+    pub const SLOT_BYTES: u32 = 16;
+    pub const INHERIT_PIPELINE: u32 = 1;
+    pub const INHERIT_BUFFERS: u32 = 2;
+    pub const ALIGNMENT: u64 = 16;
+    /// Threads per workgroup of the kernel.
+    pub const WORKGROUP_SIZE: u32 = 64;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let length = Self::SLOTS_OFFSET + Self::SLOT_BYTES * self.slots.len() as u32;
+        let mut bytes = alloc::vec![0; length as usize];
+        let mut writer = Writer {
+            bytes: &mut bytes,
+            offset: 0,
+        };
+        for address in [
+            self.header,
+            self.range,
+            self.sequences,
+            self.counts,
+            self.tables,
+            self.strides,
+        ] {
+            writer.u64(address);
+        }
+        let flag = |set: bool, flag: u32| if set { flag } else { 0 };
+        let flags = flag(self.inherit_pipeline, Self::INHERIT_PIPELINE)
+            | flag(self.inherit_buffers, Self::INHERIT_BUFFERS);
+        for word in [
+            self.count,
+            self.first,
+            self.slots.len() as u32,
+            flags,
+            self.class_count,
+        ] {
+            writer.u32(word);
+        }
+        writer.offset = Self::PUSH_OFFSET as usize;
+        writer.bytes[writer.offset..writer.offset + PushConstants::BYTES as usize]
+            .copy_from_slice(&self.constants.encode());
+        writer.offset = Self::VERTEX_BUFFERS_OFFSET as usize;
+        for buffer in &self.vertex_buffers {
+            writer.u64(buffer.address);
+            writer.u32(buffer.size);
+            writer.u32(buffer.stride);
+        }
+        for slot in &self.slots {
+            writer.u32(slot.class);
+            writer.u32(slot.action);
+            writer.u32(slot.primitive);
+            writer.u32(0);
+        }
+        bytes
+    }
+}
+
+const _: () = assert!(
+    ResolveArguments::PUSH_OFFSET + PushConstants::BYTES <= ResolveArguments::VERTEX_BUFFERS_OFFSET
+        && ResolveArguments::VERTEX_BUFFERS_OFFSET
+            + GeneratedSequence::VERTEX_BUFFER_BYTES * MAX_BUFFER_BINDINGS
+            == ResolveArguments::SLOTS_OFFSET
+);
+
+/// The offsets of a command's device-generated sequence, which the resolve
+/// kernel writes and each indirect commands layout reads at its own token
+/// offsets.
+pub struct GeneratedSequence;
+
+impl GeneratedSequence {
+    /// The `u32` execution set index.
+    pub const PIPELINE_OFFSET: u32 = 0;
+    pub const PUSH_OFFSET: u32 = 8;
+    /// `VkBindIndexBufferIndirectCommandEXT`.
+    pub const INDEX_BUFFER_OFFSET: u32 = 64;
+    /// A [`SequenceVertexBuffer`] per vertex buffer index.
+    pub const VERTEX_BUFFERS_OFFSET: u32 = 80;
+    pub const VERTEX_BUFFER_BYTES: u32 = 16;
+    /// `VkDrawIndirectCommand`.
+    pub const DRAW_OFFSET: u32 = 576;
+    /// `VkDrawIndexedIndirectCommand`.
+    pub const DRAW_INDEXED_OFFSET: u32 = 592;
+    pub const BYTES: u32 = 624;
+    pub const ALIGNMENT: u64 = 16;
+}
+
+const _: () = assert!(
+    GeneratedSequence::PUSH_OFFSET + PushConstants::BYTES <= GeneratedSequence::INDEX_BUFFER_OFFSET
+        && GeneratedSequence::VERTEX_BUFFERS_OFFSET
+            + GeneratedSequence::VERTEX_BUFFER_BYTES * MAX_BUFFER_BINDINGS
+            == GeneratedSequence::DRAW_OFFSET
+        && GeneratedSequence::DRAW_OFFSET + 16 == GeneratedSequence::DRAW_INDEXED_OFFSET
+        && GeneratedSequence::DRAW_INDEXED_OFFSET + 20 <= GeneratedSequence::BYTES
+);
+
 struct Writer<'a> {
     bytes: &'a mut [u8],
     offset: usize,
@@ -654,6 +815,79 @@ mod tests {
                 "STELA_METAL_RECORD_DISPATCH_THREADS",
                 RecordLayout::DISPATCH_THREADS,
             ),
+            (
+                "STELA_METAL_RESOLVE_HEADER",
+                ResolveArguments::HEADER_OFFSET,
+            ),
+            ("STELA_METAL_RESOLVE_RANGE", ResolveArguments::RANGE_OFFSET),
+            (
+                "STELA_METAL_RESOLVE_SEQUENCES",
+                ResolveArguments::SEQUENCES_OFFSET,
+            ),
+            (
+                "STELA_METAL_RESOLVE_COUNTS",
+                ResolveArguments::COUNTS_OFFSET,
+            ),
+            (
+                "STELA_METAL_RESOLVE_TABLES",
+                ResolveArguments::TABLES_OFFSET,
+            ),
+            (
+                "STELA_METAL_RESOLVE_STRIDES",
+                ResolveArguments::STRIDES_OFFSET,
+            ),
+            ("STELA_METAL_RESOLVE_COUNT", ResolveArguments::COUNT_OFFSET),
+            ("STELA_METAL_RESOLVE_FIRST", ResolveArguments::FIRST_OFFSET),
+            (
+                "STELA_METAL_RESOLVE_SLOT_COUNT",
+                ResolveArguments::SLOT_COUNT_OFFSET,
+            ),
+            ("STELA_METAL_RESOLVE_FLAGS", ResolveArguments::FLAGS_OFFSET),
+            (
+                "STELA_METAL_RESOLVE_CLASS_COUNT",
+                ResolveArguments::CLASS_COUNT_OFFSET,
+            ),
+            ("STELA_METAL_RESOLVE_PUSH", ResolveArguments::PUSH_OFFSET),
+            (
+                "STELA_METAL_RESOLVE_VERTEX_BUFFERS",
+                ResolveArguments::VERTEX_BUFFERS_OFFSET,
+            ),
+            ("STELA_METAL_RESOLVE_SLOTS", ResolveArguments::SLOTS_OFFSET),
+            (
+                "STELA_METAL_RESOLVE_SLOT_BYTES",
+                ResolveArguments::SLOT_BYTES,
+            ),
+            (
+                "STELA_METAL_RESOLVE_INHERIT_PIPELINE",
+                ResolveArguments::INHERIT_PIPELINE,
+            ),
+            (
+                "STELA_METAL_RESOLVE_INHERIT_BUFFERS",
+                ResolveArguments::INHERIT_BUFFERS,
+            ),
+            (
+                "STELA_METAL_SEQUENCE_PIPELINE",
+                GeneratedSequence::PIPELINE_OFFSET,
+            ),
+            ("STELA_METAL_SEQUENCE_PUSH", GeneratedSequence::PUSH_OFFSET),
+            (
+                "STELA_METAL_SEQUENCE_INDEX_BUFFER",
+                GeneratedSequence::INDEX_BUFFER_OFFSET,
+            ),
+            (
+                "STELA_METAL_SEQUENCE_VERTEX_BUFFERS",
+                GeneratedSequence::VERTEX_BUFFERS_OFFSET,
+            ),
+            (
+                "STELA_METAL_SEQUENCE_VERTEX_BUFFER_BYTES",
+                GeneratedSequence::VERTEX_BUFFER_BYTES,
+            ),
+            ("STELA_METAL_SEQUENCE_DRAW", GeneratedSequence::DRAW_OFFSET),
+            (
+                "STELA_METAL_SEQUENCE_DRAW_INDEXED",
+                GeneratedSequence::DRAW_INDEXED_OFFSET,
+            ),
+            ("STELA_METAL_SEQUENCE_BYTES", GeneratedSequence::BYTES),
             ("STELA_METAL_SELECT_RANGE", SelectArguments::RANGE_OFFSET),
             ("STELA_METAL_SELECT_FLAGS", SelectArguments::FLAGS_OFFSET),
             ("STELA_METAL_SELECT_COUNT", SelectArguments::COUNT_OFFSET),
@@ -941,6 +1175,60 @@ mod tests {
         assert_eq!(u64_at(SelectArguments::RANGE_OFFSET), 0x1000);
         assert_eq!(u64_at(SelectArguments::FLAGS_OFFSET), 0x2000);
         assert_eq!(bytes[SelectArguments::COUNT_OFFSET as usize], 7);
+    }
+
+    #[test]
+    fn resolve_arguments_encode_in_layout_order() {
+        let mut vertex_buffers = [SequenceVertexBuffer::default(); MAX_BUFFER_BINDINGS as usize];
+        vertex_buffers[30] = SequenceVertexBuffer {
+            address: 0x5000,
+            size: 64,
+            stride: 12,
+        };
+        let bytes = ResolveArguments {
+            header: 0x1000,
+            strides: 0x4000,
+            count: 9,
+            inherit_buffers: true,
+            class_count: 3,
+            constants: PushConstants {
+                tables: [0x6000, 0, 0],
+                ..PushConstants::default()
+            },
+            vertex_buffers,
+            slots: alloc::vec![ResolveSlot {
+                class: 2,
+                action: 1,
+                primitive: 4,
+            }],
+            ..ResolveArguments::default()
+        }
+        .encode();
+        let u32_at =
+            |offset: u32| u32::from_le_bytes(bytes[offset as usize..][..4].try_into().unwrap());
+        let u64_at =
+            |offset: u32| u64::from_le_bytes(bytes[offset as usize..][..8].try_into().unwrap());
+        assert_eq!(bytes.len(), 640);
+        assert_eq!(u64_at(ResolveArguments::HEADER_OFFSET), 0x1000);
+        assert_eq!(u64_at(ResolveArguments::STRIDES_OFFSET), 0x4000);
+        assert_eq!(u32_at(ResolveArguments::COUNT_OFFSET), 9);
+        assert_eq!(u32_at(ResolveArguments::SLOT_COUNT_OFFSET), 1);
+        assert_eq!(
+            u32_at(ResolveArguments::FLAGS_OFFSET),
+            ResolveArguments::INHERIT_BUFFERS
+        );
+        assert_eq!(u32_at(ResolveArguments::CLASS_COUNT_OFFSET), 3);
+        assert_eq!(u64_at(ResolveArguments::PUSH_OFFSET), 0x6000);
+        let last = ResolveArguments::SLOTS_OFFSET - GeneratedSequence::VERTEX_BUFFER_BYTES;
+        assert_eq!(
+            (u64_at(last), u32_at(last + 8), u32_at(last + 12)),
+            (0x5000, 64, 12)
+        );
+        let slot = ResolveArguments::SLOTS_OFFSET;
+        assert_eq!(
+            (u32_at(slot), u32_at(slot + 4), u32_at(slot + 8)),
+            (2, 1, 4)
+        );
     }
 
     #[test]

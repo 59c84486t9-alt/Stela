@@ -18,6 +18,7 @@ use crate::gpu::metal::{
     command_buffer::{
         BufferRef, Segment,
         counters::{COUNTER_ERROR_VALUE, CounterSample},
+        generated::GeneratedLayoutKey,
         indirect::ExecutionRange,
     },
     heap::HeapDescriptor,
@@ -36,7 +37,7 @@ use crate::gpu::metal::{
     },
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
-        ImageAspects, PrimitiveTopology, ShaderStages,
+        ImageAspects, MemoryProperties, PrimitiveTopology, ShaderStages,
         backend::{BufferAllocation, Descriptor, Requirements},
         command::{BufferImageCopy, Command, Subresource},
         object::{
@@ -200,13 +201,18 @@ impl Backend for MockBackend {
             .unwrap()
             .insert(index, pipeline);
     }
-    fn generated_commands_size(
+    fn generated_commands_requirements(
         &mut self,
         _: IndirectCommandsLayout,
         _: Option<ExecutionSet>,
         sequences: u32,
-    ) -> u64 {
-        u64::from(sequences) * 64
+        _: MemoryRequest,
+    ) -> Result<Requirements> {
+        Ok(Requirements {
+            size: u64::from(sequences) * 64,
+            alignment: 256,
+            memory_types: u32::MAX,
+        })
     }
     fn destroy(&mut self, object: Object) {
         self.destroyed.push(object);
@@ -783,6 +789,67 @@ fn indirect_pipelines_share_execution_sets_by_state() {
         1 << 32 | 3,
         "indices return only once idle"
     );
+
+    let vulkan = |device: &TestDevice, id| device.render_pipeline_state(id).unwrap().pipeline;
+    let (initial, kept) = (vulkan(&device, first), vulkan(&device, third));
+    let classes = device.indirect_render_classes();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(
+        (classes[0].index, classes[0].pipeline),
+        (0, initial.unwrap())
+    );
+    assert_eq!(classes[0].topology, PrimitiveTopologyClass::Triangle);
+    let destroyed = |device: &mut TestDevice, pipeline: Option<Pipeline>| {
+        let pipeline = Object::Pipeline(pipeline.unwrap());
+        device.backend().destroyed.contains(&pipeline)
+    };
+    device.destroy_render_pipeline(first).unwrap();
+    assert!(
+        !destroyed(&mut device, initial),
+        "the class keeps its initial pipeline"
+    );
+    assert_eq!(
+        device.indirect_render_classes()[0].pipeline,
+        kept.unwrap(),
+        "executions bind a live pipeline"
+    );
+    device.destroy_render_pipeline(third).unwrap();
+    assert!(destroyed(&mut device, initial) && destroyed(&mut device, kept));
+    assert!(device.indirect_render_classes().is_empty());
+}
+
+#[test]
+fn generated_layouts_are_created_once_per_key() {
+    let mut device = device();
+    let key = GeneratedLayoutKey {
+        stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+        execution_set: false,
+        indexed: true,
+        vertex_buffers: alloc::vec![0],
+    };
+    let request = MemoryRequest {
+        required: MemoryProperties::HOST_VISIBLE,
+        preferred: MemoryProperties::EMPTY,
+        mapped: true,
+    };
+    let (layout, requirements) = device.generated_layout(&key, None, request).unwrap();
+    assert_eq!((requirements.size, requirements.alignment), (64, 256));
+    assert_eq!(
+        device.generated_layout(&key, None, request).unwrap().0,
+        layout
+    );
+    let wide = GeneratedLayoutKey {
+        vertex_buffers: (0..31).collect(),
+        ..key.clone()
+    };
+    assert!(
+        matches!(
+            device.generated_layout(&wide, None, request),
+            Err(Error::Unsupported(_))
+        ),
+        "more tokens than the device takes"
+    );
+    assert_eq!(device.backend().layouts, [key.info()]);
 }
 
 #[test]

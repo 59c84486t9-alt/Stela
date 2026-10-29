@@ -88,9 +88,7 @@ impl CommandBuffer {
             "the encoder does not execute the indirect command buffer's command types",
         )?;
         if buffer.records().is_some() {
-            return Err(Error::Unsupported(
-                "executing GPU-resident indirect command buffers",
-            ));
+            return self.execute_records(resolver, id, &buffer, range);
         }
         let (commands, gate) = match range {
             ExecutionRange::Direct(range) => (buffer.commands(range)?, None),
@@ -513,6 +511,19 @@ impl CommandBuffer {
             });
         }
         let (layout, records) = resolver.indirect_records(destination)?;
+        let barriers = match resident {
+            true => contents.has_barriers(),
+            false => contents
+                .commands(range.clone())?
+                .iter()
+                .any(|command| command.barrier),
+        };
+        if barriers {
+            resolver.update_indirect_commands(destination, &mut |buffer| {
+                buffer.note_barriers();
+                Ok(())
+            })?;
+        }
         let end = index.checked_add(range.len()).ok_or(Error::Invalid(
             "range extends past the indirect command buffer",
         ))?;

@@ -23,7 +23,10 @@ use crate::gpu::metal::{
         PrimitiveTopologyClass, PrimitiveType, RenderStages, StoreAction,
         TessellationControlPointIndexType, TriangleFillMode, VisibilityResultMode, Winding,
     },
-    binding::{AccumulateArguments, BufferBinding, ResourceId, TessellationArguments},
+    binding::{
+        AccumulateArguments, BufferBinding, ResourceId, SequenceVertexBuffer, TessellationArguments,
+    },
+    capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
     pass::{AttachmentSlot, RenderPassPlan, RenderingAttachment},
@@ -214,6 +217,39 @@ pub(super) struct RenderState {
     samples: Vec<(CounterSample, PassBoundary)>,
     /// Timestamp queries the pass writes, reset before it begins.
     pub(super) timestamp_resets: Vec<(QueryPool, u32)>,
+}
+
+impl RenderState {
+    /// The encoder's vertex buffers as a generated command sequence binds
+    /// them, with their own strides.
+    pub(super) fn sequence_vertex_buffers(
+        &self,
+    ) -> Result<[SequenceVertexBuffer; MAX_BUFFER_BINDINGS as usize]> {
+        let mut buffers = [SequenceVertexBuffer::default(); MAX_BUFFER_BINDINGS as usize];
+        for (buffer, bound) in buffers.iter_mut().zip(&self.vertex_buffers) {
+            if let Some(bound) = bound {
+                let size = bound.buffer.length - bound.offset;
+                *buffer = SequenceVertexBuffer {
+                    address: bound.buffer.address + bound.offset,
+                    size: size.min(u32::MAX.into()) as u32,
+                    stride: u32::try_from(bound.stride.unwrap_or(0))
+                        .map_err(|_| Error::Invalid("vertex buffer stride"))?,
+                };
+            }
+        }
+        Ok(buffers)
+    }
+}
+
+/// The Vulkan topology of a Metal primitive type.
+pub(super) const fn primitive_topology(primitive: PrimitiveType) -> PrimitiveTopology {
+    match primitive {
+        PrimitiveType::Point => PrimitiveTopology::PointList,
+        PrimitiveType::Line => PrimitiveTopology::LineList,
+        PrimitiveType::LineStrip => PrimitiveTopology::LineStrip,
+        PrimitiveType::Triangle => PrimitiveTopology::TriangleList,
+        PrimitiveType::TriangleStrip => PrimitiveTopology::TriangleStrip,
+    }
 }
 
 /// The active render encoder, borrowing only the encoder field so the
@@ -901,6 +937,29 @@ impl CommandBuffer {
         })
     }
 
+    /// Forgets the bindings generated commands left undefined: the bound
+    /// pipeline, vertex and index buffers, and push constants. The
+    /// encoder's pipeline, if any, is bound again.
+    pub(super) fn after_generated_commands(&mut self) -> Result<()> {
+        let render = render(&mut self.encoder)?;
+        render.bound_vertex_buffers = [None; 31];
+        render.index_buffer = None;
+        render.topology = None;
+        render.restart = None;
+        self.bindings.pushed = None;
+        if let Some(state) = &render.pipeline {
+            if let Some(pipeline) = state.pipeline {
+                self.recorder.push(Command::BindPipeline {
+                    bind_point: PipelineBindPoint::Graphics,
+                    pipeline,
+                });
+            }
+            let discard = !state.plan.rasterization_enabled;
+            self.recorder.push(Command::SetRasterizerDiscard(discard));
+        }
+        Ok(())
+    }
+
     /// Ends the pass instance, records `between` outside it and resumes
     /// with an instance that loads every attachment.
     pub(super) fn outside_pass(
@@ -1244,13 +1303,7 @@ impl CommandBuffer {
             class == PrimitiveTopologyClass::Unspecified || class == primitive.class(),
             "the primitive type is outside the pipeline's topology class",
         )?;
-        let topology = match primitive {
-            PrimitiveType::Point => PrimitiveTopology::PointList,
-            PrimitiveType::Line => PrimitiveTopology::LineList,
-            PrimitiveType::LineStrip => PrimitiveTopology::LineStrip,
-            PrimitiveType::Triangle => PrimitiveTopology::TriangleList,
-            PrimitiveType::TriangleStrip => PrimitiveTopology::TriangleStrip,
-        };
+        let topology = primitive_topology(primitive);
         let mut commands = Vec::new();
         if render.topology != Some(topology) {
             render.topology = Some(topology);
@@ -1430,7 +1483,7 @@ impl CommandBuffer {
 
     /// Begins an occlusion query for the current visibility mode if none is
     /// active.
-    fn begin_query(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
+    pub(super) fn begin_query(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
         let render = render(&mut self.encoder)?;
         let visibility = &mut render.visibility;
         let (Some((mode, offset)), None) = (visibility.mode, visibility.active) else {

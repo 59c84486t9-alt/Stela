@@ -4,7 +4,7 @@ use super::{
     objects::{self, extent, offset, stages, subresource},
 };
 use crate::gpu::metal::{
-    binding::{AccumulateArguments, PushConstants, SelectArguments},
+    binding::{AccumulateArguments, PushConstants, ResolveArguments, SelectArguments},
     command_buffer::Segment,
     error::{Error, Result},
     pass::ClearValue,
@@ -606,6 +606,12 @@ impl Recorder<'_> {
                     arguments,
                     count,
                     SelectArguments::WORKGROUP_SIZE,
+                ),
+                &Command::ResolveCommands { arguments, count } => self.internal(
+                    self.backend.resolve,
+                    arguments,
+                    count,
+                    ResolveArguments::WORKGROUP_SIZE,
                 ),
                 &Command::BeginConditionalRendering {
                     buffer: flags,

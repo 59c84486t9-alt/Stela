@@ -25,6 +25,7 @@ use crate::gpu::metal::{
         BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, RenderPipelineState,
         Resolver, Segment,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
+        generated::{GeneratedLayoutKey, IndirectRenderClass},
         render::PassBoundary,
     },
     error::{Error, Result, ensure, require},
@@ -40,10 +41,10 @@ use crate::gpu::metal::{
     upload::{Chunk, ChunkSource},
     vulkan::{
         BufferCreate, BufferUsage, MemoryProperties, PipelineStatistics,
-        backend::{Backend, BufferAllocation, Object},
+        backend::{Backend, BufferAllocation, Object, Requirements},
         object::{
-            BufferInfo, ImageView, Memory, MemoryRequest, Pipeline, QueryPool, QueryPoolInfo,
-            QueryType, Semaphore,
+            BufferInfo, ExecutionSet, ImageView, IndirectCommandsLayout, Memory, MemoryRequest,
+            Pipeline, QueryPool, QueryPoolInfo, QueryType, Semaphore,
         },
     },
 };
@@ -772,6 +773,13 @@ const CHUNK_USAGE: BufferUsage = BufferUsage::SHADER_DEVICE_ADDRESS
     .union(BufferUsage::TRANSFER_SRC)
     .union(BufferUsage::TRANSFER_DST);
 
+/// Upload chunks' memory.
+const CHUNK_MEMORY: MemoryRequest = MemoryRequest {
+    required: MemoryProperties::HOST_VISIBLE.union(MemoryProperties::HOST_COHERENT),
+    preferred: MemoryProperties::DEVICE_LOCAL,
+    mapped: true,
+};
+
 impl<B: Backend, C: Compiler> ChunkSource for DeviceResolver<'_, B, C> {
     fn acquire(&mut self, bytes: u64) -> Result<Chunk> {
         let queue = &mut self.device.queue;
@@ -782,17 +790,20 @@ impl<B: Backend, C: Compiler> ChunkSource for DeviceResolver<'_, B, C> {
         {
             return Ok(queue.free_chunks.swap_remove(index));
         }
+        // Generated commands preprocess into chunks too.
+        let generated = self
+            .device
+            .backend
+            .physical_device()
+            .limits
+            .generated_commands;
+        let usage = CHUNK_USAGE.with(BufferUsage::PREPROCESS_BUFFER, generated.is_some());
         let info = BufferInfo {
             size: bytes,
-            usage: CHUNK_USAGE,
+            usage,
             flags: BufferCreate::EMPTY,
         };
-        let request = MemoryRequest {
-            required: MemoryProperties::HOST_VISIBLE | MemoryProperties::HOST_COHERENT,
-            preferred: MemoryProperties::DEVICE_LOCAL,
-            mapped: true,
-        };
-        let allocation = self.device.backend.create_buffer(&info, request)?;
+        let allocation = self.device.backend.create_buffer(&info, CHUNK_MEMORY)?;
         let chunk = Chunk {
             buffer: allocation.buffer,
             address: allocation.address,
@@ -876,6 +887,18 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         id: IndirectCommandBufferId,
     ) -> Result<(RecordLayout, BufferRef)> {
         self.device.indirect_records(id)
+    }
+
+    fn indirect_render_classes(&mut self) -> Vec<IndirectRenderClass> {
+        self.device.indirect_render_classes()
+    }
+
+    fn generated_layout(
+        &mut self,
+        key: &GeneratedLayoutKey,
+        set: Option<ExecutionSet>,
+    ) -> Result<(IndirectCommandsLayout, Requirements)> {
+        self.device.generated_layout(key, set, CHUNK_MEMORY)
     }
 
     fn update_indirect_commands(

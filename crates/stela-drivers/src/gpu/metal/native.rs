@@ -49,8 +49,9 @@ pub struct Loader {
     pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
 }
 
-/// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel` and
-/// `stela_metal_select_kernel` (`compiler/metal_abi.h`).
+/// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel`,
+/// `stela_metal_select_kernel` and `stela_metal_resolve_kernel`
+/// (`compiler/metal_abi.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct InternalKernels {
     /// Sums query results per
@@ -61,6 +62,10 @@ pub struct InternalKernels {
     /// [`SelectArguments`](super::binding::SelectArguments), one thread per
     /// command in workgroups of `WORKGROUP_SIZE`.
     pub select: ShaderCode,
+    /// Resolves GPU-resident indirect commands per
+    /// [`ResolveArguments`](super::binding::ResolveArguments), one thread
+    /// per command in workgroups of `WORKGROUP_SIZE`.
+    pub resolve: ShaderCode,
 }
 
 /// A host mapping of a `VkDeviceMemory`.
@@ -123,6 +128,7 @@ pub struct NativeBackend {
     bind_value: u64,
     accumulate: vk::Pipeline,
     select: vk::Pipeline,
+    resolve: vk::Pipeline,
 }
 
 impl NativeBackend {
@@ -254,6 +260,7 @@ impl NativeBackend {
             bind_value: 0,
             accumulate: vk::Pipeline::null(),
             select: vk::Pipeline::null(),
+            resolve: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         backend.create_layout(family)?;
@@ -266,6 +273,7 @@ impl NativeBackend {
         };
         backend.accumulate = backend.create_compute(&kernel(kernels.accumulate))?;
         backend.select = backend.create_compute(&kernel(kernels.select))?;
+        backend.resolve = backend.create_compute(&kernel(kernels.resolve))?;
         Ok(backend)
     }
 
@@ -560,6 +568,7 @@ impl Drop for NativeBackend {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_pipeline(self.accumulate, None);
+            self.device.destroy_pipeline(self.resolve, None);
             self.device.destroy_pipeline(self.select, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -878,14 +887,31 @@ impl Backend for NativeBackend {
         unsafe { self.generated().write_set(set.0, index, handle(pipeline.0)) }
     }
 
-    fn generated_commands_size(
+    fn generated_commands_requirements(
         &mut self,
         layout: IndirectCommandsLayout,
         set: Option<ExecutionSet>,
         sequences: u32,
-    ) -> u64 {
-        self.generated()
-            .memory_size(layout.0, set.map(|set| set.0), sequences)
+        request: MemoryRequest,
+    ) -> Result<Requirements> {
+        let needs = self
+            .generated()
+            .memory_requirements(layout.0, set.map(|set| set.0), sequences);
+        // Every type the request could allocate from must hold the memory.
+        let candidates = objects::memory_candidates(&self.snapshot.memory, u32::MAX, request);
+        if candidates
+            .iter()
+            .any(|&index| needs.memory_type_bits & 1 << index == 0)
+        {
+            return Err(Error::Unsupported(
+                "generated commands preprocessing in host-visible memory",
+            ));
+        }
+        Ok(Requirements {
+            size: needs.size,
+            alignment: needs.alignment,
+            memory_types: needs.memory_type_bits,
+        })
     }
 
     fn destroy(&mut self, object: Object) {
