@@ -18,6 +18,8 @@ pub(super) fn command_ready<'a>(
     complete(&boot, domain, 0, 1, &packet);
     boot.poll().unwrap().unwrap();
     assert!(matches!(
+        // SAFETY: Callers supply the Source/Domain belonging to this same model boot;
+        // the empty catalog selects the no-PNVM path, with no alternate device worker.
         unsafe { boot.begin_pnvm(empty, Observations::default(), source) }.unwrap(),
         PnvmProgress::Skipped
     ));
@@ -83,6 +85,8 @@ pub(super) fn drive_nvm<'a>(
         Ok(_) => panic!("uninitialized owner admitted"),
     };
     assert_eq!(state.lock().unwrap().ops.len(), before);
+    // SAFETY: All helper callers retain the original boot Source/Domain pair; its RAM
+    // is exclusive and the refused begin_radio returned that exact initializer.
     unsafe { init.advance(source) }.unwrap();
     complete(
         &init.boot,
@@ -91,6 +95,8 @@ pub(super) fn drive_nvm<'a>(
         2,
         &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
     );
+    // SAFETY: The extended-configuration ACK was synchronously completed in the same
+    // retained Domain; the caller's original Source supplies exclusive model pages.
     unsafe { init.advance(source) }.unwrap();
     complete(
         &init.boot,
@@ -99,6 +105,8 @@ pub(super) fn drive_nvm<'a>(
         3,
         &command_packet(Request::AccessComplete.id(), 1, &[]),
     );
+    // SAFETY: The access-complete ACK belongs to that same model epoch and receive
+    // mapping; no caller reset or competing submission occurs during this helper.
     unsafe { init.advance(source) }.unwrap();
     complete(
         &init.boot,
@@ -115,6 +123,8 @@ pub(super) fn drive_nvm<'a>(
             &[0x76],
         ),
     );
+    // SAFETY: The init notification was completed synchronously through the original
+    // Domain; Source and all model mappings remain retained by this initializer.
     unsafe { init.advance(source) }.unwrap();
     complete(
         &init.boot,
@@ -124,6 +134,8 @@ pub(super) fn drive_nvm<'a>(
         &command_packet(Request::GetInformation.id(), 2, &nvm_response()),
     );
     assert_eq!(
+        // SAFETY: The NVM response resides in that same owned model buffer; the original
+        // Source/Domain stay live through parsing and reclamation before returning init.
         unsafe { init.advance(source) }.unwrap(),
         InitializationProgress::Observed
     );
@@ -142,6 +154,8 @@ pub(super) fn drive_cold_prefix<'a>(
     )
     .unwrap();
     let mut radio = init.begin_radio().unwrap_or_else(|_| panic!("actual NVM"));
+    // SAFETY: Callers retain the exact Source/Domain for init, and begin_radio moves
+    // that original owner; the NVM-derived plan uses exclusive model allocations.
     unsafe { radio.advance(source) }.unwrap();
     for (i, command) in expected.commands().iter().enumerate() {
         let mut id = command.id();
@@ -155,6 +169,8 @@ pub(super) fn drive_cold_prefix<'a>(
             6 + i as u16,
             &command_packet(id, 3 + i as u16, &[]),
         );
+        // SAFETY: Each prefix ACK was synchronously completed through that same Domain;
+        // radio retains the original Source and DMA backing through the next command.
         unsafe { radio.advance(source) }.unwrap();
     }
     assert_eq!(radio.phase(), ColdRadioPhase::PlatformConfigurationRequired);
