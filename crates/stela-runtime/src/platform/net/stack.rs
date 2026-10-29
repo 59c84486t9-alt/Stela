@@ -3,6 +3,8 @@
 //! requests, and non-blocking [`Transfer`]s that several connections can
 //! run at once.
 mod automatic;
+mod client;
+pub use client::{HttpRequest, HttpTransfer, TlsUnavailable};
 mod dad;
 mod rdnss;
 mod tls;
@@ -19,6 +21,7 @@ use smoltcp::{
 };
 use stela_drivers::net::{Link, LinkError, MAX_FRAME};
 pub use tls::SecureTransfer;
+use zeroize::{Zeroize, Zeroizing};
 
 /// An interface's IPv4 configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +441,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         request: Vec<u8>,
         buffer: usize,
     ) -> Result<Transfer, NetError> {
+        let mut request = Zeroizing::new(request);
         let (name, port) = automatic::authority(host)?;
         if self.config.is_none() && !self.ipv6_ready() {
             self.automatic()?;
@@ -456,7 +460,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             .map_err(|_| NetError::Invalid("TCP connect"))?;
         Ok(Transfer {
             socket: self.sockets.add(socket),
-            request,
+            request: core::mem::take(&mut *request),
             sent: 0,
             idle_at: self.now() + IDLE_US,
         })
@@ -573,7 +577,8 @@ impl<L: Link, C: Clock> Stack<L, C> {
     }
 
     /// Ends `transfer`, gracefully if it completed, and frees its socket.
-    pub fn close(&mut self, transfer: Transfer) {
+    pub fn close(&mut self, mut transfer: Transfer) {
+        transfer.request.zeroize();
         self.sockets.get_mut::<tcp::Socket>(transfer.socket).abort();
         // The RST leaves on this poll; its failure loses nothing.
         let _ = self.poll();
@@ -642,6 +647,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod http_flow;
     #[cfg(not(target_os = "uefi"))]
     mod tls;
     use super::*;

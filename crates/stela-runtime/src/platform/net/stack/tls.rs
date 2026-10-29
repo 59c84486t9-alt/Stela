@@ -18,7 +18,10 @@ pub struct SecureTransfer {
 }
 
 fn tls_error(error: stela_tls::channel::ChannelError) -> NetError {
-    NetError::Tls(alloc::format!("{error:?}"))
+    match error {
+        stela_tls::channel::ChannelError::Truncated => NetError::Truncated("TLS record stream"),
+        other => NetError::Tls(alloc::format!("{other:?}")),
+    }
 }
 
 impl<L: Link, C: Clock> Stack<L, C> {
@@ -32,6 +35,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         buffer: usize,
         config: Arc<ClientConfig>,
     ) -> Result<SecureTransfer, NetError> {
+        let request = Zeroizing::new(request);
         if destination.scheme != http::Scheme::Https {
             return Err(NetError::Invalid("TLS requires an https destination"));
         }
@@ -42,7 +46,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         Ok(SecureTransfer {
             tcp,
             channel,
-            request: Zeroizing::new(request),
+            request,
             sent: 0,
             idle_at: self.now().saturating_add(IDLE_US),
         })

@@ -1,16 +1,11 @@
-//! Stela's own IPv4 client network over raw Ethernet frames: the restore
-//! client's signing-server POST and its ranged downloads from Apple's CDN.
+//! Dual-stack HTTP and TLS transport over retained native Ethernet adapters.
 //!
-//! The protocols are smoltcp's (ARP, IPv4, DHCPv4 with lease renewal, DNS,
-//! and TCP with window scaling, reassembly and Reno congestion control);
-//! [`Stack`] adapts it to any [`Link`](stela_drivers::net::Link), so it is
-//! independent of the adapter: one of the mount's own drivers after
-//! ExitBootServices (`stela_drivers::net`, or a USB CDC Ethernet adapter on
-//! the host xHCI), or a test peer. Every wait has an explicit deadline from
-//! a [`Clock`]; nothing is retried without bound. [`http`] frames the
-//! requests and responses (RFC 9112), with httparse reading the heads.
-//! Automatic DHCPv4 and IPv6 SLAAC/RDNSS configure the interface. Native TLS,
-//! HTTP redirects and stateful DHCPv6 remain explicit transport boundaries.
+//! smoltcp owns ARP, IPv4/IPv6, DHCPv4, DNS and TCP. SLAAC/RDNSS admission
+//! includes duplicate-address detection; the URL-aware request layer retains
+//! redirect policy and range validators. TLS uses the shared protocol provider
+//! and requires actual owned entropy and a UTC-correlated continuous clock.
+//! Missing native capabilities refuse HTTPS; they cannot select plaintext.
+//! Stateful DHCPv6 is unsupported. Raw guest relay bytes stay opaque.
 use alloc::string::String;
 use core::fmt;
 use stela_drivers::net::LinkError;
@@ -20,7 +15,9 @@ pub mod stack;
 pub mod tls;
 
 pub use smoltcp::wire::Ipv4Address as Ipv4;
-pub use stack::{Config, SecureTransfer, Stack, Transfer};
+pub use stack::{
+    Config, HttpRequest, HttpTransfer, SecureTransfer, Stack, TlsUnavailable, Transfer,
+};
 
 /// Why a network operation failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,10 +40,35 @@ pub enum NetError {
     Http(String),
     /// The TLS engine refused the peer, record or required time/entropy input.
     Tls(String),
+    /// A connection ended inside an otherwise valid framed body or record.
+    Truncated(&'static str),
+    TlsUnavailable(TlsUnavailable),
+    Url(http::UrlError),
+    Redirect(http::RedirectError),
+    ProxyAuthentication,
+    NetworkAuthentication,
     /// The server answered with a non-success HTTP status.
     Status(u16),
     /// A request the stack cannot express (bad URL, oversized message).
     Invalid(&'static str),
+}
+
+impl NetError {
+    /// Retry only a transient transport/server failure. Identity, certificate,
+    /// capability, framing and redirect policy failures need a changed input.
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Link(_)
+                | Self::NoCarrier
+                | Self::Dhcp(_)
+                | Self::Dns(_)
+                | Self::Reset
+                | Self::Timeout(_)
+                | Self::Truncated(_)
+                | Self::Status(408 | 429 | 500 | 502 | 503 | 504)
+        )
+    }
 }
 
 impl fmt::Display for NetError {
@@ -63,6 +85,12 @@ impl fmt::Display for NetError {
             Self::Timeout(what) => write!(f, "timed out: {what}"),
             Self::Http(why) => write!(f, "HTTP: {why}"),
             Self::Tls(why) => write!(f, "TLS: {why}"),
+            Self::Truncated(what)=>write!(f,"connection ended inside {what}"),
+            Self::TlsUnavailable(why)=>write!(f,"TLS unavailable: {why}"),
+            Self::Url(why)=>write!(f,"URL: {why}"),
+            Self::Redirect(why)=>write!(f,"redirect: {why}"),
+            Self::ProxyAuthentication=>f.write_str("the network requires proxy authentication (HTTP 407); no proxy credentials are configured"),
+            Self::NetworkAuthentication=>f.write_str("the network requires authentication (HTTP 511); complete network login before installing"),
             Self::Status(code) => write!(f, "HTTP status {code}"),
             Self::Invalid(why) => write!(f, "invalid request: {why}"),
         }

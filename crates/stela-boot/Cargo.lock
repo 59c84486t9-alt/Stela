@@ -880,6 +880,7 @@ dependencies = [
  "stela-loader",
  "stela-runtime",
  "stela-soc-data",
+ "stela-tls",
  "uefi",
 ]
 

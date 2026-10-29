@@ -165,7 +165,7 @@ fn invalid_lines_refuse() {
         "--system --install p.json",
         "--system --ecid 0",
         "--system --safe-boot",
-        "--system --network-check https://h/p",
+        "--system --network-check ftp://h/p",
         "--system --dram-base 0x1000",
         "--system --storage-ram 1 --storage-ram 2",
     ] {

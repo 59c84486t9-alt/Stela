@@ -1,5 +1,6 @@
 //! A remote install image (`payload::Layout::Remote`): the IPSW on Apple's
-//! CDN, read by plain-HTTP byte ranges over the mount's own network.
+//! CDN, read by URL-aware byte ranges over the mount's own network. HTTPS
+//! requires the native owner's admitted TLS time and entropy capabilities.
 //!
 //! Each request carries `If-Range` with the entity tag setup recorded, so a
 //! changed object fails instead of mixing two versions; the restore store
@@ -16,8 +17,8 @@ use crate::output;
 use alloc::{collections::VecDeque, string::String};
 use {
     stela_formats::payload::Layout, stela_formats::payload::PayloadManifest,
-    stela_formats::payload::ReadAt, stela_runtime::net::NetError, stela_runtime::net::Transfer,
-    stela_runtime::net::http, stela_runtime::net::http::Ranged,
+    stela_formats::payload::ReadAt, stela_runtime::net::HttpTransfer, stela_runtime::net::NetError,
+    stela_runtime::net::http::Ranged,
 };
 
 /// How far [`Remote::pump`] fills ahead of the restore.
@@ -34,14 +35,13 @@ const WAIT_US: u64 = 100_000;
 
 pub struct Remote {
     network: Shared,
-    host: String,
-    path: String,
+    url: String,
     etag: String,
     len: u64,
     /// Image bytes from `start`; the open range continues at their end.
     start: u64,
     buffer: VecDeque<u8>,
-    range: Option<(Transfer, Ranged)>,
+    range: Option<(HttpTransfer, Ranged)>,
     /// Ranges requested so far.
     ranges: u64,
     /// Whether [`Remote::pump`] reads ahead: from a read that succeeded
@@ -54,17 +54,25 @@ impl Remote {
         let Layout::Remote { url, etag } = &manifest.layout else {
             return Err(String::from("the install payload is not a remote image"));
         };
-        let (host, path) = super::network::split_url(url)?;
-        let last=manifest.source.bytes.checked_sub(1).ok_or_else(||String::from("the remote image is empty"))?;
-        Ranged::with_identity(0,last,etag,manifest.source.bytes).map_err(|error|alloc::format!("{error}"))?;
+        network
+            .0
+            .borrow()
+            .check_url(url)
+            .map_err(|error| alloc::format!("{error}"))?;
+        let last = manifest
+            .source
+            .bytes
+            .checked_sub(1)
+            .ok_or_else(|| String::from("the remote image is empty"))?;
+        Ranged::with_identity(0, last, etag, manifest.source.bytes)
+            .map_err(|error| alloc::format!("{error}"))?;
         output::arguments(format_args!(
-            "REMOTE IMAGE http://{host}{path} bytes={} etag={etag}\n",
+            "REMOTE IMAGE {url} bytes={} etag={etag}\n",
             manifest.source.bytes
         ));
         Ok(Self {
             network,
-            host: host.into(),
-            path: path.into(),
+            url: url.clone(),
             etag: etag.clone(),
             len: manifest.source.bytes,
             start: 0,
@@ -83,7 +91,7 @@ impl Remote {
 
     fn stop(&mut self) {
         if let Some((transfer, _)) = self.range.take() {
-            self.network.0.borrow_mut().close(transfer);
+            self.network.0.borrow_mut().close_download(transfer);
         }
     }
 
@@ -92,9 +100,12 @@ impl Remote {
     fn step(&mut self) -> Result<(), NetError> {
         if self.range.is_none() {
             let (first, last) = (self.end(), self.len - 1);
-            let ranged=Ranged::with_identity(first,last,&self.etag,self.len)?;
-            let request = http::get_range(&self.host, &self.path, first, last, Some(&self.etag))?;
-            let transfer = self.network.0.borrow_mut().download(&self.host, request)?;
+            let ranged = Ranged::with_identity(first, last, &self.etag, self.len)?;
+            let transfer = self
+                .network
+                .0
+                .borrow_mut()
+                .download(&self.url, first, last, &self.etag)?;
             self.range = Some((transfer, ranged));
             self.ranges += 1;
             output::arguments(format_args!(
@@ -108,7 +119,7 @@ impl Remote {
             .network
             .0
             .borrow_mut()
-            .read(transfer, |bytes, closed| {
+            .read_download(transfer, |bytes, closed| {
                 ranged.feed(bytes, closed, |body| buffer.extend(body))
             })?;
         if done {
@@ -124,6 +135,9 @@ impl Remote {
             let before = self.end();
             if let Err(error) = self.step() {
                 self.stop();
+                if !error.retryable() {
+                    return Err(error);
+                }
                 failures += 1;
                 output::arguments(format_args!(
                     "REMOTE IMAGE range at {before} failed ({failures}/{ATTEMPTS}): {error}\n"
@@ -164,7 +178,9 @@ impl ReadAt for Remote {
     }
 
     fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), NetError> {
-        let until = offset.checked_add(out.len() as u64).ok_or(NetError::Invalid("remote image offset overflow"))?;
+        let until = offset
+            .checked_add(out.len() as u64)
+            .ok_or(NetError::Invalid("remote image offset overflow"))?;
         if until > self.len {
             return Err(NetError::Invalid("read past the remote image's end"));
         }

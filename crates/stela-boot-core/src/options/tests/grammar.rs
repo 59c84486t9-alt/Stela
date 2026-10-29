@@ -31,7 +31,7 @@ fn duplicate_checks_keep_their_value_precedence() {
             Error::WifiCountry,
         ),
         (
-            "--system --network-check http://h/p --network-check https://h/p",
+            "--system --network-check http://h/p --network-check ftp://h/p",
             Error::UrlScheme,
         ),
         (
@@ -185,13 +185,31 @@ fn host_repeats_overwrite_but_late_value_errors_precede_exclusivity() {
 
 #[test]
 fn url_compatibility_adapter_keeps_the_same_diagnostic() {
-    for (url, error) in [
-        ("https://h/p", Error::UrlScheme),
-        ("http://h", Error::UrlPath),
-        ("http:///p", Error::UrlHost),
-    ] {
+    for (url, error) in [("http://h", Error::UrlPath), ("http:///p", Error::UrlHost)] {
         assert_eq!(parse_url(url), Err(error));
         assert_eq!(split_url(url), Err(error.message()));
     }
+    assert_eq!(
+        split_url("https://h/p"),
+        Err("only http:// URLs are supported")
+    );
     assert_eq!(split_url("http://h/p"), Ok(("h", "/p")));
+}
+#[test]
+fn https_and_syntax_hardening_keep_raw_valid_configuration_values() {
+    let raw = "https://H:443/a/../p%2f?sig=%2B%3d";
+    let options = System::parse(&format!("--system --network-check {raw}")).unwrap();
+    assert_eq!(options.network_check.as_deref(), Some(raw));
+    assert_eq!(
+        System::parse("--system --network-check http://h/p --network-check https://h/p"),
+        Err(Error::DuplicateNetworkCheck)
+    );
+    assert_eq!(
+        parse_url("http://h:bad/p"),
+        Err(Error::Url(stela_runtime::net::http::UrlError::Syntax))
+    );
+    assert_eq!(
+        parse_url("http://u:p@h/p"),
+        Err(Error::Url(stela_runtime::net::http::UrlError::Credentials))
+    );
 }

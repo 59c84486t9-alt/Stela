@@ -146,19 +146,32 @@ pub fn number(value: &str) -> Result<u64, Error> {
     .map_err(|_| Error::Number)
 }
 
-/// Check an `http://HOST/PATH` URL and split it into host and path.
+/// The legacy HTTP-only host/path adapter. URLs that need a transport scheme
+/// must use the original full URL; HTTPS cannot lose its security requirement.
 pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
-    parse_url(url).map_err(Error::message)
+    if !url.starts_with("http://") {
+        return Err("only http:// URLs are supported");
+    }
+    let value = parse_url(url).map_err(Error::message)?;
+    Ok((value.authority, value.target))
 }
 
-fn parse_url(url: &str) -> Result<(&str, &str), Error> {
-    let rest = url.strip_prefix("http://").ok_or(Error::UrlScheme)?;
-    let at = rest.find('/').ok_or(Error::UrlPath)?;
-    let (host, path) = rest.split_at(at);
-    if host.is_empty() {
-        return Err(Error::UrlHost);
+fn parse_url(url: &str) -> Result<stela_runtime::net::http::Url<'_>, Error> {
+    // Preserve scheme/path diagnostic priority, then require the one shared
+    // syntax and transport-policy parser for every accepted value.
+    if !["http://", "https://"].iter().any(|prefix| {
+        url.get(..prefix.len())
+            .is_some_and(|part| part.eq_ignore_ascii_case(prefix))
+    }) {
+        return Err(Error::UrlScheme);
     }
-    Ok((host, path))
+    stela_runtime::net::http::Url::parse(url).map_err(|error| match error {
+        stela_runtime::net::http::UrlError::Scheme => Error::UrlScheme,
+        stela_runtime::net::http::UrlError::Path => Error::UrlPath,
+        stela_runtime::net::http::UrlError::Host if url.ends_with("://") => Error::UrlPath,
+        stela_runtime::net::http::UrlError::Host => Error::UrlHost,
+        other => Error::Url(other),
+    })
 }
 
 /// The system-mode options of one `stela.cfg` line.

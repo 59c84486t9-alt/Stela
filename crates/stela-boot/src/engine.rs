@@ -874,13 +874,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         let Some(Ok(network)) = &host_network else {
             output::fatal("the network check failed")
         };
-        let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
         // Any HTTP status proves the path end to end; only a transport
         // failure (link, DHCP, DNS, TCP, malformed reply) fails the check.
-        let checked = network
-            .0
-            .borrow_mut()
-            .post(host, path, &[], "text/plain", b"");
+        let checked = network.0.borrow_mut().post_url(url, &[], "text/plain", b"");
         match checked {
             Ok(body) => {
                 output::arguments(format_args!(

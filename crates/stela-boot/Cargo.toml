@@ -34,6 +34,7 @@ stela-soc-data = { path = "../stela-soc-data", default-features = false }
 stela-engine = { path = "../stela-engine", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
+stela-tls = { path = "../stela-tls" }
 stela-formats = { path = "../stela-formats", default-features = false }
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 stela-boot-core = { path = "../stela-boot-core" }

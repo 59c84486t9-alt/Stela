@@ -13,9 +13,10 @@
 //! adapter). Its registers and DMA pages are identity-mapped in the
 //! loader's root, so every frame moves inside that root
 //! (`storage::RestoreRoot`), as block and input I/O do.
+mod security;
 use super::storage::RestoreRoot;
 use crate::output;
-use alloc::{format, rc::Rc, string::String, vec::Vec};
+use alloc::{format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::cell::RefCell;
 use stela_drivers::{
     Clock,
@@ -24,7 +25,10 @@ use stela_drivers::{
 };
 use stela_runtime::{
     machine::apple::AppleDevices,
-    net::{NetError, Stack, Transfer, stack::DOWNLOAD_BUFFER},
+    net::{
+        HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer,
+        stack::DOWNLOAD_BUFFER,
+    },
 };
 
 /// One restore-time opaque TCP relay window. TLS stays end to end between the
@@ -32,7 +36,7 @@ use stela_runtime::{
 pub const RELAY_BUFFER: usize = 1 << 20;
 
 /// What the screen says when DHCP gives the first adapter no lease.
-const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or use an Offline installer. Stateful DHCPv6 and native TLS are unsupported.";
+const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or use an Offline installer. Stateful DHCPv6 is unsupported.";
 
 /// The host's network adapters and the loader root they are reached in.
 pub struct Links {
@@ -90,6 +94,7 @@ impl stela_runtime::net::Clock for Ticking {
 
 pub struct HostNetwork {
     stack: Stack<RootLink, Ticking>,
+    security: Result<Arc<stela_tls::ClientConfig>, TlsUnavailable>,
     /// The address and adapter, for the screen.
     description: String,
 }
@@ -98,6 +103,7 @@ impl HostNetwork {
     /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
     /// address. A failed adapter keeps its diagnostic while the next is tried.
     pub fn open(links: Links, clock: Clock) -> Result<Self, String> {
+        let security = security::native();
         let mut failures = Vec::new();
         for device in links.devices {
             let location = String::from(device.location());
@@ -126,7 +132,11 @@ impl HostNetwork {
                         config.addresses, config.dns
                     ));
                     let description = format!("{:?} on adapter {location}", config.addresses);
-                    return Ok(Self { stack, description });
+                    return Ok(Self {
+                        stack,
+                        description,
+                        security,
+                    });
                 }
                 Err(error) => {
                     output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
@@ -146,8 +156,8 @@ impl HostNetwork {
         &self.description
     }
 
-    /// One POST to `http://host/path`; the response body on a 2xx status.
-    /// Plain HTTP: a TLS client is a follow-up.
+    /// Initial plaintext endpoint used by the signing transport; redirects
+    /// retain the full resulting URL and can never downgrade an HTTPS hop.
     pub fn post(
         &mut self,
         host: &str,
@@ -156,32 +166,60 @@ impl HostNetwork {
         content_type: &str,
         body: &[u8],
     ) -> Result<Vec<u8>, NetError> {
-        let result = self.stack.post(host, path, headers, content_type, body);
+        self.post_url(&format!("http://{host}{path}"), headers, content_type, body)
+    }
+    pub fn post_url(
+        &mut self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>, NetError> {
+        let result = self
+            .stack
+            .post_url(url, headers, content_type, body, self.security.clone());
         match &result {
             Ok(reply) => output::arguments(format_args!(
-                "NETWORK POST http://{host}{path} sent={} received={}\n",
+                "NETWORK POST {url} sent={} received={}\n",
                 body.len(),
                 reply.len()
             )),
-            Err(error) => output::arguments(format_args!(
-                "NETWORK POST http://{host}{path} refused: {error}\n"
-            )),
+            Err(error) => output::arguments(format_args!("NETWORK POST {url} refused: {error}\n")),
         }
         result
     }
-
-    /// Opens a download of `request`'s response from `host`.
-    pub fn download(&mut self, host: &str, request: Vec<u8>) -> Result<Transfer, NetError> {
-        self.stack.open(host, request, DOWNLOAD_BUFFER)
+    pub fn check_url(&self, url: &str) -> Result<(), NetError> {
+        let destination = stela_runtime::net::http::Url::parse(url).map_err(NetError::Url)?;
+        if destination.scheme == stela_runtime::net::http::Scheme::Https {
+            self.security
+                .as_ref()
+                .map_err(|error| NetError::TlsUnavailable(*error))?;
+        }
+        Ok(())
     }
-
-    /// What has arrived for `transfer`, without waiting (`Stack::read`).
-    pub fn read(
+    pub fn download(
         &mut self,
-        transfer: &mut Transfer,
+        url: &str,
+        first: u64,
+        last: u64,
+        etag: &str,
+    ) -> Result<HttpTransfer, NetError> {
+        self.stack.open_http(
+            url,
+            HttpRequest::range(first, last, Some(etag)),
+            DOWNLOAD_BUFFER,
+            self.security.clone(),
+        )
+    }
+    pub fn read_download(
+        &mut self,
+        transfer: &mut HttpTransfer,
         take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
     ) -> Result<bool, NetError> {
-        self.stack.read(transfer, take)
+        self.stack.read_http(transfer, take)
+    }
+    pub fn close_download(&mut self, transfer: HttpTransfer) {
+        self.stack.close_http(transfer);
     }
 
     pub fn close(&mut self, transfer: Transfer) {
@@ -357,5 +395,3 @@ impl GuestNetwork {
         }
     }
 }
-
-pub use stela_boot_core::options::split_url;

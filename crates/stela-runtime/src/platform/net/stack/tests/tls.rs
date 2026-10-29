@@ -38,12 +38,19 @@ fn client_config_for(
     owner: &'static ProviderOwner,
     time: Arc<dyn TimeProvider>,
 ) -> Arc<ClientConfig> {
+    client_config_with_ca(
+        owner,
+        time,
+        &include_bytes!("../../../../../../stela-tls/tests/fixtures/ec-ca.der")[..],
+    )
+}
+fn client_config_with_ca(
+    owner: &'static ProviderOwner,
+    time: Arc<dyn TimeProvider>,
+    ca: &'static [u8],
+) -> Arc<ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(
-            &include_bytes!("../../../../../../stela-tls/tests/fixtures/ec-ca.der")[..],
-        ))
-        .unwrap();
+    roots.add(CertificateDer::from(ca)).unwrap();
     Arc::new(
         ClientConfig::builder_with_details(Arc::new(owner.provider()), time)
             .with_safe_default_protocol_versions()
@@ -60,6 +67,9 @@ struct Peer {
     request: Vec<u8>,
     replied: bool,
     paused: bool,
+    redirect: Option<SocketHandle>,
+    http_request: Vec<u8>,
+    http_sent: usize,
 }
 impl Peer {
     fn new(clock: TestClock) -> Self {
@@ -86,13 +96,47 @@ impl Peer {
             request: Vec::new(),
             replied: false,
             paused: false,
+            redirect: None,
+            http_request: Vec::new(),
+            http_sent: 0,
         }
+    }
+    fn upgrade(clock: TestClock) -> Self {
+        let mut peer = Self::new(clock);
+        peer.redirect = Some(peer.lan.listener);
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 1 << 20]),
+            tcp::SocketBuffer::new(vec![0; 1 << 20]),
+        );
+        socket.listen(443).unwrap();
+        peer.lan.listener = peer.lan.sockets.add(socket);
+        peer
     }
     fn step(&mut self) {
         let now = Instant::from_micros(self.lan.clock.0.get() as i64);
         self.lan
             .iface
             .poll(now, &mut self.lan.server, &mut self.lan.sockets);
+        if let Some(handle) = self.redirect {
+            let socket = self.lan.sockets.get_mut::<tcp::Socket>(handle);
+            while socket.can_recv() {
+                socket
+                    .recv(|bytes| {
+                        self.http_request.extend_from_slice(bytes);
+                        (bytes.len(), ())
+                    })
+                    .unwrap();
+            }
+            if self.http_request.windows(4).any(|w| w == b"\r\n\r\n") && socket.can_send() {
+                let reply=b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://valid.test/next?sig=%2b\r\nContent-Length: 0\r\n\r\n";
+                if self.http_sent < reply.len() {
+                    self.http_sent += socket.send_slice(&reply[self.http_sent..]).unwrap();
+                }
+                if self.http_sent == reply.len() {
+                    socket.close();
+                }
+            }
+        }
         let socket = self.lan.sockets.get_mut::<tcp::Socket>(self.lan.listener);
         while socket.can_recv() {
             socket
@@ -327,4 +371,157 @@ fn entropy_failure_refuses_before_tcp_or_tls_publication() {
         0
     );
     assert!(stack.phy.link.lan.client.out.borrow().0.is_empty());
+}
+
+#[test]
+fn url_aware_https_request_delivers_authenticated_response_and_retires_socket() {
+    let clock = TestClock::default();
+    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7);
+    stack
+        .set_config(Config {
+            address: Ipv4Cidr::new(CLIENT_IP, 24),
+            router: None,
+            dns: Vec::new(),
+        })
+        .unwrap();
+    stack
+        .resolved
+        .push((String::from("valid.test"), SERVER_IP.into(), 0));
+    let mut transfer = stack
+        .open_http(
+            "https://valid.test:80/p?sig=%2b",
+            HttpRequest::post(&[], "text/plain", b""),
+            1024,
+            Ok(client_config_with_time(Arc::new(Utc))),
+        )
+        .unwrap();
+    let mut reply = Vec::new();
+    let mut done = false;
+    for _ in 0..100_000 {
+        done = stack
+            .read_http(&mut transfer, |bytes, eof| {
+                reply.extend_from_slice(bytes);
+                Ok(http::response(&reply, eof)?.is_some())
+            })
+            .unwrap();
+        if done {
+            break;
+        }
+    }
+    assert!(done);
+    assert_eq!(
+        http::response(&reply, false).unwrap().unwrap().body,
+        vec![0x5a; 256 * 1024]
+    );
+    assert!(
+        core::str::from_utf8(&stack.link_mut().request)
+            .unwrap()
+            .starts_with("POST /p?sig=%2b HTTP/1.1\r\nHost: valid.test:80\r\n")
+    );
+    assert_eq!(
+        stack
+            .sockets
+            .iter()
+            .filter(|(_, s)| matches!(s, smoltcp::socket::Socket::Tcp(_)))
+            .count(),
+        0
+    );
+    stack.close_http(transfer);
+}
+
+#[test]
+fn same_host_post_upgrade_replays_only_after_tls_verification() {
+    let clock = TestClock::default();
+    let mut stack = Stack::new(Peer::upgrade(clock.clone()), clock, 7);
+    stack
+        .set_config(Config {
+            address: Ipv4Cidr::new(CLIENT_IP, 24),
+            router: None,
+            dns: Vec::new(),
+        })
+        .unwrap();
+    stack
+        .resolved
+        .push((String::from("valid.test"), SERVER_IP.into(), 0));
+    let mut transfer = stack
+        .open_http(
+            "http://valid.test/start",
+            HttpRequest::post(
+                &[("Authorization", "Bearer fixture")],
+                "text/plain",
+                b"owned-body",
+            ),
+            1024,
+            Ok(client_config_with_time(Arc::new(Utc))),
+        )
+        .unwrap();
+    let mut response = Vec::new();
+    let mut done = false;
+    for _ in 0..100_000 {
+        done = stack
+            .read_http(&mut transfer, |bytes, eof| {
+                response.extend_from_slice(bytes);
+                Ok(http::response(&response, eof)?.is_some())
+            })
+            .unwrap();
+        if done {
+            break;
+        }
+    }
+    assert!(done);
+    assert_eq!(transfer.url(), "https://valid.test/next?sig=%2b");
+    let peer = stack.link_mut();
+    assert!(peer.http_request.ends_with(b"owned-body"));
+    assert!(
+        peer.request
+            .starts_with(b"POST /next?sig=%2b HTTP/1.1\r\nHost: valid.test\r\n")
+    );
+    assert!(peer.request.ends_with(b"owned-body"));
+    assert!(
+        core::str::from_utf8(&peer.request)
+            .unwrap()
+            .contains("Authorization: Bearer fixture\r\n")
+    );
+    stack.close_http(transfer);
+}
+#[test]
+fn untrusted_certificate_blocks_the_upgraded_post_body() {
+    static OWNER: std::sync::OnceLock<ProviderOwner> = std::sync::OnceLock::new();
+    let owner = OWNER.get_or_init(|| ProviderOwner::new(Arc::new(Random)));
+    let clock = TestClock::default();
+    let mut stack = Stack::new(Peer::upgrade(clock.clone()), clock, 7);
+    stack
+        .set_config(Config {
+            address: Ipv4Cidr::new(CLIENT_IP, 24),
+            router: None,
+            dns: Vec::new(),
+        })
+        .unwrap();
+    stack
+        .resolved
+        .push((String::from("valid.test"), SERVER_IP.into(), 0));
+    let config = client_config_with_ca(
+        owner,
+        Arc::new(Utc),
+        &include_bytes!("../../../../../../stela-tls/tests/fixtures/rsa-ca.der")[..],
+    );
+    let mut transfer = stack
+        .open_http(
+            "http://valid.test/start",
+            HttpRequest::post(&[], "text/plain", b"private-body"),
+            1024,
+            Ok(config),
+        )
+        .unwrap();
+    let mut failure = None;
+    for _ in 0..100_000 {
+        if let Err(error) = stack.read_http(&mut transfer, |_, _| panic!("untrusted response")) {
+            failure = Some(error);
+            break;
+        }
+    }
+    assert!(matches!(failure,Some(NetError::Tls(reason)) if reason.contains("InvalidCertificate")));
+    assert!(stack.link_mut().http_request.ends_with(b"private-body"));
+    assert!(stack.link_mut().request.is_empty());
+    stack.close_http(transfer);
 }

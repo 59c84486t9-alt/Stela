@@ -6,7 +6,9 @@
 //! responses are skipped; any other non-2xx status is an error. Redirects
 //! are exposed by `response_head` for explicit request policy; the simple
 //! response reader and unsupported transfer codings refuse them.
+mod redirect;
 mod url;
+pub use redirect::{Method, RedirectError, Redirects};
 pub use url::{Scheme, Url, UrlError};
 
 use super::NetError;
@@ -59,6 +61,19 @@ pub fn post(
     content_type: &str,
     body: &[u8],
 ) -> Result<Vec<u8>, NetError> {
+    if headers.iter().any(|(name, _)| {
+        [
+            "Host",
+            "Content-Length",
+            "Content-Type",
+            "Transfer-Encoding",
+            "Connection",
+        ]
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+    }) {
+        return Err(NetError::Invalid("HTTP framing header override"));
+    }
     let length = format!("{}", body.len());
     let mut fields = Vec::from([("Content-Type", content_type), ("Content-Length", &*length)]);
     fields.extend_from_slice(headers);
@@ -133,7 +148,7 @@ pub fn response_head(bytes: &[u8], closed: bool) -> Result<Option<Head>, NetErro
                 return Err(http_error("response header too large"));
             }
             Ok(httparse::Status::Partial) if closed => {
-                return Err(http_error("connection closed inside the response header"));
+                return Err(NetError::Truncated("HTTP response header"));
             }
             Ok(httparse::Status::Partial) => return Ok(None),
             Err(error) => return Err(NetError::Http(format!("response header: {error}"))),
@@ -223,7 +238,7 @@ pub fn response(bytes: &[u8], closed: bool) -> Result<Option<Response>, NetError
     let body = if head.chunked {
         match chunks(body)? {
             Some(body) => body,
-            None if closed => return Err(http_error("connection closed inside a chunk")),
+            None if closed => return Err(NetError::Truncated("HTTP chunk")),
             None => return Ok(None),
         }
     } else if let Some(length) = head.length {
@@ -233,7 +248,7 @@ pub fn response(bytes: &[u8], closed: bool) -> Result<Option<Response>, NetError
         let length = length as usize;
         if body.len() < length {
             return match closed {
-                true => Err(http_error("connection closed before the body's end")),
+                true => Err(NetError::Truncated("HTTP response body")),
                 false => Ok(None),
             };
         }
@@ -399,7 +414,7 @@ impl Ranged {
         body(&data[..take]);
         self.left -= take as u64;
         if self.left > 0 && closed {
-            return Err(http_error("connection closed before the range's end"));
+            return Err(NetError::Truncated("HTTP range body"));
         }
         Ok(self.left == 0)
     }
@@ -431,6 +446,16 @@ mod tests {
         assert!(post("a", "x", &[], "x", b"").is_err());
         assert!(post("a", "/", &[("X", "a\r\nInjected: 1")], "x", b"").is_err());
         assert!(post("a", "/", &[("X:", "1")], "x", b"").is_err());
+        for name in [
+            "host",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Connection",
+            "Content-Type",
+        ] {
+            assert!(post("a", "/", &[(name, "x")], "x", b"").is_err());
+        }
+
         let get = get_range(
             "updates-http.cdn-apple.com",
             "/a.ipsw",

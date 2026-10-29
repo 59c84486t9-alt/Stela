@@ -19,9 +19,9 @@ pub enum UrlError {
     HostEncoding,
     Resolution,
 }
-impl fmt::Display for UrlError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+impl UrlError {
+    pub const fn message(self) -> &'static str {
+        match self {
             Self::Syntax => "invalid RFC 3986 URI syntax",
             Self::Scheme => "URL scheme must be http or https",
             Self::Host => "URL without a host",
@@ -31,7 +31,12 @@ impl fmt::Display for UrlError {
             Self::Port => "URL port must be 1 to 65535",
             Self::HostEncoding => "encoded or non-IP literal host is unsupported",
             Self::Resolution => "redirect reference is not RFC 3986 resolvable",
-        })
+        }
+    }
+}
+impl fmt::Display for UrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
     }
 }
 impl core::error::Error for UrlError {}
