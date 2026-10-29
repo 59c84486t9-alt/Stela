@@ -225,6 +225,8 @@ fn failed_final_protection_rolls_back_new_mapping_without_changing_old_memory() 
         let error = transaction.publish_with(|base, _, _| {
             // Change one owned page, then simulate a partial host failure.
             assert_eq!(
+                // SAFETY: The transaction owns this page-aligned live mapping. The host page
+                // fits its allocation, and only this thread changes its protection.
                 unsafe {
                     libc::mprotect(
                         base as usize as *mut libc::c_void,

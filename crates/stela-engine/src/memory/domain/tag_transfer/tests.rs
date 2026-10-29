@@ -224,8 +224,9 @@ fn aliases_share_one_tag_plane_and_untagged_views_keep_it_hidden() {
     let pointer = backing
         .host_pointer(0, TAG_GRANULE_BYTES, AccessKind::Read)
         .unwrap();
-    // SAFETY: live raw backing, single-thread test and exact scalar footprint.
     assert_eq!(
+        // SAFETY: host_pointer validated a readable tag granule, including these eight
+        // bytes. The instruction is finished and the backing remains pinned.
         unsafe { access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline) },
         Ok(0)
     );
@@ -638,8 +639,9 @@ fn checked_entry_keeps_unchecked_tag_operations_available_in_async_data_modes() 
             }
             for offset in 0..STORAGE_BYTES {
                 let pointer = backing.host_pointer(offset, 1, AccessKind::Read).unwrap();
-                // SAFETY: completed instruction, one exact retained raw byte.
                 assert_eq!(
+                    // SAFETY: host_pointer checked this exact readable byte. The instruction has
+                    // finished, and no other thread accesses the pinned backing.
                     unsafe { pointer.as_ptr().read() },
                     if bulk { 0 } else { 0xa5 }
                 );

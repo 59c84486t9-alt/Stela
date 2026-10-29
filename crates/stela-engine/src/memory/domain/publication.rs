@@ -33,11 +33,13 @@ impl MemorySystem {
     /// does not invalidate reservations; a same-value successful write does.
     ///
     /// # Safety
-    /// The caller owns descriptor access and the whole aligned eight-byte
-    /// extent is pinned readable/writable coherent WB RAM. Every physical
-    /// writer, including source and host aliases, uses this same system.
-    /// No external DMA/direct writer is admitted; no Rust reference aliases
-    /// the bytes. Source/code publication is the outer lifecycle owner's.
+    /// The backing allocation stays live, pinned, coherent write-back raw RAM,
+    /// with no aliasing Rust references. For an admitted descriptor access, the
+    /// caller owns the descriptor and every physical writer (including source
+    /// and host aliases) uses this same system; there is no external DMA writer.
+    /// This function checks coherence identity, alignment, bounds and rights
+    /// before accessing descriptor bytes. Source/code publication remains the
+    /// outer lifecycle owner's responsibility.
     pub(in crate::memory) unsafe fn compare_update_descriptor(
         &self,
         backing: &Arc<MemoryBacking>,

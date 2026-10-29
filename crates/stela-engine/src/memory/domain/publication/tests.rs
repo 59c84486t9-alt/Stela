@@ -156,6 +156,8 @@ fn conditional_descriptor_miss_has_no_store_or_reservation_effect() {
         .load(&mut reservation, &access, || Ok::<_, ()>(()))
         .unwrap();
     assert_eq!(
+        // SAFETY: Storage pins the aligned writable eight-byte descriptor; the only
+        // writer and this reservation both use system, without Rust byte references.
         unsafe { system.compare_update_descriptor(&backing, 0, 1, 2) },
         Ok(false)
     );
@@ -173,6 +175,8 @@ fn conditional_descriptor_miss_has_no_store_or_reservation_effect() {
         .unwrap();
     // Successful same-value publication is still a physical writer event.
     assert_eq!(
+        // SAFETY: The descriptor stays pinned and writable, and all stores use system;
+        // even this same-value update participates in its reservation gate.
         unsafe { system.compare_update_descriptor(&backing, 0, 0, 0) },
         Ok(true)
     );
@@ -193,26 +197,36 @@ fn descriptor_updates_preflight_exact_rights_bounds_and_coherence() {
     let backing = backing(RIGHTS);
     publish(&system, &backing, 0, &[0x5a; STORAGE_BYTES]).unwrap();
     assert_eq!(
+        // SAFETY: The raw allocation remains pinned and unaliased; descriptor preflight
+        // rejects this unaligned offset before any memory access.
         unsafe { system.compare_update_descriptor(&backing, 1, 0, 1) },
         Err(MemoryStatus::InvalidRequest)
     );
     assert_eq!(
+        // SAFETY: The backing allocation remains live; descriptor preflight rejects
+        // this out-of-bounds offset before deriving or accessing a pointer.
         unsafe { system.compare_update_descriptor(&backing, STORAGE_BYTES, 0, 1) },
         Err(MemoryStatus::Translation)
     );
     let other = MemorySystem::new(16, 4).unwrap();
     assert_eq!(
+        // SAFETY: The allocation is live and already bound to system. The other
+        // coherence identity is rejected before any descriptor access.
         unsafe { other.compare_update_descriptor(&backing, 0, 0, 1) },
         Err(MemoryStatus::Domain)
     );
     assert_eq!(snapshot(&backing), vec![0x5a; STORAGE_BYTES]);
     let readonly = self::backing(READONLY);
     assert_eq!(
+        // SAFETY: The backing allocation is live raw RAM, but its declared write right
+        // is absent; preflight rejects it before any store.
         unsafe { system.compare_update_descriptor(&readonly, 0, 0, 1) },
         Err(MemoryStatus::Permission)
     );
     assert_eq!(snapshot(&readonly), vec![0; STORAGE_BYTES]);
     assert_eq!(
+        // SAFETY: Bytes 8..16 lie in the pinned aligned writable allocation. This thread
+        // is the sole writer and uses system; no Rust reference aliases the bytes.
         unsafe { system.compare_update_descriptor(&backing, 8, 0x5a5a_5a5a_5a5a_5a5a, 0x1234) },
         Ok(true)
     );
@@ -240,8 +254,12 @@ fn native_concurrent_descriptor_updates_share_the_same_alias_writer_gate() {
                 for _ in 0..10_000 {
                     loop {
                         let old =
+                            // SAFETY: host_pointer validated eight readable bytes at the aligned allocation
+                            // base. Storage stays pinned, and concurrent writers use descriptor CAS.
                             unsafe { access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline) }
                                 .unwrap() as u64;
+                        // SAFETY: The descriptor is pinned, aligned, and writable. Both threads use
+                        // this system for CAS, and no Rust references alias the raw bytes.
                         if unsafe { system.compare_update_descriptor(&backing, 0, old, old + 1) }
                             .unwrap()
                         {
@@ -440,8 +458,9 @@ fn complete_host_read_and_write_rights_are_required_before_any_write() {
             )
             .unwrap();
         for offset in 0..STORAGE_BYTES {
-            // SAFETY: allocation remains live readable coherent raw RAM.
             assert_eq!(
+                // SAFETY: host_pointer covers STORAGE_BYTES readable bytes, so this offset is
+                // in bounds. All writes are complete and the allocation remains pinned.
                 unsafe { access::read_part(pointer.as_ptr().add(offset), 1, TargetCpu::Baseline) }
                     .unwrap(),
                 0
@@ -561,6 +580,8 @@ mod binding_reservation {
         let (mut owner, base) = owned();
         let system = MemorySystem::new(16, 8).unwrap();
         let domain =
+            // SAFETY: owned creates private anonymous RAM; this exclusive owner is its
+            // only writer and the resulting domain retains its allocation.
             unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 11), &mut []) }.unwrap();
         let mapping = &domain.registered_views()[0];
         let backing = Arc::clone(mapping.view.backing());
@@ -599,6 +620,8 @@ mod binding_reservation {
         let (mut owner, _) = owned();
         let mut publisher = published();
         let system = MemorySystem::new(16, 8).unwrap();
+        // SAFETY: owner and publisher retain disjoint live mappings with no running
+        // guest. This call binds their complete writer set to the same system.
         let domain = unsafe {
             owner.bind_shared_memory(config(Arc::clone(&system), 12), &mut [&mut publisher])
         }
@@ -654,6 +677,8 @@ mod binding_reservation {
         let (mut owner, base) = owned();
         let (mut other_owner, other_base) = owned();
         let system = MemorySystem::new(16, 8).unwrap();
+        // SAFETY: Both owners exclusively retain separate anonymous mappings. There is
+        // no running guest; the group binds every writer before any access.
         let domain = unsafe {
             owner.bind_shared_memory_group(
                 config(Arc::clone(&system), 14),

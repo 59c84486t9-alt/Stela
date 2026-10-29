@@ -578,9 +578,9 @@ mod checked_finalization {
     #[test]
     fn malformed_fault_status_fails_finalization() {
         let (_, _, mut thread) = fixture();
-        // SAFETY: deliberate invalid fault-sidecar input tests defensive handling;
-        // header, callback and owner fields remain intact and no pointers escape.
         assert_eq!(
+            // SAFETY: The fixture retains the domain, callback, and backing for this call.
+            // Only the fault sidecar is changed; no staging or view pointer escapes.
             unsafe {
                 thread.with_checked_view(|context| {
                     context.fault_kind = u32::MAX;
@@ -594,8 +594,9 @@ mod checked_finalization {
     #[test]
     fn legacy_result_does_not_assert_successful_finalization() {
         let (_, domain, mut thread) = fixture();
-        // SAFETY: no pointer access or escape; this tests the documented legacy API.
         assert_eq!(
+            // SAFETY: The fixture retains the domain and callback. The closure accesses
+            // no guest pointers and changes only the atomic failure flag.
             unsafe {
                 thread.with_view(|_| {
                     domain.system.failed.store(true, Ordering::Release);
@@ -1627,6 +1628,8 @@ mod quantities {
                 flags: flags::WRITE,
                 pc: TEST_PC,
             };
+            // SAFETY: staging is a live, disjoint two-byte array for the callback. The fixture
+            // retains the domain; no view or staging pointer escapes this closure.
             unsafe {
                 thread.with_view(|context| {
                     assert_eq!(
@@ -1786,6 +1789,8 @@ mod quantities {
             flags: flags::WRITE,
             pc: TEST_PC,
         };
+        // SAFETY: The two-byte staging array is live and disjoint from backing RAM.
+        // The retained domain checks the guest address; pointers do not escape.
         unsafe {
             thread.with_view(|context| {
                 assert_eq!(
@@ -1811,6 +1816,8 @@ mod quantities {
                 Ok::<_, MemoryStatus>(())
             })
             .unwrap();
+        // SAFETY: The retained fixture owns this thread and its callback. The closure
+        // updates only fault metadata and retains no pointer to the view.
         unsafe {
             thread.with_view(|context| {
                 context.record(MemoryStatus::StackAlignment, GUEST_BASE + 1, TEST_PC, 0);
@@ -2636,6 +2643,8 @@ mod system_reads {
         assert_eq!(exclusive(&mut writer, &mut load).0, MemoryStatus::Success);
         // This real host writer uses exactly the same physical monitor,
         // including the A->B->A case invisible to byte comparison.
+        // SAFETY: The first sixteen bytes are pinned writable raw backing; these private
+        // source arrays are disjoint. Both writes use the domain reservation gate.
         unsafe {
             domain.system.publish(&backing, 0, &[1; 16]).unwrap();
             domain.system.publish(&backing, 0, &[0; 16]).unwrap();

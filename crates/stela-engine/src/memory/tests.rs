@@ -448,8 +448,9 @@ fn invalid_file_extents_offsets_types_and_access_decline_before_mapping() {
         (address, page, page),
         (address, page, u64::MAX - page + 1),
     ] {
-        // SAFETY: this test exclusively owns the unchanged temporary inode.
         assert!(
+            // SAFETY: The test owns this temporary inode and keeps its length and contents
+            // unchanged through construction and any returned mapping lifetime.
             unsafe {
                 OwnedMemory::map_files(vec![file_spec(
                     base,
@@ -469,8 +470,9 @@ fn invalid_file_extents_offsets_types_and_access_decline_before_mapping() {
     write_only_memory.readable = false;
     // SAFETY: this test exclusively owns the unchanged temporary inode.
     assert!(unsafe { OwnedMemory::map_files(vec![write_only_memory]) }.is_err());
-    // SAFETY: the non-regular descriptor is declined before mapping.
     assert!(
+        // SAFETY: The non-regular descriptor is rejected before mapping or memory access;
+        // this call cannot create a file mapping whose contents could change.
         unsafe {
             OwnedMemory::map_files(vec![file_spec(
                 address,
@@ -487,13 +489,15 @@ fn invalid_file_extents_offsets_types_and_access_decline_before_mapping() {
         .write(true)
         .open(temporary.path())
         .unwrap();
-    // SAFETY: this test exclusively owns the unchanged temporary inode.
     assert!(
+        // SAFETY: The test retains the temporary inode unchanged. The write-only
+        // descriptor is rejected by construction before any mapped access.
         unsafe { OwnedMemory::map_files(vec![file_spec(address, page, write_only_file, 0)]) }
             .is_err()
     );
-    // SAFETY: the cloned descriptors refer to one unchanged temporary inode.
     assert!(
+        // SAFETY: Both cloned descriptors refer to one test-owned inode whose contents
+        // and length remain unchanged throughout this mapping attempt.
         unsafe {
             OwnedMemory::map_files(vec![
                 file_spec(address, page, file.try_clone().unwrap(), 0),
@@ -521,8 +525,9 @@ fn file_collision_preserves_existing_mapping_and_source() {
     let occupied = allocate(|address, page| vec![spec(address, page)], 1);
     let region = &occupied.regions()[0];
     let file = backing_file(&[1, 2, 3], region.virtual_bytes);
-    // SAFETY: this test exclusively owns the unchanged temporary inode.
     assert!(
+        // SAFETY: The test exclusively owns this unchanged backing inode. Construction
+        // must reject the occupied virtual range without replacing its live mapping.
         unsafe {
             OwnedMemory::map_files(vec![file_spec(
                 region.guest_address,
@@ -561,8 +566,9 @@ fn partial_file_mapping_failure_rolls_back_owned_ranges() {
         if !format!("{error:#}").contains(&format!("{:#x}", address + page)) {
             continue;
         }
-        // SAFETY: the temporary inode remains unchanged until restored drops.
         if let Ok(restored) =
+            // SAFETY: The test keeps this temporary inode unchanged until the returned owner
+            // drops, including the full construction and restored mapping lifetime.
             unsafe { OwnedMemory::map_files(vec![file_spec(address, page, file, 0)]) }
         {
             assert_eq!(restored.read_snapshot(address, 3).unwrap(), [1, 2, 3]);
