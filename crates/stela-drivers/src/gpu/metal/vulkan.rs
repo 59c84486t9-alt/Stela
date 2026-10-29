@@ -158,6 +158,20 @@ raw_enum! {
     }
 }
 
+impl Format {
+    /// The aspects of an image of this format.
+    pub const fn aspects(self) -> ImageAspects {
+        match self {
+            Self::D16Unorm | Self::D32Sfloat => ImageAspects::DEPTH,
+            Self::S8Uint => ImageAspects::STENCIL,
+            Self::D24UnormS8Uint | Self::D32SfloatS8Uint => {
+                ImageAspects::DEPTH.union(ImageAspects::STENCIL)
+            }
+            _ => ImageAspects::COLOR,
+        }
+    }
+}
+
 option_set! {
     /// `VkFormatFeatureFlags2`.
     pub struct FormatFeatures: u64 {

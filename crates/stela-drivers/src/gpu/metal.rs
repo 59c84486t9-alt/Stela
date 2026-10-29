@@ -21,6 +21,8 @@ pub mod error;
 pub mod hazard;
 pub mod heap;
 pub mod library;
+#[cfg(feature = "metal-vulkan")]
+pub mod native;
 pub mod nvidia;
 pub mod pass;
 pub mod pipeline;

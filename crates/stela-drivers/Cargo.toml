@@ -25,11 +25,15 @@ intel-port = ["linux-kernel"]
 amd-port = ["linux-kernel"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
 amd-commands = ["dep:cc"]
-# Shared Metal library input validation, independent of a physical GPU backend.
+# Stela's Metal device over the internal Vulkan boundary; no Vulkan driver.
 metal = []
+# The Metal device's native backend over a loaded Vulkan driver (NVK).
+metal-vulkan = ["metal", "dep:ash"]
 
 [dependencies]
 stela-driver-core = { path = "../stela-driver-core" }
+# Vulkan bindings for the Metal device's native backend; no loader is linked.
+ash = { version = "0.38", default-features = false, optional = true }
 stela-crypto = { path = "../stela-crypto", optional = true }
 # BIP-CMAC uses the shared checked AES backend; expanded keys clear on retirement.
 aes = { version = "0.8", default-features = false, features = ["zeroize"] }
