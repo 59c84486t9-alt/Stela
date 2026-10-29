@@ -1,7 +1,9 @@
 //! Affine actual-worker/job reservation under a borrowed entered process guard.
 use super::*;
 mod owned;
-pub use owned::{ColdStackPreparation, OwnedGeneralEscrow};
+pub use owned::{
+    ColdStackPreparation, OwnedGeneralEscrow, PinnedColdStackPreparation, StackPinError,
+};
 /// Actual borrowed platform process-entry authority, independent of task IDs.
 ///
 /// # Safety

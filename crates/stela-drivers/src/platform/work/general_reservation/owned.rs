@@ -1,7 +1,7 @@
 //! Owned exclusion across creator suspension; no stack loan or child publication.
 use super::*;
 mod cold;
-pub use cold::ColdStackPreparation;
+pub use cold::{ColdStackPreparation, PinnedColdStackPreparation, StackPinError};
 
 /// Retains a genuine compatible idle worker and job slot without a process-scope
 /// borrow. The lifetime pins the actual Runtime and its StackBacking owners;

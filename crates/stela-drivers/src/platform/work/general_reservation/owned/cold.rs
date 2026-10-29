@@ -1,5 +1,7 @@
 //! Full usable-range initialization of genuinely never-entered owned backings.
 use super::*;
+mod pinned;
+pub use pinned::{PinnedColdStackPreparation, StackPinError};
 
 /// Owns excluded, zeroed cold backing through the genuine pinned Runtime.
 /// It exposes no bytes, address, C descriptor, stack ref or callback commit.
@@ -8,6 +10,9 @@ use super::*;
 #[must_use = "cancel under fresh authority; otherwise the whole owner remains retained"]
 pub struct ColdStackPreparation<'runtime, const N: usize> {
     escrow: OwnedGeneralEscrow<'runtime, N>,
+    // A returned actual pin is retained even when post-export authority/shape
+    // checks refuse it. Unknown-scope Drop must not release a platform owner.
+    pin: Option<ManuallyDrop<PinnedPages>>,
 }
 impl<'runtime, const N: usize> OwnedGeneralEscrow<'runtime, N> {
     /// Initialize only actual never-entered usable backing. Any fallible
@@ -32,7 +37,10 @@ impl<'runtime, const N: usize> OwnedGeneralEscrow<'runtime, N> {
         // owner. Native flags were restored; no callback/switch spans this exact
         // bounded usable-range write, and neither guard is included.
         unsafe { core::ptr::write_bytes(range.start as *mut u8, 0, range.len()) };
-        Ok(ColdStackPreparation { escrow: self })
+        Ok(ColdStackPreparation {
+            escrow: self,
+            pin: None,
+        })
     }
     fn begin_cold(&self, entered: &dyn EnteredProcess) -> Result<Range<usize>, WorkError> {
         self.current(entered)?;
@@ -103,6 +111,14 @@ impl<const N: usize> ColdStackPreparation<'_, N> {
     /// it cannot reseed/release another native owner or treat a C exit as done.
     pub fn cancel(self, entered: &dyn EnteredProcess) -> Result<(), WorkError> {
         self.reseed(entered)?;
-        self.escrow.cancel(entered)
+        let Self { escrow, pin } = self;
+        escrow.cancel(entered)?;
+        if let Some(pin) = pin {
+            // No C descriptor/reference was exposed. Successful exact native
+            // cancellation supplies the fresh owner context for this view's
+            // release; every failed path leaves ManuallyDrop retaining it.
+            drop(ManuallyDrop::into_inner(pin));
+        }
+        Ok(())
     }
 }

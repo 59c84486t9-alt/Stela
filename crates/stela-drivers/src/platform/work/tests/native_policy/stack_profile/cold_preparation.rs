@@ -424,3 +424,5 @@ fn stale_dropped_and_forgotten_cold_values_never_reseed_or_free() {
         isolated(mode);
     }
 }
+
+mod pinned;

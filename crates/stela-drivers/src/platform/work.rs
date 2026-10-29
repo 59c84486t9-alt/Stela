@@ -44,6 +44,7 @@ mod stack_requirement;
 #[cfg(target_arch = "x86_64")]
 pub use general_reservation::{
     AssignedGeneral, ColdStackPreparation, EnteredProcess, GeneralReservation, OwnedGeneralEscrow,
+    PinnedColdStackPreparation, StackPinError,
 };
 pub use stack_requirement::{StackProfile, StackRequirement};
 #[cfg(all(test, unix, target_arch = "x86_64"))]
@@ -144,6 +145,7 @@ pub unsafe trait Cpu: Send + Sync {
 pub unsafe trait StackBacking: Send + Sync {
     fn bounds(&self) -> Range<usize>;
     fn guard(&self) -> Range<usize>;
+
     /// Export a real allocation/mapping pin from this backing's resource owner.
     /// The caller independently checks exact usable coverage/cache/granules;
     /// an incompatible actual view is refused, never treated as stack access.
