@@ -39,20 +39,77 @@ pub struct Cache {
     pub line: u32,
 }
 
+/// The cache selected by CSSELR_EL1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CacheSelection {
+    L1Data = 0b000,
+    L1Instruction = 0b001,
+    L2Unified = 0b010,
+}
+
+impl core::fmt::Display for CacheSelection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::L1Data => "L1 data",
+            Self::L1Instruction => "L1 instruction",
+            Self::L2Unified => "L2 unified",
+        })
+    }
+}
+
+/// Why the supplied geometry cannot be encoded without FEAT_CCIDX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeometryProblem {
+    LineLength,
+    IncompleteSets,
+    FieldWidth { sets: u32 },
+}
+
+/// An invalid cache geometry, including the hierarchy entry it describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeometryError {
+    pub selection: CacheSelection,
+    pub cache: Cache,
+    pub problem: GeometryProblem,
+}
+
+impl core::fmt::Display for GeometryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} cache ({} bytes, {} ways, {}-byte line): ",
+            self.selection, self.cache.bytes, self.cache.ways, self.cache.line
+        )?;
+        match self.problem {
+            GeometryProblem::LineLength => f.write_str("line length has no CCSIDR_EL1 LineSize"),
+            GeometryProblem::IncompleteSets => {
+                f.write_str("capacity is not a whole number of sets")
+            }
+            GeometryProblem::FieldWidth { sets } => write!(
+                f,
+                "{sets} sets or the associativity exceed CCSIDR_EL1's fields"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for GeometryError {}
+
 impl Cache {
     /// Its CCSIDR_EL1, or why the geometry has no encoding.
-    fn ccsidr(self) -> Result<u32, &'static str> {
+    fn ccsidr(self) -> Result<u32, GeometryProblem> {
         if !self.line.is_power_of_two() || !(16..=2048).contains(&self.line) {
-            return Err("cache line length has no CCSIDR_EL1 LineSize");
+            return Err(GeometryProblem::LineLength);
         }
         let way_bytes = self.ways.checked_mul(self.line).filter(|&bytes| bytes != 0);
         let sets = way_bytes
             .filter(|&bytes| self.bytes.is_multiple_of(bytes))
             .map(|bytes| self.bytes / bytes)
             .filter(|&sets| sets != 0)
-            .ok_or("cache capacity is not a whole number of sets")?;
+            .ok_or(GeometryProblem::IncompleteSets)?;
         if self.ways > MAX_WAYS || sets > MAX_SETS {
-            return Err("cache geometry exceeds CCSIDR_EL1's fields");
+            return Err(GeometryProblem::FieldWidth { sets });
         }
         let line_size = self.line.trailing_zeros() - 4;
         Ok((sets - 1) << NUM_SETS | (self.ways - 1) << ASSOCIATIVITY | line_size)
@@ -74,12 +131,19 @@ impl Caches {
         instruction: Cache,
         data: Cache,
         unified: Cache,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self, GeometryError> {
         let mut ccsidr = [0; SELECTION as usize + 1];
-        // CSSELR_EL1: Level 1 data, Level 1 instruction, Level 2.
-        ccsidr[0b000] = data.ccsidr()?;
-        ccsidr[0b001] = instruction.ccsidr()?;
-        ccsidr[0b010] = unified.ccsidr()?;
+        for (selection, cache) in [
+            (CacheSelection::L1Data, data),
+            (CacheSelection::L1Instruction, instruction),
+            (CacheSelection::L2Unified, unified),
+        ] {
+            ccsidr[selection as usize] = cache.ccsidr().map_err(|problem| GeometryError {
+                selection,
+                cache,
+                problem,
+            })?;
+        }
         Ok(Self {
             clidr: SEPARATE | UNIFIED << 3,
             ccsidr,
@@ -99,6 +163,7 @@ impl Caches {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     const fn cache(bytes: u32, ways: u32) -> Cache {
         Cache {
@@ -109,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn selections_read_their_geometry_as_xnu_decodes_it() {
+    fn selection_decodes_l1_and_l2_geometry() {
         let caches = Caches::split_unified(
             cache(192 << 10, 6),
             cache(128 << 10, 8),
@@ -133,16 +198,47 @@ mod tests {
         assert_eq!(caches.ccsidr(0x10), caches.ccsidr(0));
         assert_eq!(caches.ccsidr(3), 0);
         assert_eq!(caches.ccsidr(4), 0);
-        for wrong in [
-            cache(100, 1),
-            cache(128 << 10, 0),
-            Cache {
-                line: 96,
-                ..cache(96 << 10, 8)
-            },
-            cache(1 << 30, 1),
+    }
+
+    #[test]
+    fn invalid_geometry_reports_its_selection_and_values() {
+        let valid = cache(256 << 10, 8);
+        for selection in [
+            CacheSelection::L1Data,
+            CacheSelection::L1Instruction,
+            CacheSelection::L2Unified,
         ] {
-            assert!(wrong.ccsidr().is_err(), "{wrong:?}");
+            for (wrong, problem) in [
+                (cache(100, 1), GeometryProblem::IncompleteSets),
+                (cache(128 << 10, 0), GeometryProblem::IncompleteSets),
+                (
+                    Cache {
+                        line: 96,
+                        ..cache(96 << 10, 8)
+                    },
+                    GeometryProblem::LineLength,
+                ),
+                (
+                    cache(1 << 30, 1),
+                    GeometryProblem::FieldWidth { sets: 1 << 23 },
+                ),
+            ] {
+                let (instruction, data, unified) = match selection {
+                    CacheSelection::L1Data => (valid, wrong, valid),
+                    CacheSelection::L1Instruction => (wrong, valid, valid),
+                    CacheSelection::L2Unified => (valid, valid, wrong),
+                };
+                let error = Caches::split_unified(instruction, data, unified).unwrap_err();
+                assert_eq!(
+                    error,
+                    GeometryError {
+                        selection,
+                        cache: wrong,
+                        problem
+                    }
+                );
+                assert!(error.to_string().contains(&selection.to_string()));
+            }
         }
     }
 }
