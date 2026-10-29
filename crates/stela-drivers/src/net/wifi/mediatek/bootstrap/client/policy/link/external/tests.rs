@@ -55,7 +55,14 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
     assert_eq!(session.ssid(), b"x");
     assert!(!link.carrier());
     let receipt = link
-        .transmit_external_authentication(&session, 1, 0, &[19, 0, 0xff])
+        .transmit_external_authentication(
+            &session,
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0, 0xff],
+            },
+        )
         .unwrap();
     assert_eq!(
         &finish_tx(&model)[0][24..],

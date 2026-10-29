@@ -249,14 +249,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// # Safety
     /// The real requester/provider/retention/revocation contract of the begin
     /// entrypoint remains in force through queued/deferred TX users.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn transmit_six_ghz_external_authentication<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
         authority: &mut Owner<H, O>,
         session: &Session,
-        transaction: u16,
-        status: u16,
-        data: &[u8],
+        frame: station::external::Frame<'_>,
         now: u64,
         source: &dyn PageSource,
     ) -> Result<Receipt, Error> {
@@ -272,14 +269,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         let bytes = s
             .station
-            .external_authentication_transmit(
-                session,
-                transaction,
-                status,
-                data,
-                after,
-                &mut WirePolicy,
-            )
+            .external_authentication_transmit(session, frame, after, &mut WirePolicy)
             .map_err(Error::Station)?;
         // SAFETY: actual freshly held providers cover ROC and final DMA publish.
         let result = unsafe {

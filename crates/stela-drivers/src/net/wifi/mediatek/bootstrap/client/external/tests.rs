@@ -56,9 +56,11 @@ fn actual_sae_commit_token_retry_confirm_transport_never_grants_association() {
     let first = client
         .transmit_external_authentication(
             &session,
-            1,
-            126,
-            &[19, 0, 0xaa, 0, 0xbb],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 126,
+                data: &[19, 0, 0xaa, 0, 0xbb],
+            },
             1,
             &Source,
             &mut Policy(true),
@@ -132,9 +134,11 @@ fn actual_sae_commit_token_retry_confirm_transport_never_grants_association() {
         client
             .transmit_external_authentication(
                 &session,
-                transaction,
-                0,
-                bytes,
+                crate::net::wifi::station::external::Frame {
+                    transaction,
+                    status: 0,
+                    data: bytes,
+                },
                 5 + index as u64 * 2,
                 &Source,
                 &mut Policy(true),
@@ -163,7 +167,17 @@ fn actual_sae_commit_token_retry_confirm_transport_never_grants_association() {
     );
     assert!(
         client
-            .transmit_external_authentication(&session, 2, 0, &[1], 8, &Source, &mut Policy(true))
+            .transmit_external_authentication(
+                &session,
+                crate::net::wifi::station::external::Frame {
+                    transaction: 2,
+                    status: 0,
+                    data: &[1]
+                },
+                8,
+                &Source,
+                &mut Policy(true)
+            )
             .is_err()
     );
     drop(released);
@@ -177,7 +191,17 @@ fn sae_frames_go_again_by_tx_status_until_ieee80211_auth_max_tries() {
         .begin_external_authentication(profile(), vec![b'x'], 0, 3_000_000, &mut Policy(true))
         .unwrap();
     client
-        .transmit_external_authentication(&session, 1, 0, &[19, 0], 1, &Source, &mut Policy(true))
+        .transmit_external_authentication(
+            &session,
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0],
+            },
+            1,
+            &Source,
+            &mut Policy(true),
+        )
         .unwrap();
     // The frame's TXS, as mt7925_mac_add_txs reads it.
     let txs = |pid: u8, acked: bool| {
@@ -250,7 +274,17 @@ fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
         .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
         .unwrap();
     client
-        .transmit_external_authentication(&session, 1, 0, &[19, 0], 1, &Source, &mut Policy(true))
+        .transmit_external_authentication(
+            &session,
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0],
+            },
+            1,
+            &Source,
+            &mut Policy(true),
+        )
         .unwrap();
     finish_tx(&model);
     client.poll(2, &Source, &mut Policy(true)).unwrap();
@@ -284,9 +318,11 @@ fn cancellation_retains_real_pending_dma_and_late_rx_until_explicit_peer_drain()
     let receipt = client
         .transmit_external_authentication(
             &session,
-            1,
-            0,
-            &[19, 0, 1],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0, 1],
+            },
             1,
             &Source,
             &mut Policy(true),
@@ -302,9 +338,11 @@ fn cancellation_retains_real_pending_dma_and_late_rx_until_explicit_peer_drain()
     assert!(matches!(
         client.transmit_external_authentication(
             &session,
-            2,
-            0,
-            &[1],
+            crate::net::wifi::station::external::Frame {
+                transaction: 2,
+                status: 0,
+                data: &[1]
+            },
             2,
             &Source,
             &mut Policy(true)
@@ -372,9 +410,11 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() 
         assert!(matches!(
             client.transmit_external_authentication(
                 &session,
-                transaction,
-                0,
-                &[1],
+                crate::net::wifi::station::external::Frame {
+                    transaction,
+                    status: 0,
+                    data: &[1]
+                },
                 100,
                 &Source,
                 &mut Policy(true)
@@ -385,9 +425,11 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() 
     assert!(matches!(
         client.transmit_external_authentication(
             &session,
-            1,
-            0,
-            &vec![0; wifi::frame::MAX_MPDU],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &vec![0; wifi::frame::MAX_MPDU]
+            },
             100,
             &Source,
             &mut Policy(true)
@@ -397,9 +439,11 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() 
     assert!(matches!(
         client.transmit_external_authentication(
             &foreign,
-            1,
-            0,
-            &[1],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[1]
+            },
             100,
             &Source,
             &mut Policy(true)
@@ -409,9 +453,11 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() 
     assert!(matches!(
         client.transmit_external_authentication(
             &session,
-            1,
-            0,
-            &[1],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[1]
+            },
             99,
             &Source,
             &mut Policy(true)
@@ -421,9 +467,11 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() 
     assert!(matches!(
         client.transmit_external_authentication(
             &session,
-            1,
-            0,
-            &[1],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[1]
+            },
             100,
             &Source,
             &mut Policy(false)
@@ -483,9 +531,11 @@ fn frontend_and_actual_native_deadlines_cancel_without_retransmission_or_authori
         assert!(matches!(
             client.transmit_external_authentication(
                 &session,
-                1,
-                0,
-                &[1],
+                crate::net::wifi::station::external::Frame {
+                    transaction: 1,
+                    status: 0,
+                    data: &[1]
+                },
                 now,
                 &Source,
                 &mut Policy(true)
@@ -649,9 +699,11 @@ fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication(
     assert!(matches!(
         client.transmit_external_authentication(
             &session,
-            1,
-            0,
-            &[19, 0, 1],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0, 1]
+            },
             1,
             &source,
             &mut Policy(true)
@@ -729,9 +781,11 @@ fn actual_peer_firmware_refusal_quarantines_original_exchange_and_resources() {
     assert!(matches!(
         client.transmit_external_authentication(
             &session,
-            1,
-            0,
-            &[19, 0],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0]
+            },
             1,
             &Source,
             &mut Policy(true)

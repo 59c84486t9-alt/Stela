@@ -151,8 +151,15 @@ fn an_sae_exchange_associates_like_ieee80211_mgd_assoc() {
             .is_err()
     );
     for (transaction, data) in [(1, &[19, 0][..]), (2, &[1][..])] {
-        link.transmit_external_authentication(&session, transaction, 0, data)
-            .unwrap();
+        link.transmit_external_authentication(
+            &session,
+            crate::net::wifi::station::external::Frame {
+                transaction,
+                status: 0,
+                data,
+            },
+        )
+        .unwrap();
         finish_tx(&model);
         link.service().unwrap();
         let mut frame = vec![3, 0, transaction as u8, 0, 0, 0];

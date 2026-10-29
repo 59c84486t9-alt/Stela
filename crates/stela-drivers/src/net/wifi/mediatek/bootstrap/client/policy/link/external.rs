@@ -24,20 +24,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn transmit_external_authentication(
         &mut self,
         session: &Session,
-        transaction: u16,
-        status: u16,
-        data: &[u8],
+        frame: station::external::Frame<'_>,
     ) -> Result<Receipt, LinkControlError> {
         let now = self.now();
         let state = self.state_mut();
-        let result = state.client.transmit_external_authentication(
-            session,
-            transaction,
-            status,
-            data,
-            now,
-            &state.source,
-        );
+        let result =
+            state
+                .client
+                .transmit_external_authentication(session, frame, now, &state.source);
         Self::reconcile(state);
         Ok(result?)
     }

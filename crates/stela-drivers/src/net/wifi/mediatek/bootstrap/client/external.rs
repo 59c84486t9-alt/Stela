@@ -90,13 +90,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// ROC grant. Receipt proves queue ownership, never an air ACK or successful
     /// authentication. Actual PacketOwner retains this session and controller
     /// until descriptor consumption + TX-free + unmap all complete.
-    #[allow(clippy::too_many_arguments)]
     pub fn transmit_external_authentication(
         &mut self,
         session: &Session,
-        transaction: u16,
-        status: u16,
-        data: &[u8],
+        frame: station::external::Frame<'_>,
         now: u64,
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
@@ -127,7 +124,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let before = s.station.external_deadline();
         let bytes = s
             .station
-            .external_authentication_transmit(session, transaction, status, data, now, policy)
+            .external_authentication_transmit(session, frame, now, policy)
             .map_err(Error::Station)?;
         Self::follow_external_deadline(s, before);
         Self::reserve_channel(s)?;

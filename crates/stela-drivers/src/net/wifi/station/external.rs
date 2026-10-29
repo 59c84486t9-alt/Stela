@@ -10,6 +10,15 @@
 
 use super::*;
 
+/// One OS-produced SAE transmit frame. Consumers validate their session and
+/// authority before serializing these named fields and opaque payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frame<'a> {
+    pub transaction: u16,
+    pub status: u16,
+    pub data: &'a [u8],
+}
+
 const SAE: u16 = 3;
 /// The longest exchange an OS may reserve: room for each frame of a commit,
 /// token retry and confirm to take IEEE80211_AUTH_MAX_TRIES tries of
@@ -344,12 +353,16 @@ impl Station {
     pub fn external_authentication_transmit(
         &mut self,
         session: &Session,
-        transaction: u16,
-        status: u16,
-        data: &[u8],
+        frame: Frame<'_>,
         now: u64,
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Vec<u8>, Error> {
+        let Frame {
+            transaction,
+            status,
+            data,
+        } = frame;
+
         self.validate_external_authentication(session)?;
         self.clock(now)?;
         if self.sae.done || self.sae.denied.is_some() {

@@ -66,9 +66,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     pub fn transmit_external_authentication(
         &mut self,
         session: &Session,
-        transaction: u16,
-        status: u16,
-        data: &[u8],
+        frame: station::external::Frame<'_>,
         now: u64,
         source: &dyn PageSource,
     ) -> Result<Receipt, PolicyError> {
@@ -81,15 +79,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             peer: self.peer,
         };
         self.client
-            .transmit_external_authentication(
-                session,
-                transaction,
-                status,
-                data,
-                now,
-                source,
-                &mut check,
-            )
+            .transmit_external_authentication(session, frame, now, source, &mut check)
             .map_err(PolicyError::Client)
     }
 

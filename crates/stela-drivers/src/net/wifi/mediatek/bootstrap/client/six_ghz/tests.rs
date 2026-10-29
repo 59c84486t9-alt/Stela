@@ -249,7 +249,17 @@ fn a_bound_six_ghz_session_is_fenced_and_removes_through_its_own_codec() {
         Err(Error::WrongPhase)
     ));
     assert!(matches!(
-        driver.transmit_external_authentication(&session, 1, 0, &[], 20, &Source, &mut Policy),
+        driver.transmit_external_authentication(
+            &session,
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[]
+            },
+            20,
+            &Source,
+            &mut Policy
+        ),
         Err(Error::WrongPhase)
     ));
 
@@ -259,9 +269,11 @@ fn a_bound_six_ghz_session_is_fenced_and_removes_through_its_own_codec() {
         driver.transmit_six_ghz_external_authentication(
             &mut owner,
             &session,
-            1,
-            126,
-            &[19, 0, 0xaa, 0, 0xbb],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 126,
+                data: &[19, 0, 0xaa, 0, 0xbb],
+            },
             25,
             &Source,
         )
@@ -364,9 +376,11 @@ fn a_six_ghz_sae_frame_goes_again_once_its_wait_passes() {
         driver.transmit_six_ghz_external_authentication(
             &mut owner,
             &session,
-            1,
-            0,
-            &[19, 0],
+            crate::net::wifi::station::external::Frame {
+                transaction: 1,
+                status: 0,
+                data: &[19, 0],
+            },
             25,
             &Source,
         )
@@ -460,9 +474,11 @@ fn a_six_ghz_sae_exchange_associates_like_ieee80211_mgd_assoc() {
             driver.transmit_six_ghz_external_authentication(
                 &mut owner,
                 &session,
-                u16::from(transaction),
-                0,
-                data,
+                crate::net::wifi::station::external::Frame {
+                    transaction: u16::from(transaction),
+                    status: 0,
+                    data,
+                },
                 now,
                 &Source,
             )
