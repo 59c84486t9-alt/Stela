@@ -56,6 +56,12 @@ const REL_WHEEL: u16 = 8;
 const BTN_LEFT: u16 = 0x110;
 
 pub fn matches(function: &Function) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR && function.device == MODERN_INPUT
 }
 

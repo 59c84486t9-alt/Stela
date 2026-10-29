@@ -32,6 +32,12 @@ const CLASS_RAID: [u8; 3] = [0x01, 0x04, 0x00];
 /// Whether `ahci_pci_tbl` binds the function: the AHCI class, or an AMD
 /// function of the RAID class.
 pub fn matches<C>(function: &Function<C>) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.class == CLASS || function.vendor == VENDOR_AMD && function.class == CLASS_RAID
 }
 

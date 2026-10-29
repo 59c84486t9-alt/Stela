@@ -128,6 +128,12 @@ impl Chip {
 }
 
 pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == 0x8086
         && function.class == [2, 0, 0]
         && Chip::device(function.device).is_some()

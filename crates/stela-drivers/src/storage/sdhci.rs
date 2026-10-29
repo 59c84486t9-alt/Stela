@@ -63,6 +63,12 @@ fn validate_clock(clock: Clock) -> Result<(), BlockError> {
 
 /// Standard PCI SD host programming interfaces, including the DMA interface.
 pub fn matches(function: &Function) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.class[0..2] == [0x08, 0x05] && matches!(function.class[2], 0 | 1)
 }
 

@@ -293,18 +293,24 @@ impl Link for Adapter {
 /// firmware (every USB host controller), including the HD Audio check: its
 /// memory BARs must be mapped uncached before ExitBootServices.
 pub fn claims(function: &Function) -> bool {
-    virtio::matches(function)
-        || input::virtio::matches(function)
-        || net::virtio::matches(function)
-        || net::igc::matches(function)
-        || net::e1000e::matches(function)
-        || net::igb::matches(function)
-        || realtek::matches(function)
-        || crate::audio::hda::pci::identify(function).is_ok()
+    claims_identity(&function.identity())
+}
+
+/// Candidate selection from copied firmware/native header DATA only. This
+/// grants neither resource ownership nor permission to size or attach BARs.
+pub fn claims_identity(function: &crate::bus::pci::Identity) -> bool {
+    virtio::matches_identity(function)
+        || input::virtio::matches_identity(function)
+        || net::virtio::matches_identity(function)
+        || net::igc::matches_identity(function)
+        || net::e1000e::matches_identity(function)
+        || net::igb::matches_identity(function)
+        || realtek::matches_identity(function)
+        || crate::audio::hda::pci::identify_identity(function).is_ok()
         || function.class == nvme::CLASS
-        || ahci::matches(function)
-        || sdhci::matches(function)
-        || rtsx::matches(function)
+        || ahci::matches_identity(function)
+        || sdhci::matches_identity(function)
+        || rtsx::matches_identity(function)
         || function.class == xhci::CLASS
         || usb::handoff::Kind::of(function.class).is_some()
 }

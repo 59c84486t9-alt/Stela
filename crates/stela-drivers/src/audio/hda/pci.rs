@@ -250,6 +250,11 @@ pub enum AttachError {
 /// This is a candidate match; actual subsystem/DMI exclusions are checked by
 /// prepare before any write. Intel DSP and GPU HDA functions remain separate.
 pub fn identify<C: ConfigSpace>(function: &Function<C>) -> Result<Identity, AttachError> {
+    identify_identity(&function.identity())
+}
+
+/// A copied candidate identity does not qualify BARs, clocks, DMA or resets.
+pub fn identify_identity(function: &crate::bus::pci::Identity) -> Result<Identity, AttachError> {
     identity(function.vendor, function.device, function.class)
 }
 

@@ -267,6 +267,16 @@ pub struct Interrupts {
     pub msix: Option<MsiX>,
 }
 
+/// Copied discovery observation, never proof of current configuration,
+/// mapping, controller or reset ownership. Revalidate after owned attachment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Identity {
+    pub address: Address,
+    pub vendor: u16,
+    pub device: u16,
+    pub class: [u8; 3],
+}
+
 /// One present PCI function.
 pub struct Function<C = EcamConfig> {
     pub address: Address,
@@ -275,6 +285,19 @@ pub struct Function<C = EcamConfig> {
     /// Base class, subclass and programming interface.
     pub class: [u8; 3],
     config: C,
+}
+
+impl<C> Function<C> {
+    /// Copy the already observed fields without additional config reads.
+    /// This data grants no configuration or takeover capability.
+    pub fn identity(&self) -> Identity {
+        Identity {
+            address: self.address,
+            vendor: self.vendor,
+            device: self.device,
+            class: self.class,
+        }
+    }
 }
 
 impl<C: ConfigSpace> Function<C> {
@@ -1304,6 +1327,41 @@ mod tests {
             end_bus: 3,
         };
         assert_eq!(window.range(), 0xb020_0000..0xb040_0000);
+    }
+
+    #[test]
+    fn copied_identity_performs_no_additional_configuration_reads() {
+        use core::cell::Cell;
+        struct Counted {
+            reads: Cell<usize>,
+        }
+        impl ConfigSpace for Counted {
+            fn read32(&self, offset: u16) -> u32 {
+                self.reads.set(self.reads.get() + 1);
+                match offset {
+                    0 => 0x1001_1af4,
+                    8 => 0x0100_0000,
+                    _ => 0,
+                }
+            }
+            fn write32(&mut self, _offset: u16, _value: u32) {
+                panic!("identity observation must not write configuration");
+            }
+        }
+        let function = Function::new(
+            Address::default_for_tests(),
+            Counted {
+                reads: Cell::new(0),
+            },
+        )
+        .unwrap();
+        let before = function.config.reads.get();
+        let observed = function.identity();
+        assert_eq!(function.config.reads.get(), before);
+        assert_eq!(observed.address, function.address);
+        assert_eq!(observed.vendor, function.vendor);
+        assert_eq!(observed.device, function.device);
+        assert_eq!(observed.class, function.class);
     }
 
     impl Address {

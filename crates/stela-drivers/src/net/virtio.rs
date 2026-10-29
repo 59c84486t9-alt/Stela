@@ -44,6 +44,12 @@ const LONGEST_RECEIVE: usize = HEADER + MAX_FRAME;
 const TRANSMIT_WAIT_US: u64 = 100_000;
 
 pub fn matches(function: &Function) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR
         && (function.device == MODERN_NET || function.device == TRANSITIONAL_NET)
 }

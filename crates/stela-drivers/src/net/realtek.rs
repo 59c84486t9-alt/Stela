@@ -143,6 +143,12 @@ fn block_error(e: BlockError) -> Error {
 /// Candidate PCI IDs; the constructor additionally requires an exact supported
 /// MAC revision and copper PHY. PCI-ID recognition alone does not claim support.
 pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == 0x10ec
         && revision::pci_candidate(function.device)
         && function.class == [2, 0, 0]

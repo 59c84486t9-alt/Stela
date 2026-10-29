@@ -69,6 +69,12 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Exact source identity and class; other Realtek reader generations have
 /// different PHY/power/clock profiles and cannot inherit this setup.
 pub fn matches<C>(function: &Function<C>) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR
         && ChipProfile::select(function.device).is_some()
         && function.class[0] == 0xff

@@ -114,6 +114,12 @@ const TRANSMIT_QUEUE: TransmitQueue = TransmitQueue {
 };
 
 pub fn matches(function: &Function) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR && DEVICES.contains(&function.device) && function.class == [2, 0, 0]
 }
 

@@ -62,6 +62,12 @@ const BOUNCE_BYTES: usize = 64 * 1024;
 const SECTOR: u64 = 512;
 
 pub fn matches(function: &Function) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR
         && (function.device == MODERN_BLOCK || function.device == TRANSITIONAL_BLOCK)
 }

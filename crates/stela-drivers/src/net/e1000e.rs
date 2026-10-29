@@ -221,6 +221,12 @@ const MASTER_SETTLE_US: u64 = 10_000;
 const PHY_CONFIGURATION_US: u64 = 25_000;
 
 pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
+    matches_identity(&function.identity())
+}
+
+/// Candidate selection from copied identity DATA; owned attachment still
+/// revalidates actual configuration and platform requirements.
+pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR && function.device == DEVICE && function.class == [2, 0, 0]
 }
 
