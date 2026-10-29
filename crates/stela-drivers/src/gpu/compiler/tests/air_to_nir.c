@@ -2167,8 +2167,6 @@ floating_contracts(void)
    const char *unsupported[] = {
       "%v = fdiv float 1.0, 2.0\nret void\n",
       "%v = frem float 1.0, 2.0\nret void\n",
-      "%v = fptosi float 1.0 to i32\nret void\n",
-      "%v = fptoui float 1.0 to i32\nret void\n",
    };
    for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
       LLVMMemoryBufferRef input = ieee_bitcode(stela_air_test_prefix, unsupported[i]);
@@ -2183,10 +2181,9 @@ floating_contracts(void)
    struct stela_air_error error;
    CHECK(!translate(constrained, &test_nir_options, 100, &error) && error.kind == STELA_AIR_INSTRUCTION);
    LLVMDisposeMemoryBuffer(constrained);
-   expect_refusal("%v = fadd half 1.0, 2.0\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%v = fadd double 1.0, 2.0\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%v = bitcast i64 1 to double\nret void\n", "", 100, STELA_AIR_TYPE);
-   expect_refusal("%v = bitcast <2 x i16> <i16 1, i16 2> to float\nret void\n", "", 100, STELA_AIR_TYPE);
+   expect_refusal("%v = bitcast <2 x float> zeroinitializer to double\nret void\n", "", 100, STELA_AIR_TYPE);
 }
 
 static void
@@ -2270,8 +2267,6 @@ qualified_floating_semantics(void)
    free(air);
    free(prefix);
    const char *bad_calls[][2] = {
-      {"%v = call float @air.convert.f.f32.s.i32(i64 1)\nret void\n",
-       "declare float @air.convert.f.f32.s.i32(i64)\n"},
       {"%v = call float @air.convert.f.f32.s.i32(i32 1)\nret void\n",
        "define float @air.convert.f.f32.s.i32(i32 %x) { ret float 0.0 }\n"},
       {"%v = call fastcc float @air.convert.f.f32.s.i32(i32 1)\nret void\n",

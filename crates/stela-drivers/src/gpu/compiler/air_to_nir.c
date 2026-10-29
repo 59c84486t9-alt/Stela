@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
+#include "air_math.h"
 #include "air_texture.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
@@ -162,8 +163,8 @@ float_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
          return false;
       type = LLVMGetElementType(type);
    }
-   *bits = 32;
-   return LLVMGetTypeKind(type) == LLVMFloatTypeKind;
+   *bits = LLVMGetTypeKind(type) == LLVMHalfTypeKind ? 16 : 32;
+   return LLVMGetTypeKind(type) == LLVMFloatTypeKind || LLVMGetTypeKind(type) == LLVMHalfTypeKind;
 }
 
 static bool
@@ -177,14 +178,7 @@ static bool
 leaf_shape(LLVMTypeRef type)
 {
    unsigned components, bits;
-   if (value_shape(type, &components, &bits))
-      return true;
-   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
-      if (LLVMGetVectorSize(type) < 2 || LLVMGetVectorSize(type) > 4)
-         return false;
-      type = LLVMGetElementType(type);
-   }
-   return LLVMGetTypeKind(type) == LLVMHalfTypeKind;
+   return value_shape(type, &components, &bits);
 }
 
 static bool
@@ -223,6 +217,31 @@ fp_environment(struct translator *t)
       FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32;
    t->fp_checked = true;
    return true;
+}
+
+/* Whether any ALU operation reads or writes a half. */
+static bool
+half_arithmetic(nir_shader *shader)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            const nir_op_info *info = &nir_op_infos[alu->op];
+            if (nir_alu_type_get_base_type(info->output_type) == nir_type_float &&
+                alu->def.bit_size == 16)
+               return true;
+            for (unsigned i = 0; i < info->num_inputs; i++) {
+               if (nir_alu_type_get_base_type(info->input_types[i]) == nir_type_float &&
+                   nir_src_bit_size(alu->src[i].src) == 16)
+                  return true;
+            }
+         }
+      }
+   }
+   return false;
 }
 
 static unsigned
@@ -292,9 +311,9 @@ get_value(struct translator *t, LLVMValueRef llvm)
    if (components == 1 && LLVMIsAConstantFP(llvm)) {
       /* Let LLVM serialize its APFloat bits; a host float/double conversion
        * could change a NaN's payload or signed zero before NIR sees it. */
-      LLVMValueRef encoded = LLVMConstBitCast(llvm, LLVMInt32TypeInContext(t->context));
+      LLVMValueRef encoded = LLVMConstBitCast(llvm, LLVMIntTypeInContext(t->context, bits));
       if (LLVMIsAConstantInt(encoded))
-         return nir_imm_intN_t(&t->b, LLVMConstIntGetZExtValue(encoded), 32);
+         return nir_imm_intN_t(&t->b, LLVMConstIntGetZExtValue(encoded), bits);
    }
    if (components > 1 && (LLVMIsAConstantVector(llvm) ||
                          LLVMIsAConstantDataVector(llvm) ||
@@ -1546,6 +1565,50 @@ texture_argument(void *translator, LLVMValueRef value)
    return v ? v->texture : NULL;
 }
 
+static bool
+math_environment(void *translator)
+{
+   return fp_environment(translator);
+}
+
+/* LLVM's conversions to, from and between half and float. */
+static bool
+fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
+   unsigned components, bits, source_components, source_bits;
+   LLVMTypeRef result = LLVMTypeOf(inst), source = LLVMTypeOf(LLVMGetOperand(inst, 0));
+   bool to_float = op != LLVMFPToSI && op != LLVMFPToUI;
+   bool from_float = op != LLVMSIToFP && op != LLVMUIToFP;
+   if (!(to_float ? float_shape(result, &components, &bits) : shape(result, &components, &bits)) ||
+       !(from_float ? float_shape(source, &source_components, &source_bits) :
+                      shape(source, &source_components, &source_bits)) ||
+       components != source_components || (!to_float && bits == 1))
+      return fail(t, STELA_AIR_TYPE, "unsupported floating-point conversion types");
+   if (!fp_environment(t))
+      return false;
+   nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
+   if (!a)
+      return false;
+   nir_def *value;
+   switch (op) {
+   case LLVMFPExt:
+   case LLVMFPTrunc:
+      value = bits == 16 ? nir_f2f16_rtne(&t->b, a) : nir_f2fN(&t->b, a, bits);
+      break;
+   case LLVMFPToSI: value = nir_f2iN(&t->b, a, bits); break;
+   case LLVMFPToUI: value = nir_f2uN(&t->b, a, bits); break;
+   case LLVMSIToFP:
+      value = source_bits == 1 ? nir_bcsel(&t->b, a, nir_imm_floatN_t(&t->b, -1.0, bits),
+                                           nir_imm_floatN_t(&t->b, 0.0, bits)) :
+                                 nir_i2fN(&t->b, a, bits);
+      break;
+   default:
+      value = source_bits == 1 ? nir_b2fN(&t->b, a, bits) : nir_u2fN(&t->b, a, bits);
+      break;
+   }
+   return put_value(t, inst, value, 0);
+}
+
 static const struct stela_air_sampler *
 sampler_argument(void *translator, LLVMValueRef value)
 {
@@ -1651,14 +1714,12 @@ instruction(struct translator *t, LLVMValueRef inst)
          value->view_root = origin->view_root;
          return true;
       }
-      bool fp_pair = (float_shape(source, &src_components, &src_bits) &&
-                      shape(LLVMTypeOf(inst), &components, &bits)) ||
-                     (shape(source, &src_components, &src_bits) &&
-                      float_shape(LLVMTypeOf(inst), &components, &bits));
-      if (!fp_pair || src_components != components || src_bits != 32 || bits != 32)
-         return fail(t, STELA_AIR_TYPE, "only component-preserving FP32/i32 bitcast supported");
+      if (!value_shape(source, &src_components, &src_bits) ||
+          !value_shape(LLVMTypeOf(inst), &components, &bits) || src_bits == 1 || bits == 1 ||
+          src_components * src_bits != components * bits)
+         return fail(t, STELA_AIR_TYPE, "bitcast between unsupported or differently sized types");
       nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
-      return value && put_value(t, inst, value, 0);
+      return value && put_value(t, inst, nir_bitcast_vector(&t->b, value, bits), 0);
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
@@ -1749,85 +1810,45 @@ instruction(struct translator *t, LLVMValueRef inst)
          t->shared_barriers++;
          return true;
       }
-      const char *signed_name = "air.convert.f.f32.s.i32";
-      const char *unsigned_name = "air.convert.f.f32.u.i32";
-      bool signed_conversion = name_length == strlen(signed_name) && !memcmp(name, signed_name, name_length);
-      bool unsigned_conversion = name_length == strlen(unsigned_name) && !memcmp(name, unsigned_name, name_length);
-      unsigned conversion_components = 1;
-      if (t->stage_options && !signed_conversion && !unsigned_conversion) {
-         for (unsigned n = 2; n <= 4; n++) {
-            char expected[64];
-            snprintf(expected, sizeof(expected), "air.convert.f.v%uf32.u.v%ui32", n, n);
-            if (name_length == strlen(expected) && !memcmp(name, expected, name_length)) {
-               unsigned_conversion = true; conversion_components = n; break;
-            }
-         }
-      }
-      if (!signed_conversion && !unsigned_conversion)
+      nir_def *math;
+      const struct stela_air_math_context math_context = {
+         .b = &t->b, .error = t->error, .translator = t,
+         .fragment = t->stage_options && t->stage_options->stage == STELA_AIR_FRAGMENT,
+         .operand = texture_operand, .fp_environment = math_environment,
+      };
+      switch (stela_air_math_call(&math_context, inst, callee, name, name_length, &math)) {
+      case STELA_AIR_MATH_OTHER:
          return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
-      if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
-          LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
-          LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 1 ||
-          LLVMCountParams(callee) != 1 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
-          (t->stage_options && (LLVMGetNumOperandBundles(inst) ||
-           LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee))) ||
-          (conversion_components == 1 ?
-             (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMFloatTypeKind ||
-              LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) != LLVMIntegerTypeKind ||
-              LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, 0))) != 32) :
-             (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVectorTypeKind ||
-              LLVMGetVectorSize(LLVMTypeOf(inst)) != conversion_components ||
-              LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(inst))) != LLVMFloatTypeKind ||
-              LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) != LLVMVectorTypeKind ||
-              LLVMGetVectorSize(LLVMTypeOf(LLVMGetOperand(inst, 0))) != conversion_components ||
-              LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(LLVMGetOperand(inst, 0)))) != LLVMIntegerTypeKind ||
-              LLVMGetIntTypeWidth(LLVMGetElementType(LLVMTypeOf(LLVMGetOperand(inst, 0)))) != 32)))
-         return fail(t, STELA_AIR_TYPE, "unsupported AIR integer-to-FP conversion signature");
-      if (t->stage_options) {
-         unsigned strict = LLVMGetEnumAttributeKindForName("strictfp", strlen("strictfp"));
-         if (strict && (LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, strict) ||
-                        LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, strict)))
-            return fail(t, STELA_AIR_TYPE, "strict conversion environment is unsupported");
-         const char *environment[] = {"denormal-fp-math", "denormal-fp-math-f32", "rounding-math"};
-         for (unsigned i = 0; i < ARRAY_SIZE(environment); i++) {
-            if (LLVMGetStringAttributeAtIndex(callee, LLVMAttributeFunctionIndex,
-                                              environment[i], strlen(environment[i])) ||
-                LLVMGetCallSiteStringAttribute(inst, LLVMAttributeFunctionIndex,
-                                               environment[i], strlen(environment[i])))
-               return fail(t, STELA_AIR_TYPE, "conversion environment override is unsupported");
-         }
-      }
-      if (t->options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41)
-         return fail(t, STELA_AIR_METADATA, "AIR conversion intrinsic requires qualified compiler profile");
-      if (!fp_environment(t))
+      case STELA_AIR_MATH_FAILED:
          return false;
-      nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
-      return a && put_value(t, inst, signed_conversion ? nir_i2f32(&t->b, a) : nir_u2f32(&t->b, a), 0);
+      case STELA_AIR_MATH_LOWERED:
+         break;
+      }
+      return !math || put_value(t, inst, math, 0);
    }
    if (op == LLVMFNeg) {
       nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
       /* LLVM fneg changes only the sign bit, even for NaNs/subnormals. Do not
        * route this through a target arithmetic negate that can canonicalize. */
-      return value && put_value(t, inst, nir_ixor(&t->b, value, nir_imm_int(&t->b, INT32_MIN)), 0);
+      return value && put_value(t, inst, nir_ixor(&t->b, value,
+         nir_imm_intN_t(&t->b, 1ull << (value->bit_size - 1), value->bit_size)), 0);
    }
-   if (t->stage_options && op == LLVMFDiv && LLVMGetFastMathFlags(inst) != LLVMFastMathAll)
-      return fail(t, STELA_AIR_INSTRUCTION, "precise/partially relaxed render FP division is unqualified");
-   if (op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || (t->stage_options && op == LLVMFDiv) || op == LLVMFCmp ||
-       op == LLVMSIToFP || op == LLVMUIToFP) {
+   if (op == LLVMFPExt || op == LLVMFPTrunc || op == LLVMFPToSI || op == LLVMFPToUI ||
+       op == LLVMSIToFP || op == LLVMUIToFP)
+      return fp_conversion(t, inst, op);
+   /* NIR divides at Vulkan's 2.5 ULP, which only fast math permits. */
+   if ((op == LLVMFDiv || op == LLVMFRem) && LLVMGetFastMathFlags(inst) != LLVMFastMathAll)
+      return fail(t, STELA_AIR_INSTRUCTION, "precise/partially relaxed FP division is unqualified");
+   if (op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || op == LLVMFDiv || op == LLVMFRem ||
+       op == LLVMFCmp) {
       if (!fp_environment(t))
          return false;
       nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
       if (!a)
          return false;
-      if (op == LLVMSIToFP || op == LLVMUIToFP) {
-         unsigned src_components, src_bits;
-         if (!shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &src_components, &src_bits) || src_bits != 32)
-            return fail(t, STELA_AIR_TYPE, "only i32/u32 to FP32 conversion supported");
-         return put_value(t, inst, op == LLVMSIToFP ? nir_i2f32(&t->b, a) : nir_u2f32(&t->b, a), 0);
-      }
       nir_def *b = get_value(t, LLVMGetOperand(inst, 1));
       if (!b || !float_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
-         return fail(t, STELA_AIR_TYPE, "only FP32 arithmetic/comparison supported");
+         return fail(t, STELA_AIR_TYPE, "only half and float arithmetic/comparison supported");
       nir_def *value = NULL;
       if (op == LLVMFAdd)
          value = nir_fadd(&t->b, a, b);
@@ -1837,6 +1858,9 @@ instruction(struct translator *t, LLVMValueRef inst)
          value = nir_fmul(&t->b, a, b);
       else if (op == LLVMFDiv)
          value = nir_fdiv(&t->b, a, b);
+      /* LLVM's frem is C's fmod. */
+      else if (op == LLVMFRem)
+         value = nir_frem(&t->b, a, b);
       else {
          const nir_shader_compiler_options *options = t->b.shader->options;
          /* Match the original frontend/NIR option contract. Some backends
@@ -2713,6 +2737,11 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    if (!cfg_emit(&t))
       goto done;
+   /* Metal keeps half denormals in every mode. Only half users declare it, so
+    * backends without FP16 controls still take FP32-only shaders. */
+   if (t.fp_checked && half_arithmetic(t.b.shader))
+      t.b.shader->info.float_controls_execution_mode |=
+         FLOAT_CONTROLS_DENORM_PRESERVE_FP16 | FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16;
    if (t.shared_resources) {
       nir_lower_vars_to_explicit_types(t.b.shader, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
       if (t.b.shader->info.shared_size > options->max_threadgroup_bytes) {
