@@ -360,6 +360,23 @@ static void tessellation_control_reads_factors_by_step(void)
    }
 }
 
+/* The last op intrinsic of the shader b builds, once its constants fold. */
+static nir_intrinsic_instr *last(nir_builder *b, nir_intrinsic_op op)
+{
+   while (nir_opt_constant_folding(b->shader) | nir_opt_copy_prop(b->shader))
+      ;
+   nir_intrinsic_instr *found = NULL;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b->shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == op)
+            found = nir_instr_as_intrinsic(instr);
+      }
+   }
+   assert(found);
+   return found;
+}
+
 /* Decodes words holding one attribute and folds it to constants. */
 static void decoded(const uint32_t *words, unsigned count, unsigned format, uint32_t expected[4])
 {
@@ -426,22 +443,81 @@ static void attributes_decode_metal_vertex_formats(void)
    assert(!stela_metal_vertex_format_bytes(43) && !stela_metal_vertex_format_bytes(56));
    assert(stela_metal_vertex_format_integer(39) && !stela_metal_vertex_format_integer(9));
 
-   /* Fetches read the attribute's whole words. */
+   /* Fetches read the attribute's whole words, within their bound. */
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "fetch");
-   nir_def *value = stela_metal_fetch_attribute(&b, nir_imm_int64(&b, 0x1000), 14);
+   nir_def *base = nir_imm_int64(&b, 0x1000), *offset = nir_imm_int(&b, 8);
+   nir_def *value = stela_metal_fetch_attribute(&b, base, offset, nir_imm_int(&b, 64), 14);
    assert(value->num_components == 4);
-   assert(!stela_metal_fetch_attribute(&b, nir_imm_int64(&b, 0x1000), 0));
-   bool loaded = false;
+   assert(!stela_metal_fetch_attribute(&b, base, offset, nir_imm_int(&b, 64), 0));
+   nir_intrinsic_instr *load = last(&b, nir_intrinsic_load_global_constant_bounded);
+   assert(load->def.num_components == 2 && nir_intrinsic_align_mul(load) == 4);
+   ralloc_free(b.shader);
+}
+
+static const struct stela_metal_tessellation quads = {.quad = true, .max_factor = 64};
+
+/* The constant offset the fetch of location 0 reads at, for patch 5 of
+ * instance 9 from base instance 2. */
+static uint32_t patch_fetch_offset(const struct stela_metal_stage_in *stage_in)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_TESS_EVAL, NULL, "patch");
+   nir_def *ids = nir_imm_ivec3(&b, 5, 9, 2);
+   nir_def *value = stela_metal_fetch_patch_attribute(&b, stage_in, &quads, 0, ids, NULL, false);
+   assert(value && value->num_components == 4);
+   nir_intrinsic_instr *load = last(&b, nir_intrinsic_load_global_constant_bounded);
+   assert(nir_src_is_const(load->src[1]));
+   uint32_t offset = nir_src_as_uint(load->src[1]);
+   ralloc_free(b.shader);
+   return offset;
+}
+
+/* Each step function selects its element of the attribute's buffer. */
+static void patch_attributes_fetch_their_step_functions_element(void)
+{
+   struct stela_metal_stage_in stage_in = {0};
+   /* Float4 at 4 in 16-byte elements of buffer 3. */
+   stage_in.attributes[0] = (struct stela_metal_stage_in_attribute){31, 4, 3};
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){16, STELA_METAL_STEP_PER_PATCH, 2};
+   assert(patch_fetch_offset(&stage_in) == 2 * 16 + 4);
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){16, STELA_METAL_STEP_PER_INSTANCE, 3};
+   assert(patch_fetch_offset(&stage_in) == (2 + 7 / 3) * 16 + 4);
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){16, STELA_METAL_STEP_CONSTANT, 0};
+   assert(patch_fetch_offset(&stage_in) == 4);
+
+   const struct stela_metal_tessellation indexed = {
+      .quad = true, .max_factor = 64, .control_point_index_bytes = 2};
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_TESS_EVAL, NULL, "patch");
+   nir_def *ids = nir_imm_ivec3(&b, 5, 9, 2), *point = nir_imm_int(&b, 1);
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){
+      STELA_METAL_STRIDE_DYNAMIC, STELA_METAL_STEP_PER_PATCH_CONTROL_POINT, 1};
+   /* Control points need a point, the attribute's type and the format. */
+   assert(!stela_metal_fetch_patch_attribute(&b, &stage_in, &indexed, 0, ids, NULL, false));
+   assert(!stela_metal_fetch_patch_attribute(&b, &stage_in, &indexed, 0, ids, point, true));
+   assert(!stela_metal_fetch_patch_attribute(&b, &stage_in, &indexed, 1, ids, point, false));
+   /* They read through the 16-bit indices, at the bound stride. */
+   assert(stela_metal_fetch_patch_attribute(&b, &stage_in, &indexed, 0, ids, point, false));
+   bool indices = false, stride = false;
    nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
       nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global) {
-            nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
-            loaded = load->def.num_components == 2 && nir_intrinsic_align_mul(load) == 4;
-         }
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+         if (load->intrinsic == nir_intrinsic_load_global_constant_bounded)
+            indices |= load->def.bit_size == 16;
+         /* The arguments' stride of buffer 3: a word at their address
+          * plus its offset. */
+         nir_alu_instr *address = load->intrinsic == nir_intrinsic_load_global &&
+                                  nir_def_is_alu(load->src[0].ssa) ?
+                                  nir_def_as_alu(load->src[0].ssa) : NULL;
+         stride |= address && address->op == nir_op_iadd && load->def.bit_size == 32 &&
+                   nir_src_is_const(address->src[1].src) &&
+                   nir_src_as_uint(address->src[1].src) == STELA_METAL_TESSELLATION_STRIDES + 12;
       }
    }
-   assert(loaded);
+   assert(indices && stride);
+   /* Instance and patch rates are nonzero. */
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){16, STELA_METAL_STEP_PER_INSTANCE, 0};
+   assert(!stela_metal_fetch_patch_attribute(&b, &stage_in, &indexed, 0, ids, NULL, false));
    ralloc_free(b.shader);
 }
 
@@ -457,6 +533,7 @@ int main(void)
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();
    evaluation_stages_read_their_patch_ids();
+   patch_attributes_fetch_their_step_functions_element();
    tessellation_control_reads_factors_by_step();
    attributes_decode_metal_vertex_formats();
    glsl_type_singleton_decref();

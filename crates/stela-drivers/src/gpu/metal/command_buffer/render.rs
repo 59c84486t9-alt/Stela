@@ -28,7 +28,8 @@ use crate::gpu::metal::{
     hazard::{RENDER_PASS, Use},
     pass::{AttachmentSlot, RenderPassPlan, RenderingAttachment},
     pipeline::{DepthStencilState, MAX_COLOR_ATTACHMENTS},
-    shader::{MAX_PATCH_CONTROL_POINTS, Stage},
+    shader::{Interface, MAX_PATCH_CONTROL_POINTS, Stage},
+    vertex::{STRIDE_DYNAMIC, VertexDescriptor},
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, FrontFace, IndexType,
         PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, SampleCounts,
@@ -130,6 +131,57 @@ pub struct PatchSource {
     pub patch_indices: Option<(BufferRef, u64)>,
     /// `controlPointIndexBuffer` and its offset, for indexed patch draws.
     pub control_point_indices: Option<(BufferRef, u64)>,
+}
+
+/// The strides of the vertex buffers a patch draw's evaluation stage
+/// fetches `function`'s stage-in from, by `layout`: each buffer is bound at
+/// a multiple of four, and those of dynamic stride with a stride. Zero for
+/// the buffers whose layout fixes it.
+fn patch_strides(
+    vertex_buffers: &[Option<VertexBinding>; 31],
+    function: &Interface,
+    layout: Option<&VertexDescriptor>,
+) -> Result<[u32; 31]> {
+    let mut strides = [0; 31];
+    let Some(layout) = layout else {
+        return Ok(strides);
+    };
+    for used in &function.attributes {
+        let attribute = layout
+            .attributes
+            .iter()
+            .find(|attribute| attribute.index == used.index)
+            .ok_or(Error::Invalid(
+                "stage-in attribute missing from the vertex descriptor",
+            ))?;
+        let index = attribute.buffer_index as usize;
+        let bound = vertex_buffers
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or(Error::Invalid(
+                "a vertex buffer the pipeline reads is unbound",
+            ))?;
+        ensure(
+            bound.offset.is_multiple_of(4),
+            "stage-in vertex buffers are bound at multiples of four",
+        )?;
+        let dynamic = layout.layouts.iter().any(|layout| {
+            layout.buffer_index == attribute.buffer_index && layout.stride == STRIDE_DYNAMIC
+        });
+        if dynamic {
+            let stride = bound.stride.ok_or(Error::Invalid(
+                "a dynamic-stride vertex buffer was bound without a stride",
+            ))?;
+            ensure(
+                stride.is_multiple_of(4),
+                "vertex strides are multiples of four",
+            )?;
+            strides[index] =
+                u32::try_from(stride).map_err(|_| Error::Invalid("vertex buffer stride"))?;
+        }
+    }
+    Ok(strides)
 }
 
 /// Visibility queries of one pass: each mode change or pass restart ends
@@ -1256,16 +1308,13 @@ impl CommandBuffer {
     /// to date.
     fn prepare_patches(&mut self, resolver: &mut dyn Resolver, source: &PatchSource) -> Result<()> {
         let render = render(&mut self.encoder)?;
-        let tessellation = render
+        let pipeline = render
             .pipeline
             .as_ref()
-            .ok_or(Error::Invalid("no render pipeline state is set"))?
-            .plan
-            .tessellation
-            .as_ref()
-            .ok_or(Error::Invalid(
-                "patch draws need a post-tessellation vertex function",
-            ))?;
+            .ok_or(Error::Invalid("no render pipeline state is set"))?;
+        let tessellation = pipeline.plan.tessellation.as_ref().ok_or(Error::Invalid(
+            "patch draws need a post-tessellation vertex function",
+        ))?;
         ensure(
             (1..=MAX_PATCH_CONTROL_POINTS).contains(&source.control_points),
             "patch control point count",
@@ -1316,6 +1365,14 @@ impl CommandBuffer {
             } else {
                 1.0
             },
+            control_points: source.control_points,
+            strides: patch_strides(
+                &render.vertex_buffers,
+                pipeline.interfaces.first().ok_or(Error::Invalid(
+                    "the pipeline has no post-tessellation vertex function",
+                ))?,
+                tessellation.vertex_descriptor.as_ref(),
+            )?,
         };
         if render.topology != Some(PrimitiveTopology::PatchList) {
             render.topology = Some(PrimitiveTopology::PatchList);

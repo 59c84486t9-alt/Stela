@@ -378,14 +378,95 @@ nir_def *stela_metal_decode_attribute(nir_builder *b, nir_def *words, unsigned f
    return nir_vec(b, lanes, 4);
 }
 
-nir_def *stela_metal_fetch_attribute(nir_builder *b, nir_def *address, unsigned format)
+nir_def *stela_metal_fetch_attribute(nir_builder *b, nir_def *base, nir_def *offset, nir_def *bound,
+                                     unsigned format)
 {
    unsigned bytes = stela_metal_vertex_format_bytes(format);
    if (!bytes)
       return NULL;
-   nir_def *words = nir_load_global(b, DIV_ROUND_UP(bytes, 4), 32, address,
-                                    .access = ACCESS_NON_WRITEABLE, .align_mul = 4);
+   nir_def *words = nir_load_global_constant_bounded(b, DIV_ROUND_UP(bytes, 4), 32, base, offset,
+                                                     bound, .align_mul = 4);
    return stela_metal_decode_attribute(b, words, format);
+}
+
+/* A 64-bit byte count as a 32-bit one, saturated: offsets past every
+ * 32-bit bound stay past it. */
+static nir_def *saturate32(nir_builder *b, nir_def *bytes)
+{
+   return nir_u2u32(b, nir_umin(b, bytes, nir_imm_int64(b, UINT32_MAX)));
+}
+
+/* The draw's control point index at element, zero past the indices. */
+static nir_def *control_point_index(nir_builder *b, nir_def *arguments, nir_def *element,
+                                    unsigned bytes)
+{
+   nir_def *indices = load(b, arguments, STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES, 64);
+   nir_def *length = load(b, arguments, STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES + 8, 64);
+   nir_def *offset = saturate32(b, nir_imul_imm(b, nir_u2u64(b, element), bytes));
+   nir_def *index = nir_load_global_constant_bounded(b, 1, 8 * bytes, indices, offset,
+                                                     saturate32(b, length), .align_mul = bytes);
+   return nir_u2u32(b, index);
+}
+
+nir_def *stela_metal_fetch_patch_attribute(nir_builder *b, const struct stela_metal_stage_in *stage_in,
+                                           const struct stela_metal_tessellation *tessellation,
+                                           unsigned location, nir_def *ids, nir_def *point,
+                                           bool integer)
+{
+   if (location >= AIR_MAX_VERTEX_ATTRIBUTES)
+      return NULL;
+   const struct stela_metal_stage_in_attribute *attribute = &stage_in->attributes[location];
+   if (!stela_metal_vertex_format_bytes(attribute->format) || attribute->buffer >= STELA_METAL_BUFFERS ||
+       stela_metal_vertex_format_integer(attribute->format) != integer)
+      return NULL;
+   const struct stela_metal_stage_in_layout *layout = &stage_in->layouts[attribute->buffer];
+   nir_def *arguments = load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS);
+   nir_def *patch = nir_channel(b, ids, 0), *element;
+   switch (layout->step) {
+   case STELA_METAL_STEP_CONSTANT:
+      element = nir_imm_int(b, 0);
+      break;
+   case STELA_METAL_STEP_PER_INSTANCE: {
+      /* As Vulkan's divisors: the base instance's element, then one per
+       * rate instances. */
+      if (!layout->rate)
+         return NULL;
+      nir_def *base = nir_channel(b, ids, 2);
+      element = nir_iadd(b, base, nir_udiv_imm(b, nir_isub(b, nir_channel(b, ids, 1), base),
+                                               layout->rate));
+      break;
+   }
+   case STELA_METAL_STEP_PER_PATCH:
+      if (!layout->rate)
+         return NULL;
+      element = nir_udiv_imm(b, patch, layout->rate);
+      break;
+   case STELA_METAL_STEP_PER_PATCH_CONTROL_POINT: {
+      if (!point)
+         return NULL;
+      nir_def *count = load(b, arguments, STELA_METAL_TESSELLATION_CONTROL_POINTS, 32);
+      element = nir_iadd(b, nir_imul(b, patch, count), point);
+      if (tessellation->control_point_index_bytes)
+         element = control_point_index(b, arguments, element, tessellation->control_point_index_bytes);
+      break;
+   }
+   default:
+      return NULL;
+   }
+   nir_def *table = stela_metal_load_table(b, STELA_METAL_TABLE_PRIMARY);
+   unsigned slot = 8u * attribute->buffer;
+   nir_def *base = load(b, table, STELA_METAL_TABLE_BUFFER_ADDRESSES + slot, 64);
+   nir_def *length = load(b, table, STELA_METAL_TABLE_BUFFER_LENGTHS + slot, 64);
+   nir_def *stride = layout->stride == STELA_METAL_STRIDE_DYNAMIC ?
+      load(b, arguments, STELA_METAL_TESSELLATION_STRIDES + 4u * attribute->buffer, 32) :
+      nir_imm_int(b, (int)layout->stride);
+   nir_def *offset = nir_iadd_imm(b, nir_imul(b, nir_u2u64(b, element), nir_u2u64(b, stride)),
+                                  attribute->offset);
+   /* Buffers end on word boundaries, so a format's last word is readable
+    * even past its last byte. */
+   nir_def *words = nir_iand_imm(b, nir_iadd_imm(b, length, 3), ~(int64_t)3);
+   return stela_metal_fetch_attribute(b, base, saturate32(b, offset), saturate32(b, words),
+                                      attribute->format);
 }
 
 nir_def *stela_metal_tessellation_factor(nir_builder *b, nir_def *factor, nir_def *scale,

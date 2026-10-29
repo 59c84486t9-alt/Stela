@@ -35,8 +35,8 @@ use crate::gpu::metal::{
         PatchDomain, Provenance, tests::interface,
     },
     vertex::{
-        Attribute, Layout, StageInLayout, StageInStep, StageInputDescriptor, StepFunction,
-        VertexDescriptor, VertexFormat,
+        Attribute, Layout, STRIDE_DYNAMIC, StageInLayout, StageInStep, StageInputDescriptor,
+        StepFunction, VertexDescriptor, VertexFormat,
     },
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, PipelineBindPoint, PipelineStages,
@@ -252,20 +252,32 @@ fn render_state(amplification: u64) -> RenderPipelineState {
 }
 
 /// A pipeline of a quad post-tessellation function with four control
-/// points, indexed by 16-bit control point indices.
-fn patch_state() -> RenderPipelineState {
+/// points, indexed by 16-bit control point indices, which fetches its
+/// stage-in by `layout`.
+fn patch_state(layout: Option<&VertexDescriptor>) -> RenderPipelineState {
     let evaluation = shader(Stage::Vertex, |interface| {
         interface.patch = Some(Patch {
             domain: PatchDomain::Quad,
             control_points: Some(4),
         });
+        if let Some(layout) = layout {
+            interface.attributes = layout
+                .attributes
+                .iter()
+                .map(|attribute| AttributeUse {
+                    index: attribute.index,
+                    numeric: NumericClass::Float,
+                    components: 4,
+                })
+                .collect();
+        }
     });
     let properties = TessellationDescriptor {
         factor_scale_enabled: true,
         control_point_index_type: TessellationControlPointIndexType::UInt16,
         ..TessellationDescriptor::default()
     };
-    let tessellation = tessellation(&capabilities(), &evaluation.interface, &properties, None)
+    let tessellation = tessellation(&capabilities(), &evaluation.interface, &properties, layout)
         .unwrap()
         .unwrap();
     let mut targets = RenderTargets::default();
@@ -304,7 +316,9 @@ fn patch_draws_upload_their_tessellation_arguments() {
             Vec::new(),
         )
         .unwrap();
-    commands.set_render_pipeline_state(&patch_state()).unwrap();
+    commands
+        .set_render_pipeline_state(&patch_state(None))
+        .unwrap();
     let source = PatchSource {
         control_points: 4,
         patch_indices: None,
@@ -384,8 +398,97 @@ fn patch_draws_upload_their_tessellation_arguments() {
         },
         instance_stride: 48,
         factor_scale: 2.0,
+        control_points: 4,
+        strides: [0; 31],
     };
     assert_eq!(arguments, expected.encode());
+}
+
+/// The evaluation stage fetches stage-in from the bound vertex buffers, at
+/// the strides bound with layouts of dynamic stride.
+#[test]
+fn patch_draws_bind_their_stage_in_strides() {
+    let layout = VertexDescriptor {
+        attributes: alloc::vec![Attribute {
+            index: 0,
+            format: VertexFormat::Float4,
+            offset: 0,
+            buffer_index: 2,
+        }],
+        layouts: alloc::vec![Layout {
+            buffer_index: 2,
+            stride: STRIDE_DYNAMIC,
+            step_function: StepFunction::PerPatchControlPoint,
+            step_rate: 1,
+        }],
+    };
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    commands
+        .set_render_pipeline_state(&patch_state(Some(&layout)))
+        .unwrap();
+    commands
+        .set_tessellation_factor_buffer(Some(buffer(4, 1024)), 0, 0)
+        .unwrap();
+    let source = PatchSource {
+        control_points: 4,
+        patch_indices: None,
+        control_point_indices: Some((buffer(5, 4096), 0)),
+    };
+    let mut draw =
+        |commands: &mut CommandBuffer| commands.draw_patches(&mut resolver, &source, 0, 1, 1, 0);
+    assert_eq!(
+        draw(&mut commands),
+        Err(Error::Invalid(
+            "a vertex buffer the pipeline reads is unbound"
+        ))
+    );
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(7, 256)), 0, 2)
+        .unwrap();
+    assert_eq!(
+        draw(&mut commands),
+        Err(Error::Invalid(
+            "a dynamic-stride vertex buffer was bound without a stride"
+        ))
+    );
+    commands
+        .set_vertex_buffer_with_stride(buffer(7, 256), 2, 32, 2)
+        .unwrap();
+    assert!(
+        draw(&mut commands).is_err(),
+        "offsets are multiples of four"
+    );
+    commands
+        .set_vertex_buffer_with_stride(buffer(7, 256), 16, 32, 2)
+        .unwrap();
+    draw(&mut commands).unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let constants = recording.segments[0]
+        .commands
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            Command::PushConstants(constants) => Some(*constants),
+            _ => None,
+        })
+        .unwrap();
+    let (chunk, bytes) = &recording.uploads[0];
+    let arguments = &bytes[(constants.arguments - chunk.address) as usize..];
+    let stride = TessellationArguments::STRIDES_OFFSET as usize + 4 * 2;
+    assert_eq!(arguments[stride..][..4], 32u32.to_le_bytes());
+    let count = TessellationArguments::CONTROL_POINTS_OFFSET as usize;
+    assert_eq!(arguments[count..][..4], 4u32.to_le_bytes());
 }
 
 /// The grid of `drawMeshThreads` is covered by threadgroups of the stage it
@@ -1321,7 +1424,9 @@ fn statistic_samples_sum_intervals_no_query_spans() {
             Vec::new(),
         )
         .unwrap();
-    commands.set_render_pipeline_state(&patch_state()).unwrap();
+    commands
+        .set_render_pipeline_state(&patch_state(None))
+        .unwrap();
     commands
         .set_tessellation_factor_buffer(Some(buffer(4, 1024)), 96, 48)
         .unwrap();

@@ -221,6 +221,12 @@ pub struct TessellationArguments {
     /// `setTessellationFactorScale:`; the pipeline decides whether it
     /// applies.
     pub factor_scale: f32,
+    /// `numberOfPatchControlPoints`.
+    pub control_points: u32,
+    /// The stride `setVertexBuffer:offset:attributeStride:` bound with each
+    /// vertex buffer the evaluation stage fetches through a layout of
+    /// dynamic stride; zero for the others.
+    pub strides: [u32; MAX_BUFFER_BINDINGS as usize],
 }
 
 impl TessellationArguments {
@@ -229,7 +235,9 @@ impl TessellationArguments {
     pub const CONTROL_POINT_INDICES_OFFSET: u32 = 32;
     pub const INSTANCE_STRIDE_OFFSET: u32 = 48;
     pub const FACTOR_SCALE_OFFSET: u32 = 52;
-    pub const BYTES: u32 = 56;
+    pub const CONTROL_POINTS_OFFSET: u32 = 56;
+    pub const STRIDES_OFFSET: u32 = 60;
+    pub const BYTES: u32 = 60 + 4 * MAX_BUFFER_BINDINGS;
     pub const ALIGNMENT: u64 = 16;
 
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
@@ -244,6 +252,8 @@ impl TessellationArguments {
         }
         writer.u32(self.instance_stride);
         writer.u32(self.factor_scale.to_bits());
+        writer.u32(self.control_points);
+        self.strides.iter().for_each(|stride| writer.u32(*stride));
         bytes
     }
 }
@@ -515,6 +525,7 @@ mod tests {
     use crate::gpu::metal::{
         abi::{TessellationFactorStepFunction, TessellationPartitionMode, Winding},
         nvidia::{CHIPS, fixture::nvk},
+        vertex::{StageInStep, StepFunction},
     };
 
     #[test]
@@ -607,6 +618,18 @@ mod tests {
             (
                 "STELA_METAL_TESSELLATION_FACTOR_SCALE",
                 TessellationArguments::FACTOR_SCALE_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_CONTROL_POINTS",
+                TessellationArguments::CONTROL_POINTS_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_STRIDES",
+                TessellationArguments::STRIDES_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_BYTES",
+                TessellationArguments::BYTES,
             ),
         ];
         for (name, value) in expected {
@@ -713,6 +736,35 @@ mod tests {
                 ),
             ],
         );
+        let steps = [
+            StepFunction::Constant.raw(),
+            StepFunction::PerVertex.raw(),
+            StepFunction::PerInstance.raw(),
+            StepFunction::PerPatch.raw(),
+            StepFunction::PerPatchControlPoint.raw(),
+            StageInStep::ThreadPositionInGridX.raw(),
+            StageInStep::ThreadPositionInGridY.raw(),
+            StageInStep::ThreadPositionInGridXIndexed.raw(),
+            StageInStep::ThreadPositionInGridYIndexed.raw(),
+        ];
+        let names = [
+            "CONSTANT",
+            "PER_VERTEX",
+            "PER_INSTANCE",
+            "PER_PATCH",
+            "PER_PATCH_CONTROL_POINT",
+            "THREAD_POSITION_IN_GRID_X",
+            "THREAD_POSITION_IN_GRID_Y",
+            "THREAD_POSITION_IN_GRID_X_INDEXED",
+            "THREAD_POSITION_IN_GRID_Y_INDEXED",
+        ]
+        .map(|name| alloc::format!("STELA_METAL_STEP_{name}"));
+        let values: Vec<_> = names
+            .iter()
+            .zip(steps)
+            .map(|(name, raw)| (name.as_str(), raw))
+            .collect();
+        check_enum("stela_metal_step", &values);
         check_enum(
             "stela_metal_winding",
             &[
@@ -787,6 +839,8 @@ mod tests {
             },
             instance_stride: 96,
             factor_scale: 2.0,
+            control_points: 16,
+            strides: core::array::from_fn(|index| 4 * index as u32),
         };
         let bytes = arguments.encode();
         let u64_at =
@@ -805,6 +859,11 @@ mod tests {
             bytes[TessellationArguments::FACTOR_SCALE_OFFSET as usize..][..4],
             2.0f32.to_le_bytes()
         );
+        assert_eq!(
+            bytes[TessellationArguments::CONTROL_POINTS_OFFSET as usize],
+            16
+        );
+        assert_eq!(bytes[TessellationArguments::BYTES as usize - 4], 120);
     }
 
     #[test]

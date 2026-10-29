@@ -40,13 +40,18 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
-/* TessellationArguments, which the tessellation control stage reads at the
- * push constants' arguments address. Bindings are (address, length). */
+/* TessellationArguments, which a patch draw's stages read at the push
+ * constants' arguments address. Bindings are (address, length); the draw's
+ * control points per patch follow the factor scale, then a uint stride per
+ * vertex buffer, bound with setVertexBuffer:offset:attributeStride:. */
 #define STELA_METAL_TESSELLATION_FACTORS 0u
 #define STELA_METAL_TESSELLATION_PATCH_INDICES 16u
 #define STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES 32u
 #define STELA_METAL_TESSELLATION_INSTANCE_STRIDE 48u
 #define STELA_METAL_TESSELLATION_FACTOR_SCALE 52u
+#define STELA_METAL_TESSELLATION_CONTROL_POINTS 56u
+#define STELA_METAL_TESSELLATION_STRIDES 60u
+#define STELA_METAL_TESSELLATION_BYTES 184u
 
 /* Descriptor set 0 is the device's bindless heap: one array per
  * binding.rs HeapArray, indexed by the halves of a texture's or sampler's
@@ -153,6 +158,9 @@ struct stela_metal_tessellation {
    unsigned max_factor; /* maxTessellationFactor, even. */
    enum stela_metal_factor_step step;
    enum stela_metal_winding winding;
+   /* Bytes of each control point index of indexed patch draws, 2 or 4;
+    * zero for patch draws without control point indices. */
+   unsigned control_point_index_bytes;
 };
 
 /* The stages a tessellated pipeline runs ahead of its post-tessellation
@@ -187,8 +195,55 @@ bool stela_metal_vertex_format_integer(unsigned format);
 /* The attribute in words: the 32-bit words holding its bytes, the first in
  * the low bits of the first word. */
 nir_def *stela_metal_decode_attribute(nir_builder *b, nir_def *words, unsigned format);
-/* The attribute at a 4-byte aligned address, read in whole words. */
-nir_def *stela_metal_fetch_attribute(nir_builder *b, nir_def *address, unsigned format);
+/* The attribute at the 32-bit byte offset from base, a 4-byte aligned
+ * address, read in whole words. Reads with words past the 32-bit bound
+ * read zero words. */
+nir_def *stela_metal_fetch_attribute(nir_builder *b, nir_def *base, nir_def *offset, nir_def *bound,
+                                     unsigned format);
+
+/* MTLStepFunction. */
+enum stela_metal_step {
+   STELA_METAL_STEP_CONSTANT,
+   STELA_METAL_STEP_PER_VERTEX,
+   STELA_METAL_STEP_PER_INSTANCE,
+   STELA_METAL_STEP_PER_PATCH,
+   STELA_METAL_STEP_PER_PATCH_CONTROL_POINT,
+   STELA_METAL_STEP_THREAD_POSITION_IN_GRID_X,
+   STELA_METAL_STEP_THREAD_POSITION_IN_GRID_Y,
+   STELA_METAL_STEP_THREAD_POSITION_IN_GRID_X_INDEXED,
+   STELA_METAL_STEP_THREAD_POSITION_IN_GRID_Y_INDEXED,
+};
+/* A stage-in attribute: its MTLVertexFormat, zero for an attribute the
+ * layout lacks, its byte offset in each element and its buffer's index. */
+struct stela_metal_stage_in_attribute {
+   uint32_t format, offset, buffer;
+};
+/* A buffer's elements: their stride, or STELA_METAL_STRIDE_DYNAMIC, and
+ * the step function and rate that select one. */
+struct stela_metal_stage_in_layout {
+   uint32_t stride, step, rate;
+};
+#define STELA_METAL_STRIDE_DYNAMIC UINT32_MAX
+/* A stage-in layout by attribute and buffer index: an MTLVertexDescriptor
+ * or MTLStageInputOutputDescriptor. Offsets and strides are multiples of
+ * four. */
+struct stela_metal_stage_in {
+   struct stela_metal_stage_in_attribute attributes[AIR_MAX_VERTEX_ATTRIBUTES];
+   struct stela_metal_stage_in_layout layouts[STELA_METAL_BUFFERS];
+};
+
+/* A post-tessellation vertex function's attribute at location, as
+ * stela_air_fetch_attribute reads it, from the vertex buffer of its layout
+ * in the primary argument table. The step function selects the element:
+ * the patch ID or instance index over the rate, the first element, or the
+ * control point `point` of the patch, through the draw's control point
+ * indices when it has them; a patch with no point reads only the others.
+ * Elements past the bound buffer read zero, as do control point indices
+ * past theirs. NULL when the layout does not provide the attribute so. */
+nir_def *stela_metal_fetch_patch_attribute(nir_builder *b, const struct stela_metal_stage_in *stage_in,
+                                           const struct stela_metal_tessellation *tessellation,
+                                           unsigned location, nir_def *ids, nir_def *point,
+                                           bool integer);
 
 /* One 32-bit Metal factor as Vulkan's tessellator takes it: scaled, clamped
  * to the maximum factor (less one for fractional-odd partitions) and, for
