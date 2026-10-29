@@ -408,7 +408,6 @@ kernels_take_texture_atomics(void)
 int
 main(void)
 {
-   (void)stela_air_test_store_body;
    glsl_type_singleton_init_or_ref();
    kernels_sample_write_read_and_query();
    fragments_sample_with_derivatives_compare_and_gather();

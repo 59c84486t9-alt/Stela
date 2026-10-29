@@ -377,7 +377,6 @@ kernels_read_constant_buffers(void)
 int
 main(void)
 {
-   (void)stela_air_test_store_body;
    glsl_type_singleton_init_or_ref();
    thread_memory_lowers_to_scratch();
    memory_intrinsics_lower_to_chunks();

@@ -393,7 +393,6 @@ invalid_meshes_are_refused(void)
 int
 main(void)
 {
-   (void)stela_air_test_store_body;
    glsl_type_singleton_init_or_ref();
    objects_launch_mesh_grids();
    meshes_output_primitives();

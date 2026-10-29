@@ -378,7 +378,6 @@ invalid_argument_buffers_are_refused(void)
 int
 main(void)
 {
-   (void)stela_air_test_store_body;
    glsl_type_singleton_init_or_ref();
    kernels_read_argument_buffers();
    fragments_sample_argument_buffers();
