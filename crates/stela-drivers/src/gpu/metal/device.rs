@@ -4,19 +4,22 @@
 //! with the Vulkan objects behind it. Destroying an object releases its
 //! descriptors and Vulkan objects only after the last submitted command
 //! buffer that could use it completes. Resources are in [`resources`],
-//! pipelines in [`pipelines`] and command submission in [`queue`].
+//! pipelines in [`pipelines`], indirect command buffers in [`indirect`] and
+//! command submission in [`queue`].
 use super::{
     binding::{DescriptorHeap, HeapArray, HeapLayout, ResourceId},
     capabilities::{ApiFeatures, Capabilities, Platform},
     error::{Error, Result},
+    indirect::IndirectCommandBuffer,
     shader::Compiler,
     vulkan::{
         backend::{Backend, Descriptor, Object, requirements},
         object::{Memory, Semaphore},
     },
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
+pub mod indirect;
 pub mod pipelines;
 pub mod queue;
 pub mod resources;
@@ -109,6 +112,7 @@ pub struct Device<B: Backend, C: Compiler> {
     allocated: u64,
     resources: resources::Resources,
     pipelines: pipelines::Pipelines,
+    indirect: Slab<Arc<IndirectCommandBuffer>>,
     queue: queue::Queue,
 }
 
@@ -144,6 +148,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             allocated: 0,
             resources: resources::Resources::default(),
             pipelines: pipelines::Pipelines::default(),
+            indirect: Slab::default(),
             queue: queue::Queue::default(),
         })
     }

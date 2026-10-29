@@ -80,7 +80,7 @@ impl PassBoundary {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct VertexBinding {
+pub(super) struct VertexBinding {
     buffer: BufferRef,
     offset: u64,
     /// `setVertexBuffer:offset:attributeStride:`.
@@ -89,14 +89,41 @@ struct VertexBinding {
 
 /// `setTessellationFactorBuffer:offset:instanceStride:`.
 #[derive(Clone, Copy, Debug)]
-struct FactorBuffer {
+pub(super) struct FactorBuffer {
     buffer: BufferRef,
     offset: u64,
     instance_stride: u32,
 }
 
+/// The rasterizer state Metal sets per encoder and an indirect command may
+/// set for itself: cull mode, winding, depth bias (constant, slope, clamp),
+/// depth-stencil state, triangle fill mode and depth clip mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RasterState {
+    pub cull_mode: MtlCullMode,
+    pub winding: Winding,
+    pub depth_bias: [f32; 3],
+    pub depth_stencil: DepthStencilState,
+    pub fill_mode: TriangleFillMode,
+    pub clip_mode: DepthClipMode,
+}
+
+/// Metal's initial encoder values.
+impl Default for RasterState {
+    fn default() -> Self {
+        Self {
+            cull_mode: MtlCullMode::None,
+            winding: Winding::Clockwise,
+            depth_bias: [0.0; 3],
+            depth_stencil: DepthStencilState::default(),
+            fill_mode: TriangleFillMode::Fill,
+            clip_mode: DepthClipMode::Clip,
+        }
+    }
+}
+
 /// What a patch draw reads besides the tessellation factors.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PatchSource {
     /// `numberOfPatchControlPoints`.
     pub control_points: u32,
@@ -122,15 +149,16 @@ pub(super) struct RenderState {
     pass: RenderPassPlan<ImageView>,
     /// Indices of this pass's `BeginRendering` commands in the segment.
     begins: Vec<usize>,
-    pipeline: Option<RenderPipelineState>,
-    vertex_buffers: [Option<VertexBinding>; 31],
+    pub(super) pipeline: Option<RenderPipelineState>,
+    pub(super) vertex_buffers: [Option<VertexBinding>; 31],
     bound_vertex_buffers: [Option<VertexBuffer>; 31],
     index_buffer: Option<(Buffer, u64, IndexType)>,
     topology: Option<PrimitiveTopology>,
     restart: Option<bool>,
-    amplification: Vec<u32>,
-    factors: Option<FactorBuffer>,
+    pub(super) amplification: Vec<u32>,
+    pub(super) factors: Option<FactorBuffer>,
     factor_scale: f32,
+    pub(super) raster: RasterState,
     visibility: Visibility,
     samples: Vec<(CounterSample, PassBoundary)>,
     /// Timestamp queries the pass writes, reset before it begins.
@@ -139,7 +167,7 @@ pub(super) struct RenderState {
 
 /// The active render encoder, borrowing only the encoder field so the
 /// recorder and bindings stay available.
-fn render(encoder: &mut Encoder) -> Result<&mut RenderState> {
+pub(super) fn render(encoder: &mut Encoder) -> Result<&mut RenderState> {
     match encoder {
         Encoder::Render(state) => Ok(state),
         _ => Err(Error::Invalid("no render command encoder is encoding")),
@@ -185,6 +213,7 @@ impl CommandBuffer {
             amplification: alloc::vec![0],
             factors: None,
             factor_scale: 1.0,
+            raster: RasterState::default(),
             visibility: Visibility {
                 buffer: visibility_buffer,
                 ..Visibility::default()
@@ -639,7 +668,7 @@ impl CommandBuffer {
     }
 
     pub fn set_cull_mode(&mut self, mode: MtlCullMode) -> Result<()> {
-        render(&mut self.encoder)?;
+        render(&mut self.encoder)?.raster.cull_mode = mode;
         let mode = match mode {
             MtlCullMode::None => CullMode::EMPTY,
             MtlCullMode::Front => CullMode::FRONT,
@@ -650,7 +679,7 @@ impl CommandBuffer {
     }
 
     pub fn set_front_facing_winding(&mut self, winding: Winding) -> Result<()> {
-        render(&mut self.encoder)?;
+        render(&mut self.encoder)?.raster.winding = winding;
         let face = match winding {
             Winding::Clockwise => FrontFace::Clockwise,
             Winding::CounterClockwise => FrontFace::CounterClockwise,
@@ -660,7 +689,7 @@ impl CommandBuffer {
     }
 
     pub fn set_depth_bias(&mut self, constant: f32, slope: f32, clamp: f32) -> Result<()> {
-        render(&mut self.encoder)?;
+        render(&mut self.encoder)?.raster.depth_bias = [constant, slope, clamp];
         let enable = constant != 0.0 || slope != 0.0;
         self.recorder.push(Command::SetDepthBias {
             enable,
@@ -672,8 +701,8 @@ impl CommandBuffer {
     }
 
     pub fn set_depth_stencil_state(&mut self, state: Option<&DepthStencilState>) -> Result<()> {
-        render(&mut self.encoder)?;
         let state = state.copied().unwrap_or_default();
+        render(&mut self.encoder)?.raster.depth_stencil = state;
         self.recorder
             .push(Command::SetDepthStencil(depth_stencil(&state)));
         Ok(())
@@ -693,33 +722,62 @@ impl CommandBuffer {
     }
 
     pub fn set_triangle_fill_mode(&mut self, mode: TriangleFillMode) -> Result<()> {
-        render(&mut self.encoder)?;
+        let render = render(&mut self.encoder)?;
         match (mode, self.features.polygon_mode) {
-            (TriangleFillMode::Fill, false) => Ok(()),
-            (TriangleFillMode::Lines, false) => Err(Error::Unsupported("triangle line fill")),
+            (TriangleFillMode::Fill, false) => {}
+            (TriangleFillMode::Lines, false) => {
+                return Err(Error::Unsupported("triangle line fill"));
+            }
             (mode, true) => {
-                let mode = if mode == TriangleFillMode::Lines {
+                let polygon = if mode == TriangleFillMode::Lines {
                     PolygonMode::Line
                 } else {
                     PolygonMode::Fill
                 };
-                self.recorder.push(Command::SetPolygonMode(mode));
-                Ok(())
+                self.recorder.push(Command::SetPolygonMode(polygon));
             }
         }
+        render.raster.fill_mode = mode;
+        Ok(())
     }
 
     pub fn set_depth_clip_mode(&mut self, mode: DepthClipMode) -> Result<()> {
-        render(&mut self.encoder)?;
+        let render = render(&mut self.encoder)?;
         match (mode, self.features.depth_clamp) {
-            (DepthClipMode::Clip, false) => Ok(()),
-            (DepthClipMode::Clamp, false) => Err(Error::Unsupported("depth clamping")),
+            (DepthClipMode::Clip, false) => {}
+            (DepthClipMode::Clamp, false) => return Err(Error::Unsupported("depth clamping")),
             (mode, true) => {
                 self.recorder
                     .push(Command::SetDepthClamp(mode == DepthClipMode::Clamp));
-                Ok(())
             }
         }
+        render.raster.clip_mode = mode;
+        Ok(())
+    }
+
+    /// Sets each part of `raster` that differs from the encoder's.
+    pub(super) fn set_raster_state(&mut self, raster: &RasterState) -> Result<()> {
+        let current = render(&mut self.encoder)?.raster;
+        if current.cull_mode != raster.cull_mode {
+            self.set_cull_mode(raster.cull_mode)?;
+        }
+        if current.winding != raster.winding {
+            self.set_front_facing_winding(raster.winding)?;
+        }
+        if current.depth_bias != raster.depth_bias {
+            let [constant, slope, clamp] = raster.depth_bias;
+            self.set_depth_bias(constant, slope, clamp)?;
+        }
+        if current.depth_stencil != raster.depth_stencil {
+            self.set_depth_stencil_state(Some(&raster.depth_stencil))?;
+        }
+        if current.fill_mode != raster.fill_mode {
+            self.set_triangle_fill_mode(raster.fill_mode)?;
+        }
+        if current.clip_mode != raster.clip_mode {
+            self.set_depth_clip_mode(raster.clip_mode)?;
+        }
+        Ok(())
     }
 
     /// `setVertexAmplificationCount:viewMappings:`; each mapping is
@@ -775,22 +833,35 @@ impl CommandBuffer {
         after: RenderStages,
         before: RenderStages,
     ) -> Result<()> {
-        let render = render(&mut self.encoder)?;
+        render(&mut self.encoder)?;
         ensure(!scope.is_empty(), "a barrier names a scope")?;
         let (src_stages, dst_stages) = (render_stages(after), render_stages(before));
         ensure(
             !src_stages.is_empty() && !dst_stages.is_empty(),
             "barriers name stages Vulkan has",
         )?;
+        self.outside_pass(resolver, |recorder| {
+            recorder.push(Command::Barrier(Barrier {
+                src_stages,
+                src_access: Access::MEMORY_WRITE,
+                dst_stages,
+                dst_access: Access::MEMORY_READ | Access::MEMORY_WRITE,
+            }));
+        })
+    }
+
+    /// Ends the pass instance, records `between` outside it and resumes
+    /// with an instance that loads every attachment.
+    pub(super) fn outside_pass(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        between: impl FnOnce(&mut Recorder),
+    ) -> Result<()> {
+        let render = render(&mut self.encoder)?;
         end_query(&mut self.recorder, &mut render.visibility);
         self.recorder.pause_statistics();
         self.recorder.push(Command::EndRendering);
-        self.recorder.push(Command::Barrier(Barrier {
-            src_stages,
-            src_access: Access::MEMORY_WRITE,
-            dst_stages,
-            dst_access: Access::MEMORY_READ | Access::MEMORY_WRITE,
-        }));
+        between(&mut self.recorder);
         let index = self.recorder.commands().len();
         // Patched with the final attachment operations at endEncoding.
         self.recorder.push(Command::BeginRendering(rendering(

@@ -148,7 +148,15 @@ fn every_turing_and_later_chip_derives_the_same_metal_profile() {
         let capabilities = complete(chip);
         assert_eq!(
             capabilities.families(),
-            [GpuFamily::Common1, GpuFamily::Common2],
+            [
+                GpuFamily::Common1,
+                GpuFamily::Common2,
+                GpuFamily::Common3,
+                GpuFamily::Mac1,
+                GpuFamily::Mac2,
+                GpuFamily::MacCatalyst1,
+                GpuFamily::MacCatalyst2,
+            ],
             "{}",
             chip.name
         );
@@ -190,6 +198,23 @@ fn nvidia_hardware_reaches_mac2_and_ray_tracing_blocks_metal3() {
 }
 
 #[test]
+fn common3_needs_gpu_encoded_indirect_commands() {
+    let chip = Chip::find(0x1b3).unwrap();
+    let capabilities = Capabilities::derive(
+        &nvk(chip, 16 << 30),
+        &chip.platform(attachment()),
+        ShaderFeatures::KNOWN.difference(ShaderFeatures::INDIRECT_COMMAND_ENCODING),
+        ApiFeatures::IMPLEMENTED,
+    );
+    assert!(!capabilities.supports_family(GpuFamily::Common3));
+    let gap = capabilities
+        .gaps()
+        .iter()
+        .find(|gap| gap.capability == "GPU-encoded indirect commands");
+    assert_eq!(gap.map(|gap| gap.cause), Some(Cause::Compiler));
+}
+
+#[test]
 fn missing_families_name_the_layer_that_lacks_them() {
     let capabilities = complete(Chip::find(0x172).unwrap());
     let cause = |name: &str| {
@@ -200,7 +225,8 @@ fn missing_families_name_the_layer_that_lacks_them() {
             .map(|gap| gap.cause)
     };
     assert_eq!(cause("tessellation"), None);
-    assert_eq!(cause("GPU family Common3"), Some(Cause::Api));
+    assert_eq!(cause("GPU family Common3"), None);
+    assert_eq!(cause("GPU family Metal3"), Some(Cause::Driver));
     assert_eq!(cause("ray tracing"), Some(Cause::Driver));
     assert_eq!(cause("raster order groups"), Some(Cause::Driver));
     assert_eq!(cause("GPU family Metal4"), Some(Cause::AppleArchitecture));

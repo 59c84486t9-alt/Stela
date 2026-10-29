@@ -44,12 +44,13 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 22] = [
+const ENABLED: [&CStr; 23] = [
     UNIFIED_IMAGE_LAYOUTS,
     ext::robustness2::NAME,
     ext::dynamic_rendering_unused_attachments::NAME,
     ext::extended_dynamic_state3::NAME,
     khr::maintenance5::NAME,
+    ext::conditional_rendering::NAME,
     ext::host_image_copy::NAME,
     ext::mesh_shader::NAME,
     ext::sample_locations::NAME,
@@ -128,6 +129,7 @@ pub(super) struct FeatureChain {
     robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT<'static>,
     unused_attachments: vk::PhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT<'static>,
     dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'static>,
+    conditional: vk::PhysicalDeviceConditionalRenderingFeaturesEXT<'static>,
     host_image_copy: vk::PhysicalDeviceHostImageCopyFeaturesEXT<'static>,
     mesh: vk::PhysicalDeviceMeshShaderFeaturesEXT<'static>,
     divisor: vk::PhysicalDeviceVertexAttributeDivisorFeaturesKHR<'static>,
@@ -174,6 +176,7 @@ impl FeatureChain {
             robustness2 if extensions.has(ext::robustness2::NAME);
             unused_attachments if extensions.has(ext::dynamic_rendering_unused_attachments::NAME);
             dynamic_state3 if extensions.has(ext::extended_dynamic_state3::NAME);
+            conditional if extensions.has(ext::conditional_rendering::NAME);
             host_image_copy if extensions.has(ext::host_image_copy::NAME);
             mesh if extensions.has(ext::mesh_shader::NAME);
             divisor if extensions.has(khr::vertex_attribute_divisor::NAME);
@@ -208,6 +211,8 @@ impl FeatureChain {
             .cooperative_matrix_robust_buffer_access = vk::FALSE;
         // Needs `primitiveFragmentShadingRate`, which the device never enables.
         self.mesh.primitive_fragment_shading_rate_mesh_shader = vk::FALSE;
+        // Only primary command buffers record.
+        self.conditional.inherited_conditional_rendering = vk::FALSE;
     }
 
     fn features(&self, extensions: &Extensions, api_version: u32) -> Features {
@@ -347,6 +352,7 @@ impl FeatureChain {
             // A property; `probe` fills it.
             dynamic_primitive_topology_unrestricted: false,
             host_query_reset: on(v12.host_query_reset),
+            conditional_rendering: on(self.conditional.conditional_rendering),
             image_drm_format_modifier: extensions.has(ext::image_drm_format_modifier::NAME),
             shader_float16_vector_atomics: on(self.float16_vector.shader_float16_vector_atomics),
             memory_budget: extensions.has(ext::memory_budget::NAME),

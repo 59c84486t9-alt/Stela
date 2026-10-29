@@ -5,7 +5,10 @@
 //! between queues hold by construction. Command buffer `n` signals `n` on
 //! the queue's timeline semaphore; [`Device::poll`] retires everything up to
 //! the completed value.
-use super::{BufferId, CounterBufferId, Device, EventId, Slab, TextureId};
+use super::{
+    BufferId, ComputePipelineId, CounterBufferId, Device, EventId, RenderPipelineId, Slab,
+    TextureId,
+};
 use crate::gpu::metal::{
     abi::{
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, StoreAction,
@@ -19,6 +22,7 @@ use crate::gpu::metal::{
         render::PassBoundary,
     },
     error::{Error, Result, ensure, require},
+    indirect::{IndirectCommandBuffer, IndirectCommandBufferId},
     pass::{
         self, AttachedTexture, AttachmentDescriptor, AttachmentView, RenderPassDescriptor,
         RenderPassPlan, RenderingAttachment, Target,
@@ -36,7 +40,7 @@ use crate::gpu::metal::{
         },
     },
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 /// Queries per occlusion or statistics pool.
 const POOL_QUERIES: u32 = 256;
@@ -599,13 +603,15 @@ pub struct DeviceResolver<'a, B: Backend, C: Compiler> {
 }
 
 /// Upload chunks: host-visible memory the GPU reads and copies from,
-/// preferably device-local (resizable BAR).
+/// preferably device-local (resizable BAR). Internal kernels also write
+/// scratch there, such as the select kernel's conditional rendering flags.
 const CHUNK_USAGE: BufferUsage = BufferUsage::SHADER_DEVICE_ADDRESS
     .union(BufferUsage::STORAGE_BUFFER)
     .union(BufferUsage::UNIFORM_BUFFER)
     .union(BufferUsage::VERTEX_BUFFER)
     .union(BufferUsage::INDEX_BUFFER)
     .union(BufferUsage::INDIRECT_BUFFER)
+    .union(BufferUsage::CONDITIONAL_RENDERING)
     .union(BufferUsage::TRANSFER_SRC)
     .union(BufferUsage::TRANSFER_DST);
 
@@ -685,5 +691,34 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         let pool = self.device.backend.create_query_pool(&info)?;
         self.device.backend.reset_queries(pool, 0, POOL_QUERIES);
         Ok((pool, POOL_QUERIES))
+    }
+
+    fn render_pipeline_state(&mut self, id: u64) -> Result<RenderPipelineState> {
+        let id = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
+        self.device
+            .render_pipeline_state(RenderPipelineId(id))
+            .cloned()
+    }
+
+    fn compute_pipeline_state(&mut self, id: u64) -> Result<ComputePipelineState> {
+        let id = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
+        self.device
+            .compute_pipeline_state(ComputePipelineId(id))
+            .cloned()
+    }
+
+    fn indirect_commands(
+        &mut self,
+        id: IndirectCommandBufferId,
+    ) -> Result<Arc<IndirectCommandBuffer>> {
+        self.device.indirect_snapshot(id)
+    }
+
+    fn update_indirect_commands(
+        &mut self,
+        id: IndirectCommandBufferId,
+        update: &mut dyn FnMut(&mut IndirectCommandBuffer) -> Result<()>,
+    ) -> Result<()> {
+        update(self.device.indirect_command_buffer_mut(id)?)
     }
 }

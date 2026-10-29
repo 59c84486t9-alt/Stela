@@ -305,4 +305,21 @@ pub enum Command {
         arguments: u64,
         runs: u32,
     },
+    /// Flags the commands an indirect command buffer execution range holds:
+    /// the backend binds its internal select kernel and dispatches one
+    /// thread per command, with `arguments` (a
+    /// [`SelectArguments`](crate::gpu::metal::binding::SelectArguments)
+    /// upload) in the push constants, like
+    /// [`AccumulateResults`](Self::AccumulateResults).
+    SelectCommands {
+        arguments: u64,
+        count: u32,
+    },
+    /// `vkCmdBeginConditionalRenderingEXT`: draws and dispatches up to the
+    /// end run only if the 32-bit value at `offset` is nonzero.
+    BeginConditionalRendering {
+        buffer: Buffer,
+        offset: u64,
+    },
+    EndConditionalRendering,
 }

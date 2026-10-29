@@ -627,6 +627,20 @@ option_set! {
 }
 
 option_set! {
+    /// `MTLIndirectCommandType`.
+    pub struct IndirectCommandType: u64 {
+        const DRAW = 0x1;
+        const DRAW_INDEXED = 0x2;
+        const DRAW_PATCHES = 0x4;
+        const DRAW_INDEXED_PATCHES = 0x8;
+        const CONCURRENT_DISPATCH = 0x20;
+        const CONCURRENT_DISPATCH_THREADS = 0x40;
+        const DRAW_MESH_THREADGROUPS = 0x80;
+        const DRAW_MESH_THREADS = 0x100;
+    }
+}
+
+option_set! {
     /// `MTLRenderStages`.
     pub struct RenderStages: u64 {
         const VERTEX = 0x1;

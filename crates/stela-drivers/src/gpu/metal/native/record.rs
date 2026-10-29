@@ -4,7 +4,7 @@ use super::{
     objects::{self, extent, offset, stages, subresource},
 };
 use crate::gpu::metal::{
-    binding::{AccumulateArguments, PushConstants},
+    binding::{AccumulateArguments, PushConstants, SelectArguments},
     command_buffer::Segment,
     error::{Error, Result},
     pass::ClearValue,
@@ -255,20 +255,19 @@ impl Recorder<'_> {
         }
     }
 
-    fn accumulate(&self, arguments: u64, runs: u32) {
+    /// Dispatches an internal kernel over `threads` with `arguments` in the
+    /// push constants.
+    fn internal(&self, pipeline: vk::Pipeline, arguments: u64, threads: u32, workgroup: u32) {
         // SAFETY: the internal pipeline uses the device's pipeline layout.
         unsafe {
-            self.device().cmd_bind_pipeline(
-                self.buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                self.backend.accumulate,
-            );
+            self.device()
+                .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
         }
         self.push_constants(&PushConstants {
             arguments,
             ..PushConstants::default()
         });
-        let groups = runs.div_ceil(AccumulateArguments::WORKGROUP_SIZE);
+        let groups = threads.div_ceil(workgroup);
         // SAFETY: the kernel reads only `arguments` and the addresses in it.
         unsafe { self.device().cmd_dispatch(self.buffer, groups, 1, 1) };
     }
@@ -596,8 +595,29 @@ impl Recorder<'_> {
                         flags,
                     );
                 }
-                &Command::AccumulateResults { arguments, runs } => {
-                    self.accumulate(arguments, runs);
+                &Command::AccumulateResults { arguments, runs } => self.internal(
+                    self.backend.accumulate,
+                    arguments,
+                    runs,
+                    AccumulateArguments::WORKGROUP_SIZE,
+                ),
+                &Command::SelectCommands { arguments, count } => self.internal(
+                    self.backend.select,
+                    arguments,
+                    count,
+                    SelectArguments::WORKGROUP_SIZE,
+                ),
+                &Command::BeginConditionalRendering {
+                    buffer: flags,
+                    offset,
+                } => {
+                    let info = vk::ConditionalRenderingBeginInfoEXT::default()
+                        .buffer(handle(flags.0))
+                        .offset(offset);
+                    (fns.conditional.fp().cmd_begin_conditional_rendering_ext)(buffer, &info);
+                }
+                Command::EndConditionalRendering => {
+                    (fns.conditional.fp().cmd_end_conditional_rendering_ext)(buffer);
                 }
             }
         }

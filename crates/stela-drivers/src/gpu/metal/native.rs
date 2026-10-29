@@ -55,6 +55,10 @@ pub struct InternalKernels {
     /// [`AccumulateArguments`](super::binding::AccumulateArguments), one
     /// thread per run in workgroups of `WORKGROUP_SIZE`.
     pub accumulate: ShaderCode,
+    /// Flags commands of an execution range per
+    /// [`SelectArguments`](super::binding::SelectArguments), one thread per
+    /// command in workgroups of `WORKGROUP_SIZE`.
+    pub select: ShaderCode,
 }
 
 /// A host mapping of a `VkDeviceMemory`.
@@ -89,6 +93,7 @@ struct ExtensionFns {
     sample_locations: Option<ext::sample_locations::Device>,
     mesh: Option<ext::mesh_shader::Device>,
     calibrated: Option<khr::calibrated_timestamps::Device>,
+    conditional: ext::conditional_rendering::Device,
 }
 
 pub struct NativeBackend {
@@ -113,6 +118,7 @@ pub struct NativeBackend {
     bind_timeline: vk::Semaphore,
     bind_value: u64,
     accumulate: vk::Pipeline,
+    select: vk::Pipeline,
 }
 
 /// Maps a Vulkan failure to the Metal layer's.
@@ -198,6 +204,8 @@ impl NativeBackend {
                 .then(|| ext::mesh_shader::Device::new(&instance, &device)),
             calibrated: has(khr::calibrated_timestamps::NAME)
                 .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
+            // A requirement: the device was refused without it.
+            conditional: ext::conditional_rendering::Device::new(&instance, &device),
         };
         // SAFETY: the device was created with one queue in `family`.
         let queue = unsafe { device.get_device_queue(family, 0) };
@@ -222,15 +230,18 @@ impl NativeBackend {
             bind_timeline: vk::Semaphore::null(),
             bind_value: 0,
             accumulate: vk::Pipeline::null(),
+            select: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         backend.create_layout(family)?;
         backend.bind_timeline = handle(backend.create_semaphore(0)?.0);
-        backend.accumulate = backend.create_compute(&ComputePipelineInfo {
-            code: kernels.accumulate,
+        let kernel = |code| ComputePipelineInfo {
+            code,
             required_subgroup_size: 0,
             full_subgroups: false,
-        })?;
+        };
+        backend.accumulate = backend.create_compute(&kernel(kernels.accumulate))?;
+        backend.select = backend.create_compute(&kernel(kernels.select))?;
         Ok(backend)
     }
 
@@ -524,6 +535,7 @@ impl Drop for NativeBackend {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_pipeline(self.accumulate, None);
+            self.device.destroy_pipeline(self.select, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device.destroy_sampler(self.null_sampler, None);

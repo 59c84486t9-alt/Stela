@@ -49,6 +49,9 @@ option_set! {
         const LAYERED_RENDERING = 1 << 20;
         const VERTEX_AMPLIFICATION = 1 << 21;
         const DEPTH_COMPARE_SAMPLE = 1 << 22;
+        /// Kernels encode indirect commands (`command_buffer`,
+        /// `render_command`, `compute_command`).
+        const INDIRECT_COMMAND_ENCODING = 1 << 23;
     }
 }
 
@@ -74,6 +77,7 @@ impl ApiFeatures {
     /// The paths this build implements.
     pub const IMPLEMENTED: Self = Self::HEAPS
         .union(Self::INDIRECT_DRAW_DISPATCH)
+        .union(Self::INDIRECT_COMMAND_BUFFERS)
         .union(Self::SPARSE_TEXTURES)
         .union(Self::TIMESTAMP_COUNTERS)
         .union(Self::STATISTIC_COUNTERS)
@@ -1223,8 +1227,13 @@ impl Derivation<'_> {
                 &[
                     api(
                         "indirect command buffers",
-                        true,
+                        features.conditional_rendering,
                         ApiFeatures::INDIRECT_COMMAND_BUFFERS,
+                    ),
+                    shader(
+                        "GPU-encoded indirect commands",
+                        true,
+                        ShaderFeatures::INDIRECT_COMMAND_ENCODING,
                     ),
                     shader("quadgroup functions", true, ShaderFeatures::QUADGROUP),
                     api("heaps", true, ApiFeatures::HEAPS),

@@ -311,6 +311,7 @@ fn features(chip: &Chip) -> Features {
         dynamic_rendering_unused_attachments: true,
         dynamic_primitive_topology_unrestricted: true,
         host_query_reset: true,
+        conditional_rendering: true,
         image_drm_format_modifier: true,
         shader_float16_vector_atomics: true,
         memory_budget: true,

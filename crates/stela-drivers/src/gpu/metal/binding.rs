@@ -257,6 +257,39 @@ impl AccumulateArguments {
     }
 }
 
+/// What the backend's internal select kernel reads at the push constants'
+/// `arguments`. Thread `n` below `count` writes the 32-bit flag
+/// `flags[n]`: 1 when the `MTLIndirectCommandBufferExecutionRange` at
+/// `range` (`uint` location and length) holds command `n`, else 0.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SelectArguments {
+    pub range: u64,
+    pub flags: u64,
+    pub count: u32,
+}
+
+impl SelectArguments {
+    pub const RANGE_OFFSET: u32 = 0;
+    pub const FLAGS_OFFSET: u32 = 8;
+    pub const COUNT_OFFSET: u32 = 16;
+    pub const BYTES: u32 = 24;
+    pub const ALIGNMENT: u64 = 16;
+    /// Threads per workgroup of the kernel.
+    pub const WORKGROUP_SIZE: u32 = 64;
+
+    pub fn encode(&self) -> [u8; Self::BYTES as usize] {
+        let mut bytes = [0; Self::BYTES as usize];
+        let mut writer = Writer {
+            bytes: &mut bytes,
+            offset: 0,
+        };
+        writer.u64(self.range);
+        writer.u64(self.flags);
+        writer.u32(self.count);
+        bytes
+    }
+}
+
 struct Writer<'a> {
     bytes: &'a mut [u8],
     offset: usize,
@@ -485,6 +518,21 @@ mod tests {
             bytes[TessellationArguments::FACTOR_SCALE_OFFSET as usize..][..4],
             2.0f32.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn select_arguments_encode_in_layout_order() {
+        let bytes = SelectArguments {
+            range: 0x1000,
+            flags: 0x2000,
+            count: 7,
+        }
+        .encode();
+        let u64_at =
+            |offset: u32| u64::from_le_bytes(bytes[offset as usize..][..8].try_into().unwrap());
+        assert_eq!(u64_at(SelectArguments::RANGE_OFFSET), 0x1000);
+        assert_eq!(u64_at(SelectArguments::FLAGS_OFFSET), 0x2000);
+        assert_eq!(bytes[SelectArguments::COUNT_OFFSET as usize], 7);
     }
 
     #[test]

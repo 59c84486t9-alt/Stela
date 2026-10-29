@@ -20,7 +20,7 @@ use crate::gpu::metal::{
 use alloc::{boxed::Box, vec::Vec};
 
 /// Every access a compute dispatch can make.
-const COMPUTE: Use = Use::new(
+pub(super) const COMPUTE: Use = Use::new(
     PipelineStages::COMPUTE_SHADER.union(PipelineStages::DRAW_INDIRECT),
     Access::SHADER_READ
         .union(Access::SHADER_WRITE)
@@ -29,7 +29,7 @@ const COMPUTE: Use = Use::new(
 
 /// `setStageInRegion:` or `setStageInRegionWithIndirectBuffer:…`.
 #[derive(Clone, Copy, Debug)]
-enum StageInRegion {
+pub(super) enum StageInRegion {
     /// Origin and size, as `MTLStageInRegionIndirectArguments` holds them.
     Direct([u32; 6]),
     /// The address of the GPU's `MTLStageInRegionIndirectArguments`.
@@ -37,14 +37,14 @@ enum StageInRegion {
 }
 
 pub(super) struct ComputeState {
-    dispatch_type: DispatchType,
-    pipeline: Option<ComputePipelineState>,
-    threadgroup_lengths: Vec<(u32, u64)>,
-    bound: Option<Pipeline>,
-    stage_in: Option<StageInRegion>,
+    pub(super) dispatch_type: DispatchType,
+    pub(super) pipeline: Option<ComputePipelineState>,
+    pub(super) threadgroup_lengths: Vec<(u32, u64)>,
+    pub(super) bound: Option<Pipeline>,
+    pub(super) stage_in: Option<StageInRegion>,
 }
 
-fn compute(encoder: &mut Encoder) -> Result<&mut ComputeState> {
+pub(super) fn compute(encoder: &mut Encoder) -> Result<&mut ComputeState> {
     match encoder {
         Encoder::Compute(state) => Ok(state),
         _ => Err(Error::Invalid("no compute command encoder is encoding")),

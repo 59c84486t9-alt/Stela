@@ -5,7 +5,7 @@ use super::{
 };
 use crate::gpu::metal::{
     abi::{
-        CpuCacheMode, DispatchType, HazardTrackingMode, HeapType, LoadAction,
+        CpuCacheMode, DispatchType, HazardTrackingMode, HeapType, IndirectCommandType, LoadAction,
         MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, PrimitiveTopologyClass,
         PrimitiveType, ResourceOptions, SparsePageSize, SparseTextureMappingMode, StorageMode,
         StoreAction, StoreActionOptions, SwizzleChannels, TessellationPartitionMode, TextureType,
@@ -15,8 +15,10 @@ use crate::gpu::metal::{
     command_buffer::{
         BufferRef, Segment,
         counters::{COUNTER_ERROR_VALUE, CounterSample},
+        indirect::ExecutionRange,
     },
     heap::HeapDescriptor,
+    indirect::IndirectCommandBufferDescriptor,
     nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
     pipeline::{
         ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets, TessellationDescriptor,
@@ -1143,4 +1145,82 @@ fn sparse_textures_map_heap_pages_at_commit() {
     device.destroy_texture(sparse).unwrap();
     assert_eq!(device.heap_usage(heap, 1), Ok((0, 4 << 16)));
     device.destroy_heap(heap).unwrap();
+}
+
+#[test]
+fn indirect_commands_execute_snapshots_of_their_buffer() {
+    let mut device = device();
+    let kernel = device.new_function(1, "kernel", Vec::new()).unwrap();
+    let pipeline = device
+        .new_compute_pipeline(&ComputePipelineRequest {
+            compute_function: kernel,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup: 0,
+            stage_input: None,
+        })
+        .unwrap();
+    let state = device.compute_pipeline_state(pipeline).unwrap().clone();
+    let buffer = device
+        .new_buffer(4096, options(StorageMode::Private))
+        .unwrap();
+    let buffer = device.buffer(buffer).unwrap();
+    let descriptor = IndirectCommandBufferDescriptor {
+        command_types: IndirectCommandType::CONCURRENT_DISPATCH,
+        inherit_pipeline_state: false,
+        inherit_buffers: false,
+        inherit_cull_mode: true,
+        inherit_depth_stencil_state: true,
+        inherit_depth_bias: true,
+        inherit_depth_clip_mode: true,
+        inherit_front_facing_winding: true,
+        inherit_triangle_fill_mode: true,
+        max_vertex_buffer_bind_count: 0,
+        max_fragment_buffer_bind_count: 0,
+        max_kernel_buffer_bind_count: 1,
+        max_kernel_threadgroup_memory_bind_count: 0,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
+        support_ray_tracing: false,
+        support_dynamic_attribute_stride: false,
+    };
+    let icb = device.new_indirect_command_buffer(&descriptor, 2).unwrap();
+    let threads = Size {
+        width: 64,
+        height: 1,
+        depth: 1,
+    };
+    let contents = device.indirect_command_buffer_mut(icb).unwrap();
+    let mut command = contents.compute_command(0).unwrap();
+    command.set_compute_pipeline_state(&state).unwrap();
+    command.set_kernel_buffer(buffer, 0, 0).unwrap();
+    command
+        .concurrent_dispatch_threadgroups([3, 1, 1], threads)
+        .unwrap();
+
+    let mut commands = device.new_command_buffer();
+    commands.begin_compute(DispatchType::Serial).unwrap();
+    commands
+        .execute_commands(&mut device.resolver(), icb, ExecutionRange::Direct(0..2))
+        .unwrap();
+    // Encoding after the execution changes later executions only.
+    device
+        .indirect_command_buffer_mut(icb)
+        .unwrap()
+        .reset(0..1)
+        .unwrap();
+    commands
+        .execute_commands(&mut device.resolver(), icb, ExecutionRange::Direct(0..2))
+        .unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    device.commit(commands).unwrap();
+    let segments = device.backend().submissions.last().unwrap().clone();
+    let dispatches = segments[0]
+        .commands
+        .iter()
+        .filter(|command| **command == Command::Dispatch([3, 1, 1]))
+        .count();
+    assert_eq!(dispatches, 1);
+    assert_eq!(device.indirect_command_buffer(icb).unwrap().size(), 2);
+    device.destroy_indirect_command_buffer(icb).unwrap();
+    assert!(device.indirect_command_buffer(icb).is_err());
 }

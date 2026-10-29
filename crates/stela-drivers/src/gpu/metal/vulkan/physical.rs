@@ -268,6 +268,7 @@ pub struct Features {
     /// `VkPhysicalDeviceExtendedDynamicState3PropertiesEXT`.
     pub dynamic_primitive_topology_unrestricted: bool,
     pub host_query_reset: bool,
+    pub conditional_rendering: bool,
     pub image_drm_format_modifier: bool,
     pub shader_float16_vector_atomics: bool,
     pub memory_budget: bool,

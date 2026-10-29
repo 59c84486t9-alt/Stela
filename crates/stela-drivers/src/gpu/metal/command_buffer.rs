@@ -13,6 +13,7 @@ use super::{
     binding::{ArgumentTable, BufferBinding, PushConstants, ResourceId},
     error::{Error, Result, ensure},
     hazard::{FULL, Hazards, Use},
+    indirect::{IndirectCommandBuffer, IndirectCommandBufferId},
     pipeline::{ComputePipelinePlan, RenderPipelinePlan},
     shader::{Interface, Specialization, Stage},
     sparse::MappingRequest,
@@ -22,11 +23,12 @@ use super::{
         object::{Buffer, Pipeline, QueryPool, QueryType, Semaphore},
     },
 };
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 pub mod blit;
 pub mod compute;
 pub mod counters;
+pub mod indirect;
 pub mod render;
 pub mod resource_state;
 
@@ -103,6 +105,27 @@ pub trait Resolver: ChunkSource {
     /// A reset query pool of `query_type` and its query count; pipeline
     /// statistics pools count [`counters::STATISTICS`].
     fn query_pool(&mut self, query_type: QueryType) -> Result<(QueryPool, u32)>;
+
+    /// The render pipeline state with device id `id`, which an indirect
+    /// command names.
+    fn render_pipeline_state(&mut self, id: u64) -> Result<RenderPipelineState>;
+
+    /// The compute pipeline state with device id `id`.
+    fn compute_pipeline_state(&mut self, id: u64) -> Result<ComputePipelineState>;
+
+    /// The current contents of an indirect command buffer.
+    fn indirect_commands(
+        &mut self,
+        id: IndirectCommandBufferId,
+    ) -> Result<Arc<IndirectCommandBuffer>>;
+
+    /// Changes an indirect command buffer's contents, for blit resets and
+    /// copies; a failed `update` leaves them unchanged.
+    fn update_indirect_commands(
+        &mut self,
+        id: IndirectCommandBufferId,
+        update: &mut dyn FnMut(&mut IndirectCommandBuffer) -> Result<()>,
+    ) -> Result<()>;
 }
 
 /// Optional dynamic states the device enabled; see [`Capabilities`].
@@ -200,6 +223,18 @@ impl Bindings {
         let bound = self.table(stage).buffers[buffer_slot(index)?];
         let bound = bound.ok_or(Error::Invalid("no buffer is bound at that index"))?;
         self.set_buffer(stage, Some(bound), offset, index)
+    }
+
+    /// Unbinds the buffers of `stages`, keeping their textures and samplers.
+    fn clear_buffers(&mut self, stages: &[Stage]) {
+        for &stage in stages {
+            let table = self.table(stage);
+            if table.buffers.iter().any(Option::is_some) {
+                table.slots.buffers = ArgumentTable::default().buffers;
+                table.buffers = [None; super::capabilities::MAX_BUFFER_BINDINGS as usize];
+                table.address = None;
+            }
+        }
     }
 
     fn set_texture(&mut self, stage: Stage, texture: ResourceId, index: u32) -> Result<()> {

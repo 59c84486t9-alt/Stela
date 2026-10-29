@@ -1,15 +1,17 @@
 use super::{
     blit::{BlitTexture, BufferLayout, Region},
     counters::{CounterRange, CounterSample},
+    indirect::ExecutionRange,
     render::{PassBoundary, PatchSource, Viewport},
     *,
 };
 use crate::gpu::metal::{
     abi::{
-        BarrierScope, BlitOption, CpuCacheMode, DispatchType, HazardTrackingMode, IndexType,
-        LoadAction, PrimitiveTopologyClass, PrimitiveType, RenderStages, ResourceOptions,
-        StorageMode, StoreAction, StoreActionOptions, SwizzleChannels,
-        TessellationControlPointIndexType, TextureType, TextureUsage, VisibilityResultMode,
+        BarrierScope, BlitOption, CpuCacheMode, CullMode as CullModeAbi, DispatchType,
+        HazardTrackingMode, IndexType, IndirectCommandType, LoadAction, PrimitiveTopologyClass,
+        PrimitiveType, RenderStages, ResourceOptions, StorageMode, StoreAction, StoreActionOptions,
+        SwizzleChannels, TessellationControlPointIndexType, TextureType, TextureUsage,
+        VisibilityResultMode,
     },
     binding::{
         AccumulateArguments, ArgumentTable, BufferBinding, PushConstants, TessellationArguments,
@@ -17,6 +19,7 @@ use crate::gpu::metal::{
     capabilities::Size,
     error::Error,
     hazard::FULL,
+    indirect::{IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandBufferId},
     nvidia::fixture::capabilities,
     pass::{AttachedTexture, AttachmentDescriptor, RenderPassDescriptor, Target, render_pass},
     pipeline::{
@@ -35,18 +38,22 @@ use crate::gpu::metal::{
         VertexDescriptor, VertexFormat,
     },
     vulkan::{
-        Access, AttachmentLoadOp, AttachmentStoreOp, PipelineBindPoint, PipelineStages,
+        Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, PipelineBindPoint, PipelineStages,
         command::{Barrier, BufferCopy},
         object::{Image, ImageView, QueryType, ShaderCode},
     },
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 #[derive(Default)]
 struct MockResolver {
     chunks: u64,
     compiled: Vec<Specialization>,
     pools: u64,
+    /// Pipeline states by id, for indirect commands.
+    render_states: Vec<RenderPipelineState>,
+    compute_states: Vec<ComputePipelineState>,
+    indirect: Vec<Arc<IndirectCommandBuffer>>,
 }
 
 impl ChunkSource for MockResolver {
@@ -96,6 +103,35 @@ impl Resolver for MockResolver {
     fn query_pool(&mut self, _: QueryType) -> Result<(QueryPool, u32)> {
         self.pools += 1;
         Ok((QueryPool(self.pools), 2))
+    }
+
+    fn render_pipeline_state(&mut self, id: u64) -> Result<RenderPipelineState> {
+        let known = self.render_states.iter().find(|state| state.id == id);
+        known.cloned().ok_or(Error::Invalid("unknown pipeline"))
+    }
+
+    fn compute_pipeline_state(&mut self, id: u64) -> Result<ComputePipelineState> {
+        let known = self.compute_states.iter().find(|state| state.id == id);
+        known.cloned().ok_or(Error::Invalid("unknown pipeline"))
+    }
+
+    fn indirect_commands(
+        &mut self,
+        id: IndirectCommandBufferId,
+    ) -> Result<Arc<IndirectCommandBuffer>> {
+        let known = self.indirect.get(id.0 as usize);
+        known.cloned().ok_or(Error::Invalid("unknown object"))
+    }
+
+    fn update_indirect_commands(
+        &mut self,
+        id: IndirectCommandBufferId,
+        update: &mut dyn FnMut(&mut IndirectCommandBuffer) -> Result<()>,
+    ) -> Result<()> {
+        let known = self.indirect.get_mut(id.0 as usize);
+        update(Arc::make_mut(
+            known.ok_or(Error::Invalid("unknown object"))?,
+        ))
     }
 }
 
@@ -1465,4 +1501,367 @@ fn blits_resolve_counters_on_the_gpu() {
         1,
         "commit has nothing left to resolve"
     );
+}
+
+fn icb_descriptor(command_types: IndirectCommandType) -> IndirectCommandBufferDescriptor {
+    IndirectCommandBufferDescriptor {
+        command_types,
+        inherit_pipeline_state: false,
+        inherit_buffers: false,
+        inherit_cull_mode: false,
+        inherit_depth_stencil_state: true,
+        inherit_depth_bias: true,
+        inherit_depth_clip_mode: true,
+        inherit_front_facing_winding: true,
+        inherit_triangle_fill_mode: true,
+        max_vertex_buffer_bind_count: 4,
+        max_fragment_buffer_bind_count: 1,
+        max_kernel_buffer_bind_count: 1,
+        max_kernel_threadgroup_memory_bind_count: 0,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
+        support_ray_tracing: false,
+        support_dynamic_attribute_stride: false,
+    }
+}
+
+/// A resolver knowing the encoder's pipeline (id 0, `Pipeline(42)`), an
+/// indirect pipeline (id 1, `Pipeline(43)`) and `buffer` as indirect
+/// command buffer 0.
+fn icb_resolver(buffer: IndirectCommandBuffer) -> MockResolver {
+    let mut other = render_state(1);
+    other.id = 1;
+    other.pipeline = Some(Pipeline(43));
+    MockResolver {
+        render_states: alloc::vec![render_state(1), other],
+        indirect: alloc::vec![Arc::new(buffer)],
+        ..MockResolver::default()
+    }
+}
+
+fn render_icb(count: u64) -> IndirectCommandBuffer {
+    let types = IndirectCommandType::DRAW | IndirectCommandType::DRAW_INDEXED;
+    let mut icb =
+        IndirectCommandBuffer::new(&capabilities(), &icb_descriptor(types), count).unwrap();
+    let mut other = render_state(1);
+    other.id = 1;
+    for index in 0..count as usize {
+        let mut command = icb.render_command(index).unwrap();
+        command.set_render_pipeline_state(&other).unwrap();
+        command
+            .set_buffer(Stage::Vertex, buffer(5, 256), 0, 2)
+            .unwrap();
+        command.set_cull_mode(CullModeAbi::Back).unwrap();
+        command
+            .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap();
+    }
+    icb
+}
+
+fn vertex_buffers(commands: &[Command]) -> Vec<Buffer> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::BindVertexBuffers { buffers, .. } => Some(buffers[0].buffer),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn indirect_draws_replay_and_restore_the_encoder() {
+    let mut icb = render_icb(3);
+    icb.render_command(1).unwrap().reset();
+    let mut indexed = icb.render_command(2).unwrap();
+    indexed
+        .draw_indexed_primitives(
+            PrimitiveType::Triangle,
+            6,
+            IndexType::UInt16,
+            buffer(6, 64),
+            0,
+            1,
+            0,
+            0,
+        )
+        .unwrap();
+    let mut resolver = icb_resolver(icb);
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    commands
+        .set_render_pipeline_state(&render_state(1))
+        .unwrap();
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    commands
+        .execute_commands(
+            &mut resolver,
+            IndirectCommandBufferId(0),
+            ExecutionRange::Direct(0..3),
+        )
+        .unwrap();
+    commands
+        .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 4, 1, 0)
+        .unwrap();
+    assert!(
+        commands
+            .execute_commands(
+                &mut resolver,
+                IndirectCommandBufferId(0),
+                ExecutionRange::Direct(2..4)
+            )
+            .is_err()
+    );
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    let pipelines: Vec<Pipeline> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::BindPipeline { pipeline, .. } => Some(*pipeline),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pipelines,
+        [Pipeline(42), Pipeline(43), Pipeline(42)],
+        "the commands share a pipeline, then the encoder's returns"
+    );
+    assert_eq!(
+        vertex_buffers(commands),
+        [Buffer(5), Buffer(3)],
+        "the commands' buffers bind once"
+    );
+    let culls: Vec<&Command> = commands
+        .iter()
+        .filter(|command| matches!(command, Command::SetCullMode(_)))
+        .collect();
+    assert_eq!(
+        culls[1..],
+        [
+            &Command::SetCullMode(CullMode::BACK),
+            &Command::SetCullMode(CullMode::EMPTY)
+        ]
+    );
+    let draws: Vec<u32> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Draw { vertex_count, .. } => Some(*vertex_count),
+            Command::DrawIndexed { index_count, .. } => Some(*index_count),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(draws, [3, 6, 4], "the reset command draws nothing");
+}
+
+#[test]
+fn gpu_ranges_select_commands_outside_the_pass() {
+    let mut resolver = icb_resolver(render_icb(2));
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let range = |offset| ExecutionRange::Indirect {
+        buffer: buffer(9, 64),
+        offset,
+    };
+    let id = IndirectCommandBufferId(0);
+    assert!(
+        commands
+            .execute_commands(&mut resolver, id, range(2))
+            .is_err()
+    );
+    assert!(
+        commands
+            .execute_commands(&mut resolver, id, range(60))
+            .is_err()
+    );
+    commands
+        .execute_commands(&mut resolver, id, range(8))
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    let select = commands
+        .iter()
+        .position(|command| matches!(command, Command::SelectCommands { count: 2, .. }))
+        .unwrap();
+    assert!(matches!(commands[select - 2], Command::EndRendering));
+    let resume = select
+        + commands[select..]
+            .iter()
+            .position(|command| matches!(command, Command::BeginRendering(_)))
+            .unwrap();
+    assert!(
+        commands[select..resume]
+            .iter()
+            .any(|command| matches!(command, Command::Barrier(barrier)
+                if barrier.dst_stages.contains(PipelineStages::CONDITIONAL_RENDERING))),
+        "the flags are visible to conditional rendering"
+    );
+    let Command::SelectCommands { arguments, .. } = commands[select] else {
+        unreachable!()
+    };
+    let arguments = uploaded(&recording, arguments);
+    assert_eq!(double(arguments, 0), (9 << 32) + 8);
+    assert_eq!(word(arguments, 16), 2);
+    let flags = double(arguments, 8);
+
+    let gated: Vec<(usize, u64)> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| match command {
+            Command::BeginConditionalRendering { offset, .. } => Some((index, *offset)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(gated.len(), 2);
+    let flag_offset = |address: u64| {
+        let (chunk, _) = recording
+            .uploads
+            .iter()
+            .find(|(chunk, _)| (chunk.address..chunk.address + chunk.size).contains(&address))
+            .unwrap();
+        address - chunk.address
+    };
+    assert_eq!(gated[0].1, flag_offset(flags));
+    assert_eq!(gated[1].1, flag_offset(flags) + 4);
+    for &(begin, _) in &gated {
+        let end = begin
+            + commands[begin..]
+                .iter()
+                .position(|command| matches!(command, Command::EndConditionalRendering))
+                .unwrap();
+        assert_eq!(
+            count(&commands[begin..end], |command| matches!(
+                command,
+                Command::Draw { .. }
+            )),
+            1,
+            "each command's draw is gated by its flag"
+        );
+    }
+}
+
+#[test]
+fn indirect_dispatches_compile_their_variants() {
+    let types =
+        IndirectCommandType::CONCURRENT_DISPATCH | IndirectCommandType::CONCURRENT_DISPATCH_THREADS;
+    let mut icb = IndirectCommandBuffer::new(&capabilities(), &icb_descriptor(types), 2).unwrap();
+    let state = kernel_state(true);
+    let threads = |width| Size {
+        width,
+        height: 1,
+        depth: 1,
+    };
+    let mut first = icb.compute_command(0).unwrap();
+    first.set_compute_pipeline_state(&state).unwrap();
+    first.set_kernel_buffer(buffer(4, 64), 0, 0).unwrap();
+    first
+        .concurrent_dispatch_threadgroups([2, 1, 1], threads(64))
+        .unwrap();
+    let mut second = icb.compute_command(1).unwrap();
+    second.set_compute_pipeline_state(&state).unwrap();
+    second.set_kernel_buffer(buffer(4, 64), 0, 0).unwrap();
+    second.set_barrier();
+    second
+        .concurrent_dispatch_threads([100, 1, 1], threads(32))
+        .unwrap();
+    let mut resolver = MockResolver {
+        compute_states: alloc::vec![state],
+        indirect: alloc::vec![Arc::new(icb)],
+        ..MockResolver::default()
+    };
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Concurrent).unwrap();
+    commands
+        .execute_commands(
+            &mut resolver,
+            IndirectCommandBufferId(0),
+            ExecutionRange::Direct(0..2),
+        )
+        .unwrap();
+    assert_eq!(
+        commands.dispatch_threadgroups(&mut resolver, [1, 1, 1], threads(1)),
+        Err(Error::Invalid("no compute pipeline state is set")),
+        "the encoder's own state returns"
+    );
+    commands.end_encoding(&mut resolver).unwrap();
+    assert_eq!(
+        resolver.compiled.len(),
+        2,
+        "one variant per threadgroup size"
+    );
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+    let dispatches: Vec<usize> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| matches!(command, Command::Dispatch(_)).then_some(index))
+        .collect();
+    assert_eq!(commands[dispatches[0]], Command::Dispatch([2, 1, 1]));
+    assert_eq!(commands[dispatches[1]], Command::Dispatch([4, 1, 1]));
+    assert!(
+        commands[dispatches[0]..dispatches[1]].contains(&Command::Barrier(FULL)),
+        "the second command's barrier"
+    );
+}
+
+#[test]
+fn blits_reset_and_copy_indirect_commands() {
+    let types = IndirectCommandType::DRAW;
+    let empty = IndirectCommandBuffer::new(&capabilities(), &icb_descriptor(types), 3).unwrap();
+    let mut resolver = icb_resolver(render_icb(2));
+    resolver.indirect.push(Arc::new(empty));
+    let (source, destination) = (IndirectCommandBufferId(0), IndirectCommandBufferId(1));
+    let mut commands = CommandBuffer::new(FEATURES);
+    assert!(
+        commands
+            .reset_commands(&mut resolver, source, 0..1)
+            .is_err(),
+        "outside a blit encoder"
+    );
+    commands.begin_blit().unwrap();
+    commands
+        .copy_indirect_commands(&mut resolver, source, 0..2, destination, 1)
+        .unwrap();
+    assert!(
+        commands
+            .copy_indirect_commands(&mut resolver, source, 0..2, destination, 2)
+            .is_err()
+    );
+    commands
+        .reset_commands(&mut resolver, source, 1..2)
+        .unwrap();
+    commands
+        .optimize_indirect_commands(&mut resolver, destination, 0..3)
+        .unwrap();
+    assert!(
+        commands
+            .optimize_indirect_commands(&mut resolver, destination, 2..4)
+            .is_err()
+    );
+    let copied = resolver.indirect[1].commands(0..3).unwrap();
+    assert!(copied[0].action.is_none());
+    assert!(copied[1].action.is_some() && copied[2].action.is_some());
+    let reset = resolver.indirect[0].commands(0..2).unwrap();
+    assert!(reset[0].action.is_some() && reset[1].action.is_none());
 }
