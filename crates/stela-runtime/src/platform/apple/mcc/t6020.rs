@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(owner.requests()[0].written, 0x80001107);
     }
     #[test]
-    fn live_drain_retains_high_control_and_never_leaves_a_saved_ready_word() {
+    fn live_drain_keeps_high_control_and_never_leaves_a_saved_ready_word() {
         let layout = Layout::new(16).unwrap();
         let mut configuration = Configuration::clear_software_controls(layout);
         configuration.channels[63].drain_high = 0x91ab;

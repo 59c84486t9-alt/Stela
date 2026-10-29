@@ -216,7 +216,7 @@ fn exact_assigned_cardinality_constructs_below_and_at_capacity_without_stock_cou
     }
 }
 #[test]
-fn above_capacity_names_the_actual_consumer_and_never_truncates() {
+fn above_capacity_names_the_consumer_and_never_truncates() {
     let (host, mut r, a) = fixture(&contiguous(21));
     assert_eq!(
         Plan::build(&host, &r, &a).unwrap_err(),
@@ -482,7 +482,7 @@ fn mixed_core_types_share_physical_cluster_cache_and_keep_distinct_aff2() {
     assert_eq!(plan.pes()[1].identity.mpidr >> 16 & 7, 4);
 }
 #[test]
-fn same_plan_retains_roster_and_resource_revision_without_native_authority() {
+fn same_plan_keeps_roster_and_resource_revision_without_native_permission() {
     let (host, r, a) = fixture(&[0, 1]);
     let plan = Plan::build(&host, &r, &a).unwrap();
     host.revision.set(8);

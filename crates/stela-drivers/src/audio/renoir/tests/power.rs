@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn optional_source_power_off_has_actual_deadlines_and_failed_gating_keeps_pins() {
+fn optional_source_power_off_has_deadlines_and_failed_gating_keeps_pins() {
     for late in 0..3 {
         let (mut controller, device, source) = ready(1, 4096);
         controller.start().unwrap();
@@ -34,7 +34,7 @@ fn optional_source_power_off_has_actual_deadlines_and_failed_gating_keeps_pins()
 }
 
 #[test]
-fn suspended_shutdown_reproves_power_and_reset_before_releasing_actual_owners() {
+fn suspended_shutdown_reproves_power_and_reset_before_releasing_owners() {
     for power_gate in [false, true] {
         let (mut controller, device, source) = ready(1, 4096);
         controller.start().unwrap();
@@ -73,7 +73,7 @@ fn suspended_shutdown_reproves_power_and_reset_before_releasing_actual_owners() 
 }
 
 #[test]
-fn power_clock_and_actual_iova_limit_failures_do_not_publish_dma() {
+fn power_clock_and_iova_limit_failures_do_not_publish_dma() {
     let (mut controller, device, source) = fixture(1);
     device.lock().unwrap().power_never = true;
     assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));

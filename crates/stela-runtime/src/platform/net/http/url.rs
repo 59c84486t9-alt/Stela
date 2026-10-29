@@ -127,7 +127,7 @@ impl<'a> Url<'a> {
 mod tests {
     use super::*;
     #[test]
-    fn signed_request_target_and_numeric_authority_remain_exact() {
+    fn signed_request_target_and_numeric_permission_remain_exact() {
         let raw = "https://CDN.example:8443/a/../b%2fc?key=%2B%20&sig=a%2fb%3D";
         let url = Url::parse(raw).unwrap();
         assert_eq!(url.as_str(), raw);

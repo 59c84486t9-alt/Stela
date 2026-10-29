@@ -122,7 +122,7 @@ fn preparation_refusal_preserves_source_and_owner_reason_without_execution() {
 }
 
 #[test]
-fn warm_controls_reuse_digest_but_observe_every_actual_id_profile_and_missing_input() {
+fn warm_controls_reuse_digest_but_observe_every_id_profile_and_missing_input() {
     let (mut machine, _) = fixture();
     prepare_artifact(&mut machine, BINDING).unwrap();
     let original = capture_controls(&machine).unwrap();
@@ -285,7 +285,7 @@ fn repeated_preparation_reuses_only_immutable_artifact_and_refetches_changed_sou
 }
 
 #[test]
-fn actual_return_shares_immutable_provenance_after_artifact_replacement() {
+fn return_shares_immutable_provenance_after_artifact_replacement() {
     let (mut machine, ram) = fixture();
     let bytes = source_window(machine.cpu.pc, &machine.breakpoints, &machine.traces);
     let run = prepare(
@@ -354,7 +354,7 @@ fn warm_revalidation_reads_the_entire_maximum_compiler_window() {
 }
 
 #[test]
-fn unchanged_source_requires_both_actual_chip_policies_and_withheld_features() {
+fn unchanged_source_requires_both_chip_policies_and_withheld_features() {
     let (mut machine, _) = fixture();
     let first = prepare_artifact(&mut machine, BINDING).unwrap();
     let chip = machine.profile.chip;
@@ -571,7 +571,7 @@ fn cached_code_never_bypasses_current_fetch_translation_or_execute_permission() 
     ));
 }
 #[test]
-fn retained_capacities_are_bounded_and_owner_budget_can_only_tighten() {
+fn kept_capacities_are_bounded_and_owner_budget_can_only_tighten() {
     let (mut machine, _) = fixture();
     let first = prepare_artifact(&mut machine, BINDING).unwrap();
     let mut cache = ArtifactCache::default();
@@ -1016,7 +1016,7 @@ fn high_water_slots_release_for_tiny_artifact_and_zero_budget() {
 }
 
 #[test]
-fn oversized_slot_buffer_does_not_prevent_retaining_controls_after_eviction() {
+fn oversized_slot_buffer_does_not_prevent_keeping_controls_after_eviction() {
     let (machine, _, _) = branch_artifacts(1);
     let controls = capture_controls(&machine).unwrap();
     let mut cache = ArtifactCache::default();
@@ -1036,7 +1036,7 @@ fn oversized_slot_buffer_does_not_prevent_retaining_controls_after_eviction() {
 }
 
 #[test]
-fn varied_payload_capacity_replacement_and_controls_changes_charge_actual_storage() {
+fn varied_payload_capacity_replacement_and_controls_changes_charge_storage() {
     let (mut machine, _, artifacts) = branch_artifacts(3);
     let original_controls = capture_controls(&machine).unwrap();
     let mut cache = ArtifactCache::default();
@@ -1130,7 +1130,7 @@ fn growth_failure_returns_prepared_uncached_code_without_losing_valid_entries() 
 }
 
 #[test]
-fn growth_arithmetic_overflow_declines_without_mutating_retained_cache() {
+fn growth_arithmetic_overflow_declines_without_mutating_kept_cache() {
     let (machine, _, _) = branch_artifacts(3);
     let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;
     let initial = cache.stats();

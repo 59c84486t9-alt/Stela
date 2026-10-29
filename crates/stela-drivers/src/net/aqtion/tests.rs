@@ -789,7 +789,7 @@ fn native_b1_and_antigua_initialize_real_rings_transfer_and_wrap() {
     }
 }
 #[test]
-fn bad_rx_metadata_and_fragment_chains_are_not_fabricated_as_frames() {
+fn bad_rx_metadata_and_fragment_chains_are_not_invented_as_frames() {
     let (mut net, peer, _, _) = setup(0x07b1);
     net.start().unwrap();
     peer.set(0x370, 0x100);
@@ -810,7 +810,7 @@ fn bad_rx_metadata_and_fragment_chains_are_not_fabricated_as_frames() {
     net.retire().unwrap();
 }
 #[test]
-fn genuine_stop_and_dma_drain_failures_retain_all_resources_for_retry() {
+fn stop_and_dma_drain_failures_keep_all_resources_for_retry() {
     let (mut net, peer, domain, dropped) = setup(0x04c0);
     net.start().unwrap();
     peer.fault.set(Fault::QueueStop);
@@ -883,7 +883,7 @@ fn unsupported_coherent_dma_cannot_be_silently_replaced_with_a_fence() {
 }
 
 #[test]
-fn ordinary_suspend_stops_dma_before_d3_and_retains_the_resumable_epoch() {
+fn ordinary_suspend_stops_dma_before_d3_and_keeps_the_resumable_epoch() {
     let (mut net, peer, domain, dropped) = setup(0x07b1);
     let config = net.function.as_mut().unwrap().config();
     config.write16(6, 1 << 4);
@@ -1249,7 +1249,7 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
 }
 
 #[test]
-fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
+fn initial_native_d0_failure_keeps_uninitialized_owner_without_mmio() {
     let (mut net, peer, domain, dropped) = setup_with_memory(0x07b1, false);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     // Model attach before Memory allocation, using its power helper.
@@ -1283,7 +1283,7 @@ fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
 }
 
 #[test]
-fn modeled_removed_config_resume_retains_owners_and_never_uses_powered_off_mmio() {
+fn modeled_removed_config_resume_keeps_owners_and_never_uses_powered_off_mmio() {
     for device in [0x07b1, 0x04c0] {
         let (mut net, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
@@ -1530,7 +1530,7 @@ fn assert_bus_master_rejection(body: impl FnOnce()) {
     assert!(message.contains("PCI bus mastering must be disabled before DMA drain or unmap"));
 }
 #[test]
-fn model_rejects_dma_drain_before_native_bus_master_clear_and_retains_pending_writes() {
+fn model_rejects_dma_drain_before_native_bus_master_clear_and_keeps_pending_writes() {
     for device in [0x07b1, 0x04c0] {
         let (mut net, peer, domain, dropped) = setup(device);
         net.start().unwrap();
@@ -1636,7 +1636,7 @@ fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
 }
 
 #[test]
-fn model_rejects_unmap_after_native_bus_master_reenable_and_retains_dma() {
+fn model_rejects_unmap_after_native_bus_master_reenable_and_keeps_dma() {
     for device in [0x07b1, 0x04c0] {
         let (mut net, _, domain, dropped) = setup(device);
         net.start().unwrap();

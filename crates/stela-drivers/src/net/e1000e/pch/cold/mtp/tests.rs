@@ -117,7 +117,7 @@ fn unknown_board_identity_refuses_before_config_and_observed_absence_is_not_unkn
 }
 #[test]
 #[ignore = "oracle: STELA_E1000E_PCH_MTP_DMI_ORACLE"]
-fn unchanged_dmi_matches_and_actual_quirk_table_preserve_byte_string_semantics() {
+fn unchanged_dmi_matches_and_quirk_table_preserve_byte_string_semantics() {
     const V: [Option<&[u8]>; 8] = [
         None,
         Some(b""),
@@ -296,7 +296,7 @@ fn retries_never_swallow_access_removal_or_uncertain_owner_cleanup() {
     }
 }
 #[test]
-fn actual_cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
+fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
     for device in [0x550a, 0x57b3] {
         for kind in 0..3 {
             let (state, released, io, timer) = spt::tests::fixture_spt();

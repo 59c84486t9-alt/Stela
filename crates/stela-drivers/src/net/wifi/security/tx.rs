@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_nonce_has_no_fabricated_host_counter_or_header() {
+    fn firmware_nonce_has_no_invented_host_counter_or_header() {
         let (mut slot, key) = installed(TransmitSeed::FIRMWARE_FRESH);
         assert_eq!(slot.host_tx_counter(key), Err(Error::WrongNonceOwner));
         assert!(matches!(

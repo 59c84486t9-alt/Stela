@@ -515,7 +515,7 @@ fn queue_reset_flushes_a_partial_command_and_unknown_commands_refuse() {
     assert!(c.read(STATUS, Width::Byte, &mut a).is_err());
 }
 #[test]
-fn retained_pauses_keep_masked_response_ownership_and_independent_inputs() {
+fn kept_pauses_keep_masked_response_ownership_and_independent_inputs() {
     let mut c = controller();
     let mut latch = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut latch);
@@ -793,7 +793,7 @@ fn routed_outputs_require_unique_real_deasserted_owners_and_valid_vectors() {
 }
 
 #[test]
-fn actual_pmic_alarm_time_and_output_continue_while_spmi_master_clock_is_paused() {
+fn pmic_alarm_time_and_output_continue_while_spmi_master_clock_is_paused() {
     use {
         crate::platform::apple::counter::FREQUENCY_HZ, crate::platform::apple::pmu::Pmu,
         stela_soc_data::pmu::ClockOffset, stela_soc_data::pmu::Rtc,
@@ -1088,7 +1088,7 @@ fn fifo_byte_capacity_and_refused_final_payload_preserve_transaction_ownership()
 
 #[test]
 #[ignore = "oracle: STELA_TEST_SPMI_DT"]
-fn original_j314s_all_seven_gen1_resource_views_match_the_qualified_contract() {
+fn original_j314s_all_seven_gen1_resource_views_match_the_checked_contract() {
     use stela_contracts::adt::Node;
     let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
     assert_eq!(
@@ -1130,7 +1130,7 @@ fn original_j314s_all_seven_gen1_resource_views_match_the_qualified_contract() {
     assert_eq!(controllers, 7);
 }
 #[test]
-fn unsupported_slave_preserves_unconsumed_payload_and_never_fabricates_ack() {
+fn unsupported_slave_preserves_unconsumed_payload_and_never_invents_ack() {
     use alloc::rc::Rc;
     use core::cell::Cell;
     struct Refused {
@@ -1244,7 +1244,7 @@ fn original_gen1_layout_vector_depth_and_counter_tables_are_source_pinned() {
     );
 }
 #[test]
-fn gen1_only_zero_control_reset_is_qualified_and_retained_pauses_keep_owners() {
+fn gen1_only_zero_control_reset_is_checked_and_kept_pauses_keep_owners() {
     let mut c = configured(Profile::Gen1, 192, 256);
     let mut latch = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut latch);

@@ -182,7 +182,7 @@ fn mapped(
     }
 }
 #[test]
-fn queued_io_requires_the_same_real_dispatcher_and_actual_port() {
+fn queued_io_requires_the_same_real_dispatcher_and_port() {
     let (broker, mut service, owners, mut ram, mut dart, mut sync) = setup();
     let key = Key::Authored(Rc::new(()));
     assert!(matches!(
@@ -232,7 +232,7 @@ fn queued_io_requires_the_same_real_dispatcher_and_actual_port() {
     ));
 }
 #[test]
-fn trace_write_retains_later_page_and_within_page_prefixes_without_replay() {
+fn trace_write_keeps_later_page_and_within_page_prefixes_without_replay() {
     for short in [None, Some(3)] {
         let (broker, mut service, owners, mut ram, mut dart, mut sync) = setup();
         let mut client = mapped(

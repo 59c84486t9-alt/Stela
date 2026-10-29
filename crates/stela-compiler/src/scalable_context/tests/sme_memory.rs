@@ -306,7 +306,7 @@ fn complete_body_requirements_fold_every_memory_instruction() {
 // Append to scalable_context/sme_memory_tests.rs; reuse its source/profile/target helpers.
 
 #[test]
-fn prepared_memory_metadata_retains_per_pc_features_helpers_and_quantities() {
+fn prepared_memory_metadata_keeps_per_pc_features_helpers_and_quantities() {
     use crate::aarch64::scalable::execution::{
         GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements,
     };

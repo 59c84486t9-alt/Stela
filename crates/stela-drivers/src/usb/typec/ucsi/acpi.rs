@@ -209,7 +209,7 @@ mod tests {
         (memory, mailbox)
     }
     #[test]
-    fn versions_use_actual_mailbox_layout_and_dsm_synchronization() {
+    fn versions_use_mailbox_layout_and_dsm_synchronization() {
         for (version, size, offset, outgoing) in [
             (0x0120, 48, 32, 16),
             (0x0200, 528, 272, 256),

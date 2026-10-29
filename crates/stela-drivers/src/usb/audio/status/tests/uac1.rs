@@ -40,7 +40,7 @@ fn notice(raw: [u8; 2]) -> StatusEvent {
 }
 
 #[test]
-fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
+fn uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(4));
@@ -82,7 +82,7 @@ fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
 }
 
 #[test]
-fn actual_uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() {
+fn uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(4));
@@ -113,7 +113,7 @@ fn actual_uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() 
 }
 
 #[test]
-fn uac1_two_byte_endpoint_admission_uses_actual_protocol_and_exclusive_dci() {
+fn uac1_two_byte_endpoint_admission_uses_protocol_and_exclusive_dci() {
     for speed in [xhci::FULL_SPEED, xhci::HIGH_SPEED] {
         let raw = configuration(2);
         let all = xhci::interfaces(&raw);
@@ -144,7 +144,7 @@ fn uac1_two_byte_endpoint_admission_uses_actual_protocol_and_exclusive_dci() {
 }
 
 #[test]
-fn actual_uac1_stall_usb_clear_failure_retains_dma_until_real_recovery() {
+fn uac1_stall_usb_clear_failure_keeps_dma_until_real_recovery() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(2));
@@ -197,7 +197,7 @@ fn actual_uac1_stall_usb_clear_failure_retains_dma_until_real_recovery() {
 }
 
 #[test]
-fn actual_uac1_cached_event_refuses_retired_device_before_any_mmio() {
+fn uac1_cached_event_refuses_retired_device_before_any_mmio() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(2));

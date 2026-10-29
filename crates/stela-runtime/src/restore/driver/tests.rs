@@ -262,7 +262,7 @@ fn blocked_data_keeps_control_live_and_limits_open_handles() {
     assert!(matches!(d.poll(&mut h), Poll::Ready(Err(_))));
 }
 #[test]
-fn refusal_retains_request_never_completes_and_cancels_once() {
+fn refusal_keeps_request_never_completes_and_cancels_once() {
     let (mut d, mut h) = setup();
     restoring(&mut d, &mut h);
     let r = request("NORData", false);

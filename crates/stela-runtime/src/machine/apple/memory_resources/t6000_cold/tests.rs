@@ -114,7 +114,7 @@ fn full_opaque_control_image_and_weights_are_separate_from_capacity() {
     assert_eq!(zero.weights(), &[7; 32]);
 }
 #[test]
-fn input_free_source_installs_one_same_ram_joint_owner_with_actual_local_ptd() {
+fn input_free_source_installs_one_same_ram_joint_owner_with_local_ptd() {
     let (controller, direct, ram, power) = components();
     let plan = Plan::prepare_resources(
         &controller,
@@ -198,7 +198,7 @@ fn input_free_source_installs_one_same_ram_joint_owner_with_actual_local_ptd() {
     assert_eq!(owner.local_notifications().unwrap().asserted(), 0); // No IRQ enable or event invented.
 }
 #[test]
-fn switched_input_samples_actual_pmgr_and_preserves_clock_gating() {
+fn switched_input_samples_pmgr_and_preserves_clock_gating() {
     let (controller, direct, ram, mut power) = components();
     power.resources[0].clocks.push(id());
     let plan = Plan::prepare_resources(

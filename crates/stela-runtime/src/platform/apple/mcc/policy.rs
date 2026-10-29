@@ -293,7 +293,7 @@ mod tests {
         Controller::initialized_cacheless(configuration(), lifecycle()).unwrap()
     }
     #[test]
-    fn zero_way_source_sequence_completes_from_actual_empty_resources_only() {
+    fn zero_way_source_sequence_completes_from_empty_resources_only() {
         let owner = owner();
         assert_eq!(owner.cache_resource(), CacheResource::Cacheless);
         let mut latch = InterruptLatch::new();
@@ -379,7 +379,7 @@ mod tests {
         assert!(owner.policy(0, 0, 32).is_err());
     }
     #[test]
-    fn actual_policy_borrow_freezes_owner_and_rejects_configuration_or_lifecycle_races() {
+    fn policy_borrow_freezes_owner_and_rejects_configuration_or_lifecycle_races() {
         let owner = owner();
         let mut alias = owner.view(0).unwrap();
         let mut latch = InterruptLatch::new();
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(owner.policy(0, 0, 0).unwrap().persistence(), None);
     }
     #[test]
-    fn persistence_and_deprioritization_retire_only_qualified_empty_resource_effects() {
+    fn persistence_and_deprioritization_retire_only_checked_empty_resource_effects() {
         let owner = owner();
         let mut view = owner.view(3).unwrap();
         let mut latch = InterruptLatch::new();

@@ -24,7 +24,7 @@ fn reference_fixture() -> (Services, Arc<Counts>) {
 }
 
 #[test]
-fn device_and_power_references_keep_actual_type_through_arguments() {
+fn device_and_power_references_keep_type_through_arguments() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let (services, counts) = reference_fixture();
     // SAFETY: this serialized fixture transfers its complete provider
@@ -88,7 +88,7 @@ fn device_and_power_references_keep_actual_type_through_arguments() {
 }
 
 #[test]
-fn wire_reference_metadata_retains_unrecognized_codes() {
+fn wire_reference_metadata_keeps_unrecognized_codes() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let (services, _) = reference_fixture();
     // SAFETY: the fixture owns all callbacks and mappings through this real Session.

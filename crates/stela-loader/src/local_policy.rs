@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn the_unverified_authority_refuses_every_policy_by_name() {
+    fn the_unverified_permission_refuses_every_policy_by_name() {
         let bytes = policy(&[0xab; 48], &[0x11; 16]);
         let mut parsed = LocalPolicy::parse("G/LocalPolicy/x.img4", &bytes).unwrap();
         let error = format!("{:#}", parsed.verify(&Unverified).unwrap_err());

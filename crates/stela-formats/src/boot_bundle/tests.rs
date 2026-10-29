@@ -285,7 +285,7 @@ fn verifies_loads_and_patches_into_guest_ram() -> Result<(), BundleError> {
 }
 
 #[test]
-fn external_pipe_geometry_uses_the_same_actual_framebuffer() -> Result<(), BundleError> {
+fn external_pipe_geometry_uses_the_same_framebuffer() -> Result<(), BundleError> {
     let kernel = [0xaa; 100];
     let tree = [0x11; 28];
     let patches = format!(

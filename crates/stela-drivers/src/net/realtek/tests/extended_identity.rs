@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn extended_xid_checks_aperture_before_read_and_retains_raw_and_classification() {
+fn extended_xid_checks_aperture_before_read_and_keeps_raw_and_classification() {
     struct Version {
         raw: u32,
         reads: Cell<usize>,

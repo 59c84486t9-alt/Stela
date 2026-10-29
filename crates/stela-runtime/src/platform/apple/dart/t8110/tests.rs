@@ -41,7 +41,7 @@ fn setup_version(version: u16) -> (Dart, Ram, InterruptLatch) {
 }
 
 #[test]
-fn resume_saves_and_restores_transaction_limits_and_clamp_retains_zero() {
+fn resume_saves_and_restores_transaction_limits_and_clamp_keeps_zero() {
     let mut d = Dart::new(16, None);
     let mut sink = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut sink);
@@ -476,7 +476,7 @@ fn dma_completes_prior_pages_but_stops_before_a_protected_page() {
 }
 
 #[test]
-fn quiesce_and_reset_are_distinct_from_retained_power() {
+fn quiesce_and_reset_are_distinct_from_kept_power() {
     let (mut dart, mut ram, mut sink) = setup();
     let mut a = Access::new(0, 0, &mut sink);
     dart.write(PROTECT, Width::Word, 1, &mut a).unwrap();
@@ -638,7 +638,7 @@ fn the_apf_holds_its_slices_until_sptm_locks_them() {
 /// transfer semantics. This fixture preserves that refusal.
 #[test]
 #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
-fn original_pmp_apf_programming_retains_all_slices_without_granting_dma() {
+fn original_pmp_apf_programming_keeps_all_slices_without_granting_dma() {
     let bytes = std::fs::read(
         std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
             .join("DeviceTree.j473ap.adt"),

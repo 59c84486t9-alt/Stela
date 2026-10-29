@@ -17,7 +17,7 @@ fn parts_for(chip: u32) -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<
 }
 
 #[test]
-fn all_actual_asic_modes_match_source_and_keep_plain_transmit_and_receive_descriptors() {
+fn all_asic_modes_match_source_and_keep_plain_transmit_and_receive_descriptors() {
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let (hardware, pages, domain, peer) = parts_for(chip);
         // These are firmware-observed control bits, with RESET/ENABLE clear.
@@ -71,7 +71,7 @@ fn independent_peer_rejects_deleted_source_lso_mode_before_any_dma_effect() {
 
 #[test]
 #[ignore = "oracle: STELA_TG3_RDMA_MODE_ORACLE"]
-fn unchanged_linux_complete_rdma_mode_matches_actual_register_and_raw_traffic() {
+fn unchanged_linux_complete_rdma_mode_matches_register_and_raw_traffic() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_RDMA_MODE_ORACLE").expect("fresh original-source trace required"),
     )

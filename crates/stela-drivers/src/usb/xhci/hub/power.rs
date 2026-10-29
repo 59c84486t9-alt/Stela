@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn external_hub_suspend_resume_observes_actual_link_and_retains_identity_current() {
+    fn external_hub_suspend_resume_observes_link_and_keeps_identity_current() {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
             for context in [32, 64] {
                 let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);

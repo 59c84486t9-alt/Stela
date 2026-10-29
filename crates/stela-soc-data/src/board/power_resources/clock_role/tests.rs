@@ -75,7 +75,7 @@ fn selected(states: &PowerStates) -> &super::super::PowerResource {
 }
 
 #[test]
-fn each_qualified_provider_pair_requires_its_matching_bus_and_actual_binding() {
+fn each_checked_provider_pair_requires_its_matching_bus_and_binding() {
     let binding = words(&[0x99, 0x636c6b47]);
     for (bus, controller) in PROVIDER_BINDINGS {
         let mut bytes = tree(Some(&binding), controller, &[], &[], false);
@@ -164,7 +164,7 @@ fn normal_consumers_child_gates_and_provider_power_remain_enforced() {
 }
 
 #[test]
-fn compatible_or_names_cannot_replace_actual_function_provider_binding() {
+fn compatible_or_names_cannot_replace_function_provider_binding() {
     for binding in [
         None,
         Some(words(&[0x98, 0x636c6b47])),

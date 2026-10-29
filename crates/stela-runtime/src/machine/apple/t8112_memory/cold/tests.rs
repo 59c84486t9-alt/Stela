@@ -156,7 +156,7 @@ fn only_disable_argument_and_live_matching_geometry_can_prepare() {
 }
 
 #[test]
-fn actual_clock_gated_parent_initializes_both_real_sinks_paused_on_same_ram() {
+fn clock_gated_parent_initializes_both_real_sinks_paused_on_same_ram() {
     let (controller, cache, ram, states) = components();
     let plan = Plan::prepare_resources(
         &controller,

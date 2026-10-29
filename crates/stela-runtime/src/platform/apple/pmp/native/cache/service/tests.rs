@@ -592,7 +592,7 @@ fn real_initialized_cache_and_ptd_start_stop_restart_preserve_deferred_work() {
     assert!(f.service.publisher.awaiting_publication());
 }
 #[test]
-fn evaluated_gate_preserves_actual_pending_command_and_never_echoes_an_ack() {
+fn evaluated_gate_preserves_pending_command_and_never_echoes_an_ack() {
     let mut f = Fixture::new();
     f.start();
     f.command(0xabc, 0);
@@ -734,7 +734,7 @@ fn equal_real_arrivals_copy_scale_and_queue_before_ack_without_callback_completi
     )));
 }
 #[test]
-fn stop_after_pending_clear_retains_tail_and_refuses_restart_before_effects() {
+fn stop_after_pending_clear_keeps_tail_and_refuses_restart_before_effects() {
     let mut f = Fixture::new();
     f.start();
     f.activate_manager();
@@ -830,7 +830,7 @@ fn consumed_budget_payload_is_not_replayed_after_real_cache_pause_and_new_input(
     assert_ne!(entry.metadata & NEW_DATA, 0);
 }
 #[test]
-fn retired_exit_trace_refusal_keeps_single_actual_ack_and_does_not_replay_trace() {
+fn retired_exit_trace_refusal_keeps_single_ack_and_does_not_replay_trace() {
     let mut f = Fixture::new();
     f.start();
     f.activate_manager();
@@ -875,7 +875,7 @@ fn retired_exit_trace_refusal_keeps_single_actual_ack_and_does_not_replay_trace(
     );
 }
 #[test]
-fn foreign_actual_quota_bank_refuses_before_trace_or_irreversible_ptd_consumption() {
+fn foreign_quota_bank_refuses_before_trace_or_irreversible_ptd_consumption() {
     let mut f = Fixture::new();
     let mut other = Fixture::new();
     f.start();
@@ -933,7 +933,7 @@ fn consumed_zero_id_command_still_applies_real_requests_without_ack_publication(
     );
 }
 #[test]
-fn native_owner_abandonment_invalidates_retained_service_before_actual_effects() {
+fn native_owner_abandonment_invalidates_kept_service_before_effects() {
     let mut f = Fixture::new();
     f.start();
     f.activate_manager();

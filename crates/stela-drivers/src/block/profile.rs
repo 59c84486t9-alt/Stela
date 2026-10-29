@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_nested_callbacks_publish_without_acquiring_the_held_disk_lock() {
+    fn nested_callbacks_publish_without_acquiring_the_held_disk_lock() {
         let _clock = crate::test_clock::virtualize();
         let owner = Rc::new(RefCell::new(None));
         let samples = Rc::new(RefCell::new(Vec::new()));

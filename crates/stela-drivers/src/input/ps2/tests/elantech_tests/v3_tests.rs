@@ -28,7 +28,7 @@ fn packet(crc: bool, head: bool, fingers: u8, x: u16, y: u16, buttons: u8) -> [u
     ]
 }
 #[test]
-fn v3_actual_fast_queries_rw_mode_and_every_readback_byte_are_source_admitted() {
+fn v3_fast_queries_rw_mode_and_every_readback_byte_are_source_admitted() {
     for firmware in [0x050001, 0x051001, 0x054001, 0x055001] {
         for byte in 0..=255 {
             let (mut c, h) = target(firmware);
@@ -59,7 +59,7 @@ fn v3_actual_fast_queries_rw_mode_and_every_readback_byte_are_source_admitted() 
     }
 }
 #[test]
-fn v3_head_tail_and_early_tail_keep_actual_head_provenance_and_clickpad_effects() {
+fn v3_head_tail_and_early_tail_keep_head_provenance_and_clickpad_effects() {
     for firmware in [0x050001, 0x051001, 0x054001, 0x055001] {
         let (mut c, h) = configured(firmware);
         let crc = firmware & 0x4000 != 0;
@@ -102,7 +102,7 @@ fn v3_head_tail_and_early_tail_keep_actual_head_provenance_and_clickpad_effects(
 }
 
 #[test]
-fn v3_late_rw_mode_ack_retains_actual_effect_without_readback_reporting_or_replay() {
+fn v3_late_rw_mode_ack_keeps_effect_without_readback_reporting_or_replay() {
     let (mut c, h) = target(0x050001);
     {
         let mut hw = h.borrow_mut();
@@ -198,7 +198,7 @@ fn v3_broken_samples_and_all_late_or_missing_query_bytes_never_arm_reporting_or_
     }
 }
 #[test]
-fn v3_debounce_invalid_signatures_stop_and_requery_retain_source_cached_head_provenance() {
+fn v3_debounce_invalid_signatures_stop_and_requery_keep_source_cached_head_provenance() {
     for firmware in [0x050001, 0x054001] {
         let (mut c, h) = configured(firmware);
         let crc = firmware & 0x4000 != 0;
@@ -232,7 +232,7 @@ fn v3_debounce_invalid_signatures_stop_and_requery_retain_source_cached_head_pro
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_V3_CONTROLS_ORACLE"]
-fn unchanged_linux_v3_configuration_matches_actual_fast_query_and_register_transactions() {
+fn unchanged_linux_v3_configuration_matches_fast_query_and_register_transactions() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_V3_CONTROLS_ORACLE").unwrap())
@@ -242,7 +242,7 @@ fn unchanged_linux_v3_configuration_matches_actual_fast_query_and_register_trans
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_V3_REPORTS_ORACLE"]
-fn unchanged_linux_v3_head_tail_reports_match_actual_configured_i8042_device() {
+fn unchanged_linux_v3_head_tail_reports_match_configured_i8042_device() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_V3_REPORTS_ORACLE").unwrap())

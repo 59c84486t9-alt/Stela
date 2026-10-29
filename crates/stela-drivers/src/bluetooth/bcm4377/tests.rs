@@ -1348,7 +1348,7 @@ fn stale_duplicate_out_of_range_cross_ring_and_corrupt_indices_fail_closed() {
     }
 }
 #[test]
-fn observation_bound_retains_final_packet_and_first_failure() {
+fn observation_bound_keeps_final_packet_and_first_failure() {
     let (mut transport, d) = active(0x5f69);
     transport.observation_bytes = OBSERVATION_BYTES - 1;
     let raw = d.lock().unwrap().completion(2, 2, 0, 2, &[0xff, 0], false);
@@ -1359,7 +1359,7 @@ fn observation_bound_retains_final_packet_and_first_failure() {
     assert_eq!(transport.close(), Err(Error::ObservationLimit));
 }
 #[test]
-fn failed_root_retirement_is_attempted_once_and_all_actual_owners_survive() {
+fn failed_root_retirement_is_attempted_once_and_all_owners_survive() {
     let (mut transport, d) = active(0x5f71);
     d.lock().unwrap().fail_retire = true;
     let error = transport.close().unwrap_err();
@@ -1377,7 +1377,7 @@ fn failed_root_retirement_is_attempted_once_and_all_actual_owners_survive() {
     assert!(!domain.stopped);
 }
 #[test]
-fn unmap_failure_preserves_actual_mapping_and_cannot_restart_retirement() {
+fn unmap_failure_preserves_mapping_and_cannot_restart_retirement() {
     let (mut transport, d) = active(0x5fa0);
     d.lock().unwrap().domain.0.lock().unwrap().fail_unmap = true;
     assert_eq!(
@@ -1453,7 +1453,7 @@ fn every_start_visibility_error_preserves_terminal_buffers_and_root_owner() {
 }
 
 #[test]
-fn tx_capacity_and_rx_malformed_lengths_retain_original_bytes() {
+fn tx_capacity_and_rx_malformed_lengths_keep_original_bytes() {
     let (mut transport, d) = active(0x5f69);
     let mut command = vec![0x98, 0xfd, 255];
     command.extend_from_slice(&[0x5a; 255]);
@@ -1570,7 +1570,7 @@ fn every_live_send_poll_and_close_mmio_effect_error_stops_once() {
     }
 }
 #[test]
-fn genuine_retirement_cancels_unacknowledged_tx_without_delivery_claim() {
+fn retirement_cancels_unacknowledged_tx_without_delivery_claim() {
     let (mut transport, d) = active(0x5fa0);
     d.lock().unwrap().acknowledge = false;
     let submission = transport.send(Kind::Acl, &[1, 0, 0, 0]).unwrap();
@@ -1790,7 +1790,7 @@ fn setup_fixture(device: u16, stepping: &str, replacement: bool, fault: HciFault
     (Transport::new(p, &mut a).unwrap(), d, provider, expected)
 }
 #[test]
-fn actual_ipc_initialization_uses_source_variant_calibration_ptb_and_address() {
+fn ipc_initialization_uses_source_variant_calibration_ptb_and_address() {
     for (device, stepping) in [
         (0x5fa0, "a0"),
         (0x5f69, "b1"),
@@ -1847,7 +1847,7 @@ fn actual_ipc_initialization_uses_source_variant_calibration_ptb_and_address() {
     }
 }
 #[test]
-fn native_ack_or_status_alone_cannot_finish_hci_and_credits_require_actual_grant() {
+fn native_ack_or_status_alone_cannot_finish_hci_and_credits_require_grant() {
     for fault in [
         HciFault::AckOnly(0),
         HciFault::StatusOnly(0),
@@ -1886,7 +1886,7 @@ fn native_ack_or_status_alone_cannot_finish_hci_and_credits_require_actual_grant
     );
 }
 #[test]
-fn actual_controller_rejections_stop_required_upload_but_4377_ptb_is_explicit() {
+fn controller_rejections_stop_required_upload_but_4377_ptb_is_explicit() {
     for at in 0..7 {
         let (mut transport, d, provider, _) =
             setup_fixture(0x5f69, "b1", false, HciFault::Reject(at, 0x0c));
@@ -1962,7 +1962,7 @@ fn native_malformed_wrong_duplicate_and_late_hci_are_terminal_with_raw_transcrip
     }
 }
 #[test]
-fn actual_address_property_requires_real_write_and_matching_readback() {
+fn address_property_requires_real_write_and_matching_readback() {
     for fault in [HciFault::IgnoreAddressWrite, HciFault::InvalidReadback] {
         let (mut transport, _, provider, _) = setup_fixture(0x5f72, "z9", true, fault);
         assert!(matches!(
@@ -2003,7 +2003,7 @@ fn actual_address_property_requires_real_write_and_matching_readback() {
     }
 }
 #[test]
-fn metadata_labels_do_not_supply_actual_board_calibration_or_live_hci_credits() {
+fn metadata_labels_do_not_supply_board_calibration_or_live_hci_credits() {
     for property in [None, Some(vec![]), Some(vec![0; 4 * 1024 * 1024 + 1])] {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
         let diagnostic = property
@@ -2070,7 +2070,7 @@ impl Provider for SetupProvider {
     }
 }
 #[test]
-fn actual_ptb_missing_fallback_and_nonmissing_refusal_preserve_completed_calibration() {
+fn ptb_missing_fallback_and_nonmissing_refusal_preserve_completed_calibration() {
     let (mut transport, d, _, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     let ptb = (0..415).map(|n| (n % 239) as u8).collect::<Vec<_>>();
     let fallback = setup_catalog(&d, &ptb, true);
@@ -2120,7 +2120,7 @@ fn actual_ptb_missing_fallback_and_nonmissing_refusal_preserve_completed_calibra
     }
 }
 #[test]
-fn actual_ptb_capacity_refuses_without_truncated_hci_or_fallback() {
+fn ptb_capacity_refuses_without_truncated_hci_or_fallback() {
     for (device, ptb) in [
         (0x5fa0, vec![0xa1; 256]),
         (0x5f69, vec![0xa2; 4 * 1024 * 1024 + 1]),
@@ -2163,7 +2163,7 @@ fn initialization_transcript_bound_keeps_real_completion_before_terminal_refusal
     assert_eq!(d.lock().unwrap().retire, 1);
 }
 #[test]
-fn every_native_setup_mmio_effect_error_retains_first_fault_and_actual_domain() {
+fn every_native_setup_mmio_effect_error_keeps_first_fault_and_domain() {
     let first = {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
         transport.start(&provider).unwrap();
@@ -2229,7 +2229,7 @@ fn already_received_same_opcode_cannot_authorize_a_new_hci_command() {
     assert_eq!(observed.packets[0].bytes, [0x0e, 4, 1, 0x97, 0xfd, 0]);
 }
 #[test]
-fn actual_status_then_complete_preserves_both_events_and_only_complete_finishes() {
+fn status_then_complete_preserves_both_events_and_only_complete_finishes() {
     let (mut transport, _, provider, expected) =
         setup_fixture(0x5f69, "b1", false, HciFault::StatusThenComplete(0));
     transport.initialize(&provider).unwrap();

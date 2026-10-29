@@ -938,7 +938,7 @@ fn gsm_allocation_failure_child() {
     assert_eq!(counts.reservation_dropped.load(Ordering::SeqCst), 0);
 }
 #[test]
-fn gsm_actual_metadata_allocation_failure_is_recoverable() {
+fn gsm_metadata_allocation_failure_is_recoverable() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "gsm_allocation_failure_child", "--nocapture"])
         .env("STELA_INTEL_GSM_ALLOC_FAIL", "1")

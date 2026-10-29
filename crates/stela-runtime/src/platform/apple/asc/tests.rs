@@ -357,7 +357,7 @@ impl Firmware for Retained {
 }
 
 #[test]
-fn retained_halt_keeps_mailboxes_state_and_cpu_work_until_resume() {
+fn kept_halt_keeps_mailboxes_state_and_cpu_work_until_resume() {
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
     let mut asc = Asc::new(

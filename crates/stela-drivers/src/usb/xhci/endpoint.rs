@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn superspeed_companion_controls_burst_and_actual_periodic_payload() {
+    fn superspeed_companion_controls_burst_and_periodic_payload() {
         for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
             for burst in 0..=15 {
                 let mut ep = endpoint(2, 1024, 0);

@@ -174,7 +174,7 @@ mod tests {
         snapshot
     }
     #[test]
-    fn actual_amd64_controls_hidden_attributes_and_encryption_are_required() {
+    fn amd64_controls_hidden_attributes_and_encryption_are_required() {
         let source = snapshot();
         assert!(architectural(&source));
         assert!(State::from_snapshot(&source, 52).is_ok());

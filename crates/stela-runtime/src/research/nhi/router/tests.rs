@@ -558,7 +558,7 @@ fn e2e_and_unimplemented_modes_refuse_atomically_but_unused_rings_can_stop() {
 }
 
 #[test]
-fn programmed_control_dma_retains_queued_replies_and_effects_across_faults() {
+fn programmed_control_dma_keeps_queued_replies_and_effects_across_faults() {
     use super::super::{Error as NhiError, Layout, Nhi, Profile};
     use {
         stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,

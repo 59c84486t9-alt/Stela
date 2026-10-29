@@ -423,7 +423,7 @@ unsafe extern "C" {
     ) -> u32;
 }
 #[test]
-fn real_allocation_counter_refusal_retains_every_owner_and_can_retry() {
+fn real_allocation_counter_refusal_keeps_every_owner_and_can_retry() {
     let (config, owner, source, domain, c) = inputs();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
@@ -447,7 +447,7 @@ fn real_allocation_counter_refusal_retains_every_owner_and_can_retry() {
     assert_eq!(c.values(), [1, 1, 1, 1, 3]);
 }
 #[test]
-fn drop_uncertainty_retains_whole_owned_bundle_without_extending_borrows() {
+fn drop_uncertainty_keeps_whole_owned_bundle_without_extending_borrows() {
     let (config, owner, source, domain, c) = inputs();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
@@ -497,7 +497,7 @@ fn lost_context_after_config_and_live_allocation_drop_keep_all_storage_alive() {
     assert_eq!(c.values(), [0; 5]);
 }
 #[test]
-fn actual_configured_geometry_refusal_precedes_allocation_and_binding() {
+fn configured_geometry_refusal_precedes_allocation_and_binding() {
     let (config, owner, source, domain, c) = inputs();
     assert!(matches!(
         // SAFETY: the model device, its pages and its domain belong to this test alone; no
@@ -510,7 +510,7 @@ fn actual_configured_geometry_refusal_precedes_allocation_and_binding() {
 }
 
 #[test]
-fn native_failure_and_provider_error_context_loss_retain_all_owned_inputs() {
+fn native_failure_and_provider_error_context_loss_keep_all_owned_inputs() {
     let (mut config, owner, source, domain, c) = inputs();
     config.words[0] ^= 1;
     c.lose_context.store(true, Ordering::SeqCst);
@@ -572,7 +572,7 @@ fn metadata_context_loss_precedes_provider_allocation_and_config_access() {
 }
 
 #[test]
-fn every_config_read_loss_stops_before_the_next_actual_effect() {
+fn every_config_read_loss_stops_before_the_next_effect() {
     for word in 0..16 {
         for (mismatch, transient) in [(false, false), (true, false), (false, true), (true, true)] {
             let (mut config, owner, source, domain, c) = inputs();
@@ -610,7 +610,7 @@ fn handle(d: &mut PreparedDevice<Config>) -> *mut c_void {
     unsafe { Pin::new_unchecked((&mut *this.pci.get()).as_mut().unwrap()).as_raw() }
 }
 #[test]
-fn actual_pci_callback_failures_widths_and_latched_uncertainty() {
+fn pci_callback_failures_widths_and_latched_uncertainty() {
     let (config, owner, source, domain, c) = inputs();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.

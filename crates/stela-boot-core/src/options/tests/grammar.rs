@@ -121,7 +121,7 @@ fn normalization_follows_all_assignments_and_preserves_repeated_ranges() {
 }
 
 #[test]
-fn producer_errors_retain_the_argument_that_failed() {
+fn producer_errors_keep_the_argument_that_failed() {
     for (line, argument) in [
         ("--system --storage bad", TargetArgument::Storage),
         ("--system --nor bad", TargetArgument::Nor),

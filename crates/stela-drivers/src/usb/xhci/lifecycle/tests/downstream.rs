@@ -115,7 +115,7 @@ fn downstream_reset_failure_never_addresses_a_replacement() {
 }
 
 #[test]
-fn downstream_reset_reobserves_actual_root_and_hub_power_before_endpoint_retirement() {
+fn downstream_reset_reobserves_root_and_hub_power_before_endpoint_retirement() {
     for root_lost in [false, true] {
         let mut memory = vec![0u64; 512 * 1024];
         let start = memory.as_mut_ptr() as u64;

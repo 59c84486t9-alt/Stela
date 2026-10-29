@@ -700,8 +700,7 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.hci.io.writes.len(), 1);
     }
     #[test]
-    fn ordinary_reset_after_vendor_setup_forwards_actual_completion_and_credits_without_fd98_reapply()
-     {
+    fn ordinary_reset_after_vendor_setup_forwards_completion_and_credits_without_fd98_reapply() {
         let mut s = Session::start(
             hci(Model {
                 reset_credits: 3,
@@ -740,7 +739,7 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.lifecycle(), Lifecycle::Running);
     }
     #[test]
-    fn ordinary_reset_retires_active_voice_and_partial_media_until_new_actual_voice_selection() {
+    fn ordinary_reset_retires_active_voice_and_partial_media_until_new_voice_selection() {
         let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
         s.poll().unwrap();
         s.set_voice(

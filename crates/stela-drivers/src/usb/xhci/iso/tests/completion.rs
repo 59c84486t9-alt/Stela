@@ -95,7 +95,7 @@ fn ring_xrun_and_missed_service_events() {
 }
 
 #[test]
-fn incompatible_completions_retain_tickets() {
+fn incompatible_completions_keep_tickets() {
     for code in [6, 22, 36, 99] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;

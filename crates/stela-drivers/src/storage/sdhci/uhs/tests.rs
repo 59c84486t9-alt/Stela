@@ -32,7 +32,7 @@ fn host(
 }
 
 #[test]
-fn native_sdr12_25_50_104_switch_actual_voltage_and_complete_pio_adma_io() {
+fn native_sdr12_25_50_104_switch_voltage_and_complete_pio_adma_io() {
     for (functions, caps, timing, hz, tuned) in [
         (1, CAP_SDR50, Timing::Sdr12, 20_800_000, false),
         (3, CAP_SDR50, Timing::Sdr25, 34_666_666, false),
@@ -120,7 +120,7 @@ fn native_voltage_pin_clock_and_enable_failures_power_off_before_fresh_identify(
 }
 
 #[test]
-fn native_uhs_failed_poweroff_retains_primary_and_cleanup_and_quarantines_owner() {
+fn native_uhs_failed_poweroff_keeps_primary_and_cleanup_and_quarantines_owner() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: quarantined ownership keeps backing through every refused operation.

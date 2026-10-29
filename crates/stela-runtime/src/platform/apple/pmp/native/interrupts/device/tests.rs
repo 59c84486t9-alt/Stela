@@ -177,7 +177,7 @@ fn absent_foreign_abandoned_and_dropped_line_owners_cannot_become_zero_inputs() 
 }
 
 #[test]
-fn multiple_actual_inputs_assert_line_but_ambiguous_claim_refuses_atomically() {
+fn multiple_inputs_assert_line_but_ambiguous_claim_refuses_atomically() {
     let controller = Controller::new_software(configuration(2)).unwrap();
     let mut view = controller.device();
     let owner0 = Rc::new(Cell::new(true));
@@ -235,7 +235,7 @@ fn boundary_source_and_bad_width_register_bits_are_checked_before_any_effect() {
 }
 
 #[test]
-fn actual_owner_initialization_signal_and_dispatch_use_the_shared_controller_resource() {
+fn owner_initialization_signal_and_dispatch_use_the_shared_controller_resource() {
     struct Peripheral {
         level: bool,
         line: Option<HardwareLine>,
@@ -326,7 +326,7 @@ fn actual_owner_initialization_signal_and_dispatch_use_the_shared_controller_res
 }
 
 #[test]
-fn actual_driver_retains_unmask_prefix_until_the_real_producer_is_bound() {
+fn driver_keeps_unmask_prefix_until_the_real_producer_is_bound() {
     let controller = Controller::new_software(configuration(65)).unwrap();
     let mut native = Owner::t8112(
         controller.placement(),

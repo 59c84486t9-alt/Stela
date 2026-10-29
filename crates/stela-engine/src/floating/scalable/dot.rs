@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_full_a64_enables_refuse_before_any_destination_or_status_commit() {
+    fn kept_full_a64_enables_refuse_before_any_destination_or_status_commit() {
         let (mut state, mut scalable) = setup(32);
         state.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
         let original = state.clone();

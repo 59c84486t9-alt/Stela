@@ -77,7 +77,7 @@ pub(crate) fn native(backing: &Arc<MemoryBacking>, offset: usize, bytes: usize) 
 }
 
 #[test]
-fn bind_retains_actual_storage_after_facade_drop() {
+fn bind_keeps_storage_after_facade_drop() {
     let (mut memory, base) = owned();
     memory.write(base, &[42]).unwrap();
     // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
@@ -170,7 +170,7 @@ fn bound_exact_write_preserves_neighbors_and_supports_lifecycle() {
 }
 
 #[test]
-fn guest_ro_publisher_uses_same_group_and_retains_both_aliases() {
+fn guest_ro_publisher_uses_same_group_and_keeps_both_aliases() {
     let (mut memory, _) = owned();
     let mut owner = published();
     // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
@@ -287,7 +287,7 @@ fn split_rights_and_private_file_decline_before_binding() {
 }
 
 #[test]
-fn maximum_authority_does_not_promote_current_ro_view() {
+fn maximum_permission_does_not_promote_current_ro_view() {
     let (mut memory, base) = owned();
     memory
         .protect_data(base, host_page_size().unwrap() as u64, true, false)
@@ -419,7 +419,7 @@ impl crate::memory::domain::DataPolicy for Policy {
 }
 
 #[test]
-fn actual_service_borrow_excludes_native_and_competing_facade_operations() {
+fn service_borrow_excludes_native_and_competing_facade_operations() {
     let (mut memory, base) = owned();
     let (mut facade, other) = owned();
     // SAFETY: new owned anonymous write-back storage with every writer.
@@ -454,7 +454,7 @@ fn actual_service_borrow_excludes_native_and_competing_facade_operations() {
 }
 
 #[test]
-fn service_borrow_requires_actual_domain_even_with_equal_namespace() {
+fn service_borrow_requires_domain_even_with_equal_namespace() {
     let (mut memory, base) = owned();
     let (mut other, _) = owned();
     // SAFETY: each test owns an independent software domain.

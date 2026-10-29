@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_exception_enables_refuse_before_any_architectural_write() {
+    fn kept_exception_enables_refuse_before_any_architectural_write() {
         let (mut state, mut scalable) = setup(32);
         state.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
         let old = state.clone();

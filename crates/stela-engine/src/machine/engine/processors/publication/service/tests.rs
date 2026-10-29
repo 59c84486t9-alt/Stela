@@ -160,7 +160,7 @@ fn held_roster_checks_inventory_binding_and_generation_before_membership() {
 }
 
 #[test]
-fn held_roster_requires_each_actual_frame_and_completed_hold() {
+fn held_roster_requires_each_frame_and_completed_hold() {
     let (mut inventory, _, _, stopped) = held();
     inventory.slots[1].frame = Frame::InFlight(stopped.request.generation);
     assert_eq!(
@@ -273,7 +273,7 @@ fn sparse_leaf_roster_hold_does_not_authorize_whole_processor_write() {
 }
 
 #[test]
-fn effects_require_actual_assigned_host_and_receipt_before_close_or_release() {
+fn effects_require_assigned_host_and_receipt_before_close_or_release() {
     let (mut inventory, mut owners, mut hosts, held) = held();
     let mut services = inventory.open_services(&held, 1).unwrap();
     assert!(matches!(
@@ -389,7 +389,7 @@ fn closed_session_with_weak_observer_keeps_its_identity_separate() {
 }
 
 #[test]
-fn retained_stale_command_cannot_alias_or_replay_a_reopened_session() {
+fn kept_stale_command_cannot_alias_or_replay_a_reopened_session() {
     let (mut inventory, mut owners, mut hosts, held) = held();
     let mut services = inventory.open_services(&held, 0).unwrap();
     let command = services.command(HostEffect::DiscardCode).unwrap();
@@ -422,7 +422,7 @@ fn retained_stale_command_cannot_alias_or_replay_a_reopened_session() {
 }
 
 #[test]
-fn refused_close_keeps_pending_authority_and_cannot_populate_reuse_slot() {
+fn refused_close_keeps_pending_permission_and_cannot_populate_reuse_slot() {
     let (mut inventory, mut owners, mut hosts, held) = held();
     let mut services = inventory.open_services(&held, 1).unwrap();
     let allocation = Arc::as_ptr(&services.session);
@@ -446,7 +446,7 @@ fn refused_close_keeps_pending_authority_and_cannot_populate_reuse_slot() {
 }
 
 #[test]
-fn unique_closed_allocation_can_serve_a_new_actual_stop_generation() {
+fn unique_closed_allocation_can_serve_a_new_stop_generation() {
     let (mut inventory, mut owners, mut hosts, stopped) = held();
     let services = inventory.open_services(&stopped, 0).unwrap();
     let generation = services.stop;
@@ -512,7 +512,7 @@ fn dropping_session_never_grants_stopped_worker_release() {
 
 #[cfg(feature = "std")]
 #[test]
-fn boxed_controls_are_consumed_on_the_actual_owner_thread_before_receipt() {
+fn boxed_controls_are_consumed_on_the_owner_thread_before_receipt() {
     let (mut inventory, mut owners, mut hosts, held) = held();
     let mut services = inventory.open_services(&held, 1).unwrap();
     let cpu = crate::machine::Cpu::of(

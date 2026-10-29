@@ -164,7 +164,7 @@ fn marked<P: DataPolicy>(thread: &mut MemoryThread<P>, access: &ReservationAcces
 }
 
 #[test]
-fn actual_native_scalar_reads_zero_extend_and_preserve_ram_and_tags() {
+fn native_scalar_reads_zero_extend_and_preserve_ram_and_tags() {
     let (_, backing, domain) = setup();
     let original = snapshot(&backing);
     let mut thread = domain.thread(controls(TagCheckFaultMode::Synchronous));
@@ -197,7 +197,7 @@ fn actual_native_scalar_reads_zero_extend_and_preserve_ram_and_tags() {
 }
 
 #[test]
-fn policy_erased_reader_retains_explicit_address_space_binding() {
+fn policy_erased_reader_keeps_explicit_address_space_binding() {
     let (system, backing, _) = setup();
     let domain = MemoryDomain::new_for_address_space(
         ADDRESS_SPACE,
@@ -302,7 +302,7 @@ fn contiguous_views_and_cross_sca_reads_use_existing_native_service() {
 }
 
 #[test]
-fn permission_and_translation_faults_retain_guest_source_and_private_prefix() {
+fn permission_and_translation_faults_keep_guest_source_and_private_prefix() {
     let (system, backing, _) = setup();
     let no_read = AccessPermissions {
         readable: false,
@@ -505,7 +505,7 @@ impl DataPolicy for PanicPolicy {
 }
 
 #[test]
-fn policy_panic_uses_existing_fail_stop_cleanup_and_retains_source_location() {
+fn policy_panic_uses_existing_fail_stop_cleanup_and_keeps_source_location() {
     let (_, backing, domain) = setup();
     let original = snapshot(&backing);
     let mut thread = domain.thread(PanicPolicy(controls(TagCheckFaultMode::Synchronous)));
@@ -742,7 +742,7 @@ fn checked_scalar_terminal_preentry_is_distinct_from_executed_read() {
 }
 
 #[test]
-fn checked_scalar_healthy_finalization_returns_exact_native_read() {
+fn checked_scalar_healthy_finalization_returns_native_read() {
     let (system, backing, domain) = setup();
     let (policy, calls) = checked_policy(&system, false);
     let mut thread = domain.thread(policy);

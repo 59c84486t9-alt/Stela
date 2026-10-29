@@ -576,11 +576,8 @@ fn admission_refusals_return_owner() {
     );
 }
 #[test]
-fn admission_postcheck_retains_marker() {
-    isolate(
-        "admission_postcheck_retains_marker",
-        &[("postcheck", false)],
-    );
+fn admission_postcheck_keeps_marker() {
+    isolate("admission_postcheck_keeps_marker", &[("postcheck", false)]);
 }
 #[test]
 fn forgotten_admission_keeps_both_owners() {

@@ -620,7 +620,7 @@ mod original {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_IBOOTDATA"]
-    fn original_authority_provenance_cache_and_full_family_refusals() {
+    fn original_permission_provenance_cache_and_full_family_refusals() {
         let bytes = adt();
         let mut input = inputs();
         input.revision = RevisionAuthority::ObservedCache {

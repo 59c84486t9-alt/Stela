@@ -579,7 +579,7 @@ fn partial_file_mapping_failure_rolls_back_owned_ranges() {
 }
 
 #[test]
-fn retained_file_descriptor_maps_original_inode_after_path_replacement() {
+fn kept_file_descriptor_maps_original_inode_after_path_replacement() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cache");
     let mut file = File::create(&path).unwrap();

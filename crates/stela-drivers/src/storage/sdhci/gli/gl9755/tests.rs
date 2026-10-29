@@ -551,7 +551,7 @@ fn native_gl9755_ocp_during_voltage_delay_and_tuning_keeps_first_failed_cleanup_
 }
 
 #[test]
-fn native_gl9755_engine_lost_pci_identity_power_decode_or_requester_authority_fences_without_mmio()
+fn native_gl9755_engine_lost_pci_identity_power_decode_or_requester_permission_fences_without_mmio()
 {
     for mutation in 0..5 {
         let mut backing = vec![0u64; 128 * 1024];

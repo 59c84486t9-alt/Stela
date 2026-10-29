@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn real_ready_handshake_carries_lun_cdb_direction_and_actual_dma_bytes() {
+fn real_ready_handshake_carries_lun_cdb_direction_and_dma_bytes() {
     for input in [false, true] {
         for length in [512, 4096, MAX_TD] {
             let mut memory = vec![0u64; 32 * 1024];
@@ -124,7 +124,7 @@ fn short_write_is_an_error_and_short_read_reports_only_received_bytes() {
 }
 
 #[test]
-fn terminal_status_before_data_completion_still_waits_for_actual_data() {
+fn terminal_status_before_data_completion_still_waits_for_data() {
     let mut memory = vec![0u64; 32 * 1024];
     let (io, mut dma) = model(&mut memory, 512, true, Fault::StatusBeforeData);
     let state = io.state.clone();

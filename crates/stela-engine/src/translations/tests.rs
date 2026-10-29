@@ -130,7 +130,7 @@ fn source_witness_geometry_is_checked_even_with_a_valid_record_checksum() {
 }
 
 #[test]
-fn portable_after_phase_requires_the_actual_retained_fallthrough_instruction() {
+fn portable_after_phase_requires_the_kept_fallthrough_instruction() {
     use stela_compiler::Lifter as _;
     let source = words(&[0xd503201f, 0xd4000001]);
     let mut entry = proved(&source, 0x40).unwrap();

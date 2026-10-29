@@ -38,7 +38,7 @@ fn full_reply_side_queue_preserves_every_consumed_byte_and_leaves_further_hardwa
     assert_eq!(h.borrow().writes.len(), writes);
 }
 #[test]
-fn full_side_queue_still_allows_actual_primary_ack_without_consuming_another_sibling_byte() {
+fn full_side_queue_still_allows_primary_ack_without_consuming_another_sibling_byte() {
     let (mut c, h) = controller(Config::default());
     c.initialize().unwrap();
     h.borrow_mut().inject_led = [8, 1, 0, 0]
@@ -98,7 +98,7 @@ fn consumed_framed_error_byte_survives_first_failure_even_with_full_side_queue()
     }
 }
 #[test]
-fn original_and_containment_frame_failures_keep_their_distinct_actual_bytes() {
+fn original_and_containment_frame_failures_keep_their_distinct_bytes() {
     let (mut c, h) = controller(Config::default());
     c.initialize().unwrap();
     for byte in [8, 1, 0, 0].into_iter().cycle().take(QUEUE_LIMIT) {
@@ -695,7 +695,7 @@ fn keyboard_make_break_repeat_extended_printscreen_pause_and_led_commands() {
 }
 
 #[test]
-fn interleaved_ports_and_same_port_data_are_retained_during_led_ack() {
+fn interleaved_ports_and_same_port_data_are_kept_during_led_ack() {
     let (mut c, h) = ready();
     h.borrow_mut().inject_led = vec![
         (Port::Keyboard, 0x1c),
@@ -855,7 +855,7 @@ fn busy_controller_and_unbounded_stale_output_have_bounded_failures() {
 }
 
 #[test]
-fn framed_input_error_retains_prior_events_and_requires_actual_owner_reset() {
+fn framed_input_error_keeps_prior_events_and_requires_owner_reset() {
     let (mut c, h) = ready();
     emit(&h, Port::Keyboard, &[0x1c]);
     h.borrow_mut().output.push_back((Port::Mouse, 0x08, 0x80));
@@ -1044,7 +1044,7 @@ fn silent_partial_frames_expire_without_waiting_for_a_later_byte() {
 }
 
 #[test]
-fn idle_expiration_does_not_preempt_a_complete_retained_frame() {
+fn idle_expiration_does_not_preempt_a_complete_kept_frame() {
     let (mut c, h) = ready();
     h.borrow_mut().inject_led = vec![
         (Port::Keyboard, 0xe0),
@@ -1070,7 +1070,7 @@ fn idle_expiration_does_not_preempt_a_complete_retained_frame() {
 }
 
 #[test]
-fn explorer_negotiates_both_actual_ids_and_retains_five_buttons_and_wheel() {
+fn explorer_negotiates_both_ids_and_keeps_five_buttons_and_wheel() {
     for no_ack in [false, true] {
         let (mut c, h) = controller(Config::default());
         h.borrow_mut().explorer_capable = true;

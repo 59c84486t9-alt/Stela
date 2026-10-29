@@ -1702,7 +1702,7 @@ fn native_constructor_stop_budget_starts_before_first_mmio_publication() {
     assert!(!c.effects.iter().any(|e| matches!(e, Effect::Command(..))));
 }
 #[test]
-fn native_actual_wrong_ack_sd_error_and_transfer_failure_survive_same_read_deadline() {
+fn native_wrong_ack_sd_error_and_transfer_failure_survive_same_read_deadline() {
     for mode in 0..4 {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
@@ -2030,7 +2030,7 @@ fn native_rts522a_mmc_empty_media_retirement_and_failed_ocp_ack() {
     }
 }
 #[test]
-fn native_rts522a_overcurrent_clears_actual_latch_after_poweroff_without_later_stop() {
+fn native_rts522a_overcurrent_clears_latch_after_poweroff_without_later_stop() {
     let chip = rts522a(false, true, 0, 15, false);
     let mut host = make_host(&chip, false).unwrap();
     let mut card = host.poll().unwrap().unwrap();
@@ -2090,7 +2090,7 @@ fn native_rts522a_unavailable_ltr_and_revision_access_failures_are_explicit() {
     assert!(!matches(&function(&chip)));
 }
 #[test]
-fn native_rts522a_actual_cmd11_modes_clocks_and_three_sweep_tuning() {
+fn native_rts522a_cmd11_modes_clocks_and_three_sweep_tuning() {
     for (function, hz, timing) in [
         (0, 25_000_000, Timing::Sdr12),
         (1, 50_000_000, Timing::Sdr25),
@@ -2231,7 +2231,7 @@ fn native_rts522a_tuning_media_faults_or_unacknowledged_speed_do_not_become_phas
     assert!(host.inner.borrow().medium.is_none());
 }
 #[test]
-fn native_rts522a_actual_phase_timeouts_continue_only_after_acknowledged_idle_and_stop() {
+fn native_rts522a_phase_timeouts_continue_only_after_acknowledged_idle_and_stop() {
     for rejection in [Fault::CrcTimeout, Fault::ResponseTimeout] {
         let chip = rts522a(false, true, 1, 15, false);
         chip.borrow_mut().card.uhs_modes = 8;
@@ -2258,7 +2258,7 @@ fn native_rts522a_actual_phase_timeouts_continue_only_after_acknowledged_idle_an
     assert!(host.inner.borrow().medium.is_none());
 }
 #[test]
-fn native_rts522a_late_actual_timeout_status_is_fatal_not_another_phase() {
+fn native_rts522a_late_timeout_status_is_fatal_not_another_phase() {
     let chip = rts522a(false, true, 1, 15, false);
     chip.borrow_mut().card.uhs_modes = 8;
     chip.borrow_mut().tuning_late_timeout = true;

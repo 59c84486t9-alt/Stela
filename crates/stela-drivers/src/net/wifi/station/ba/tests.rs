@@ -123,7 +123,7 @@ fn only_real_current_native_install_completion_activates_exact_session_and_posit
 }
 
 #[test]
-fn default_window_and_actual_hardware_clamp_are_applied_after_source_validation() {
+fn default_window_and_hardware_clamp_are_applied_after_source_validation() {
     let mut s = associated(256, false);
     let (_, session) = program(
         receive(&mut s, &request(1, 0, 0, 0, 10, true)).unwrap(),
@@ -157,7 +157,7 @@ fn unrelated_generic_ie_errors_ignore_extension_and_keep_valid_base_addba_reques
 }
 
 #[test]
-fn source_invalid_tid_policy_and_oversize_refusals_keep_actual_air_parameters() {
+fn source_invalid_tid_policy_and_oversize_refusals_keep_air_parameters() {
     for (tid, window, immediate, expected) in [
         (15, 512, true, 37),
         (3, 512, false, 38),
@@ -219,7 +219,7 @@ fn replacement_stops_and_invalidates_old_session_before_programming_new_exact_ss
 }
 
 #[test]
-fn rejected_idle_install_refuses_peer_while_uncertain_install_retains_and_cannot_retry() {
+fn rejected_idle_install_refuses_peer_while_uncertain_install_keeps_and_cannot_retry() {
     for outcome in [Completion::RejectedAndIdle, Completion::Uncertain] {
         let mut s = associated(1024, true);
         let (ticket, old) = program(
@@ -291,7 +291,7 @@ fn local_delba_is_sent_only_after_disable_drain_with_recipient_direction() {
 }
 
 #[test]
-fn actual_peer_initiator_delba_stops_rx_without_sending_a_reply() {
+fn peer_initiator_delba_stops_rx_without_sending_a_reply() {
     let mut s = associated(1024, true);
     active(&mut s, 1, 3);
     let frame = response(0xd0, &[3, 2, 0, 0x38, 37, 0]);
@@ -390,7 +390,7 @@ fn wrong_peer_radio_epoch_integrity_and_protected_actions_cannot_create_agreemen
 }
 
 #[test]
-fn bar_requires_exact_current_peer_tid_and_acknowledged_active_queue() {
+fn bar_requires_current_peer_tid_and_acknowledged_active_queue() {
     let mut s = associated(1024, true);
     let current = active(&mut s, 1, 3);
     let mut bytes = vec![0; 20];
@@ -422,7 +422,7 @@ fn bar_requires_exact_current_peer_tid_and_acknowledged_active_queue() {
 }
 
 #[test]
-fn disconnect_revokes_pending_install_and_active_sessions_but_allows_actual_stop() {
+fn disconnect_revokes_pending_install_and_active_sessions_but_allows_stop() {
     let mut s = associated(1024, true);
     let installed = active(&mut s, 1, 3);
     let (pending, plan) = program(

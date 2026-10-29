@@ -133,7 +133,7 @@ mod tests {
         }
     }
     #[test]
-    fn exact_native_extent_and_every_covered_byte_require_actual_integrity() {
+    fn native_extent_and_every_covered_byte_require_integrity() {
         let mut bytes = test_image();
         assert_eq!(
             verify(&bytes, CONFIGURATION, VERSION, METADATA as u16),
@@ -162,7 +162,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_CRAM_J314S_LLB"]
-    fn original_maverick_tag_matches_all_1132_actual_covered_bytes() {
+    fn original_maverick_tag_matches_all_1132_covered_bytes() {
         let llb = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(
             stela_formats::sha256(&llb),

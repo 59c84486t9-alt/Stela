@@ -172,7 +172,7 @@ fn aliases_merge_parent_dependencies_and_partial_sinks_never_enable_controls() {
     }
 }
 #[test]
-fn die_qualified_ids_never_merge_without_a_shared_physical_address() {
+fn die_checked_ids_never_merge_without_a_shared_physical_address() {
     let mut second = domain(1, Some(0x200), &[]);
     second.id.die = 1;
     let requirements = [second.id];

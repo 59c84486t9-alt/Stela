@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn every_routing_mode_refuses_retained_enables_without_partial_effects() {
+    fn every_routing_mode_refuses_kept_enables_without_partial_effects() {
         for inputs in [
             Inputs::Elementwise {
                 left: LAST_VECTOR_REGISTER,

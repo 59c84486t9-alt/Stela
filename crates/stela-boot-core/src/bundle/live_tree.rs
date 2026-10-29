@@ -346,7 +346,7 @@ mod tests {
         (memory, regions, tree)
     }
     #[test]
-    fn actual_live_bytes_and_nonidentity_boot_pointer_are_captured() {
+    fn live_bytes_and_nonidentity_boot_pointer_are_captured() {
         let (mut ram, regions, mut tree) = fixture();
         tree.node_mut("/chosen")
             .unwrap()
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(ram.writes, 0);
     }
     #[test]
-    fn harvesting_guard_uses_actual_boot_args_and_refuses_even_zero_overrides() {
+    fn harvesting_guard_uses_boot_args_and_refuses_even_zero_overrides() {
         for command in [
             "acc-harvesting=0",
             "-v acc-harvesting=2 debug=1",

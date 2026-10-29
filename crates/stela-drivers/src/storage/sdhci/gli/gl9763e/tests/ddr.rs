@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn native_ddr52_uses_actual_sampling_pads_power_class_and_changed_pio_or_adma_payloads() {
+fn native_ddr52_uses_sampling_pads_power_class_and_changed_pio_or_adma_payloads() {
     for vcc180 in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;

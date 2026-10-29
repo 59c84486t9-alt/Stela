@@ -342,7 +342,7 @@ fn unsupported_wake_and_bus_master_refuse_before_effects() {
 }
 
 #[test]
-fn d3hot_only_pme_is_armed_in_d0_for_the_actual_target_state() {
+fn d3hot_only_pme_is_armed_in_d0_for_the_target_state() {
     let (function, timer, d) = fixture(true);
     d.borrow_mut().put_word(PM + 2, 3 | (1 << 14));
     // SAFETY: same isolated original configuration/platform owner.
@@ -378,7 +378,7 @@ fn inaccessible_states_refuse_function_access_and_release_without_effects() {
 }
 
 #[test]
-fn every_refused_transition_store_or_wait_retains_original_owners() {
+fn every_refused_transition_store_or_wait_keeps_original_owners() {
     let (mut power, d) = owner(false);
     suspend(&mut power).unwrap();
     power.resume().unwrap();

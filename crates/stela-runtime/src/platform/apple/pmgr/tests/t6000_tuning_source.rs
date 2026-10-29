@@ -226,7 +226,7 @@ const LISTS: [&[usize]; 193] = [
 ];
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_KERNELCACHE"]
-fn original_all_193_bridge_programs_keep_masks_order_and_actual_dt_bounds() {
+fn original_all_193_bridge_programs_keep_masks_order_and_dt_bounds() {
     let bytes = original(
         "STELA_TEST_PMGR_M1_KERNELCACHE",
         "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90",

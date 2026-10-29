@@ -141,7 +141,7 @@ mod idt95 {
     // Canonical dispatch and failed reset
     // must keep the same IDT port/PCM permission, not just a vendor handle.
     #[test]
-    fn idt95_failed_reset_retains_port() {
+    fn idt95_failed_reset_keeps_port() {
         let mut fixture = Fixture::new();
         let model = device();
         let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -294,7 +294,7 @@ mod stac9872 {
     }
 
     #[test]
-    fn stac9872_amp_failure_retains_owner() {
+    fn stac9872_amp_failure_keeps_owner() {
         for live_loss in [false, true] {
             let mut fixture = Fixture::new();
             let model = device(0x8384_7662);

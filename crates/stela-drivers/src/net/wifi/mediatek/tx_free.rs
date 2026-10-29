@@ -177,7 +177,7 @@ mod tests {
         bytes
     }
     #[test]
-    fn connac2_pairs_per_msdu_status_and_complete_tail_are_retained() {
+    fn connac2_pairs_per_msdu_status_and_complete_tail_are_kept() {
         for chip in [Chip::Mt7921, Chip::Mt7922] {
             let pair = (1 << 31) | (19 << 14);
             let words = [7 << 16, pair, (8 << 16) | (2 << 13) | 5, 0xabcdef01];
@@ -309,7 +309,7 @@ mod tests {
         );
     }
     #[test]
-    fn full_ten_bit_count_does_not_wrap_and_future_compatible_version_is_retained() {
+    fn full_ten_bit_count_does_not_wrap_and_future_compatible_version_is_kept() {
         let words: Vec<_> = (0..1023).map(|t| t << 16).collect();
         assert_eq!(
             parse(Chip::Mt7921, &packet(Chip::Mt7921, 1023, &words))

@@ -305,7 +305,7 @@ fn qca_shutdown_preserves_reset_packets_without_a_fallible_post_reset_live_read(
     assert_eq!(s.0.hci.io.reads_after_reset, 0);
 }
 #[test]
-fn qca_shutdown_later_receipt_failure_keeps_actual_cc_async_and_prior_receipts() {
+fn qca_shutdown_later_receipt_failure_keeps_cc_async_and_prior_receipts() {
     let mut s = Session::start(hci(
         super::super::Kind::Wcn,
         Model {
@@ -369,7 +369,7 @@ fn qca_shutdown_status_only_error_completion_or_failed_retirement_never_credit_s
     }
 }
 #[test]
-fn qca_media_refuses_uninitialized_or_foreign_retained_evidence() {
+fn qca_media_refuses_uninitialized_or_foreign_kept_evidence() {
     let mut h = hci(super::super::Kind::Rome, Model::default(), true);
     h.initialization = None;
     assert!(Session::start(h).is_err());

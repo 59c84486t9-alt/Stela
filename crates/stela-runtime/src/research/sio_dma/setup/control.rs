@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn set_param_ack_waits_for_dma_and_actual_mounted_physical_effects() {
+    fn set_param_ack_waits_for_dma_and_mounted_physical_effects() {
         let mut control = control();
         let mut memory = memory();
         address(&mut control, 0x1e);
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn dma_and_routed_refusals_retain_request_without_a_success_ack() {
+    fn dma_and_routed_refusals_keep_request_without_a_success_ack() {
         let mut control = control();
         address(&mut control, 0x1e);
         control.receive(command(11, 0x1f, 24)).unwrap();

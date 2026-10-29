@@ -280,7 +280,7 @@ mod tests {
         );
     }
     #[test]
-    fn observation_preserves_actual_leaf_fields_and_rejects_unknown_table_storage() {
+    fn observation_preserves_leaf_fields_and_rejects_unknown_table_storage() {
         let t = tables();
         let read = |table: u64, index: usize| {
             table

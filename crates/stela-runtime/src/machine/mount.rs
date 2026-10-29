@@ -756,7 +756,7 @@ mod tests {
     use stela_soc_data::board::PmgrBank;
 
     #[test]
-    fn native_memory_preflight_matches_live_descriptors_and_actual_ram() {
+    fn native_memory_preflight_matches_live_descriptors_and_ram() {
         let (memory, cache) = t8112::cache::EmptyResource::service_test_components();
         let descriptor = memory.descriptor().clone();
         let controller = cache.source().clone();

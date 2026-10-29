@@ -233,7 +233,7 @@ fn local_source(
     })
 }
 #[test]
-fn genuinely_local_source_releases_before_handler_only_on_qualified_cpu() {
+fn local_source_releases_before_handler_only_on_checked_cpu() {
     let model = Model::new();
     let registry = registry(model.clone());
     let token = std::rc::Rc::new(core::cell::Cell::new(0));
@@ -296,7 +296,7 @@ fn untouched_typed_refusal_keeps_affine_source_and_callback_bound_for_default_dr
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn all_early_admission_errors_retain_affine_source_and_callback_owner() {
+fn all_early_admission_errors_keep_affine_source_and_callback_owner() {
     for case in 0..4 {
         let model = Model::new();
         let registry = registry(model.clone());
@@ -342,7 +342,7 @@ fn all_early_admission_errors_retain_affine_source_and_callback_owner() {
     }
 }
 #[test]
-fn actual_foreign_thread_admission_and_abandoned_migration_never_drop_local_owner() {
+fn foreign_thread_admission_and_abandoned_migration_never_drop_local_owner() {
     let model = Model::new();
     let registry = Box::leak(Box::new(Registry::new(ModelPlatform(
         model.clone(),
@@ -514,7 +514,7 @@ fn typed_early_refusal_preserves_original_source_for_untouched_retry() {
 }
 
 #[test]
-fn failed_pending_read_and_timeout_retain_for_retry_without_vector_reuse() {
+fn failed_pending_read_and_timeout_keep_for_retry_without_vector_reuse() {
     let model = Model::new();
     let registry = registry(model.clone());
     let mut registration = request(registry, &model);

@@ -49,7 +49,7 @@ fn fault_node(fault: Fault) -> Node {
 }
 
 #[test]
-fn superspeed_cold_hub_uses_actual_contexts_depth_power_routes_and_bulk_io() {
+fn superspeed_cold_hub_uses_contexts_depth_power_routes_and_bulk_io() {
     for context in [32, 64] {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -173,7 +173,7 @@ fn nested_superspeed_hubs_preserve_five_route_nibbles_and_no_usb2_tt() {
 }
 
 #[test]
-fn superspeedplus_uses_actual_bos_speed_ids_and_extended_status() {
+fn superspeedplus_uses_bos_speed_ids_and_extended_status() {
     for lanes in [1, 2] {
         let mut nodes = nodes();
         let root = nodes.get_mut(&0).unwrap();
@@ -206,7 +206,7 @@ fn superspeedplus_uses_actual_bos_speed_ids_and_extended_status() {
 }
 
 #[test]
-fn asymmetric_or_unknown_actual_ssp_port_status_never_inherits_upstream_speed() {
+fn asymmetric_or_unknown_ssp_port_status_never_inherits_upstream_speed() {
     for extended in [0x21, 0x111, 0x10011] {
         let mut nodes = nodes();
         let root = nodes.get_mut(&0).unwrap();
@@ -242,7 +242,7 @@ fn asymmetric_or_unknown_actual_ssp_port_status_never_inherits_upstream_speed() 
 }
 
 #[test]
-fn actual_hub_power_and_overcurrent_health_gate_all_downstream_admission() {
+fn hub_power_and_overcurrent_health_gate_all_downstream_admission() {
     for (self_powered, status, change, after) in [
         (true, 1, 0, None),
         (true, 2, 0, None),
@@ -976,7 +976,7 @@ fn bus_powered_hub(ports: usize) -> Node {
 }
 
 #[test]
-fn bus_powered_hub_charges_controller_and_ports_once_and_commits_actual_configuration() {
+fn bus_powered_hub_charges_controller_and_ports_once_and_commits_configuration() {
     let mut nodes = BTreeMap::from([(0, bus_powered_hub(4))]);
     for port in 1..=4 {
         let mut leaf = Node::leaf(SUPER_SPEED);
@@ -1177,7 +1177,7 @@ fn consecutive_bus_hubs_refuse_but_self_powered_downstream_hubs_keep_local_capac
 }
 
 #[test]
-fn failed_or_uncertain_raw_configuration_keeps_maximum_draw_until_actual_ack() {
+fn failed_or_uncertain_raw_configuration_keeps_maximum_draw_until_ack() {
     for silent in [false, true] {
         let mut leaf = Node::leaf(SUPER_SPEED);
         leaf.max_power = 100;
@@ -1334,7 +1334,7 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
 }
 
 #[test]
-fn hub_power_contract_uses_actual_status_after_configuration_ack() {
+fn hub_power_contract_uses_status_after_configuration_ack() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for self_powered in [false, true] {
             let mut hub = Node::hub(speed, 1);
@@ -1557,7 +1557,7 @@ fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
 }
 
 #[test]
-fn retained_hub_status_uses_same_reserved_field_contract_as_cold_enumeration() {
+fn kept_hub_status_uses_same_reserved_field_contract_as_cold_enumeration() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
         let mut backing = vec![0u64; 256 * 1024];

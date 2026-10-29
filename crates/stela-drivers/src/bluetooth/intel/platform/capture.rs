@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(copied.platform_inputs().dsbr.parameters(), [1, 11]);
     }
     #[test]
-    fn only_actual_not_found_is_absent_and_all_uefi_errors_keep_raw_status() {
+    fn only_not_found_is_absent_and_all_uefi_errors_keep_raw_status() {
         let capture = DsbrCapture::from_uefi_error(UEFI_NOT_FOUND, None);
         assert_eq!(capture.input(), DsbrInput::Absent);
         assert_eq!(

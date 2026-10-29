@@ -531,7 +531,7 @@ fn ready(revision: u8, period: usize) -> (Controller<Model, Time>, Arc<Mutex<Dev
 }
 
 #[test]
-fn actual_pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
+fn pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
     for (revision, period) in [(0x60, 4096), (0x6f, 8192), (0x62, 5000)] {
         let (mut controller, device, source) = ready(revision, period);
         let ring = period * 4;
@@ -756,7 +756,7 @@ fn independent_counter_rollover_and_wrap_are_not_torn_or_truncated() {
 }
 
 #[test]
-fn late_start_acknowledgement_stop_reset_and_unmap_failures_retain_exact_owners() {
+fn late_start_acknowledgement_stop_reset_and_unmap_failures_keep_owners() {
     for fault in [0, 1, 2, 3] {
         let (mut controller, device, source) = ready(0x60, 4096);
         if fault == 0 {
@@ -874,7 +874,7 @@ fn partial_pte_write_unpublished_visibility_failure_and_reset_reconfiguration() 
 }
 
 #[test]
-fn power_clock_and_actual_iova_limit_failures_do_not_publish_dma() {
+fn power_clock_and_iova_limit_failures_do_not_publish_dma() {
     let (mut controller, device, source) = fixture(0x60);
     device.lock().unwrap().power_never = true;
     assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
@@ -976,7 +976,7 @@ fn successful_but_late_power_and_reset_accesses_do_not_advance_initialization() 
 }
 
 #[test]
-fn successful_but_late_dma_and_reset_completion_retains_pins_until_fresh_recovery() {
+fn successful_but_late_dma_and_reset_completion_keeps_pins_until_fresh_recovery() {
     for write in [false, true] {
         for phase in [
             Phase::DmaStart,
@@ -1173,7 +1173,7 @@ fn failed_real_group_disable_keeps_the_original_published_iova_and_pins() {
     assert_eq!(source.drops.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn replacing_a_published_ring_cannot_retire_it_after_a_failed_actual_reset() {
+fn replacing_a_published_ring_cannot_retire_it_after_a_failed_reset() {
     let (mut controller, device, source) = ready(0x60, 4096);
     controller.start().unwrap();
     device.lock().unwrap().advance(32);
@@ -1242,7 +1242,7 @@ fn cache_invalidation_never_completes_posted_payload_or_releases_faulted_dma() {
 }
 
 #[test]
-fn missing_actual_yellow_carp_payload_drain_refuses_before_first_mapping() {
+fn missing_yellow_carp_payload_drain_refuses_before_first_mapping() {
     let (mut controller, device, source) = fixture(0x60);
     device.lock().unwrap().drain_unavailable = true;
     assert_eq!(

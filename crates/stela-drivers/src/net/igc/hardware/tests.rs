@@ -257,7 +257,7 @@ fn drain_mac_reset_autoload_and_phy_reset_deadlines_never_look_successful() {
 }
 
 #[test]
-fn every_actual_failed_register_read_refuses_initialization() {
+fn every_failed_register_read_refuses_initialization() {
     let model = Model::ready(true);
     Hardware::new(&model, &model).unwrap().initialize().unwrap();
     let reads = model.reads.get();
@@ -306,7 +306,7 @@ fn firmware_management_and_semaphore_refusals_cannot_be_bypassed() {
 }
 
 #[test]
-fn programmed_flash_checksum_and_observed_phy_identity_are_not_fabricated() {
+fn programmed_flash_checksum_and_observed_phy_identity_are_not_invented() {
     let model = Model::ready(true);
     model.state.borrow_mut().nvm[10] = 1;
     assert_eq!(

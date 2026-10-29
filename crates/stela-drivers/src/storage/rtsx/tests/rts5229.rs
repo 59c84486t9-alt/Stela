@@ -17,7 +17,7 @@ fn chip(mmc: bool, present: bool, revision: u8) -> Rc<RefCell<Chip>> {
 }
 
 #[test]
-fn native_rts5229_actual_revision_power_and_drive_profile_runs_changed_sd_and_mmc_io() {
+fn native_rts5229_revision_power_and_drive_profile_runs_changed_sd_and_mmc_io() {
     let _virtual = crate::test_clock::virtualize();
     for revision in [0, 2, 15] {
         for mmc in [false, true] {

@@ -427,11 +427,11 @@ fn run_wait_signal(policy: work::ReservationPolicy) {
 }
 
 #[test]
-fn actual_aml_wait_signal_keeps_portal_notify_and_gpe_progress_with_general_parked() {
+fn aml_wait_signal_keeps_portal_notify_and_gpe_progress_with_general_parked() {
     run_wait_signal(work::ReservationPolicy::NativeFirmware16);
 }
 #[test]
-fn protected_gpe_policy_keeps_actual_aml_wait_signal_progress_with_general_parked() {
+fn protected_gpe_policy_keeps_aml_wait_signal_progress_with_general_parked() {
     run_wait_signal(work::ReservationPolicy::NativeFirmware16Protected {
         gpe: work::GpeQueueBudget::QUALIFICATION,
     });

@@ -300,7 +300,7 @@ fn context_carriers_preserve_exact_operands_without_granting_other_families() {
 }
 
 #[test]
-fn wait_carriers_retain_kind_and_timeout_register_from_decoder() {
+fn wait_carriers_keep_kind_and_timeout_register_from_decoder() {
     use synchronization::WaitKind;
     for (word, kind, timeout_register) in [
         (WFE, WaitKind::Event, None),

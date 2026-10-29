@@ -356,7 +356,7 @@ fn live_map_drift_quarantines_routes() {
 }
 
 #[test]
-fn failed_jack_power_retains_owner() {
+fn failed_jack_power_keeps_owner() {
     for lost_ack in [false, true] {
         let mut fixture = Fixture::new();
         let model = idt83_device(0x111d_7605);

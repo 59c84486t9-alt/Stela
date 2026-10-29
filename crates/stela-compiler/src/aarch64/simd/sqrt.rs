@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_bit_changes_do_not_retain_sqrt_semantics() {
+    fn fixed_bit_changes_do_not_keep_sqrt_semantics() {
         for (encoding, mask) in [
             (SCALAR_FSQRT, SCALAR_MASK),
             (VECTOR_FSQRT, VECTOR_MASK),

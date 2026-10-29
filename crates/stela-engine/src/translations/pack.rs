@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_budget_charges_actual_emitted_recovery_buffers() {
+    fn shared_cache_budget_charges_emitted_recovery_buffers() {
         let key = Digest::of(b"page");
         let preparation = Arc::new(test_preparation());
         let context = preparation.context(0x1000);
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn reducing_shared_cache_budget_releases_retained_entries_and_fifo_capacity() {
+    fn reducing_shared_cache_budget_releases_kept_entries_and_fifo_capacity() {
         let key = Digest::of(b"page");
         let first = offer(0x1000, key);
         let context = first.context();

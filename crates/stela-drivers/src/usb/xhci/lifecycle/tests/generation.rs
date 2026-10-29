@@ -206,7 +206,7 @@ fn a_dead_host_controller_disconnects_every_device_like_usb_hc_died() {
 }
 
 #[test]
-fn retained_hub_parent_and_retirement_authority_refuse_same_number_generation_before_effects() {
+fn kept_hub_parent_and_retirement_permission_refuse_same_number_generation_before_effects() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let mut old_memory = vec![0u64; 512 * 1024];
         let mut new_memory = vec![0u64; 512 * 1024];
@@ -364,7 +364,7 @@ fn original_child_identity_cannot_release_current_or_retire_parent_after_parent_
 }
 
 #[test]
-fn genuine_recovery_capability_refuses_an_independent_same_slot_hub_without_mutation() {
+fn recovery_capability_refuses_an_independent_same_slot_hub_without_mutation() {
     let mut old_memory = vec![0u64; 512 * 1024];
     let mut new_memory = vec![0u64; 512 * 1024];
     let start = old_memory.as_mut_ptr() as u64;

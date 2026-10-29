@@ -1540,7 +1540,7 @@ fn basic_pac_integer_fields_distinguish_sp_zero_and_discard() {
 }
 
 #[test]
-fn generic_code_requires_explicit_profile_and_retains_helper_source_boundary() {
+fn generic_code_requires_explicit_profile_and_keeps_helper_source_boundary() {
     const PACGA_X1_X2_X3: u32 = 0x9ac3_3041;
     let pc = GuestAddress(0x1000);
     let source = bytes(&[PACGA_X1_X2_X3]);

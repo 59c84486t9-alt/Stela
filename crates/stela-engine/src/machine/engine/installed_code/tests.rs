@@ -47,7 +47,7 @@ impl Arena {
     }
 }
 #[test]
-fn warm_live_owner_reuses_actual_installed_bytes_without_another_copy() {
+fn warm_live_owner_reuses_installed_bytes_without_another_copy() {
     let code = Arc::new(vec![1, 2, 3, 4]);
     let mut arena = Arena::new();
     let cold = arena.immutable(&code).unwrap();
@@ -60,7 +60,7 @@ fn warm_live_owner_reuses_actual_installed_bytes_without_another_copy() {
     assert_eq!((arena.installs, arena.copies), (2, 8));
 }
 #[test]
-fn last_slot_warm_hit_uses_only_the_exact_live_allocation() {
+fn last_slot_warm_hit_uses_only_the_live_allocation() {
     let mut cache = InstalledCodeCache::default();
     let owners: Vec<_> = (0..MAX_ENTRIES)
         .map(|_| Arc::new(vec![1, 2, 3, 4]))
@@ -182,7 +182,7 @@ fn caller_strong_owner_survives_concurrent_external_release() {
     any(target_os = "macos", target_os = "linux")
 ))]
 #[test]
-fn actual_native_selection_tracks_allocation_replacement_and_arena_reset() {
+fn native_selection_tracks_allocation_replacement_and_arena_reset() {
     use crate::execution::platform::Mapping;
     use stela_compiler::{GuestAddress, GuestState};
 

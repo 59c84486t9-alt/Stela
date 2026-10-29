@@ -574,7 +574,7 @@ fn check_clean(f: &Fixture) {
 }
 
 #[test]
-fn retained_actual_pci_owner_drives_crc_wire_for_all_admitted_protocols() {
+fn kept_pci_owner_drives_crc_wire_for_all_admitted_protocols() {
     assert_eq!(host_crc(b"123456789"), 0xf4);
     assert_eq!(peripheral_crc(b"123456789"), 0xf4);
     for device in [0x24c3, 0x24d3, 0x7e22, 0x6e23] {
@@ -900,7 +900,7 @@ fn byte_done_bad_packet_mid_transfer_errors_and_premature_completion_never_publi
 }
 
 #[test]
-fn byte_done_malformed_counts_and_failed_kill_bound_recovery_and_retain_owners() {
+fn byte_done_malformed_counts_and_failed_kill_bound_recovery_and_keep_owners() {
     for length in [0, 33] {
         for stuck in [false, true] {
             let mut f = fixture(0x7e22, false);
@@ -1028,7 +1028,7 @@ fn unchanged_linux_byte_done_payload_ack_last_byte_and_pec_policy() {
 }
 
 #[test]
-fn process_call_crc_cleanup_or_kill_failure_retains_both_original_owners() {
+fn process_call_crc_cleanup_or_kill_failure_keeps_both_original_owners() {
     for fault in 0..3 {
         let mut f = fixture(0x7e22, false);
         match fault {
@@ -1157,7 +1157,7 @@ fn unchanged_linux_process_call_registers_and_pec_error_policy() {
 }
 
 #[test]
-fn mixed_errors_and_late_hardware_flags_preserve_actual_donor_precedence() {
+fn mixed_errors_and_late_hardware_flags_preserve_donor_precedence() {
     for initial in [
         FAILED,
         DEV_ERR,
@@ -1297,7 +1297,7 @@ fn real_pci_identity_and_host_mode_revalidation_precede_read_publication() {
 }
 
 #[test]
-fn one_deadline_includes_final_data_aux_restoration_and_actual_pci_guard() {
+fn one_deadline_includes_final_data_aux_restoration_and_pci_guard() {
     for kind in 0..5 {
         for stage in 0..3 {
             let mut f = fixture(0x7e22, true);
@@ -1356,7 +1356,7 @@ fn one_deadline_includes_final_data_aux_restoration_and_actual_pci_guard() {
 }
 
 #[test]
-fn timeout_kill_acknowledgment_and_failed_kill_retain_real_owners() {
+fn timeout_kill_acknowledgment_and_failed_kill_keep_real_owners() {
     for stuck in [false, true] {
         let mut f = fixture(0x7e22, true);
         f.state.borrow_mut().hang = true;

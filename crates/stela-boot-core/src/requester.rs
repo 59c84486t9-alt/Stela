@@ -222,7 +222,7 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn actual_config_identity_mastering_and_interrupt_policy_are_checked() {
+    fn config_identity_mastering_and_interrupt_policy_are_checked() {
         let mut f = function();
         assert_eq!(RequesterClaim::validate_stopped(&mut f), Ok(()));
         for bad in [4, 0, u16::MAX] {
@@ -250,7 +250,7 @@ mod tests {
         }
     }
     #[test]
-    fn malformed_or_failed_capability_reads_do_not_qualify_a_claim() {
+    fn malformed_or_failed_capability_reads_do_not_check_a_claim() {
         for pointer in [0x41, 0x3c, 0xff] {
             let mut f = function();
             f.config().write16(6, 16);

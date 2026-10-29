@@ -288,7 +288,7 @@ fn map(authority: &Authority, resource: Resource) -> Mapping {
 }
 
 #[test]
-fn exact_lease_pairing_distinguishes_other_mapping_in_same_authority() {
+fn exact_lease_pairing_distinguishes_other_mapping_in_same_permission() {
     let (_, authority, resource, _) = basic();
     let mut first = map(&authority, resource);
     let view = first.view(0..4096).unwrap();
@@ -368,7 +368,7 @@ fn make_device_resource(regions: Vec<DeviceCacheRegion>) -> (Resource, Arc<Atomi
     (resource, dropped)
 }
 #[test]
-fn one_original_bar_maps_disjoint_qualified_uc_wc_and_retains_whole_owner() {
+fn one_original_bar_maps_disjoint_checked_uc_wc_and_keeps_whole_owner() {
     let (model, authority, _, _) = basic();
     let (resource, dropped) = make_device_resource(device_regions());
     assert_eq!(resource.kind(), ResourceKind::Registers);
@@ -505,7 +505,7 @@ fn device_permissions_cover_whole_pages_and_refuse_gaps_wrong_types_and_straddle
     assert_eq!(model.calls(), 0);
 }
 #[test]
-fn malformed_device_permission_tables_release_actual_owner_before_any_map() {
+fn malformed_device_permission_tables_release_owner_before_any_map() {
     let (model, _authority, _, _) = basic();
     let uc = device_regions()[0];
     for (regions, expected) in [
@@ -783,7 +783,7 @@ fn unpublished_lease_drop_preserves_uncertain_and_invalid_native_ownership() {
 }
 
 #[test]
-fn owned_mapping_uses_actual_virtual_backing_and_checked_subviews() {
+fn owned_mapping_uses_virtual_backing_and_checked_subviews() {
     let (model, authority, resource, dropped) = basic();
     let mut mapping = authority
         .map(
@@ -1070,7 +1070,7 @@ fn prefetchable_bar_never_establishes_wc_by_itself() {
     unsafe { mapping.retire() }.unwrap();
 }
 #[test]
-fn unchanged_failure_releases_but_uncertain_map_retains_resource_and_provider() {
+fn unchanged_failure_releases_but_uncertain_map_keeps_resource_and_provider() {
     let (model, authority, resource, dropped) = basic();
     let platform_dropped = Arc::clone(&model.dropped);
     model.mode(Mode::Unchanged);
@@ -1174,7 +1174,7 @@ fn unmap_failure_preserves_token_and_blocks_access_until_acknowledged_retry() {
     assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn dropped_active_mapping_retains_views_and_native_owner_without_unmapping() {
+fn dropped_active_mapping_keeps_views_and_native_owner_without_unmapping() {
     let (model, authority, resource, dropped) = basic();
     let mapping = map(&authority, resource);
     let view = mapping.view(0..16).unwrap();
@@ -1217,7 +1217,7 @@ fn lock_contention_and_context_refusal_do_not_publish_or_reuse_state() {
     assert_eq!(model.calls(), 0);
 }
 #[test]
-fn nonwrapping_ids_and_single_production_authority_survive_last_public_drop() {
+fn nonwrapping_ids_and_single_production_permission_survive_last_public_drop() {
     let model = Model::new();
     let provider_dropped = Arc::clone(&model.dropped);
     // SAFETY: this sole production-constructor test models one complete
@@ -1258,7 +1258,7 @@ fn nonwrapping_ids_and_single_production_authority_survive_last_public_drop() {
     assert_eq!(provider_dropped.load(Ordering::Relaxed), 0);
 }
 #[test]
-fn simultaneous_overlapping_requests_have_exactly_one_actual_publication() {
+fn simultaneous_overlapping_requests_have_exactly_one_publication() {
     let (model, authority, resource, _) = basic();
     let ready = std::sync::Barrier::new(2);
     let outcomes = std::thread::scope(|scope| {
@@ -1302,7 +1302,7 @@ fn simultaneous_overlapping_requests_have_exactly_one_actual_publication() {
     assert_eq!(model.calls(), 1);
 }
 #[test]
-fn physical_only_abi_requires_registered_full_owner_and_retains_it_through_ack() {
+fn physical_only_abi_requires_registered_full_owner_and_keeps_it_through_ack() {
     let (model, authority, resource, dropped) = basic();
     let span = PhysicalSpan::new(BASE + 123, 4097).unwrap();
     assert!(matches!(
@@ -1406,7 +1406,7 @@ fn map_retry(authority: &Authority, resource: Resource) -> Result<Mapping, Error
     }
 }
 #[test]
-fn duplicate_nonzero_token_quarantines_both_actual_windows_and_forbids_unmap() {
+fn duplicate_nonzero_token_quarantines_both_windows_and_forbids_unmap() {
     let (model, authority, resource, first_dropped) = basic();
     let mut first = map(&authority, resource);
     let first_cpu = first.address(0, 1).unwrap();
@@ -1641,7 +1641,7 @@ fn pending_reply_blocks_old_retirement_before_duplicate_identity_is_known() {
     assert_eq!(authority.status().unwrap().quarantined, 2);
 }
 #[test]
-fn actual_unmap_excludes_new_map_callbacks_until_all_root_acknowledgement() {
+fn unmap_excludes_new_map_callbacks_until_all_root_acknowledgement() {
     let (model, authority, resource, _) = basic();
     let mut old = map(&authority, resource);
     let (second, _) = disjoint_resource();

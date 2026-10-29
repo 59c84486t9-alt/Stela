@@ -4,7 +4,7 @@ use super::*;
 use periodic_tests::{attached_periodic, input_interrupt};
 
 #[test]
-fn actual_configuration_zero_retires_bulk_and_interrupt_handles_and_reconfigures_fresh() {
+fn configuration_zero_retires_bulk_and_interrupt_handles_and_reconfigures_fresh() {
     let (mut c, m, id, bulk, interrupt) = attached_periodic(64, 1, 4);
     let ticket = c.submit_bulk_out(output(&bulk), &[7], 1_000_000).unwrap();
     assert_eq!(c.poll(&ticket).unwrap().unwrap().actual, 1);
@@ -54,7 +54,7 @@ fn actual_configuration_zero_retires_bulk_and_interrupt_handles_and_reconfigures
 }
 
 #[test]
-fn configuration_zero_busy_and_foreign_preflight_preserves_actual_current_dma() {
+fn configuration_zero_busy_and_foreign_preflight_preserves_current_dma() {
     for periodic in [false, true] {
         let (mut c, m, id, bulk, interrupt) = attached_periodic(64, 1, 4);
         let current = if periodic {

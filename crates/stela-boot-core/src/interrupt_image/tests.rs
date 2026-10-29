@@ -25,7 +25,7 @@ unsafe fn initialize(backing: &Backing<BYTES>, location: Location) {
     }
 }
 #[test]
-fn hardware_frame_copy_and_return_are_disjoint_from_the_retained_image() {
+fn hardware_frame_copy_and_return_are_disjoint_from_the_kept_image() {
     let backing = Backing::<BYTES>::new();
     let location = location(&backing);
     // SAFETY: isolated initialized test allocation and complete test save.

@@ -333,7 +333,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy() {
+    fn images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
             let bytes =

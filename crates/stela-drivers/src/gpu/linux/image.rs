@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn retains_registered_owner_after_receipt_and_registry_exit() {
+    fn keeps_registered_owner_after_receipt_and_registry_exit() {
         let image = empty_image();
         let weak = Arc::downgrade(&image);
         let drops = image.drops.clone();
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_registration_retains_exactly_the_winner() {
+    fn concurrent_registration_keeps_exactly_the_winner() {
         const OWNERS: usize = 8;
         let registry = Registry::new();
         let images: [Arc<EmptyImage>; OWNERS] = core::array::from_fn(|_| empty_image());

@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_install_retains_distinct_ids_one_ram_and_reached_lock_state() {
+    fn paired_install_keeps_distinct_ids_one_ram_and_reached_lock_state() {
         let (memory, mut cache) = components();
         let dcs = memory.bindings()[0].0;
         let base = cache.binding().0;

@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_rom_staging_defers_conditional_pnvm_until_actual_alive() {
+    fn pre_rom_staging_defers_conditional_pnvm_until_alive() {
         let profile = Profile::select(observed(AX210)).unwrap();
         let catalog = Catalog::from_handoff(vec![]).unwrap();
         let provider = Observing {

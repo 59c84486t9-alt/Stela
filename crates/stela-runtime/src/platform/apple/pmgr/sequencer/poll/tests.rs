@@ -11,7 +11,7 @@ fn cursor(words: &[u32], format: AddressFormat) -> PacketCursor {
     cursor
 }
 #[test]
-fn actual_reads_hold_no_match_then_advance_to_a_real_store_without_program_retirement() {
+fn reads_hold_no_match_then_advance_to_a_real_store_without_program_retirement() {
     let mut cursor = cursor(
         &[2, 3, 0x10, 0x10, 0x101, 4, 0x1234, 0],
         AddressFormat::Compact,
@@ -172,7 +172,7 @@ fn wide_high_address_padding_and_unknown_controls_are_checked_before_effects() {
     );
 }
 #[test]
-fn mounted_partial_read_error_preserves_actual_mmio_effect_and_cannot_be_replayed() {
+fn mounted_partial_read_error_preserves_mmio_effect_and_cannot_be_replayed() {
     use alloc::boxed::Box;
     use core::cell::Cell;
     use {
@@ -258,7 +258,7 @@ fn mounted_partial_read_error_preserves_actual_mmio_effect_and_cannot_be_replaye
 #[cfg(feature = "std")]
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_IBOOTDATA, STELA_TEST_PMGR_M1_LLB"]
-fn original_poll_emitter_and_actual_source_operands_are_pinned() {
+fn original_poll_emitter_and_source_operands_are_pinned() {
     use sha2::{Digest, Sha256};
     let llb =
         std::fs::read(std::env::var("STELA_TEST_PMGR_M1_LLB").expect("matching original LLB"))

@@ -245,7 +245,7 @@ fn firmware_and_separate_config_tx_locks_refuse_before_any_write() {
 }
 
 #[test]
-fn actual_revision_selects_extended_pad_ownership_and_word_stride() {
+fn revision_selects_extended_pad_ownership_and_word_stride() {
     let (mut controller, state, _) = setup(&[8], 0x110);
     state.borrow_mut().words.insert((0, 0x20 + 8 * 4), 3);
     state.borrow_mut().trace.clear();
@@ -363,7 +363,7 @@ fn level_is_masked_through_consumer_and_reassertion_remains_masked() {
 }
 
 #[test]
-fn consumed_irq_evidence_survives_failure_and_original_owner_is_retained() {
+fn consumed_irq_evidence_survives_failure_and_original_owner_is_kept() {
     let (mut controller, state, drops) = setup(&[0], 0x94);
     controller.interrupt_type(0, Interrupt::Rising).unwrap();
     controller.interrupt_mask(0, false).unwrap();
@@ -484,7 +484,7 @@ fn native_supplier_dynamic_claim_preserves_direction_and_restores_before_reuse()
 }
 
 #[test]
-fn native_supplier_failed_request_retains_snapshot_and_failed_restore_retains_claim() {
+fn native_supplier_failed_request_keeps_snapshot_and_failed_restore_keeps_claim() {
     let (transport, state, drops) = peer(modern(), 0x94);
     let mut controller = Controller::new(transport, modern(), &[]).unwrap();
     controller.capture(0).unwrap();

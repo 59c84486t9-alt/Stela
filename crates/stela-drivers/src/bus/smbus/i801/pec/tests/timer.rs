@@ -28,7 +28,7 @@ impl Timer for OpaqueTime {
 }
 
 #[test]
-fn raw_opaque_markers_cross_divided_rollover_and_bound_the_actual_controller() {
+fn raw_opaque_markers_cross_divided_rollover_and_bound_the_controller() {
     for budget in [1, 5] {
         let Fixture {
             host,

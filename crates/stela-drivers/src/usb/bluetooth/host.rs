@@ -483,7 +483,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn firmware_bulk_uses_actual_dma_and_invalid_or_zero_budget_never_publishes() {
+    fn firmware_bulk_uses_dma_and_invalid_or_zero_budget_never_publishes() {
         use alloc::rc::Rc;
         use core::cell::RefCell;
         let mut backing = vec![0u64; 64 * 1024];

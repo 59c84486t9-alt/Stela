@@ -403,7 +403,7 @@ mod tests {
         }
     }
     #[test]
-    fn callback_wake_during_busy_survives_actual_return_zero_and_retries_same_lease() {
+    fn callback_wake_during_busy_survives_return_zero_and_retries_same_lease() {
         let r = Runtime::new();
         let q = r.create_queue(QueueConfiguration::mc_metrics()).unwrap();
         let handle = Rc::new(RefCell::new(None));
@@ -448,7 +448,7 @@ mod tests {
         }
     }
     #[test]
-    fn refusal_keeps_actual_invocation_and_retired_diagnostic_requeues_once() {
+    fn refusal_keeps_invocation_and_retired_diagnostic_requeues_once() {
         let r = Runtime::new();
         let q = r.create_queue(QueueConfiguration::mc_metrics()).unwrap();
         let seen = Rc::new(RefCell::new(Vec::new()));

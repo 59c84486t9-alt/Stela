@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn original_read_callback_uses_actual_live_registers_and_limits() {
+    fn original_read_callback_uses_live_registers_and_limits() {
         for (word, address, value) in [
             (0x3a, 0x30, 0x1234_5678),
             (0x3b, 0x34, 0x8765_4321),

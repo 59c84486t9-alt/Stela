@@ -91,7 +91,7 @@ fn original_bulk_consumer_drains_wrapping_fifo_and_transmitter_backlog() {
 }
 
 #[test]
-fn enable_rmw_preserves_fifo_and_drives_actual_level_changes() {
+fn enable_rmw_preserves_fifo_and_drives_level_changes() {
     let lines = [0x42c, 0x42b, 0x42e, 0x42d].map(|i| AicInput::new(0, i));
     let mut latch = InterruptLatch::new();
     let mut wrapper = MxWrap::booted(
@@ -293,7 +293,7 @@ fn shared_rtkit_management_runs_through_the_original_mailbox_framing() {
 }
 
 #[test]
-fn retained_halt_preserves_fifo_indexes_backlog_staging_and_levels() {
+fn kept_halt_preserves_fifo_indexes_backlog_staging_and_levels() {
     #[derive(Default)]
     struct Retained {
         starts: usize,

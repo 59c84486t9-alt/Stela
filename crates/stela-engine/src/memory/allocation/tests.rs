@@ -120,7 +120,7 @@ fn unpublished_initialization_applies_final_readonly_rights_on_commit() {
 }
 
 #[test]
-fn dropping_unpublished_mapping_and_owner_releases_exact_native_extent() {
+fn dropping_unpublished_mapping_and_owner_releases_native_extent() {
     for _ in 0..ALLOCATION_ATTEMPTS {
         let mut memory = empty();
         let transaction = memory

@@ -137,7 +137,7 @@ fn peer_delba_cancels_queued_operational_without_enabling_firmware_aggregation()
 }
 
 #[test]
-fn canceled_prepare_retains_previous_qos_until_descriptor_txfree_and_unmap() {
+fn canceled_prepare_keeps_previous_qos_until_descriptor_txfree_and_unmap() {
     let mut f = TxFixture::new();
     f.transmit();
     f.driver.begin_tx_block_ack(TID, 0, NOW).unwrap();
@@ -196,7 +196,7 @@ fn canceled_prepare_retains_previous_qos_until_descriptor_txfree_and_unmap() {
 }
 
 #[test]
-fn failed_actual_disable_quarantines_exact_session_and_all_native_owners() {
+fn failed_disable_quarantines_exact_session_and_all_native_owners() {
     let mut f = TxFixture::new();
     let session = queued_operational(&mut f);
     delba(&mut f, NOW + 5);
@@ -269,7 +269,7 @@ fn queued_operational_cancel_also_drains_original_session_management_packet() {
 }
 
 #[test]
-fn ordinary_local_delba_retains_resume_and_data_block_until_real_packet_retirement() {
+fn ordinary_local_delba_keeps_resume_and_data_block_until_real_packet_retirement() {
     let mut f = TxFixture::new();
     f.driver.begin_tx_block_ack(TID, 0, NOW).unwrap();
     f.progress(NOW + 1).unwrap();

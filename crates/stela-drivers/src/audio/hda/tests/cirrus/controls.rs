@@ -391,7 +391,7 @@ mod power {
     }
 
     #[test]
-    fn cs421x_power_failure_retains_routes() {
+    fn cs421x_power_failure_keeps_routes() {
         for fail_resume in [false, true] {
             let mut fixture = Fixture::new();
             let model = device(false);

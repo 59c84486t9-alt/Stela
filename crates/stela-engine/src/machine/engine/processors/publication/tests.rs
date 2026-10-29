@@ -160,7 +160,7 @@ fn hold(
 }
 
 #[test]
-fn retained_idle_owners_rejoin_changing_actual_run_rosters_without_new_commands() {
+fn kept_idle_owners_rejoin_changing_run_rosters_without_new_commands() {
     let (mut publications, mut owners, mut hosts) = ready();
     let request = publications.request_stop(&[0, 1]).unwrap();
     let mut held = hold(&mut publications, &mut owners, &mut hosts, request);
@@ -305,7 +305,7 @@ fn sparse_idle_roster_rejects_changed_stop_generation_without_rebasing_receipts(
 }
 
 #[test]
-fn selective_release_preflight_and_failed_actual_recovery_keep_full_authority() {
+fn selective_release_preflight_and_failed_recovery_keep_full_permission() {
     let (mut publications, mut owners, mut hosts) = ready();
     let request = publications.request_stop(&[0, 1]).unwrap();
     let mut held = hold(&mut publications, &mut owners, &mut hosts, request);
@@ -377,7 +377,7 @@ fn selective_release_preflight_and_failed_actual_recovery_keep_full_authority() 
 }
 
 #[test]
-fn registration_requires_unique_bindings_and_actual_initial_publication() {
+fn registration_requires_unique_bindings_and_initial_publication() {
     assert!(matches!(
         WorkerPublications::new(&[]),
         Err(PublicationError::EmptyCohort)
@@ -434,7 +434,7 @@ fn registration_requires_unique_bindings_and_actual_initial_publication() {
 }
 
 #[test]
-fn actual_host_identity_is_required_before_any_native_owner_effect() {
+fn host_identity_is_required_before_any_native_owner_effect() {
     let (mut publications, mut owners) = WorkerPublications::new(&bindings()).unwrap();
     let mut serial = LocalHost::default();
     assert_eq!(
@@ -582,7 +582,7 @@ fn a_real_return_preserves_registers_retirement_and_full_native_fault() {
 }
 
 #[test]
-fn failed_recovery_keeps_actual_frame_and_blocks_stop_credit_until_retry() {
+fn failed_recovery_keeps_frame_and_blocks_stop_credit_until_retry() {
     let (mut publications, mut owners, mut hosts) = ready();
     let mut state = GuestState::default();
     let mut retired = 0;
@@ -677,7 +677,7 @@ fn whole_cohort_preflight_has_no_partial_stop_or_invalidation_effect() {
 }
 
 #[test]
-fn identity_and_actual_owner_refusals_retain_the_original_tokens() {
+fn identity_and_owner_refusals_keep_the_original_tokens() {
     let (mut a, mut owners, mut hosts) = ready();
     let (mut b, _, _) = ready();
     let mut state = GuestState::default();
@@ -763,7 +763,7 @@ fn redispatch_waits_for_same_generation_owner_release_receipts() {
 }
 
 #[test]
-fn different_held_generations_cannot_qualify_one_cpu_transaction() {
+fn different_held_generations_cannot_check_one_cpu_transaction() {
     let (mut publications, mut owners, mut hosts) = ready();
     let first = publications.request_stop(&[0]).unwrap();
     let _held0 = hold(&mut publications, &mut owners, &mut hosts, first);
@@ -931,7 +931,7 @@ fn processor_write_checks_all_requested_owners_even_for_unchanged_pause_state() 
 
 #[cfg(feature = "std")]
 #[test]
-fn two_workers_execute_actual_disjoint_loans_concurrently_and_publish_returns() {
+fn two_workers_execute_disjoint_loans_concurrently_and_publish_returns() {
     use std::sync::{Barrier, mpsc};
     let (mut publications, owners, _) = ready();
     let mut states = [GuestState::default(), GuestState::default()];

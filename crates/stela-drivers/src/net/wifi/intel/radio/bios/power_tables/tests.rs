@@ -141,7 +141,7 @@ fn geo_full_capacity_and_ppag_size_first_revision_branch_are_exact() {
     }
 }
 #[test]
-fn tas_and_country_maps_retain_raw_fields_without_policy_authority() {
+fn tas_and_country_maps_keep_raw_fields_without_policy_permission() {
     for revision in [1, 2] {
         for count in 0..=17 {
             let raw = fixture(4, 17, revision, 38, 0x18007, count);

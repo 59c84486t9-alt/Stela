@@ -36,7 +36,7 @@ fn payload(bytes: u32) -> Vec<u8> {
 }
 
 #[test]
-fn actual_read_bytes_survive_destination_refusal_and_only_real_write_can_join() {
+fn read_bytes_survive_destination_refusal_and_only_real_write_can_join() {
     let mut cursor = cursor(&words(SOURCE, DESTINATION, 256), AddressFormat::HighWord);
     let start = cursor.packet_pc();
     assert_eq!(cursor.packet_kind(), Ok(PacketKind::Copy));

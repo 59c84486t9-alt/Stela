@@ -239,7 +239,7 @@ pub(super) mod tests {
     use super::*;
     use alloc::collections::VecDeque;
     #[test]
-    fn ipv6_authorities_keep_address_and_port_separate() {
+    fn ipv6_permissions_keep_address_and_port_separate() {
         assert_eq!(
             authority("[2001:db8::1]:8080").unwrap(),
             ("2001:db8::1", 8080)

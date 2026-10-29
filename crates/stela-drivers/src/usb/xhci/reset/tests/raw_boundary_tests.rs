@@ -506,7 +506,7 @@ fn matching_disable_ack_permanently_fences_raw_access_before_fatal_health_failur
 mod slot_resource_tests;
 
 #[test]
-fn immutable_uas_planner_retains_current_generation_after_actual_slot_reuse() {
+fn immutable_uas_planner_keeps_current_generation_after_slot_reuse() {
     for context in [32, 64] {
         let mut backing = vec![0u64; 512 * 1024];
         let (mut c, previous, hardware, mut dma) =

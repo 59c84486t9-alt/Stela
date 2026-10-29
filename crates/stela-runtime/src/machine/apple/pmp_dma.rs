@@ -560,7 +560,7 @@ mod tests {
         assert!(SourceProvenance::from_trees(&absent, &absent, &wrong).is_err());
     }
     #[test]
-    fn host_granule_comes_from_retained_cpuid_instead_of_a_constant() {
+    fn host_granule_comes_from_kept_cpuid_instead_of_a_constant() {
         let bytes = tree(None, None, false, 0x7d);
         let source = SourceProvenance::from_trees(&bytes, &bytes, &pmp()).unwrap();
         for (field, expected) in [(8, 64), (16, 128)] {
@@ -626,7 +626,7 @@ mod tests {
         }
     }
     #[test]
-    fn mounted_profile_and_actual_bus_identity_are_required_beside_numeric_geometry() {
+    fn mounted_profile_and_bus_identity_are_required_beside_numeric_geometry() {
         let mut devices = AppleDevices::new();
         devices
             .add_pmp(&pmp(), stela_formats::builds::DEFAULT)
@@ -684,7 +684,7 @@ mod tests {
         assert!(master.check_bus(&devices.bus).is_err());
     }
     #[test]
-    fn actual_native_loan_is_busy_and_a_failed_domain_retires_the_session() {
+    fn native_loan_is_busy_and_a_failed_domain_retires_the_session() {
         let mut coherence = coherence();
         let loan = coherence.ram.reference_execution_loan().unwrap();
         assert_eq!(coherence.ready(), Completion::Busy { deadline: None });
@@ -714,7 +714,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
-    fn original_j473_static_dma_configuration_retains_source_identity() {
+    fn original_j473_static_dma_configuration_keeps_source_identity() {
         let bytes = std::fs::read(
             std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
                 .join("DeviceTree.j473ap.adt"),

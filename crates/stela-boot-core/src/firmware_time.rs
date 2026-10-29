@@ -203,7 +203,7 @@ mod tests {
         );
     }
     #[test]
-    fn daylight_is_already_accounted_for_and_nanoseconds_are_retained() {
+    fn daylight_is_already_accounted_for_and_nanoseconds_are_kept() {
         let standard = Time {
             hour: 12,
             timezone_minutes: 480,

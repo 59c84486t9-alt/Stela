@@ -227,7 +227,7 @@ fn fixture(layout: Layout, bank: u8) -> Fixture {
     (nvm, state, released)
 }
 #[test]
-fn actual_geometries_and_banks_supply_validated_factory_station() {
+fn geometries_and_banks_supply_validated_factory_station() {
     for layout in [Layout::Pch2, Layout::Lpt, Layout::Spt] {
         for bank in 0..2 {
             let (mut nvm, state, released) = fixture(layout, bank);
@@ -274,7 +274,7 @@ fn odd_spt_reads_and_erased_data_are_actual_bounded_payloads() {
     }
 }
 #[test]
-fn every_flash_access_failure_preserves_output_and_retains_owner() {
+fn every_flash_access_failure_preserves_output_and_keeps_owner() {
     for layout in [Layout::Pch2, Layout::Spt] {
         let (mut good, state, _) = fixture(layout, 1);
         let begin = state.borrow().accesses;
@@ -351,7 +351,7 @@ fn retry_count_and_hung_completion_are_finite_and_do_not_program_flash() {
     assert_eq!(released.load(Ordering::SeqCst), 0);
 }
 #[test]
-fn a_failed_post_cycle_observation_keeps_the_actual_timeout() {
+fn a_failed_post_cycle_observation_keeps_the_timeout() {
     let (mut baseline, state, _) = fixture(Layout::Spt, 0);
     state.borrow_mut().hang = true;
     state.borrow_mut().record = false;
@@ -407,7 +407,7 @@ fn geometry_and_me_qualification_refuse_without_sequencer_writes() {
     }
 }
 #[test]
-fn native_separate_and_integrated_windows_enforce_actual_access_widths() {
+fn native_separate_and_integrated_windows_enforce_access_widths() {
     use crate::net::e1000e::pch::io::NvmMmio;
     use core::ptr::NonNull;
     let mut mac = vec![0u32; 0x10000 / 4];

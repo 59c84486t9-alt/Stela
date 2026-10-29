@@ -114,7 +114,7 @@ mod tests {
         }
     }
     #[test]
-    fn a_guest_subset_retains_sparse_actual_worker_ids() {
+    fn a_guest_subset_keeps_sparse_worker_ids() {
         use stela_engine::machine::engine::publication::WorkerId;
         let bindings = [
             WorkerBinding {

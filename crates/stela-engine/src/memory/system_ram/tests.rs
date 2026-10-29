@@ -197,7 +197,7 @@ fn compare_exchange_stores_only_while_ram_holds_the_expected_bytes() {
 }
 
 #[test]
-fn canonical_registration_retains_original_bytes_and_actual_mapping_owner() {
+fn canonical_registration_keeps_original_bytes_and_mapping_owner() {
     let storage = Storage::new();
     let weak = Arc::downgrade(&storage);
     let ranges = [range(&storage, 0x4000, 0, 128)];
@@ -412,7 +412,7 @@ fn long_physical_read_keeps_one_backing_and_the_original_scalar_observations() {
 
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn actual_native_scalar_fetches_are_coherent_with_the_same_host_writer_system() {
+fn native_scalar_fetches_are_coherent_with_the_same_host_writer_system() {
     let storage = Storage::new();
     let ranges = [range(&storage, 0x4000, 0, 128)];
     // SAFETY: the test's storage backs every range, stays alive with the registration and has

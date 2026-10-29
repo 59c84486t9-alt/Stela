@@ -6,7 +6,7 @@ use crate::bus::thunderbolt::ring::{Direction, TX_DESCRIPTOR, model::*};
 use alloc::vec::Vec;
 
 #[test]
-fn link_bonds_and_activates_both_actual_configured_routers_with_observed_nonadjacent_lanes() {
+fn link_bonds_and_activates_both_configured_routers_with_observed_nonadjacent_lanes() {
     use super::super::link::Activate;
     for map in 0..2 {
         for generation in [2, 3] {
@@ -62,7 +62,7 @@ fn link_bonds_and_activates_both_actual_configured_routers_with_observed_nonadja
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_LINK_ORACLE"]
-fn unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_actual_dma() {
+fn unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_dma() {
     use super::super::link::Activate;
     use std::{env, fs};
     let trace =
@@ -263,7 +263,7 @@ fn link_unknown_phy_modes_asymmetry_and_missing_bonding_support_never_write_link
 }
 
 #[test]
-fn link_every_write_uncertainty_retains_both_routers_without_claiming_rollback() {
+fn link_every_write_uncertainty_keeps_both_routers_without_claiming_rollback() {
     use super::super::link::{Activate, Error};
     for target in 1..=7 {
         for failure in 0..3 {
@@ -504,7 +504,7 @@ fn link_secondary_connection_wait_obeys_ten_source_reads_and_hundred_ms_spacing(
 }
 
 #[test]
-fn link_receipt_storage_failure_refuses_before_publication_and_retains_active_routers() {
+fn link_receipt_storage_failure_refuses_before_publication_and_keeps_active_routers() {
     use super::super::link::{Activate, Error};
     let LinkFixture {
         domain,

@@ -181,7 +181,7 @@ fn watchdog_side_words_use_independent_translated_dt_ranges() {
 
 #[test]
 #[ignore = "oracle: STELA_TEST_GPIO_DT"]
-fn original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims() {
+fn original_j314s_ap_gpio_checks_without_auxiliary_or_lifecycle_claims() {
     let data = std::fs::read(std::env::var("STELA_TEST_GPIO_DT").unwrap()).unwrap();
     assert_eq!(
         stela_formats::sha256(&data),
@@ -1449,7 +1449,7 @@ fn cpu_binding_rejects_aliasing_affinities_before_synthetic_type_bits() {
 }
 #[test]
 #[ignore = "oracle: STELA_TEST_ANS_DT"]
-fn original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board() {
+fn original_j314s_ans_geometry_and_handoff_check_independently_of_whole_board() {
     let data = std::fs::read(std::env::var("STELA_TEST_ANS_DT").unwrap()).unwrap();
     assert_eq!(
         stela_formats::sha256(&data),

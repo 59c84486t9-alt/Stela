@@ -229,7 +229,7 @@ fn complete_width_alignment_and_knownness_are_required_without_padding_registers
 }
 
 #[test]
-fn snapshots_never_consume_metadata_notifications_or_retained_lifecycle() {
+fn snapshots_never_consume_metadata_notifications_or_kept_lifecycle() {
     let (mut bank, local) = Ptd::initialized_local(384, &ranges(384), lifecycle()).unwrap();
     let mut latch = InterruptLatch::new();
     for entry in [0u32, 33, 98, 383] {

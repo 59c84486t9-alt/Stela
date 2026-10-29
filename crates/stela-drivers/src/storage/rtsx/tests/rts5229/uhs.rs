@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn rts5229_cmd11_all_sdr_modes_and_tx27_tuning_drive_actual_changed_pio_payloads() {
+fn rts5229_cmd11_all_sdr_modes_and_tx27_tuning_drive_changed_pio_payloads() {
     let _virtual = crate::test_clock::virtualize();
     for (function, hz, timing) in [
         (0, 25_000_000, Timing::Sdr12),

@@ -357,7 +357,7 @@ mod tests {
         }
     }
     #[test]
-    fn source_sram_reservations_and_actual_empty_h2c_preserve_unrelated_bits() {
+    fn source_sram_reservations_and_empty_h2c_preserve_unrelated_bits() {
         let mut m = Model::new(0xa5);
         let head_upper = m.get(REG_H2C_HEAD, 4) & 0xfffc_0000;
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -397,7 +397,7 @@ mod tests {
         }
     }
     #[test]
-    fn actual_identity_mcu_llt_h2c_and_removal_failures_are_explicit() {
+    fn identity_mcu_llt_h2c_and_removal_failures_are_explicit() {
         for mode in 0..6 {
             let mut m = Model::new(11);
             match mode {

@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_exception_enables_refuse_without_successful_outcomes() {
+    fn kept_exception_enables_refuse_without_successful_outcomes() {
         for format in FORMATS {
             for bit in 0..u32::BITS {
                 let exception = 1 << bit;

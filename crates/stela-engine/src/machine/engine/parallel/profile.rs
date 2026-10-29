@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_publication_retains_observation_and_counts_saturate() {
+    fn exhausted_publication_keeps_observation_and_counts_saturate() {
         let slot = Slot::default();
         slot.kinds[0]
             .elapsed_ticks

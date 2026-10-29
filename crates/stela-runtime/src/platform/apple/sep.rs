@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_mounted_rom_random_requires_entropy_and_full_mailbox_commit_before_reply() {
+    fn mounted_rom_random_requires_entropy_and_full_mailbox_commit_before_reply() {
         use std::{cell::Cell, rc::Rc};
         let calls = Rc::new(Cell::new(0));
         let observed = calls.clone();
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_mounted_sep_retains_staged_and_committed_work_across_checked_gates() {
+    fn mounted_sep_keeps_staged_and_committed_work_across_checked_gates() {
         use std::{cell::Cell, rc::Rc};
         let calls = Rc::new(Cell::new(0));
         let observed = calls.clone();

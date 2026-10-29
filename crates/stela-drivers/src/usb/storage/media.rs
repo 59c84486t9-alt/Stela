@@ -475,7 +475,7 @@ mod tests {
         }
     }
     #[test]
-    fn service_recovers_native_uas_without_replaying_data_and_retains_empty_media() {
+    fn service_recovers_native_uas_without_replaying_data_and_keeps_empty_media() {
         use crate::block::BlockDevice;
         use crate::usb::xhci;
         for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {

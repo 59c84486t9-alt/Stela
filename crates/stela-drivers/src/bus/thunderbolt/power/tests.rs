@@ -205,7 +205,7 @@ fn wake_programs_sorted_real_ports_then_device_router_with_ack_and_readback() {
 }
 
 #[test]
-fn sleep_requires_actual_ack_then_ready_status_without_extending_deadline() {
+fn sleep_requires_ack_then_ready_status_without_extending_deadline() {
     for ready in [false, true] {
         let (_source, domain, model, mut channel) = channel();
         channel.start(0).unwrap();

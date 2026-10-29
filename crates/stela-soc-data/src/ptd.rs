@@ -86,7 +86,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn physical_alias_uses_the_actual_update_and_interrupt_capacities() {
+    fn physical_alias_uses_the_update_and_interrupt_capacities() {
         const BASE: u64 = 0x23b3c0000;
         for entries in [1, 377, 1024, MAX_ENTRIES] {
             let geometry = Geometry::new(

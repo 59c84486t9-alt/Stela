@@ -38,7 +38,7 @@ mod checked_finalization {
     }
 
     #[test]
-    fn callback_fault_clears_actual_reservation_and_preserves_fault() {
+    fn callback_fault_clears_reservation_and_preserves_fault() {
         let (backing, domain, mut thread) = fixture();
         let access = reserve(&mut thread);
         thread.policy.reject = Some(GUEST_BASE);
@@ -79,7 +79,7 @@ mod checked_finalization {
     }
 
     #[test]
-    fn local_alignment_fault_clears_actual_reservation() {
+    fn local_alignment_fault_clears_reservation() {
         let (_, domain, mut thread) = fixture();
         let access = reserve(&mut thread);
         // SAFETY: this body records a local fault without exposing ABI pointers.
@@ -109,7 +109,7 @@ mod checked_finalization {
     }
 
     #[test]
-    fn retained_session_fault_preserves_prefix_and_clears_actual_reservation() {
+    fn kept_session_fault_preserves_prefix_and_clears_reservation() {
         let (_, domain, mut thread) = fixture();
         let access = reserve(&mut thread);
         let session = thread.execution_session().unwrap();
@@ -141,7 +141,7 @@ mod checked_finalization {
     }
 
     #[test]
-    fn retained_session_final_failure_keeps_write_and_external_fault_evidence() {
+    fn kept_session_final_failure_keeps_write_and_external_fault_evidence() {
         let (backing, domain, mut thread) = fixture();
         let session = thread.execution_session().unwrap();
         let mut data = [0x6b];
@@ -224,7 +224,7 @@ mod checked_finalization {
     }
 
     #[test]
-    fn actual_monitor_failure_during_body_is_reported_by_post_body_health() {
+    fn monitor_failure_during_body_is_reported_by_post_body_health() {
         let (backing, domain, mut thread) = fixture();
         reserve(&mut thread);
         let range = monitor::WriteRange::new(backing, 0, 1).unwrap();
@@ -697,7 +697,7 @@ mod access_intent {
         );
     }
     #[test]
-    fn ordered_adaptation_retains_source_category_and_exclusive_direction() {
+    fn ordered_adaptation_keeps_source_category_and_exclusive_direction() {
         let backing = backing();
         let domain = domain(vec![view(&backing, 0, STORAGE_BYTES, RIGHTS)]);
         let mut thread = domain.thread(Directed::default());

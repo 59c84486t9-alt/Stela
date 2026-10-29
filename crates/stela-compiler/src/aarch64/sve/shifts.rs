@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn xor_rotate_retains_both_inputs_and_width_rotation() {
+    fn xor_rotate_keeps_both_inputs_and_width_rotation() {
         let word = XAR_Z_ZZI | 1 << TSIZE_LOW_SHIFT | 9 << SOURCE_SHIFT | 31;
         let operand = decode(word).unwrap().unwrap();
         assert_eq!(operand.kind, Kind::XorRotate);

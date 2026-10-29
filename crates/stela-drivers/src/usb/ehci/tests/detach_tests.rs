@@ -13,7 +13,7 @@ fn two_roots() -> (Controller, Arc<Mutex<Shared>>) {
 }
 
 #[test]
-fn actual_pe_clear_isolates_old_address_before_real_reuse_and_fresh_bulk_io() {
+fn pe_clear_isolates_old_address_before_real_reuse_and_fresh_bulk_io() {
     let (mut c, m) = two_roots();
     let old = c.reset_port(1).unwrap();
     c.set_address(&old, 7).unwrap();
@@ -61,7 +61,7 @@ fn actual_pe_clear_isolates_old_address_before_real_reuse_and_fresh_bulk_io() {
 }
 
 #[test]
-fn default_address_is_released_only_after_actual_root_disable_and_requires_fresh_reset() {
+fn default_address_is_released_only_after_root_disable_and_requires_fresh_reset() {
     let (mut c, m) = two_roots();
     let old = c.reset_port(1).unwrap();
     assert!(matches!(c.reset_port(2), Err(Error::Busy)));
@@ -82,7 +82,7 @@ fn default_address_is_released_only_after_actual_root_disable_and_requires_fresh
 }
 
 #[test]
-fn disable_preflight_preserves_actual_pending_bulk_periodic_and_private_suspend_owners() {
+fn disable_preflight_preserves_pending_bulk_periodic_and_private_suspend_owners() {
     for periodic in [false, true] {
         let (mut c, m, id, bulk, interrupt) = periodic_tests::attached_periodic(64, 1, 4);
         let ticket = if periodic {

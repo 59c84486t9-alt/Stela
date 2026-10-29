@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn native_mapping_releases_only_after_final_retained_owner() {
+    fn native_mapping_releases_only_after_final_kept_owner() {
         let storage = NativeStorage::anonymous(anonymous(host_page_size().unwrap()));
         let base = storage.primary_base();
         let retained = Arc::clone(&storage);
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_backing_retains_both_publication_aliases_and_file() {
+    fn canonical_backing_keeps_both_publication_aliases_and_file() {
         let region = published();
         let storage = Arc::clone(&region.storage);
         let guest = storage.primary_base();
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn unpublished_transaction_drop_releases_retained_storage() {
+    fn unpublished_transaction_drop_releases_kept_storage() {
         let mut memory = OwnedMemory::map(Vec::new()).unwrap();
         let rights = DataPermissions {
             readable: true,

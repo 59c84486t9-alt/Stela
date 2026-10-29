@@ -32,7 +32,7 @@ fn seed(hw: &mut FirmwareModel, dack: bool) {
 }
 
 #[test]
-fn rtl8156b_actual_12_13_15_flash_phy_dsp_tuning_and_capabilities() {
+fn rtl8156b_12_13_15_flash_phy_dsp_tuning_and_capabilities() {
     for revision in [0x7400, 0x7410, 0x7420] {
         let bytes = image(revision);
         let firmware =

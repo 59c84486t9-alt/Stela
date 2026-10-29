@@ -534,7 +534,7 @@ fn debounce_exact_time_bins_internal_pin_zero_and_invalid_limit() {
 }
 
 #[test]
-fn settle_timeout_is_bounded_sticky_and_retains_actual_owner() {
+fn settle_timeout_is_bounded_sticky_and_keeps_owner() {
     let (mut c, s, drops) = setup(Profile::Amdi0030, &[3]);
     s.borrow_mut().hold_enable = true;
     assert_eq!(
@@ -611,7 +611,7 @@ fn late_different_cause_and_reassertion_are_masked_not_silently_lost() {
 }
 
 #[test]
-fn masked_pending_is_not_acknowledged_and_consumer_failure_masks_retains() {
+fn masked_pending_is_not_acknowledged_and_consumer_failure_masks_keeps() {
     let (mut c, s, drops) = setup(Profile::Amd0030, &[2, 3]);
     c.interrupt_enable(p(2), false).unwrap();
     c.interrupt_enable(p(3), true).unwrap();
@@ -751,7 +751,7 @@ fn reserved_pad_claim_and_out_of_table_tail_never_touch_registers() {
 }
 
 #[test]
-fn failed_master_eoi_never_reports_a_completed_service_and_retains_owner() {
+fn failed_master_eoi_never_reports_a_completed_service_and_keeps_owner() {
     for post in [false, true] {
         let (mut c, s, drops) = setup(Profile::Amd0030, &[1]);
         c.interrupt_enable(p(1), true).unwrap();

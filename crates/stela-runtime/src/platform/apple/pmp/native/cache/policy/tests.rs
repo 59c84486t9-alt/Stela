@@ -90,7 +90,7 @@ fn raw_rows_duplicates_sentinel_and_opaque_words_remain_exact() {
 }
 
 #[test]
-fn actual_full_word_seeds_replace_raw_limits_and_only_class1_assigned() {
+fn full_word_seeds_replace_raw_limits_and_only_class1_assigned() {
     let mut rows = [row(0, 1, 1), row(1, 1, 2), row(2, 1, 3)];
     rows[0][8] = 1024;
     rows[1][8] = 12345;
@@ -161,7 +161,7 @@ fn dynamic_minimum_uses_remaining_ceiling_and_requested_independently() {
 }
 
 #[test]
-fn class1_nonzero_policy_is_retained_when_dynamic_budget_is_zero() {
+fn class1_nonzero_policy_is_kept_when_dynamic_budget_is_zero() {
     let mut p = policy(&[row(0, 1, 2), row(1, 3, 1)]);
     p.set_request(0, 64).unwrap();
     p.set_budget_payload(0);
@@ -202,7 +202,7 @@ fn lane_flags_zero_two_and_upper_bits_do_not_select_policy_class() {
 }
 
 #[test]
-fn source_feature_guard_retains_only_when_word_and_slot_bit1_are_set() {
+fn source_feature_guard_keeps_only_when_word_and_slot_bit1_are_set() {
     for (feature, flags, retained) in [
         (0, 2, false),
         (1, 0, false),

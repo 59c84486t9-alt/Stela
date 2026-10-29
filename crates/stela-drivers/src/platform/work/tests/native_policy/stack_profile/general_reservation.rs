@@ -414,12 +414,12 @@ fn run(mode: Mode) {
     assert_eq!(cpu.model.flags(), 0x202);
 }
 #[test]
-fn dropped_and_failed_metadata_setup_restore_actual_worker_without_ticket() {
+fn dropped_and_failed_metadata_setup_restore_worker_without_ticket() {
     run(Mode::Drop);
     run(Mode::MetadataFailure);
 }
 #[test]
-fn committed_actual_child_runs_after_borrow_release_on_its_reserved_geometry() {
+fn committed_child_runs_after_borrow_release_on_its_reserved_geometry() {
     run(Mode::Commit);
 }
 #[test]
@@ -469,13 +469,13 @@ fn forgotten_permit_stops_before_return_or_owner_release() {
 }
 
 #[test]
-fn actual_authority_profile_and_ticket_exhaustion_refuse_before_publication() {
+fn permission_profile_and_ticket_exhaustion_refuse_before_publication() {
     run(Mode::Denied);
     run(Mode::NoProfile);
     run(Mode::CommitExhaust);
 }
 
 #[test]
-fn physically_idle_but_retained_binding_is_not_an_unowned_spawn_stack() {
+fn physically_idle_but_kept_binding_is_not_an_unowned_spawn_stack() {
     run(Mode::BoundWorker);
 }

@@ -418,7 +418,7 @@ fn allocator(memory: &mut [u64]) -> RegionAllocator {
 }
 
 #[test]
-fn actual_native_ep0_probes_once_and_writes_exact_dma() {
+fn native_ep0_probes_once_and_writes_exact_dma() {
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = native(&mut dma);
@@ -467,7 +467,7 @@ fn actual_native_ep0_probes_once_and_writes_exact_dma() {
 }
 
 #[test]
-fn actual_native_ep0_short_range_and_stalled_set_propagate_failures() {
+fn native_ep0_short_range_and_stalled_set_propagate_failures() {
     for failure in 0..2 {
         let mut backing = vec![0u64; 512 * 1024];
         let mut dma = allocator(&mut backing);

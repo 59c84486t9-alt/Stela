@@ -241,7 +241,7 @@ impl Configuration {
 mod tests {
     use super::*;
     #[test]
-    fn independently_qualified_fifo_bytes_and_vector_do_not_follow_generation_labels() {
+    fn independently_checked_fifo_bytes_and_vector_do_not_follow_generation_labels() {
         let cfg = Configuration::new(Profile::Gen1, 192, [256, 256]).unwrap();
         assert_eq!(cfg.response_words(), 64);
         assert_eq!(cfg.queue_bytes(), [256, 256]);

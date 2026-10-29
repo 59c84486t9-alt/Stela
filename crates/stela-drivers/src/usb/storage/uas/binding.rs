@@ -207,7 +207,7 @@ mod tests {
         raw
     }
     #[test]
-    fn pipe_roles_follow_actual_endpoint_boundaries_in_every_descriptor_order() {
+    fn pipe_roles_follow_endpoint_boundaries_in_every_descriptor_order() {
         for a in 1..=4 {
             for b in 1..=4 {
                 for c in 1..=4 {
@@ -252,7 +252,7 @@ mod tests {
         }
     }
     #[test]
-    fn accepted_asm1053_binding_retains_240_sector_limit_and_asm1153_does_not() {
+    fn accepted_asm1053_binding_keeps_240_sector_limit_and_asm1153_does_not() {
         for power in [0, 36] {
             let original = raw([1, 2, 3, 4]);
             let mut configuration = original[..18].to_vec();

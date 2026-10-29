@@ -252,7 +252,7 @@ fn identified(asic: Asic, function: u8) -> (Hardware<Reg, Timer>, Rc<RefCell<Mod
 }
 
 #[test]
-fn actual_config_revision_and_phy_oui_select_each_named_family() {
+fn config_revision_and_phy_oui_select_each_named_family() {
     for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
         for function in 0..4 {
             let (mut hardware, _) = model(asic, function);
@@ -377,7 +377,7 @@ fn mdio_timeout_and_hardware_read_failure_are_sticky() {
 }
 
 #[test]
-fn every_successful_mdio_io_access_fault_poison_retains_owner() {
+fn every_successful_mdio_io_access_fault_poison_keeps_owner() {
     let (mut hardware, m) = identified(Asic::Bcm5720, 1);
     m.borrow_mut().mac.insert(MAC_MI_MODE, MI_AUTO_POLL);
     let before = m.borrow().io_count;
@@ -411,7 +411,7 @@ fn sram_data_all_ones_is_valid_and_window_is_restored_on_every_path() {
 }
 
 #[test]
-fn firmware_requires_the_actual_inverted_bootcode_signature() {
+fn firmware_requires_the_inverted_bootcode_signature() {
     let (mut hardware, m) = identified(Asic::Bcm5761, 0);
     hardware.arm_firmware_handshake().unwrap();
     assert_eq!(m.borrow().sram[&FIRMWARE_MBOX], FIRMWARE_MAGIC);
@@ -692,7 +692,7 @@ fn nvram_and_firmware_timeouts_never_produce_reset_completion() {
 }
 
 #[test]
-fn every_core_reset_access_fault_retains_the_actual_epoch() {
+fn every_core_reset_access_fault_keeps_the_epoch() {
     let (mut hardware, m) = reset_model(Asic::Bcm5720);
     let before = m.borrow().io_count;
     hardware.reset_unmanaged_core().unwrap();
@@ -779,7 +779,7 @@ fn unavailable_native_clock_refuses_before_identification_access_and_keeps_origi
 }
 
 #[test]
-fn every_mdio_wait_failure_restores_autopoll_releases_original_grant_and_poison_retains() {
+fn every_mdio_wait_failure_restores_autopoll_releases_original_grant_and_poison_keeps() {
     for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
         let (mut hardware, model) = identified(asic, 1);
         model
@@ -837,7 +837,7 @@ fn every_mdio_wait_failure_restores_autopoll_releases_original_grant_and_poison_
 }
 
 #[test]
-fn every_actual_core_reset_wait_failure_prevents_completion_and_keeps_original_epoch() {
+fn every_core_reset_wait_failure_prevents_completion_and_keeps_original_epoch() {
     for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
         let (mut hardware, model) = reset_model(asic);
         let before = model.borrow().delay_count;

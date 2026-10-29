@@ -194,7 +194,7 @@ mod fp8_matrix_scope {
     }
 
     #[test]
-    fn supported_forms_retain_fpmr_and_za_access_requirements() {
+    fn supported_forms_keep_fpmr_and_za_access_requirements() {
         let word = PUBLIC_FORMS[0].1;
         let decoded = decode_scalable_numerical_instruction(PC, word)
             .unwrap()
@@ -626,7 +626,7 @@ mod sme_matrix {
     }
 
     #[test]
-    fn matrix_proof_retains_immutable_numerical_features_and_full_a64_permission() {
+    fn matrix_proof_keeps_immutable_numerical_features_and_full_a64_permission() {
         let sme = ScalableFeatures::of(Feature::Sme);
         for full_a64 in [false, true] {
             for ebf16 in [false, true] {

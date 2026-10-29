@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn source_suspend_resume_retains_same_real_ring_and_starts_a_fresh_capture_epoch() {
+fn source_suspend_resume_keeps_same_real_ring_and_starts_a_fresh_capture_epoch() {
     use crate::audio::acp_pdm::trace_assertions::assert_ring_invalidation;
     for power_gate in [false, true] {
         let (mut controller, device, source) = ready(1, 4096);
@@ -139,7 +139,7 @@ fn source_suspend_resume_retains_same_real_ring_and_starts_a_fresh_capture_epoch
 }
 
 #[test]
-fn failed_source_suspend_retains_ever_published_owner_and_first_error() {
+fn failed_source_suspend_keeps_ever_published_owner_and_first_error() {
     for fault in 0..4 {
         let (mut controller, device, source) = ready(1, 4096);
         controller.start().unwrap();

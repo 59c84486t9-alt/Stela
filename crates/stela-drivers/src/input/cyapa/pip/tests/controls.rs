@@ -80,7 +80,7 @@ fn both_generations_acknowledge_scan_intervals_and_keep_reporting_wake_and_stop(
     }
 }
 #[test]
-fn gen6_empty_slot_actual_applied_intervals_and_readback_own_power_admission() {
+fn gen6_empty_slot_applied_intervals_and_readback_own_power_admission() {
     let (h, mut d) = target(Generation::Gen6);
     h.borrow_mut().intervals = (9, 0, 77);
     h.borrow_mut().set_intervals = Some((9, 66, 77));
@@ -326,7 +326,7 @@ fn calibration_timeout_and_late_bus_effects_never_replay_or_resume_uncertain_com
     }
 }
 #[test]
-fn every_low_power_late_failure_retains_owner_and_refuses_replay() {
+fn every_low_power_late_failure_keeps_owner_and_refuses_replay() {
     for generation in [Generation::Gen5, Generation::Gen6] {
         let (sample, mut owner) = target(generation);
         let first = sample.borrow().effects.len();
@@ -363,7 +363,7 @@ fn every_low_power_late_failure_retains_owner_and_refuses_replay() {
 
 #[test]
 #[ignore = "oracle: STELA_CYAPA_CONTROL_ORACLE"]
-fn retained_linux_control_commands_match_actual_native_device_operations() {
+fn kept_linux_control_commands_match_native_device_operations() {
     extern crate std;
     let path = std::env::var("STELA_CYAPA_CONTROL_ORACLE").expect("source records path");
     let records = std::fs::read_to_string(path).expect("source records");

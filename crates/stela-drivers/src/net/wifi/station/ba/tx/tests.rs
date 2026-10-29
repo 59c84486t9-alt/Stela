@@ -107,7 +107,7 @@ fn operational(s: &mut Station, tid: u8, timeout: u16) -> Arc<Session> {
 }
 
 #[test]
-fn actual_sequence_peer_response_and_native_ack_are_all_required_before_aggregate_tx() {
+fn sequence_peer_response_and_native_ack_are_all_required_before_aggregate_tx() {
     let mut s = station(512);
     let (prepare, session) = prepare(&mut s, 3, 19);
     assert!(s.active_tx_block_ack(3).is_none());
@@ -160,7 +160,7 @@ fn actual_sequence_peer_response_and_native_ack_are_all_required_before_aggregat
 }
 
 #[test]
-fn genuine_tid_block_preserves_software_cursor_until_synchronized_prepare_snapshot() {
+fn tid_block_preserves_software_cursor_until_synchronized_prepare_snapshot() {
     let mut s = station(1024);
     let context = Arc::clone(s.context.as_ref().unwrap());
     for sequence in 0..17 {
@@ -424,7 +424,7 @@ fn recipient_delba_cancels_pending_prepare_request_and_operational_completion() 
 }
 
 #[test]
-fn response_and_inactivity_deadlines_use_actual_publication_and_cannot_extend_from_queueing() {
+fn response_and_inactivity_deadlines_use_publication_and_cannot_extend_from_queueing() {
     let mut s = station(1024);
     let session = request_sent(&mut s, 3);
     let due = s.next_tx_block_ack_deadline().unwrap();
@@ -562,7 +562,7 @@ fn uncertain_operational_ack_cannot_be_replayed_into_success_or_legacy_queue_rel
 }
 
 #[test]
-fn disconnect_revokes_data_and_late_operational_ack_requires_actual_stop_without_delba() {
+fn disconnect_revokes_data_and_late_operational_ack_requires_stop_without_delba() {
     let mut s = station(1024);
     let session = request_sent(&mut s, 3);
     let frame = peer_response(&session, session.dialog(), 0, 64, 0, true);

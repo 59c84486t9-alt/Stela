@@ -230,7 +230,7 @@ fn stale_iqk_zero_publication_timeout_unwind_and_packet_failure_quarantine_both_
     }
 }
 #[test]
-fn every_iqk_control_failure_late_reset_and_regressed_clock_retain_both_owners() {
+fn every_iqk_control_failure_late_reset_and_regressed_clock_keep_both_owners() {
     use super::super::firmware_control::{Control, tests::bus};
     // One successful run determines the I/O/clock transaction count;
     // each later case fails one operation, including post-publication
@@ -457,7 +457,7 @@ fn native_bases_and_real_dma_consumer_control_firmware_packet_lifetime() {
     assert_eq!(device.lock().unwrap().drops, 1);
 }
 #[test]
-fn uncertain_initialization_and_completed_unmap_retain_pins_and_claim() {
+fn uncertain_initialization_and_completed_unmap_keep_pins_and_claim() {
     for operation in 1..=7 {
         let memory = Arc::new(Mutex::new(Model::default()));
         let device = Arc::new(Mutex::new(Device {

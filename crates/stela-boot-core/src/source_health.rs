@@ -78,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_failures_keep_their_typed_cause() {
+    fn kept_failures_keep_their_typed_cause() {
         for error in [
             WorkError::Unavailable,
             WorkError::WrongCpu,

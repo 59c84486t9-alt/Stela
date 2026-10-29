@@ -303,7 +303,7 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn actual_mask_one_interoperability_preserves_unrequested_legacy_sse() {
+    fn mask_one_interoperability_preserves_unrequested_legacy_sse() {
         let identity = cpuid(0, 0);
         if identity.eax < 0xd
             || cpuid(1, 0).ecx & (XSAVE | (1 << 27)) != XSAVE | (1 << 27)

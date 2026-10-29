@@ -128,7 +128,7 @@ fn run(
     }
 }
 #[test]
-fn actual_generic_capture_precedes_absent_special_descriptors_and_arrival() {
+fn generic_capture_precedes_absent_special_descriptors_and_arrival() {
     let (mut frames, local, mut latch) = setup();
     let (capture, copy, selected) = copied(&mut frames, &local, &mut latch);
     let mut o =
@@ -170,7 +170,7 @@ fn actual_generic_capture_precedes_absent_special_descriptors_and_arrival() {
     assert_eq!(frames.progress().consumed, 3);
 }
 #[test]
-fn prior_pending_only_capture_allows_the_next_actual_cycle_without_optional_post() {
+fn prior_pending_only_capture_allows_the_next_cycle_without_optional_post() {
     let (mut frames, local, mut latch) = setup();
     let (first, copy, selected) = copied(&mut frames, &local, &mut latch);
     let mut o =
@@ -291,7 +291,7 @@ fn mc_event_copy_preflights_storage_and_clears_only_low96_arrivals() {
     assert_eq!(frames.progress().consumed, 3);
 }
 #[test]
-fn group_views_copy_exact_retained_value_metadata_without_reconsume_or_early_copy() {
+fn group_views_copy_kept_value_metadata_without_reconsume_or_early_copy() {
     let (mut frames, local, mut latch) = setup();
     let (capture, copy, selected) = copied(&mut frames, &local, &mut latch);
     let mut o =
@@ -350,7 +350,7 @@ fn group_views_copy_exact_retained_value_metadata_without_reconsume_or_early_cop
     assert!(o.group(&frames, 0).is_err());
 }
 #[test]
-fn unknown_special_provider_retains_generic_and_local_prefix_without_arrival() {
+fn unknown_special_provider_keeps_generic_and_local_prefix_without_arrival() {
     let (mut frames, local, mut latch) = setup();
     let (capture, copy, selected) = copied(&mut frames, &local, &mut latch);
     let mut refs = [CounterReference::default(); 12];
@@ -407,7 +407,7 @@ fn unknown_special_provider_retains_generic_and_local_prefix_without_arrival() {
     assert_eq!(o.arrivals(), 0);
 }
 #[test]
-fn retained_activity_zero_does_not_copy_again_or_derive_arrival_from_expected() {
+fn kept_activity_zero_does_not_copy_again_or_derive_arrival_from_expected() {
     let (mut frames, local, mut latch) = setup();
     publish(&local, 32, 777, &mut latch);
     let capture = frames

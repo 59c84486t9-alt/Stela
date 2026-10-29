@@ -984,7 +984,7 @@ fn attach() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
 }
 
 #[test]
-fn actual_nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
+fn nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
     let (mut packet, pages, domain, peer) = attach();
     assert_eq!(packet.mac(), Mac([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
     assert!(packet.carrier());
@@ -1008,7 +1008,7 @@ fn actual_nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
     assert_eq!(peer.lock().unwrap().drops, 1);
 }
 #[test]
-fn wraps_actual_tx_and_rx_producer_return_indices() {
+fn wraps_tx_and_rx_producer_return_indices() {
     let (mut packet, _, domain, peer) = attach();
     // One frame past the 512-entry send ring, then past the 2048-entry
     // standard and 4096-entry return rings.
@@ -1063,7 +1063,7 @@ fn carrier_comes_from_phy_status_and_negotiated_mode() {
     assert!(packet.retire().is_ok());
 }
 #[test]
-fn corrupted_rx_is_dropped_and_invalid_opaque_poison_retains_owners() {
+fn corrupted_rx_is_dropped_and_invalid_opaque_poison_keeps_owners() {
     let (mut packet, pages, domain, peer) = attach();
     peer.lock().unwrap().receive(&[0x12; 60], 0x10000, &domain);
     assert_eq!(packet.receive().unwrap(), None);
@@ -1158,7 +1158,7 @@ fn reset_phy_nvm_and_coherence_failures_never_advertise_attachment() {
     }
 }
 #[test]
-fn nvm_fallback_uses_actual_internal_port_and_exact_read_protocol() {
+fn nvm_fallback_uses_internal_port_and_exact_read_protocol() {
     let (hardware, pages, domain, peer) = parts();
     {
         let mut p = peer.lock().unwrap();
@@ -1192,7 +1192,7 @@ fn live_status_with_future_completion_cannot_retire_unsubmitted_buffer() {
 }
 
 #[test]
-fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_actual_rings() {
+fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_rings() {
     let (mut packet, _, domain, peer) = attach();
     assert!(packet.carrier());
     peer.lock().unwrap().hold_tx = true;
@@ -1213,7 +1213,7 @@ fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_actual_rings() {
     assert!(packet.retire().is_ok());
 }
 #[test]
-fn ignored_actual_bus_master_clear_does_not_authorize_drain_or_unmap() {
+fn ignored_bus_master_clear_does_not_authorize_drain_or_unmap() {
     let (packet, pages, domain, peer) = attach();
     peer.lock().unwrap().ignore_master_clear = true;
     let packet = match packet.retire() {
@@ -1226,7 +1226,7 @@ fn ignored_actual_bus_master_clear_does_not_authorize_drain_or_unmap() {
     assert!(packet.retire().is_ok());
 }
 #[test]
-fn visibility_failure_after_attachment_poison_retains_for_real_retirement() {
+fn visibility_failure_after_attachment_poison_keeps_for_real_retirement() {
     let (mut packet, pages, domain, _) = attach();
     domain.fail_sync.store(true, Ordering::Relaxed);
     assert!(packet.transmit(&[0x5a; 60]).is_err());
@@ -1301,7 +1301,7 @@ fn peer_refuses_cpu_ownership_before_delayed_dma_payload_completion() {
     assert!(refused.is_err());
 }
 #[test]
-fn peer_rejects_drain_without_actual_engine_stop_and_bus_master_clear() {
+fn peer_rejects_drain_without_engine_stop_and_bus_master_clear() {
     let (_packet, _, domain, _) = attach();
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: intentional rejected symbolic negative control only.
@@ -1449,7 +1449,7 @@ fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
     assert!(packet.retire().is_ok());
 }
 #[test]
-fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_retained_fault() {
+fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_kept_fault() {
     // Preserve every original single-bit cause: four registers by 32 bits,
     // excluding only the flow low-water bit and message MSI request bit.
     // Also keep the combined flow mask to exercise simultaneous causes;
@@ -1503,7 +1503,7 @@ fn stale_status_and_msi_request_alone_are_not_fatal_attention_causes() {
     assert!(packet.retire().is_ok());
 }
 #[test]
-fn attention_access_and_w1c_ack_failures_are_explicit_and_retain_owners() {
+fn attention_access_and_w1c_ack_failures_are_explicit_and_keep_owners() {
     // Cause reads, targeted W1C write, and ordering read after that write.
     for fault in 0..6 {
         let (mut packet, pages, domain, peer) = attach();
@@ -1615,7 +1615,7 @@ fn peer_refuses_each_deleted_or_disabled_mac_dma_engine_and_workaround() {
     }
 }
 #[test]
-fn peer_refuses_dma_without_actual_pci_and_host_access_controls() {
+fn peer_refuses_dma_without_pci_and_host_access_controls() {
     for path in [DmaPath::Tx, DmaPath::Rx, DmaPath::Status] {
         let (packet, _, domain, peer) = attach();
         packet.memory.as_ref().unwrap().tx(0, &[0x92; 60]).unwrap();

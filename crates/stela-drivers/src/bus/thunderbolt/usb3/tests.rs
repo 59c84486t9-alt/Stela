@@ -6,7 +6,7 @@ use crate::bus::thunderbolt::ring::{Direction, TX_DESCRIPTOR, model::*};
 use alloc::vec::Vec;
 
 #[test]
-fn bandwidth_actual_hca_consumed_floor_scale_and_original_link_move_into_path() {
+fn bandwidth_hca_consumed_floor_scale_and_original_link_move_into_path() {
     use super::super::{
         path::Activate,
         usb3::{Allocate, Rates},
@@ -53,7 +53,7 @@ fn bandwidth_actual_hca_consumed_floor_scale_and_original_link_move_into_path() 
 }
 
 #[test]
-fn bandwidth_each_cmr_scale_allocation_clear_write_failure_retains_actual_accounting() {
+fn bandwidth_each_cmr_scale_allocation_clear_write_failure_keeps_accounting() {
     use super::super::usb3::{Allocate, Error, Rates};
     for target in 1..=4 {
         for failure in 0..3 {
@@ -319,7 +319,7 @@ fn bandwidth_busy_controller_encoding_and_unconsumed_receipts_keep_original_owne
 }
 
 #[test]
-fn bandwidth_path_composition_wrong_permission_epoch_never_copies_authority() {
+fn bandwidth_path_composition_wrong_permission_epoch_never_copies_permission() {
     use super::super::{
         path::Activate,
         usb3::{Allocate, Rates},
@@ -364,7 +364,7 @@ fn bandwidth_path_composition_wrong_permission_epoch_never_copies_authority() {
 
 #[test]
 #[ignore = "oracle: STELA_USB3_BANDWIDTH_ORACLE"]
-fn unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_actual_dma() {
+fn unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_dma() {
     use super::super::usb3::{Allocate, Rates};
     let text = std::fs::read_to_string(
         std::env::var("STELA_USB3_BANDWIDTH_ORACLE").expect("set oracle trace path"),
@@ -540,7 +540,7 @@ fn bandwidth_full_tx_clock_cancel_and_hotplug_never_release_native_owners() {
 }
 
 #[test]
-fn tunnel_both_real_paths_then_endpoints_use_one_bandwidth_link_and_retained_owners() {
+fn tunnel_both_real_paths_then_endpoints_use_one_bandwidth_link_and_kept_owners() {
     use super::super::{path::LaneCredits, usb3::ActivateTunnel};
     for credits in [LaneCredits::LegacyBonded, LaneCredits::RouterAllocated(23)] {
         for stale in [false, true] {
@@ -677,7 +677,7 @@ fn tunnel_all_ten_possible_writes_keep_both_paths_accounting_and_link_on_failure
 }
 
 #[test]
-fn tunnel_constructor_mismatch_and_both_storage_failures_retain_every_live_owner() {
+fn tunnel_constructor_mismatch_and_both_storage_failures_keep_every_live_owner() {
     assert_ne!(
         core::mem::size_of::<super::super::path::Active>(),
         core::mem::size_of::<super::super::usb3::ActiveTunnel>(),
@@ -750,7 +750,7 @@ fn tunnel_constructor_mismatch_and_both_storage_failures_retain_every_live_owner
 }
 
 #[test]
-fn tunnel_busy_endpoints_second_path_preflight_and_unconsumed_completion_retain_chain() {
+fn tunnel_busy_endpoints_second_path_preflight_and_unconsumed_completion_keep_chain() {
     use super::super::{
         path::LaneCredits,
         usb3::{ActivateTunnel, Error},
@@ -1036,7 +1036,7 @@ fn teardown_normal_does_not_release_bandwidth_and_returns_local_owners_only_expl
 }
 
 #[test]
-fn teardown_separate_release_unused_retains_900_floor_and_active_owner_chain() {
+fn teardown_separate_release_unused_keeps_900_floor_and_active_owner_chain() {
     use super::super::{
         path::LaneCredits,
         usb3::{ReleaseUnused, StopTunnel},
@@ -1084,7 +1084,7 @@ fn teardown_separate_release_unused_retains_900_floor_and_active_owner_chain() {
 }
 
 #[test]
-fn teardown_each_endpoint_and_hop_disable_failure_retains_all_six_native_owners() {
+fn teardown_each_endpoint_and_hop_disable_failure_keeps_all_six_native_owners() {
     use super::super::{
         path::LaneCredits,
         usb3::{Error, StopTunnel},
@@ -1151,7 +1151,7 @@ fn teardown_each_endpoint_and_hop_disable_failure_retains_all_six_native_owners(
 }
 
 #[test]
-fn teardown_release_unused_each_uncertain_write_retains_both_split_owner_halves() {
+fn teardown_release_unused_each_uncertain_write_keeps_both_split_owner_halves() {
     use super::super::{
         path::LaneCredits,
         usb3::{Error, ReleaseUnused},

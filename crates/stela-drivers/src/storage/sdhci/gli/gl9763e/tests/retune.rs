@@ -106,7 +106,7 @@ fn retune_downgrade_tuning_restore_or_reset_failure_powers_off_and_fences_aliase
 }
 
 #[test]
-fn retune_refuses_other_timings_without_switches_and_lost_authority_without_mmio() {
+fn retune_refuses_other_timings_without_switches_and_lost_permission_without_mmio() {
     for (mode, revoked) in [(2, false), (4, false), (1, true)] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;

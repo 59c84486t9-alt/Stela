@@ -296,7 +296,7 @@ fn prior_bank_faults_and_shared_irq_survive_success_and_cohort_refusal() {
 }
 
 #[test]
-fn assignment_and_binding_preserve_actual_owners_geometry_and_bank_identity() {
+fn assignment_and_binding_preserve_owners_geometry_and_bank_identity() {
     let (banks, mut ram, mut sink) = setup();
     let refs = [&banks[0], &banks[1]];
     for (client, mapper, context) in [(0, 0xd3, 1), (0xd4, 0, 1), (1, 1, 1), (0xd4, 0xd3, 16)] {
@@ -359,7 +359,7 @@ fn convergent_targets_still_require_real_ram_and_tables_are_checked_again() {
 }
 
 #[test]
-fn checked_work_is_bounded_by_actual_bank_and_current_preimage_count() {
+fn checked_work_is_bounded_by_bank_and_current_preimage_count() {
     struct CountRam {
         ram: Ram,
         reads: usize,

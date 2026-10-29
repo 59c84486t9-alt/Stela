@@ -4,7 +4,7 @@ use super::*;
 // ACPICA installation, OSL port transport and kept handler lifecycle.
 mod ec_binding_tests {
     #[test]
-    fn native_installed_ec_unlock_preserves_exact_original_native_io_cause() {
+    fn native_installed_ec_unlock_preserves_original_native_io_cause() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
@@ -140,7 +140,7 @@ mod ec_binding_tests {
         assert!(counts.destroyed.load(Ordering::Acquire));
     }
     #[test]
-    fn native_installed_ec_dependency_cannot_reopen_after_actual_callback_unlock_failure() {
+    fn native_installed_ec_dependency_cannot_reopen_after_callback_unlock_failure() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
@@ -190,7 +190,7 @@ mod ec_binding_tests {
         assert!(counts.destroyed.load(Ordering::Acquire));
     }
     #[test]
-    fn native_installed_ec_dependency_shutdown_retains_storage_and_quarantines_io() {
+    fn native_installed_ec_dependency_shutdown_keeps_storage_and_quarantines_io() {
         let _serial = TEST_SERIAL.lock().unwrap();
         if std::env::var_os("STELA_EC_DEPENDENCY_SHUTDOWN_CHILD").is_some() {
             let (provider, counts) = fixture_ec_legacy(true);
@@ -232,12 +232,12 @@ mod ec_binding_tests {
             return;
         }
         let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "platform::acpi::tests::ec_binding_tests::native_installed_ec_dependency_shutdown_retains_storage_and_quarantines_io"])
+            .args(["--exact", "platform::acpi::tests::ec_binding_tests::native_installed_ec_dependency_shutdown_keeps_storage_and_quarantines_io"])
             .env("STELA_EC_DEPENDENCY_SHUTDOWN_CHILD", "1").status().unwrap();
         assert!(result.success());
     }
     #[test]
-    fn native_ec_capability_requires_activation_and_pins_actual_binding() {
+    fn native_ec_capability_requires_activation_and_pins_binding() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec_legacy(false);
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
@@ -303,7 +303,7 @@ mod ec_binding_tests {
     }
 
     #[test]
-    fn native_installed_ec_dependency_requires_actual_activation_and_retains_owner() {
+    fn native_installed_ec_dependency_requires_activation_and_keeps_owner() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec_legacy(true);
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
@@ -358,7 +358,7 @@ mod ec_binding_tests {
         assert!(counts.destroyed.load(Ordering::Acquire));
     }
     #[test]
-    fn native_installed_ec_quiescence_rechecks_actual_ownership_before_termination() {
+    fn native_installed_ec_quiescence_rechecks_ownership_before_termination() {
         let _serial = TEST_SERIAL.lock().unwrap();
         if std::env::var_os("STELA_EC_QUIESCENCE_OWNER_CHILD").is_some() {
             let (provider, counts) = fixture_ec_legacy(true);
@@ -423,12 +423,12 @@ mod ec_binding_tests {
             return;
         }
         let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "platform::acpi::tests::ec_binding_tests::native_installed_ec_quiescence_rechecks_actual_ownership_before_termination"])
+            .args(["--exact", "platform::acpi::tests::ec_binding_tests::native_installed_ec_quiescence_rechecks_ownership_before_termination"])
             .env("STELA_EC_QUIESCENCE_OWNER_CHILD", "1").status().unwrap();
         assert!(result.success());
     }
     #[test]
-    fn native_installed_ec_precedes_actual_hardware_activation_and_ini() {
+    fn native_installed_ec_precedes_hardware_activation_and_ini() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (mut provider, counts) = fixture_ec(true);
         // SAFETY: this test still exclusively owns the unpublished table/provider.
@@ -562,7 +562,7 @@ mod ec_binding_tests {
     }
 
     #[test]
-    fn native_installed_ec_subtracts_actual_raw_timer_before_unit_conversion() {
+    fn native_installed_ec_subtracts_raw_timer_before_unit_conversion() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
@@ -1412,7 +1412,7 @@ mod ec_binding_tests {
     }
 
     #[test]
-    fn native_installed_ec_failed_removal_retains_context_until_real_termination() {
+    fn native_installed_ec_failed_removal_keeps_context_until_real_termination() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec(false);
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps

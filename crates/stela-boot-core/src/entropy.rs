@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn genuine_zero_output_is_preserved_and_unused_capacity_is_not_a_request() {
+    fn zero_output_is_preserved_and_unused_capacity_is_not_a_request() {
         let mut pool = Pool::<64, 1>::capture([8], Algorithm::Raw, |_, out| {
             out.fill(0);
             Ok(())

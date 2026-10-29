@@ -355,7 +355,7 @@ fn integral_maxima_lane_poison_and_irrelevant_controls_preserve_bits() {
 }
 
 #[test]
-fn retained_enables_decline_before_exact_zero_or_invalid_cases() {
+fn kept_enables_decline_before_exact_zero_or_invalid_cases() {
     for (format, _, _, _, _) in VALUES {
         for operation in OPERATIONS {
             if format == Format::Half && operation.signed_width().is_some() {

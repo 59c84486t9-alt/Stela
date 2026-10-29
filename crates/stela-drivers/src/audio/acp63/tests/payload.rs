@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn missing_actual_payload_completion_service_refuses_before_first_dma_publication() {
+fn missing_payload_completion_service_refuses_before_first_dma_publication() {
     let (mut controller, device, source) = fixture(0x63);
     device.lock().unwrap().drain_unavailable = true;
     assert_eq!(
@@ -41,7 +41,7 @@ fn missing_actual_payload_completion_service_refuses_before_first_dma_publicatio
 }
 
 #[test]
-fn posted_payload_requires_actual_domain_completion_before_cpu_or_release() {
+fn posted_payload_requires_domain_completion_before_cpu_or_release() {
     let (mut controller, device, source) = ready(0x63, 4096);
     controller.start().unwrap();
     device.lock().unwrap().defer_payload = true;

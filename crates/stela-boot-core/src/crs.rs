@@ -54,7 +54,7 @@ mod tests {
     use stela_drivers::platform::acpi::resources::{self, Interrupt};
 
     #[test]
-    fn actual_extended_bytes_preserve_direct_crs_electrical_and_pin_index() {
+    fn extended_bytes_preserve_direct_crs_electrical_and_pin_index() {
         // ACPI Extended IRQ encoding: consumer/shared/low/level, GSI33.
         let descriptors = resources::parse(&[0x89, 6, 0, 13, 1, 33, 0, 0, 0, 0x79, 0]).unwrap();
         assert_eq!(

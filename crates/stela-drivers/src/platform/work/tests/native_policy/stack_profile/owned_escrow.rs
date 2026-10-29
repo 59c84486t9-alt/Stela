@@ -410,11 +410,11 @@ fn run(mode: Mode) {
     assert_eq!(dropped.load(Ordering::Relaxed), 32);
 }
 #[test]
-fn owned_exclusion_survives_actual_park_and_peer_return_before_fresh_cancel() {
+fn owned_exclusion_survives_park_and_peer_return_before_fresh_cancel() {
     run(Mode::RoundTrip);
 }
 #[test]
-fn owned_workers_and_job_slots_stay_exclusive_under_actual_pressure() {
+fn owned_workers_and_job_slots_stay_exclusive_under_pressure() {
     run(Mode::Pressure);
     run(Mode::Exhaust);
 }
@@ -460,7 +460,7 @@ fn stale_foreign_creator_and_private_nonce_refuse_before_affine_release() {
     }
 }
 #[test]
-fn dropped_foreign_and_forgotten_owned_values_keep_actual_owners_until_stop() {
+fn dropped_foreign_and_forgotten_owned_values_keep_owners_until_stop() {
     if let Ok(mode) = std::env::var("STELA_ESCROW_TEST_MODE") {
         run(match mode.as_str() {
             "drop" => Mode::Drop,
@@ -472,12 +472,12 @@ fn dropped_foreign_and_forgotten_owned_values_keep_actual_owners_until_stop() {
     }
     for mode in ["drop", "foreign-drop", "forget"] {
         isolated(
-            "dropped_foreign_and_forgotten_owned_values_keep_actual_owners_until_stop",
+            "dropped_foreign_and_forgotten_owned_values_keep_owners_until_stop",
             mode,
         );
     }
 }
 #[test]
-fn forgotten_parked_escrow_blocks_retirement_and_whole_executor_drop_retains_mappings() {
+fn forgotten_parked_escrow_blocks_retirement_and_whole_executor_drop_keeps_mappings() {
     run(Mode::ForgottenParked);
 }

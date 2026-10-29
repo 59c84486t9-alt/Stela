@@ -8,7 +8,7 @@ fn thermal_power_use_original_ax200_epoch_and_reclaimed_completions() {
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_thermal_power_versions_and_capability_branches() {
+fn ax200_thermal_power_versions_and_capability_branches() {
     exercise_setup(true);
 }
 fn exercise_setup(actual: bool) {

@@ -225,7 +225,7 @@ struct RegisterState {
 }
 struct Model(Arc<Mutex<RegisterState>>);
 #[test]
-fn native_clock_refusal_precedes_sfh_authority_registers_and_dma() {
+fn native_clock_refusal_precedes_sfh_permission_registers_and_dma() {
     struct Untouched;
     impl Registers for Untouched {
         fn check_authority(&mut self) -> Result<(), Error> {
@@ -450,7 +450,7 @@ fn continuous_coherence_refusal_occurs_before_dma_publication() {
     assert_eq!(domain.0.lock().unwrap().unmaps, 1);
 }
 #[test]
-fn timeout_retains_iova_and_late_enable_is_completed_without_replay_before_stop() {
+fn timeout_keeps_iova_and_late_enable_is_completed_without_replay_before_stop() {
     let (mut controller, registers, domain, pages) = fixture(&[Sensor::Gyroscope]);
     registers.lock().unwrap().respond = false;
     assert!(matches!(
@@ -500,7 +500,7 @@ fn stale_response_cannot_grant_new_enable_or_release_unknown_dma() {
     assert_eq!(pages.0.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn authority_loss_and_failed_command_write_never_fabricate_reports_or_completion() {
+fn permission_loss_and_failed_command_write_never_invent_reports_or_completion() {
     let (mut controller, registers, domain, pages) = fixture(&[Sensor::AmbientColor]);
     registers.lock().unwrap().fail = Some(C2P_COMMAND);
     assert_eq!(
@@ -523,7 +523,7 @@ fn authority_loss_and_failed_command_write_never_fabricate_reports_or_completion
 }
 
 #[test]
-fn failed_fabric_drain_retains_every_published_mapping_and_first_error() {
+fn failed_fabric_drain_keeps_every_published_mapping_and_first_error() {
     let (mut controller, registers, domain, pages) = fixture(&[Sensor::Gyroscope]);
     controller.initialize(&pages).unwrap();
     domain.0.lock().unwrap().deny_drain = true;
@@ -596,7 +596,7 @@ fn control_feature_and_input_reports_reflect_programmed_state_and_poll_event() {
 }
 
 #[test]
-fn actual_acs_dialect_is_required_and_unknown_advertisements_remain_visible() {
+fn acs_dialect_is_required_and_unknown_advertisements_remain_visible() {
     for dialect in [0, 1, 3, 15] {
         let (controller, registers, domain, _) = fixture(&[Sensor::Gyroscope]);
         registers.lock().unwrap().acs = (1 << 5) | dialect;

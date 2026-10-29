@@ -121,7 +121,7 @@ fn four_round_encryption_and_key_recipes_keep_aliases_flags_and_unrelated_state(
 }
 
 #[test]
-fn actual_key_schedule_and_eight_encrypt_groups_match_the_standard_sm4_known_answer() {
+fn key_schedule_and_eight_encrypt_groups_match_the_standard_sm4_known_answer() {
     for gfni in [false, true] {
         if gfni && !TargetCpu::detect().supports(TargetCpu::Gfni) {
             continue;

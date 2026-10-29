@@ -255,7 +255,7 @@ mod tests {
     use crate::board::fixture_support::flat_fixture_extent;
 
     #[test]
-    fn s5l_gpio_admission_requires_qualified_pair_and_ap_role() {
+    fn s5l_gpio_admission_requires_checked_pair_and_ap_role() {
         let compatible = b"gpio,t6000\0gpio,s5l8960x\0";
         for role in [
             b"AP\0".as_slice(),

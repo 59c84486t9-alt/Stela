@@ -71,7 +71,7 @@ fn invalid_budget_precedes_register_access() {
 }
 
 #[test]
-fn retry_retains_codec_failures() {
+fn retry_keeps_codec_failures() {
     for ready_after in [2, 4] {
         let mut fixture = Fixture::new();
         let model = graph_model();
@@ -262,7 +262,7 @@ fn reinitialize_stales_streams_and_routes() {
 }
 
 #[test]
-fn failed_quiescence_retains_reservations() {
+fn failed_quiescence_keeps_reservations() {
     for command_stop in [false, true] {
         let mut fixture = Fixture::new();
         let model = analog_model();

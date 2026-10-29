@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_word_ranges_and_actual_alignment_refuse_before_access() {
+    fn invalid_word_ranges_and_alignment_refuse_before_access() {
         let mut backing = [0xa5a5_a5a5_a5a5_a5a5u64; 4];
         let original = backing;
         let mut buffer = DmaBuffer {

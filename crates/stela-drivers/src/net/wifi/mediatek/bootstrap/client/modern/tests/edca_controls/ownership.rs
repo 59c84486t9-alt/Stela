@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn update_retains_outstanding_packet() {
+fn update_keeps_outstanding_packet() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();

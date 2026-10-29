@@ -181,7 +181,7 @@ fn quiesced(link: &Shared) -> bool {
 }
 
 #[test]
-fn iop_sleep_to_wake_resumes_the_retained_rpc_region_without_a_hello() {
+fn iop_sleep_to_wake_resumes_the_kept_rpc_region_without_a_hello() {
     for sleep in [0x201, 0x202] {
         let (scanout, _) = screen(1920, 1080);
         let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
@@ -268,7 +268,7 @@ fn iop_sleep_to_wake_resumes_the_retained_rpc_region_without_a_hello() {
 }
 
 #[test]
-fn asc_cpu_halt_and_restart_resume_the_retained_dcp_link_without_an_iop_request() {
+fn asc_cpu_halt_and_restart_resume_the_kept_dcp_link_without_an_iop_request() {
     use super::super::asc::{Asc, Lines};
     use super::super::bus::{Access, MmioDevice, Width};
     use super::super::interrupt::InterruptLatch;

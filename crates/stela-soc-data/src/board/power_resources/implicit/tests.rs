@@ -171,7 +171,7 @@ fn endpoint_translation_alone_cannot_hide_an_internal_aperture_hole() {
 }
 
 #[test]
-fn partial_trailing_register_cells_cannot_qualify_an_exact_native_view() {
+fn partial_trailing_register_cells_cannot_check_an_native_view() {
     for binding in T8112 {
         for trailing in [1, 4, 8, 15, 16] {
             let mut reg = [binding.physical, binding.bytes]

@@ -213,7 +213,7 @@ fn source_initialization_is_distinct_from_buffer_and_no_record_return() {
     assert_eq!(o.backend.reads, 0);
 }
 #[test]
-fn actual_body_then_ordering_then_timestamp_retry_keeps_same_request() {
+fn body_then_ordering_then_timestamp_retry_keeps_same_request() {
     let mut o = bound();
     o.backend.busy_timestamp.set(true);
     o.begin_emit(0x1234_5678, [0xaaaa_ffff_1234_5678, 2, 3, 4])
@@ -255,7 +255,7 @@ fn actual_body_then_ordering_then_timestamp_retry_keeps_same_request() {
     );
 }
 #[test]
-fn before_write_refusal_retains_reservation_and_prefix_without_new_clock() {
+fn before_write_refusal_keeps_reservation_and_prefix_without_new_clock() {
     let mut o = bound();
     o.backend.refuse_body.set(true);
     o.begin_emit(8, [0; 4]).unwrap();
@@ -282,7 +282,7 @@ fn before_write_refusal_retains_reservation_and_prefix_without_new_clock() {
     assert_eq!(o.backend.reads, 1);
 }
 #[test]
-fn filter_reads_actual_mapping_and_refresh_precedes_new_observation() {
+fn filter_reads_mapping_and_refresh_precedes_new_observation() {
     let mut o = bound();
     command(&mut o, (2u64 << 48) | 0x8000);
     o.begin_emit(0x860b_b000, [1; 4]).unwrap();
@@ -339,7 +339,7 @@ fn full_ring_notifies_and_returns_error_without_overwriting_slot() {
     assert_eq!(o.indices(), (0, 1));
 }
 #[test]
-fn consumed_callback_can_retire_while_real_lifecycle_wait_is_retained() {
+fn consumed_callback_can_retire_while_real_lifecycle_wait_is_kept() {
     let mut o = bound();
     o.begin_emit(1, [0; 4]).unwrap();
     until(

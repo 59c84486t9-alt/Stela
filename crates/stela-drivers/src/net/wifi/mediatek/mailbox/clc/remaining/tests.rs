@@ -139,7 +139,7 @@ pub(crate) fn prepare_with_channels(
     }
 }
 #[test]
-fn coherent_clc_domain_power_dma_response_and_pse_facts_keep_genuine_owner() {
+fn coherent_clc_domain_power_dma_response_and_pse_facts_keep_owner() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for retain in [false, true] {
             let mut fixture = Fixture::new(chip, Some(1));
@@ -228,7 +228,7 @@ fn coherent_clc_domain_power_dma_response_and_pse_facts_keep_genuine_owner() {
     }
 }
 #[test]
-fn remaining_refusal_retains_completed_clc_before_any_domain_or_power_publication() {
+fn remaining_refusal_keeps_completed_clc_before_any_domain_or_power_publication() {
     for mode in 0..5 {
         let chip = Chip::Mt7925;
         let mut fixture = Fixture::new(chip, Some(1));
@@ -277,7 +277,7 @@ fn remaining_refusal_retains_completed_clc_before_any_domain_or_power_publicatio
     }
 }
 #[test]
-fn actual_partial_domain_power_failure_early_reply_and_bad_pse_never_release_policy_guard() {
+fn partial_domain_power_failure_early_reply_and_bad_pse_never_release_policy_guard() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for mode in 0..5 {
             if mode == 4 && chip == Chip::Mt7925 {
@@ -404,7 +404,7 @@ fn all_source_rate_plans_cross_coherent_native_clc_domain_power_and_pse_dma() {
 
 #[test]
 #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
-fn actual_images_execute_retained_clc_domain_power_chain_past_provider_lifetime() {
+fn images_execute_kept_clc_domain_power_chain_past_provider_lifetime() {
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let mut fixture = Fixture::with_ram(
@@ -434,7 +434,7 @@ fn actual_images_execute_retained_clc_domain_power_chain_past_provider_lifetime(
 }
 
 #[test]
-fn actual_clc_reply_resolves_domain_and_power_without_replay_and_failed_resolution_retains_owner() {
+fn clc_reply_resolves_domain_and_power_without_replay_and_failed_resolution_keeps_owner() {
     for chip in [Chip::Mt7921, Chip::Mt7922] {
         for returned_flags in [0u8, 1] {
             for fail_plan in [false, true] {

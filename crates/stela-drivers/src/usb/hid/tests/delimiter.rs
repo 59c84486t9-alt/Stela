@@ -254,7 +254,7 @@ fn interface(bytes: &[u8], boot: bool) -> Interface {
 }
 
 #[test]
-fn actual_get_descriptor_dma_poll_and_control_use_only_selected_aliases() {
+fn get_descriptor_dma_poll_and_control_use_only_selected_aliases() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: backing outlives every native DMA owner in this test.
@@ -418,7 +418,7 @@ fn malformed_ordinary_descriptors_refuse_before_hid_allocation_or_input_publicat
 }
 
 #[test]
-fn actual_boot_subclass_retains_existing_fallback_and_original_rejected_bytes() {
+fn boot_subclass_keeps_existing_fallback_and_original_rejected_bytes() {
     let bytes = [0xa9, 1, 9, 4, 0xa9, 0, 0x81, 0]; // prohibited Array aliases
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;

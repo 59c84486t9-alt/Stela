@@ -684,7 +684,7 @@ fn storage_modes(value: u8, superspeed: bool, bot: bool, uas: bool) -> Vec<u8> {
 }
 
 #[test]
-fn storage_selector_uses_actual_stream_policy_before_configuration_and_bot_fallback() {
+fn storage_selector_uses_stream_policy_before_configuration_and_bot_fallback() {
     let mut memory = vec![0u64; 128 * 1024];
     let start = memory.as_mut_ptr() as u64;
     // SAFETY: backing storage outlives the controller and its modeled DMA.

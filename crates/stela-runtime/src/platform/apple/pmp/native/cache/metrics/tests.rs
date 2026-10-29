@@ -266,7 +266,7 @@ fn initialized() -> (Owner<Sink>, Samples) {
     (o, s)
 }
 #[test]
-fn actual_scheduler_registration_and_wake_cannot_be_replaced_by_effect_success() {
+fn scheduler_registration_and_wake_cannot_be_replaced_by_effect_success() {
     let mut sink = Sink::new();
     sink.omit_registration = true;
     let mut o = Owner::initialized_source(Configuration::t8112(), sink);
@@ -292,7 +292,7 @@ fn actual_scheduler_registration_and_wake_cannot_be_replaced_by_effect_success()
     assert!(o.pending() && !o.queued());
 }
 #[test]
-fn missing_weak_callback_owner_refuses_and_same_actual_invocation_can_retry() {
+fn missing_weak_callback_owner_refuses_and_same_invocation_can_retry() {
     let (mut o, samples) = initialized();
     o.backend.check_replay = true;
     o.submit_after_housekeeping().unwrap();
@@ -318,7 +318,7 @@ fn missing_weak_callback_owner_refuses_and_same_actual_invocation_can_retry() {
     assert!(o.last_dispatch.as_ref().unwrap().check_current().is_err());
 }
 #[test]
-fn actual_registration_live_getters_and_source_once_flag() {
+fn registration_live_getters_and_source_once_flag() {
     let (mut o, s) = initialized();
     assert!(o.initialized());
     o.begin_register(5).unwrap();
@@ -420,7 +420,7 @@ fn schedule_deduplicates_without_inline_callback_and_fast_cleanup_notifies() {
     assert_eq!(o.backend.notifications, 1);
 }
 #[test]
-fn detailed_callback_uses_actual_fields_and_native_wrapping_arithmetic() {
+fn detailed_callback_uses_fields_and_native_wrapping_arithmetic() {
     let (mut o, mut s) = initialized();
     o.begin_register(1).unwrap();
     until(&mut o, &s, Progress::Registered);
@@ -484,7 +484,7 @@ fn rate_udiv_zero_preserves_raw_counts_for_zero_and_wrapped_intervals() {
     }
 }
 #[test]
-fn actual_callback_retirement_and_busy_keep_both_pending_lifecycles() {
+fn callback_retirement_and_busy_keep_both_pending_lifecycles() {
     let (mut o, s) = initialized();
     o.backend.busy_notify = true;
     o.submit_after_housekeeping().unwrap();
@@ -513,7 +513,7 @@ fn actual_callback_retirement_and_busy_keep_both_pending_lifecycles() {
     assert_eq!(o.backend.notifications, 2);
 }
 #[test]
-fn stop_drives_real_queued_callback_and_actual_wait_notification() {
+fn stop_drives_real_queued_callback_and_wait_notification() {
     let (mut o, s) = initialized();
     o.backend.wait = true;
     o.submit_after_housekeeping().unwrap();
@@ -594,7 +594,7 @@ fn trace_refusal_and_retired_prefix_cannot_complete_absent_destination() {
     );
 }
 #[test]
-fn foreground_event_traces_leave_merely_queued_work_untouched() {
+fn foreground_event_traces_leave_queued_work_untouched() {
     let (mut o, s) = initialized();
     o.backend.trace = 1;
     o.submit_after_housekeeping().unwrap();

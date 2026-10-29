@@ -501,7 +501,7 @@ fn nvm_failures_and_unprogrammed_addresses_are_explicit() {
 }
 
 #[test]
-fn alternate_mac_uses_the_actual_lan_function_and_nvm_pointer() {
+fn alternate_mac_uses_the_lan_function_and_nvm_pointer() {
     let io = Model::new(Chip::I82576, PHY_IGP3, true);
     io.set(STATUS, 1 << 2);
     io.eeprom.borrow_mut()[0x37] = 0x80;

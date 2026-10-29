@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_native_cancellation_retains_request_buffer_and_fences_owner() {
+    fn failed_native_cancellation_keeps_request_buffer_and_fences_owner() {
         let mut memory = vec![0u64; 512 * 1024];
         let start = memory.as_mut_ptr() as u64;
         // SAFETY: exclusive fixture RAM remains live even after failed cancel.

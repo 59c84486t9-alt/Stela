@@ -44,7 +44,7 @@ fn reduced_scan_configuration_completes_real_ack_and_keeps_board_policy_required
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_scan_cfg5_uses_real_rx_tx_antennas_and_original_dma_epoch() {
+fn ax200_scan_cfg5_uses_real_rx_tx_antennas_and_original_dma_epoch() {
     exercise(true);
 }
 fn exercise(actual: bool) {

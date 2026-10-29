@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn ax210_publishes_iml_scratch_dummy_tails_and_retains_pnvm_context_after_alive() {
+fn ax210_publishes_iml_scratch_dummy_tails_and_keeps_pnvm_context_after_alive() {
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();

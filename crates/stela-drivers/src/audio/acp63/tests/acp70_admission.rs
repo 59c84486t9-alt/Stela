@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn acp70_actual_soundwire_enable_and_wake_refuse_before_whole_function_effects() {
+fn acp70_soundwire_enable_and_wake_refuse_before_whole_function_effects() {
     for offset in [0x3000, 0x3004, 0x3c00, 0x3c04, 0x1458, 0x1460] {
         let (mut controller, device, _) = fixture70(0x70);
         device.lock().unwrap().words[offset / 4] = 1;

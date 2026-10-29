@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax210_ucode_external_pnvm_source_dma_doorbell_and_notification() {
+fn ax210_ucode_external_pnvm_source_dma_doorbell_and_notification() {
     use crate::net::wifi::intel::platform::{Observation, Stage};
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
@@ -97,7 +97,7 @@ fn actual_ax210_ucode_external_pnvm_source_dma_doorbell_and_notification() {
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations() {
+fn ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -164,7 +164,7 @@ fn actual_ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations() {
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_image_publishes_owned_context_and_consumes_completed_alive() {
+fn ax200_image_publishes_owned_context_and_consumes_completed_alive() {
     use sha2::{Digest, Sha256};
     let directory = std::env::var("STELA_IWLWIFI_IMAGES").expect("image directory");
     let bytes = std::fs::read(std::path::Path::new(&directory).join(Family::Ax200.firmware_name()))

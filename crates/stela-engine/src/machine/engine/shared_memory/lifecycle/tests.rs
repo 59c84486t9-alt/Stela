@@ -328,7 +328,7 @@ fn nonzero_first_p_binding_refuses_incomplete_or_nonbijective_rosters_before_pub
 }
 
 #[test]
-fn nonzero_first_p_bsp_recovers_actual_native_refusal_and_starts_unrenumbered_peers() {
+fn nonzero_first_p_bsp_recovers_native_refusal_and_starts_unrenumbered_peers() {
     use publication::PublicationError;
     let (mut machine, ram) = first_p_fixture();
     let identities = machine.profile.processors.clone();
@@ -495,7 +495,7 @@ fn nonzero_first_p_lifecycle_refuses_mixed_and_released_stop_generations() {
     assert!(machine.devices.power.is_empty());
 }
 #[test]
-fn actual_tlbi_and_both_preparations_refresh_every_retained_data_tlb() {
+fn tlbi_and_both_preparations_refresh_every_kept_data_tlb() {
     use super::super::policy::tests::ordinary_transfer;
     use crate::machine::system::Register;
     const LEAF: u64 = 0x13020;
@@ -594,7 +594,7 @@ fn fresh(profile: &CpuProfile, pe: usize) -> Cpu {
     cpu
 }
 #[test]
-fn assigned_off_pe_starts_only_with_actual_complete_held_roster() {
+fn assigned_off_pe_starts_only_with_complete_held_roster() {
     let (mut machine, mut owners) = fixture(3);
     assert!(matches!(machine.peers[1], Peer::Off));
     let before = machine.cpu.state.clone();
@@ -666,7 +666,7 @@ fn reset_preparation_rejects_incomplete_or_released_generation_without_effects()
     assert!(matches!(machine.peers[1], Peer::Off));
 }
 #[test]
-fn warm_reset_retains_registered_ram_and_other_pe_event_identity() {
+fn warm_reset_keeps_registered_ram_and_other_pe_event_identity() {
     let (mut machine, mut owners) = fixture(2);
     let held = hold(&mut machine, &mut owners);
     machine

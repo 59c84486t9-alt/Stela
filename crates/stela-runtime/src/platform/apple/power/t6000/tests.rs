@@ -41,7 +41,7 @@ fn controller(geometry: &[Instance], value: u32) -> Controller {
     Controller::from_observations(geometry.to_vec(), LIVE, words(geometry, value)).unwrap()
 }
 #[test]
-fn all_source_selectors_and_cio_ports_retain_ordered_actual_mounted_inputs() {
+fn all_source_selectors_and_cio_ports_keep_ordered_mounted_inputs() {
     let owner = controller(&[FULL], 0x8000);
     let mut bus = Bus::new();
     let id = bus.add(Box::new(owner.view(0).unwrap()));
@@ -140,7 +140,7 @@ fn unknown_or_busy_capture_cannot_become_idle_or_a_healthy_zero() {
     assert_eq!(owner.captured_pending().len(), 2);
 }
 #[test]
-fn shared_views_retain_partial_prefix_and_knownness_across_independent_pauses() {
+fn shared_views_keep_partial_prefix_and_knownness_across_independent_pauses() {
     let owner = controller(&[FULL, FULL], 0);
     let mut a = owner.view(0).unwrap();
     let mut b = owner.view(1).unwrap();
@@ -240,7 +240,7 @@ fn gating_configuration_preserves_captured_fields_and_does_not_invent_idle_edges
     assert_eq!(owner.captured_pending().len(), 7);
 }
 #[test]
-fn mounted_isp_reference_clock_requests_share_order_and_retained_busy_ownership() {
+fn mounted_isp_reference_clock_requests_share_order_and_kept_busy_ownership() {
     let owner = controller(&[FULL], 0x4000);
     let mut bus = Bus::new();
     let clock = bus.add(Box::new(owner.clock_view(0).unwrap()));

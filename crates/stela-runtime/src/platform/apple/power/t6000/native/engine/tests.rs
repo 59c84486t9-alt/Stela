@@ -202,7 +202,7 @@ fn read_poll(engine: &mut Engine, bus: &mut Bus, access: &mut Access<'_>) {
 }
 
 #[test]
-fn all_four_actual_mounted_requests_execute_shared_sram_and_retire_only_after_action_and_end() {
+fn all_four_mounted_requests_execute_shared_sram_and_retire_only_after_action_and_end() {
     for port in 0..4 {
         let (owner, mut bus, requests) = fixture(None, true);
         let mut pins = InterruptLatch::new();
@@ -272,7 +272,7 @@ fn all_four_actual_mounted_requests_execute_shared_sram_and_retire_only_after_ac
 }
 
 #[test]
-fn actual_canonical_source_copy_retains_bytes_across_pause_and_destination_refusal() {
+fn canonical_source_copy_keeps_bytes_across_pause_and_destination_refusal() {
     const SOURCE: u64 = stela_soc_data::pmgr::t6000::SRAM_BASE + 0x60000;
     const DESTINATION: u64 = 0x1301000000;
     let bytes: Vec<u8> = (0..128).map(|n| (n ^ 0x59) as u8).collect();
@@ -391,7 +391,7 @@ fn actual_canonical_source_copy_retains_bytes_across_pause_and_destination_refus
 }
 
 #[test]
-fn actual_mounted_control_context_changes_survive_pause_and_require_exact_route_acceptance() {
+fn mounted_control_context_changes_survive_pause_and_require_exact_route_acceptance() {
     let words = vec![
         0x30001c, // source18000, fields[0,0,0,3,0]
         0x28e09c01,
@@ -474,7 +474,7 @@ fn actual_mounted_control_context_changes_survive_pause_and_require_exact_route_
 }
 
 #[test]
-fn later_native_job_inherits_actual_retired_context_instead_of_replaying_entry_input() {
+fn later_native_job_inherits_retired_context_instead_of_replaying_entry_input() {
     let words = vec![0x30001c, 0x28e09a01, 0, 0xd, 1 << 16, 0];
     let (owner, mut bus, _) = fixture(Some(words), true);
     let mut pins = InterruptLatch::new();
@@ -515,7 +515,7 @@ fn later_native_job_inherits_actual_retired_context_instead_of_replaying_entry_i
 }
 
 #[test]
-fn stride_packet_retires_each_actual_controller_write_before_cio_end() {
+fn stride_packet_retires_each_controller_write_before_cio_end() {
     // Two stores to the same CPM word must remain two ordered effects.
     // This is a declared test program, not an original SRAM observation.
     let words = vec![
@@ -610,7 +610,7 @@ fn partial_external_effect_and_dropped_handle_cannot_ack_or_duplicate_the_store(
 }
 
 #[test]
-fn action_before_later_effects_retains_in_flight_generation_and_cannot_publish_completion() {
+fn action_before_later_effects_keeps_in_flight_generation_and_cannot_publish_completion() {
     let words = vec![
         0x28e09a01,
         0,
@@ -734,7 +734,7 @@ fn unknown_instruction_early_end_missing_action_and_unactivated_request_preserve
 }
 
 #[test]
-fn retained_clock_power_and_quiesce_keep_the_actual_job_and_distinct_delay_progress() {
+fn kept_clock_power_and_quiesce_keep_the_job_and_distinct_delay_progress() {
     for pause in 0..3 {
         let (owner, mut bus, requests) = fixture(None, true);
         let mut pins = InterruptLatch::new();

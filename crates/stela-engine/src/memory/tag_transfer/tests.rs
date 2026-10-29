@@ -205,7 +205,7 @@ fn pair_uses_address_tag_and_snapshots_both_data_aliases() {
 }
 
 #[test]
-fn faults_preserve_registers_and_report_actual_successful_callbacks() {
+fn faults_preserve_registers_and_report_successful_callbacks() {
     for operand in [
         Operand::StoreTags {
             kind: StoreKind::ZeroTagPair,

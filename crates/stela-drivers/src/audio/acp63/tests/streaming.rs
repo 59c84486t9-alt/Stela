@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn continuous_actual_completed_periods_cross_wraps_without_stopping_dma() {
+fn continuous_completed_periods_cross_wraps_without_stopping_dma() {
     let (mut controller, device, source) = ready(0x63, 4096);
     controller.start().unwrap();
     let mut pcm = vec![0xa5; 4096];

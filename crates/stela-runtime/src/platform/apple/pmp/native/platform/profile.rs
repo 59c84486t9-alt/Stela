@@ -627,7 +627,7 @@ pub(super) mod tests {
         .unwrap()
     }
     #[test]
-    fn joined_profile_keeps_actual_ordinals_slices_provider_and_counter_references() {
+    fn joined_profile_keeps_ordinals_slices_provider_and_counter_references() {
         let p = fixture();
         assert_eq!((p.enabled, p.aggregates), (0x2ffff, 15));
         assert_eq!(p.descriptors[1].aggregate, 0xf9f0);

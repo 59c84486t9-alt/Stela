@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_bytes_and_ignored_hints_retain_source_access_checks() {
+    fn whole_bytes_and_ignored_hints_keep_source_access_checks() {
         for (word, quantity) in [
             (
                 WHOLE_VECTOR_CLASS,

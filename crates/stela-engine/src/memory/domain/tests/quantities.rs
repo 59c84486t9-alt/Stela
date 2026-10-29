@@ -42,7 +42,7 @@ fn crossing_quadword_split_requires_explicit_predicated_sve_or_asimd() {
 }
 
 #[test]
-fn raw_reached_part_translation_precedes_permissions_and_retains_prefix() {
+fn raw_reached_part_translation_precedes_permissions_and_keeps_prefix() {
     use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
     for tbi in [false, true] {
         let backing = backing();
@@ -132,7 +132,7 @@ fn fault_settlement_preserves_declines_and_clears_selected_architectural_faults(
 }
 
 #[test]
-fn sme_crossing_prefix_invalidates_only_bytes_actually_written() {
+fn sme_crossing_prefix_invalidates_only_bytes_written() {
     let backing = backing();
     let readonly = AccessPermissions {
         writable: false,

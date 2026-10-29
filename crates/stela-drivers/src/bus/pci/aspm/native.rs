@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(bridges[0].config.read32(0xc0), 0xa5c3_5a00);
     }
     #[test]
-    fn actual_nonzero_root_is_required_and_no_absent_parent_is_inferred() {
+    fn nonzero_root_is_required_and_no_absent_parent_is_inferred() {
         let writes = Writes::default();
         let mut endpoint = function(8, 0, None, &writes);
         assert_eq!(

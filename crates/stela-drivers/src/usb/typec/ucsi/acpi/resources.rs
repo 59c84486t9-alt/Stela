@@ -128,7 +128,7 @@ mod tests {
         [0x86, 9, 0, 1, 0, 0x90, 0, 0, 0x10, 2, 0, 0, 0x79, 0]
     }
     #[test]
-    fn actual_fixed_template_and_checksum() {
+    fn fixed_template_and_checksum() {
         let mut bytes = fixed();
         assert_eq!(
             mailbox_resource(&bytes),

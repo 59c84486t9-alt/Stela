@@ -46,7 +46,7 @@ fn download(pmu: &mut Pmu, bytes: &mut [u8], now: u64) {
 }
 
 #[test]
-fn upload_and_readback_use_retained_bytes_across_repeated_windows_and_short_final_tails() {
+fn upload_and_readback_use_kept_bytes_across_repeated_windows_and_short_final_tails() {
     for count in [
         1usize, 7, 8, 9, 15, 16, 17, 24, 31, 32, 33, 0x2270, 0x2c78, 0x3000,
     ] {

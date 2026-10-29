@@ -58,7 +58,7 @@ fn native_quiesce_retires_idle_sco_output_schedule_before_repost_after_long_paus
     idle_sco_output_schedule(false);
 }
 #[test]
-fn native_realtek_sco_without_iso_resumes_actual_retired_schedule_after_long_pause() {
+fn native_realtek_sco_without_iso_resumes_retired_schedule_after_long_pause() {
     idle_sco_output_schedule(true);
 }
 fn idle_sco_output_schedule(realtek: bool) {
@@ -174,7 +174,7 @@ fn mt7925_wideband_sco_paces_alternate_6_like_btusb_isoc_tx() {
 }
 
 #[test]
-fn native_realtek_alt6_queues_actual_zero_services_and_payloads_with_bounded_receipts() {
+fn native_realtek_alt6_queues_zero_services_and_payloads_with_bounded_receipts() {
     for speed in [xhci::FULL_SPEED, xhci::HIGH_SPEED] {
         queued_wideband_services(speed);
     }

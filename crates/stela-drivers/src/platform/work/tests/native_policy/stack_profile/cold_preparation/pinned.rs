@@ -377,7 +377,7 @@ fn pin_cancel_restores_entry() {
     run(Case::Good);
 }
 #[test]
-fn pin_refusal_retains_owner() {
+fn pin_refusal_keeps_owner() {
     for case in [
         Case::Missing,
         Case::Oom,
@@ -397,7 +397,7 @@ fn pin_survives_creator_park() {
     run(Case::Park);
 }
 #[test]
-fn pin_abandonment_retains_owner() {
+fn pin_abandonment_keeps_owner() {
     if let Ok(case) = std::env::var("STELA_COLD_PIN_MODE") {
         run(match case.as_str() {
             "drop" => Case::Drop,
@@ -408,7 +408,7 @@ fn pin_abandonment_retains_owner() {
         unreachable!();
     }
     let test = format!(
-        "{}::pin_abandonment_retains_owner",
+        "{}::pin_abandonment_keeps_owner",
         module_path!().split_once("::").unwrap().1
     );
     for case in ["drop", "stale", "forget"] {

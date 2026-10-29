@@ -27,7 +27,7 @@ fn pool() -> Pool {
 }
 
 #[test]
-fn original_scatter_gather_reports_only_after_actual_peripheral_delivery() {
+fn original_scatter_gather_reports_only_after_peripheral_delivery() {
     let mut ram = Ram::new(RAM, 0x8000);
     ram.bytes[0x2000..0x2008].copy_from_slice(b"abcdefgh");
     descriptor(&mut ram, 8, &[(BUFFER, 3), (BUFFER + 3, 5)]);
@@ -79,7 +79,7 @@ fn original_scatter_gather_reports_only_after_actual_peripheral_delivery() {
 }
 
 #[test]
-fn retained_clock_and_quiesce_pause_actual_dma_and_fifo_without_completing_work() {
+fn kept_clock_and_quiesce_pause_dma_and_fifo_without_completing_work() {
     let mut ram = Ram::new(RAM, 0x8000);
     ram.bytes[0x2000..0x2004].copy_from_slice(b"data");
     descriptor(&mut ram, 1, &[(BUFFER, 4)]);
@@ -256,7 +256,7 @@ fn configure_and_issue_ack_real_effects_and_unknown_controls_never_ack() {
 }
 
 #[test]
-fn software_termination_reports_peripheral_delivery_and_retains_undelivered_fifo_ownership() {
+fn software_termination_reports_peripheral_delivery_and_keeps_undelivered_fifo_ownership() {
     let mut ram = Ram::new(RAM, 0x8000);
     ram.bytes[0x2000..0x2008].copy_from_slice(b"keeprest");
     descriptor(&mut ram, 1, &[(BUFFER, 8)]);
@@ -334,7 +334,7 @@ fn software_termination_reports_peripheral_delivery_and_retains_undelivered_fifo
 }
 
 #[test]
-fn actual_dart_clock_and_stream_faults_cannot_be_substituted_for_dma_success() {
+fn dart_clock_and_stream_faults_cannot_be_substituted_for_dma_success() {
     use {
         crate::platform::apple::dart::Dart, stela_contracts::bus::Access,
         stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,

@@ -187,7 +187,7 @@ pub(in crate::net::e1000e::pch::cold) fn replay_eee_cases(
     }
 }
 #[test]
-fn only_the_actual_32_mta_words_are_cleared_before_packet_initialization() {
+fn only_the_32_mta_words_are_cleared_before_packet_initialization() {
     // Prove the hardware model refuses every word beyond the MTA
     // table instead of accepting all BAR-relative addresses as registers.
     for address in (0x5280..0x5400).step_by(4) {
@@ -311,7 +311,7 @@ fn fragments_bad_status_and_bad_lengths_are_never_delivered() {
     assert_eq!(net.receive().unwrap(), None);
 }
 #[test]
-fn link_reconnect_and_speed_changes_apply_actual_82579_workarounds() {
+fn link_reconnect_and_speed_changes_apply_82579_workarounds() {
     let mut memory = Memory::new();
     let (state, _, controller) = setup();
     let mut net = open(controller, &mut memory);
@@ -345,7 +345,7 @@ fn link_reconnect_and_speed_changes_apply_actual_82579_workarounds() {
     assert!(!net.controller.is_poisoned());
 }
 #[test]
-fn unretired_tx_cannot_be_overwritten_and_stall_poison_retains_owner() {
+fn unretired_tx_cannot_be_overwritten_and_stall_poison_keeps_owner() {
     let mut memory = Memory::new();
     let (state, released, controller) = setup();
     let mut net = open(controller, &mut memory);
@@ -366,7 +366,7 @@ fn unretired_tx_cannot_be_overwritten_and_stall_poison_retains_owner() {
     assert_eq!(released.load(Ordering::SeqCst), 0);
 }
 #[test]
-fn uncertain_tx_rx_doorbells_and_stop_drain_never_release_actual_owner() {
+fn uncertain_tx_rx_doorbells_and_stop_drain_never_release_owner() {
     for lpt in [false, true] {
         for failure in 0..5 {
             let mut memory = Memory::new();
@@ -430,7 +430,7 @@ fn uncertain_tx_rx_doorbells_and_stop_drain_never_release_actual_owner() {
     }
 }
 #[test]
-fn every_queue_configuration_access_failure_prevents_reuse_and_retains_owner() {
+fn every_queue_configuration_access_failure_prevents_reuse_and_keeps_owner() {
     let mut memory = Memory::new();
     let (state, _, controller) = setup();
     let first = state.borrow().accesses;
@@ -454,7 +454,7 @@ fn every_queue_configuration_access_failure_prevents_reuse_and_retains_owner() {
     }
 }
 #[test]
-fn every_shutdown_access_failure_retains_the_actual_owner() {
+fn every_shutdown_access_failure_keeps_the_owner() {
     for lpt in [false, true] {
         let mut memory = Memory::new();
         let (state, _, controller) = if lpt { setup_lpt(0x153a, 0) } else { setup() };
@@ -485,7 +485,7 @@ fn every_shutdown_access_failure_retains_the_actual_owner() {
     }
 }
 #[test]
-fn lpt_exact_devices_honor_actual_shra_locks_ecc_and_packet_lifecycle() {
+fn lpt_exact_devices_honor_shra_locks_ecc_and_packet_lifecycle() {
     for device in [0x153a, 0x153b, 0x15a0, 0x15a1] {
         for lock in 0..8 {
             let mut memory = Memory::new();
@@ -581,7 +581,7 @@ fn lpt_link_speeds_and_same_speed_events_update_pll_emi_and_platform_ltr() {
     assert_eq!(state.borrow().mac[&0xf8], 1 << 30);
 }
 #[test]
-fn every_lpt_queue_config_and_link_transition_access_failure_retains_owner() {
+fn every_lpt_queue_config_and_link_transition_access_failure_keeps_owner() {
     let mut memory = Memory::new();
     let (state, _, controller) = setup_lpt(0x153a, 0);
     let first = state.borrow().accesses;
@@ -679,7 +679,7 @@ fn spt_cohort_ecc_shra_errata_link_payload_wrap_and_live_stop_status() {
     }
 }
 #[test]
-fn spt_all_speeds_apply_ipg_gap_and_actual_analog_k1_policy() {
+fn spt_all_speeds_apply_ipg_gap_and_analog_k1_policy() {
     let (state, _, controller) = setup_spt(0x1570, 0);
     let mut memory = Memory::new();
     let mut net = open(controller, &mut memory);
@@ -709,7 +709,7 @@ fn spt_all_speeds_apply_ipg_gap_and_actual_analog_k1_policy() {
     assert_eq!(state.borrow().mac[&0x10] & (1 << 31), 0);
 }
 #[test]
-fn spt_owned_ring_flush_uses_actual_dummy_dma_and_rx_fallback_before_vendor_drain() {
+fn spt_owned_ring_flush_uses_dummy_dma_and_rx_fallback_before_vendor_drain() {
     for rx in [false, true] {
         for tail in [0, 31] {
             let (state, released, controller) = setup_spt(0x156f, 0);
@@ -787,7 +787,7 @@ fn unresolved_flush_tail_mismatch_or_independent_master_timeout_never_release_ow
     }
 }
 #[test]
-fn every_spt_config_link_and_flushing_stop_access_failure_retains_owner() {
+fn every_spt_config_link_and_flushing_stop_access_failure_keeps_owner() {
     let (state, _, controller) = setup_spt(0x156f, 0);
     let mut memory = Memory::new();
     let first = state.borrow().accesses;
@@ -1160,7 +1160,7 @@ fn all_declared_i219_ids_complete_cold_packet_wrap_and_live_flushing_stop() {
     }
 }
 #[test]
-fn each_new_family_cold_config_link_and_flushing_stop_fault_retains_actual_owner() {
+fn each_new_family_cold_config_link_and_flushing_stop_fault_keeps_owner() {
     for family in i219::tests::families() {
         let device = i219::tests::sample_device(family);
         let (state, _, io, timer) = i219::tests::fixture();
@@ -1429,7 +1429,7 @@ fn mandatory_mtp_nvm_source_outcomes_and_clock_policy_compose_through_packet_sto
     }
 }
 #[test]
-fn every_mtp_ptp_cold_k1_queue_link_and_flushing_stop_access_fault_retains_owner() {
+fn every_mtp_ptp_cold_k1_queue_link_and_flushing_stop_access_fault_keeps_owner() {
     use super::super::mtp;
     for device in [0x550a, 0x57b3] {
         for disable in [false, true] {

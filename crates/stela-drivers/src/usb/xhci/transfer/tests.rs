@@ -167,7 +167,7 @@ fn short_control_out_after_status_ack_fails_without_poisoning_completed_endpoint
 }
 
 #[test]
-fn control_timeout_stops_running_ep0_and_retains_poison_if_stop_fails() {
+fn control_timeout_stops_running_ep0_and_keeps_poison_if_stop_fails() {
     for fail_stop in [false, true] {
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;

@@ -58,7 +58,7 @@ fn first_failure_survives_needs_reset_cleanup_errors_and_successful_recovery() {
 }
 
 #[test]
-fn late_start_acknowledgement_stop_reset_and_unmap_failures_retain_exact_owners() {
+fn late_start_acknowledgement_stop_reset_and_unmap_failures_keep_owners() {
     for fault in [0, 1, 2, 3] {
         let (mut controller, device, source) = ready(0x63, 4096);
         if fault == 0 {
@@ -176,7 +176,7 @@ fn partial_pte_write_unpublished_visibility_failure_and_reset_reconfiguration() 
 }
 
 #[test]
-fn successful_but_late_dma_and_reset_completion_retains_pins_until_fresh_recovery() {
+fn successful_but_late_dma_and_reset_completion_keeps_pins_until_fresh_recovery() {
     for write in [false, true] {
         for phase in [
             Phase::DmaStart,

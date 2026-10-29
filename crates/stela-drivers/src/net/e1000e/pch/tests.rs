@@ -164,7 +164,7 @@ fn fixture(kind: Kind) -> Fixture {
 }
 
 #[test]
-fn actual_phy_identity_is_observed_under_one_semaphore_and_revision_retained() {
+fn phy_identity_is_observed_under_one_semaphore_and_revision_kept() {
     for kind in [Kind::I82579, Kind::I217] {
         for revision in 0..16 {
             let (mut phy, state, _) = fixture(kind);
@@ -306,7 +306,7 @@ fn bounded_mdic_failure_releases_semaphore_and_never_reuses_epoch() {
 }
 
 #[test]
-fn exhausted_claim_retains_timeout_and_separate_cleanup_error() {
+fn exhausted_claim_keeps_timeout_and_separate_cleanup_error() {
     // FWSM read, initial SWFLAG read, claim write, then 1000 claim polls.
     // Failure at either final cleanup access must not replace that timeout.
     for fail_at in [1003, 1004] {
@@ -352,7 +352,7 @@ fn exhausted_claim_retains_timeout_and_separate_cleanup_error() {
 }
 
 #[test]
-fn every_wakeup_access_failure_is_terminal_and_retains_actual_owner() {
+fn every_wakeup_access_failure_is_terminal_and_keeps_owner() {
     let (mut good, state, released) = fixture(Kind::I217);
     good.write(Register::new(WAKE_PAGE, 0x1234).unwrap(), 0x9876)
         .unwrap();

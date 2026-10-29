@@ -222,7 +222,7 @@ fn assert_read(bytes: &[u8], address: u8) {
 }
 
 #[test]
-fn two_actual_buses_all_lengths_inline_dma_and_power_lifecycle() {
+fn two_buses_all_lengths_inline_dma_and_power_lifecycle() {
     let (mut h, m, drops) = fixture();
     for id in 0..2 {
         h.enable(bus(id)).unwrap();
@@ -383,7 +383,7 @@ fn before_and_after_every_register_effect_fail_closed_for_both_buses_and_dma() {
     }
 }
 #[test]
-fn late_reads_keep_the_actual_event_and_timeout_retains_payload_owners() {
+fn late_reads_keep_the_event_and_timeout_keeps_payload_owners() {
     let (mut baseline, m, _) = fixture();
     baseline.enable(bus(0)).unwrap();
     m.0.borrow_mut().count = 0;
@@ -422,7 +422,7 @@ fn late_reads_keep_the_actual_event_and_timeout_retains_payload_owners() {
     assert_eq!(out, [0xa5; 33]);
 }
 #[test]
-fn enabled_drop_retains_actual_owner_and_normal_disable_allows_release() {
+fn enabled_drop_keeps_owner_and_normal_disable_allows_release() {
     let (mut h, m, drops) = fixture();
     h.enable(bus(1)).unwrap();
     drop(h);
@@ -589,7 +589,7 @@ fn write_and_power_faults_fence_both_buses_and_never_replay_a_command() {
     }
 }
 #[test]
-fn invalid_claim_returns_the_actual_owned_resources_without_io() {
+fn invalid_claim_returns_the_owned_resources_without_io() {
     let (host, m, _) = fixture();
     let (r, t, buffer) = host.release().ok().unwrap();
     let physical = buffer.bus_address();

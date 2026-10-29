@@ -5,13 +5,13 @@
 use super::*;
 
 #[test]
-fn cold_radio_real_prefix_retains_nvm_epoch_and_actual_command_completions() {
+fn cold_radio_real_prefix_keeps_nvm_epoch_and_command_completions() {
     exercise_cold_radio(false);
 }
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn cold_radio_actual_images_run_source_prefix_with_distinct_offload_and_latencies() {
+fn cold_radio_images_run_source_prefix_with_distinct_offload_and_latencies() {
     exercise_cold_radio(true);
 }
 

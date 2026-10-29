@@ -334,7 +334,7 @@ pub(crate) mod tests {
         count
     }
     #[test]
-    fn actual_receive_ddone_payload_and_gap_refill_wrap_non_power_of_two_rings() {
+    fn receive_ddone_payload_and_gap_refill_wrap_non_power_of_two_rings() {
         let (mut ring, state) = setup(7);
         for i in 0..70u8 {
             assert_eq!(ring.poll().unwrap(), None);
@@ -403,7 +403,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn failed_rearm_retains_queue_and_all_published_buffers_until_quiescence() {
+    fn failed_rearm_keeps_queue_and_all_published_buffers_until_quiescence() {
         let (mut ring, state) = setup(4);
         device_receive(&state, &[0x5a; 200], true, 0);
         state.lock().unwrap().fail_publish = true;
@@ -430,7 +430,7 @@ pub(crate) mod tests {
         assert_eq!(state.lock().unwrap().queue_drops, 1);
     }
     #[test]
-    fn active_drop_retains_owned_requester_and_all_posted_receive_pins() {
+    fn active_drop_keeps_owned_requester_and_all_posted_receive_pins() {
         let (ring, state) = setup(4);
         drop(ring);
         assert_eq!(
@@ -441,7 +441,7 @@ pub(crate) mod tests {
         device_receive(&state, &[0xa5; 100], true, 0);
     }
     #[test]
-    fn assembly_retains_fragment_boundaries_and_drop_and_bounds_entire_chain() {
+    fn assembly_keeps_fragment_boundaries_and_drop_and_bounds_entire_chain() {
         let fragment = |more, drop| Fragment {
             bytes: vec![0x71; 2048],
             more,
@@ -470,7 +470,7 @@ pub(crate) mod tests {
         assert_eq!(a.push(fragment(false, false)), Err(Error::Poisoned));
     }
     #[test]
-    fn actual_donor_1536_entry_data_queue_is_supported_without_power_of_two_assumptions() {
+    fn donor_1536_entry_data_queue_is_supported_without_power_of_two_assumptions() {
         let (mut ring, state) = setup(1536);
         assert_eq!(state.lock().unwrap().head, 1535);
         device_receive(&state, &[0x39; 2048], true, 0);
@@ -489,7 +489,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn every_completed_descriptor_payload_and_rearm_visibility_failure_retains_ownership() {
+    fn every_completed_descriptor_payload_and_rearm_visibility_failure_keeps_ownership() {
         for fail_at in 8..=11 {
             let (mut ring, state) = setup(4);
             state.lock().unwrap().memory.lock().unwrap().fail_sync_at = Some(fail_at);

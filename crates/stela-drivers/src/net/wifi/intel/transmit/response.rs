@@ -263,7 +263,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_negotiate_complete_source_format2_and_tx_response7() {
+    fn images_negotiate_complete_source_format2_and_tx_response7() {
         for family in [Family::Ax200, Family::Ax210] {
             let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
             let b =

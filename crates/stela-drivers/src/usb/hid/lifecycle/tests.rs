@@ -206,7 +206,7 @@ fn stale_hid_stop_and_cached_stopped_success_preserve_state_before_mmio() {
     }
 }
 #[test]
-fn actual_same_controller_root_reuse_refuses_retained_hid_stop_without_touching_current_dma() {
+fn same_controller_root_reuse_refuses_kept_hid_stop_without_touching_current_dma() {
     for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
         for context in [32, 64] {
             for stopped in [false, true] {

@@ -51,7 +51,7 @@ fn programming_faults_revoke_authorization() {
     }
 }
 #[test]
-fn enable_and_mask_faults_retain_owners() {
+fn enable_and_mask_faults_keep_owners() {
     let f = fixture(true, true);
     let cd = f.config_drops.clone();
     let rd = f.root_drops.clone();

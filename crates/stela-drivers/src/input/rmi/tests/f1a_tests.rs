@@ -75,7 +75,7 @@ fn f1a_requires_a_real_function_irq_and_verified_representable_button_count() {
     assert_eq!(h.borrow().memory[0x41], 1);
 }
 #[test]
-fn f1a_uses_one_mixed_attention_and_retains_complete_earlier_reports() {
+fn f1a_uses_one_mixed_attention_and_keeps_complete_earlier_reports() {
     let h = hardware();
     install(&h);
     super::f12_tests::install_f12(&h, 2);

@@ -274,7 +274,7 @@ mod tests {
         }
     }
     #[test]
-    fn actual_prepared_adapter_keeps_dense_w_pairs_and_every_scalar_width_exact() {
+    fn prepared_adapter_keeps_dense_w_pairs_and_every_scalar_width_exact() {
         for (bytes, pair) in [(1, false), (2, false), (4, false), (8, false), (8, true)] {
             let (mut machine, ram, events) = super::super::tests::machine();
             machine

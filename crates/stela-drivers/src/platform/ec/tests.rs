@@ -239,7 +239,7 @@ fn read_write_every_byte_and_multibyte_regions_use_real_commands() {
     }
 }
 #[test]
-fn query_preserves_actual_event_identity_and_zero_has_no_method() {
+fn query_preserves_event_identity_and_zero_has_no_method() {
     let (mut ec, m) = model(false);
     m.borrow_mut().queries.extend([0x17, 0xa2]);
     m.borrow_mut().status |= SCI;
@@ -252,7 +252,7 @@ fn query_preserves_actual_event_identity_and_zero_has_no_method() {
 }
 
 #[test]
-fn polled_event_receipt_uses_actual_sci_and_releases_arbitration() {
+fn polled_event_receipt_uses_sci_and_releases_arbitration() {
     let (mut ec, m) = model(false);
     assert_eq!(ec.poll_query().unwrap(), None);
     assert!(m.borrow().commands.is_empty());
@@ -440,7 +440,7 @@ fn prepublication_timeout_can_retry_but_uncertain_command_cannot() {
     assert_eq!(m.borrow().accesses, accesses);
 }
 #[test]
-fn burst_bad_ack_is_disabled_and_original_error_retained() {
+fn burst_bad_ack_is_disabled_and_original_error_kept() {
     let (mut ec, m) = model(true);
     m.borrow_mut().bad_ack = true;
     let error = ec.read_region(0, 16).unwrap_err();
@@ -464,7 +464,7 @@ fn failure_after_publishing_never_replays_or_returns_partial_region() {
     assert_eq!(m.borrow().commands.as_slice(), [READ]);
 }
 #[test]
-fn every_io_fault_and_firmware_unlock_failure_retains_failure() {
+fn every_io_fault_and_firmware_unlock_failure_keeps_failure() {
     let (mut baseline, m) = model(false);
     baseline.read(3).unwrap();
     let total = m.borrow().accesses;

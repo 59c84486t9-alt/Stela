@@ -73,7 +73,7 @@ fn publish(
         .unwrap();
 }
 #[test]
-fn retained_software_cells_and_capture_identity_grant_no_consumption_or_arrival() {
+fn kept_software_cells_and_capture_identity_grant_no_consumption_or_arrival() {
     let local = local();
     let mut frames = frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0xa5; 144]);
     let view = frames.retain_cells(1).unwrap();
@@ -109,7 +109,7 @@ fn retained_software_cells_and_capture_identity_grant_no_consumption_or_arrival(
     assert!(frames.retain_cells(1).is_err());
 }
 #[test]
-fn retained_cells_survive_source_discard_and_refuse_a_later_partial_buffer_copy() {
+fn kept_cells_survive_source_discard_and_refuse_a_later_partial_buffer_copy() {
     let local = local();
     let mut frames = frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0; 144]);
     let mut latch = InterruptLatch::new();
@@ -214,7 +214,7 @@ fn source_counts_and_declared_software_bytes_never_create_observed_frames() {
     assert_eq!(local.asserted(), 0);
 }
 #[test]
-fn actual_entries_partial_pause_overwrite_and_snapshot_races_keep_exact_prefixes() {
+fn entries_partial_pause_overwrite_and_snapshot_races_keep_exact_prefixes() {
     let local = local();
     let mut frames = frames(&local, &[0, 14, 0, 0, 1, 1, 1, 1], &[0xa5; 144]);
     let mut latch = InterruptLatch::new();
@@ -344,7 +344,7 @@ fn foreign_receipts_abandonment_and_invalid_plans_refuse_without_consumption() {
     assert!(a.finish_copy().is_err());
 }
 #[test]
-fn accounting_overflow_refuses_before_capture_or_actual_consume() {
+fn accounting_overflow_refuses_before_capture_or_consume() {
     let local = local();
     let mut frames = frames(&local, &[14], &[0; 112]);
     let mut latch = InterruptLatch::new();
@@ -444,7 +444,7 @@ fn raw_metadata_layout_preserves_destination_byte_and_distinct_flags() {
     }
 }
 #[test]
-fn null_destination_discard_retains_cells_and_real_partial_consumption() {
+fn null_destination_discard_keeps_cells_and_real_partial_consumption() {
     let local = local();
     let mut frames = frames(&local, &[14], &[0xa5; 112]);
     let mut latch = InterruptLatch::new();
@@ -571,7 +571,7 @@ fn discard_exhaustion_refuses_before_consume_or_receipt_and_empty_selection_read
     );
 }
 #[test]
-fn freshness_consumes_actual_first_value_without_copy_or_retesting_frozen_bits() {
+fn freshness_consumes_first_value_without_copy_or_retesting_frozen_bits() {
     let local = local();
     let mut frames = frames(&local, &[1, 0], &[0x6a; 8]);
     let mut latch = InterruptLatch::new();
@@ -690,7 +690,7 @@ fn freshness_failure_and_exhaustion_leave_first_entry_available_for_the_same_ope
 #[test]
 #[cfg(feature = "std")]
 #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
-fn original_dynamic_slices_and_metadata_copy_match_actual_ptd_effects() {
+fn original_dynamic_slices_and_metadata_copy_match_ptd_effects() {
     use stela_contracts::adt::Node;
     let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
     let dt = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();

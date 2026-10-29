@@ -103,7 +103,7 @@ fn constrained_store_writeback_overlap_stays_decoder_nop_without_memory_requirem
 }
 
 #[test]
-fn load_pairs_reach_checked_plans_without_store_or_asimd_authority() {
+fn load_pairs_reach_checked_plans_without_store_or_asimd_permission() {
     let forms = [
         0x2940_0000,
         0x29c0_0000,

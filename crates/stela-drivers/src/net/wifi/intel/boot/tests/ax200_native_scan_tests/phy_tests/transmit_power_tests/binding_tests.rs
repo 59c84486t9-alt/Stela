@@ -175,7 +175,7 @@ fn finish_add(
     assert_eq!(binding.phase(), Ax200BindingPhase::AuthenticationRequired);
 }
 #[test]
-fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebind() {
+fn quota_cache_requires_ack_reclaim_and_survives_same_original_owner_rebind() {
     let bytes = quota_bytes(true, false, Some(2));
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -341,7 +341,7 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
     }
 }
 #[test]
-fn cold_binding_checks_every_rate_and_actual_limit_through_real_ack_power_and_unbind() {
+fn cold_binding_checks_every_rate_and_limit_through_real_ack_power_and_unbind() {
     for layout in [false, true] {
         exercise(&binding_bytes(layout), layout);
     }
@@ -353,7 +353,7 @@ fn cold_binding_checks_every_rate_and_actual_limit_through_real_ack_power_and_un
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_binding_schema_does_not_bypass_mld_mac_link_requirement() {
+fn ax200_binding_schema_does_not_bypass_mld_mac_link_requirement() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -549,7 +549,7 @@ fn binding_requires_entire_os_envelope_and_ceiling_before_any_dma_publication() 
     }
 }
 #[test]
-fn binding_status_failure_partial_power_failure_and_missing_ack_retain_original_epoch() {
+fn binding_status_failure_partial_power_failure_and_missing_ack_keep_original_epoch() {
     for case in 0..4 {
         let bytes = binding_bytes(false);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

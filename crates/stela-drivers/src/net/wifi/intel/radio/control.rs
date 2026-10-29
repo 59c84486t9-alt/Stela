@@ -414,7 +414,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_preserve_capability_skips_and_real_control_schemas() {
+    fn images_preserve_capability_skips_and_real_control_schemas() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
             let b =

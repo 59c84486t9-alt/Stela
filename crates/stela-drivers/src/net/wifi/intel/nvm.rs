@@ -213,7 +213,7 @@ mod tests {
         b
     }
     #[test]
-    fn exact_versions_retain_every_channel_word_and_refuse_truncation_or_inconsistent_abi() {
+    fn exact_versions_keep_every_channel_word_and_refuse_truncation_or_inconsistent_abi() {
         for version in 3..=5 {
             let input = image(version, version >= 4);
             let fw = Firmware::parse(&input).unwrap();
@@ -375,7 +375,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_advertise_nvm_v4_with_correct_api_stride() {
+    fn images_advertise_nvm_v4_with_correct_api_stride() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
             let b =

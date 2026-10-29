@@ -93,7 +93,7 @@ const FREQUENCY: [u8; 6] = [0, 1, 0, 1, 0, 10];
 const VOLUME: [u8; 6] = [0, 2, 1, 2, 0, 2];
 
 #[test]
-fn actual_descriptor_dma_completion_rearm_and_bounded_backpressure() {
+fn descriptor_dma_completion_rearm_and_bounded_backpressure() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -148,7 +148,7 @@ fn actual_descriptor_dma_completion_rearm_and_bounded_backpressure() {
 }
 
 #[test]
-fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
+fn hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -205,7 +205,7 @@ fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
 }
 
 #[test]
-fn actual_exclusive_endpoint_claim_and_failed_stop_preserve_live_dma_owner() {
+fn exclusive_endpoint_claim_and_failed_stop_preserve_live_dma_owner() {
     for command in [15, 16, 12] {
         let mut backing = memory();
         let mut dma = allocator(&mut backing);
@@ -249,7 +249,7 @@ fn actual_exclusive_endpoint_claim_and_failed_stop_preserve_live_dma_owner() {
     }
 }
 #[test]
-fn actual_configuration_failure_retains_staged_owner_and_native_quarantine() {
+fn configuration_failure_keeps_staged_owner_and_native_quarantine() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -278,7 +278,7 @@ fn actual_configuration_failure_retains_staged_owner_and_native_quarantine() {
 }
 
 #[test]
-fn actual_stale_identity_refuses_before_cached_dequeue_or_any_mmio() {
+fn stale_identity_refuses_before_cached_dequeue_or_any_mmio() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -350,7 +350,7 @@ fn descriptor_selection_refuses_foreign_aliases_and_invalid_status_endpoint_prof
 }
 
 #[test]
-fn actual_fragmented_packet_dma_alignment_preserves_one_td_boundary() {
+fn fragmented_packet_dma_alignment_preserves_one_td_boundary() {
     struct Fragmented<'a>(&'a mut RegionAllocator);
     impl DmaAllocator for Fragmented<'_> {
         fn allocate(
@@ -386,7 +386,7 @@ fn actual_fragmented_packet_dma_alignment_preserves_one_td_boundary() {
 }
 
 #[test]
-fn actual_descriptor_advertised_clock_selector_multiplier_and_feature_attributes() {
+fn descriptor_advertised_clock_selector_multiplier_and_feature_attributes() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -411,7 +411,7 @@ fn actual_descriptor_advertised_clock_selector_multiplier_and_feature_attributes
 }
 
 #[test]
-fn actual_scalar_feature_status_accepts_advertised_cur_and_numeric_range_only() {
+fn scalar_feature_status_accepts_advertised_cur_and_numeric_range_only() {
     let mut raw = configuration();
     let at = raw
         .windows(5)
@@ -452,7 +452,7 @@ fn actual_scalar_feature_status_accepts_advertised_cur_and_numeric_range_only() 
 }
 
 #[test]
-fn dropping_pending_owner_retains_boot_dma_and_cannot_mint_replacement_authority() {
+fn dropping_pending_owner_keeps_boot_dma_and_cannot_mint_replacement_permission() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -479,7 +479,7 @@ fn dropping_pending_owner_retains_boot_dma_and_cannot_mint_replacement_authority
 }
 
 #[test]
-fn actual_transfer_error_retains_ticket_until_reset_dequeue_and_drop_ack() {
+fn transfer_error_keeps_ticket_until_reset_dequeue_and_drop_ack() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -550,7 +550,7 @@ fn unsupported_optional_status_profile_preserves_pcm_and_refuses_before_status_a
 }
 
 #[test]
-fn actual_usb_halt_clear_failure_retains_owner_and_never_acknowledges_drop() {
+fn usb_halt_clear_failure_keeps_owner_and_never_acknowledges_drop() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);
@@ -630,7 +630,7 @@ fn actual_usb_halt_clear_failure_retains_owner_and_never_acknowledges_drop() {
 }
 
 #[test]
-fn actual_unpolled_stall_is_cleared_on_device_before_acknowledged_restart() {
+fn unpolled_stall_is_cleared_on_device_before_acknowledged_restart() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer(&mut dma);

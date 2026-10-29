@@ -272,7 +272,7 @@ fn bss_he_keeps_source_hidden_maps_without_advertising_their_widths() {
     );
 }
 #[test]
-fn every_supported_width_encodes_actual_centers_and_distinct_command_bandwidth() {
+fn every_supported_width_encodes_centers_and_distinct_command_bandwidth() {
     for (band, mode) in [
         (Band::Ghz2, Mode::Ht),
         (Band::Ghz5, Mode::He),

@@ -29,7 +29,7 @@ fn crs() -> Vec<u8> {
 }
 
 #[test]
-fn ecdt_preserves_actual_addresses_uid_gpe_and_path() {
+fn ecdt_preserves_addresses_uid_gpe_and_path() {
     let mut table = ecdt();
     let parsed = Ecdt::parse(&table).unwrap();
     assert_eq!(

@@ -584,7 +584,7 @@ pub(in crate::net::wifi::intel) mod tests {
         unsafe { MappedFirmware::prepare(plan, source, Some(domain.clone())) }
     }
     #[test]
-    fn actual_domain_addresses_copies_visibility_and_split_lifetimes() {
+    fn domain_addresses_copies_visibility_and_split_lifetimes() {
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();
@@ -711,7 +711,7 @@ pub(in crate::net::wifi::intel) mod tests {
         }
     }
     #[test]
-    fn failed_invalidation_retains_pins_for_retry_and_exposed_drop_quarantines() {
+    fn failed_invalidation_keeps_pins_for_retry_and_exposed_drop_quarantines() {
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();
@@ -745,7 +745,7 @@ pub(in crate::net::wifi::intel) mod tests {
 
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_preserve_every_mapped_payload_and_paging_lifetime() {
+    fn images_preserve_every_mapped_payload_and_paging_lifetime() {
         use super::super::firmware::{Family, Firmware};
         use sha2::{Digest, Sha256};
         let directory = std::env::var("STELA_IWLWIFI_IMAGES").expect("firmware directory");

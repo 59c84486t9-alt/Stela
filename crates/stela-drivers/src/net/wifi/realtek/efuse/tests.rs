@@ -306,7 +306,7 @@ fn logical_words_extended_blocks_overrides_and_protected_boundaries_are_explicit
     assert_eq!(logical_map(&p).unwrap(), [255; LOGICAL]);
 }
 #[test]
-fn immutable_board_provenance_retains_raw_values_without_fallback_or_policy() {
+fn immutable_board_provenance_keeps_raw_values_without_fallback_or_policy() {
     let mut log = Logical {
         profile: profile(),
         bytes: core::array::from_fn(|i| i as u8),

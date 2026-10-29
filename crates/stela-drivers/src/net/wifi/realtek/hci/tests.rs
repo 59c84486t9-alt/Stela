@@ -87,7 +87,7 @@ fn native() -> (Native, Rx, Tx, Arc<Bar>, Arc<Mutex<Model>>) {
     (io, rx, tx, bar, memory)
 }
 #[test]
-fn post_power_rebinding_restores_every_actual_native_queue_base_without_unmapping() {
+fn post_power_rebinding_restores_every_native_queue_base_without_unmapping() {
     let (mut io, mut rx, mut tx, bar, memory) = native();
     let regs = [
         0x308, 0x1320, 0x330, 0x328, 0x318, 0x320, 0x310, 0x340, 0x338,
@@ -168,7 +168,7 @@ fn live_rx_or_command_generations_and_pending_beacon_cannot_be_reset() {
     }
 }
 #[test]
-fn failed_cpu_visibility_before_rebinding_retains_all_native_resources() {
+fn failed_cpu_visibility_before_rebinding_keeps_all_native_resources() {
     for fail in [1, 2, 3, 9] {
         let (mut io, mut rx, mut tx, bar, memory) = native();
         memory.lock().unwrap().fail_cpu_sync_at = Some(fail);

@@ -287,7 +287,7 @@ unsafe impl BeaconQueue for Harness {
     }
 }
 #[test]
-fn dma_uses_domain_iovas_and_reuse_requires_actual_source_completion_proof() {
+fn dma_uses_domain_iovas_and_reuse_requires_source_completion_proof() {
     let m = Arc::new(Mutex::new(Model::default()));
     let mut queue = install(&m).unwrap();
     let data: Vec<u8> = (0..4096).map(|i| i as u8).collect();
@@ -321,7 +321,7 @@ fn dma_uses_domain_iovas_and_reuse_requires_actual_source_completion_proof() {
     assert_eq!(state.drops, 1);
 }
 #[test]
-fn publication_visibility_and_teardown_failures_retain_the_real_queue_owner() {
+fn publication_visibility_and_teardown_failures_keep_the_real_queue_owner() {
     for mode in 0..6 {
         let m = Arc::new(Mutex::new(Model::default()));
         {

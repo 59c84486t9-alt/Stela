@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn dot_retains_separately_flushed_and_overflowed_stages() {
+    fn dot_keeps_separately_flushed_and_overflowed_stages() {
         assert_eq!(dot_add(0, 0, [BFLOAT16_MINIMUM; 2], [BFLOAT16_HALF; 2]), 0);
         // Opposite overflowing products become opposite infinities before their
         // pair addition; cancellation of real products is not fused.

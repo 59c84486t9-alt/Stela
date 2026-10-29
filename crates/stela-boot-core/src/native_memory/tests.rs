@@ -460,7 +460,7 @@ fn constrained_source_placement(source: &NativeMemory, ram: *mut u8, bytes: usiz
 }
 
 #[test]
-fn actual_heap_pages_stay_pinned_through_cpu_mapping_and_reclaim() {
+fn heap_pages_stay_pinned_through_cpu_mapping_and_reclaim() {
     let layout = Layout::from_size_align(128 * PAGE, 128 * PAGE).unwrap();
     // SAFETY: this separate RAM allocation is kept alive until every test pin
     // ends. Its PA relation is a model; privileged CPU mappings run in QEMU.

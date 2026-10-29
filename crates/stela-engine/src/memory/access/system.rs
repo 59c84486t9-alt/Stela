@@ -94,7 +94,7 @@ mod tests {
     unsafe impl Sync for Storage {}
 
     #[test]
-    fn actual_cx16_reads_preserve_every_byte_at_all_supported_offsets_and_widths() {
+    fn cx16_reads_preserve_every_byte_at_all_supported_offsets_and_widths() {
         let target = TargetCpu::X86_64_V2;
         if !target.supported() {
             return;

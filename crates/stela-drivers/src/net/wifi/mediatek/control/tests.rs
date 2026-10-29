@@ -91,7 +91,7 @@ fn setup(chip: Chip, model: Model) -> Control<Model> {
     .unwrap()
 }
 #[test]
-fn actual_ownership_ack_and_dma_idle_precede_scheduler_reset_writes() {
+fn ownership_ack_and_dma_idle_precede_scheduler_reset_writes() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for force in [false, true] {
             let mut m = Model::default();
@@ -131,7 +131,7 @@ fn actual_ownership_ack_and_dma_idle_precede_scheduler_reset_writes() {
     }
 }
 #[test]
-fn ownership_retries_bound_actual_attempts_and_never_proceed_on_timeout() {
+fn ownership_retries_bound_attempts_and_never_proceed_on_timeout() {
     for accept in [Some(3), None] {
         let mut c = setup(
             Chip::Mt7921,
@@ -285,7 +285,7 @@ fn unavailable_control_and_zero_clock_fail_before_fabricating_ownership() {
 }
 #[test]
 #[ignore = "oracle: STELA_MT792X_CONTROL_ORACLE"]
-fn unchanged_pinned_ownership_and_disable_helpers_match_actual_register_effects() {
+fn unchanged_pinned_ownership_and_disable_helpers_match_register_effects() {
     let root = std::env::var_os("STELA_MT792X_CONTROL_ORACLE").expect("reference trace directory");
     for force in [false, true] {
         let bytes = std::fs::read(std::path::Path::new(&root).join(if force {
@@ -380,7 +380,7 @@ fn polling_start_uses_chip_prefetch_and_index_reset_with_all_irq_sources_masked(
     }
 }
 #[test]
-fn unsupported_dma_mode_and_ignored_control_stores_never_qualify_start() {
+fn unsupported_dma_mode_and_ignored_control_stores_never_check_start() {
     for (address, initial) in [
         (MT_WFDMA0_GLO_CFG, 1 << 26),
         (MT_WFDMA0_GLO_CFG, 1),

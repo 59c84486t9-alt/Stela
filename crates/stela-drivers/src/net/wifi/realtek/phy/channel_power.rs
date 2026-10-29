@@ -529,7 +529,7 @@ mod tests {
         assert!(rate_section(84).is_none());
     }
     #[test]
-    fn actual_os_eirp_antenna_sar_and_low_ceiling_arithmetic_never_wraps_up() {
+    fn os_eirp_antenna_sar_and_low_ceiling_arithmetic_never_wraps_up() {
         let p = super::super::board_power::channel_fixture(0, nvm(0));
         let g = Geometry::new(1, Width::Mhz20, None, None).unwrap();
         let a = p.plan_channel_power(g, limits()).unwrap();

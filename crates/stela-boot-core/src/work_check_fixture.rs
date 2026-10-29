@@ -62,7 +62,7 @@ mod tests {
         t[9] = 0u8.wrapping_sub(t.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
     }
     #[test]
-    fn actual_enabled_identity_and_checksum_are_required() {
+    fn enabled_identity_and_checksum_are_required() {
         let mut t = table(&[0, 8, 0, 7, 1, 0, 0, 0]);
         assert_eq!(one_processor(&t, 7), Ok(()));
         assert!(one_processor(&t, 8).is_err());

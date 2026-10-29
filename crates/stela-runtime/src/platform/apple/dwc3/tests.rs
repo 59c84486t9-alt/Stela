@@ -126,7 +126,7 @@ fn a_host_command_completion_raises_its_interrupters_shared_wire() {
 }
 
 #[test]
-fn lifecycle_keeps_partial_device_dma_on_clock_and_retained_power_and_cancels_reset_work() {
+fn lifecycle_keeps_partial_device_dma_on_clock_and_kept_power_and_cancels_reset_work() {
     for retention in [false, true] {
         let (mut dwc, mut dart, mut ram, mut latch) = setup();
         let mut access = Access::new(0, 0, &mut latch);
@@ -330,7 +330,7 @@ fn phy_electrical_edges_preserve_transfer_resources_and_reset_sources_are_ored()
 }
 
 #[test]
-fn lifecycle_retains_real_host_rings_freezes_microframes_and_reset_prevents_stale_completion() {
+fn lifecycle_keeps_real_host_rings_freezes_microframes_and_reset_prevents_stale_completion() {
     let (mut dwc, mut dart, mut ram, mut latch) = setup();
     let (erst, ring, commands) = (RAM + 0x8000, RAM + 0x9000, RAM + 0xa000);
     ram.put_u64(erst, ring);

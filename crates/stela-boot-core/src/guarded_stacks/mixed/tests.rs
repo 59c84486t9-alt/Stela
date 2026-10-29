@@ -39,7 +39,7 @@ fn mixed_native_profile_has_real_aligned_c_stacks_and_separate_rust_extents() {
     assert_eq!(layout.backing(raw, 32), Err(Error::Slot));
 }
 #[test]
-fn physical_alignment_retains_all_prefix_and_per_slot_padding() {
+fn physical_alignment_keeps_all_prefix_and_per_slot_padding() {
     let specs = [Geometry::new(PAGE, PAGE).unwrap(), linux(), rust()];
     let layout = MixedLayout::new(PAGE, &specs).unwrap();
     assert_eq!(layout.physical_offset(1), Ok(16 * 1024));

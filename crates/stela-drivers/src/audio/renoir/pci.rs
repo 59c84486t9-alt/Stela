@@ -259,7 +259,7 @@ mod tests {
         }
     }
     #[test]
-    fn exact_native_class_revision_and_containment_are_admission_boundaries() {
+    fn native_class_revision_and_containment_are_admission_boundaries() {
         for (revision_class, expected) in [
             (0x0480_0000, Error::UnsupportedController),
             (0x0480_0060, Error::UnsupportedController),

@@ -142,7 +142,7 @@ fn reset_control_failure_attempts_cleanup() {
 }
 
 #[test]
-fn failed_reset_retains_dma_until_recovery() {
+fn failed_reset_keeps_dma_until_recovery() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let model = Model::new(16);

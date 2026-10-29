@@ -142,7 +142,7 @@ fn modeled_capture(
 }
 
 #[test]
-fn declaration_construction_requires_complete_floor_and_actual_local_owner() {
+fn declaration_construction_requires_complete_floor_and_local_owner() {
     let actual = baseline();
     for bit in 0..32 {
         if CPUID_FLOOR_EDX & (1 << bit) != 0 {
@@ -249,7 +249,7 @@ fn invalid_controls() -> alloc::vec::Vec<(NativeControls, Refusal)> {
 }
 
 #[test]
-fn leased_capture_and_all_three_rechecks_validate_actual_live_controls() {
+fn leased_capture_and_all_three_rechecks_validate_live_controls() {
     let actual = baseline();
     for (changed, expected) in invalid_controls() {
         let candidate = Observation {

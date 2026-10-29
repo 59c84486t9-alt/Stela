@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn atc_permission_never_enables_actual_ats_or_a_reserved_dte_bit() {
+    fn atc_permission_never_enables_ats_or_a_reserved_dte_bit() {
         for flags in (0u8..=u8::MAX).filter(|flags| flags & 8 == 0) {
             let ordinary = Policy::new(flags);
             let permitted = Policy::new(flags | 8);

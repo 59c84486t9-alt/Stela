@@ -235,7 +235,7 @@ fn geometry_is_explicit_and_every_encoded_boundary_is_checked() {
 }
 
 #[test]
-fn initial_register_and_actual_aperture_must_agree_without_mutation() {
+fn initial_register_and_aperture_must_agree_without_mutation() {
     let geometry = geometry();
     for (word, units, expected) in [
         (
@@ -277,7 +277,7 @@ fn initial_register_and_actual_aperture_must_agree_without_mutation() {
 }
 
 #[test]
-fn allocation_and_release_change_actual_view_before_ready_and_preserve_data() {
+fn allocation_and_release_change_view_before_ready_and_preserve_data() {
     let mut component = component(0);
     let base = component.geometry().base();
     let empty = component.read().unwrap();
@@ -399,7 +399,7 @@ fn stale_backing_generation_identity_or_mapping_never_exposes_ready() {
 }
 
 #[test]
-fn exhausted_or_invalid_completion_does_not_invent_progress_or_rollback_actual_effects() {
+fn exhausted_or_invalid_completion_does_not_invent_progress_or_rollback_effects() {
     let mut component = component(0);
     component.backing.generation = u64::MAX;
     component.state = component.backing.state();
@@ -1226,7 +1226,7 @@ mod original {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
-    fn unchanged_j314s_entry_uses_actual_whole_reservation_initialization_before_image_copy() {
+    fn unchanged_j314s_entry_uses_whole_reservation_initialization_before_image_copy() {
         live_entry(EntryPolicy::Initialized);
     }
     #[test]
@@ -1495,7 +1495,7 @@ mod original {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
-    fn unchanged_original_allocation_and_release_execute_against_actual_view_owner() {
+    fn unchanged_original_allocation_and_release_execute_against_view_owner() {
         allocation_and_release(J473);
     }
     #[test]
@@ -1505,7 +1505,7 @@ mod original {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
-    fn unchanged_j314s_allocation_and_release_execute_against_actual_view_owner() {
+    fn unchanged_j314s_allocation_and_release_execute_against_view_owner() {
         allocation_and_release(J314S);
     }
     #[test]

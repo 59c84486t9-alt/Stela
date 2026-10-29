@@ -100,7 +100,7 @@ fn f12_invalid_descriptor_or_tuning_never_enables_function_interrupt() {
 }
 
 #[test]
-fn f12_late_second_function_failure_retains_first_complete_frame_and_irq_status() {
+fn f12_late_second_function_failure_keeps_first_complete_frame_and_irq_status() {
     let h = hardware();
     install_f12(&h, 1);
     install_f12(&h, 2);

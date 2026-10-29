@@ -205,7 +205,7 @@ fn construction_leaves_source_default_publication_and_allocation_explicit() {
     assert_eq!(quota(&mut cache, 0), 0x4012_0000);
 }
 #[test]
-fn actual_words_and_ptd_preserve_interleaving_and_a_failed_fourth_store_prefix() {
+fn words_and_ptd_preserve_interleaving_and_a_failed_fourth_store_prefix() {
     let (memory, mut cache) = components();
     let mut publisher = publisher(&memory, &mut cache, 4, 0);
     assert_eq!(publisher.policy().group(0).unwrap().ceiling, 64);
@@ -403,7 +403,7 @@ fn bindings_modes_and_counts_refuse_before_any_publication_and_do_not_reopen() {
     assert_eq!(publisher.progress().current_group, Some(0));
 }
 #[test]
-fn actual_ptd_and_cache_lifecycle_pauses_retain_effects_without_replay() {
+fn ptd_and_cache_lifecycle_pauses_keep_effects_without_replay() {
     let (memory, mut cache) = components();
     let mut publisher = publisher(&memory, &mut cache, 1, 0);
     let mut latch = InterruptLatch::new();
@@ -440,7 +440,7 @@ fn actual_ptd_and_cache_lifecycle_pauses_retain_effects_without_replay() {
 #[test]
 #[cfg(feature = "std")]
 #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
-fn original_table_and_configuration_publish_through_actual_component_owners() {
+fn original_table_and_configuration_publish_through_component_owners() {
     use stela_contracts::adt::Node;
     let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
     let dt = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();

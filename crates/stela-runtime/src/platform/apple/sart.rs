@@ -312,7 +312,7 @@ mod tests {
     };
 
     #[test]
-    fn retained_physical_gates_revoke_both_allow_queries_and_actual_translation() {
+    fn kept_physical_gates_revoke_both_allow_queries_and_translation() {
         let mut sart = Sart::new(Bounds::Exclusive);
         let active = sart.lifecycle;
         let mut latch = InterruptLatch::new();

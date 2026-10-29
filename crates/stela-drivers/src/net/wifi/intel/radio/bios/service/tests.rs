@@ -324,7 +324,7 @@ unsafe impl BiosIo for ClockModel {
     }
 }
 #[test]
-fn clock_selection_requires_actual_source_and_preserves_fallback_and_truncation() {
+fn clock_selection_requires_source_and_preserves_fallback_and_truncation() {
     for scenario in 0..8 {
         let mut session = Session::new(ClockModel(scenario));
         let result = session.external_clock();
@@ -404,7 +404,7 @@ unsafe impl BiosIo for CountryModel {
     }
 }
 #[test]
-fn bios_country_accepts_only_genuine_cn_and_never_converts_missing_service_into_absence() {
+fn bios_country_accepts_only_cn_and_never_converts_missing_service_into_absence() {
     for scenario in 0..6 {
         let mut session = Session::new(CountryModel(scenario));
         let result = session.country();

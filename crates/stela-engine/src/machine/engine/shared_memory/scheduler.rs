@@ -951,7 +951,7 @@ mod tests {
         }
     }
     #[test]
-    fn refused_source_clear_does_not_retire_or_change_the_actual_cpu_prefix() {
+    fn refused_source_clear_does_not_retire_or_change_the_cpu_prefix() {
         let (mut machine, ram, events) = super::super::tests::machine();
         machine
             .install_shared_memory_for_processors(ram, &events)

@@ -92,7 +92,7 @@ fn radio_loader_refuses_package_and_step_variables_before_provider_access() {
 }
 
 #[test]
-fn raw_radio_bytes_stay_present_without_package_or_authority_inference() {
+fn raw_radio_bytes_stay_present_without_package_or_permission_inference() {
     for descriptor in &VARIABLE_DESCRIPTORS[Variable::Wrds as usize..] {
         let variable = descriptor.variable;
         let raw = vec![0xa5; descriptor.minimum_bytes + 1];
@@ -206,7 +206,7 @@ fn custom_provider_cannot_redirect_an_observed_resource_name_or_target() {
     }
 }
 #[test]
-fn borrowed_permanent_capture_keeps_the_actual_byte_pointer_and_provenance() {
+fn borrowed_permanent_capture_keeps_the_byte_pointer_and_provenance() {
     static RAW: [u8; 8] = [1, 0xfe, 0x12, 0x34, 0x56, 0x78, 0xaa, 0xbb];
     let mut capture =
         CapturedVariable::from_variable(Variable::Step, &RAW[..], 0x87, Some(12)).unwrap();
@@ -241,7 +241,7 @@ fn package() -> Vec<u8> {
     ]
 }
 #[test]
-fn captured_resource_moves_bytes_once_and_checks_actual_observation() {
+fn captured_resource_moves_bytes_once_and_checks_observation() {
     for variable in [Variable::OemPnvm, Variable::ReducedPower] {
         let bytes = package();
         let original = bytes.as_ptr();
@@ -377,7 +377,7 @@ fn configured_platform_shadow_and_provenance_changes_refuse() {
     );
 }
 #[test]
-fn actual_sku_source_policy_has_no_default_image() {
+fn sku_source_policy_has_no_default_image() {
     for ax210 in [false, true] {
         let p = profile(ax210);
         assert_eq!(
@@ -413,7 +413,7 @@ fn actual_sku_source_policy_has_no_default_image() {
     }
 }
 #[test]
-fn step_uses_distinct_guid_actual_absence_and_full_observed_resource() {
+fn step_uses_distinct_guid_absence_and_full_observed_resource() {
     assert_eq!(Variable::Step.guid(), WIFI_BT_GUID);
     assert_ne!(
         Variable::Step.requirement().target.hardware,

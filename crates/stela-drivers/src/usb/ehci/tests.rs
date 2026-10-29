@@ -866,7 +866,7 @@ fn output(pipes: &[BulkPipe]) -> &BulkPipe {
 }
 
 #[test]
-fn actual_native_hs_control_status_descriptor_configuration_and_bulk_dma_chain() {
+fn native_hs_control_status_descriptor_configuration_and_bulk_dma_chain() {
     let (mut c, m, id, pipes) = attached();
     let setup = [0x80, 0x55, 0, 0, 0, 0, 0, 0];
     assert_eq!(c.control_in(&id, setup).unwrap(), Vec::<u8>::new());
@@ -898,7 +898,7 @@ fn actual_native_hs_control_status_descriptor_configuration_and_bulk_dma_chain()
     assert!(m.drains > 0 && m.cpu_syncs > 0 && m.device_syncs > 0);
 }
 #[test]
-fn actual_hs_short_bulk_skips_active_successors_and_keeps_overlay_toggle_with_zlp() {
+fn hs_short_bulk_skips_active_successors_and_keeps_overlay_toggle_with_zlp() {
     let (mut c, m, _, pipes) = attached();
     m.lock().unwrap().short_limit = Some(16_384 + 23);
     let ticket = c
@@ -916,7 +916,7 @@ fn actual_hs_short_bulk_skips_active_successors_and_keeps_overlay_toggle_with_zl
     assert_eq!(toggles, &[false, true, false]);
 }
 #[test]
-fn actual_control_short_data_follows_status_and_qh_overlay_supersedes_stale_qtd() {
+fn control_short_data_follows_status_and_qh_overlay_supersedes_stale_qtd() {
     let (mut c, m, id, _) = attached();
     m.lock().unwrap().suppress_writeback = true;
     // Descriptor32bytes requested as20000: first DATAshort must jump directly
@@ -962,7 +962,7 @@ fn stale_device_pipe_and_transfer_refuse_before_io_and_preserve_current_completi
     assert_eq!(c.poll(&ticket).unwrap().unwrap().actual, 9);
 }
 #[test]
-fn foreign_controller_and_reconfigured_pipes_have_no_authority() {
+fn foreign_controller_and_reconfigured_pipes_have_no_permission() {
     let (mut c, m, id, pipes) = attached();
     let (mut other, other_model, _, other_pipes) = attached();
     let current = other
@@ -993,7 +993,7 @@ fn foreign_controller_and_reconfigured_pipes_have_no_authority() {
     assert_eq!(m.lock().unwrap().io, before);
 }
 #[test]
-fn actual_stall_requires_successful_clear_feature_before_toggle_reset() {
+fn stall_requires_successful_clear_feature_before_toggle_reset() {
     let (mut c, m, _, pipes) = attached();
     m.lock().unwrap().mode = Mode::Stall;
     let ticket = c
@@ -1150,7 +1150,7 @@ fn real_disconnect_change_invalidates_attachment_before_pending_dma_is_touched()
 }
 
 #[test]
-fn actual_partial_current_overlay_resumes_without_replaying_acked_packet() {
+fn partial_current_overlay_resumes_without_replaying_acked_packet() {
     let (mut c, m, _, pipes) = attached();
     m.lock().unwrap().mode = Mode::Partial;
     let ticket = c.submit_bulk_in(input(&pipes), 4096, 1_000_000).unwrap();
@@ -1266,7 +1266,7 @@ fn failed_set_configuration_status_revokes_old_pipe_before_ambiguous_bus_effect(
 }
 
 #[test]
-fn actual_descriptor_dma_rejects_ambiguous_endpoint_and_invalid_hs_packet_metadata() {
+fn descriptor_dma_rejects_ambiguous_endpoint_and_invalid_hs_packet_metadata() {
     for fault in 0..4 {
         let m = Arc::new(Mutex::new(Shared::new()));
         let mut c = controller(m.clone());
@@ -1318,7 +1318,7 @@ fn impossible_residual_is_never_copied_as_completed_dma() {
 
 #[test]
 #[ignore = "oracle: STELA_EHCI_QTD_ORACLE"]
-fn actual_production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace() {
+fn production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace() {
     // This compares pure descriptor arithmetic, including54 cases whose
     // payload arithmetic crosses4GiB. It manufactures no DMA permission:
     // Arena::new separately refuses a native arena crossing its segment.
@@ -1585,7 +1585,7 @@ fn ambiguous_owned_reset_failures_cannot_release_old_default_or_assigned_bus_own
 }
 
 #[test]
-fn actual_disconnect_releases_assigned_address_and_preserves_other_root_completion() {
+fn disconnect_releases_assigned_address_and_preserves_other_root_completion() {
     let (mut c, m) = two_roots();
     let old = c.reset_port(1).unwrap();
     c.set_address(&old, 7).unwrap();
@@ -1640,7 +1640,7 @@ fn inherited_enabled_roots_are_physically_disabled_before_first_default_owner() 
 }
 
 #[test]
-fn inherited_root_disable_requires_actual_ack_and_retains_uncertain_native_owner() {
+fn inherited_root_disable_requires_ack_and_keeps_uncertain_native_owner() {
     let m = Arc::new(Mutex::new(Shared::new()));
     {
         let mut m = m.lock().unwrap();

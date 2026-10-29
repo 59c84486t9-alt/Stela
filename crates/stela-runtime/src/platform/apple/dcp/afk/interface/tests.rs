@@ -358,7 +358,7 @@ fn unpublished_and_terminated_interfaces_return_offline_without_mapping_dma() {
 }
 
 #[test]
-fn actual_close_and_reset_release_sessions_but_unmatched_responses_do_not() {
+fn close_and_reset_release_sessions_but_unmatched_responses_do_not() {
     let (mut interfaces, effects) = interfaces();
     let mut memory = Memory::default();
     receive(&mut interfaces, 1, &report(OPEN, &[]), &mut memory).unwrap();

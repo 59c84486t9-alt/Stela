@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_save_restore_commands_preserve_dma_cursors_and_block_suspended_mutation() {
+    fn save_restore_commands_preserve_dma_cursors_and_block_suspended_mutation() {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_zhaoxin_9202_suspend_refuses_before_mutation_and_9203_keeps_saved_context() {
+    fn zhaoxin_9202_suspend_refuses_before_mutation_and_9203_keeps_saved_context() {
         use crate::bus::pci::{Address, ConfigSpace};
         struct Pci(u16);
         impl ConfigSpace for Pci {

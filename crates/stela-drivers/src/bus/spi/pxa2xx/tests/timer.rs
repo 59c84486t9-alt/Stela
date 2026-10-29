@@ -22,7 +22,7 @@ impl Timer for OpaqueTime {
 }
 
 #[test]
-fn every_ssp_layout_uses_opaque_deadlines_including_select_delays_and_actual_fifo_exchange() {
+fn every_ssp_layout_uses_opaque_deadlines_including_select_delays_and_fifo_exchange() {
     for profile in PROFILES {
         let (mut original, hardware) = host(profile);
         // No child initialization/register access has happened. Move the exact

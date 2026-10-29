@@ -400,7 +400,7 @@ fn tiny_half_product_can_still_cause_directed_single_overflow() {
 }
 
 #[test]
-fn every_retained_enable_refuses_before_all_arithmetic_under_both_ah_modes() {
+fn every_kept_enable_refuses_before_all_arithmetic_under_both_ah_modes() {
     for ah in [0, FPCR_AH] {
         for enabled in [
             INVALID,

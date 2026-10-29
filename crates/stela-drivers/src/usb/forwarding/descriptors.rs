@@ -136,7 +136,7 @@ mod tests {
         ]
     }
     #[test]
-    fn retains_nonsequential_composite_configuration_and_alternates() {
+    fn keeps_nonsequential_composite_configuration_and_alternates() {
         let mut d = device(vec![composite()]);
         d.descriptor[17] = 1;
         let inventory = inventory(&d).unwrap();

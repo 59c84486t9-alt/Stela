@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_exact_live_endpoint_coverage_and_valid_direct_paths() {
+    fn requires_live_endpoint_coverage_and_valid_direct_paths() {
         let one = [1, 8, 0, 0, 0, 0, 1, 0];
         let two = [1, 8, 0, 0, 0, 0, 2, 0];
         let ioapic = [3, 8, 0, 0, 0, 255, 31, 0];

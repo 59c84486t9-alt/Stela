@@ -70,7 +70,7 @@ fn started_transfers_finish_at_later_looks_like_waited_ones() {
 }
 
 #[test]
-fn native_sd_and_mmc_initialize_actual_registers_and_complete_pio_and_adma_io() {
+fn native_sd_and_mmc_initialize_registers_and_complete_pio_and_adma_io() {
     for kind in [Kind::Sd, Kind::Mmc] {
         for sector in [false, true] {
             for pio in [false, true] {
@@ -291,7 +291,7 @@ fn clock_divisors_never_exceed_requested_frequency_or_wrap_fields() {
 }
 
 #[test]
-fn empty_socket_is_retained_and_generation_overflow_never_wraps() {
+fn empty_socket_is_kept_and_generation_overflow_never_wraps() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: the empty host and later card share one live fixture RAM.
@@ -367,7 +367,7 @@ fn unchanged_linux_clock_divisors_and_card_capacity_match_native_decoders() {
 }
 
 #[test]
-fn sd_command_class_and_live_write_tab_follow_actual_card_authority() {
+fn sd_command_class_and_live_write_tab_follow_card_permission() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: both fixtures keep disjoint buffers in this exclusive backing.
@@ -387,7 +387,7 @@ fn sd_command_class_and_live_write_tab_follow_actual_card_authority() {
 }
 
 #[test]
-fn completed_host_data_does_not_override_actual_card_error_status() {
+fn completed_host_data_does_not_override_card_error_status() {
     for status in [1 << 18, 1 << 17, 1 << 3] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;

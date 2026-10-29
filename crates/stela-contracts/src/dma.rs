@@ -409,7 +409,7 @@ pub mod test_support {
         assert_eq!(iommu.calls, 0);
     }
     #[test]
-    fn progress_retains_prior_pages_and_terminal_writer_prefix() {
+    fn progress_keeps_prior_pages_and_terminal_writer_prefix() {
         struct Partial {
             calls: usize,
             bytes: [u8; 32],
@@ -517,7 +517,7 @@ pub mod test_support {
         assert_eq!(&output[8..], &[0x99; 16]);
     }
     #[test]
-    fn map_admission_walks_actual_permissions_without_touching_ram() {
+    fn map_admission_walks_permissions_without_touching_ram() {
         let mut ram = Ram::new(0x1000, 48);
         ram.bytes.fill(0xa5);
         let mut iommu = Shift {

@@ -243,7 +243,7 @@ fn default_amp_follows_eapd_ack() {
 }
 
 #[test]
-fn missing_eapd_ack_retains_owner() {
+fn missing_eapd_ack_keeps_owner() {
     for (id, zero) in [
         (0x10ec_0882, 0),
         (0x10ec_0883, 0),
@@ -337,7 +337,7 @@ fn stale_graph_blocks_amp() {
 }
 
 #[test]
-fn failed_coefficient_retains_owner() {
+fn failed_coefficient_keeps_owner() {
     for fault in 0..4 {
         let mut fixture = Fixture::new();
         let model = family_model(0x10ec_0892);
@@ -640,7 +640,7 @@ fn laptop_depop_timing() {
     }
 }
 #[test]
-fn laptop_failed_shutdown_retains_owner() {
+fn laptop_failed_shutdown_keeps_owner() {
     for fault in 0..2 {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec_0256, true);

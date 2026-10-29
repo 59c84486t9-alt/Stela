@@ -116,7 +116,7 @@ fn source_placement_and_native_capacity_are_checked_before_publication() {
     assert_eq!(owner.descriptor().ptd_entries, 2048);
 }
 #[test]
-fn publication_aliases_and_pairs_keep_one_actual_256_entry_local_bank() {
+fn publication_aliases_and_pairs_keep_one_256_entry_local_bank() {
     let ram = ram();
     let owner = owner(Arc::clone(&ram));
     assert!(Arc::ptr_eq(owner.registered_ram(), &ram));
@@ -200,7 +200,7 @@ fn publication_aliases_and_pairs_keep_one_actual_256_entry_local_bank() {
     assert!(latch.take_aic_inputs().is_empty());
 }
 #[test]
-fn placement_keeps_actual_amcc_lock_identity_and_refuses_a_second_publication_owner() {
+fn placement_keeps_amcc_lock_identity_and_refuses_a_second_publication_owner() {
     let mut board = AppleDevices::new();
     let reg = |offset| stela_soc_data::amcc::Register {
         offset,

@@ -394,7 +394,7 @@ fn identical_key_retry_does_not_reset_nonce_or_replay_state() {
 }
 
 #[test]
-fn retained_crypto_header_and_mic_match_all_declared_ciphers() {
+fn kept_crypto_header_and_mic_match_all_declared_ciphers() {
     for cipher in [
         Cipher::Ccmp128,
         Cipher::Ccmp256,

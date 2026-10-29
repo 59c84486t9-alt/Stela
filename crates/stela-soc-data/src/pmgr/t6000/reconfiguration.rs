@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_exact_native_profile_and_keeps_whole_original_rows() {
+    fn selects_native_profile_and_keeps_whole_original_rows() {
         let bytes = image();
         let image = Image::parse(&bytes).unwrap();
         assert_eq!(

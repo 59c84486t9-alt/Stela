@@ -155,7 +155,7 @@ fn authorized_programming_precedes_start_and_locked_writes_refuse() {
 }
 
 #[test]
-fn one_owner_retains_or_invalidates_every_auxiliary_handle() {
+fn one_owner_keeps_or_invalidates_every_auxiliary_handle() {
     let mut asc = owner(true);
     // Capture may include opaque bits the consumers never decode.
     let opaque = 1 << 63;
@@ -261,7 +261,7 @@ fn resource_geometry_and_locked_identity_are_checked() {
 }
 
 #[test]
-fn mapped_iop_zero_requires_current_allocation_mapping_and_actual_instruction() {
+fn mapped_iop_zero_requires_current_allocation_mapping_and_instruction() {
     let (mut asc, owned) = owner_with_mapping(false, 0);
     let h =
         EntryHandoff::from_mapping(mapping(0), 0, INSTRUCTION, LOCK, Origin::NativeBootResource)

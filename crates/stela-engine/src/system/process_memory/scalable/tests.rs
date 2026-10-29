@@ -643,7 +643,7 @@ mod retained {
     }
 
     #[test]
-    fn retained_owner_rechecks_actual_state_before_each_native_call() {
+    fn kept_owner_rechecks_state_before_each_native_call() {
         use super::fixture::{LD1B_Z1_P0_X5, VL, banks};
         use crate::system::{process_memory::ProcessMemoryError, state::PSTATE_IL_MASK};
         use stela_compiler::TargetCpu;
@@ -678,7 +678,7 @@ mod retained {
 }
 
 #[test]
-fn qualified_entry_owns_source_and_executes_same_snapshot_domain() {
+fn checked_entry_owns_source_and_executes_same_snapshot_domain() {
     for (word, bytes, target, ram_base) in [
         (LD1B_Z1_P0_X5, 2, TargetCpu::Baseline, RAM),
         (LD1D_Z1_P0_X5, 8, wide_target(), RAM),
@@ -994,7 +994,7 @@ fn q16_native_aligned_residue8_and_other_residues() {
 }
 
 #[test]
-fn qualified_q16_translation_permission_order_and_prefix() {
+fn checked_q16_translation_permission_order_and_prefix() {
     // SME keeps its descriptor and uses byte parts when an unaligned quadword
     // crosses a 16-byte granule; permission and translation still fault at the
     // first inaccessible byte.
@@ -1041,7 +1041,7 @@ fn qualified_q16_translation_permission_order_and_prefix() {
 }
 
 #[test]
-fn qualified_callback_and_inactive_sp_faults_reset_next_entry() {
+fn checked_callback_and_inactive_sp_faults_reset_next_entry() {
     for translation in [false, true] {
         let mut f = Fixture::new(
             LD1B_Z1_P0_X5,

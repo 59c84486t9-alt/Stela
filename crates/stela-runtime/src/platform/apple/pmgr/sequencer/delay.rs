@@ -111,7 +111,7 @@ mod tests {
         cursor
     }
     #[test]
-    fn actual_cycles_hold_pc_without_repeated_sample_progress_or_end_completion() {
+    fn cycles_hold_pc_without_repeated_sample_progress_or_end_completion() {
         let mut cursor = cursor(&[4 | (3 << 6), 0]);
         assert_eq!(
             cursor.advance_delay(7),

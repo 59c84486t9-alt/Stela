@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_pauses_preserve_split_transfers_and_irq_without_clocking_targets() {
+    fn kept_pauses_preserve_split_transfers_and_irq_without_clocking_targets() {
         let irq = AicInput::new(0, 761);
         let mut c = I2c::new(irq);
         c.attach(0x38, Box::new(Echo { cursor: 0 })).unwrap();

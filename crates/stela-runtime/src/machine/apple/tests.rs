@@ -445,7 +445,7 @@ fn powered_serial_controllers() -> (AppleDevices, Console, u64, [u64; 3]) {
 }
 
 #[test]
-fn pmgr_serial_constructor_hooks_gate_actual_mmio_and_preserve_retained_configuration() {
+fn pmgr_serial_constructor_hooks_gate_mmio_and_preserve_kept_configuration() {
     let (mut d, console, supply, [uart, i2c, spi]) = powered_serial_controllers();
     for (address, value) in [(uart, 3), (i2c + 0x30, 0x1234), (spi + 0x30, 7)] {
         d.write(0, address, 4, value, 0).unwrap();
@@ -468,7 +468,7 @@ fn pmgr_serial_constructor_hooks_gate_actual_mmio_and_preserve_retained_configur
 }
 
 #[test]
-fn pmgr_serial_reset_preflights_actual_nor_before_clearing_other_controllers() {
+fn pmgr_serial_reset_preflights_nor_before_clearing_other_controllers() {
     let (mut d, console, supply, [uart, i2c, spi]) = powered_serial_controllers();
     d.write(0, uart + 0x20, 4, u64::from(b'a'), 0).unwrap();
     d.write(0, spi + 0x0c, 4, 0, 0).unwrap(); // Internal CS low.
@@ -600,7 +600,7 @@ fn repeated_resource_names_do_not_cross_connect_native_power_domains() {
 }
 
 #[test]
-fn pmgr_all_native_banks_preflight_before_register_or_actual_dart_effects() {
+fn pmgr_all_native_banks_preflight_before_register_or_dart_effects() {
     use coverage::{Admission, Domain, DomainId};
     use stela_soc_data::board::PowerResource;
     let mut d = AppleDevices::new();
@@ -969,7 +969,7 @@ fn pmgr_replays_queued_off_on_and_reset_edges_before_the_next_client_access() {
 }
 
 #[test]
-fn pmgr_unavailable_shared_consumers_keep_actual_native_lifecycle_effects_in_all_directions() {
+fn pmgr_unavailable_shared_consumers_keep_native_lifecycle_effects_in_all_directions() {
     use stela_soc_data::board::PowerResource;
     for retention in [false, true] {
         let (mut d, _, supply, base) = powered_dart_with(retention, 1, |states| {
@@ -1979,7 +1979,7 @@ fn rtc_publication_precedes_every_timed_service_and_refuses_stale_effects() {
 }
 
 #[test]
-fn native_dma_constructors_preflight_every_actual_owner_before_publication() {
+fn native_dma_constructors_preflight_every_owner_before_publication() {
     const DART: u64 = 0x235004000;
     const AES: u64 = 0x23500c000;
     const WRAPPER: u64 = 0x271c00000;
@@ -2132,7 +2132,7 @@ fn native_dma_constructors_preflight_every_actual_owner_before_publication() {
 }
 
 #[test]
-fn mounted_dcpext_retained_pm_gates_suppress_real_surface_dma_and_scanout() {
+fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
     use crate::platform::apple::dcp::{link, swap};
     struct Screen(Rc<RefCell<usize>>);
     impl Scanout for Screen {
@@ -2956,7 +2956,7 @@ fn version_5_aes_places_its_dkey_range_after_the_key_disable_words() {
     assert!(devices.write(0, DKEY + 4, 4, 1, 0).is_err());
 }
 #[test]
-fn sep_native_nonzero_routes_read_actual_firmware_and_preflight_owner_capacity() {
+fn sep_native_nonzero_routes_read_firmware_and_preflight_owner_capacity() {
     use crate::platform::apple::sep::message::{Frame, ROM};
     const DART: u64 = 0x25d2c0000;
     const SEP: u64 = 0x25e400000;
@@ -3340,7 +3340,7 @@ fn mounted_usb_dma_service_failure_is_protected_from_survey_substitution() {
 }
 
 #[test]
-fn actual_phy_clock_and_retained_supply_freeze_usb_time_while_quiesce_does_not() {
+fn phy_clock_and_kept_supply_freeze_usb_time_while_quiesce_does_not() {
     use coverage::{Domain, DomainId};
     use stela_soc_data::board::PowerResource;
     let mut d = AppleDevices::new();
@@ -3459,7 +3459,7 @@ fn phy_phandles_distinguish_standalone_views_on_the_same_connector() {
 }
 
 #[test]
-fn usb_requires_actual_phy_binding_and_retained_phy_pauses_preserve_sessions() {
+fn usb_requires_phy_binding_and_kept_phy_pauses_preserve_sessions() {
     use coverage::{Domain, DomainId};
     use stela_soc_data::board::PowerResource;
     let mut d = AppleDevices::new();

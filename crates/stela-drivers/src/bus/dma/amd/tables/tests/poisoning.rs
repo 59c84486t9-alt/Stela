@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn uncertain_publication_retains_pins() {
+fn uncertain_publication_keeps_pins() {
     for stage in [3, 4, 5] {
         let (mut tree, monitor) = new_tree(2, 12);
         let root = tree.root_for_publication().unwrap().value();

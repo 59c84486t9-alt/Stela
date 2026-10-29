@@ -36,7 +36,7 @@ fn the_table_applies_where_each_chips_census_shows_the_encoding() {
 /// Independent bit ranges from the pinned header: every named field is
 /// preserved, while every hole refuses without changing state or counts.
 #[test]
-fn objc_prediction_fields_are_qualified_on_each_consuming_chip() {
+fn objc_prediction_fields_are_checked_on_each_consuming_chip() {
     for chip in Chip::ALL {
         for (encoding, ranges) in [
             (BP_OBJC_ADR_EL1, &[(0, 55)][..]),

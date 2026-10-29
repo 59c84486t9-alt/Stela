@@ -375,7 +375,7 @@ fn live_control_drift_quarantines_routes() {
 }
 
 #[test]
-fn speaker_boost_failure_retains_owner() {
+fn speaker_boost_failure_keeps_owner() {
     for lost_ack in [false, true] {
         let mut fixture = Fixture::new();
         let model = cs4210_device(false, 63);

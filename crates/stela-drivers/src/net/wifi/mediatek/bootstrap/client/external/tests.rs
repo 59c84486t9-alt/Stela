@@ -28,7 +28,7 @@ fn finish(mut client: Client<Bar, Q, NativeGuard>, model: Model, now: u64) {
 }
 
 #[test]
-fn actual_sae_commit_token_retry_confirm_transport_never_grants_association() {
+fn sae_commit_token_retry_confirm_transport_never_grants_association() {
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(
@@ -310,7 +310,7 @@ fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
 }
 
 #[test]
-fn cancellation_retains_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
+fn cancellation_keeps_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
@@ -395,7 +395,7 @@ fn cancellation_retains_real_pending_dma_and_late_rx_until_explicit_peer_drain()
 }
 
 #[test]
-fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() {
+fn stale_foreign_and_invalid_os_commands_are_refused_before_roc_or_dma() {
     let (mut client, model) = setup();
     let (mut other, other_model) = setup();
     let session = client
@@ -497,7 +497,7 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_actual_roc_or_dma() 
 }
 
 #[test]
-fn frontend_and_actual_native_deadlines_cancel_without_retransmission_or_authority() {
+fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
     for native_timeout in [false, true] {
         let (mut client, model) = setup();
         let session = client
@@ -547,7 +547,7 @@ fn frontend_and_actual_native_deadlines_cancel_without_retransmission_or_authori
 }
 
 #[test]
-fn actual_rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() {
+fn rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() {
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
@@ -661,7 +661,7 @@ fn actual_rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fi
 }
 
 #[test]
-fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication() {
+fn exchange_deadline_during_dma_preparation_refuses_producer_publication() {
     use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageGeometry, PinnedPages};
     struct DelayedSource {
         clock: crate::Clock,
@@ -739,7 +739,7 @@ fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication(
 }
 
 #[test]
-fn actual_peer_firmware_refusal_quarantines_original_exchange_and_resources() {
+fn peer_firmware_refusal_quarantines_original_exchange_and_resources() {
     let (mut client, model) = setup();
     // Existing firmware peer model returns its nonzero unified status.
     // BSS may have succeeded and the peer command may have affected hardware;

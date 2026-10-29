@@ -2,7 +2,7 @@ use super::*;
 use crate::usb::hid::{Descriptor, Translator, report};
 
 #[test]
-fn report_size_failure_retains_the_item_offset_and_wire_value() {
+fn report_size_failure_keeps_the_item_offset_and_wire_value() {
     let error = Descriptor::parse(&[0x05, 1, 0x77, 1, 1, 0, 0]).unwrap_err();
     assert_eq!(error.reader, Reader::Descriptor);
     assert_eq!(error.offset, Some(2));
@@ -10,7 +10,7 @@ fn report_size_failure_retains_the_item_offset_and_wire_value() {
 }
 
 #[test]
-fn truncated_item_retains_the_missing_payload_extent() {
+fn truncated_item_keeps_the_missing_payload_extent() {
     let error = Descriptor::parse(&[0x05, 1, 0x77, 0xaa]).unwrap_err();
     assert_eq!(error.offset, Some(2));
     assert_eq!(

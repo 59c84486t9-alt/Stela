@@ -296,7 +296,7 @@ fn power_pings_and_naps_are_answered_as_the_ap_expects() {
 }
 
 #[test]
-fn retained_cpu_halt_requires_sleep_and_resumes_without_enumeration() {
+fn kept_cpu_halt_requires_sleep_and_resumes_without_enumeration() {
     for sleep in [0x201, 0x202] {
         let mut rtkit = booted();
         assert!(rtkit.stop().is_err()); // Incomplete protocol start.

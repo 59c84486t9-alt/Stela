@@ -292,7 +292,7 @@ fn missing_runtime_atomic_capability_precedes_the_gpr_prefix() {
 }
 
 #[test]
-fn later_memory_fault_retains_prefix_but_not_the_staged_destination() {
+fn later_memory_fault_keeps_prefix_but_not_the_staged_destination() {
     let leaf = PreparedScalableLeaf::prepare(
         &words(&[MOV_X0_SEVEN, LD1B_Z1_P0_X5, RET_X30]),
         GuestAddress(GUEST_BASE),

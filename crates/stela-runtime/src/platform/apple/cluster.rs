@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn acc_state_maps_event_pairs_and_enable_configuration_retain_full64_values() {
+    fn acc_state_maps_event_pairs_and_enable_configuration_keep_full64_values() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut cluster = Cluster::new(&[], 18)

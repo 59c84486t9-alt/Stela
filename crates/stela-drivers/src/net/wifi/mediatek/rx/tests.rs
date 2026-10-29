@@ -75,7 +75,7 @@ fn packet(chip: Chip, groups: u32, mode: u8, format: u8, offset: u8) -> Vec<u8> 
     bytes
 }
 #[test]
-fn every_valid_optional_group_combination_retains_boundaries_and_payload_padding() {
+fn every_valid_optional_group_combination_keeps_boundaries_and_payload_padding() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for groups in 0..32 {
             if groups & 16 != 0 && groups & 4 == 0 {
@@ -218,7 +218,7 @@ fn security_flags_never_synthesize_integrity_key_or_replay_success() {
     }
 }
 #[test]
-fn translated_fragment_and_error_profiles_remain_explicit_and_fcs_is_retained() {
+fn translated_fragment_and_error_profiles_remain_explicit_and_fcs_is_kept() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for (flag, error) in [
             (23, Error::AmsduError),
@@ -248,7 +248,7 @@ fn translated_fragment_and_error_profiles_remain_explicit_and_fcs_is_retained() 
     }
 }
 #[test]
-fn packet_classification_and_channel_encoding_follow_actual_chip_layout_without_wrapping() {
+fn packet_classification_and_channel_encoding_follow_chip_layout_without_wrapping() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for kind in 0..32u32 {
             for flag in [0, 1, 2] {

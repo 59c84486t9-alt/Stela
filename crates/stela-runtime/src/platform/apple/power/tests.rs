@@ -50,7 +50,7 @@ fn unknown_handoff_is_never_zero_marker_unlocked_channel_or_healthy_status() {
     ));
 }
 #[test]
-fn mounted_gpce_preserves_real_busy_and_retains_request_without_fake_readiness() {
+fn mounted_gpce_preserves_real_busy_and_keeps_request_without_fake_readiness() {
     let mut bus = Bus::new();
     let id = bus.add(Box::new(
         Power::from_snapshot(Kind::Gpce, [(0, 0x120), (4, 0x830)]).unwrap(),
@@ -172,7 +172,7 @@ fn captured_unready_gpce_and_cio_work_cannot_become_an_empty_idle_queue() {
 }
 
 #[test]
-fn actual_gpce_finalization_retains_ordered_masked_effects_without_clearing_native_progress() {
+fn gpce_finalization_keeps_ordered_masked_effects_without_clearing_native_progress() {
     let mut bus = Bus::new();
     let id = bus.add(Box::new(
         Power::from_snapshot(Kind::GpceFinalize, [(0x2008, 0x123), (0x200c, 0x456)]).unwrap(),
@@ -234,7 +234,7 @@ fn native_gpce_status_control_fields_do_not_gain_semantics_from_the_ap_request_s
     assert_eq!(model.pending_gpce().count(), 0);
 }
 #[test]
-fn tvm_retains_config_and_other_domains_without_claiming_idle_progress() {
+fn tvm_keeps_config_and_other_domains_without_claiming_idle_progress() {
     let mut sink = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut sink);
     let mut model = snapshot(Kind::Tvm, 0x123);

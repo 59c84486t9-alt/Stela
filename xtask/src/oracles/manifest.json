@@ -19,7 +19,7 @@
   },
   {
     "package": "stela-boot-core",
-    "test": "original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission",
+    "test": "original_mode1_factory_projects_live_tree_without_public_pmgr_admission",
     "source": "crates/stela-boot-core/src/assigned_topology/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -334,7 +334,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_dp_complete_write_transcript_matches_actual_native_dma",
+    "test": "unchanged_linux_dp_complete_write_transcript_matches_native_dma",
     "source": "crates/stela-drivers/src/bus/thunderbolt/displayport/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -344,7 +344,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_drom_acquisition_crc_and_port_metadata_match_actual_native_frames",
+    "test": "unchanged_linux_drom_acquisition_crc_and_port_metadata_match_native_frames",
     "source": "crates/stela-drivers/src/bus/thunderbolt/drom/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -374,7 +374,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_actual_dma",
+    "test": "unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_dma",
     "source": "crates/stela-drivers/src/bus/thunderbolt/link/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -384,7 +384,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_native_dma",
+    "test": "unchanged_linux_router_operation_bytes_and_source_statuses_match_native_dma",
     "source": "crates/stela-drivers/src/bus/thunderbolt/operations/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -394,7 +394,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_path_usb3_complete_write_trace_matches_actual_dma",
+    "test": "unchanged_linux_path_usb3_complete_write_trace_matches_dma",
     "source": "crates/stela-drivers/src/bus/thunderbolt/path/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -404,7 +404,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_pcie_complete_write_transcript_matches_actual_native_dma",
+    "test": "unchanged_linux_pcie_complete_write_transcript_matches_native_dma",
     "source": "crates/stela-drivers/src/bus/thunderbolt/pcie/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -424,7 +424,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_router_full_write_trace_matches_actual_dma_engine",
+    "test": "unchanged_linux_router_full_write_trace_matches_dma_engine",
     "source": "crates/stela-drivers/src/bus/thunderbolt/router/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -444,7 +444,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_actual_dma",
+    "test": "unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_dma",
     "source": "crates/stela-drivers/src/bus/thunderbolt/usb3/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -498,7 +498,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "retained_linux_control_commands_match_actual_native_device_operations",
+    "test": "kept_linux_control_commands_match_native_device_operations",
     "source": "crates/stela-drivers/src/input/cyapa/pip/tests/controls.rs",
     "kind": "oracle",
     "inputs": [
@@ -519,7 +519,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_mutable_register_values_and_transactions_match_actual_native_controls",
+    "test": "unchanged_linux_mutable_register_values_and_transactions_match_native_controls",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/controls_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -529,7 +529,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_integrated_trackpoint_records_match_actual_native_profiles",
+    "test": "unchanged_linux_integrated_trackpoint_records_match_native_profiles",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/trackpoint_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -539,7 +539,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_integrated_report_id_configuration_matches_actual_native_transactions",
+    "test": "unchanged_linux_integrated_report_id_configuration_matches_native_transactions",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/trackpoint_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -549,7 +549,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_v3_configuration_matches_actual_fast_query_and_register_transactions",
+    "test": "unchanged_linux_v3_configuration_matches_fast_query_and_register_transactions",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/v3_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -559,7 +559,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_v3_head_tail_reports_match_actual_configured_i8042_device",
+    "test": "unchanged_linux_v3_head_tail_reports_match_configured_i8042_device",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/v3_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -569,7 +569,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_v4_configuration_matches_actual_mode_rate_and_register_transactions",
+    "test": "unchanged_linux_v4_configuration_matches_mode_rate_and_register_transactions",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/v4_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -579,7 +579,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_v4_reports_and_mt_policy_match_actual_configured_i8042_device",
+    "test": "unchanged_linux_v4_reports_and_mt_policy_match_configured_i8042_device",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests/v4_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -589,7 +589,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_known_rejection_service_budget_and_delay_match_actual_native_retry",
+    "test": "unchanged_linux_known_rejection_service_budget_and_delay_match_native_retry",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -599,7 +599,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_elantech_configuration_matches_actual_i8042_transactions",
+    "test": "unchanged_linux_elantech_configuration_matches_i8042_transactions",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -609,7 +609,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_elantech_reports_match_actual_configured_i8042_device",
+    "test": "unchanged_linux_elantech_reports_match_configured_i8042_device",
     "source": "crates/stela-drivers/src/input/ps2/tests/elantech_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -619,7 +619,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_cleanup_mode_matches_actual_quiesced_i8042_owner",
+    "test": "unchanged_linux_cleanup_mode_matches_quiesced_i8042_owner",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -629,7 +629,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_board_coordinates_match_actual_pnp_queried_device",
+    "test": "unchanged_linux_board_coordinates_match_pnp_queried_device",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -639,7 +639,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_child_packets_and_oob_match_actual_bound_i8042_mouse",
+    "test": "unchanged_linux_child_packets_and_oob_match_bound_i8042_mouse",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -649,7 +649,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_explorer_scroll_matches_actual_acknowledged_child_mode",
+    "test": "unchanged_linux_explorer_scroll_matches_acknowledged_child_mode",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -659,7 +659,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_rate_commands_match_actual_i8042_controls",
+    "test": "unchanged_linux_rate_commands_match_i8042_controls",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -669,7 +669,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_forcepad_temporal_records_match_actual_i8042_reports",
+    "test": "unchanged_linux_forcepad_temporal_records_match_i8042_reports",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -679,7 +679,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport",
+    "test": "unchanged_linux_passthrough_commands_and_fields_match_i8042_transport",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -689,7 +689,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_button_reports_match_actual_i8042_extended_updates",
+    "test": "unchanged_linux_button_reports_match_i8042_extended_updates",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -699,7 +699,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_image_count_policy_matches_actual_i8042_reports",
+    "test": "unchanged_linux_image_count_policy_matches_i8042_reports",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -709,7 +709,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_agm_records_match_actual_advanced_mode_input",
+    "test": "unchanged_linux_agm_records_match_advanced_mode_input",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -719,7 +719,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_absolute_records_match_actual_i8042_input",
+    "test": "unchanged_linux_absolute_records_match_i8042_input",
     "source": "crates/stela-drivers/src/input/ps2/tests/synaptics_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -739,7 +739,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_flb_rbl_complete_reset_writes_and_settling_match_actual_hardware",
+    "test": "unchanged_linux_flb_rbl_complete_reset_writes_and_settling_match_hardware",
     "source": "crates/stela-drivers/src/net/aqtion/tests/reset_source.rs",
     "kind": "oracle",
     "inputs": [
@@ -828,7 +828,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_dmi_matches_and_actual_quirk_table_preserve_byte_string_semantics",
+    "test": "unchanged_dmi_matches_and_quirk_table_preserve_byte_string_semantics",
     "source": "crates/stela-drivers/src/net/e1000e/pch/cold/mtp/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1039,7 +1039,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_5761_initialization_selections_match_actual_retained_packet_owner",
+    "test": "unchanged_linux_5761_initialization_selections_match_kept_packet_owner",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/bcm5761.rs",
     "kind": "oracle",
     "inputs": [
@@ -1049,7 +1049,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_5761_phy_power_writes_match_actual_clock_and_retained_owner",
+    "test": "unchanged_linux_5761_phy_power_writes_match_clock_and_kept_owner",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/bcm5761_power.rs",
     "kind": "oracle",
     "inputs": [
@@ -1059,7 +1059,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_5720_5762_selected_packet_setup_matches_actual_registers",
+    "test": "unchanged_linux_5720_5762_selected_packet_setup_matches_registers",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/bcm5762.rs",
     "kind": "oracle",
     "inputs": [
@@ -1069,7 +1069,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_clkreq_flag_and_complete_word_policy_match_actual_packet_owner",
+    "test": "unchanged_linux_clkreq_flag_and_complete_word_policy_match_packet_owner",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/clkreq.rs",
     "kind": "oracle",
     "inputs": [
@@ -1079,7 +1079,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_aux_decode_and_mac_duplex_match_actual_driver",
+    "test": "unchanged_linux_aux_decode_and_mac_duplex_match_driver",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/phy_link.rs",
     "kind": "oracle",
     "inputs": [
@@ -1089,7 +1089,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_phy_power_writes_match_actual_retained_driver",
+    "test": "unchanged_linux_phy_power_writes_match_kept_driver",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/phy_power.rs",
     "kind": "oracle",
     "inputs": [
@@ -1099,7 +1099,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_complete_rdma_mode_matches_actual_register_and_raw_traffic",
+    "test": "unchanged_linux_complete_rdma_mode_matches_register_and_raw_traffic",
     "source": "crates/stela-drivers/src/net/tg3/packet/tests/rdma_mode.rs",
     "kind": "oracle",
     "inputs": [
@@ -1239,7 +1239,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_binding_schema_does_not_bypass_mld_mac_link_requirement",
+    "test": "ax200_binding_schema_does_not_bypass_mld_mac_link_requirement",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1249,7 +1249,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_board_schema_and_native_owner",
+    "test": "ax200_board_schema_and_native_owner",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_board_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1259,7 +1259,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_bt_config6_ci2_and_fixed_old_profile_source_owner",
+    "test": "ax200_bt_config6_ci2_and_fixed_old_profile_source_owner",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/queue_tests/coexistence_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1269,7 +1269,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_mld_image_refuses_legacy_mac_before_effects",
+    "test": "ax200_mld_image_refuses_legacy_mac_before_effects",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mac_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1309,7 +1309,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_mld_scheduler3_reply2_allocates_and_removes_original_queue_dma",
+    "test": "ax200_mld_scheduler3_reply2_allocates_and_removes_original_queue_dma",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/queue_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1319,7 +1319,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_umac15_schema_does_not_bypass_mld_mac_requirement",
+    "test": "ax200_umac15_schema_does_not_bypass_mld_mac_requirement",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1329,7 +1329,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_mld_peer_schema_requires_distinct_mac_link_owner",
+    "test": "ax200_mld_peer_schema_requires_distinct_mac_link_owner",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1339,7 +1339,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement",
+    "test": "ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1349,7 +1349,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_scan_cfg5_uses_real_rx_tx_antennas_and_original_dma_epoch",
+    "test": "ax200_scan_cfg5_uses_real_rx_tx_antennas_and_original_dma_epoch",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_scan_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1359,7 +1359,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_thermal_power_versions_and_capability_branches",
+    "test": "ax200_thermal_power_versions_and_capability_branches",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests/thermal.rs",
     "kind": "oracle",
     "inputs": [
@@ -1369,7 +1369,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "mcc_actual_ax200_v5_response_is_retained_with_original_dma_epoch",
+    "test": "mcc_ax200_v5_response_is_kept_with_original_dma_epoch",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests/mcc.rs",
     "kind": "oracle",
     "inputs": [
@@ -1379,7 +1379,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_power5_schema_does_not_bypass_mld_mac_requirement",
+    "test": "ax200_power5_schema_does_not_bypass_mld_mac_requirement",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1389,7 +1389,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "cold_radio_actual_images_run_source_prefix_with_distinct_offload_and_latencies",
+    "test": "cold_radio_images_run_source_prefix_with_distinct_offload_and_latencies",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/cold_radio.rs",
     "kind": "oracle",
     "inputs": [
@@ -1399,7 +1399,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unified_actual_images_drive_real_command_and_notification_epoch",
+    "test": "unified_images_drive_real_command_and_notification_epoch",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/nvm_completion.rs",
     "kind": "oracle",
     "inputs": [
@@ -1419,7 +1419,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax210_ucode_external_pnvm_source_dma_doorbell_and_notification",
+    "test": "ax210_ucode_external_pnvm_source_dma_doorbell_and_notification",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
@@ -1429,7 +1429,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations",
+    "test": "ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
@@ -1439,7 +1439,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_image_publishes_owned_context_and_consumes_completed_alive",
+    "test": "ax200_image_publishes_owned_context_and_consumes_completed_alive",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
@@ -1449,7 +1449,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "lari_actual_images_drive_lari6_without_extension_and_lari8_with_extension",
+    "test": "lari_images_drive_lari6_without_extension_and_lari8_with_extension",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/lari_policy.rs",
     "kind": "oracle",
     "inputs": [
@@ -1491,7 +1491,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_preserve_every_mapped_payload_and_paging_lifetime",
+    "test": "images_preserve_every_mapped_payload_and_paging_lifetime",
     "source": "crates/stela-drivers/src/net/wifi/intel/dma.rs",
     "kind": "oracle",
     "inputs": [
@@ -1531,7 +1531,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_select_same_v4_layout_but_different_capability_semantics",
+    "test": "images_select_same_v4_layout_but_different_capability_semantics",
     "source": "crates/stela-drivers/src/net/wifi/intel/mcc.rs",
     "kind": "oracle",
     "inputs": [
@@ -1551,7 +1551,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_advertise_nvm_v4_with_correct_api_stride",
+    "test": "images_advertise_nvm_v4_with_correct_api_stride",
     "source": "crates/stela-drivers/src/net/wifi/intel/nvm.rs",
     "kind": "oracle",
     "inputs": [
@@ -1581,7 +1581,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax210_skus_match_unchanged_linux_selector",
+    "test": "ax210_skus_match_unchanged_linux_selector",
     "source": "crates/stela-drivers/src/net/wifi/intel/pnvm/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1592,7 +1592,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pnvm_skus_preserve_payloads_in_both_layouts",
+    "test": "pnvm_skus_preserve_payloads_in_both_layouts",
     "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma/tests/reference.rs",
     "kind": "oracle",
     "inputs": [
@@ -1653,7 +1653,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_preserve_capability_skips_and_real_control_schemas",
+    "test": "images_preserve_capability_skips_and_real_control_schemas",
     "source": "crates/stela-drivers/src/net/wifi/intel/radio/control.rs",
     "kind": "oracle",
     "inputs": [
@@ -1673,7 +1673,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_select_source_lari6_and_lari8_with_frozen_extension",
+    "test": "images_select_source_lari6_and_lari8_with_frozen_extension",
     "source": "crates/stela-drivers/src/net/wifi/intel/radio/lari.rs",
     "kind": "oracle",
     "inputs": [
@@ -1693,7 +1693,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy",
+    "test": "images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy",
     "source": "crates/stela-drivers/src/net/wifi/intel/radio.rs",
     "kind": "oracle",
     "inputs": [
@@ -1723,7 +1723,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_admit_only_source_family_descriptor_versions",
+    "test": "images_admit_only_source_family_descriptor_versions",
     "source": "crates/stela-drivers/src/net/wifi/intel/receive/mpdu/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1743,7 +1743,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "both_actual_firmware_images_negotiate_alive_six",
+    "test": "both_firmware_images_negotiate_alive_six",
     "source": "crates/stela-drivers/src/net/wifi/intel/receive/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1763,7 +1763,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_select_queue_command3_reply2_and_stage_canonical_native_maps",
+    "test": "images_select_queue_command3_reply2_and_stage_canonical_native_maps",
     "source": "crates/stela-drivers/src/net/wifi/intel/transmit/queue.rs",
     "kind": "oracle",
     "inputs": [
@@ -1783,7 +1783,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_negotiate_complete_source_format2_and_tx_response7",
+    "test": "images_negotiate_complete_source_format2_and_tx_response7",
     "source": "crates/stela-drivers/src/net/wifi/intel/transmit/response.rs",
     "kind": "oracle",
     "inputs": [
@@ -1803,7 +1803,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_negotiate_source_rate2_and_family9_10_layouts",
+    "test": "images_negotiate_source_rate2_and_family9_10_layouts",
     "source": "crates/stela-drivers/src/net/wifi/intel/transmit/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1853,7 +1853,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "all_actual_images_boot_the_full_native_layout_before_source_initialization",
+    "test": "all_images_boot_the_full_native_layout_before_source_initialization",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/bootstrap/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1873,7 +1873,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_pinned_ownership_and_disable_helpers_match_actual_register_effects",
+    "test": "unchanged_pinned_ownership_and_disable_helpers_match_register_effects",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/control/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1893,7 +1893,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pinned_download_matches_every_unchanged_donor_command_byte",
+    "test": "pinned_download_matches_every_unchanged_donor_command_byte",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/download.rs",
     "kind": "oracle",
     "inputs": [
@@ -1934,7 +1934,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pinned_images_preserve_all_regions_and_release_information",
+    "test": "pinned_images_preserve_all_regions_and_release_information",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/firmware.rs",
     "kind": "oracle",
     "inputs": [
@@ -1954,7 +1954,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_execute_retained_clc_domain_power_chain_past_provider_lifetime",
+    "test": "images_execute_kept_clc_domain_power_chain_past_provider_lifetime",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/clc/remaining/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1974,7 +1974,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_downloaded_images_and_owned_reports_execute_clc_past_provider_lifetime",
+    "test": "downloaded_images_and_owned_reports_execute_clc_past_provider_lifetime",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/clc/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1984,7 +1984,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pinned_download_crosses_owned_dma_and_actual_mcu_event_path",
+    "test": "pinned_download_crosses_owned_dma_and_mcu_event_path",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -1995,7 +1995,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pinned_firmware_and_linux_capability_reports_cross_native_dma_query",
+    "test": "pinned_firmware_and_linux_capability_reports_cross_native_dma_query",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2006,7 +2006,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pci_callbacks_select_three_second_deadline_and_exact_queue",
+    "test": "pci_callbacks_select_three_second_deadline_and_exact_queue",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2016,7 +2016,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_images_and_eeprom_source_reports_cross_native_dma_with_retained_clc_owner",
+    "test": "images_and_eeprom_source_reports_cross_native_dma_with_kept_clc_owner",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2027,7 +2027,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_pinned_downloads_bind_same_owned_clc_input_past_provider_lifetime",
+    "test": "pinned_downloads_bind_same_owned_clc_input_past_provider_lifetime",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2047,7 +2047,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_full_capability_helpers_match_actual_report_observations",
+    "test": "unchanged_full_capability_helpers_match_report_observations",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/capabilities.rs",
     "kind": "oracle",
     "inputs": [
@@ -2177,7 +2177,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "complete_unchanged_source_matches_each_release_and_retained_queue",
+    "test": "complete_unchanged_source_matches_each_release_and_kept_queue",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/reorder.rs",
     "kind": "oracle",
     "inputs": [
@@ -2187,7 +2187,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_dma_add_buf_matches_actual_owned_queue_descriptors",
+    "test": "unchanged_dma_add_buf_matches_owned_queue_descriptors",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/ring/data/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2257,7 +2257,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_firmware_download_register_and_packet_trace_matches_unchanged_c",
+    "test": "firmware_download_register_and_packet_trace_matches_unchanged_c",
     "source": "crates/stela-drivers/src/net/wifi/realtek/download/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2268,7 +2268,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_download_uses_native_pinned_beacon_dma_with_each_new_completion",
+    "test": "download_uses_native_pinned_beacon_dma_with_each_new_completion",
     "source": "crates/stela-drivers/src/net/wifi/realtek/download/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -2309,7 +2309,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_vendor_layouts_are_borrowed_complete_and_versioned",
+    "test": "vendor_layouts_are_borrowed_complete_and_versioned",
     "source": "crates/stela-drivers/src/net/wifi/realtek/firmware.rs",
     "kind": "oracle",
     "inputs": [
@@ -2550,7 +2550,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_native_amd_factory_opregion_retirement_and_fresh_rebind",
+    "test": "native_amd_factory_opregion_retirement_and_fresh_rebind",
     "source": "crates/stela-drivers/src/platform/acpi/resources/gpio/tests.rs",
     "kind": "oracle",
     "inputs": [],
@@ -2775,7 +2775,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace",
+    "test": "production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace",
     "source": "crates/stela-drivers/src/usb/ehci/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3342,7 +3342,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_j314s_display_ptd_view_is_the_actual_pmgr_pmp_update_bank",
+    "test": "original_j314s_display_ptd_view_is_the_pmgr_pmp_update_bank",
     "source": "crates/stela-runtime/src/machine/apple/display_resources/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3363,7 +3363,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_j473_iboot_lock_map_and_mcc_views_qualify_the_independent_owner",
+    "test": "original_j473_iboot_lock_map_and_mcc_views_check_the_independent_owner",
     "source": "crates/stela-runtime/src/machine/apple/memory_resources/t8112/amcc.rs",
     "kind": "oracle",
     "inputs": [
@@ -3374,7 +3374,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_table_and_configuration_publish_through_actual_component_owners",
+    "test": "original_table_and_configuration_publish_through_component_owners",
     "source": "crates/stela-runtime/src/machine/apple/memory_resources/t8112/cache/native/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3415,7 +3415,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_j473_static_dma_configuration_retains_source_identity",
+    "test": "original_j473_static_dma_configuration_keeps_source_identity",
     "source": "crates/stela-runtime/src/machine/apple/pmp_dma.rs",
     "kind": "oracle",
     "inputs": [
@@ -3425,7 +3425,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_j473_first_p_binds_only_actual_core_and_complex_from_placed_state",
+    "test": "original_j473_first_p_binds_only_core_and_complex_from_placed_state",
     "source": "crates/stela-runtime/src/machine/apple/processor_power/projection/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3457,7 +3457,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_authority_provenance_cache_and_full_family_refusals",
+    "test": "original_permission_provenance_cache_and_full_family_refusals",
     "source": "crates/stela-runtime/src/machine/apple/t6000_pmgr.rs",
     "kind": "oracle",
     "inputs": [
@@ -3478,7 +3478,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "unchanged_j314s_entry_uses_actual_whole_reservation_initialization_before_image_copy",
+    "test": "unchanged_j314s_entry_uses_whole_reservation_initialization_before_image_copy",
     "source": "crates/stela-runtime/src/machine/cram/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3498,7 +3498,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "unchanged_original_allocation_and_release_execute_against_actual_view_owner",
+    "test": "unchanged_original_allocation_and_release_execute_against_view_owner",
     "source": "crates/stela-runtime/src/machine/cram/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3518,7 +3518,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "unchanged_j314s_allocation_and_release_execute_against_actual_view_owner",
+    "test": "unchanged_j314s_allocation_and_release_execute_against_view_owner",
     "source": "crates/stela-runtime/src/machine/cram/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3568,7 +3568,7 @@
   },
   {
     "package": "stela-soc-data",
-    "test": "original_j473_uses_its_actual_2048_slot_update_alias",
+    "test": "original_j473_uses_its_2048_slot_update_alias",
     "source": "crates/stela-soc-data/src/board/memory_topology/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3578,7 +3578,7 @@
   },
   {
     "package": "stela-soc-data",
-    "test": "original_pmp_retains_its_dart_mapper_instead_of_assuming_physical_buffers",
+    "test": "original_pmp_keeps_its_dart_mapper_instead_of_assuming_physical_buffers",
     "source": "crates/stela-soc-data/src/board/pmp_topology.rs",
     "kind": "oracle",
     "inputs": [
@@ -3700,7 +3700,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_complete_descriptor_and_sparse_ownership_have_no_fabricated_state",
+    "test": "original_complete_descriptor_and_sparse_ownership_have_no_invented_state",
     "source": "crates/stela-runtime/src/machine/apple/tests/data_integration.rs",
     "kind": "oracle",
     "inputs": [
@@ -3752,7 +3752,7 @@
   },
   {
     "package": "stela-soc-data",
-    "test": "original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims",
+    "test": "original_j314s_ap_gpio_checks_without_auxiliary_or_lifecycle_claims",
     "source": "crates/stela-soc-data/src/board/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3762,7 +3762,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners",
+    "test": "original_j314s_spmi_parent_checks_all_seven_independent_resource_owners",
     "source": "crates/stela-runtime/src/machine/apple/tests/data_integration.rs",
     "kind": "oracle",
     "inputs": [
@@ -3792,7 +3792,7 @@
   },
   {
     "package": "stela-soc-data",
-    "test": "original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board",
+    "test": "original_j314s_ans_geometry_and_handoff_check_independently_of_whole_board",
     "source": "crates/stela-soc-data/src/board/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3818,7 +3818,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_three_complexes_mount_actual_views_and_preserve_a_committed_prefix",
+    "test": "original_three_complexes_mount_views_and_preserve_a_committed_prefix",
     "source": "crates/stela-runtime/src/platform/apple/cluster/t6000.rs",
     "kind": "oracle",
     "inputs": [
@@ -3829,7 +3829,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_pmp_apf_programming_retains_all_slices_without_granting_dma",
+    "test": "original_pmp_apf_programming_keeps_all_slices_without_granting_dma",
     "source": "crates/stela-runtime/src/platform/apple/dart/t8110/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -3859,7 +3859,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_m1_dpe_geometry_does_not_qualify_the_t8112_bank",
+    "test": "original_m1_dpe_geometry_does_not_check_the_t8112_bank",
     "source": "crates/stela-runtime/src/platform/apple/dpe.rs",
     "kind": "oracle",
     "inputs": [
@@ -3971,7 +3971,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_poll_emitter_and_actual_source_operands_are_pinned",
+    "test": "original_poll_emitter_and_source_operands_are_pinned",
     "source": "crates/stela-runtime/src/platform/apple/pmgr/sequencer/poll/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -4004,7 +4004,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_all_193_bridge_programs_keep_masks_order_and_actual_dt_bounds",
+    "test": "original_all_193_bridge_programs_keep_masks_order_and_dt_bounds",
     "source": "crates/stela-runtime/src/platform/apple/pmgr/tests/t6000_tuning_source.rs",
     "kind": "oracle",
     "inputs": [
@@ -4068,7 +4068,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_dynamic_slices_and_metadata_copy_match_actual_ptd_effects",
+    "test": "original_dynamic_slices_and_metadata_copy_match_ptd_effects",
     "source": "crates/stela-runtime/src/platform/apple/pmp/native/counters/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -4255,7 +4255,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_maverick_tag_matches_all_1132_actual_covered_bytes",
+    "test": "original_maverick_tag_matches_all_1132_covered_bytes",
     "source": "crates/stela-runtime/src/platform/apple/pmu/startup/integrity.rs",
     "kind": "oracle",
     "inputs": [
@@ -4418,7 +4418,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_rtc_helper_uses_raw_keyr_with_actual_interface_dispatch",
+    "test": "original_rtc_helper_uses_raw_keyr_with_interface_dispatch",
     "source": "crates/stela-runtime/src/platform/apple/smc/rtc.rs",
     "kind": "oracle",
     "inputs": [
@@ -4459,7 +4459,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_j314s_all_seven_gen1_resource_views_match_the_qualified_contract",
+    "test": "original_j314s_all_seven_gen1_resource_views_match_the_checked_contract",
     "source": "crates/stela-runtime/src/platform/apple/spmi/tests.rs",
     "kind": "oracle",
     "inputs": [
@@ -4540,7 +4540,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_llb_reconfiguration_programs_retain_the_complete_physical_inventory",
+    "test": "original_llb_reconfiguration_programs_keep_the_complete_physical_inventory",
     "source": "crates/stela-runtime/tests/pmgr_handoff_source.rs",
     "kind": "oracle",
     "inputs": [
@@ -4591,7 +4591,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_llb_native_emission_retains_packing_fetches_and_termination_limits",
+    "test": "original_llb_native_emission_keeps_packing_fetches_and_termination_limits",
     "source": "crates/stela-runtime/tests/pmgr_handoff_source.rs",
     "kind": "oracle",
     "inputs": [
@@ -4671,7 +4671,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_llb_group_table_publication_retains_actual_metadata_and_pointer_widths",
+    "test": "original_llb_group_table_publication_keeps_metadata_and_pointer_widths",
     "source": "crates/stela-runtime/tests/pmgr_handoff_source.rs",
     "kind": "oracle",
     "inputs": [
@@ -4691,7 +4691,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_m1_pro_llb_entry_retains_its_own_link_profile_and_unknown_input",
+    "test": "original_m1_pro_llb_entry_keeps_its_own_link_profile_and_unknown_input",
     "source": "crates/stela-runtime/tests/pmgr_llb_execution.rs",
     "kind": "oracle",
     "inputs": [
@@ -4712,7 +4712,7 @@
   },
   {
     "package": "stela-runtime",
-    "test": "original_isp_has_actual_camera_dart_sensor_and_performance_requirements",
+    "test": "original_isp_has_camera_dart_sensor_and_performance_requirements",
     "source": "crates/stela-runtime/tests/pmgr_m1_handoff_source.rs",
     "kind": "oracle",
     "inputs": [

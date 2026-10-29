@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn optional_mixed_plan_retains_exact_payload_padding_guards_and_classes() {
+    fn optional_mixed_plan_keeps_exact_payload_padding_guards_and_classes() {
         let layout = prototype_tasks(0x9_0000_0000).unwrap();
         assert_eq!(layout.count(), 32);
         assert_eq!(layout.physical_bytes(), 1_785_856);

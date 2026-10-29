@@ -164,7 +164,7 @@ fn native_unavailable_overflow_and_half_period_clocks_refuse_designware_and_smbu
 }
 
 #[test]
-fn invalid_native_spi_and_mp2_clocks_return_exact_original_unmodified_owners() {
+fn invalid_native_spi_and_mp2_clocks_return_original_unmodified_owners() {
     for rate in [0, u64::MAX, u64::MAX / 2 / BUDGET + 1] {
         let (r, d) = no_io();
         let error = spi::amd::Controller::new(r, clock(rate), BUDGET)

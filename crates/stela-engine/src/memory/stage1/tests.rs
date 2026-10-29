@@ -116,7 +116,7 @@ fn assert_fault(
 }
 
 #[test]
-fn actual_physical_indices_and_leaf_extents() {
+fn physical_indices_and_leaf_extents() {
     for leaf_level in 1..=3u8 {
         let mut memory = Ram::default();
         let va = 0x1234_5678_9abcu64;
@@ -844,7 +844,7 @@ fn regions_partial_root_indices_ignore_upper_canonical_extension() {
 }
 
 #[test]
-fn regions_mmu_off_tbi_tbid_use_actual_access_kind() {
+fn regions_mmu_off_tbi_tbid_use_access_kind() {
     let mut values = controls();
     values.sctlr_el1 &= !1;
     values.tcr_el1 = TCR_TBI0_TEST | TCR_TBID0_TEST;

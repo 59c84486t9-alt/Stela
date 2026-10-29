@@ -976,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn row_groups_partition_the_actual_streaming_length() {
+    fn row_groups_partition_the_streaming_length() {
         let operand = decode_vector(FADD_ZA_ZW_4X4 | ZA_OFFSET_MASK).unwrap();
         for bytes in [16, 32, 64, 128, 256] {
             let length = VectorLength::from_bytes(bytes).unwrap();

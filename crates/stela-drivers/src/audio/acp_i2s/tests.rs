@@ -3,7 +3,7 @@ use super::*;
 use alloc::vec::Vec;
 // All tests below are authored SOURCE ONLY, UNRUN until the parent's finite gate.
 #[test]
-fn actual_four_stream_pte_dma_duplex_and_independent_auxiliary_layouts() {
+fn four_stream_pte_dma_duplex_and_independent_auxiliary_layouts() {
     for revision in [0, 0x50] {
         let (mut controller, device, source) = fixture(revision);
         controller.initialize().unwrap();
@@ -74,7 +74,7 @@ fn actual_four_stream_pte_dma_duplex_and_independent_auxiliary_layouts() {
     }
 }
 #[test]
-fn real_retained_pte_clock_and_pcm_epochs_survive_controller_pm() {
+fn real_kept_pte_clock_and_pcm_epochs_survive_controller_pm() {
     for revision in [0, 0x50] {
         let (mut controller, device, source) = fixture(revision);
         controller.initialize().unwrap();
@@ -335,7 +335,7 @@ fn stop_payload_drain_and_faulted_reset_do_not_release_a_published_iova() {
     assert_eq!(source.drops.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn actual_pin_pte_pci_and_clock_authority_loss_quarantine_dma() {
+fn pin_pte_pci_and_clock_permission_loss_quarantine_dma() {
     for fault in 0..4 {
         let (mut controller, device, source) = fixture(0x50);
         controller.initialize().unwrap();
@@ -373,7 +373,7 @@ fn actual_pin_pte_pci_and_clock_authority_loss_quarantine_dma() {
     }
 }
 #[test]
-fn successful_but_late_power_start_and_stop_effects_retain_original_owners() {
+fn successful_but_late_power_start_and_stop_effects_keep_original_owners() {
     for phase in [Phase::PowerOn, Phase::DmaStart, Phase::DmaStop] {
         let (mut controller, device, source) = fixture(0x50);
         if phase != Phase::PowerOn {

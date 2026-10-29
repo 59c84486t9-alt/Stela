@@ -109,7 +109,7 @@ fn replacement_and_private_copy_cannot_reuse_view_or_backing_identity() {
 }
 
 #[test]
-fn retained_access_keeps_mapping_and_storage_alive() {
+fn kept_access_keeps_mapping_and_storage_alive() {
     let backing = backing();
     let weak = Arc::downgrade(&backing);
     let view = MemoryView::new(

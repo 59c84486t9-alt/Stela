@@ -93,7 +93,7 @@ fn pointers(owner: &Windows) -> (NonNull<u8>, NonNull<u8>) {
 }
 
 #[test]
-fn invalid_first_or_second_window_returns_both_exact_original_owners_without_effects() {
+fn invalid_first_or_second_window_returns_both_original_owners_without_effects() {
     for fault in 0..6 {
         let counts = Arc::new(Counts::default());
         let original = function(counts.clone());
@@ -149,7 +149,7 @@ fn invalid_first_or_second_window_returns_both_exact_original_owners_without_eff
 }
 
 #[test]
-fn failed_window_can_retry_with_same_originals_and_actual_bounded_volatile_accesses() {
+fn failed_window_can_retry_with_same_originals_and_bounded_volatile_accesses() {
     let counts = Arc::new(Counts::default());
     let original = function(counts.clone());
     let owner = windows(counts.clone());

@@ -369,7 +369,7 @@ fn set_resource(session: &Session, physical: u32) {
 }
 
 #[test]
-fn genuine_activation_bind_start_notify_suspend_resume_and_retire() {
+fn activation_bind_start_notify_suspend_resume_and_retire() {
     let _serial = TEST_SERIAL.lock().unwrap();
     // SAFETY: fixture owns all ACPICA services; test holds singleton lock.
     let session = unsafe { Session::start(provider(), Mode::InterpreterOnly) }.unwrap();
@@ -422,7 +422,7 @@ fn genuine_activation_bind_start_notify_suspend_resume_and_retire() {
 }
 
 #[test]
-fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
+fn resource_and_dependency_changes_refuse_commands_and_retirement() {
     let _serial = TEST_SERIAL.lock().unwrap();
     // SAFETY: fixture owns all ACPICA services; serialized singleton.
     let session = unsafe { Session::start(provider(), Mode::Hardware) }.unwrap();
@@ -528,7 +528,7 @@ fn acknowledged_first_event_survives_later_service_failure() {
 }
 
 #[test]
-fn failed_actual_notify_removal_permanently_quarantines_detach_and_drop() {
+fn failed_notify_removal_permanently_quarantines_detach_and_drop() {
     let _serial = TEST_SERIAL.lock().unwrap();
     // SAFETY: fixture owns all ACPICA services; serialized singleton.
     for running in [false, true] {

@@ -109,7 +109,7 @@ fn check_ps_retirement_failure<P: Profile>(
 }
 
 #[test]
-fn ps_actual_reset_group_bme_and_domain_failures_retain_exact_published_owners() {
+fn ps_reset_group_bme_and_domain_failures_keep_exact_published_owners() {
     for path in [
         RetirePath::Replace,
         RetirePath::Suspend,

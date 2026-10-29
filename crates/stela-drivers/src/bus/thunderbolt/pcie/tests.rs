@@ -285,7 +285,7 @@ fn drive_stop(
 }
 
 #[test]
-fn actual_pcie_tunnel_source_order_credits_priority_and_repeated_local_reuse() {
+fn pcie_tunnel_source_order_credits_priority_and_repeated_local_reuse() {
     for credits in [
         LaneCredits::LegacyBonded,
         LaneCredits::RouterAllocated(6),
@@ -427,7 +427,7 @@ fn fail_actual_write(
 }
 
 #[test]
-fn every_pcie_activation_write_lost_ack_controller_error_and_readback_refusal_retains_all_owners() {
+fn every_pcie_activation_write_lost_ack_controller_error_and_readback_refusal_keeps_all_owners() {
     for target in 1..=10 {
         for fault in 0..3 {
             let f = fixture(LaneCredits::RouterAllocated(6));
@@ -468,7 +468,7 @@ fn every_pcie_activation_write_lost_ack_controller_error_and_readback_refusal_re
 }
 
 #[test]
-fn every_pcie_stop_write_lost_ack_controller_error_and_readback_refusal_retains_all_owners() {
+fn every_pcie_stop_write_lost_ack_controller_error_and_readback_refusal_keeps_all_owners() {
     for target in 1..=6 {
         for fault in 0..3 {
             let f = fixture(LaneCredits::LegacyBonded);
@@ -598,7 +598,7 @@ fn pcie_ltssm_detect_timeout_and_guard_revocation_never_publish_enable() {
 }
 
 #[test]
-fn each_actual_pending_hop_and_changed_owned_hop_refuses_local_pcie_reuse() {
+fn each_pending_hop_and_changed_owned_hop_refuses_local_pcie_reuse() {
     for hop in 0..4 {
         for pending in [false, true] {
             let f = fixture(LaneCredits::RouterAllocated(23));
@@ -644,7 +644,7 @@ fn each_actual_pending_hop_and_changed_owned_hop_refuses_local_pcie_reuse() {
 }
 
 #[test]
-fn stopped_pcie_guard_revocation_and_unconsumed_completions_keep_exact_owners() {
+fn stopped_pcie_guard_revocation_and_unconsumed_completions_keep_owners() {
     for revoked in [false, true] {
         let f = fixture(LaneCredits::LegacyBonded);
         let mut peer = Peer::new(&f, false);
@@ -683,7 +683,7 @@ fn stopped_pcie_guard_revocation_and_unconsumed_completions_keep_exact_owners() 
 }
 
 #[test]
-fn post_publication_native_revocation_or_actual_hotplug_never_releases_partial_pcie_paths() {
+fn post_publication_native_revocation_or_hotplug_never_releases_partial_pcie_paths() {
     for hotplug in [false, true] {
         let f = fixture(LaneCredits::RouterAllocated(6));
         let mut peer = Peer::new(&f, false);
@@ -750,7 +750,7 @@ fn post_publication_native_revocation_or_actual_hotplug_never_releases_partial_p
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_PCIE_ORACLE"]
-fn unchanged_linux_pcie_complete_write_transcript_matches_actual_native_dma() {
+fn unchanged_linux_pcie_complete_write_transcript_matches_native_dma() {
     extern crate std;
     let trace = std::fs::read_to_string(
         std::env::var("STELA_THUNDERBOLT_PCIE_ORACLE").expect("set PCIe trace"),

@@ -113,7 +113,7 @@ fn every_descriptor_truncation_declared_overflow_and_raw_identity_are_checked() 
     }
 }
 #[test]
-fn status_and_overloaded_fields_remain_observations_without_security_authority() {
+fn status_and_overloaded_fields_remain_observations_without_security_permission() {
     for apis in [false, true] {
         let b = firmware(Some(4), apis);
         let fw = Firmware::parse(&b).unwrap();
@@ -197,7 +197,7 @@ fn status_and_overloaded_fields_remain_observations_without_security_authority()
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_images_admit_only_source_family_descriptor_versions() {
+fn images_admit_only_source_family_descriptor_versions() {
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     for family in [Family::Ax200, Family::Ax210] {
         let b = std::fs::read(std::path::Path::new(&root).join(family.firmware_name())).unwrap();

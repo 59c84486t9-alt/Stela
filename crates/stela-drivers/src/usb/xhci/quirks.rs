@@ -179,7 +179,7 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn actual_asmedia_owner_acknowledges_both_mailbox_phases_with_narrow_control_stores() {
+    fn asmedia_owner_acknowledges_both_mailbox_phases_with_narrow_control_stores() {
         let mut f = function(true);
         after_reset(
             &mut f,

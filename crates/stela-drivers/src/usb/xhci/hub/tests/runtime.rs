@@ -266,7 +266,7 @@ fn runtime_failed_retirement_never_replaces_that_owner_and_sibling_survives() {
 }
 
 #[test]
-fn runtime_empty_controller_retains_root_events_and_reconnect_never_reuses_old_identity() {
+fn runtime_empty_controller_keeps_root_events_and_reconnect_never_reuses_old_identity() {
     let nodes = BTreeMap::from([(0, unbound_leaf(SUPER_SPEED))]);
     let mut backing = vec![0u64; 512 * 1024];
     let start = backing.as_mut_ptr() as u64;
@@ -316,7 +316,7 @@ fn runtime_empty_controller_retains_root_events_and_reconnect_never_reuses_old_i
 }
 
 #[test]
-fn runtime_malformed_bitmap_or_actual_global_power_loss_quarantines_the_hub_tree() {
+fn runtime_malformed_bitmap_or_global_power_loss_quarantines_the_hub_tree() {
     for malformed in [false, true] {
         let nodes = BTreeMap::from([
             (0, Node::hub(SUPER_SPEED, 1)),
@@ -685,7 +685,7 @@ fn runtime_hub_recovery_acknowledges_cools_rechecks_and_publishes_fresh_subtree(
 }
 
 #[test]
-fn runtime_persistent_hub_power_fault_keeps_public_aliases_fenced_until_actual_restoration() {
+fn runtime_persistent_hub_power_fault_keeps_public_aliases_fenced_until_restoration() {
     for local_loss in [false, true] {
         let speed = SUPER_SPEED;
         let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, unbound_leaf(speed))]);

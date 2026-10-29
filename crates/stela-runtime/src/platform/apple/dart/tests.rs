@@ -6,7 +6,7 @@ use {
 };
 
 #[test]
-fn explicit_profiles_keep_the_shared_bus_master_type_and_actual_table_effects() {
+fn explicit_profiles_keep_the_shared_bus_master_type_and_table_effects() {
     const ROOT: u64 = 0x8_0000_0000;
     const PAGE: u64 = 0x4000;
     for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
@@ -208,7 +208,7 @@ fn construction_profile_survives_grouping_and_optional_views() {
 }
 
 #[test]
-fn grouped_profile_requires_an_actual_translation_instance() {
+fn grouped_profile_requires_an_translation_instance() {
     for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
         assert!(matches!(
             Dart::group_for_profile(profile, 16, None, 0),
@@ -344,7 +344,7 @@ fn incoming_streams_outside_the_profile_never_truncate_into_fault_sids() {
 }
 
 #[test]
-fn functional_clock_gating_retains_configuration_and_blocks_both_access_paths() {
+fn functional_clock_gating_keeps_configuration_and_blocks_both_access_paths() {
     for profile in [
         Profile::T8020,
         Profile::T6000,

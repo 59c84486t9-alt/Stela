@@ -215,7 +215,7 @@ fn initialized() -> Controller<Ppm, Time> {
 }
 
 #[test]
-fn initialization_drives_real_commands_and_retains_wire_observations() {
+fn initialization_drives_real_commands_and_keeps_wire_observations() {
     let controller = initialized();
     assert!(controller.initialized());
     assert_eq!(controller.generation(), 1);
@@ -304,7 +304,7 @@ fn incomplete_cancel_and_quiet_timeouts_require_explicit_reset() {
     }
 }
 #[test]
-fn ppm_error_reads_actual_error_status_with_version_correct_connector() {
+fn ppm_error_reads_error_status_with_version_correct_connector() {
     for version in [0x0120, 0x0200] {
         let command = Command::alternate_mode(port(), Recipient::Partner, 3);
         let mut failed = Reply::new(command, &[]);
@@ -482,7 +482,7 @@ fn response_and_output_bounds_are_checked_without_exposing_partial_data() {
 }
 
 #[test]
-fn uncertain_publication_retains_pending_event_and_requires_reset() {
+fn uncertain_publication_keeps_pending_event_and_requires_reset() {
     for fail in [0x12, 4] {
         let mut controller = initialized();
         controller.transport.connector = 1;

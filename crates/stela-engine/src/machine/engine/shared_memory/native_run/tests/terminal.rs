@@ -100,7 +100,7 @@ impl<'a> publication::NativeFrame for FailedFrame<'a> {
     }
 }
 #[test]
-fn ignored_recovered_fault_observation_cannot_readmit_the_actual_frame() {
+fn ignored_recovered_fault_observation_cannot_readmit_the_frame() {
     let (mut machine, _ram) = super::super::tests::artifact::fixture();
     let binding = publication::WorkerBinding {
         pe: 0,

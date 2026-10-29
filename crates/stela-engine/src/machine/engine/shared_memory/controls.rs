@@ -249,7 +249,7 @@ pub(super) mod tests {
         (cpu, profile, missing)
     }
     #[test]
-    fn fp_memory_admission_tracks_actual_cpacr_and_cptr_permissions() {
+    fn fp_memory_admission_tracks_cpacr_and_cptr_permissions() {
         let (mut cpu, profile, missing) = captured();
         assert!(
             !Controls::capture(&cpu, profile.name, &missing)
@@ -271,7 +271,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn actual_cpu_ids_and_effective_controls_qualify_without_raw_authority() {
+    fn cpu_ids_and_effective_controls_check_without_raw_permission() {
         let (mut cpu, profile, missing) = captured();
         let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
         assert_eq!(controls.sp, CheckedMemoryProfile::SpAlignmentDisabled);
@@ -305,7 +305,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn cached_digest_separates_qualified_address_controls_from_legacy_identity() {
+    fn cached_digest_separates_checked_address_controls_from_legacy_identity() {
         let (mut cpu, profile, missing) = captured();
         let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
         // Preserve the prior serialization as a negative compatibility input;

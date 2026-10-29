@@ -5,13 +5,13 @@
 use super::*;
 
 #[test]
-fn unified_real_commands_wait_for_actual_init_notification_and_nvm_with_rfkill() {
+fn unified_real_commands_wait_for_init_notification_and_nvm_with_rfkill() {
     exercise_unified_nvm(false);
 }
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn unified_actual_images_drive_real_command_and_notification_epoch() {
+fn unified_images_drive_real_command_and_notification_epoch() {
     exercise_unified_nvm(true);
 }
 
@@ -105,7 +105,7 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
 }
 
 #[test]
-fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
+fn unified_keeps_init_notification_across_alive_and_pnvm_buffers() {
     use crate::net::wifi::intel::nvm::Request;
     let bytes = unified_bytes(false);
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

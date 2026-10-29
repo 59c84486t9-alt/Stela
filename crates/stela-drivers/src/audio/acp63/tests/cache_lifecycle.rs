@@ -121,7 +121,7 @@ fn check_ps_cache_lifecycle<P: Profile>(
 }
 
 #[test]
-fn ps_atu_cache_command_is_write_only_and_ordered_for_all_actual_profiles() {
+fn ps_atu_cache_command_is_write_only_and_ordered_for_all_profiles() {
     for readback in [0, 1, 0x1234_5678, u32::MAX] {
         check_ps_cache_lifecycle(fixture(0x63), readback);
         for revision in 0x70..=0x72 {

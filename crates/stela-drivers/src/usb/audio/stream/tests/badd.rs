@@ -530,7 +530,7 @@ fn badd_rejected_capture_request_preserves_live_playback_power_and_dma() {
 }
 
 #[test]
-fn badd_failed_live_power_authority_check_retires_or_quarantines_the_session() {
+fn badd_failed_live_power_permission_check_retires_or_quarantines_the_session() {
     for mode in 0..3 {
         run(|a| {
             a.transport.inner.hold = true;

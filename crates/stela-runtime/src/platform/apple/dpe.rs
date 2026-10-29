@@ -376,7 +376,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
-    fn original_m1_dpe_geometry_does_not_qualify_the_t8112_bank() {
+    fn original_m1_dpe_geometry_does_not_check_the_t8112_bank() {
         use sha2::{Digest, Sha256};
         let path = std::env::var_os("STELA_TEST_PMGR_M1_KERNELCACHE")
             .expect("original M1 Pro KernelCache path");

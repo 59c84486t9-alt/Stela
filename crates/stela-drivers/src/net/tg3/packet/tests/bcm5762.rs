@@ -385,7 +385,7 @@ fn actual_5762_transfers_and_fatal_dma_attention_preserve_ownership() {
     let (mut packet, pages, domain, peer) = attach_5762();
     assert!(packet.carrier());
     // The 5762 shares the 5720's ring geometry, whose wrap
-    // `wraps_actual_tx_and_rx_producer_return_indices` covers; these frames
+    // `wraps_tx_and_rx_producer_return_indices` covers; these frames
     // cross the 5762's own DMA prerequisites.
     for index in 0..8usize {
         let frame = vec![index as u8; 60];
@@ -408,7 +408,7 @@ fn actual_5762_transfers_and_fatal_dma_attention_preserve_ownership() {
 
 #[test]
 #[ignore = "oracle: STELA_TG3_PACKET_ORACLE"]
-fn unchanged_linux_5720_5762_selected_packet_setup_matches_actual_registers() {
+fn unchanged_linux_5720_5762_selected_packet_setup_matches_registers() {
     let path = std::env::var("STELA_TG3_PACKET_ORACLE").expect("fresh original C trace required");
     let trace = std::fs::read_to_string(path).unwrap();
     let mut lines = trace.lines();

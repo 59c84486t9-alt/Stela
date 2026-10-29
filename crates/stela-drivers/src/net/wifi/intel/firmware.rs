@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn iml_retains_exact_borrowed_payload_and_refuses_empty_or_ambiguous_loader() {
+    fn iml_keeps_exact_borrowed_payload_and_refuses_empty_or_ambiguous_loader() {
         let mut bytes = image();
         assert!(Firmware::parse(&bytes).unwrap().iml().is_none());
         let at = bytes.len() + TLV_HEADER_BYTES;
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_command_and_api_shapes_are_validated_without_fabricated_versions() {
+    fn scalar_command_and_api_shapes_are_validated_without_invented_versions() {
         for kind in [
             FLAGS,
             PHY_SKU,

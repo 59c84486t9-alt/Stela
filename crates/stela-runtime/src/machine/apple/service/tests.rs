@@ -31,7 +31,7 @@ fn hardware(board: &mut AppleDevices) -> u64 {
 }
 
 #[test]
-fn aic_refusal_retains_committed_prefix_tail_and_later_edges() {
+fn aic_refusal_keeps_committed_prefix_tail_and_later_edges() {
     for layout in [AicLayout::V1, AicLayout::aic2(0x8000, 0)] {
         let mut board = AppleDevices::new();
         board.add_aic(AIC, 32, layout).unwrap();
@@ -90,7 +90,7 @@ fn aic_refusal_retains_committed_prefix_tail_and_later_edges() {
 }
 
 #[test]
-fn missing_aic_resumes_original_edges_and_timestamp_after_actual_binding() {
+fn missing_aic_resumes_original_edges_and_timestamp_after_binding() {
     let mut board = AppleDevices::new();
     edge(&mut board, 1, true);
     edge(&mut board, 1, false);
@@ -248,7 +248,7 @@ impl MmioDevice for ResettingClient {
 }
 
 #[test]
-fn lifecycle_callback_reset_and_actual_state_survive_failed_delivery_without_replay() {
+fn lifecycle_callback_reset_and_state_survive_failed_delivery_without_replay() {
     const SUPPLY: u64 = 0x5000_0000;
     let mut board = AppleDevices::new();
     board

@@ -382,7 +382,7 @@ fn actual_5761_changed_postreset_profile_and_unmap_failure_keep_original_owner()
 }
 
 #[test]
-fn actual_phy_reset_uncertainty_poison_retains_original_owner_before_any_allocation() {
+fn phy_reset_uncertainty_poison_keeps_original_owner_before_any_allocation() {
     for profile in 0..3 {
         let (hardware, pages, domain, peer) = match profile {
             0 => parts(),
@@ -421,7 +421,7 @@ fn core_resets(peer: &Arc<Mutex<Device>>) -> usize {
 
 #[test]
 #[ignore = "oracle: STELA_TG3_BCM5761_ORACLE"]
-fn unchanged_linux_5761_initialization_selections_match_actual_retained_packet_owner() {
+fn unchanged_linux_5761_initialization_selections_match_kept_packet_owner() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_BCM5761_ORACLE").expect("fresh original-source trace required"),
     )

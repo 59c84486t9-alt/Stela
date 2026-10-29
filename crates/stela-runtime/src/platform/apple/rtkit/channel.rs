@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_rtkit_enable_and_disable_gate_the_paired_system_mailbox() {
+    fn rtkit_enable_and_disable_gate_the_paired_system_mailbox() {
         let (endpoint, mut mailbox) = channel();
         let mut kit = RtKit::with_system_endpoints(
             Vec::new(),

@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn original_c_views_retain_pins_after_parent_release() {
+    fn original_c_views_keep_pins_after_parent_release() {
         let released = Arc::new(AtomicUsize::new(0));
         let (pages, cpu) = backing(
             12,

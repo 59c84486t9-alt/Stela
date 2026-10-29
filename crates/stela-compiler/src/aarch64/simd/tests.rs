@@ -104,7 +104,7 @@ fn comparisons_distinguish_zero_operands_and_reserved_scalar_vector_sizes() {
 }
 
 #[test]
-fn actual_xcode_words_keep_vector_bank_and_address_units() {
+fn xcode_words_keep_vector_bank_and_address_units() {
     for (word, expected) in [
         (
             0xfd42f100,

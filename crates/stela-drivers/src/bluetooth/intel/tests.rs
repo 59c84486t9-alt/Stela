@@ -1393,7 +1393,7 @@ mod iml_tests {
         }
     }
     #[test]
-    fn hybrid_lms_and_combined_engines_use_actual_iml_security_and_per_fragment_events() {
+    fn hybrid_lms_and_combined_engines_use_iml_security_and_per_fragment_events() {
         for variant in [0x20, 0x21, 0x22] {
             for engine in [2, 3] {
                 let (device, catalog, script) = fixture_iml(variant, engine, true);
@@ -1422,7 +1422,7 @@ mod iml_tests {
         }
     }
     #[test]
-    fn actual_iml_observation_selects_second_stage_and_preserves_raw_inherited_inputs() {
+    fn iml_observation_selects_second_stage_and_preserves_raw_inherited_inputs() {
         for variant in [0x1e, 0x1f, 0x22] {
             for engine in [0, 1] {
                 let (device, catalog, script) = fixture_iml(variant, engine, true);
@@ -1494,7 +1494,7 @@ mod iml_tests {
         }
     }
     #[test]
-    fn missing_later_resources_capture_both_actual_companions_and_completed_stage_without_upload() {
+    fn missing_later_resources_capture_both_companions_and_completed_stage_without_upload() {
         let (device, catalog, script) = fixture_iml(0x1e, 1, false);
         let provider = Recording {
             catalog: &catalog,
@@ -1611,7 +1611,7 @@ mod iml_tests {
     }
 
     #[test]
-    fn fresh_complete_iml_uses_its_own_selector_and_retains_preupload_dsbr() {
+    fn fresh_complete_iml_uses_its_own_selector_and_keeps_preupload_dsbr() {
         let (mut device, _, _) = fixture();
         device.descriptor[10] = 0x35;
         let initial = observation(0x1f, 1, 2, true);
@@ -1703,7 +1703,7 @@ mod iml_tests {
         }
     }
     #[test]
-    fn rejected_second_boot_retains_actual_pending_identity_without_crediting_stage() {
+    fn rejected_second_boot_keeps_pending_identity_without_crediting_stage() {
         for contradictory_security in [false, true] {
             let (device, catalog, mut script) = fixture_iml(0x1e, 1, true);
             let payload = if contradictory_security {
@@ -1751,7 +1751,7 @@ mod iml_tests {
 }
 
 #[test]
-fn intel_initializer_uses_actual_xhci_dma_and_reframes_bulk_after_acknowledged_stop() {
+fn intel_initializer_uses_xhci_dma_and_reframes_bulk_after_acknowledged_stop() {
     use crate::usb::bluetooth::{FirmwareStatus, Packet, intel};
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;

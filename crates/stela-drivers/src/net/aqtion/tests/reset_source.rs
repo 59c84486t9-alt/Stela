@@ -55,7 +55,7 @@ fn reset(flb: bool, gsr: u32, spi: bool, seed: bool) -> Vec<(u32, u32, u32)> {
     boundary.effects.take()
 }
 #[test]
-fn actual_flb_and_rbl_reset_preserve_exact_source_control_bits_and_fixed_settling() {
+fn flb_and_rbl_reset_preserve_exact_source_control_bits_and_fixed_settling() {
     for flb in [false, true] {
         for gsr in [0, 0x55aa1234, 0x00ff4444, 0xdeadbeef] {
             let effects = reset(flb, gsr, true, true);
@@ -85,7 +85,7 @@ fn actual_flb_and_rbl_reset_preserve_exact_source_control_bits_and_fixed_settlin
 }
 #[test]
 #[ignore = "oracle: STELA_AQTION_RESET_ORACLE"]
-fn unchanged_linux_flb_rbl_complete_reset_writes_and_settling_match_actual_hardware() {
+fn unchanged_linux_flb_rbl_complete_reset_writes_and_settling_match_hardware() {
     let text =
         std::fs::read_to_string(std::env::var("STELA_AQTION_RESET_ORACLE").unwrap()).unwrap();
     let mut count = 0;

@@ -343,7 +343,7 @@ mod tests {
         );
     }
     #[test]
-    fn bank_transitions_preserve_actual_stack_values_and_flags() {
+    fn bank_transitions_preserve_stack_values_and_flags() {
         let mut state = SystemState::new_with_higher_el(
             PSTATE_EL1H,
             0x1000,

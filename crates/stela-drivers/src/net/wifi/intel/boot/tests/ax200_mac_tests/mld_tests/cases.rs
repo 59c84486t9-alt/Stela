@@ -26,7 +26,7 @@ fn pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands() {
 }
 
 #[test]
-fn unsupported_mld_versions_and_partial_publication_retain_owner() {
+fn unsupported_mld_versions_and_partial_publication_keep_owner() {
     for case in 0..3 {
         let bytes = image(
             if case == 0 { 4 } else { 1 },

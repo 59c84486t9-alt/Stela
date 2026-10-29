@@ -7,7 +7,7 @@ fn prototype() -> ReservationPolicy {
     }
 }
 #[test]
-fn thirty_three_jobs_and_sixty_four_jobs_admit_all_thirty_two_actual_roles() {
+fn thirty_three_jobs_and_sixty_four_jobs_admit_all_thirty_two_roles() {
     full_admission_policy::<33>(prototype(), GpeQueueBudget::QUALIFICATION, 24);
     full_admission_policy::<64>(prototype(), GpeQueueBudget::QUALIFICATION, 55);
 }
@@ -172,7 +172,7 @@ fn actual_saturation(policy: ReservationPolicy, count: usize) {
     assert_eq!(cpu.flags(), 0x202);
 }
 #[test]
-fn actual_thirty_two_saturation_does_not_give_old_sixteen_phantom_workers() {
+fn thirty_two_saturation_does_not_give_old_sixteen_phantom_workers() {
     actual_saturation(prototype(), 32);
     actual_saturation(
         ReservationPolicy::NativeFirmware16Protected {

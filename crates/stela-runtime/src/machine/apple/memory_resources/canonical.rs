@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_drain_routes_require_a_live_service_before_any_ordinary_read() {
+    fn drain_routes_require_a_live_service_before_any_ordinary_read() {
         use crate::machine::apple::AppleDevices;
         use stela_engine::machine::Devices;
         use stela_engine::machine::engine::DeviceReadShape;

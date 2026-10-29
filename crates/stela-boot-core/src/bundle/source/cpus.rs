@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_pe_uses_retained_prepared_order_and_immutable_source_index() {
+    fn selected_pe_uses_kept_prepared_order_and_immutable_source_index() {
         let original = tree(None);
         let prepared = tree(Some("cpu4"));
         let record = selected();
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn first_cpu_policy_selects_the_first_retained_original_cpu() {
+    fn first_cpu_policy_selects_the_first_kept_original_cpu() {
         let original = tree(None);
         let first = BootCpu {
             path: "/cpus/cpu9".into(),
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_malformed_and_unresolved_cpu_fields_are_never_authority() {
+    fn duplicate_malformed_and_unresolved_cpu_fields_are_never_permission() {
         let original = tree(None);
         let prepared = tree(Some("cpu4"));
         for key in ["name", "reg", "cluster-type", "state"] {

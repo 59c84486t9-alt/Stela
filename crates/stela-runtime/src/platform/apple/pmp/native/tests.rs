@@ -156,7 +156,7 @@ fn latest(local: &LocalNotifications, entry: u32) -> Option<u64> {
 }
 
 #[test]
-fn refresh_busy_precedes_actual_publication_and_all_source_effects_precede_status() {
+fn refresh_busy_precedes_publication_and_all_source_effects_precede_status() {
     let local = local();
     let mut backend = Backend::new();
     backend.refresh_busy = true;
@@ -217,7 +217,7 @@ fn refresh_busy_precedes_actual_publication_and_all_source_effects_precede_statu
 }
 
 #[test]
-fn actual_routes_masks_and_device_targets_share_bank_without_ordinal_ap_wires() {
+fn routes_masks_and_device_targets_share_bank_without_ordinal_ap_wires() {
     let local = local();
     let mut bank = local.bank().clone();
     let mut latch = InterruptLatch::new();
@@ -363,7 +363,7 @@ fn every_backend_refusal_preserves_prefix_and_post_effect_refusal_never_replays(
 }
 
 #[test]
-fn exit_zeroes_only_actual_ack_groups_then_status_before_retained_cleanup_tail() {
+fn exit_zeroes_only_ack_groups_then_status_before_kept_cleanup_tail() {
     let local = local();
     let mut backend = Backend::new();
     backend.before = Some(Effect::DisablePowerActions);
@@ -430,7 +430,7 @@ fn exit_zeroes_only_actual_ack_groups_then_status_before_retained_cleanup_tail()
 }
 
 #[test]
-fn constructor_validates_actual_selected_ids_inventory_and_request_identity() {
+fn constructor_validates_selected_ids_inventory_and_request_identity() {
     let local = local();
     let prefix = local.bank().requests();
     let mut invalid = IDS;

@@ -523,7 +523,7 @@ fn backend_identities_refuse_exhaustion_before_any_resource_effect() {
     );
 }
 #[test]
-fn absent_database_is_a_retained_source_failure_without_getter_or_publication() {
+fn absent_database_is_a_kept_source_failure_without_getter_or_publication() {
     let mut owner = Owner::new(Host::new());
     let token = Registration::new();
     let calls = Rc::new(Cell::new(0));

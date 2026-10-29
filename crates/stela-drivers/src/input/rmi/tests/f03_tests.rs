@@ -59,7 +59,7 @@ fn f03_drains_stale_announcements_and_preserves_every_status_and_data_byte() {
     }
 }
 #[test]
-fn f03_legacy_query_rules_and_all_nonzero_queue_lengths_are_source_qualified() {
+fn f03_legacy_query_rules_and_all_nonzero_queue_lengths_are_source_checked() {
     for query in [0, 1, 0x10, 7, 0x70] {
         let h = hardware();
         install(&h, query, 0);

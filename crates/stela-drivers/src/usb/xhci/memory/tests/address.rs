@@ -231,7 +231,7 @@ impl Registers for RegistersPeer {
 }
 
 #[test]
-fn initial_output_visibility_precedes_actual_address_ack_and_failed_address_retirement() {
+fn initial_output_visibility_precedes_address_ack_and_failed_address_retirement() {
     for mode in [
         Mode::Addressed,
         Mode::AddressError,

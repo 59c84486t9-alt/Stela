@@ -355,7 +355,7 @@ fn drive_stop(
 }
 
 #[test]
-fn actual_dp_cm_caps_video_nfc_aux_paths_dprx_and_normal_stop_keep_original_owner_chain() {
+fn dp_cm_caps_video_nfc_aux_paths_dprx_and_normal_stop_keep_original_owner_chain() {
     for credits in [
         Credits::LegacyBonded,
         Credits::RouterAllocated {
@@ -501,7 +501,7 @@ fn inject_write_failure(
 }
 
 #[test]
-fn each_actual_dp_activation_write_handles_ack_loss_controller_rejection_and_observable_readback_or_handshake_timeout()
+fn each_dp_activation_write_handles_ack_loss_controller_rejection_and_observable_readback_or_handshake_timeout()
  {
     for target in 1..=18 {
         for fault in 0..3 {
@@ -549,7 +549,7 @@ fn each_actual_dp_activation_write_handles_ack_loss_controller_rejection_and_obs
 }
 
 #[test]
-fn each_actual_dp_stop_write_retains_entire_payload_link_and_accounting_chain_on_uncertainty() {
+fn each_dp_stop_write_keeps_entire_payload_link_and_accounting_chain_on_uncertainty() {
     for target in 1..=10 {
         for fault in 0..3 {
             let f = fixture(Credits::LegacyBonded, 0);
@@ -589,8 +589,8 @@ fn each_actual_dp_stop_write_retains_entire_payload_link_and_accounting_chain_on
 }
 
 #[test]
-fn unsupported_bandwidth_mode_and_invalid_observed_dp_caps_never_publish_handshake_or_fabricate_caps()
- {
+fn unsupported_bandwidth_mode_and_invalid_observed_dp_caps_never_publish_handshake_or_invent_caps()
+{
     for fault in 0..3 {
         let f = fixture(Credits::LegacyBonded, 0);
         let mut peer = Peer::new(&f, false);
@@ -748,7 +748,7 @@ fn nfc_underflow_and_each_pending_video_or_aux_hop_never_authorize_local_reuse()
 }
 
 #[test]
-fn actual_dp_grant_rejection_revoked_or_unconsumed_receipts_preserve_exact_owners() {
+fn dp_grant_rejection_revoked_or_unconsumed_receipts_preserve_owners() {
     for invalid in 0..7 {
         let Fixture {
             domain: _,
@@ -846,7 +846,7 @@ fn display_capability_budget_preserves_bits_and_never_invents_rate_or_lanes() {
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_DP_ORACLE"]
-fn unchanged_linux_dp_complete_write_transcript_matches_actual_native_dma() {
+fn unchanged_linux_dp_complete_write_transcript_matches_native_dma() {
     extern crate std;
     let trace = std::fs::read_to_string(
         std::env::var("STELA_THUNDERBOLT_DP_ORACLE").expect("set DP trace"),

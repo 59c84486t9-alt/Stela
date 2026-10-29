@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn native_epoch_retains_scaled_offset_and_gated_timer_rules() {
+    fn native_epoch_keeps_scaled_offset_and_gated_timer_rules() {
         let mut cpu = Cpu::of(Chip::AppleM2, 0, Pstate::reset(2));
         cpu.registers.set(Register::CNTVOFF_EL2, 0, 100);
         cpu.registers.set(Register::CNTV_CVAL_EL0, 0, 50);

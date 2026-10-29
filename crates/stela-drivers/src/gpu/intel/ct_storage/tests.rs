@@ -305,7 +305,7 @@ fn drop_never_assumes_quiescence_or_an_allowed_unmap_context() {
 }
 
 #[test]
-fn failed_teardown_retains_exact_lease_and_successful_token_is_not_reused() {
+fn failed_teardown_keeps_exact_lease_and_successful_token_is_not_reused() {
     let model = Arc::new(Model::default());
     let mut published = allocate(&model).unwrap().publish().unwrap();
     model.fail_unmap_id.store(1, Ordering::Relaxed);

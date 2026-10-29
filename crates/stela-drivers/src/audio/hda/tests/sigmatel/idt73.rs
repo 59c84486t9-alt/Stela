@@ -433,7 +433,7 @@ fn failed_quiet_stops_command_dma() {
 }
 
 #[test]
-fn failed_map_update_retains_owner() {
+fn failed_map_update_keeps_owner() {
     for lost_ack in [false, true] {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_76c0);

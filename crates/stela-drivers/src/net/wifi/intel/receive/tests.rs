@@ -74,7 +74,7 @@ fn hostile_lengths_queues_and_truncations_fuse_without_exposing_payload() {
     ));
 }
 #[test]
-fn actual_family_descriptor_layouts_and_reserved_bytes_are_preserved() {
+fn family_descriptor_layouts_and_reserved_bytes_are_preserved() {
     assert_eq!(
         free_descriptor(Family::Ax200, 0x123456789000, 0xabc).unwrap(),
         FreeDescriptor::Ax200(0x123456789abcu64.to_le_bytes())
@@ -211,7 +211,7 @@ fn negotiated_alive_layout_full_metadata_failures_and_extra_bytes() {
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn both_actual_firmware_images_negotiate_alive_six() {
+fn both_firmware_images_negotiate_alive_six() {
     extern crate std;
     use sha2::{Digest, Sha256};
     let directory = std::env::var("STELA_IWLWIFI_IMAGES").expect("image directory");

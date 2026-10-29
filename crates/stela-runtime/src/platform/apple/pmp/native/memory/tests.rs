@@ -234,7 +234,7 @@ fn local_unmap_retires_before_wire_free_and_equal_bus_reuse_has_new_identity() {
     .unwrap();
 }
 #[test]
-fn static_table_is_actual_read_prefix_not_mapping_authority_or_dynamic_allocation() {
+fn static_table_is_actual_read_prefix_not_mapping_permission_or_dynamic_allocation() {
     let mut backing = Backing::new();
     backing.fail_read = true;
     backing.table[..8].copy_from_slice(&0x8000_0000u64.to_le_bytes());
@@ -276,7 +276,7 @@ fn static_table_is_actual_read_prefix_not_mapping_authority_or_dynamic_allocatio
     );
 }
 #[test]
-fn actual_zero_reply_and_read_empty_table_are_distinct_and_abandonment_does_not_cleanup() {
+fn zero_reply_and_read_empty_table_are_distinct_and_abandonment_does_not_cleanup() {
     for bus in [0, 0x1000] {
         let mut c = client(Backing::new());
         c.begin_init().unwrap();
@@ -312,7 +312,7 @@ fn actual_zero_reply_and_read_empty_table_are_distinct_and_abandonment_does_not_
     assert!(c.backend.unmaps.is_empty());
 }
 #[test]
-fn bad_backend_geometry_is_retained_and_never_credited_or_replayed() {
+fn bad_backend_geometry_is_kept_and_never_credited_or_replayed() {
     let mut backing = Backing::new();
     backing.bad_geometry = true;
     let mut c = client(backing);

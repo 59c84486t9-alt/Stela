@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_visibility_prevents_doorbell_and_final_unmap_failure_retains_retry() {
+    fn failed_visibility_prevents_doorbell_and_final_unmap_failure_keeps_retry() {
         let (_source, _domain, model, mut ring) = ring(Direction::Tx, 4);
         ring.start().unwrap();
         let writes = model.state.lock().unwrap().writes.len();

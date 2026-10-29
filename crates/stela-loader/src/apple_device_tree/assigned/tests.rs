@@ -378,7 +378,7 @@ fn bad_late_resource_and_unbound_extra_slot_leave_tree_unchanged() {
     assert!(Projection::prepare(&plan, &tree, &source).is_err());
 }
 #[test]
-fn removed_source_cpu_needs_no_native_resource_ids_but_retained_cpu_does() {
+fn removed_source_cpu_needs_no_native_resource_ids_but_kept_cpu_does() {
     let f = Fixture::new();
     let plan = f.plan();
     let bindings = [f.bindings[0], f.bindings[2]];

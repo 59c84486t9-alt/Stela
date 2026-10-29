@@ -492,7 +492,7 @@ mod tests {
         }
     }
     #[test]
-    fn geo_acpi_replicates_missing_band_but_uefi_retains_source_zero_initialization() {
+    fn geo_acpi_replicates_missing_band_but_uefi_keeps_source_zero_initialization() {
         for revision in 0..=4 {
             let bands = if revision < 2 {
                 2

@@ -167,7 +167,7 @@ fn native_root_uas_reuses_three_original_owners_across_96_resets_and_real_io() {
 }
 
 #[test]
-fn native_uas_failed_reset_retains_all_three_original_owners_and_bytes() {
+fn native_uas_failed_reset_keeps_all_three_original_owners_and_bytes() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
             for fault in [

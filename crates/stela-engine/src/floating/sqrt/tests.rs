@@ -271,7 +271,7 @@ fn vector_nan_invalid_and_inexact_lanes_commit_one_sticky_union() {
 }
 
 #[test]
-fn retained_enables_refuse_before_any_lane_or_status_commit() {
+fn kept_enables_refuse_before_any_lane_or_status_commit() {
     for (format, _, _, four, _) in VALUES {
         for shape in [Shape::Scalar, Shape::Vector128] {
             for enabled in [

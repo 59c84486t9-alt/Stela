@@ -246,7 +246,7 @@ mod tests {
         assert!(Bridge::new(&[], [1, 0x80, 0, 1], &[pmsg], None).is_err());
     }
     #[test]
-    fn t6000_actual_configuration_retains_only_known_words_and_never_invents_counter_effects() {
+    fn t6000_configuration_keeps_only_known_words_and_never_invents_counter_effects() {
         use stela_soc_data::pmgr::t6000::tunables::Profile;
         let profile = Profile::new(0x6000, 8, 0).unwrap();
         let mut irq = InterruptLatch::new();

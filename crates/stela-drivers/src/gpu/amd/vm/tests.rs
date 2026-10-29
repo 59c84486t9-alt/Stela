@@ -261,7 +261,7 @@ fn entry(table: &RamPageTable, offset: usize) -> u64 {
 }
 
 #[test]
-fn real_retained_storage_uses_domain_iova_and_original_cpu_entries() {
+fn real_kept_storage_uses_domain_iova_and_original_cpu_entries() {
     let pages = ModelSource::default();
     let domain = Arc::new(ModelDomain::default());
     let mut table = table(&pages, domain.clone(), 24);
@@ -399,7 +399,7 @@ fn failed_teardown_is_retryable_and_unmapped_storage_cannot_be_written() {
 }
 
 #[test]
-fn dropping_active_table_quarantines_its_actual_mapping_and_pin() {
+fn dropping_active_table_quarantines_its_mapping_and_pin() {
     let pages = ModelSource::default();
     let domain = Arc::new(ModelDomain::default());
     drop(table(&pages, domain.clone(), 24));
@@ -494,7 +494,7 @@ fn clear_preserves_neighbors_and_uses_invalid_encoding_without_address_override(
 }
 
 #[test]
-fn failed_clear_visibility_reports_modified_entries_and_retains_backing() {
+fn failed_clear_visibility_reports_modified_entries_and_keeps_backing() {
     let pages = ModelSource::default();
     let domain = Arc::new(ModelDomain::default());
     let mut table = table(&pages, domain.clone(), 24);

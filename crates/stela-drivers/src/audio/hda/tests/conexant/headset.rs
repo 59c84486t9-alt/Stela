@@ -174,7 +174,7 @@ fn headphone_detection_precedence() {
 }
 
 #[test]
-fn detection_failure_retains_routes() {
+fn detection_failure_keeps_routes() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = headset_device(0x14f1_1f86, true);

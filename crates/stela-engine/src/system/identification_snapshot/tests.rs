@@ -98,7 +98,7 @@ fn declaration_digest_binds_named_values_and_identity_without_order_dependence()
 }
 
 #[test]
-fn retained_arc_input_accounts_for_tail_padding() {
+fn kept_arc_input_accounts_for_tail_padding() {
     let capture = |bytes| {
         Snapshot::captured(
             "snapshot-arc-padding-fixture",
@@ -120,7 +120,7 @@ fn retained_arc_input_accounts_for_tail_padding() {
 }
 
 #[test]
-fn retained_snapshot_accounting_includes_arc_payload_and_all_allocation_capacities() {
+fn kept_snapshot_accounting_includes_arc_payload_and_all_allocation_capacities() {
     let input: Arc<[u8]> = alloc::vec![0x5a; 256].into();
     let snapshot = Snapshot::captured(
         "snapshot-retained-accounting-fixture",
@@ -139,7 +139,7 @@ fn retained_snapshot_accounting_includes_arc_payload_and_all_allocation_capaciti
 }
 
 #[test]
-fn captured_readbacks_are_extracted_from_and_retain_actual_immutable_input() {
+fn captured_readbacks_are_extracted_from_and_keep_immutable_input() {
     let mut bytes = Vec::new();
     bytes.extend(0x0123_4567_89ab_cdef_u64.to_le_bytes());
     bytes.extend(u64::MAX.to_le_bytes());

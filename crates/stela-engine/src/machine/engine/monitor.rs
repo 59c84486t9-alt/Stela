@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_tracing_retains_gl2_interrupts_faults_and_illegal_erets() {
+    fn monitor_tracing_keeps_gl2_interrupts_faults_and_illegal_erets() {
         use super::super::Exception;
         let mut machine = gxf(Chip::AppleM2);
         machine.cpu.set_pstate(Pstate::reset(2));

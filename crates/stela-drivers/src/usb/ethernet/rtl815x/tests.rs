@@ -547,7 +547,7 @@ fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
 }
 
 #[test]
-fn rtl815x_firmware_uses_actual_ep0_dma_wrapping_and_poison_guards() {
+fn rtl815x_firmware_uses_ep0_dma_wrapping_and_poison_guards() {
     use ethernet::{
         firmware::{Firmware, tests::synthetic_upload},
         rtl815x::{Chip, FirmwareModel, Revision},
@@ -669,7 +669,7 @@ fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
 }
 
 #[test]
-fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_receipt() {
+fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_keeps_owned_receipt() {
     use crate::{
         firmware::{Catalog, Provenance, Provider, Resource, Target},
         net::Link,

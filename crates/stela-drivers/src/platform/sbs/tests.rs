@@ -167,7 +167,7 @@ fn manager_selection_is_actual_and_absence_never_reads_battery() {
 }
 
 #[test]
-fn alarm_needs_real_write_readback_and_retains_uncertain_owner() {
+fn alarm_needs_real_write_readback_and_keeps_uncertain_owner() {
     let (mut sbs, m) = model(Topology::Managed, false);
     assert_eq!(sbs.set_alarm(100), Err(Error::NotPresent));
     sbs.refresh(0).unwrap();

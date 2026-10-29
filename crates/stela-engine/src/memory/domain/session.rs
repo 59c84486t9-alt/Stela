@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_profile_still_validates_each_new_requirement_without_effects() {
+    fn kept_profile_still_validates_each_new_requirement_without_effects() {
         let system = MemorySystem::new(16, 8).unwrap();
         let (_, mut thread) = fixture(&system);
         let session = thread.execution_session().unwrap();

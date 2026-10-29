@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn amd_install_preserves_actual_routing_and_normalizes_only_visibility() {
+    fn amd_install_preserves_routing_and_normalizes_only_visibility() {
         let mut snapshot = source();
         snapshot.records[0].ebx = amd::VENDOR[0];
         snapshot.records[0].edx = amd::VENDOR[1];

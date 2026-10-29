@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn all_8153a_revisions_apply_their_actual_phy_power_fifo_and_link_branches() {
+    fn all_8153a_revisions_apply_their_phy_power_fifo_and_link_branches() {
         for revision in [0x5c00, 0x5c10, 0x5c20, 0x5c30] {
             let bytes = if revision == 0x5c00 {
                 Vec::new()

@@ -92,7 +92,7 @@ fn reconfiguration_reuses_ring_cursor() {
 }
 
 #[test]
-fn allocation_failure_retains_reclaimed_rings() {
+fn allocation_failure_keeps_reclaimed_rings() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma =

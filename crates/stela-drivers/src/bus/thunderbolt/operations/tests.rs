@@ -236,7 +236,7 @@ fn drive(
     panic!("actual operation did not finish")
 }
 #[test]
-fn actual_router_operations_query_allocate_deallocate_and_drom_retained_completion() {
+fn router_operations_query_allocate_deallocate_and_drom_kept_completion() {
     for operation in [
         Operation::QueryDp { port: 6 },
         Operation::AllocateDp { port: 6 },
@@ -297,7 +297,7 @@ fn actual_router_operations_query_allocate_deallocate_and_drom_retained_completi
     }
 }
 #[test]
-fn actual_router_unsupported_and_status_failures_never_allocate_by_default() {
+fn router_unsupported_and_status_failures_never_allocate_by_default() {
     for operation in [
         Operation::QueryDp { port: 6 },
         Operation::AllocateDp { port: 6 },
@@ -354,7 +354,7 @@ fn actual_router_unsupported_and_status_failures_never_allocate_by_default() {
 }
 
 #[test]
-fn actual_dp_resource_roundtrip_preserves_real_router_and_busy_query_state() {
+fn dp_resource_roundtrip_preserves_real_router_and_busy_query_state() {
     let f = fixture(Operation::QueryDp { port: 6 });
     let mut peer = Peer::new(&f);
     let Fixture {
@@ -388,7 +388,7 @@ fn actual_dp_resource_roundtrip_preserves_real_router_and_busy_query_state() {
     channel_release(&mut channel);
 }
 #[test]
-fn each_actual_operation_write_uncertainty_readback_and_busy_timeout_poison_and_retain() {
+fn each_operation_write_uncertainty_readback_and_busy_timeout_poison_and_keep() {
     for target in 1..=2 {
         for fault in 0..3 {
             let f = fixture(Operation::AllocateDp { port: 6 });
@@ -451,7 +451,7 @@ fn each_actual_operation_write_uncertainty_readback_and_busy_timeout_poison_and_
     }
 }
 #[test]
-fn actual_operation_preflight_idle_header_revocation_and_ranges_refuse_publication() {
+fn operation_preflight_idle_header_revocation_and_ranges_refuse_publication() {
     for fault in 0..3 {
         let f = fixture(Operation::AllocateDp { port: 6 });
         let mut peer = Peer::new(&f);
@@ -519,7 +519,7 @@ fn actual_operation_preflight_idle_header_revocation_and_ranges_refuse_publicati
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_OPERATIONS_ORACLE"]
-fn unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_native_dma() {
+fn unchanged_linux_router_operation_bytes_and_source_statuses_match_native_dma() {
     extern crate std;
     let trace = std::fs::read_to_string(
         std::env::var("STELA_THUNDERBOLT_OPERATIONS_ORACLE").expect("set router operation trace"),
@@ -666,7 +666,7 @@ fn unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_nativ
 }
 
 #[test]
-fn actual_router_admission_loss_after_metadata_or_command_write_retains_original_engine() {
+fn router_admission_loss_after_metadata_or_command_write_keeps_original_engine() {
     for target in 1..=2 {
         let f = fixture(Operation::AllocateDp { port: 6 });
         let mut peer = Peer::new(&f);

@@ -48,7 +48,7 @@ fn unowned_hub_port_and_reserved_controls_refuse_before_mmio_and_current_dma() {
 }
 
 #[test]
-fn admitted_root_device_class_vendor_and_standard_reads_still_use_actual_ep0() {
+fn admitted_root_device_class_vendor_and_standard_reads_still_use_ep0() {
     let (mut c, m, id, _) = attached();
     for setup in [
         [0x21, 0xff, 0, 0, 0, 0, 0, 0],

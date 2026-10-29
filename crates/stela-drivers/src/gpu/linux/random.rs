@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn post_seed_fills_retain_state_without_source_calls() {
+    fn post_seed_fills_keep_state_without_source_calls() {
         let mut stream = {
             let source = Once(AtomicUsize::new(0));
             let stream = Seeded::from_entropy(&source).unwrap();

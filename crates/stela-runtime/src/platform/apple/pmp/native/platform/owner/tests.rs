@@ -398,7 +398,7 @@ fn refusal_does_not_admit_init_start_selection_or_pending_reset() {
     assert_eq!(o.pending_control(ordinal(8)), 0);
 }
 #[test]
-fn actual_packet_observation_drives_isp_mode1_tuple_and_periodic_refresh() {
+fn packet_observation_drives_isp_mode1_tuple_and_periodic_refresh() {
     let mut o = owner();
     selection(&mut o, 1 << 8);
     o.backend.payload = (1000 << 16) | 363;
@@ -417,7 +417,7 @@ fn actual_packet_observation_drives_isp_mode1_tuple_and_periodic_refresh() {
     assert_eq!(o.logical_request(ordinal(4)).nibble(1), Some(4));
 }
 #[test]
-fn stop_deactivates_before_each_actual_stop_and_keeps_inactive_tail_effects() {
+fn stop_deactivates_before_each_stop_and_keeps_inactive_tail_effects() {
     let mut o = owner();
     selection(&mut o, 1 << 8);
     o.begin_cycle().unwrap();
@@ -457,7 +457,7 @@ fn stop_deactivates_before_each_actual_stop_and_keeps_inactive_tail_effects() {
     }
 }
 #[test]
-fn actual_hook_products_feed_next_stage_and_absent_products_cannot_succeed() {
+fn hook_products_feed_next_stage_and_absent_products_cannot_succeed() {
     let mut o = owner();
     selection(&mut o, 1 << 8);
     o.backend.hook_buffer = Some(7);
@@ -477,7 +477,7 @@ fn actual_hook_products_feed_next_stage_and_absent_products_cannot_succeed() {
     assert!(step(&mut o).is_err());
 }
 #[test]
-fn source_enable_and_configuration_are_policy_data_without_activation_authority() {
+fn source_enable_and_configuration_are_policy_data_without_activation_permission() {
     let mut o = owner();
     o.apply_source_enable(ordinal(8), 5).unwrap();
     assert_eq!(o.activation(ordinal(8)), 0);

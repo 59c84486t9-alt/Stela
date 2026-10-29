@@ -564,7 +564,7 @@ fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_writ
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
-fn original_m1_pro_llb_entry_retains_its_own_link_profile_and_unknown_input() {
+fn original_m1_pro_llb_entry_keeps_its_own_link_profile_and_unknown_input() {
     execute_original(&M1_PRO);
 }
 

@@ -263,7 +263,7 @@ fn retire(inputs: Inputs) {
 }
 
 #[test]
-fn retained_function_and_all_register_bytes_are_unchanged() {
+fn kept_function_and_all_register_bytes_are_unchanged() {
     let mut function = make_function(&[(CAP, BASE, CAP_EXTENDED | EFR_SUPPORTED)], false);
     let original_config: Vec<_> = (0..4096u16)
         .step_by(4)
@@ -594,7 +594,7 @@ fn mapping_count_policy_identity_and_overlaps_are_checked() {
 }
 
 #[test]
-fn reserved_firmware_fields_and_actual_reserved_registers_are_never_used() {
+fn reserved_firmware_fields_and_reserved_registers_are_never_used() {
     for attributes in [1 << 17, 1 << 13, u32::MAX] {
         for actual_efr in [false, true] {
             let function = make_function(

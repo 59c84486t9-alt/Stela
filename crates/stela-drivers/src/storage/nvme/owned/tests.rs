@@ -898,7 +898,7 @@ fn owned_protocol_initializes_identifies_transfers_prps_wraps_and_retires() {
     );
 }
 #[test]
-fn invalid_clock_retains_unadmitted_original_owners_without_any_effect() {
+fn invalid_clock_keeps_unadmitted_original_owners_without_any_effect() {
     for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * 255 * 500_000) + 1] {
         let f = Fixture::new();
         // SAFETY: the complete same-controller permission is transferred;
@@ -1270,7 +1270,7 @@ fn owned_controller_that_keeps_timing_out_fails_after_five_resets() {
     disk.retire_owned().unwrap();
 }
 #[test]
-fn owned_stop_bme_drain_and_unmap_failures_retain_exact_original_owners() {
+fn owned_stop_bme_drain_and_unmap_failures_keep_original_owners() {
     for stage in 0..4 {
         let f = Fixture::new();
         let mut a = f.attach().unwrap();
@@ -1357,7 +1357,7 @@ fn owned_absent_coherent_observation_refuses_before_enable_and_releases_unpublis
     assert!(!m.events.contains(&"command") && !m.events.contains(&"bme_on"));
 }
 #[test]
-fn owned_register_failure_after_doorbell_poison_retains_no_cpu_reacquire() {
+fn owned_register_failure_after_doorbell_poison_keeps_no_cpu_reacquire() {
     let f = Fixture::new();
     let mut a = f.attach().unwrap();
     let before = f.model.lock().unwrap().sync_cpu;
@@ -1548,7 +1548,7 @@ unsafe impl crate::bus::mmio::owned::MappingPlatform for RegisterPlatform {
 }
 
 #[test]
-fn owned_mapping_registers_reject_actual_unaligned_mapping_and_return_its_owner() {
+fn owned_mapping_registers_reject_unaligned_mapping_and_return_its_owner() {
     use crate::bus::mmio::owned::{AddressSpace, Authority, Resource};
     for offset in [1, 2, 3, 0] {
         let platform = Arc::new(RegisterPlatform {

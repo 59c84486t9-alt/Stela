@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn uniform_maps_retain_header_and_nonuniform_maps_install_data_remap_base() -> Result<()> {
+    fn uniform_maps_keep_header_and_nonuniform_maps_install_data_remap_base() -> Result<()> {
         for (remap, expected) in [(0x2000, 0), (0x8000, 0x8000)] {
             let c = configured(slide_fixture(), false)?;
             let p = policy(&c, remap);
@@ -419,7 +419,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn actual_skip_flag_and_mapping_receipt_remain_bound() -> Result<()> {
+    fn skip_flag_and_mapping_receipt_remain_bound() -> Result<()> {
         let mut raw = slide_fixture();
         w64(&mut raw, 0x1058, 0x1234);
         let c = configured(raw, false)?;

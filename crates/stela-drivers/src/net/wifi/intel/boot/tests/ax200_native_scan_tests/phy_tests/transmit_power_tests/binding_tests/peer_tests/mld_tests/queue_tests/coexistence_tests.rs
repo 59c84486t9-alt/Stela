@@ -101,7 +101,7 @@ fn ci_emitted(
     assert_eq!(actual, command.bytes());
 }
 #[test]
-fn actual_bt_profile_survives_diagnostics_and_ci_cache_waits_for_ack_and_reclaim() {
+fn bt_profile_survives_diagnostics_and_ci_cache_waits_for_ack_and_reclaim() {
     exercise(&coex_image(2));
 }
 fn exercise(bytes: &[u8]) {
@@ -353,7 +353,7 @@ fn missing_ci_ack_does_not_apply_cache_or_release_original_queue_through_failed_
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_bt_config6_ci2_and_fixed_old_profile_source_owner() {
+fn ax200_bt_config6_ci2_and_fixed_old_profile_source_owner() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =

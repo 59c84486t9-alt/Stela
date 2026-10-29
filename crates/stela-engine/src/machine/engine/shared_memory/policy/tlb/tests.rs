@@ -42,7 +42,7 @@ fn refresh(thread: &mut MemoryThread<Policy>, generation: u64) {
 }
 
 #[test]
-fn authentic_tlb_retains_translation_until_epoch_but_always_reads_current_bytes() {
+fn authentic_tlb_keeps_translation_until_epoch_but_always_reads_current_bytes() {
     let (mut thread, ram) = thread();
     publish(&ram, DATA, &7u64.to_le_bytes());
     publish(&ram, OTHER, &9u64.to_le_bytes());

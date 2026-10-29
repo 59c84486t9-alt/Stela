@@ -270,7 +270,7 @@ fn stop(found: &mut xhci::Found) {
 }
 
 #[test]
-fn actual_composite_ep0_dma_initialization_and_discovery_preserve_standard_input_once() {
+fn composite_ep0_dma_initialization_and_discovery_preserve_standard_input_once() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: backing outlives every real native controller/class/DMA owner.
@@ -366,7 +366,7 @@ fn actual_composite_ep0_dma_initialization_and_discovery_preserve_standard_input
 }
 
 #[test]
-fn actual_wrong_slot_nonce_and_old_success_or_error_replies_cannot_requalify_reconnect() {
+fn wrong_slot_nonce_and_old_success_or_error_replies_cannot_requalify_reconnect() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: native owners use this exclusive backing allocation.
@@ -459,7 +459,7 @@ fn actual_wrong_slot_nonce_and_old_success_or_error_replies_cannot_requalify_rec
 }
 
 #[test]
-fn actual_stop_restart_stall_and_external_output_revoke_protocol_without_reusing_history() {
+fn stop_restart_stall_and_external_output_revoke_protocol_without_reusing_history() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: all controller and native class buffers remain in live RAM.
@@ -518,7 +518,7 @@ fn actual_stop_restart_stall_and_external_output_revoke_protocol_without_reusing
 }
 
 #[test]
-fn stale_actual_member_cannot_mutate_shared_current_group_or_consume_current_dma() {
+fn stale_member_cannot_mutate_shared_current_group_or_consume_current_dma() {
     let mut ram = vec![0u64; 2 * 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: both separately addressed native controllers keep this backing.
@@ -604,7 +604,7 @@ fn stale_actual_member_cannot_mutate_shared_current_group_or_consume_current_dma
 }
 
 #[test]
-fn actual_candidate_or_profile_refusal_keeps_generic_hid_owners_and_raw_reports() {
+fn candidate_or_profile_refusal_keeps_generic_hid_owners_and_raw_reports() {
     let mut ram = vec![0u64; 2 * 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: every model/native owner remains within this allocation.
@@ -668,7 +668,7 @@ fn actual_candidate_or_profile_refusal_keeps_generic_hid_owners_and_raw_reports(
 }
 
 #[test]
-fn actual_output_status_failure_is_not_a_protocol_ack_or_an_automatic_retry() {
+fn output_status_failure_is_not_a_protocol_ack_or_an_automatic_retry() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: RAM outlives the configured native controller and all class owners.

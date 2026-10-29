@@ -569,7 +569,7 @@ fn stopped_siblings_remain_contained_and_a_second_nvme_is_explicitly_refused() {
 }
 
 #[test]
-fn failed_posted_bus_master_ack_retains_original_hierarchy_and_domain() {
+fn failed_posted_bus_master_ack_keeps_original_hierarchy_and_domain() {
     let model = Model::new();
     let state = model.state.clone();
     let drops = model.drops.clone();
@@ -642,7 +642,7 @@ fn invalid_timing_precedes_hierarchy_and_capability_config_accesses() {
 }
 
 #[test]
-fn exact_pm_wait_requests_follow_actual_word_effect_and_propagate_failure() {
+fn exact_pm_wait_requests_follow_word_effect_and_propagate_failure() {
     struct CapturedTime {
         state: Arc<Mutex<State>>,
         fail: bool,

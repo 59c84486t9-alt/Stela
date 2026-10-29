@@ -202,7 +202,7 @@ fn message() -> Message {
 }
 
 #[test]
-fn actual_paged_multi_batch_commands_change_data_and_preserve_unrelated_causes() {
+fn paged_multi_batch_commands_change_data_and_preserve_unrelated_causes() {
     for layout in [Layout::Legacy, Layout::Extended] {
         for count in 1..=33 {
             let (mut host, h) = setup(layout);
@@ -233,7 +233,7 @@ fn actual_paged_multi_batch_commands_change_data_and_preserve_unrelated_causes()
 }
 
 #[test]
-fn every_nack_or_missing_ack_withholds_all_read_output_and_retains_original_link() {
+fn every_nack_or_missing_ack_withholds_all_read_output_and_keeps_original_link() {
     for missing in [false, true] {
         for at in 0..17 {
             let (mut host, h) = setup(Layout::Extended);

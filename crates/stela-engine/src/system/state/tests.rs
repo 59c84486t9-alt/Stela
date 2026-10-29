@@ -221,7 +221,7 @@ fn transitions_exchange_only_distinct_banks() {
 }
 
 #[test]
-fn flags_have_only_guest_state_authority() {
+fn flags_have_only_guest_state_permission() {
     let (mut system, mut registers) = state(PSTATE_EL1T);
     registers.nzcv = u32::MAX;
     assert_eq!(system.pstate(&registers), PSTATE_EL1T | NZCV_MASK);

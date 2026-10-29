@@ -153,7 +153,7 @@ fn source_orders_smen_before_fp_and_zen_before_fp() {
 }
 
 #[test]
-fn sme_only_sve_branch_uses_actual_streaming_and_za_is_helper_specific() {
+fn sme_only_sve_branch_uses_streaming_and_za_is_helper_specific() {
     let ids = ids(false);
     let owner = make_owner(&ids, FP_ENABLED | SME_ENABLED, 0);
     let state = state(false, 0);
@@ -242,7 +242,7 @@ fn register_access_is_not_general_sme_instruction_access() {
 }
 
 #[test]
-fn smcr_writes_ignore_only_raz_fields_and_decline_actual_length_changes() {
+fn smcr_writes_ignore_only_raz_fields_and_decline_length_changes() {
     let ids = ids(false);
     let mut owner = make_owner(&ids, FP_ENABLED | SME_ENABLED, 0);
     let state = state(false, 0);
@@ -301,7 +301,7 @@ fn sole_cpacr_bank_is_shared_with_fp_and_smcr_keeps_its_generation() {
 }
 
 #[test]
-fn actual_il_declines_register_effects_and_checked_callback() {
+fn il_declines_register_effects_and_checked_callback() {
     let ids = ids(false);
     let mut owner = make_owner(&ids, FP_ENABLED | SME_ENABLED, 0);
     let state = state(false, PSTATE_IL_MASK);
@@ -333,7 +333,7 @@ fn actual_il_declines_register_effects_and_checked_callback() {
 }
 
 #[test]
-fn checked_callback_uses_same_actual_state_and_named_implementation() {
+fn checked_callback_uses_same_state_and_named_implementation() {
     let ids = ids(false);
     let owner = make_owner(&ids, FP_ENABLED | SME_ENABLED, 0);
     let state = state(false, 0);

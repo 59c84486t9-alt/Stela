@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_actual_channels_retain_their_own_opaque_control_images() {
+    fn all_eight_channels_keep_their_own_opaque_control_images() {
         let ram = ram();
         let mut owner = controller(&ram);
         let mut latch = InterruptLatch::new();
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_configuration_is_retained_and_never_becomes_a_drain_or_power_ack() {
+    fn pending_configuration_is_kept_and_never_becomes_a_drain_or_power_ack() {
         let ram = ram();
         let mut owner = controller(&ram);
         let mut alias = owner.clone();
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_lifecycle_pauses_all_aliases_without_reinitializing_controls() {
+    fn kept_lifecycle_pauses_all_aliases_without_reinitializing_controls() {
         let ram = ram();
         let mut owner = controller(&ram);
         let mut alias = owner.clone();

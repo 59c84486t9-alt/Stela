@@ -127,7 +127,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_publications_preserve_fraction_and_match_one_actual_owner_advance() {
+    fn split_publications_preserve_fraction_and_match_one_owner_advance() {
         for hz in [1, 32768, 1_000_000, FREQUENCY_HZ + 1, u64::MAX] {
             let epoch = PmicEpoch {
                 counter: 17,

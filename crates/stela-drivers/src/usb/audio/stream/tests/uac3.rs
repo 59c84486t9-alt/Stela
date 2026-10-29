@@ -349,7 +349,7 @@ fn run(c: Vec<u8>, f: impl FnOnce(&mut AudioDevice<GeneralDevice>)) {
     f(&mut a);
 }
 #[test]
-fn uac3_pure_plan_requires_actual_stable_high_capability_replies_before_binding() {
+fn uac3_pure_plan_requires_stable_high_capability_replies_before_binding() {
     let c = configuration();
     let p = plan(&c).unwrap();
     assert!(matches!(p, crate::usb::audio::Plan::DiscoverUac3(_)));
@@ -424,7 +424,7 @@ fn uac3_real_clocks_pcm_and_independent_feature_registers_observe_power_before_c
     });
 }
 #[test]
-fn uac3_discovery_validates_graph_power_domains_and_actual_cluster_relationships() {
+fn uac3_discovery_validates_graph_power_domains_and_cluster_relationships() {
     let base = configuration();
     for mode in 0..7 {
         let mut c = base.clone();
@@ -558,7 +558,7 @@ fn uac3_mixer_signal_and_clock_selectors_and_multiplier_use_discovered_layouts()
     );
 }
 #[test]
-fn uac3_generic_implicit_feedback_uses_actual_capture_and_retires_both_power_domains() {
+fn uac3_generic_implicit_feedback_uses_capture_and_retires_both_power_domains() {
     let mut c = configuration();
     let output = c
         .windows(7)

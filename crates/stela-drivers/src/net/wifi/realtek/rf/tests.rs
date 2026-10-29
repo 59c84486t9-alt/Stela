@@ -163,7 +163,7 @@ fn masks_paths_and_values_reject_before_io_without_poisoning_valid_state() {
     assert_eq!(m.lock().unwrap().quarantined, 0);
 }
 #[test]
-fn actual_domain_identity_ready_and_ambiguous_rf_observations_are_terminal() {
+fn domain_identity_ready_and_ambiguous_rf_observations_are_terminal() {
     for (register, width, value) in [
         (0xf0, 4, u32::MAX),
         (0xf0, 4, 0),
@@ -266,7 +266,7 @@ fn every_io_failure_and_late_identity_loss_quarantines_real_control_borrow() {
     clippy::arc_with_non_send_sync,
     reason = "NativeIo holds Arc<dyn Any> without Send; this CPU-affine fixture keeps its registers !Sync"
 )]
-fn native_mmio_uses_real_rf_offsets_widths_and_retains_actual_uncertain_owner() {
+fn native_mmio_uses_real_rf_offsets_widths_and_keeps_uncertain_owner() {
     use core::{
         cell::UnsafeCell,
         ptr::NonNull,

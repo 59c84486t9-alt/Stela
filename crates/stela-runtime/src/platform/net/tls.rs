@@ -30,7 +30,7 @@ mod tests {
         }
     }
     #[test]
-    fn original_source_is_retained_and_failure_preserves_output() {
+    fn original_source_is_kept_and_failure_preserves_output() {
         let source: Arc<dyn Entropy> = Arc::new(Refusing);
         let weak = Arc::downgrade(&source);
         let adapter = OwnedEntropy(source.clone());

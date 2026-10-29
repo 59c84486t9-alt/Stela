@@ -186,7 +186,7 @@ mod tests {
     };
 
     #[test]
-    fn actual_guard_poison_invalidates_health_and_preflight_without_owner_flag() {
+    fn guard_poison_invalidates_health_and_preflight_without_owner_flag() {
         let (mut owner, base) = owned();
         // SAFETY: new anonymous storage with every software writer.
         let domain = unsafe {

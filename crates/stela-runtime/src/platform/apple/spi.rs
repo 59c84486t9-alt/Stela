@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_pauses_preserve_queued_shifts_and_pending_interrupts() {
+    fn kept_pauses_preserve_queued_shifts_and_pending_interrupts() {
         let irq = AicInput::new(0, 749);
         let mut spi = Spi::new(Image::fresh(), irq, false);
         let mut latch = InterruptLatch::new();
@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn destructive_edges_preserve_the_die_and_only_actual_cs_edges_commit_programs() {
+    fn destructive_edges_preserve_the_die_and_only_cs_edges_commit_programs() {
         for external_cs in [false, true] {
             for reset in [false, true] {
                 let irq = AicInput::new(0, 749);
@@ -741,7 +741,7 @@ mod tests {
         assert!(spi.write(CTRL, Width::Double, 1, &mut a).is_err());
     }
     #[test]
-    fn shifter_cs_override_and_delays_are_retained_configuration() {
+    fn shifter_cs_override_and_delays_are_kept_configuration() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut external = Spi::new(Image::fresh(), AicInput::new(0, 1), true);

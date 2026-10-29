@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_acp63_irq_zsc_policy_and_retained_resume_do_not_alias_a_clock_mux() {
+fn acp63_irq_zsc_policy_and_kept_resume_do_not_alias_a_clock_mux() {
     let (mut controller, device, source) = fixture(0x63);
     device.lock().unwrap().words[0x1a04 / 4] = 1 << 7;
     device.lock().unwrap().words[0x1a0c / 4] = 1 << 9;
@@ -148,7 +148,7 @@ fn actual_acp63_irq_zsc_policy_and_retained_resume_do_not_alias_a_clock_mux() {
 }
 
 #[test]
-fn acp63_failed_suspend_or_restore_retains_the_original_published_epoch() {
+fn acp63_failed_suspend_or_restore_keeps_the_original_published_epoch() {
     for restore in [false, true] {
         for fault in 0..4 {
             let (mut controller, device, source) = ready(0x63, 4096);
@@ -238,7 +238,7 @@ fn acp63_failed_suspend_or_restore_retains_the_original_published_epoch() {
 }
 
 #[test]
-fn live_acp63_pin_and_zsc_loss_are_actual_authority_failures() {
+fn live_acp63_pin_and_zsc_loss_are_actual_permission_failures() {
     for (offset, value) in [(0x1440, 5), (0x1014, 1)] {
         let (mut controller, device, source) = ready(0x63, 4096);
         controller.start().unwrap();

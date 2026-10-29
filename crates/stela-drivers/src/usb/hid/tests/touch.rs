@@ -150,7 +150,7 @@ fn feed(input: &mut UsbInput, peer: &Rc<RefCell<model::CancelModel>>, raw: Vec<u
 }
 
 #[test]
-fn actual_descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_events() {
+fn descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_events() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: RAM outlives the controller and every DMA owner.
@@ -246,7 +246,7 @@ fn actual_descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_e
 }
 
 #[test]
-fn actual_maximum_refusal_keeps_raw_poll_and_requires_fresh_ack_after_set_report() {
+fn maximum_refusal_keeps_raw_poll_and_requires_fresh_ack_after_set_report() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: controller owners are dropped before RAM.
@@ -281,7 +281,7 @@ fn actual_maximum_refusal_keeps_raw_poll_and_requires_fresh_ack_after_set_report
 }
 
 #[test]
-fn actual_truncation_and_acknowledged_stop_restart_cannot_finish_old_hybrid_frame() {
+fn truncation_and_acknowledged_stop_restart_cannot_finish_old_hybrid_frame() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: controller owners are dropped before RAM.
@@ -368,7 +368,7 @@ fn stale_native_identity_discards_pending_before_mmio_or_current_completion() {
 }
 
 #[test]
-fn actual_feature_length_id_and_descriptor_minimum_are_checked_before_authority() {
+fn feature_length_id_and_descriptor_minimum_are_checked_before_permission() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: RAM outlives all kept native DMA owners.
@@ -415,7 +415,7 @@ fn actual_feature_length_id_and_descriptor_minimum_are_checked_before_authority(
 }
 
 #[test]
-fn actual_stall_recovery_abandons_pending_frame_and_retains_original_dma_owner() {
+fn stall_recovery_abandons_pending_frame_and_keeps_original_dma_owner() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: RAM outlives all kept native DMA owners.

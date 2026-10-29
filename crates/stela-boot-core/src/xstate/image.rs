@@ -187,7 +187,7 @@ mod tests {
         image
     }
     #[test]
-    fn standard_and_compacted_banks_follow_actual_component_geometry() {
+    fn standard_and_compacted_banks_follow_component_geometry() {
         let layout = discovered_layout();
         let mask = X87 | SSE | AVX | AVX512 | APX;
         for (format, offset) in [(ImageFormat::Standard, 960), (ImageFormat::Compacted, 2432)] {
@@ -203,7 +203,7 @@ mod tests {
         }
     }
     #[test]
-    fn qualified_init_bank_is_zero_but_a_disabled_bank_is_unavailable() {
+    fn checked_init_bank_is_zero_but_a_disabled_bank_is_unavailable() {
         let layout = discovered_layout();
         let mask = X87 | SSE | APX;
         let mut image = make_image(mask, ImageFormat::Standard);

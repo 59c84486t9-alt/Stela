@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn actual_alive_bios_source_scratch_doorbell_and_raw_notification_preserve_tables() {
+fn alive_bios_source_scratch_doorbell_and_raw_notification_preserve_tables() {
     for fragmented in [false, true] {
         let mut bytes = ax210_bytes();
         if fragmented {
@@ -202,7 +202,7 @@ fn zero_sku_requests_nothing_and_missing_capture_or_bad_bios_never_fake_fallback
 }
 
 #[test]
-fn ax200_retains_actual_bios_receipts_and_explicit_pre_v2_no_payload_transfer() {
+fn ax200_keeps_bios_receipts_and_explicit_pre_v2_no_payload_transfer() {
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let (observations, provider) =

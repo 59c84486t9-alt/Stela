@@ -11,7 +11,7 @@ fn attached(bcm5762: bool) -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex
 }
 
 #[test]
-fn actual_negotiated_half_and_full_duplex_modes_transfer_and_restore_mac() {
+fn negotiated_half_and_full_duplex_modes_transfer_and_restore_mac() {
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         assert_eq!(peer.lock().unwrap().phy[&4], 0x1e1);
@@ -42,7 +42,7 @@ fn actual_negotiated_half_and_full_duplex_modes_transfer_and_restore_mac() {
 }
 
 #[test]
-fn actual_mac_duplex_write_must_latch_before_packet_publication() {
+fn mac_duplex_write_must_latch_before_packet_publication() {
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         {
@@ -98,7 +98,7 @@ fn unsupported_gigabit_half_and_reserved_phy_results_cannot_create_carrier() {
 
 #[test]
 #[ignore = "oracle: STELA_TG3_PHY_LINK_ORACLE"]
-fn unchanged_linux_aux_decode_and_mac_duplex_match_actual_driver() {
+fn unchanged_linux_aux_decode_and_mac_duplex_match_driver() {
     let path = std::env::var("STELA_TG3_PHY_LINK_ORACLE").expect("set original AUX/MAC trace");
     let trace = std::fs::read_to_string(path).unwrap();
     let lines: Vec<_> = trace.lines().collect();

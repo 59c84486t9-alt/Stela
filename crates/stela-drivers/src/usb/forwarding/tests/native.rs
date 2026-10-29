@@ -549,7 +549,7 @@ fn packet_extent_limits_and_foreign_requests_cannot_publish_or_consume_dma() {
 }
 
 #[test]
-fn failed_stop_or_post_publication_controller_failure_retains_all_original_buffers() {
+fn failed_stop_or_post_publication_controller_failure_keeps_all_original_buffers() {
     for fail_after_publication in [false, true] {
         let mut ram = vec![0u64; 512 * 1024];
         let start = ram.as_mut_ptr() as u64;
@@ -583,7 +583,7 @@ fn failed_stop_or_post_publication_controller_failure_retains_all_original_buffe
 }
 
 #[test]
-fn qualified_primary_streams_reuse_original_payload_dma_and_reject_stale_streams() {
+fn checked_primary_streams_reuse_original_payload_dma_and_reject_stale_streams() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: original stream arrays, rings and payload DMA remain live.
@@ -657,7 +657,7 @@ fn cancellation_preserves_unpolled_terminal_receipts_for_each_transfer_kind() {
 }
 
 #[test]
-fn ordinary_cancellation_preserves_receive_boundaries_racing_actual_stop() {
+fn ordinary_cancellation_preserves_receive_boundaries_racing_stop() {
     for code in [1, 13, 26, 28] {
         for failure in [None, Some(STOP), Some(SET_DEQUEUE)] {
             let mut ram = vec![0u64; 512 * 1024];
@@ -1117,7 +1117,7 @@ fn explicit_packet_lists_wrap_real_microframes_and_keep_subframe_queue_continuat
 }
 
 #[test]
-fn explicit_preflight_uses_actual_interval_and_checks_entire_list_horizon_without_cancel() {
+fn explicit_preflight_uses_interval_and_checks_entire_list_horizon_without_cancel() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: original addressed endpoint contexts and payload DMA remain live.
@@ -1229,7 +1229,7 @@ fn explicit_clock_advance_during_publication_requires_real_endpoint_cancellation
 }
 
 #[test]
-fn explicit_partial_publication_or_failed_stop_retains_every_original_packet_buffer() {
+fn explicit_partial_publication_or_failed_stop_keeps_every_original_packet_buffer() {
     for fatal in [false, true] {
         let mut ram = vec![0u64; 512 * 1024];
         let start = ram.as_mut_ptr() as u64;
@@ -1294,7 +1294,7 @@ fn explicit_partial_publication_or_failed_stop_retains_every_original_packet_buf
 }
 
 #[test]
-fn modeled_state_transitions_preserve_actual_configured_endpoint_context_fields() {
+fn modeled_state_transitions_preserve_configured_endpoint_context_fields() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: configured endpoint contexts and every ring remain in
@@ -1482,7 +1482,7 @@ fn current_shutdown_fenced_forwarding_owner_can_drain_real_cancellation_receipts
 }
 
 #[test]
-fn actual_same_controller_root_reuse_preserves_stale_forwarding_cache_and_current_completion() {
+fn same_controller_root_reuse_preserves_stale_forwarding_cache_and_current_completion() {
     for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
         for context in [32, 64] {
             for iso in [false, true] {

@@ -102,7 +102,7 @@ fn failed_real_group_disable_keeps_the_original_published_iova_and_pins() {
 }
 
 #[test]
-fn replacing_a_published_ring_cannot_retire_it_after_a_failed_actual_reset() {
+fn replacing_a_published_ring_cannot_retire_it_after_a_failed_reset() {
     let (mut controller, device, source) = ready(1, 4096);
     controller.start().unwrap();
     device.lock().unwrap().advance(32);

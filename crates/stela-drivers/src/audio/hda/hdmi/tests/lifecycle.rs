@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn stop_failure_retains_first_cause() {
+fn stop_failure_keeps_first_cause() {
     for dma_fault in [false, true] {
         let mut f = Fixture::new(false);
         let mut c = f.controller();
@@ -30,7 +30,7 @@ fn stop_failure_retains_first_cause() {
 }
 
 #[test]
-fn drop_retains_active_owner() {
+fn drop_keeps_active_owner() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);

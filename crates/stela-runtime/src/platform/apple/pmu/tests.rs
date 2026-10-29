@@ -347,7 +347,7 @@ fn a_legacy_scratch_clock_offset_keeps_seconds_and_fraction_in_scratch_storage()
 }
 
 #[test]
-fn a_pmu_without_rtc_routes_an_actual_permanently_deasserted_output() {
+fn a_pmu_without_rtc_routes_an_permanently_deasserted_output() {
     use {
         crate::platform::apple::spmi::Spmi, stela_contracts::interrupt::AicInput,
         stela_soc_data::spmi::Configuration as Controller, stela_soc_data::spmi::Profile,

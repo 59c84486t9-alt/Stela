@@ -330,7 +330,7 @@ fn exact_ulp_exempt_lpt_cohort_has_generation_correct_cold_reset_and_nvm() {
     }
 }
 #[test]
-fn actual_config_access_failures_and_reserved_limits_refuse_before_mutation() {
+fn config_access_failures_and_reserved_limits_refuse_before_mutation() {
     for at in 0..2 {
         for fault in [Fault::Access, Fault::Removed] {
             let (state, released, io, timer) = fixture_lpt();
@@ -386,7 +386,7 @@ fn forced_smbus_wrong_phy_and_invalid_smbus_frequency_are_not_recovery_success()
     }
 }
 #[test]
-fn every_lpt_cold_access_failure_retains_the_same_function_without_packet_dma() {
+fn every_lpt_cold_access_failure_keeps_the_same_function_without_packet_dma() {
     let (state, _, io, timer) = fixture_lpt();
     let controller = start_lpt(0x15a1, io, timer).unwrap();
     let count = state.borrow().accesses;

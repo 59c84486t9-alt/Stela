@@ -210,7 +210,7 @@ fn old_mount_paths_refuse_missing_owners_before_publishing_any_aperture() {
 }
 
 #[test]
-fn paused_joint_owner_refuses_locks_and_retains_checked_state() {
+fn paused_joint_owner_refuses_locks_and_keeps_checked_state() {
     let mut owner = prepared();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
@@ -260,7 +260,7 @@ fn paused_joint_owner_refuses_locks_and_retains_checked_state() {
 }
 
 #[test]
-fn paired_read_consumes_only_the_actual_complete_publication_entry() {
+fn paired_read_consumes_only_the_complete_publication_entry() {
     use stela_engine::machine::Devices;
     let owner = prepared();
     let offset = owner.ptd_offset();
@@ -434,7 +434,7 @@ fn status_pairs_snapshot_one_pending_bank_without_consuming_publications() {
 }
 
 #[test]
-fn original_cache_status_reads_the_same_actual_per_plane_way_commands() {
+fn original_cache_status_reads_the_same_per_plane_way_commands() {
     let mut owner = prepared();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 3, &mut latch);

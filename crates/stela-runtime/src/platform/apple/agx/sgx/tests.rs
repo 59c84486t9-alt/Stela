@@ -41,7 +41,7 @@ fn firmware_region_at(
 }
 
 #[test]
-fn native_firmware_pio_walks_the_uat_and_shares_the_actual_ap_register() {
+fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
     use super::super::generation::{G13G, G13X, G14G, G14X, G15G};
     use {stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram};
     let physical = 0x204000000;
@@ -238,7 +238,7 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_actual_ap_register() {
 }
 
 #[test]
-fn native_asc_binding_uses_declared_placement_and_qualifies_the_whole_private_word() {
+fn native_asc_binding_uses_declared_placement_and_checks_the_whole_private_word() {
     let mut sgx = Sgx::new(t8112()).unwrap();
     write(&mut sgx, GATING_CONTROL, 4).unwrap();
     let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();

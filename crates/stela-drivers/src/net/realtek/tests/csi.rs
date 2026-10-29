@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn csi_failed_data_read_does_not_publish_a_fabricated_config_value() {
+fn csi_failed_data_read_does_not_publish_a_invented_config_value() {
     for version in [34, 61, 63, 64, 65, 66, 70] {
         let time = Time::default();
         let mut model = Model::nbase(&time);

@@ -221,7 +221,7 @@ fn real_error_is_preserved_and_cannot_become_a_successful_read() {
     }
 }
 #[test]
-fn plug_event_ack_preserves_actual_route_port_and_hotplug_group() {
+fn plug_event_ack_preserves_route_port_and_hotplug_group() {
     for unplug in [false, true] {
         let event = encode(
             PacketType::Event,

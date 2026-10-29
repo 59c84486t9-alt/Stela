@@ -633,7 +633,7 @@ fn fixture_image(bytes: Vec<u8>, doorbell: u32) -> Fixture {
     (controller, model, source, domain)
 }
 #[test]
-fn actual_bdl_nonidentity_dma_cold_boot_direct_dmic_wrap_pause_release_and_retire() {
+fn bdl_nonidentity_dma_cold_boot_direct_dmic_wrap_pause_release_and_retire() {
     let (mut controller, model, source, domain) = fixture();
     assert_eq!(controller.firmware_report().unwrap().abi, 0x03017001);
     controller
@@ -664,7 +664,7 @@ fn actual_bdl_nonidentity_dma_cold_boot_direct_dmic_wrap_pause_release_and_retir
     assert_eq!(source.drops.load(Ordering::Relaxed), 6);
 }
 #[test]
-fn ipc_timeout_or_unacknowledged_dma_stop_retains_real_pins_and_blocks_new_submission() {
+fn ipc_timeout_or_unacknowledged_dma_stop_keeps_real_pins_and_blocks_new_submission() {
     let (mut controller, model, source, domain) = fixture();
     controller
         .install_dmic(topology::tests::topology())
@@ -721,7 +721,7 @@ fn mailbox_ready_accepts_busy_only_and_nonpanic_doorbell_payloads() {
     }
 }
 #[test]
-fn ready_rejects_genuine_panic_and_bad_mailbox_header_abi_or_windows_before_ack() {
+fn ready_rejects_panic_and_bad_mailbox_header_abi_or_windows_before_ack() {
     for defect in 0..5 {
         let (mut controller, model, _, _) = fixture();
         let before;
@@ -816,7 +816,7 @@ fn pending_dma_survives_run_clear_and_failed_drain_without_cpu_ownership() {
     assert_eq!(source.drops.load(Ordering::Relaxed), 6);
 }
 #[test]
-fn failed_or_ambiguous_bme_containment_retains_pins_and_blocks_cpu_handoff() {
+fn failed_or_ambiguous_bme_containment_keeps_pins_and_blocks_cpu_handoff() {
     for after_effect in [false, true] {
         let (mut controller, model, source, domain) = fixture();
         controller

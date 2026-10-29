@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_hop_disable_pending_drain_and_flow_clear_preserve_usb4_vendor_ingress() {
+    fn hop_disable_pending_drain_and_flow_clear_preserve_usb4_vendor_ingress() {
         use super::super::{
             config::Route,
             hop::{Event, Target, Teardown, Words},
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_hop_pending_or_rejected_disable_retains_allocation_and_poisoned_channel() {
+    fn uncertain_hop_pending_or_rejected_disable_keeps_allocation_and_poisoned_channel() {
         use super::super::{
             channel::Error as ChannelError,
             config::Route,
@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn already_disabled_hop_is_observed_without_fabricated_flow_control_writes() {
+    fn already_disabled_hop_is_observed_without_invented_flow_control_writes() {
         use super::super::{
             config::Route,
             hop::{Event, Target, Teardown},

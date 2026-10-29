@@ -169,7 +169,7 @@ impl Callback for Hold {
     }
 }
 #[test]
-fn drain_restores_all_recursion_only_after_actual_notify_and_mutex_release() {
+fn drain_restores_all_recursion_only_after_notify_and_mutex_release() {
     let r = Runtime::new();
     let q = r.global_reporting_queue().unwrap();
     let key = r.key();

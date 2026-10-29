@@ -542,7 +542,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consumer_arrays_use_the_actual_discontiguous_usage_list() {
+    fn consumer_arrays_use_the_discontiguous_usage_list() {
         let descriptor = Descriptor::parse(&[
             0x05, 0x0c, 0x09, 0x01, 0xa1, 1, 0x85, 3, 0x09, 0xe9, 0x09, 0xea, 0x0a, 0x23, 0x02,
             0x15, 1, 0x25, 3, 0x75, 8, 0x95, 1, 0x81, 0, 0xc0,
@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_finger_collections_retain_contact_identity_and_units() {
+    fn repeated_finger_collections_keep_contact_identity_and_units() {
         let mut bytes = alloc::vec![5, 0x0d, 9, 4, 0xa1, 1, 0x85, 7];
         for _ in 0..2 {
             bytes.extend_from_slice(&[

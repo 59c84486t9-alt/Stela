@@ -13,7 +13,7 @@ use crate::board::fixture_support::flat_fixture_extent;
 use {crate::board::DART, stela_contracts::adt::encode};
 
 #[test]
-fn usb_and_phy_resource_owners_require_qualified_complete_lists() {
+fn usb_and_phy_resource_owners_require_checked_complete_lists() {
     for (compatible, owner) in [
         (
             b"usb-drd,t6000\0usb-drd,t8103\0".as_slice(),
@@ -357,7 +357,7 @@ fn dma_dependencies_do_not_inherit_mapper_power_ownership() {
 }
 
 #[test]
-fn repeated_sibling_names_keep_actual_ancestry_and_ambiguous_admission_is_atomic() {
+fn repeated_sibling_names_keep_ancestry_and_ambiguous_admission_is_atomic() {
     let first = encode(&[("name", b"view")], &[]);
     let leaf = encode(&[("name", b"leaf")], &[]);
     let second = encode(&[("name", b"view"), ("reg", &words(&[0]))], &[leaf]);
@@ -997,7 +997,7 @@ fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, String> {
 }
 
 #[test]
-fn die_qualified_gates_reach_each_dies_strided_pmgr_records() {
+fn die_checked_gates_reach_each_dies_strided_pmgr_records() {
     let id = |die, device| DomainId { die, device };
     for (compatible, property, stride) in [
         (&b"pmgr1,t8112"[..], Some(0x40_0000_0000), 0x40_0000_0000),

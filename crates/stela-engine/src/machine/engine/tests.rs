@@ -770,7 +770,7 @@ fn pair_fault_device() -> PairFaultDevice {
 }
 
 #[test]
-fn device_dma_preflights_the_actual_memory_lock_before_any_copy() {
+fn device_dma_preflights_the_memory_lock_before_any_copy() {
     let mut machine = board(&[], pair_fault_device(), Vec::new());
     let first = BASE + 0x808;
     let last = BASE + 0x80f;

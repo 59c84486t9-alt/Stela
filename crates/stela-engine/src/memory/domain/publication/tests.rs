@@ -527,7 +527,7 @@ mod binding_reservation {
     use stela_compiler::TargetCpu;
 
     #[test]
-    fn actual_service_write_invalidates_the_original_backing_reservation() {
+    fn service_write_invalidates_the_original_backing_reservation() {
         use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
         let (mut owner, base) = owned();
         let system = MemorySystem::new(16, 8).unwrap();

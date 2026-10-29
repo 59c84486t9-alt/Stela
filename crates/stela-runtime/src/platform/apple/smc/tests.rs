@@ -31,7 +31,7 @@ fn send(smc: &mut Smc, payload: u64) -> u64 {
 }
 
 #[test]
-fn rtc_key_requires_actual_owner_and_publication_without_reply_or_sram_fabrication() {
+fn rtc_key_requires_owner_and_publication_without_reply_or_sram_fabrication() {
     use crate::platform::apple::pmu::{RtcClock, RtcEpoch};
     let (mut smc, sram) = smc();
     let clock = RtcClock::new(RtcEpoch {

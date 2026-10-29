@@ -1,5 +1,5 @@
 #[test]
-fn endpoint_retains_one_registry_for_later_cpu_starts() {
+fn endpoint_keeps_one_registry_for_later_cpu_starts() {
     let domain = super::EventDomain::new();
     let first = domain.register(false, None).unwrap();
     drop(domain);
@@ -111,7 +111,7 @@ fn send_local_all_coalescing_and_registration_are_distinct() {
 }
 
 #[test]
-fn weak_producers_do_not_retain_or_retarget_retired_pes() {
+fn weak_producers_do_not_keep_or_retarget_retired_pes() {
     let domain = EventDomain::new();
     let first = domain.register(false, None).unwrap();
     let producer = first.producer();

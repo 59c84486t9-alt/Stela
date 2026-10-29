@@ -470,7 +470,7 @@ fn original_display_compare_and_native_length_returns_use_raw_unsigned_bytes() {
 }
 
 #[test]
-fn nvlink_c_metadata_retains_full_payload_and_zero_size_ownership() {
+fn nvlink_c_metadata_keeps_full_payload_and_zero_size_ownership() {
     unsafe extern "C" {
         fn nvlink_malloc(bytes: u64) -> *mut c_void;
         fn nvlink_free(pointer: *mut c_void);

@@ -75,7 +75,7 @@ impl RegisterIo for Registers {
 }
 
 #[test]
-fn actual_usb2_root_resume_preserves_source_forty_millisecond_signal_before_u0() {
+fn usb2_root_resume_preserves_source_forty_millisecond_signal_before_u0() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let mut memory = vec![0u64; 512 * 1024];
         let (mut host, devices, hardware, state, mut dma) =
@@ -153,7 +153,7 @@ fn unavailable_root_timing_preserves_live_consumers_before_any_suspend_effect() 
 }
 
 #[test]
-fn missing_actual_root_u0_acknowledgement_retains_fenced_original_consumers() {
+fn missing_root_u0_acknowledgement_keeps_fenced_original_consumers() {
     let mut memory = vec![0u64; 512 * 1024];
     let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
     let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
@@ -184,7 +184,7 @@ fn missing_actual_root_u0_acknowledgement_retains_fenced_original_consumers() {
 }
 
 #[test]
-fn unavailable_resume_timing_retains_private_snapshot_without_an_extra_consumer_fence() {
+fn unavailable_resume_timing_keeps_private_snapshot_without_an_extra_consumer_fence() {
     for rate in [0, u64::MAX] {
         let mut memory = vec![0u64; 512 * 1024];
         let (mut host, devices, hardware, state, mut dma) =

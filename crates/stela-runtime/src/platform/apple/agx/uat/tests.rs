@@ -280,7 +280,7 @@ fn every_context_shares_the_kernel_window_through_the_shared_l2() {
 }
 
 #[test]
-fn physical_gate_prevents_a_real_agent_walk_and_retains_the_mapping() {
+fn physical_gate_prevents_a_real_agent_walk_and_keeps_the_mapping() {
     let (mut ram, mut uat, va, page) = firmware_space(shared(Access::FirmwareGpu, true, true));
     ram.put_u64(page, 0x12345678);
     assert_eq!(

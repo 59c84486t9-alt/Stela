@@ -20,7 +20,7 @@ fn power_writes(peer: &Arc<Mutex<Device>>, from: usize) -> Vec<(u8, u16)> {
 }
 
 #[test]
-fn actual_phy_low_power_and_resume_retain_dma_and_restore_packet_traffic() {
+fn phy_low_power_and_resume_keep_dma_and_restore_packet_traffic() {
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();
@@ -87,7 +87,7 @@ fn stopped_suspended_owner_can_retire_without_waking_phy_or_repeating_stop() {
 }
 
 #[test]
-fn phy_suspend_never_precedes_actual_engine_stop_and_posted_payload_drain() {
+fn phy_suspend_never_precedes_engine_stop_and_posted_payload_drain() {
     for bcm5762 in [false, true] {
         for stop_failure in [false, true] {
             let (mut packet, pages, domain, peer) = attached(bcm5762);
@@ -118,7 +118,7 @@ fn phy_suspend_never_precedes_actual_engine_stop_and_posted_payload_drain() {
 }
 
 #[test]
-fn actual_link_flap_avoidance_policy_refuses_phy_mutation_and_allows_retirement() {
+fn link_flap_avoidance_policy_refuses_phy_mutation_and_allows_retirement() {
     for bcm5762 in [false, true] {
         let (mut packet, pages, _, peer) = attached(bcm5762);
         peer.lock().unwrap().sram.insert(0xd3c, 0x0040_0000);
@@ -192,7 +192,7 @@ fn independent_peer_refuses_power_writes_with_live_dma_or_missing_drain() {
 
 #[test]
 #[ignore = "oracle: STELA_TG3_PHY_POWER_ORACLE"]
-fn unchanged_linux_phy_power_writes_match_actual_retained_driver() {
+fn unchanged_linux_phy_power_writes_match_kept_driver() {
     let path = std::env::var("STELA_TG3_PHY_POWER_ORACLE").expect("set original PHY power trace");
     let trace = std::fs::read_to_string(path).unwrap();
     let mut lines = trace.lines();

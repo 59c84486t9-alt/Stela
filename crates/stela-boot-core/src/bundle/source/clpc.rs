@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_an_ordinary_retained_clpc_cannot_waive_its_absence_notice() {
+    fn deleting_an_ordinary_kept_clpc_cannot_waive_its_absence_notice() {
         let original = tree();
         let mut removed = original.clone();
         removed.root.children.clear();

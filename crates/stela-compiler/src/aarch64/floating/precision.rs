@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_exception_enables_decline_before_special_cases() {
+    fn kept_exception_enables_decline_before_special_cases() {
         for exception in [
             INVALID,
             super::super::DIVIDE_BY_ZERO,

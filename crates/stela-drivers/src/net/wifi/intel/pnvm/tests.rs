@@ -287,7 +287,7 @@ fn payload_count_and_image_tlv_budgets_are_bounded() {
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES, STELA_IWLWIFI_PNVM_ORACLE"]
-fn actual_ax210_skus_match_unchanged_linux_selector() {
+fn ax210_skus_match_unchanged_linux_selector() {
     extern crate std;
     use sha2::{Digest, Sha256};
     let directory = std::env::var("STELA_IWLWIFI_IMAGES").expect("firmware directory");

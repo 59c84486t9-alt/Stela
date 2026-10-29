@@ -430,7 +430,7 @@ mod tests {
         assert!(r.is_poisoned());
     }
     #[test]
-    fn native_window_checks_complete_bounds_and_retains_the_real_mapping_owner() {
+    fn native_window_checks_complete_bounds_and_keeps_the_real_mapping_owner() {
         let owner = Arc::new(std::sync::Mutex::new([0u32; 4]));
         let weak = Arc::downgrade(&owner);
         let base = {

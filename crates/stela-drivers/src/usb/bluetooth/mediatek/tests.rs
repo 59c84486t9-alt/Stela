@@ -481,7 +481,7 @@ fn attempt(e: &Error) -> (&Error, &Attempt) {
     }
 }
 #[test]
-fn exact_native_report_owns_evidence_preserves_present_unknown_and_never_retries() {
+fn native_report_owns_evidence_preserves_present_unknown_and_never_retries() {
     for chip in [Chip::Mt7961, Chip::Mt7922, Chip::Mt7925] {
         for fault in [Fault::None, Fault::Present, Fault::ProgressOnce] {
             let (mut hci, catalog, trace) = fixture(chip, fault);
@@ -607,7 +607,7 @@ fn missing_exact_image_is_recorded_once_and_uncertain_candidate_is_quarantined()
     assert!(hci.submit_command(&[3, 0x0c, 0]).is_err());
 }
 #[test]
-fn genuine_ep0_wmt_and_hci_reset_completions_cannot_be_substituted_or_guessed() {
+fn ep0_wmt_and_hci_reset_completions_cannot_be_substituted_or_guessed() {
     for fault in [
         Fault::ProgressForever,
         Fault::FragmentProgress,

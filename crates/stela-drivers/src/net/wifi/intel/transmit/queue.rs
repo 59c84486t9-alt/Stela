@@ -447,7 +447,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_select_queue_command3_reply2_and_stage_canonical_native_maps() {
+    fn images_select_queue_command3_reply2_and_stage_canonical_native_maps() {
         for family in [Family::Ax200, Family::Ax210] {
             let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
             let bytes =

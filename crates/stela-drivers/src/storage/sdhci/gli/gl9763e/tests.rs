@@ -296,7 +296,7 @@ fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_rea
 }
 
 #[test]
-fn native_gl9763e_fixed_180_supply_and_wide_adma_use_actual_card_and_controller_state() {
+fn native_gl9763e_fixed_180_supply_and_wide_adma_use_card_and_controller_state() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: the model DMA engine consumes these descriptor/payload pages.
@@ -484,7 +484,7 @@ fn native_gl9763e_invalid_clock_is_refused_before_original_pci_or_controller_eff
 }
 
 #[test]
-fn native_gl9763e_current_metadata_uses_the_actual_vcc_supply_field() {
+fn native_gl9763e_current_metadata_uses_the_vcc_supply_field() {
     for (capability, power, units) in [
         (CAP_330, POWER_330, 0x11),
         (CAP_300, POWER_300, 0x22),

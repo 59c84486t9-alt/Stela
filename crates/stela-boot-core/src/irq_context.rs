@@ -78,7 +78,7 @@ impl Drop for Guard<'_> {
 mod tests {
     use super::*;
     #[test]
-    fn actual_entry_scopes_balance_nested_saved_frames_and_wrong_cpu_refuses() {
+    fn entry_scopes_balance_nested_saved_frames_and_wrong_cpu_refuses() {
         let c = Context::new();
         assert_eq!(c.current(Ok(())), Ok(None));
         // SAFETY: test entries model one CPU's interrupt nesting; each guard drops before its outer

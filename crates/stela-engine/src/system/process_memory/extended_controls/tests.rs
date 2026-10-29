@@ -217,7 +217,7 @@ fn missing_features_and_unimplemented_extended_bits_never_default() {
 }
 
 #[test]
-fn cpt_fields_require_cpa2_and_the_qualified_same_bank_constructor() {
+fn cpt_fields_require_cpa2_and_the_checked_same_bank_constructor() {
     let domain = new_domain();
     for cpa in [0, 1, 2, FIELD_MASK] {
         let mut values = entries(0);

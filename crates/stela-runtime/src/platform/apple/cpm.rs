@@ -85,7 +85,7 @@ mod tests {
     use super::*;
     use stela_contracts::interrupt::InterruptLatch;
     #[test]
-    fn throttlers_retain_configuration_and_restore_does_not_discard_it() {
+    fn throttlers_keep_configuration_and_restore_does_not_discard_it() {
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
         for performance in [false, true] {

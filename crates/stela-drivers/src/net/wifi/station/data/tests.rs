@@ -215,7 +215,7 @@ fn eth(destination: Mac, protocol: u16) -> Vec<u8> {
 }
 
 #[test]
-fn separately_boxed_keys_keep_exact_original_replay_and_publication_guards() {
+fn separately_boxed_keys_keep_original_replay_and_publication_guards() {
     use alloc::boxed::Box;
     let (mut station, mut original) = station(PortPolicy::Controlled, false);
     let mut gtk = Box::new(original.pop().unwrap());

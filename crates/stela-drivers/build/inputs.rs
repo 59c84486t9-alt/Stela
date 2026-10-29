@@ -394,7 +394,7 @@ mod tests {
         assert!(validate_relative(Path::new("bad/./one")).is_err()); assert!(validate_relative(Path::new("bad//one")).is_err());
     }
     #[test]
-    fn hash_only_cache_counts_unique_inputs_and_final_rehash_without_retaining_bytes() {
+    fn hash_only_cache_counts_unique_inputs_and_final_rehash_without_keeping_bytes() {
         let (directory, mut inputs, root) = fixture(); fs::write(directory.path().join("compiler"), b"compiler").unwrap();
         let compiler = key(&mut inputs, root, "compiler", Some(digest(b"compiler")), 512);
         for _ in 0..774 { assert_eq!(inputs.verify(compiler).unwrap().bytes, 8); }

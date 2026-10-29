@@ -401,7 +401,7 @@ fn all_context_purposes_need_independent_current_hardware_and_os_permission() {
 }
 
 #[test]
-fn missing_power_authority_revocation_and_exact_channel_are_rechecked() {
+fn missing_power_permission_revocation_and_exact_channel_are_rechecked() {
     for change in 0..6 {
         let (s, c, mut owner, m) = fixture();
         let admission = owner

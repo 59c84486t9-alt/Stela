@@ -114,7 +114,7 @@ fn failed_reads_do_not_acknowledge_controls() {
 }
 
 #[test]
-fn failed_stream_reads_retain_buffer_ownership() {
+fn failed_stream_reads_keep_buffer_ownership() {
     for case in 0..4 {
         let mut fixture = Fixture::new();
         let model = Model::new(256);

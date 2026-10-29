@@ -162,7 +162,7 @@ fn published_root_pool_reuses_all_ordinary_and_stream_dma_across_96_real_lifetim
 }
 
 #[test]
-fn published_pool_follows_actual_different_enable_slot_without_allocating_another_set() {
+fn published_pool_follows_different_enable_slot_without_allocating_another_set() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
         let (shared, mut old, _, hardware, mut dma) =
@@ -570,7 +570,7 @@ fn unread_stream_read(
     (cbw, payload, finish)
 }
 #[test]
-fn old_stream_ticket_cannot_consume_actual_unread_completion_at_identical_reused_pointer() {
+fn old_stream_ticket_cannot_consume_unread_completion_at_identical_reused_pointer() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
         let (shared, old, _, hardware, mut dma) = prepared(&mut memory, SUPER_SPEED, context, 1);

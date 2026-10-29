@@ -63,7 +63,7 @@ fn owning_link_consumes_current_wmm_and_preserves_native_notice_and_association(
 }
 
 #[test]
-fn failed_owning_update_reconciles_carrier_and_retained_ethernet_immediately() {
+fn failed_owning_update_reconciles_carrier_and_kept_ethernet_immediately() {
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);

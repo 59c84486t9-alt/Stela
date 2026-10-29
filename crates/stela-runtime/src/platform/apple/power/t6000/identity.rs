@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_sparse_bus_reads_share_explicit_authority_without_claiming_surrounding_banks() {
+    fn sparse_bus_reads_share_explicit_permission_without_claiming_surrounding_banks() {
         let image = declared();
         let mut bus = mount(&image);
         let mut pins = InterruptLatch::new();
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn native_revision_discriminator_and_all_chip_branches_retain_exact_source_rules() {
+    fn native_revision_discriminator_and_all_chip_branches_keep_exact_source_rules() {
         for chip in 0..=3 {
             for raw in [0, 0x10, 0x20, 0x21, 0x42, 0xfffffff6] {
                 for discriminator in [0, 0x8e, 0x8f, 0x90, 0x3ff] {

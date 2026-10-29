@@ -233,7 +233,7 @@ fn complete(result: Completion<Value>) {
     );
 }
 #[test]
-fn selected_t8112_local_tails_preserve_actual_frames_without_another_consume() {
+fn selected_t8112_local_tails_preserve_frames_without_another_consume() {
     for ordinal in 4..=7 {
         let (mut frames, local, mut latch) = setup();
         let captured = capture(
@@ -465,7 +465,7 @@ fn extended_configuration() -> Configuration {
     Configuration::declared(&descriptor(4), &rows).unwrap()
 }
 #[test]
-fn packed_and_member_reads_share_one_actual_bank2_consumption() {
+fn packed_and_member_reads_share_one_bank2_consumption() {
     let (mut frames, local, mut latch) = setup();
     let captured = capture(&mut frames, &local, 4, 0x1234, &mut latch);
     publish(&local, 203, 0x8001, &mut latch);
@@ -496,7 +496,7 @@ fn packed_and_member_reads_share_one_actual_bank2_consumption() {
     assert_eq!(frames.progress(), progress);
 }
 #[test]
-fn unknown_actual_correction_pointer_refuses_after_its_read_without_reconsumption() {
+fn unknown_correction_pointer_refuses_after_its_read_without_reconsumption() {
     let (mut frames, local, mut latch) = setup();
     let captured = capture(&mut frames, &local, 4, 1, &mut latch);
     publish(&local, 203, 0x8001, &mut latch);
@@ -697,7 +697,7 @@ fn compiled_empty_amcc_still_performs_reached_state_and_timer_transitions() {
     assert!(resources.calls.is_empty());
 }
 #[test]
-fn captured_identity_is_retained_across_busy_and_does_not_follow_new_observation() {
+fn captured_identity_is_kept_across_busy_and_does_not_follow_new_observation() {
     let (mut frames, local, mut latch) = setup();
     let captured = capture(&mut frames, &local, 4, 1, &mut latch);
     let cfg = Configuration::t8112(&descriptor(4)).unwrap();
@@ -738,7 +738,7 @@ fn captured_identity_is_retained_across_busy_and_does_not_follow_new_observation
     assert_eq!(resources.calls.len(), 1);
 }
 #[test]
-fn source_configure_retains_registration_prefix_and_does_not_register_thresholds_alone() {
+fn source_configure_keeps_registration_prefix_and_does_not_register_thresholds_alone() {
     let (_, local, mut latch) = setup();
     let cfg = Configuration::t8112(&descriptor(4)).unwrap();
     let mut image = SoftwareImage::zeroed(&cfg);
@@ -819,7 +819,7 @@ fn source_configure_retains_registration_prefix_and_does_not_register_thresholds
 }
 
 #[test]
-fn actual_auxiliary_callback_binds_same_control_and_preserves_busy_reset_and_replay() {
+fn auxiliary_callback_binds_same_control_and_preserves_busy_reset_and_replay() {
     use super::super::super::super::super::interrupts as irq;
     use alloc::boxed::Box;
     use core::cell::RefCell;

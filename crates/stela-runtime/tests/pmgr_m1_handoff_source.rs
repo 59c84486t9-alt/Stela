@@ -130,7 +130,7 @@ fn original_m1_table_covers_all_196_physical_records_without_initial_state_credi
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
-fn original_isp_has_actual_camera_dart_sensor_and_performance_requirements() {
+fn original_isp_has_camera_dart_sensor_and_performance_requirements() {
     let bytes = adt();
     let (records, physical) = inventory(&bytes);
     assert_eq!(physical[&0x28e5803a8], 0x125);

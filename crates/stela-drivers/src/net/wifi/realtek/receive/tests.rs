@@ -254,7 +254,7 @@ fn adverse_completion_errors_never_release_pins_or_claim_a_frame() {
     }
 }
 #[test]
-fn configuration_publish_unmap_and_callback_uncertainty_retain_actual_owner() {
+fn configuration_publish_unmap_and_callback_uncertainty_keep_owner() {
     let memory = Arc::new(Mutex::new(Model::default()));
     let device = Arc::new(Mutex::new(Device {
         fail_configure: true,

@@ -396,7 +396,7 @@ fn invalid_lengths_and_unsupported_old_reads_touch_neither_controller_nor_config
     assert_eq!(f.state.borrow().config_count, 0);
 }
 #[test]
-fn before_and_after_each_config_access_preserve_caller_outputs_and_actual_owners() {
+fn before_and_after_each_config_access_preserve_caller_outputs_and_owners() {
     for write in [false, true] {
         let total = if write { 5 } else { 2 };
         for index in 1..=total {
@@ -555,7 +555,7 @@ fn ordinary_smbus_read_is_published_only_after_the_configuration_guard() {
 }
 
 #[test]
-fn actual_function_provider_uses_narrow_writes_and_retains_its_root_guard() {
+fn function_provider_uses_narrow_writes_and_keeps_its_root_guard() {
     struct NativeSpace {
         id: Rc<Cell<u32>>,
         byte: Rc<Cell<u8>>,
@@ -621,7 +621,7 @@ fn actual_function_provider_uses_narrow_writes_and_retains_its_root_guard() {
     assert_eq!(drops.get(), 1);
 }
 #[test]
-fn invalid_composite_claim_returns_actual_host_and_configuration_without_writes() {
+fn invalid_composite_claim_returns_host_and_configuration_without_writes() {
     let f = fixture(0x7e22, false);
     let (host, mut cfg) = f.host.release().ok().unwrap();
     cfg.device = 0x24d3;

@@ -55,7 +55,7 @@ mod identification {
     }
 
     #[test]
-    fn retains_same_snapshot_and_keeps_legacy_constructor_unqualified() {
+    fn keeps_same_snapshot_and_keeps_legacy_constructor_unqualified() {
         let domain = domain();
         let identification = snapshot(&ids());
         let controls = FixedProcessMemoryControls::new_with_identification(
@@ -762,7 +762,7 @@ fn source_renewal_rejects_equal_looking_other_domain_without_replacing_old_witne
 }
 
 #[test]
-fn actual_mapping_publication_invalidates_same_domain_source_until_explicit_renewal() {
+fn mapping_publication_invalidates_same_domain_source_until_explicit_renewal() {
     use crate::memory::domain::MappingAttributes;
     use crate::memory::{
         AllocateDataRequest, DataInheritance, DataPermissions, DataPlacement, OwnedMemory,

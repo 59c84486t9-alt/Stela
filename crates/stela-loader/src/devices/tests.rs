@@ -542,7 +542,7 @@ fn original_m4_imac_unused_spmi_alternatives_are_all_retired() {
 }
 
 #[test]
-fn role_claim_retains_only_its_nub_and_referenced_provider() {
+fn role_claim_keeps_only_its_nub_and_referenced_provider() {
     let mut ans = node(
         "ans",
         Some(board::ASC.as_bytes()),
@@ -737,7 +737,7 @@ fn a_visible_gpu_gets_the_handed_off_ttbat_published() {
 }
 
 #[test]
-fn spi_requires_a_nor_slave_and_retains_its_gpio_provider() {
+fn spi_requires_a_nor_slave_and_keeps_its_gpio_provider() {
     let mut gpio = node("gpio", Some(board::GPIO.as_bytes()), vec![]);
     gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())
         .unwrap();
@@ -783,7 +783,7 @@ fn spi_requires_a_nor_slave_and_retains_its_gpio_provider() {
 }
 
 #[test]
-fn a_visible_client_retains_the_gpio_bank_its_interrupt_names() {
+fn a_visible_client_keeps_the_gpio_bank_its_interrupt_names() {
     let mut gpio = node("gpio", Some(board::GPIO.as_bytes()), vec![]);
     gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())
         .unwrap();
@@ -1025,7 +1025,7 @@ fn original_j314s_preparation_keeps_the_complete_external_display_graph() {
 }
 
 #[test]
-fn native_legacy_dart_preparation_preserves_qualified_mapper_dependencies_only() {
+fn native_legacy_dart_preparation_preserves_checked_mapper_dependencies_only() {
     for compatible in [b"dart,t8020\0".as_slice(), b"dart,t6000\0"] {
         let mut engine = aes(b"aes,s8000\0");
         engine

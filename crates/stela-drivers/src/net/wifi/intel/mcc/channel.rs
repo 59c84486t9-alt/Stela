@@ -213,7 +213,7 @@ mod tests {
         }
     }
     #[test]
-    fn channel_inventory_boundaries_and_no_fabricated_missing_channels() {
+    fn channel_inventory_boundaries_and_no_invented_missing_channels() {
         for (inventory, last) in [
             (Inventory::Extended, (50, Band::Ghz5, 181, 5905)),
             (Inventory::UltraHighBand, (109, Band::Ghz6, 233, 7115)),

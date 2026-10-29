@@ -361,7 +361,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn actual_causes_preserve_unowned_status_and_queue_identity_without_completion_claims() {
+    fn causes_preserve_unowned_status_and_queue_identity_without_completion_claims() {
         use super::super::transmit::Queue;
         for q in [
             Queue::Background,
@@ -420,7 +420,7 @@ mod tests {
         }
     }
     #[test]
-    fn every_uncertain_io_and_all_ones_read_retains_actual_owner() {
+    fn every_uncertain_io_and_all_ones_read_keeps_owner() {
         let normal = Arc::new(Mutex::new(Model::new(0)));
         cycle(&normal).unwrap();
         let calls = normal.lock().unwrap().calls;

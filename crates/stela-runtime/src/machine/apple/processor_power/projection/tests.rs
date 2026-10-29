@@ -321,7 +321,7 @@ fn stale_model_reserved_fields_and_unassigned_changes_leave_all_words_unchanged(
 
 #[test]
 #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
-fn original_j473_first_p_binds_only_actual_core_and_complex_from_placed_state() {
+fn original_j473_first_p_binds_only_core_and_complex_from_placed_state() {
     use sha2::{Digest, Sha256};
     use stela_soc_data::board::assigned::{BspSource, SourceIdentity};
     let directory = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap());

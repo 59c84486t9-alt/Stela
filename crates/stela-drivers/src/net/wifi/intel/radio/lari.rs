@@ -392,7 +392,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_select_source_lari6_and_lari8_with_frozen_extension() {
+    fn images_select_source_lari6_and_lari8_with_frozen_extension() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
             let b =

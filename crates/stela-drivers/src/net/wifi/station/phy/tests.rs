@@ -246,7 +246,7 @@ fn asymmetric_directional_maps_do_not_transpose_or_invent_streams() {
 }
 
 #[test]
-fn ht_asymmetric_stbc_stream_limits_and_mcs32_width_have_actual_effect() {
+fn ht_asymmetric_stbc_stream_limits_and_mcs32_width_have_effect() {
     let (mut local, mut peer) = pair(Band::Ghz5, 12, false);
     local.ht.as_mut().unwrap().capability &= !0x380;
     local.ht.as_mut().unwrap().tx_params = 3; // Explicit one TX stream.
@@ -347,7 +347,7 @@ fn capability_sizing_and_duplicates_never_accept_partial_fields() {
 }
 
 #[test]
-fn deferred_eht_layout_uses_actual_he_and_role_not_ie_order() {
+fn deferred_eht_layout_uses_he_and_role_not_ie_order() {
     let h = he(0);
     let e_sta = eht(0, Role::Station, false);
     let e_ap = eht(0, Role::AccessPoint, false);
@@ -570,7 +570,7 @@ fn complete_unchanged_linux_eht_station_union_oracle() {
 }
 
 #[test]
-fn basic_eht_twenty_only_mapping_and_unsupported_width_skip_use_actual_local_union() {
+fn basic_eht_twenty_only_mapping_and_unsupported_width_skip_use_local_union() {
     let mut local = pair(Band::Ghz5, 0, false).0;
     let mut bytes = eht(0, Role::Station, false);
     bytes[11..].copy_from_slice(&[0x12, 0x23, 0x34, 0x45]);
@@ -656,7 +656,7 @@ fn opaque_multi_link_fragments_cannot_inherit_other_link_ie_fields() {
 }
 
 #[test]
-fn complete_local_he_source_words_must_match_transmitted_maps_without_gaining_authority() {
+fn complete_local_he_source_words_must_match_transmitted_maps_without_gaining_permission() {
     let (local, ap) = pair(Band::Ghz5, 12, false);
     let he = local.he().unwrap();
     let maps = [he.mcs_80, he.mcs_160.unwrap(), McsMaps { rx: 0, tx: 0 }];

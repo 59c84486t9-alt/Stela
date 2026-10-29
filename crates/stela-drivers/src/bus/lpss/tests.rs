@@ -292,7 +292,7 @@ fn native_i2c_unavailable_or_unrepresentable_clock_returns_untouched_original_re
 }
 
 #[test]
-fn concrete_native_registers_use_actual_owned_mapping_and_acknowledged_reset_release() {
+fn concrete_native_registers_use_owned_mapping_and_acknowledged_reset_release() {
     let (function, mapping, config_counts, bar_counts) = native_fixture();
     let physical = mapping.physical_span().unwrap().start();
     // SAFETY: stopped exclusively owned RAM fixture and its mapping.
@@ -320,7 +320,7 @@ fn concrete_native_registers_use_actual_owned_mapping_and_acknowledged_reset_rel
     release_native(retired.into_resources(), &config_counts, &bar_counts);
 }
 #[test]
-fn concrete_native_live_and_uncertain_child_owners_retain_original_platform_resources() {
+fn concrete_native_live_and_uncertain_child_owners_keep_original_platform_resources() {
     for stage in 0..4 {
         let (function, mapping, config_counts, bar_counts) = native_fixture();
         if stage >= 2 {
@@ -457,7 +457,7 @@ fn exact_nine_profiles_program_source_reset_and_full_physical_remap() {
     }
 }
 #[test]
-fn metadata_refusals_return_actual_unmodified_resources_without_register_writes() {
+fn metadata_refusals_return_unmodified_resources_without_register_writes() {
     for (device, base, caps) in [
         (0x9d5f, 0x8000_0000, 0),
         (0xa163, 0x8000_0000, 0),
@@ -477,7 +477,7 @@ fn metadata_refusals_return_actual_unmodified_resources_without_register_writes(
     }
 }
 #[test]
-fn every_access_fault_preserves_original_failure_and_actual_post_effect_owners() {
+fn every_access_fault_preserves_original_failure_and_post_effect_owners() {
     for call in 1..=10 {
         for after in [false, true] {
             let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
@@ -505,7 +505,7 @@ fn every_access_fault_preserves_original_failure_and_actual_post_effect_owners()
     }
 }
 #[test]
-fn ignored_program_and_retirement_writes_do_not_release_actual_owners() {
+fn ignored_program_and_retirement_writes_do_not_release_owners() {
     for offset in [RESET, REMAP_LOW, REMAP_HIGH] {
         let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
         h.borrow_mut().reject = Some(offset);
@@ -554,7 +554,7 @@ fn real_designware_child_drives_combined_pio_and_acknowledged_retirement() {
     assert_eq!(drops.get(), 1);
 }
 #[test]
-fn real_child_init_shutdown_and_live_drop_failures_retain_actual_platform_grants() {
+fn real_child_init_shutdown_and_live_drop_failures_keep_platform_grants() {
     for stage in 0..3 {
         let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
         let owner = Controller::initialize(registers).unwrap();

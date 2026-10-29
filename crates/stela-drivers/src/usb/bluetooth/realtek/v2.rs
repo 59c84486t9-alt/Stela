@@ -233,7 +233,7 @@ mod tests {
         b
     }
     #[test]
-    fn complete_version_controls_unknown_sections_and_donor_reverse_ties_are_retained() {
+    fn complete_version_controls_unknown_sections_and_donor_reverse_ties_are_kept() {
         let b = image();
         let p = V2Patch::parse(&b, Project::Rtl8852Bu, 0, 0).unwrap();
         assert_eq!(p.metadata.version, [1, 2, 3, 4, 5, 6, 7, 8]);

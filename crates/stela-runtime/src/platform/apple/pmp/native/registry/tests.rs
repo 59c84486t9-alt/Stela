@@ -350,7 +350,7 @@ impl Callback<Backing> for NativeCallback {
     }
 }
 #[test]
-fn cold_init_retains_static_result_two_real_buffers_and_frees_only_temporary_after_reply() {
+fn cold_init_keeps_static_result_two_real_buffers_and_frees_only_temporary_after_reply() {
     let (owner, lab) = initialized();
     let l = lab.borrow();
     assert_eq!(owner.regions(), Some(&None));
@@ -364,7 +364,7 @@ fn cold_init_retains_static_result_two_real_buffers_and_frees_only_temporary_aft
     assert!(owner.initialized);
 }
 #[test]
-fn full_remote_add_set_remove_and_slot_reuse_keep_actual_descriptor_and_object_identity() {
+fn full_remote_add_set_remove_and_slot_reuse_keep_descriptor_and_object_identity() {
     let (mut owner, lab) = initialized();
     let entry = added(&mut owner, &lab, &[1, 2, 3, 4], None);
     let header = lab.borrow().headers[0];
@@ -405,7 +405,7 @@ fn full_remote_add_set_remove_and_slot_reuse_keep_actual_descriptor_and_object_i
     assert_eq!(lab.borrow().objects.len(), 2);
 }
 #[test]
-fn class4_callback_retains_actual_mapping_effect_and_runs_during_class3_wait() {
+fn class4_callback_keeps_mapping_effect_and_runs_during_class3_wait() {
     let (mut owner, lab) = initialized();
     let capture = Rc::new(RefCell::new(Capture {
         accepted: true,
@@ -475,7 +475,7 @@ fn class4_callback_retains_actual_mapping_effect_and_runs_during_class3_wait() {
     ));
 }
 #[test]
-fn actual_default_read_prefix_and_published_copy_retirement_never_replay() {
+fn default_read_prefix_and_published_copy_retirement_never_replay() {
     let (mut owner, lab) = initialized();
     owner.begin_add(configuration(1), &[], None).unwrap();
     loop {
@@ -626,7 +626,7 @@ fn local_remote_only_bounds_callback_refusal_and_owner_abandonment_preserve_reso
     assert_eq!(lab.borrow().objects.len(), count);
 }
 #[test]
-fn failed_admission_returns_actual_owned_client_instead_of_losing_resources() {
+fn failed_admission_returns_owned_client_instead_of_losing_resources() {
     let lab = Rc::new(RefCell::new(Lab::default()));
     let identity = Rc::new(());
     let alive = Rc::new(Cell::new(true));
@@ -658,7 +658,7 @@ fn publish_until(owner: &mut Owner<Backing>, lab: &Rc<RefCell<Lab>>, kind: u64) 
 }
 
 #[test]
-fn actual_ap_zero_results_and_bad_replies_preserve_source_cleanup_and_local_prefix() {
+fn ap_zero_results_and_bad_replies_preserve_source_cleanup_and_local_prefix() {
     let (mut owner, lab) = initialized();
     owner
         .begin_add(configuration(1), &[1, 2, 3, 4], None)
@@ -732,7 +732,7 @@ fn actual_ap_zero_results_and_bad_replies_preserve_source_cleanup_and_local_pref
 }
 
 #[test]
-fn actual_initialized_capacity_is_enforced_without_wire_truncation_or_an_extra_slot() {
+fn initialized_capacity_is_enforced_without_wire_truncation_or_an_extra_slot() {
     let (mut owner, lab) = initialized();
     let words = lab.borrow().wire.len();
     let mut last = None;

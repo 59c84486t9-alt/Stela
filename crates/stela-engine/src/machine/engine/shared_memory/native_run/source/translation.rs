@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn same_pc_prefix_rereads_canonical_bytes_with_one_actual_resolution() {
+    fn same_pc_prefix_rereads_canonical_bytes_with_one_resolution() {
         fixture(|memory, controls, ram| {
             let expected = [0xd503201fu32.to_le_bytes(), 0x14000001u32.to_le_bytes()].concat();
             // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays

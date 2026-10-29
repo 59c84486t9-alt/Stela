@@ -122,7 +122,7 @@ fn hci(sub: u16) -> Hci<Model> {
 }
 
 #[test]
-fn broadcom_diagnostic_controls_preserve_actual_wire_and_usb_record_boundaries() {
+fn broadcom_diagnostic_controls_preserve_wire_and_usb_record_boundaries() {
     for sub in [0x2105, 0x220e, 0x410e] {
         let mut owner = Session::start(hci(sub), &mut NoDma).unwrap();
         assert_eq!(owner.pair().input.address, 0x83);
@@ -182,7 +182,7 @@ fn broadcom_diagnostic_binding_and_initialization_refuse_before_native_start() {
 }
 
 #[test]
-fn broadcom_diagnostic_read_error_retains_prior_hci_and_enable_error_retains_delivery_history() {
+fn broadcom_diagnostic_read_error_keeps_prior_hci_and_enable_error_keeps_delivery_history() {
     let mut owner = Session::start(hci(0x220e), &mut NoDma).unwrap();
     owner.set_enabled(true).unwrap();
     owner.hci.io.fail_write = true;

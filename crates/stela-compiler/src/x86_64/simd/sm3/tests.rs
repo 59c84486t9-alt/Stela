@@ -89,7 +89,7 @@ fn vector(words: [u32; 4]) -> [u64; 2] {
 }
 
 #[test]
-fn actual_baseline_recipes_match_lane_model_under_all_source_alias_partitions() {
+fn baseline_recipes_match_lane_model_under_all_source_alias_partitions() {
     let mut cases = 0;
     let mut random = 0x6a09e667f3bcc908_u64;
     // Restricted-growth tuples enumerate all15 equality partitions of four

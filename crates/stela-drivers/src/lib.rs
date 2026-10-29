@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_deadline_retains_complete_interval_across_raw_counter_rollover() {
+    fn clock_deadline_keeps_complete_interval_across_raw_counter_rollover() {
         let clock = Clock {
             ticks_per_microsecond: 3,
         };
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_delay_uses_actual_shared_loop_without_truncation_or_wrap_hang() {
+    fn clock_delay_uses_shared_loop_without_truncation_or_wrap_hang() {
         let clock = Clock {
             ticks_per_microsecond: 3,
         };

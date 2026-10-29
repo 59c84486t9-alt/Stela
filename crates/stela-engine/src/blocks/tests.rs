@@ -513,7 +513,7 @@ mod resident {
     }
 
     #[test]
-    fn resident_budget_counts_original_blocks_and_prioritizes_actual_edge() -> Result<()> {
+    fn resident_budget_counts_original_blocks_and_prioritizes_edge() -> Result<()> {
         for (subtract, upper) in [(SUBS_X0_ONE, 0), (SUBS_W0_ONE, 0x1234_5678_0000_0000)] {
             for count in 1..=5 {
                 for budget in 0..=7 {

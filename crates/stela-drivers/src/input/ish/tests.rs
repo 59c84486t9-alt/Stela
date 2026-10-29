@@ -798,7 +798,7 @@ fn retained(f: &Fixture) {
 }
 
 #[test]
-fn actual_owned_native_irq_firmware_discovery_fragmented_descriptors_tx_controls_and_input() {
+fn owned_native_irq_firmware_discovery_fragmented_descriptors_tx_controls_and_input() {
     let mut f = running();
     assert!(f.driver.irq_handled().unwrap() > 0);
     assert!(f.peer.callbacks.load(Ordering::Relaxed) > 0);
@@ -860,8 +860,7 @@ fn native_mixed_unsolicited_input_before_feature_response_keeps_receive_credit_a
     retained(&f);
 }
 #[test]
-fn native_actual_aggregate_byte_cursor_accepts_publish_response_bits_and_preserves_total_metadata()
-{
+fn native_aggregate_byte_cursor_accepts_publish_response_bits_and_preserves_total_metadata() {
     let mut f = running();
     let mut b = vec![0x34, 0x12, 2, 0x55];
     for command in [5, 0x85] {
@@ -888,7 +887,7 @@ fn native_first_irq_enable_handles_pending_firmware_reset_without_false_readback
     retained(&f);
 }
 #[test]
-fn native_every_actual_rearm_register_boundary_preserves_pending_input_and_masks_callback() {
+fn native_every_rearm_register_boundary_preserves_pending_input_and_masks_callback() {
     let mut baseline = running();
     let start = baseline.peer.state.lock().unwrap().events.len();
     baseline.driver.service().unwrap();
@@ -914,7 +913,7 @@ fn native_every_actual_rearm_register_boundary_preserves_pending_input_and_masks
     }
 }
 #[test]
-fn native_missing_irq_delivery_is_not_qualified_by_successful_mailbox_polling() {
+fn native_missing_irq_delivery_is_not_checked_by_successful_mailbox_polling() {
     let mut f = prepared();
     f.peer.state.lock().unwrap().no_delivery = true;
     assert_eq!(
@@ -927,7 +926,7 @@ fn native_missing_irq_delivery_is_not_qualified_by_successful_mailbox_polling() 
     retained(&f);
 }
 #[test]
-fn actual_profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
+fn profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
     for variant in 0..5 {
         let (mut i, peer, _, _) = inputs();
         match variant {
@@ -964,7 +963,7 @@ fn actual_profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dm
     }
 }
 #[test]
-fn native_wrong_guid_properties_stale_reset_duplicate_credit_and_unaddressable_ids_retain_epoch() {
+fn native_wrong_guid_properties_stale_reset_duplicate_credit_and_unaddressable_ids_keep_epoch() {
     for fault in 0..6 {
         let mut f = prepared();
         {
@@ -1066,7 +1065,7 @@ fn native_corrupt_aggregate_nested_length_and_unsolicited_dma_are_terminal_witho
     }
 }
 #[test]
-fn native_acknowledged_stop_and_domain_failure_keep_original_armed_msi_epoch_retained() {
+fn native_acknowledged_stop_and_domain_failure_keep_original_armed_msi_epoch_kept() {
     for failure in 0..3 {
         let mut f = running();
         {

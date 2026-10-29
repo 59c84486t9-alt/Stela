@@ -153,7 +153,7 @@ fn missing_invariant_or_real_control_observation_never_becomes_a_policy_shortcut
     assert_eq!(counter_policy(&snapshot, 1), Err(Error::MalformedCapture));
 }
 #[test]
-fn pc10_policy_requires_actual_package_observation_and_rejects_enabled_limit() {
+fn pc10_policy_requires_package_observation_and_rejects_enabled_limit() {
     let mut snapshot = fixture();
     assert_eq!(
         hpet_power_constraint(&snapshot),
@@ -303,7 +303,7 @@ fn disturbed_backwards_zero_and_ambiguous_counter_data_fail_explicitly() {
 }
 
 #[test]
-fn missing_declared_topology_never_fabricates_a_legacy_cpu_identity() {
+fn missing_declared_topology_never_invents_a_legacy_cpu_identity() {
     let mut snapshot = fixture();
     record(&mut snapshot, 0xb).leaf = 0x1234;
     assert_eq!(counter_policy(&snapshot, 1), Err(Error::MalformedCapture));

@@ -3,12 +3,12 @@
 use super::*;
 
 #[test]
-fn mcc_actual_query_bios_selection_and_response_never_echo_requested_country() {
+fn mcc_query_bios_selection_and_response_never_echo_requested_country() {
     exercise_mcc(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn mcc_actual_ax200_v5_response_is_retained_with_original_dma_epoch() {
+fn mcc_ax200_v5_response_is_kept_with_original_dma_epoch() {
     exercise_mcc(true);
 }
 fn exercise_mcc(actual: bool) {

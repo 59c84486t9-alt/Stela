@@ -1071,7 +1071,7 @@ fn owned_control(family: &'static Family, kind: u32) -> (State, Flat, u64) {
 }
 
 #[test]
-fn accepted_device_controls_retain_all_effects_count_and_retirement_on_every_family() {
+fn accepted_device_controls_keep_all_effects_count_and_retirement_on_every_family() {
     for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
         for kind in [
             7,
@@ -1274,7 +1274,7 @@ fn a_device_control_pre_effect_input_fault_accepts_no_entry() {
 }
 
 #[test]
-fn device_control_counter_read_and_write_have_separate_retained_phases() {
+fn device_control_counter_read_and_write_have_separate_kept_phases() {
     let (mut state, flat, count) = owned_control(&G14G, 0x27);
     let mut memory = WorkMemory {
         flat,
@@ -1564,7 +1564,7 @@ fn signal_scalar_crossing_a_uat_page_refuses_before_signal_effects() {
 }
 
 #[test]
-fn full_event_ring_retains_work_between_shared_signal_and_completion() {
+fn full_event_ring_keeps_work_between_shared_signal_and_completion() {
     use event::tests::{EVENT_STATE, entry};
     let (mut state, flat, master) = owned_signal(&G14G);
     let mut memory = WorkMemory {

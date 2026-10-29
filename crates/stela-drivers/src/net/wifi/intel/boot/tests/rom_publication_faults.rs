@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn ax210_every_launch_csr_fault_quarantines_actual_owner_after_publication() {
+fn ax210_every_launch_csr_fault_quarantines_owner_after_publication() {
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();

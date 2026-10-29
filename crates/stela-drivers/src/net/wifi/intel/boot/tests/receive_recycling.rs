@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn rx_recycling_publishes_initial_tail_and_sustains_actual_command_ring_wraps() {
+fn rx_recycling_publishes_initial_tail_and_sustains_command_ring_wraps() {
     exercise_rx_recycling(None);
 }
 
@@ -22,7 +22,7 @@ fn rx_recycling_unchanged_source_free_producer_and_vid_oracle() {
 }
 
 #[test]
-fn rx_recycling_waits_for_actual_target_slot_completion_when_payloads_complete_out_of_order() {
+fn rx_recycling_waits_for_target_slot_completion_when_payloads_complete_out_of_order() {
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

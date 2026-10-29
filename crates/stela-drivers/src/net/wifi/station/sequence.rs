@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn only_actual_accepted_removal_resets_retired_peer_software_counters() {
+    fn only_accepted_removal_resets_retired_peer_software_counters() {
         for outcome in [Completion::Accepted, Completion::Uncertain] {
             let (mut station, context) = associated();
             assert_eq!(station.allocate_qos_sequence(&context, 3), Ok(0));

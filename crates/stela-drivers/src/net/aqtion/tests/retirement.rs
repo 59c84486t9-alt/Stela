@@ -2,7 +2,7 @@
 //! Mapping-prefix retirement, never a caller-supplied stopped flag.
 use super::*;
 #[test]
-fn every_actual_unmap_failure_permanently_fences_rebuild_and_retries_original_retirement() {
+fn every_unmap_failure_permanently_fences_rebuild_and_retries_original_retirement() {
     for device in [0x07b1, 0x04c0] {
         for failed in 1..=4 {
             let (mut owner, peer, domain, dropped) = setup(device);
@@ -65,7 +65,7 @@ fn every_actual_unmap_failure_permanently_fences_rebuild_and_retries_original_re
     }
 }
 #[test]
-fn actual_retiring_suspended_owner_refuses_pm_resume_before_configuration_or_mmio() {
+fn retiring_suspended_owner_refuses_pm_resume_before_configuration_or_mmio() {
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();

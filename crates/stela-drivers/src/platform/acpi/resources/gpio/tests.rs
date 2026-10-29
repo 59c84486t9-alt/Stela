@@ -183,7 +183,7 @@ impl NativeController for Backend {
     }
 }
 #[test]
-fn actual_acpica_connection_nonzero_index_wide_reads_and_integer_only_writes() {
+fn acpica_connection_nonzero_index_wide_reads_and_integer_only_writes() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture());
     // SAFETY: authored OSL services and native singleton are serialized.
@@ -275,7 +275,7 @@ fn failed_first_request_is_not_replayed_and_claim_retires_after_handler_callback
     assert_eq!(Arc::strong_count(&model), 1);
 }
 #[test]
-fn actual_aei_method_resolution_follows_edge_level_then_evt_with_native_arguments() {
+fn aei_method_resolution_follows_edge_level_then_evt_with_native_arguments() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture());
     // SAFETY: provider and native singleton test lock remain held.
@@ -482,7 +482,7 @@ unsafe extern "C" fn refuse_once_before_wait(
 }
 
 #[test]
-fn native_wait_refusal_is_retained_without_claims_or_invented_operation_error() {
+fn native_wait_refusal_is_kept_without_claims_or_invented_operation_error() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let mut provider = reduced_hardware_fixture(&fixture());
     *ORIGINAL_WAIT.lock().unwrap() = Some(provider.wait_semaphore);
@@ -520,7 +520,7 @@ fn native_wait_refusal_is_retained_without_claims_or_invented_operation_error() 
 struct NativePage(core::cell::UnsafeCell<[u8; 4096]>);
 
 #[test]
-fn actual_namespace_dependent_memory_cannot_construct_a_native_device() {
+fn namespace_dependent_memory_cannot_construct_a_native_device() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let mut resource = vec![0x31, 0, 0x86, 9, 0, 1];
     resource.extend_from_slice(&0xfd00_0100u32.to_le_bytes());
@@ -645,7 +645,7 @@ unsafe impl crate::bus::mmio::owned::MappingPlatform for NativeMappingModel {
 
 #[test]
 #[ignore = "oracle: fresh-process"]
-fn actual_native_amd_factory_opregion_retirement_and_fresh_rebind() {
+fn native_amd_factory_opregion_retirement_and_fresh_rebind() {
     use crate::bus::gpio::native::Device;
     use crate::bus::mmio::owned::{AddressSpace, Authority, Resource as MmioResource};
     let _serial = TEST_SERIAL.lock().unwrap();

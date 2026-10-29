@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn ah_accepts_all_retained_enables_without_fresh_status() {
+    fn ah_accepts_all_kept_enables_without_fresh_status() {
         for format in FORMATS {
             for kind in KINDS {
                 for enabled in [

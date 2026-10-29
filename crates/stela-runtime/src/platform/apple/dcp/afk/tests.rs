@@ -472,7 +472,7 @@ fn variable_frames_wrap_and_credit_retries_never_reexecute_the_command() {
 }
 
 #[test]
-fn large_outbound_messages_split_retain_order_and_keep_the_total_length() {
+fn large_outbound_messages_split_keep_order_and_keep_the_total_length() {
     let mut memory = Memory::default();
     let mut afk = started(&mut memory);
     let bytes: Vec<_> = (0..20_000).map(|index| (index % 251) as u8).collect();
@@ -519,7 +519,7 @@ fn large_outbound_messages_split_retain_order_and_keep_the_total_length() {
 }
 
 #[test]
-fn a_retained_assembly_is_ram_and_survives_transport_pause() {
+fn a_kept_assembly_is_ram_and_survives_transport_pause() {
     let mut memory = Memory::default();
     let (mut afk, calls) = service(&mut memory);
     let packet = command_entry(7, b"data");

@@ -509,7 +509,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn patch_and_ram_retain_endianness_security_and_non_download_regions() {
+    fn patch_and_ram_keep_endianness_security_and_non_download_regions() {
         let p = patch_bytes();
         let parsed = Patch::parse(&p).unwrap();
         assert_eq!(parsed.regions()[0].mode, 0x8000_000f);
@@ -578,7 +578,7 @@ pub(crate) mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
-    fn actual_pinned_images_preserve_all_regions_and_release_information() {
+    fn pinned_images_preserve_all_regions_and_release_information() {
         extern crate std;
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
         for (chip, patch_count, ram_count, patch_hash, ram_hash) in [

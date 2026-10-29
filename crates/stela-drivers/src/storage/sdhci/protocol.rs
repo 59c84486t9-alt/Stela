@@ -190,7 +190,7 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn actual_crc_and_failed_reset_retain_primary_and_both_cleanup_outcomes() {
+    fn crc_and_failed_reset_keep_primary_and_both_cleanup_outcomes() {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: backing and the model remain alive through every alias and

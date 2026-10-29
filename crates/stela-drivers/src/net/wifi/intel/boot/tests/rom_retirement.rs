@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn actual_rom_pointer_csr_alive_restock_and_dma_alive_are_distinct_owned_states() {
+fn rom_pointer_csr_alive_restock_and_dma_alive_are_distinct_owned_states() {
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let source = Source::default();
@@ -170,7 +170,7 @@ fn duplicate_unsubmitted_wrong_queue_failed_alive_and_bad_producer_never_release
 }
 
 #[test]
-fn failed_stop_ack_and_partial_invalidation_retain_actual_owner_and_allow_retry() {
+fn failed_stop_ack_and_partial_invalidation_keep_owner_and_allow_retry() {
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     for fail in 0..42 {

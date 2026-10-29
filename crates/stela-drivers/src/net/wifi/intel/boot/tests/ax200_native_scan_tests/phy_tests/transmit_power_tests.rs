@@ -124,7 +124,7 @@ fn bounded_power_uses_source_schema_country_ceiling_real_dma_and_reclaim() {
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_power5_schema_does_not_bypass_mld_mac_requirement() {
+fn ax200_power5_schema_does_not_bypass_mld_mac_requirement() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =

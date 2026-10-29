@@ -396,7 +396,7 @@ mod tests {
         assert!(p.read(EVENTS + 4, Width::Word, &mut a).is_err());
     }
     #[test]
-    fn lifecycle_retains_electrical_state_but_separates_clock_quiesce_and_reset() {
+    fn lifecycle_keeps_electrical_state_but_separates_clock_quiesce_and_reset() {
         let mut p = AtcPhy::new();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);

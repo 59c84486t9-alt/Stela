@@ -106,7 +106,7 @@ fn finish_stop(driver: &mut ManagedClient<Bar, Q, NativeGuard>, model: &Model) {
     assert_eq!(driver.phase(), Phase::Stopped);
 }
 #[test]
-fn managed_scan_uses_actual_policy_revokes_real_scan_then_stops_and_releases() {
+fn managed_scan_uses_policy_revokes_real_scan_then_stops_and_releases() {
     let (client, model) = setup();
     let mut driver = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
     let count = model.response.lock().unwrap().client_commands.len();
@@ -199,7 +199,7 @@ fn awaiting(
     (driver, model)
 }
 #[test]
-fn managed_modern_ap_observation_configures_actual_eht_keys_qos_and_revocation() {
+fn managed_modern_ap_observation_configures_eht_keys_qos_and_revocation() {
     let (client, model) = setup_modern();
     let (mut driver, model) = awaiting(client, model, country());
     driver.configure_modern(105).unwrap();
@@ -236,7 +236,7 @@ fn managed_modern_ap_observation_configures_actual_eht_keys_qos_and_revocation()
     assert!(model.memory.lock().unwrap().mappings.is_empty());
 }
 #[test]
-fn actual_source_hardware_footprint_and_country_width_refuse_before_configuration() {
+fn source_hardware_footprint_and_country_width_refuse_before_configuration() {
     for hardware in [true, false] {
         let (client, model) = if hardware { setup() } else { setup_modern() };
         let country = if hardware {
@@ -270,7 +270,7 @@ fn actual_source_hardware_footprint_and_country_width_refuse_before_configuratio
     }
 }
 #[test]
-fn unequal_actual_wide_power_rows_refuse_split_eirp_rules_before_configuration() {
+fn unequal_wide_power_rows_refuse_split_eirp_rules_before_configuration() {
     let (client, model) = setup_modern_power(true);
     let original = fixture();
     let mut b = vec![0; 128];
@@ -310,7 +310,7 @@ fn unequal_actual_wide_power_rows_refuse_split_eirp_rules_before_configuration()
     finish_stop(&mut driver, &model);
 }
 #[test]
-fn actual_restricted_edca_publication_waits_for_ack_and_preserves_ap_metadata() {
+fn restricted_edca_publication_waits_for_ack_and_preserves_ap_metadata() {
     for accepted in [true, false] {
         let (client, model) = setup_modern();
         let mut b = fixture();

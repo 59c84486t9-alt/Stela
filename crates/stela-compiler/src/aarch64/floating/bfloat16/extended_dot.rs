@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn enhanced_mode_forces_default_nans_and_suppresses_retained_enables() {
+    fn enhanced_mode_forces_default_nans_and_suppresses_kept_enables() {
         for ah in [0, FPCR_AH] {
             let expected_nan = 0x7fc0_0000 | if ah == 0 { 0 } else { SINGLE_SIGN };
             for left in [

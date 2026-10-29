@@ -156,7 +156,7 @@ fn unbound_mac_power_filter_and_remove_use_original_owner_and_real_ack_reclaim()
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_mld_image_refuses_legacy_mac_before_effects() {
+fn ax200_mld_image_refuses_legacy_mac_before_effects() {
     exercise(true);
 }
 fn exercise(actual: bool) {

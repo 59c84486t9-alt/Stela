@@ -1014,7 +1014,7 @@ fn native_poison_preflight_preserves_all_buffers() {
     }
 }
 #[test]
-fn retained_reader_discovers_inserted_media_and_never_revives_removed_aliases() {
+fn kept_reader_discovers_inserted_media_and_never_revives_removed_aliases() {
     use super::super::media::{Owner, scan_bot};
     use crate::block::BlockDevice;
     let mut memory = vec![0u64; 32 * 1024];
@@ -1235,7 +1235,7 @@ fn unchanged_linux_cbw_builder_matches_all_luns_and_transfer_profiles() {
     }
 }
 #[test]
-fn discovery_reports_empty_slots_and_publishes_only_actual_ready_units() {
+fn discovery_reports_empty_slots_and_publishes_only_ready_units() {
     let mut memory = vec![0u64; 32 * 1024];
     let start = memory.as_mut_ptr() as u64;
     let mut dma = dma(&mut memory);
@@ -1303,7 +1303,7 @@ fn invalid_identification_capacity_and_mode_never_publish_a_block_device() {
     }
 }
 #[test]
-fn malformed_sense_never_fabricates_a_ready_unit() {
+fn malformed_sense_never_invents_a_ready_unit() {
     for bytes in [
         vec![],
         vec![0x70; 13],
@@ -1444,7 +1444,7 @@ fn recovery_waits_for_real_reset_settle_before_clears_and_next_lun() {
     );
 }
 #[test]
-fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
+fn source_bridge_profiles_change_wire_transfers_and_probes() {
     // Two kept 64-KiB-aligned owners plus wrappers can require
     // 262207 bytes from an arbitrary base, exceeding a 256-KiB fixture.
     let mut memory = vec![0u64; 33 * 1024];
@@ -1514,7 +1514,7 @@ fn source_residue_learning_skipped_data_and_chained_csw_retry_use_real_status() 
 }
 
 #[test]
-fn metadata_warmup_limits_and_last_sector_split_reach_actual_block_commands() {
+fn metadata_warmup_limits_and_last_sector_split_reach_block_commands() {
     use crate::block::BlockDevice;
     let mut memory = vec![0u64; 32 * 1024];
     let start = memory.as_mut_ptr() as u64;

@@ -566,7 +566,7 @@ mod tests {
         r.step(&mut Access::new(0, 7, &mut latch))
     }
     #[test]
-    fn shared_work_pending_before_registration_is_one_actual_source_cell() {
+    fn shared_work_pending_before_registration_is_one_source_cell() {
         let runtime = Runtime::new();
         let count = Rc::new(Cell::new(0));
         let work = runtime.bind_work(15, Count(count.clone())).unwrap();

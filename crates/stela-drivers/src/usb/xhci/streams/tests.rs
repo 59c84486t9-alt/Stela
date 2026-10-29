@@ -536,7 +536,7 @@ fn retired_device_stream_ticket_is_pure_before_readiness_and_preserves_current_d
 }
 
 #[test]
-fn primary_arrays_match_actual_limits_and_keep_zero_unused_contexts() {
+fn primary_arrays_match_limits_and_keep_zero_unused_contexts() {
     let endpoints = [endpoint(0x81, 4), endpoint(2, 3), endpoint(0x83, 0)];
     for maximum in [4, 8, 16, 65536] {
         for requested in [1, 2, 3, 4, 7, 8, 9, 65535] {
@@ -645,7 +645,7 @@ fn real_contexts_independent_dma_completions_and_stream_rings_wrap() {
 }
 
 #[test]
-fn actual_ordinary_and_stream_submissions_reject_high_payloads_before_ring_mutation() {
+fn ordinary_and_stream_submissions_reject_high_payloads_before_ring_mutation() {
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: the model keeps exclusive live backing for all DMA.
@@ -886,7 +886,7 @@ fn transferless_stream_errors_reset_the_endpoint_like_linux() {
 }
 
 #[test]
-fn partial_dequeue_failure_retains_every_stream_and_blocks_all_mutation() {
+fn partial_dequeue_failure_keeps_every_stream_and_blocks_all_mutation() {
     for fail_stream in 1..=3 {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -1233,7 +1233,7 @@ fn command_timeout_and_32bit_dma_refusal_keep_unacknowledged_streams_inaccessibl
 }
 
 #[test]
-fn actual_pci_identity_binds_exact_stream_quirks_without_writes() {
+fn pci_identity_binds_exact_stream_quirks_without_writes() {
     use crate::bus::pci::Address;
     struct Config {
         id: u32,

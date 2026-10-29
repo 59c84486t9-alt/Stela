@@ -282,7 +282,7 @@ fn drive(
     panic!("actual DROM sequence did not complete")
 }
 #[test]
-fn actual_drom_frames_probe_chunks_crc_ports_names_and_original_owner() {
+fn drom_frames_probe_chunks_crc_ports_names_and_original_owner() {
     for version in [1, 3] {
         for fallback in [false, true] {
             let f = fixture();
@@ -612,7 +612,7 @@ fn native_drom_clock_admission_precedes_uid_or_any_router_operation() {
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_DROM_ORACLE"]
-fn unchanged_linux_drom_acquisition_crc_and_port_metadata_match_actual_native_frames() {
+fn unchanged_linux_drom_acquisition_crc_and_port_metadata_match_native_frames() {
     extern crate std;
     let trace = std::fs::read_to_string(
         std::env::var("STELA_THUNDERBOLT_DROM_ORACLE").expect("set DROM trace"),

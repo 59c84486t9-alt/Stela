@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn h_phy_adc_bias_sentinel_rlen_and_masks_use_actual_calibration_values() {
+fn h_phy_adc_bias_sentinel_rlen_and_masks_use_calibration_values() {
     for xid in [0x541, 0x6c0] {
         let detected = revision::detect(xid << 20).unwrap();
         assert_eq!(detected.version, 46);

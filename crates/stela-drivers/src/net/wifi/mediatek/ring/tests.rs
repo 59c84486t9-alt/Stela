@@ -218,7 +218,7 @@ pub(crate) fn device_complete_one(state: &Arc<Mutex<State>>) {
     s.index = (s.index + 1) % s.count;
 }
 #[test]
-fn actual_iova_payload_and_dma_index_ownership_survive_many_ring_wraps() {
+fn iova_payload_and_dma_index_ownership_survive_many_ring_wraps() {
     let (mut ring, state) = setup(8);
     for i in 0..70u64 {
         let bytes = vec![i as u8; 4096 - i as usize];
@@ -394,7 +394,7 @@ fn partial_unmap_failure_can_finish_after_acknowledged_quiescence() {
     );
 }
 #[test]
-fn uncertain_configuration_retains_only_the_published_descriptor_mapping() {
+fn uncertain_configuration_keeps_only_the_published_descriptor_mapping() {
     let state = Arc::new(Mutex::new(State {
         fail_configure: true,
         ..State::default()

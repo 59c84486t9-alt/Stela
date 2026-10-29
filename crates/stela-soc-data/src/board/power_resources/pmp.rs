@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn source_inventory_retains_many_to_one_virtual_unmapped_and_die_members() {
+    fn source_inventory_keeps_many_to_one_virtual_unmapped_and_die_members() {
         let bytes = fixture();
         let root = Node::root(&bytes).unwrap();
         let states = states(&root);

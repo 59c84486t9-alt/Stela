@@ -27,7 +27,7 @@ fn lifecycle(uart: &mut S5lUart<Console>, state: LifecycleState, latch: &mut Int
 }
 
 #[test]
-fn retained_pauses_preserve_fifo_and_irq_without_transmitting_while_gated() {
+fn kept_pauses_preserve_fifo_and_irq_without_transmitting_while_gated() {
     let mut uart = uart();
     let mut latch = InterruptLatch::new();
     write(&mut uart, &mut latch, UCON, 5 | UCON_TXTHRESH_ENABLE);

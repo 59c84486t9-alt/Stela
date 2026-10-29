@@ -310,7 +310,7 @@ fn llb() -> Vec<u8> {
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_ADT, STELA_TEST_PMGR_LLB"]
-fn original_llb_reconfiguration_programs_retain_the_complete_physical_inventory() {
+fn original_llb_reconfiguration_programs_keep_the_complete_physical_inventory() {
     use std::collections::BTreeSet;
     let bytes = llb();
     let physical = original_physical_ps();
@@ -693,7 +693,7 @@ fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_LLB"]
-fn original_llb_native_emission_retains_packing_fetches_and_termination_limits() {
+fn original_llb_native_emission_keeps_packing_fetches_and_termination_limits() {
     let bytes = llb();
     for (start, end, digest) in [
         (
@@ -1266,7 +1266,7 @@ fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_LLB"]
-fn original_llb_group_table_publication_retains_actual_metadata_and_pointer_widths() {
+fn original_llb_group_table_publication_keeps_metadata_and_pointer_widths() {
     let bytes = llb();
     for (start, end, digest) in [
         (

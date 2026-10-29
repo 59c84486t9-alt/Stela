@@ -379,7 +379,7 @@ fn checked_low128_structure_entry_preserves_ordered_fault_prefix_and_writeback()
 }
 
 #[test]
-fn checked_low128_literal_entry_requires_actual_context_and_preserves_full_fault_state() {
+fn checked_low128_literal_entry_requires_context_and_preserves_full_fault_state() {
     use crate::system::{
         fp_access::{self, NoSme},
         scalable_controls::fp::FpControlOwner,
@@ -768,7 +768,7 @@ fn native_ordinary_alias_writes_invalidate_reservations_even_after_aba() {
 }
 
 #[test]
-fn native_fault_retains_prior_effects_and_exact_source_without_later_effects() {
+fn native_fault_keeps_prior_effects_and_exact_source_without_later_effects() {
     let domain = domain();
     let mut worker = Worker::new(&domain);
     // str x1,[x0]; ldr x2,[x3]; ret

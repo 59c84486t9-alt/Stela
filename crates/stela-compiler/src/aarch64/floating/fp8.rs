@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn fused_dot_retains_sticky_below_quad_precision_and_suppresses_traps() {
+    fn fused_dot_keeps_sticky_below_quad_precision_and_suppresses_traps() {
         // Dot is exactly 1 + 2^-24, a Single midpoint. The minimum Single
         // addend moves it above the midpoint despite lying below Quad precision.
         for controls in [

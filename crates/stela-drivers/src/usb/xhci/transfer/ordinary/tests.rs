@@ -58,7 +58,7 @@ fn transaction_errors_soft_retry_in_place_like_linux() {
 }
 
 #[test]
-fn invalid_synchronous_budget_refuses_before_mmio_and_preserves_current_actual_dma_receipt() {
+fn invalid_synchronous_budget_refuses_before_mmio_and_preserves_current_dma_receipt() {
     struct NoAccess;
     impl Registers for NoAccess {
         fn read32(&mut self, _: usize) -> u32 {
@@ -123,7 +123,7 @@ fn invalid_synchronous_budget_refuses_before_mmio_and_preserves_current_actual_d
 }
 
 #[test]
-fn expired_valid_budget_retires_actual_late_td_and_never_credits_late_completion() {
+fn expired_valid_budget_retires_late_td_and_never_credits_late_completion() {
     struct Empty;
     impl Registers for Empty {
         fn read32(&mut self, _: usize) -> u32 {
@@ -429,7 +429,7 @@ fn caller_length_cannot_consume_or_change_the_submitted_completion() {
 }
 
 #[test]
-fn malformed_and_error_events_retain_records_until_real_cancel_ack() {
+fn malformed_and_error_events_keep_records_until_real_cancel_ack() {
     for (code, residual, parameter_offset, event_data) in [
         (SUCCESS, 65, 0, false),
         (SUCCESS, 0, 8, false),
@@ -490,7 +490,7 @@ fn malformed_and_error_events_retain_records_until_real_cancel_ack() {
 }
 
 #[test]
-fn actual_dma_payload_and_success_residual_complete_once() {
+fn dma_payload_and_success_residual_complete_once() {
     let mut backing = vec![0u64; 64 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: one range contains every DMA allocation.
@@ -752,7 +752,7 @@ fn synchronous_error_retires_real_dma_before_class_recovery_readiness() {
     }
 }
 #[test]
-fn cancellation_observes_actual_dma_completion_racing_stop_ack() {
+fn cancellation_observes_dma_completion_racing_stop_ack() {
     struct Empty;
     impl Registers for Empty {
         fn read32(&mut self, _: usize) -> u32 {

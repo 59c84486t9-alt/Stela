@@ -347,7 +347,7 @@ fn failed_quiescence_blocks_pci_power() {
 }
 
 #[test]
-fn failed_resume_retains_reservations() {
+fn failed_resume_keeps_reservations() {
     let mut fixture = Fixture::new();
     let (model, mut function, state) = hardware();
     let mut c = claim(&mut function, &state, &mut fixture);

@@ -28,7 +28,7 @@ fn native_clock(
     }
 }
 #[test]
-fn actual_invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
+fn invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
     for device in [0x07b1, 0x04c0] {
         for rate in [0, u64::MAX, (u64::MAX / 2) / 60_000_000 + 1] {
             let (owner, peer, domain, dropped) = setup(device);
@@ -62,7 +62,7 @@ fn actual_invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
     }
 }
 #[test]
-fn actual_retained_model_timer_preflight_preserves_running_and_suspended_epoch() {
+fn kept_model_timer_preflight_preserves_running_and_suspended_epoch() {
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
@@ -123,7 +123,7 @@ fn actual_retained_model_timer_preflight_preserves_running_and_suspended_epoch()
     }
 }
 #[test]
-fn every_actual_reset_wait_failure_preserves_issued_reset_or_releases_only_owned_locks() {
+fn every_reset_wait_failure_preserves_issued_reset_or_releases_only_owned_locks() {
     for (device, flb) in [(0x07b1, false), (0x07b1, true)] {
         let (_, base, _, _) = setup(device);
         if device == 0x07b1 {
@@ -155,7 +155,7 @@ fn every_actual_reset_wait_failure_preserves_issued_reset_or_releases_only_owned
     }
 }
 #[test]
-fn actual_wait_failure_acquiring_second_reset_semaphore_releases_only_first() {
+fn wait_failure_acquiring_second_reset_semaphore_releases_only_first() {
     let (_, peer, _, _) = setup(0x07b1);
     firmware4(&peer, false);
     peer.second_lock_busy.set(true);
@@ -171,7 +171,7 @@ fn actual_wait_failure_acquiring_second_reset_semaphore_releases_only_first() {
 }
 
 #[test]
-fn actual_antigua_reset_clock_failure_fences_retry_and_retains_dma() {
+fn antigua_reset_clock_failure_fences_retry_and_keeps_dma() {
     let (mut owner, peer, domain, dropped) = setup(0x04c0);
     peer.fault.set(Fault::Reset);
     peer.fail_wait.set(Some(1));
@@ -192,7 +192,7 @@ fn actual_antigua_reset_clock_failure_fences_retry_and_retains_dma() {
 }
 
 #[test]
-fn actual_pm_wait_failure_keeps_unknown_power_and_original_owners_until_d0_retry() {
+fn pm_wait_failure_keeps_unknown_power_and_original_owners_until_d0_retry() {
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();

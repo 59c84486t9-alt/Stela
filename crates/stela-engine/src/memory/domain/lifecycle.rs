@@ -309,7 +309,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retained_execution_membership_requires_same_domain_system_and_health() {
+    fn kept_execution_membership_requires_same_domain_system_and_health() {
         use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
         let system = MemorySystem::new(16, 8).unwrap();
         let domain = MemoryDomain::new_for_address_space(
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_thread_observation_pins_views_and_preserves_reservation_without_writers() {
+    fn thread_observation_pins_views_and_preserves_reservation_without_writers() {
         use crate::memory::binding::tests::{config, native, owned, published};
         use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
         let (mut owner, base) = owned();

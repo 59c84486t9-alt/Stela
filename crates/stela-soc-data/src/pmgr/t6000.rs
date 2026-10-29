@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_layout_rejects_missing_overflowing_and_ambiguous_actual_geometry() {
+    fn complete_layout_rejects_missing_overflowing_and_ambiguous_geometry() {
         let mut regs = registers();
         assert!(Layout::new(&regs, 48, 32).is_err());
         assert!(Layout::new(&regs[..240], 48, 193).is_err());

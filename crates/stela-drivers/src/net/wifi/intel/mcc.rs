@@ -472,7 +472,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-    fn actual_images_select_same_v4_layout_but_different_capability_semantics() {
+    fn images_select_same_v4_layout_but_different_capability_semantics() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for (family, version) in [(Family::Ax200, 5), (Family::Ax210, 6)] {
             let b =

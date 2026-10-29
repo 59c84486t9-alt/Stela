@@ -148,7 +148,7 @@ fn live_igtk_independent_peer_matches_nist_and_unchanged_source_mic() {
 }
 
 #[test]
-fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
+fn live_igtk_ack_keeps_both_index_windows_without_data_pn_reset() {
     let (mut mailbox, mut key, response, wm, drops, gtk) = fixture();
     let old = key.installed_igtk().unwrap();
     key.authorize(&key_packet(gtk, 9)).unwrap();
@@ -359,7 +359,7 @@ fn live_igtk_history_exhaustion_preserves_current_and_other_receive_windows() {
 }
 
 #[test]
-fn actual_negative_late_or_missing_live_igtk_ack_quarantines_every_key_owner() {
+fn negative_late_or_missing_live_igtk_ack_quarantines_every_key_owner() {
     for fault in 0..4 {
         let (mut mailbox, mut key, response, wm, drops, gtk) = fixture();
         let old = key.installed_igtk().unwrap();

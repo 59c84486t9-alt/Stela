@@ -250,7 +250,7 @@ fn mount_prepared(
 }
 
 #[test]
-fn display_update_view_uses_actual_prepared_storage_and_preserves_unknown_tail() {
+fn display_update_view_uses_prepared_storage_and_preserves_unknown_tail() {
     let (mut devices, owners, views) = placement();
     let (id, publication) = mount_prepared(&mut devices, prepared());
     let addresses = [
@@ -507,7 +507,7 @@ fn unrelated_display_windows_preserve_a_refused_ptd_owners_full_extent() {
 
 #[test]
 #[ignore = "oracle: STELA_T6000_MCC_DEVICE_TREE"]
-fn original_j314s_display_ptd_view_is_the_actual_pmgr_pmp_update_bank() {
+fn original_j314s_display_ptd_view_is_the_pmgr_pmp_update_bank() {
     use stela_contracts::adt::Node;
     let input = std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");
     let bytes = std::fs::read(&input).unwrap();

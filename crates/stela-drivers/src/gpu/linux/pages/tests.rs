@@ -114,12 +114,12 @@ unsafe impl Provider for PairModel {
 }
 
 #[test]
-fn multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations() {
+fn multiple_mapping_pins_keep_their_distinct_cpu_and_physical_relations() {
     if std::env::var_os("STELA_LINUX_EXTENTS_CHILD").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "gpu::linux::pages::tests::multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations",
+                "gpu::linux::pages::tests::multiple_mapping_pins_keep_their_distinct_cpu_and_physical_relations",
                 "--test-threads=1",
                 "--nocapture",
             ])
@@ -218,12 +218,12 @@ unsafe impl Provider for DeferredModel {
 }
 
 #[test]
-fn logical_c_free_and_busy_drop_retain_the_pin_until_its_owner_acknowledges() {
+fn logical_c_free_and_busy_drop_keep_the_pin_until_its_owner_acknowledges() {
     if std::env::var_os("STELA_LINUX_RETAINED_PAGE_CHILD").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "gpu::linux::pages::tests::logical_c_free_and_busy_drop_retain_the_pin_until_its_owner_acknowledges",
+                "gpu::linux::pages::tests::logical_c_free_and_busy_drop_keep_the_pin_until_its_owner_acknowledges",
                 "--test-threads=1",
                 "--nocapture",
             ])

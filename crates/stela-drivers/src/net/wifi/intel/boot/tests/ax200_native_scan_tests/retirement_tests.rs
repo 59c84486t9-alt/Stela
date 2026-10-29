@@ -406,7 +406,7 @@ fn stale_first_request_completion_after_retirement_cannot_complete_second_reques
     scan.stop().unwrap();
 }
 #[test]
-fn retirement_native_read_fault_is_sticky_and_retains_original_owners() {
+fn retirement_native_read_fault_is_sticky_and_keeps_original_owners() {
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -435,7 +435,7 @@ fn retirement_native_read_fault_is_sticky_and_retains_original_owners() {
     assert_eq!(native.os_drops.load(Ordering::Relaxed), 0);
 }
 #[test]
-fn abort_ack_and_actual_aborted_completion_retire_without_repairing_revoked_country() {
+fn abort_ack_and_aborted_completion_retire_without_repairing_revoked_country() {
     for revoked in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

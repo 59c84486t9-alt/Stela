@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn query_then_one_permanent_read_retains_exact_variable_attrs_length_and_digest() {
+    fn query_then_one_permanent_read_keeps_exact_variable_attrs_length_and_digest() {
         for variable in stela_drivers::net::wifi::intel::platform::VARIABLE_DESCRIPTORS
             .iter()
             .map(|descriptor| descriptor.variable)
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_empty_success_remains_present_without_allocation_or_retry() {
+    fn empty_success_remains_present_without_allocation_or_retry() {
         let calls = Cell::new(0);
         let capture = capture_with(
             Variable::Step,
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn only_not_found_is_absence_and_probe_failures_keep_actual_status_and_size() {
+    fn only_not_found_is_absence_and_probe_failures_keep_status_and_size() {
         for status in [
             Status::NOT_FOUND,
             Status::DEVICE_ERROR,
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_read_zero_success_and_allocation_failure_are_distinct() {
+    fn read_zero_success_and_allocation_failure_are_distinct() {
         let capture = capture_with(
             Variable::Step,
             |_, buffer| {

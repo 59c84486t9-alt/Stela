@@ -106,7 +106,7 @@ fn linear_conversion_moves_the_event_register_and_refuses_live_legacy_reservatio
     assert!(!producer.signal_local());
 }
 #[test]
-fn clrex_clears_the_real_local_reservation_and_retains_its_global_event_mark() {
+fn clrex_clears_the_real_local_reservation_and_keeps_its_global_event_mark() {
     let (mut machine, ram, events) = machine();
     machine
         .install_shared_memory_for_processors(Arc::clone(&ram), &events)
@@ -243,7 +243,7 @@ fn clock_domain(
     active
 }
 #[test]
-fn retained_pause_commits_the_same_monitor_before_controller_ack() {
+fn kept_pause_commits_the_same_monitor_before_controller_ack() {
     use super::super::ProcessorChange;
     let (mut machine, ram, events) = machine();
     machine

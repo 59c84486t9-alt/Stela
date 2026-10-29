@@ -245,7 +245,7 @@ fn dp(pin: Pin, status: u32, configuration: u32) -> Mode {
 }
 
 #[test]
-fn scu_actual_word_protocol_zero_padding_and_staged_responses_cover_all_lengths() {
+fn scu_word_protocol_zero_padding_and_staged_responses_cover_all_lengths() {
     for input_length in 0usize..=16 {
         for output_length in 0..=16 {
             let hardware = make_hardware();
@@ -342,7 +342,7 @@ fn scu_every_register_failure_before_or_after_effect_blocks_replay_and_partial_o
     }
 }
 #[test]
-fn native_scalar_mmio_checks_alignment_bounds_and_actual_words() {
+fn native_scalar_mmio_checks_alignment_bounds_and_words() {
     #[repr(C, align(4))]
     struct Region([u8; 0xa0]);
     let mut memory = Region([0; 0xa0]);
@@ -415,7 +415,7 @@ fn firmware_busy_retries_only_three_and_fatal_errors_quarantine() {
     assert_eq!(controller.last_reply().unwrap().response, [0, 3, 0, 0]);
 }
 #[test]
-fn inherited_actual_role_prevents_unknown_cache_from_hiding_a_required_swap() {
+fn inherited_role_prevents_unknown_cache_from_hiding_a_required_swap() {
     let (mut controller, hardware) = controller(IomKind::AlderLake);
     hardware.borrow_mut().iom[0] = (1 << 31) | (3 << 6);
     controller.set_orientation(0, Orientation::Normal).unwrap();

@@ -63,7 +63,7 @@ fn pending_descriptor(model: &Model) -> (u16, u16, Vec<u8>) {
 }
 
 #[test]
-fn owning_management_notices_preserve_the_65th_actual_ddone_and_consume_original_context() {
+fn owning_management_notices_preserve_the_65th_ddone_and_consume_original_context() {
     let (mut link, model, session, drops) = prepared();
     for pn in 1..=64 {
         incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, pn)), false);

@@ -422,7 +422,7 @@ fn write_enable_program_and_raw_command_share_the_original_controller_epoch() {
 }
 
 #[test]
-fn actual_fifo_boundary_and_lane_or_argument_refusals_never_truncate_or_touch_hardware() {
+fn fifo_boundary_and_lane_or_argument_refusals_never_truncate_or_touch_hardware() {
     let (mut controller, state) = fixture(Profile::V2);
     let mut output = [0; 63];
     let mut operation = Operation {
@@ -502,7 +502,7 @@ fn actual_fifo_boundary_and_lane_or_argument_refusals_never_truncate_or_touch_ha
 }
 
 #[test]
-fn every_uncertain_access_and_late_readback_retains_owners_and_unpublished_rx() {
+fn every_uncertain_access_and_late_readback_keeps_owners_and_unpublished_rx() {
     let (mut successful, state) = fixture(Profile::V2);
     read(&mut successful, &mut [0; 9]).unwrap();
     let accesses = state.borrow().accesses.len();

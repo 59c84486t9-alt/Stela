@@ -294,7 +294,7 @@ mod tests {
         }))
     }
     #[test]
-    fn actual_crs_subpage_reservation_pins_whole_owned_pages_through_last_mapping_resource() {
+    fn crs_subpage_reservation_pins_whole_owned_pages_through_last_mapping_resource() {
         let _serial = TEST_SERIAL.lock().unwrap();
         // SAFETY: OSL provider and singleton remain test-serialized.
         let session =

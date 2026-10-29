@@ -126,7 +126,7 @@ fn full_admission_policy<const N: usize>(
     assert_eq!(cpu.flags(), 0x202);
 }
 #[test]
-fn minimum_seventeen_and_actual_sixty_four_slot_queues_keep_all_roles_admissible() {
+fn minimum_seventeen_and_sixty_four_slot_queues_keep_all_roles_admissible() {
     full_admission::<17>(GpeQueueBudget::QUALIFICATION, 8);
     full_admission::<64>(GpeQueueBudget::QUALIFICATION, 55);
 }

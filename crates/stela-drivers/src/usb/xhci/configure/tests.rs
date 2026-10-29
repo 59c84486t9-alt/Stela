@@ -64,7 +64,7 @@ fn unacknowledged_configuration_never_activates_endpoints_or_reuses_poisoned_ep0
 }
 
 #[test]
-fn failed_endpoint_configuration_retains_rings_without_exposing_or_replacing_them() {
+fn failed_endpoint_configuration_keeps_rings_without_exposing_or_replacing_them() {
     for missing_completion in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;

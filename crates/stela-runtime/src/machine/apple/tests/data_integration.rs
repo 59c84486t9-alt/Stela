@@ -268,7 +268,7 @@ fn the_a18_pro_takes_the_m4_cpu_profile() {
 
 #[test]
 #[ignore = "oracle: STELA_TEST_SPMI_DT"]
-fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() {
+fn original_j314s_spmi_parent_checks_all_seven_independent_resource_owners() {
     use stela_engine::machine::Devices;
     let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
     assert_eq!(
@@ -432,7 +432,7 @@ fn original_j314s_watchdog_mounts_one_shared_panic_flags_word() {
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
-fn original_complete_descriptor_and_sparse_ownership_have_no_fabricated_state() {
+fn original_complete_descriptor_and_sparse_ownership_have_no_invented_state() {
     let data = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_ADT").unwrap()).unwrap();
     assert_eq!(
         stela_formats::sha256(&data),
@@ -639,7 +639,7 @@ fn chapel_places_a_shared_alarm_byte_and_explicit_off_to_wake_history() {
 }
 
 #[test]
-fn actual_aic_and_gpio_hooks_receive_only_their_qualified_supply() {
+fn aic_and_gpio_hooks_receive_only_their_checked_supply() {
     use crate::machine::apple::AppleDevices;
     use crate::machine::apple::Range;
     use stela_engine::machine::engine::Devices;

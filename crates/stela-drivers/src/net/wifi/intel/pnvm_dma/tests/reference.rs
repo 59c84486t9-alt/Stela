@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_pnvm_skus_preserve_payloads_in_both_layouts() {
+fn pnvm_skus_preserve_payloads_in_both_layouts() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =

@@ -283,7 +283,7 @@ mod tests {
         }
     }
     #[test]
-    fn actual_read_grants_require_full_unambiguous_readable_canonical_data_ram() {
+    fn read_grants_require_full_unambiguous_readable_canonical_data_ram() {
         assert_eq!(
             grant(
                 [span(0x1000, 1), span(0x2000, 1)].into_iter(),

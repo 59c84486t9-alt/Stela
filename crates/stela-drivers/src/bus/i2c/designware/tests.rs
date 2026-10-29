@@ -419,7 +419,7 @@ fn completed_access_deadlines_never_report_success_or_publish_later_wire_command
 }
 
 #[test]
-fn late_actual_abort_remains_the_original_failure_through_cleanup() {
+fn late_abort_remains_the_original_failure_through_cleanup() {
     for source in [ABRT_ADDRESS_NACK, ABRT_DATA_NACK, ABRT_ARBITRATION_LOST] {
         let (mut bus, state) = controller(2, 2);
         {

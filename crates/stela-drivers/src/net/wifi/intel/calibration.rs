@@ -222,7 +222,7 @@ mod tests {
     use resources::{Catalog, Provenance, Provider, Resource, Target};
     use sha2::{Digest, Sha256};
     #[test]
-    fn only_actual_native_errors_absence_or_short_packages_allow_acquisition_fallback() {
+    fn only_native_errors_absence_or_short_packages_allow_acquisition_fallback() {
         use platform::Stage;
         for observation in [
             Observation::NotCaptured,

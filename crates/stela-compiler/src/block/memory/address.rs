@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn unchecked_specialization_preserves_every_adapter_body_and_retains_new_requirements() {
+    fn unchecked_specialization_preserves_every_adapter_body_and_keeps_new_requirements() {
         let unchecked =
             EffectiveAddressChecks::new(AddressAddChecks::Disabled, AddressAddChecks::Disabled);
         for original in [

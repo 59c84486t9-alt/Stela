@@ -169,7 +169,7 @@ fn bracket(m: &mut Manager<Device, Queries>, c: ManagerContext) -> Request {
     r
 }
 #[test]
-fn complete_source_lists_retain_opaque_records_and_resolve_controller_offsets() {
+fn complete_source_lists_keep_opaque_records_and_resolve_controller_offsets() {
     let bytes = record(0x16, 17, 1);
     let c = configuration(&[3, 0, 3], &bytes, &[2, 3]);
     assert_eq!(c.controller_offsets(), &[4, 8, 4]);
@@ -224,7 +224,7 @@ fn controller_rmw_preserves_intervening_bits_and_repeated_source_indices() {
     assert!(m.capture_scratch().is_err());
 }
 #[test]
-fn uncertain_mmio_failure_keeps_actual_prefix_and_never_replays_the_write() {
+fn uncertain_mmio_failure_keeps_prefix_and_never_replays_the_write() {
     let (mut m, d, _) = manager(configuration(&[1, 0], &[], &[]));
     d.borrow_mut().fail_write = Some(2);
     let r = request(1, 1, None);
@@ -244,7 +244,7 @@ fn uncertain_mmio_failure_keeps_actual_prefix_and_never_replays_the_write() {
     assert_eq!(m.saved, [Some(0), None]);
 }
 #[test]
-fn actual_callback_pairs_use_current_packet_bucket_and_preserve_busy_and_refusal_prefixes() {
+fn callback_pairs_use_current_packet_bucket_and_preserve_busy_and_refusal_prefixes() {
     let rows = [record(0x16, 17, 0), record(4, 28, 16)].concat();
     let mut states = vec![4; 17];
     states[0] = 2;
@@ -301,7 +301,7 @@ fn actual_callback_pairs_use_current_packet_bucket_and_preserve_busy_and_refusal
     assert_eq!(m.buckets[0][0], [0, 0]);
 }
 #[test]
-fn foreign_changed_and_stale_manager_operations_cannot_replace_the_retained_cycle() {
+fn foreign_changed_and_stale_manager_operations_cannot_replace_the_kept_cycle() {
     let (mut m, _, q) = manager(configuration(&[], &record(2, 1, 0), &[2]));
     let c = context();
     let r = bracket(&mut m, c);
@@ -558,7 +558,7 @@ fn cache_fixture() -> CacheHarness {
     (native, frames, cache, manager)
 }
 #[test]
-fn provider_cache_uses_actual_before_capture_masks_and_preserves_newer_ptd_until_next_reset() {
+fn provider_cache_uses_before_capture_masks_and_preserves_newer_ptd_until_next_reset() {
     use {stela_contracts::bus::MmioDevice, stela_soc_data::ptd::UPDATE_OFFSET};
     let (native, mut frames, mut cache, mut manager) = cache_fixture();
     let masks = manager.read_masks();
@@ -724,7 +724,7 @@ fn provider_cache_rejects_unbound_and_other_recipient_masks_even_on_same_ptd() {
     assert_eq!(actual_manager.scratch(), [0; 32]);
 }
 #[test]
-fn provider_cache_refuses_another_native_capture_on_the_same_actual_ptd() {
+fn provider_cache_refuses_another_native_capture_on_the_same_ptd() {
     use crate::platform::apple::pmp::native;
     use native::{counters::Frames, power::DeviceTable};
     let (native, mut own_frames, mut cache, mut manager) = cache_fixture();

@@ -256,7 +256,7 @@ fn refused_final_admission_changes_no_descriptor_token_or_context_owner() {
     assert_eq!(model.drops.load(Ordering::Relaxed), 2);
 }
 #[test]
-fn actual_requester_reads_txwi_then_late_payload_until_both_completions_through_wrap_and_reuse() {
+fn requester_reads_txwi_then_late_payload_until_both_completions_through_wrap_and_reuse() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let (mut ring, mut model) = setup(chip, if chip == Chip::Mt7925 { 2048 } else { 8 });
         let baseline = model.memory.lock().unwrap().mappings.len();
@@ -431,7 +431,7 @@ fn ring_and_token_pressure_are_separate_and_bad_submissions_publish_nothing() {
     assert_eq!(model.drops.load(Ordering::Relaxed), 5);
 }
 #[test]
-fn uncertain_publication_drop_retains_real_queue_pins_and_context() {
+fn uncertain_publication_drop_keeps_real_queue_pins_and_context() {
     for failure in [false, true] {
         let chip = Chip::Mt7925;
         let (mut ring, mut model) = setup(chip, 8);
@@ -457,7 +457,7 @@ fn uncertain_publication_drop_retains_real_queue_pins_and_context() {
     }
 }
 #[test]
-fn unmap_and_completion_visibility_failures_retain_context_until_quiescent_retry() {
+fn unmap_and_completion_visibility_failures_keep_context_until_quiescent_retry() {
     for failure in 0..6 {
         let chip = Chip::Mt7925;
         let (mut ring, mut model) = setup(chip, 8);
@@ -535,7 +535,7 @@ fn every_submission_visibility_failure_distinguishes_unpublished_from_reachable_
 }
 
 #[test]
-fn invalid_actual_indices_and_uncertain_constructor_keep_actual_owner() {
+fn invalid_indices_and_uncertain_constructor_keep_owner() {
     for actual in [1, u16::MAX] {
         let (mut ring, mut model) = setup(Chip::Mt7921, 8);
         model.tx.lock().unwrap().index = actual;
@@ -567,7 +567,7 @@ fn invalid_actual_indices_and_uncertain_constructor_keep_actual_owner() {
 }
 
 #[test]
-fn failed_partial_quiescent_unmap_drop_retains_context_with_remaining_mappings() {
+fn failed_partial_quiescent_unmap_drop_keeps_context_with_remaining_mappings() {
     let (mut ring, mut model) = setup(Chip::Mt7925, 8);
     ring.submit(
         &Source,
@@ -597,7 +597,7 @@ fn failed_partial_quiescent_unmap_drop_retains_context_with_remaining_mappings()
 
 #[test]
 #[ignore = "oracle: STELA_MT792X_DATA_ORACLE"]
-fn unchanged_dma_add_buf_matches_actual_owned_queue_descriptors() {
+fn unchanged_dma_add_buf_matches_owned_queue_descriptors() {
     use std::{
         io::Write,
         process::{Command, Stdio},

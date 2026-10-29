@@ -337,7 +337,7 @@ fn canonical_channel_and_regulatory_checks_precede_start() {
 }
 
 #[test]
-fn success_requires_submission_terminal_event_and_actual_retirement() {
+fn success_requires_submission_terminal_event_and_retirement() {
     let mut scanner = Scanner::new(LOCAL).unwrap();
     let ticket = scanner.begin(request(), 0, 100, &mut policy()).unwrap();
     assert_eq!(
@@ -396,7 +396,7 @@ fn timeout_and_cancel_keep_resources_until_real_completion_and_drain() {
 }
 
 #[test]
-fn uncertain_retirement_requires_independent_qualified_reset() {
+fn uncertain_retirement_requires_independent_checked_reset() {
     let (mut scanner, ticket) = scanner();
     scanner.completed(ticket, Outcome::Aborted).unwrap();
     assert_eq!(scanner.retire(ticket, Retirement::Uncertain).unwrap(), None);
@@ -633,7 +633,7 @@ fn hidden_absent_and_malformed_ssids_are_not_conflated() {
 }
 
 #[test]
-fn advanced_observations_are_retained_without_advertising_probe_support() {
+fn advanced_observations_are_kept_without_advertising_probe_support() {
     let (scanner, ticket) = scanner();
     let ies = [255, 2, 107, 0x5a];
     assert_eq!(

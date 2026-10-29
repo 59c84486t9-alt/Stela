@@ -161,7 +161,7 @@ fn poll(controller: &mut Controller<'_, Pci, Model>, now: u64) -> Result<Option<
     controller.poll(now)
 }
 #[test]
-fn intel_integrated_actual_force_ready_ltr_reset_and_interrupt_register_effects() {
+fn intel_integrated_force_ready_ltr_reset_and_interrupt_register_effects() {
     let (mut pci, model) = fixture(0x8086, 0x9a1b, 0x0c0340, 0x40, 8);
     let state = pci.state.clone();
     // SAFETY: both surfaces are this same exclusively owned synthetic

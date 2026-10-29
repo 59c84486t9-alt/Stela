@@ -776,7 +776,7 @@ fn full_prepared_download_uses_real_tx_and_rx_iova_memory_for_every_chip() {
     }
 }
 #[test]
-fn actual_ack_does_not_release_tx_memory_before_hardware_dma_index() {
+fn ack_does_not_release_tx_memory_before_hardware_dma_index() {
     let (mut m, wm, _, _) = setup(Chip::Mt7925, true, false, 3);
     assert_eq!(m.command(0x10, &1u32.to_le_bytes()), Ok(2));
     assert_eq!(wm.lock().unwrap().index, 1);
@@ -799,7 +799,7 @@ fn actual_ack_does_not_release_tx_memory_before_hardware_dma_index() {
     unsafe { m.release_after_quiesce() }.unwrap();
 }
 #[test]
-fn host_scheduling_delay_preserves_real_deadline_but_expiry_keeps_actual_ownership() {
+fn host_scheduling_delay_preserves_real_deadline_but_expiry_keeps_ownership() {
     for expire in [false, true] {
         let response = Arc::new(Mutex::new(Response {
             pause_next_index_us: 10_000,
@@ -994,7 +994,7 @@ fn invalid_runtime_payload_is_usable_but_uncertain_publication_is_not() {
     unsafe { mailbox.release_after_quiesce() }.unwrap();
 }
 #[test]
-fn actual_asynchronous_events_transfer_for_dispatch_without_becoming_runtime_ack() {
+fn asynchronous_events_transfer_for_dispatch_without_becoming_runtime_ack() {
     use super::super::mcu::runtime::Command as Uni;
     let (mut mailbox, _, _, rx) = setup(Chip::Mt7925, true, false, 0);
     for n in 0..100u32 {
@@ -1066,7 +1066,7 @@ fn exact_firmware_target_is_checked_before_the_first_mcu_command() {
     assert!(fwdl.lock().unwrap().completed.is_empty());
 }
 #[test]
-fn actual_core_dump_event_is_retained_and_refuses_even_a_later_valid_ack() {
+fn core_dump_event_is_kept_and_refuses_even_a_later_valid_ack() {
     for (eid, option) in [(0xf0, 0), (0x0a, 6)] {
         let (mut m, _, _, rx) = setup(Chip::Mt7925, true, false, 0);
         let mut event = vec![0u8; 44];
@@ -1086,7 +1086,7 @@ fn actual_core_dump_event_is_retained_and_refuses_even_a_later_valid_ack() {
 }
 #[test]
 #[ignore = "oracle: STELA_MT792X_FIRMWARE, STELA_MT792X_ORACLE"]
-fn actual_pinned_download_crosses_owned_dma_and_actual_mcu_event_path() {
+fn pinned_download_crosses_owned_dma_and_mcu_event_path() {
     use super::super::download::Downloader;
     use sha2::{Digest, Sha256};
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
@@ -1268,7 +1268,7 @@ pub(crate) fn key_packet(
     .unwrap()
 }
 #[test]
-fn canonical_keys_require_actual_dma_ack_and_removed_users_drain() {
+fn canonical_keys_require_dma_ack_and_removed_users_drain() {
     use crate::net::wifi::security::{Cipher, Error as Sec, ReplaySeed};
     use key::{Error as KeyError, HardwareKey};
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
@@ -1360,7 +1360,7 @@ fn canonical_keys_require_actual_dma_ack_and_removed_users_drain() {
     }
 }
 #[test]
-fn uncertain_key_programming_retains_actual_resource_and_canonical_candidate() {
+fn uncertain_key_programming_keeps_resource_and_canonical_candidate() {
     use crate::net::wifi::security::{Cipher, ReplaySeed};
     use key::HardwareKey;
     for chip in [Chip::Mt7921, Chip::Mt7925] {
@@ -1483,7 +1483,7 @@ fn native_key_owner_refuses_cross_mailbox_and_stale_removal_receipts() {
     unsafe { b.release_after_quiesce() }.unwrap();
 }
 #[test]
-fn failed_removal_invalidates_and_retains_the_actual_station_until_real_drain() {
+fn failed_removal_invalidates_and_keeps_the_station_until_real_drain() {
     use crate::net::wifi::security::{Cipher, ReplaySeed};
     use key::HardwareKey;
     for chip in [Chip::Mt7921, Chip::Mt7925] {
@@ -1619,7 +1619,7 @@ fn native_initial_interface_requires_both_real_commands_and_later_user_drain() {
     }
 }
 #[test]
-fn partial_initial_registration_or_uncertain_publication_retains_actual_contexts() {
+fn partial_initial_registration_or_uncertain_publication_keeps_contexts() {
     use device::{Disposition, Interface};
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for case in 0..7 {
@@ -1691,7 +1691,7 @@ fn partial_initial_registration_or_uncertain_publication_retains_actual_contexts
     }
 }
 #[test]
-fn source_already_inactive_applies_only_to_actual_bss_deactivation() {
+fn source_already_inactive_applies_only_to_bss_deactivation() {
     use device::{Disposition, Error as Dev, Interface};
     for case in 0..4 {
         let response = Arc::new(Mutex::new(Response {
@@ -1759,7 +1759,7 @@ fn source_already_inactive_applies_only_to_actual_bss_deactivation() {
     }
 }
 #[test]
-fn initial_owner_private_receipt_and_actual_resource_survive_wrong_controller_and_drop() {
+fn initial_owner_private_receipt_and_resource_survive_wrong_controller_and_drop() {
     use device::{Error as Dev, Interface};
     let (mut a, awm, _, _) = setup(Chip::Mt7921, true, false, 0);
     let (mut b, bwm, _, _) = setup(Chip::Mt7921, true, false, 0);
@@ -1834,7 +1834,7 @@ pub(crate) fn capability_bytes(chip: Chip, n: u8) -> Vec<u8> {
     bytes
 }
 #[test]
-fn actual_capability_queries_share_runtime_sequence_and_bind_owned_raw_facts() {
+fn capability_queries_share_runtime_sequence_and_bind_owned_raw_facts() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let response = Arc::new(Mutex::new(Response {
             capability_payload: Some(capability_bytes(chip, 0)),
@@ -1875,7 +1875,7 @@ fn actual_capability_queries_share_runtime_sequence_and_bind_owned_raw_facts() {
     }
 }
 #[test]
-fn malformed_completed_capability_body_returns_actual_owned_frame_without_port_poison() {
+fn malformed_completed_capability_body_returns_owned_frame_without_port_poison() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for body in [vec![], vec![1, 0, 0, 0], vec![1, 4, 0, 0]] {
             let response = Arc::new(Mutex::new(Response {
@@ -1901,7 +1901,7 @@ fn malformed_completed_capability_body_returns_actual_owned_frame_without_port_p
     }
 }
 #[test]
-fn uncertain_capability_response_retains_early_reply_and_closes_same_epoch() {
+fn uncertain_capability_response_keeps_early_reply_and_closes_same_epoch() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for case in 0..6 {
             if case == 2 && chip != Chip::Mt7925 {
@@ -1953,7 +1953,7 @@ fn uncertain_capability_response_retains_early_reply_and_closes_same_epoch() {
 }
 #[test]
 #[ignore = "oracle: STELA_MT792X_CAPABILITIES_ORACLE, STELA_MT792X_FIRMWARE"]
-fn actual_pinned_firmware_and_linux_capability_reports_cross_native_dma_query() {
+fn pinned_firmware_and_linux_capability_reports_cross_native_dma_query() {
     use super::super::download::Downloader;
     let images = std::path::PathBuf::from(
         std::env::var_os("STELA_MT792X_FIRMWARE").expect("firmware images"),
@@ -2022,7 +2022,7 @@ fn actual_pinned_firmware_and_linux_capability_reports_cross_native_dma_query() 
 
 #[test]
 #[ignore = "oracle: STELA_MT792X_PCI_MCU_ORACLE"]
-fn actual_pci_callbacks_select_three_second_deadline_and_exact_queue() {
+fn pci_callbacks_select_three_second_deadline_and_exact_queue() {
     let oracle = std::path::PathBuf::from(std::env::var("STELA_MT792X_PCI_MCU_ORACLE").unwrap());
     for (chip, number) in [
         (Chip::Mt7921, 7921),
@@ -2088,7 +2088,7 @@ pub(crate) fn eeprom_body(chip: Chip, value: u8) -> Vec<u8> {
     body
 }
 #[test]
-fn native_encapsulation_read_keeps_exact_owner_raw_byte_and_shared_sequence() {
+fn native_encapsulation_read_keeps_owner_raw_byte_and_shared_sequence() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let response = Arc::new(Mutex::new(Response {
             encapsulation_payload: Some(eeprom_body(chip, 0)),
@@ -2130,7 +2130,7 @@ fn native_encapsulation_read_keeps_exact_owner_raw_byte_and_shared_sequence() {
     }
 }
 #[test]
-fn malformed_completed_eeprom_read_retains_raw_frame_without_default_board_byte() {
+fn malformed_completed_eeprom_read_keeps_raw_frame_without_default_board_byte() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let mut wrong = eeprom_body(chip, 0xff);
         wrong[if chip == Chip::Mt7925 { 12 } else { 0 }] ^= 16;
@@ -2163,7 +2163,7 @@ fn malformed_completed_eeprom_read_retains_raw_frame_without_default_board_byte(
     }
 }
 #[test]
-fn uncertain_eeprom_exchange_retains_early_response_and_never_reopens_epoch() {
+fn uncertain_eeprom_exchange_keeps_early_response_and_never_reopens_epoch() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for mode in 0..5 {
             let response = Arc::new(Mutex::new(Response {
@@ -2210,7 +2210,7 @@ fn uncertain_eeprom_exchange_retains_early_response_and_never_reopens_epoch() {
 }
 #[test]
 #[ignore = "oracle: STELA_MT792X_EEPROM_ORACLE, STELA_MT792X_FIRMWARE"]
-fn actual_images_and_eeprom_source_reports_cross_native_dma_with_retained_clc_owner() {
+fn images_and_eeprom_source_reports_cross_native_dma_with_kept_clc_owner() {
     use super::super::download::Downloader;
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
     let oracle = std::path::PathBuf::from(std::env::var("STELA_MT792X_EEPROM_ORACLE").unwrap());
@@ -2276,7 +2276,7 @@ fn actual_images_and_eeprom_source_reports_cross_native_dma_with_retained_clc_ow
 }
 
 #[test]
-fn native_download_binding_keeps_actual_inputs_and_separate_skipped_patch_outcome() {
+fn native_download_binding_keeps_inputs_and_separate_skipped_patch_outcome() {
     use super::super::download::{PatchState, ReleaseState};
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for skipped in [false, true] {
@@ -2346,7 +2346,7 @@ fn native_download_binding_keeps_actual_inputs_and_separate_skipped_patch_outcom
     }
 }
 #[test]
-fn failed_native_bound_download_retains_actual_uncertain_owner_without_any_binding() {
+fn failed_native_bound_download_keeps_uncertain_owner_without_any_binding() {
     let response = Arc::new(Mutex::new(Response {
         fail_firmware_start_publication: true,
         ..Response::default()
@@ -2414,7 +2414,7 @@ fn bound_download_checks_native_identity_before_commands_and_raw_boot_invalidate
 }
 #[test]
 #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
-fn actual_pinned_downloads_bind_same_owned_clc_input_past_provider_lifetime() {
+fn pinned_downloads_bind_same_owned_clc_input_past_provider_lifetime() {
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let (mut mailbox, _, _, _) = setup(chip, true, false, 3);

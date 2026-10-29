@@ -536,7 +536,7 @@ fn unmanaged_exact_cohort_and_readiness_are_required() {
     assert_eq!(released.load(Ordering::SeqCst), 1);
 }
 #[test]
-fn each_access_failure_retains_the_single_actual_function_without_packet_dma() {
+fn each_access_failure_keeps_the_single_function_without_packet_dma() {
     let (state, _, io, timer) = fixture();
     let ready = start(io, timer).unwrap();
     let count = state.borrow().accesses;

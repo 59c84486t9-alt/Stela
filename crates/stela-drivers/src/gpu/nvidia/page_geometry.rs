@@ -193,7 +193,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn actual_queries_precede_publication_and_unknown_sources_never_install_defaults() {
+    fn queries_precede_publication_and_unknown_sources_never_install_defaults() {
         let state = AtomicU32::new(EMPTY);
         let unknown = Source(Err(MemoryError::Unavailable), Cell::new(0));
         assert_eq!(

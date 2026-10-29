@@ -214,12 +214,12 @@ fn network_generation_peer(vendor: bool) {
 }
 
 #[test]
-fn retained_cdc_generation_refuses_before_mmio_and_preserves_current_completion() {
+fn kept_cdc_generation_refuses_before_mmio_and_preserves_current_completion() {
     network_generation_peer(false);
 }
 
 #[test]
-fn retained_vendor_ethernet_generation_refuses_before_mmio_and_preserves_current_completion() {
+fn kept_vendor_ethernet_generation_refuses_before_mmio_and_preserves_current_completion() {
     network_generation_peer(true);
 }
 
@@ -343,28 +343,28 @@ fn media_generation_peer(kind: u8) {
 }
 
 #[test]
-fn retained_uac2_generation_refuses_before_mmio_and_preserves_current_completion() {
+fn kept_uac2_generation_refuses_before_mmio_and_preserves_current_completion() {
     media_generation_peer(0);
 }
 
 #[test]
-fn retained_mt7925_media_generation_refuses_before_mmio_and_preserves_current_completion() {
+fn kept_mt7925_media_generation_refuses_before_mmio_and_preserves_current_completion() {
     media_generation_peer(1);
 }
 #[test]
-fn retained_hci_generation_refuses_cached_partial_timeout_and_close_before_mmio_and_preserves_current_completion()
+fn kept_hci_generation_refuses_cached_partial_timeout_and_close_before_mmio_and_preserves_current_completion()
  {
     media_generation_peer(4);
 }
 
 #[test]
-fn retained_mt7925_session_generation_refuses_cached_state_before_mmio_and_preserves_current_completion()
+fn kept_mt7925_session_generation_refuses_cached_state_before_mmio_and_preserves_current_completion()
  {
     media_generation_peer(3);
 }
 
 #[test]
-fn retained_ath3k_initializer_generation_refuses_before_mmio_and_preserves_current_completion() {
+fn kept_ath3k_initializer_generation_refuses_before_mmio_and_preserves_current_completion() {
     media_generation_peer(2);
 }
 

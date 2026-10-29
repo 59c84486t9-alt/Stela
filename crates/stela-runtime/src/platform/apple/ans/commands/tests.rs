@@ -759,7 +759,7 @@ fn unknown_vendor_effects_refuse_without_dma() {
 }
 
 #[test]
-fn queue_count_and_feature_refusals_do_not_fabricate_effects() {
+fn queue_count_and_feature_refusals_do_not_invent_effects() {
     let mut ans = Ans::new(
         Box::new(RamDisk::new("", 4, 4096)),
         &[Description {

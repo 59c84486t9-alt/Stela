@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mixed_access_levels_retain_opposite_effects_and_reject_same_level_conflicts() {
+    fn mixed_access_levels_keep_opposite_effects_and_reject_same_level_conflicts() {
         let resolved =
             EffectiveAddressChecks::new(AddressAddChecks::Disabled, AddressAddChecks::Enabled);
         let el0 = AddressCheckRequirements::for_access(AccessEl::El0, AddressAddChecks::Disabled);

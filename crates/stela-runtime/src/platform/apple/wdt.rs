@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn a_core_trigger_word_retains_only_its_mask() {
+    fn a_core_trigger_word_keeps_only_its_mask() {
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
         let mut trigger = CoreTrigger::new(0xf);

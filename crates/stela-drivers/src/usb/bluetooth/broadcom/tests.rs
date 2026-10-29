@@ -311,7 +311,7 @@ fn all_usb_chip_profiles_replay_source_order_and_required_delays() {
     }
 }
 #[test]
-fn fallback_only_permits_missing_and_retains_exact_runtime_target() {
+fn fallback_only_permits_missing_and_keeps_exact_runtime_target() {
     let (mut hci, _) = model(0x220e);
     let cat = catalog(0x220e, true, image_bytes());
     let p = Recording {
@@ -394,7 +394,7 @@ fn malformed_images_are_rejected_before_download_mode() {
     }
 }
 #[test]
-fn every_submission_failure_retains_observations_and_never_reuses_attachment() {
+fn every_submission_failure_keeps_observations_and_never_reuses_attachment() {
     for failed in 1..=14 {
         let (mut hci, trace) = model(0x220e);
         hci.io.fail_command = Some(failed);
@@ -439,7 +439,7 @@ fn status_wrong_duplicate_and_silent_completions_do_not_credit_commands() {
     }
 }
 #[test]
-fn zero_credits_wait_for_real_statusless_nop_and_asynchronous_packets_are_retained() {
+fn zero_credits_wait_for_real_statusless_nop_and_asynchronous_packets_are_kept() {
     let (mut hci, _) = model(0x220e);
     hci.io.steps[7].responses = vec![
         (cc(0xfc4c, &[0], 0), Some(0)),
@@ -487,7 +487,7 @@ fn default_address_needs_real_platform_value_and_readback() {
     assert_eq!(report.address, [1, 2, 3, 4, 5, 6]);
 }
 #[test]
-fn retained_native_initialization_and_cleanup_failure_are_explicit() {
+fn kept_native_initialization_and_cleanup_failure_are_explicit() {
     let (mut hci, trace) = model(0x220e);
     let cat = catalog(0x220e, false, image_bytes());
     assert!(matches!(

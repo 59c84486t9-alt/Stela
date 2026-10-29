@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn unit_special_values_and_retained_enables_have_fixed_bits_without_status() {
+    fn unit_special_values_and_kept_enables_have_fixed_bits_without_status() {
         let controls = FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK;
         for (input, reciprocal_bits, sqrt_bits) in [
             (0x3f80_0000, 0x3f7f_f000, 0x3f7f_f000),

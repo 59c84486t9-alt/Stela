@@ -371,7 +371,7 @@ fn amd_immediate_foreign_busy_response_and_clear_timeouts_never_publish_or_repla
 }
 
 #[test]
-fn amd_immediate_each_access_fault_or_lateness_stages_output_and_retains_original_owner() {
+fn amd_immediate_each_access_fault_or_lateness_stages_output_and_keeps_original_owner() {
     let baseline = Hardware::new(Manager::First);
     controller(&baseline, 100_000)
         .read_registers(message(true), &mut [0; 3])

@@ -73,7 +73,7 @@ fn allocator(memory: &mut [u64]) -> RegionAllocator {
 }
 
 #[test]
-fn actual_native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned() {
+fn native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned() {
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = peer(&mut dma, 1);
@@ -147,7 +147,7 @@ fn absent_reserved_or_foreign_connector_access_does_not_submit_a_control() {
 }
 
 #[test]
-fn actual_short_or_stalled_connector_query_never_fabricates_connected_state() {
+fn short_or_stalled_connector_query_never_invents_connected_state() {
     for stalled in [false, true] {
         let mut backing = vec![0u64; 512 * 1024];
         let mut dma = allocator(&mut backing);
@@ -183,7 +183,7 @@ fn actual_short_or_stalled_connector_query_never_fabricates_connected_state() {
 }
 
 #[test]
-fn actual_connector_interrupt_invalidates_but_never_replaces_a_status_query() {
+fn connector_interrupt_invalidates_but_never_replaces_a_status_query() {
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = peer(&mut dma, 1);

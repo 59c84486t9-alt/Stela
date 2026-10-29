@@ -61,7 +61,7 @@ fn cold_policy() -> Policy {
     )
 }
 #[test]
-fn actual_asimd_pair_store_copies_both_q_members_through_canonical_parts() {
+fn asimd_pair_store_copies_both_q_members_through_canonical_parts() {
     use stela_compiler::context::memory::{MemoryRequest, MemoryRequirements};
     let (mut cpu, profile, missing, ram) = fixture();
     cpu.registers.set_raw(Register::CPACR_EL1, 0, 3 << 20);
@@ -182,7 +182,7 @@ fn normal_cacheability_hints_use_the_same_canonical_ram_without_device_ordering(
 }
 
 #[test]
-fn non_writeback_normal_ram_retains_page_fault_prefix_and_physical_ownership() {
+fn non_writeback_normal_ram_keeps_page_fault_prefix_and_physical_ownership() {
     for attribute in [0x44, 0xbb, 0x4f, 0xf4] {
         for descriptor in [0, (DESCRIPTOR + PAGE as u64) | (2 << 6)] {
             let mut policy = ordinary_policy();
@@ -445,7 +445,7 @@ fn unaligned_page_faults_preserve_only_the_architectural_mem_prefix() {
     }
 }
 #[test]
-fn original_alignment_is_checked_once_and_retained_before_device_permissions() {
+fn original_alignment_is_checked_once_and_kept_before_device_permissions() {
     let mut policy = ordinary_policy();
     let ram = Arc::clone(&policy.ram);
     policy.controls.translation.sctlr |= mmu::alignment::SCTLR_A;
@@ -509,7 +509,7 @@ fn original_alignment_is_checked_once_and_retained_before_device_permissions() {
 }
 
 #[test]
-fn address_specialization_requires_actual_source_cpa2_absence() {
+fn address_specialization_requires_source_cpa2_absence() {
     use stela_compiler::context::memory::address::{
         AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,
     };
@@ -558,7 +558,7 @@ fn address_specialization_requires_actual_source_cpa2_absence() {
 }
 
 #[test]
-fn asimd_requests_require_actual_source_permission_and_preserve_scalable_refusals() {
+fn asimd_requests_require_source_permission_and_preserve_scalable_refusals() {
     let (mut cpu, profile, missing, ram) = fixture();
     let denied = Policy::new(
         Controls::capture(&cpu, profile.name, &missing).unwrap(),
@@ -741,7 +741,7 @@ fn cold_ordered_ram_uses_typed_acquire_release_and_preserves_exact_widths() {
 }
 
 #[test]
-fn cold_ordered_requests_cannot_acquire_device_or_unaligned_ram_authority() {
+fn cold_ordered_requests_cannot_acquire_device_or_unaligned_ram_permission() {
     use stela_compiler::context::memory::{
         MemoryOrder, MemoryRequest, MemoryRequirements, ordered::OrderedData,
     };

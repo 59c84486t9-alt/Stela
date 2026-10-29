@@ -430,7 +430,7 @@ mod tests {
         resolve_cpu_power(Chip::AppleM1, &root, &views, identities, harvesting)
     }
     #[test]
-    fn t6000_mode1_uses_actual_order_ids_and_non_dense_ps_locations() {
+    fn t6000_mode1_uses_order_ids_and_non_dense_ps_locations() {
         let (bytes, identities) = authored(0);
         let owners = resolve_authored(&bytes, &identities, 1).unwrap();
         assert_eq!(owners.len(), 9);

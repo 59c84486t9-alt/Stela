@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_old_and_dummy_metadata_preserve_complete_frame_without_fcs_trim() {
+    fn old_and_dummy_metadata_preserve_complete_frame_without_fcs_trim() {
         for dummy in [false, true] {
             let a = vec![0x53; 60];
             let b = vec![0xa9; 1518];

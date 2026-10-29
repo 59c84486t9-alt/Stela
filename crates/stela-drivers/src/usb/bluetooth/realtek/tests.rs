@@ -286,7 +286,7 @@ fn attempt(e: &Error) -> (&Error, &Attempt) {
     }
 }
 #[test]
-fn native_report_retains_actual_identity_receipts_and_indices_after_provider_drop() {
+fn native_report_keeps_identity_receipts_and_indices_after_provider_drop() {
     for project in [Project::Rtl8761Bu, Project::Rtl8822B, Project::Rtl8852Bu] {
         let (mut hci, catalog, trace) = fixture(project, true);
         {
@@ -386,7 +386,7 @@ fn missing_firmware_records_both_exact_companions_and_closes_without_upload() {
     assert!(hci.submit_acl(&[1, 0, 0, 0]).is_err());
 }
 #[test]
-fn absent_config_is_retained_only_for_the_exact_optional_profile() {
+fn absent_config_is_kept_only_for_the_exact_optional_profile() {
     let (mut hci, catalog, _) = fixture(Project::Rtl8761Bu, false);
     let r = initialize(&mut hci, &catalog).unwrap();
     assert!(
@@ -399,7 +399,7 @@ fn absent_config_is_retained_only_for_the_exact_optional_profile() {
     assert_eq!(hci.state(), State::Closed);
 }
 #[test]
-fn genuine_completion_status_credits_shape_and_timeout_are_required() {
+fn completion_status_credits_shape_and_timeout_are_required() {
     for fault in 0..7 {
         let (mut hci, catalog, trace) = fixture(Project::Rtl8761Bu, true);
         let step = &mut hci.io.steps[4];
@@ -524,7 +524,7 @@ fn optional_config_integrity_or_target_errors_never_become_absence() {
     }
 }
 #[test]
-fn usb_failures_retain_typed_error_and_native_attempt_never_reopens() {
+fn usb_failures_keep_typed_error_and_native_attempt_never_reopens() {
     for command in 1..=7 {
         let (mut hci, catalog, trace) = fixture(Project::Rtl8761Bu, true);
         hci.io.fail_command = Some(command);

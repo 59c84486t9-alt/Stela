@@ -160,7 +160,7 @@ fn drain(
     actions
 }
 #[test]
-fn all_thirty_bindings_reach_actual_pointer_ram_and_preserve_paired_fields() {
+fn all_thirty_bindings_reach_pointer_ram_and_preserve_paired_fields() {
     let mut ram = Ram::new(NUB_BASE, 0x40000);
     ram.bytes.fill(0xcc);
     let mut sink = InterruptLatch::new();
@@ -220,7 +220,7 @@ fn all_thirty_bindings_reach_actual_pointer_ram_and_preserve_paired_fields() {
     assert_eq!(seen, (0..30).collect());
 }
 #[test]
-fn both_families_use_actual_native_binding_bank_without_claiming_hardware_completion() {
+fn both_families_use_native_binding_bank_without_claiming_hardware_completion() {
     use {crate::platform::apple::power::Power, stela_soc_data::power::Kind};
     let mut bus = Bus::new();
     let offsets = Kind::NubBindings.offsets();
@@ -275,7 +275,7 @@ fn both_families_use_actual_native_binding_bank_without_claiming_hardware_comple
 }
 
 #[test]
-fn setup_activation_and_dmb_order_follow_actual_stage_guards_without_retirement() {
+fn setup_activation_and_dmb_order_follow_stage_guards_without_retirement() {
     for stage in [2, 3, 5, 10, 11] {
         for kind in [
             ProgramKind::EarlyCpu,

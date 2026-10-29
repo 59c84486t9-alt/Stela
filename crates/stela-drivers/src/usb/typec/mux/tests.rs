@@ -198,7 +198,7 @@ fn address() -> Address {
 }
 
 #[test]
-fn simple_muxes_preserve_actual_orientation_and_register_neighbors() {
+fn simple_muxes_preserve_orientation_and_register_neighbors() {
     for byte in 0..=255 {
         for orientation in [Orientation::Normal, Orientation::Reverse] {
             for mode in [Mode::Safe, Mode::Usb, dp(Pin::C), dp(Pin::D), dp(Pin::E)] {
@@ -295,7 +295,7 @@ fn every_simple_mux_io_failure_quarantines_later_register_access() {
     }
 }
 #[test]
-fn nb7_lane_map_orientation_and_mode_program_actual_channels() {
+fn nb7_lane_map_orientation_and_mode_program_channels() {
     for lanes in [[0, 1, 2, 3], [3, 2, 1, 0]] {
         for orientation in [Orientation::Normal, Orientation::Reverse] {
             for mode in [
@@ -535,7 +535,7 @@ fn absent_real_power_resources_cannot_initialize_a_retimer() {
     assert_eq!(onsemi.version(), None);
 }
 #[test]
-fn nb7_uncertain_power_failure_and_parade_secondary_cleanup_error_are_retained() {
+fn nb7_uncertain_power_failure_and_parade_secondary_cleanup_error_are_kept() {
     for fail_after in [false, true] {
         for fail_at in [1, 2] {
             let (device, power, model, resources) = fixture(Kind::OnSemi);

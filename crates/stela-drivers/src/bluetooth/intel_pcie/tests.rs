@@ -486,7 +486,7 @@ pub(super) fn transport(
     (Transport::new(ModelPlatform(m.clone()), dma).unwrap(), m)
 }
 #[test]
-fn every_source_id_boots_actual_published_context_and_posts_exactly61_buffers() {
+fn every_source_id_boots_published_context_and_posts_exactly61_buffers() {
     assert_eq!(
         DEVICE_IDS,
         &[0x4d76, 0xa876, 0xe376, 0xe476, 0xd346, 0x6e74]
@@ -520,7 +520,7 @@ fn every_source_id_boots_actual_published_context_and_posts_exactly61_buffers() 
     }
 }
 #[test]
-fn actual_tfd_payload_and_source_next_index_completions_wrap_without_hci_fabrication() {
+fn tfd_payload_and_source_next_index_completions_wrap_without_hci_fabrication() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -560,7 +560,7 @@ fn rx_completions_drain_coalesced_frames_preserve_padding_and_rearm_only_returne
     }
 }
 #[test]
-fn intel_reset_requires_actual_tx_and_gp0_then_real_boot_event_before_d0() {
+fn intel_reset_requires_tx_and_gp0_then_real_boot_event_before_d0() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0x4d76, &mut dma);
@@ -672,7 +672,7 @@ fn d0_preexisting_stage_change_and_late_write_acknowledgment_are_refused() {
 }
 
 #[test]
-fn rom_stage_without_actual_gp0_never_starts_rx_or_claims_startup() {
+fn rom_stage_without_gp0_never_starts_rx_or_claims_startup() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -690,7 +690,7 @@ fn rom_stage_without_actual_gp0_never_starts_rx_or_claims_startup() {
     assert_eq!(m.borrow().dropped, 1);
 }
 #[test]
-fn actual_abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
+fn abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
     for stage in [
         ROM | (1 << 10),
         ROM | (1 << 11),
@@ -825,7 +825,7 @@ fn mmio_start_read_and_effect_then_write_errors_cannot_reopen_or_rewrite_dma() {
 }
 
 #[test]
-fn active_tx_rx_and_cause_errors_retain_first_fault_and_failed_cleanup_owner() {
+fn active_tx_rx_and_cause_errors_keep_first_fault_and_failed_cleanup_owner() {
     for operation in 0..7 {
         for cleanup_fails in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
@@ -1039,7 +1039,7 @@ fn out_of_order_rx_cannot_overwrite_a_still_posted_buffer_during_rearm() {
     assert_eq!(t.state(), State::Failed);
 }
 #[test]
-fn reset_transmit_does_not_complete_without_actual_matching_alive_stage() {
+fn reset_transmit_does_not_complete_without_matching_alive_stage() {
     for no_cause in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -1807,7 +1807,7 @@ mod native_models {
         assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (1, 1, 1));
     }
     #[test]
-    fn native_missing_stop_or_cpu_drain_never_releases_actual_owners() {
+    fn native_missing_stop_or_cpu_drain_never_releases_owners() {
         for no_stop in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
             let mut dma = allocator(&mut backing);
@@ -1955,7 +1955,7 @@ mod native_models {
         assert_eq!(h.lock().unwrap().bt.writes.len(), writes);
     }
     #[test]
-    fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_exact_owners() {
+    fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owners() {
         for failure in 0..7 {
             let (mut inputs, h, registry, _) = inputs();
             match failure {

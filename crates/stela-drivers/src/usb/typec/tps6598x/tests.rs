@@ -242,7 +242,7 @@ fn supported_silicon_initializes_and_observes_pd_identity_and_connection_state()
     }
 }
 #[test]
-fn actual_roles_are_verified_and_partner_rejection_does_not_poison_idle_controller() {
+fn roles_are_verified_and_partner_rejection_does_not_poison_idle_controller() {
     let (mut controller, model) = initialized(0xf7);
     assert!(
         !controller
@@ -276,7 +276,7 @@ fn actual_roles_are_verified_and_partner_rejection_does_not_poison_idle_controll
     assert!(controller.request_data_role(DataRole::Host).unwrap().host());
 }
 #[test]
-fn firmware_upload_uses_verified_exact_resource_chunks_and_requires_actual_app_mode() {
+fn firmware_upload_uses_verified_exact_resource_chunks_and_requires_app_mode() {
     for bytes in [vec![0x5a; 1], (0..=255).collect(), vec![0x91; 257]] {
         let (mut controller, model) = make_controller(0xf9, *b"PTCH");
         let catalog = catalog(bytes.clone(), 0xf9);
@@ -311,7 +311,7 @@ fn firmware_upload_uses_verified_exact_resource_chunks_and_requires_actual_app_m
     }
 }
 #[test]
-fn each_patch_protocol_failure_retains_owned_evidence_and_refuses_retry() {
+fn each_patch_protocol_failure_keeps_owned_evidence_and_refuses_retry() {
     for command in [*b"PTCs", *b"PTCd", *b"PTCc"] {
         let (mut controller, model) = make_controller(0, *b"PTCH");
         model.borrow_mut().patch_fail = Some(command);

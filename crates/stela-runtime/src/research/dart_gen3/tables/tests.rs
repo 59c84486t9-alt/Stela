@@ -16,7 +16,7 @@ fn entry(address: u64) -> u64 {
 }
 
 #[test]
-fn explicitly_qualified_native_low_root_executes_dma_without_relaxing_context_bounds() {
+fn explicitly_checked_native_low_root_executes_dma_without_relaxing_context_bounds() {
     let iova = 0x200_4000;
     let context = Context::from_vm_range(0x200_0000, 0x100_0000).unwrap();
     assert!(Handoff::new(0x300, TRANSLATE, context).is_err());
@@ -69,7 +69,7 @@ fn explicitly_qualified_native_low_root_executes_dma_without_relaxing_context_bo
 }
 
 #[test]
-fn qualified_handoffs_execute_both_native_roots_without_rebinding_an_encoding() {
+fn checked_handoffs_execute_both_native_roots_without_rebinding_an_encoding() {
     for (base, bytes, iova, config) in [
         (0x10000004000, 0xffff0000, 0x10002004000, TRANSLATE),
         (0x10000000000, 3 << 40, 0x21002004000, TRANSLATE | CONTEXT),
@@ -341,7 +341,7 @@ fn three_level_context_keeps_high_index_and_fault_address_through_rejected_recon
 }
 
 #[test]
-fn source_software_bounds_do_not_qualify_aliased_hardware_fill_regions() {
+fn source_software_bounds_do_not_check_aliased_hardware_fill_regions() {
     let context = Context::from_vm_range((1 << 40) - PAGE, 1 << 20).unwrap();
     let mut tables = Tables::new(1).unwrap();
     tables.configure_context(0, TRANSLATE, 1, context).unwrap();

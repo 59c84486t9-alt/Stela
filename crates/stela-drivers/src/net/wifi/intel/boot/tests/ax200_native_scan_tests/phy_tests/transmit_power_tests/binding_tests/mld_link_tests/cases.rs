@@ -60,7 +60,7 @@ fn mld_activation_refuses_unapproved_rate_or_power_before_publication() {
 }
 
 #[test]
-fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
+fn missing_ack_keeps_phy_parent_and_latches_mld_failure() {
     for target in [0, 1, 3, 5, 6] {
         let bytes = image();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

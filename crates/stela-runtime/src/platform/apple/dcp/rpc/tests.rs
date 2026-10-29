@@ -229,7 +229,7 @@ fn effects_up(memory: &mut Memory) -> Link<Effects> {
 }
 
 #[test]
-fn request_header_and_body_read_faults_retain_only_unaccepted_input() {
+fn request_header_and_body_read_faults_keep_only_unaccepted_input() {
     for address in [REGION + 0x40, REGION + 0x40 + 12] {
         let mut memory = Memory::mapped();
         let mut link = effects_up(&mut memory);
@@ -468,7 +468,7 @@ fn unsolicited_callback_identity_survives_both_write_phases_and_reply_read_failu
 }
 
 #[test]
-fn native_continuation_refusals_retain_identity_without_false_completion_or_reexecution() {
+fn native_continuation_refusals_keep_identity_without_false_completion_or_reexecution() {
     for top_level in [false, true] {
         let mut memory = Memory::mapped();
         let mut link = effects_up(&mut memory);

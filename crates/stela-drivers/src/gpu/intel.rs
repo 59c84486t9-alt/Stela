@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn i915_encoding_uses_actual_native_packet_and_range_checks() {
+    fn i915_encoding_uses_native_packet_and_range_checks() {
         let mut storage = [0xa5a5_a5a5; 8];
         let mut commands = CommandBuffer::new(&mut storage, AddressBits::Bits48);
         assert_eq!(

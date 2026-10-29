@@ -77,7 +77,7 @@ fn spc6_version_keeps_sparse_reported_units_beyond_first_absent_sequential_unit(
 }
 
 #[test]
-fn actual_initial_zero_survives_omission_but_absent_zero_is_never_invented() {
+fn initial_zero_survives_omission_but_absent_zero_is_never_invented() {
     use crate::block::BlockDevice;
     for case in 0..5 {
         let zero = Lun::default();
@@ -141,7 +141,7 @@ fn actual_initial_zero_survives_omission_but_absent_zero_is_never_invented() {
 }
 
 #[test]
-fn source_no_report_fallback_scans_past_empty_slot_and_stops_at_actual_absence() {
+fn source_no_report_fallback_scans_past_empty_slot_and_stops_at_absence() {
     let mut empty = Media::disk(Lun::default(), 0);
     empty.empty = true;
     let target = Target::new(vec![empty, Media::disk(Lun::sequential(1), 0x11)]);

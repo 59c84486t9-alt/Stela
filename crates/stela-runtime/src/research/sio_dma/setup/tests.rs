@@ -106,7 +106,7 @@ impl MmioDevice for RefuseWriteOnce {
 }
 
 #[test]
-fn mounted_native_bank_retains_read_value_and_phase_across_write_refusal() {
+fn mounted_native_bank_keeps_read_value_and_phase_across_write_refusal() {
     let mut program = load(&table(&[(0, 4, 1, 0)]), BANK, 8).unwrap();
     let mut bus = Bus::new();
     let id = bus.add(Box::new(RefuseWriteOnce {

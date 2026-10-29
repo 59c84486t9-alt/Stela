@@ -375,7 +375,7 @@ fn run(mode: Mode) {
     assert_eq!(dropped.load(Ordering::Relaxed), 32);
 }
 #[test]
-fn cold_usable_bytes_zero_after_if_restore_and_actual_frame_reseed_runs() {
+fn cold_usable_bytes_zero_after_if_restore_and_frame_reseed_runs() {
     run(Mode::Bytes);
 }
 #[test]
@@ -383,7 +383,7 @@ fn hot_idle_frame_is_rejected_while_real_unstarted_selection_finds_cold_peer() {
     run(Mode::Hot);
 }
 #[test]
-fn cold_owner_survives_real_park_until_fresh_creator_authority_reseeds() {
+fn cold_owner_survives_real_park_until_fresh_creator_permission_reseeds() {
     run(Mode::Park);
 }
 #[test]

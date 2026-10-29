@@ -67,7 +67,7 @@ fn images() -> Vec<NativeImage> {
         .collect()
 }
 #[test]
-fn publication_reaches_actual_shared_controls_and_sram_not_a_parallel_capture_bank() {
+fn publication_reaches_shared_controls_and_sram_not_a_parallel_capture_bank() {
     let owner = owner(Handoff::StelaEmpty {
         sram: SramInitialization::Unknown,
     });
@@ -127,7 +127,7 @@ fn publication_reaches_actual_shared_controls_and_sram_not_a_parallel_capture_ba
     assert!(sink.take_aic_inputs().is_empty());
 }
 #[test]
-fn retained_views_share_lifecycle_and_pending_requests_prevent_code_replacement() {
+fn kept_views_share_lifecycle_and_pending_requests_prevent_code_replacement() {
     let owner = owner(Handoff::StelaEmpty {
         sram: SramInitialization::Unknown,
     });
@@ -302,7 +302,7 @@ fn explicit_whole_zero_policy_never_supplies_other_device_status_or_accepts_unkn
 }
 
 #[test]
-fn actual_frozen_sram_effects_route_stores_and_polls_through_the_same_controller_and_pause() {
+fn frozen_sram_effects_route_stores_and_polls_through_the_same_controller_and_pause() {
     use crate::platform::apple::pmgr::sequencer::{self, AddressFormat, RouteOutcome, poll};
     let owner = owner(Handoff::StelaEmpty {
         sram: SramInitialization::Unknown,
@@ -440,7 +440,7 @@ fn actual_frozen_sram_effects_route_stores_and_polls_through_the_same_controller
 }
 
 #[test]
-fn actual_sram_delay_uses_shared_native_clock_with_distinct_quiesce_and_supply_pauses() {
+fn sram_delay_uses_shared_native_clock_with_distinct_quiesce_and_supply_pauses() {
     use crate::platform::apple::{
         pmgr::sequencer::{self, AddressFormat, RouteOutcome, delay::Progress},
         power::t6000::clock,

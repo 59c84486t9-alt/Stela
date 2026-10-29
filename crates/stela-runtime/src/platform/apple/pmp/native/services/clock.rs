@@ -43,7 +43,7 @@ mod tests {
         48
     }
     #[test]
-    fn actual_reader_offset_precedes_exact_source_conversion() {
+    fn reader_offset_precedes_exact_source_conversion() {
         let c = Clock::new(ticks, 24_000_000, -24).unwrap();
         assert_eq!(c.raw(), 24);
         assert_eq!(c.converted(), 1);

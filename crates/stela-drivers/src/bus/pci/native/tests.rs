@@ -107,7 +107,7 @@ fn bad_access_refuses_before_context_or_bytes_and_does_not_poison() {
 }
 
 #[test]
-fn post_write_context_uncertainty_retains_effect_and_all_original_owners() {
+fn post_write_context_uncertainty_keeps_effect_and_all_original_owners() {
     let (mut function, counters, drops) = setup();
     let pointer = fixture_pointer(function.config(), 0x40);
     let mut owner = attach(function, drops.clone());
@@ -140,7 +140,7 @@ fn post_write_context_uncertainty_retains_effect_and_all_original_owners() {
 }
 
 #[test]
-fn identity_change_latches_and_rejection_returns_exact_original_exclusion() {
+fn identity_change_latches_and_rejection_returns_original_exclusion() {
     let (function, counters, drops) = setup();
     let mut owner = attach(function, drops.clone());
     // RAM allows this identity store: model a post-effect epoch replacement.

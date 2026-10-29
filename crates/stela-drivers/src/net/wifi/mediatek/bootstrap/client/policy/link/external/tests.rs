@@ -12,7 +12,7 @@ use core::sync::atomic::Ordering;
 use reg::database::tests::country;
 
 #[test]
-fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive() {
+fn owning_link_authentication_uses_bss_and_backpressures_native_receive() {
     let (client, model) = setup_modern();
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
     let mut link = ManagedLink::new(client, Source).unwrap();

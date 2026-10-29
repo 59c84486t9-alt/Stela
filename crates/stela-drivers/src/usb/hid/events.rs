@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn gamepad_changes_and_relative_axes_follow_actual_reports() {
+    fn gamepad_changes_and_relative_axes_follow_reports() {
         let descriptor = Descriptor::parse(&[
             5, 1, 9, 5, 0xa1, 1, 9, 0x30, 0x15, 0x81, 0x25, 0x7f, 0x75, 8, 0x95, 1, 0x81, 2, 9,
             0x31, 0x81, 6, 0xc0,

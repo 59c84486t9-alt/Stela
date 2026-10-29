@@ -49,7 +49,7 @@ fn lost_endpoint_readiness_fences_every_published_lun_before_dma_mutation() {
 }
 
 #[test]
-fn failed_error_path_cancellation_retains_poison_and_actual_pending_data() {
+fn failed_error_path_cancellation_keeps_poison_and_pending_data() {
     let mut memory = vec![0u64; 32 * 1024];
     let (io, mut dma) = model(&mut memory, 512, true, Fault::CancelError);
     let state = io.state.clone();

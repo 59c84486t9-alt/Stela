@@ -123,7 +123,7 @@ fn route(
     }
 }
 #[test]
-fn complete_family_installs_real_pointer_ram_aliases_and_actual_binding_fields() {
+fn complete_family_installs_real_pointer_ram_aliases_and_binding_fields() {
     let mut install = programs(0x20, Some(0), images()).unwrap();
     let (mut bus, id) = bus(&install);
     let mut ram = Ram::new(SRAM_BASE, (SRAM_LIMIT - SRAM_BASE) as usize);

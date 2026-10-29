@@ -606,7 +606,7 @@ pub(in crate::machine::apple) mod tests {
         assert!(unsafe { owner.read_ram_drain(offset, Width::Word, &service) }.is_err());
     }
     #[test]
-    fn retained_pause_resumes_without_reset_or_a_fabricated_cache_status() {
+    fn kept_pause_resumes_without_reset_or_a_invented_cache_status() {
         let mut owner = prepared(4, ram(RAM));
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
@@ -738,7 +738,7 @@ pub(in crate::machine::apple) mod tests {
         assert_eq!(devices.memory_controller, Some(id));
     }
     #[test]
-    fn publication_dispatch_retains_refused_footprint_without_a_pair_or_alias_grant() {
+    fn publication_dispatch_keeps_refused_footprint_without_a_pair_or_alias_grant() {
         let mut devices = AppleDevices::new();
         devices
             .add_t6020_memory_resources(prepared(4, ram(RAM)))

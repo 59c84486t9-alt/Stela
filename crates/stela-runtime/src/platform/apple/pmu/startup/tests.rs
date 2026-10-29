@@ -110,7 +110,7 @@ fn native_loader_requires_explicit_resources_and_never_claims_reset_state() {
     }
 }
 #[test]
-fn both_protection_sequences_own_actual_staged_controls_and_sram() {
+fn both_protection_sequences_own_staged_controls_and_sram() {
     for profile in [FirmwareStartup::Maverick, FirmwareStartup::Monaco] {
         let mut owner = pmu(profile);
         prefix(&mut owner, profile, 0x270, 0);
@@ -288,7 +288,7 @@ fn malformed_or_holey_uploads_and_late_time_failure_have_no_partial_effects() {
 }
 
 #[test]
-fn real_master_retains_native_loader_ownership_and_failed_start_payload() {
+fn real_master_keeps_native_loader_ownership_and_failed_start_payload() {
     use crate::platform::apple::spmi::Spmi;
     use alloc::{boxed::Box, rc::Rc};
     use core::cell::RefCell;
@@ -405,7 +405,7 @@ fn native_time(pmu: &Pmu) -> (u64, u64, u64) {
     pmu.loader.as_ref().unwrap().clock.as_ref().unwrap().state()
 }
 #[test]
-fn native_epoch_belongs_to_actual_pmic_and_checks_all_time_before_control_or_rtc_effects() {
+fn native_epoch_belongs_to_pmic_and_checks_all_time_before_control_or_rtc_effects() {
     let epoch = PmicEpoch {
         counter: 0,
         cycles: 7,
@@ -512,7 +512,7 @@ fn paused_master_still_advances_the_same_native_pmic_clock_without_firmware_comp
     assert!(owner.borrow().loader.as_ref().unwrap().image.is_none());
 }
 #[test]
-fn native_start_preflights_actual_current_time_and_deadline_without_admitting_missing_services() {
+fn native_start_preflights_current_time_and_deadline_without_admitting_missing_services() {
     for (epoch, now) in [
         (
             PmicEpoch {

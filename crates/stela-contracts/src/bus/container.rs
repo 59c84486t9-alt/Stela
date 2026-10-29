@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_coalesce_without_replacing_actual_child_routes() {
+    fn aliases_coalesce_without_replacing_child_routes() {
         let mut bus = Bus::new();
         let child = bus
             .install(Box::new(Refusing), &[(0x1800, 0x400, 0x40)])
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(bus.device_name(child), Some("child"));
     }
     #[test]
-    fn explicit_partial_view_keeps_the_complete_actual_bank_and_offsets() {
+    fn explicit_partial_view_keeps_the_complete_bank_and_offsets() {
         let mut bus = Bus::new();
         let id = bus
             .install(Box::new(Refusing), &[(0x1800, 0x1000, 0x40)])

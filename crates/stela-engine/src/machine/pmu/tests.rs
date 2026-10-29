@@ -101,7 +101,7 @@ fn overflow_asserts_the_pmi_until_software_rewrites_the_counter() {
 }
 
 #[test]
-fn qualified_counter_geometry_masks_writes_without_inheriting_future_layouts() {
+fn checked_counter_geometry_masks_writes_without_inheriting_future_layouts() {
     for (chip, mask, overflow) in [
         (Chip::AppleM1, (1u64 << 48) - 1, 1u64 << 47),
         (Chip::AppleM2, u64::MAX, 1u64 << 63),
@@ -300,7 +300,7 @@ fn programmed(chip: Chip, clock: u64, selectors: [u64; 2], control: u64, filter:
 }
 
 #[test]
-fn programmed_cycles_cover_every_qualified_slot_and_none_is_explicit() {
+fn programmed_cycles_cover_every_checked_slot_and_none_is_explicit() {
     // Original counter fields: all ten counts, EL0 and kernel filters.
     const COUNTS: u64 = 0xff | 3 << 32;
     const FILTERS: u64 = 0xffff00 | 3 << 40 | 3 << 48;

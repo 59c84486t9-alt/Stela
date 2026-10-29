@@ -160,7 +160,7 @@ fn an_address_device_error_does_not_issue_a_setup() {
 }
 
 #[test]
-fn descriptor_failure_retains_the_request_and_completion_code() {
+fn descriptor_failure_keeps_the_request_and_completion_code() {
     let mut backing = vec![0u64; 16 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: backing outlives the controller and all its DMA buffers.

@@ -543,7 +543,7 @@ fn unchanged_linux_complete_receive_policy_crc_hash_slots_writes_and_settling_ma
 }
 
 #[test]
-fn all_ones_filter_data_requires_independent_actual_pci_identity_and_mmio_liveness() {
+fn all_ones_filter_data_requires_independent_pci_identity_and_mmio_liveness() {
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let mut f = fixture(chip);
         let alias = Mac([2, 1, 0xff, 0xff, 0xff, 0xff]);

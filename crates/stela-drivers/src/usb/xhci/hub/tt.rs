@@ -144,7 +144,7 @@ mod tests {
     use alloc::collections::BTreeMap;
 
     #[test]
-    fn tt_clear_uses_actual_device_address_endpoint_direction_and_committed_multi_tt_port() {
+    fn tt_clear_uses_device_address_endpoint_direction_and_committed_multi_tt_port() {
         for multi in [false, true] {
             for context in [32, 64] {
                 let mut hub = Node::hub(HIGH_SPEED, 3);
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn tt_clear_refuses_missing_address_and_propagates_actual_hub_control_failure() {
+    fn tt_clear_refuses_missing_address_and_propagates_hub_control_failure() {
         let mut hub = Node::hub(HIGH_SPEED, 1);
         hub.ports.as_mut().unwrap()[0].child_speed = FULL_SPEED;
         let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(FULL_SPEED))]);

@@ -393,7 +393,7 @@ mod tests {
 
     // Authored SOURCE ONLY; parent owns finite native driver gate execution.
     #[test]
-    fn actual_native_uc_function_and_all_serial_engines_gate_owner_return() {
+    fn native_uc_function_and_all_serial_engines_gate_owner_return() {
         for revision in [0, 0x50] {
             let (mapping, unmaps) = mapping();
             // SAFETY: isolated canonical function and reserved UC BAR fixture.
@@ -439,7 +439,7 @@ mod tests {
         }
     }
     #[test]
-    fn native_identity_bar_irq_and_generation_failures_retain_both_actual_owners() {
+    fn native_identity_bar_irq_and_generation_failures_keep_both_owners() {
         for fault in 0..4 {
             let mut requester = stopped(0x50);
             if fault == 0 {

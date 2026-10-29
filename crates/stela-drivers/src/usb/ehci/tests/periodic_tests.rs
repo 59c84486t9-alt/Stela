@@ -57,7 +57,7 @@ fn output_interrupt(pipes: &[InterruptPipe]) -> &InterruptPipe {
 }
 
 #[test]
-fn actual_periodic_links_smask_mult_intervals_and_duplex_payloads() {
+fn periodic_links_smask_mult_intervals_and_duplex_payloads() {
     for interval in 1..=14 {
         for transactions in 1..=3 {
             let (mut c, m, _, bulk, pipes) = attached_periodic(1024, transactions, interval);
@@ -120,7 +120,7 @@ fn actual_periodic_links_smask_mult_intervals_and_duplex_payloads() {
 }
 
 #[test]
-fn periodic_service_follows_actual_microframe_clock_and_frame_list_wrap() {
+fn periodic_service_follows_microframe_clock_and_frame_list_wrap() {
     let (mut c, m, _, bulk, pipes) = attached_periodic(32, 1, 5); // 16 microframes.
     {
         let mut m = m.lock().unwrap();
@@ -144,7 +144,7 @@ fn periodic_service_follows_actual_microframe_clock_and_frame_list_wrap() {
 }
 
 #[test]
-fn interrupt_short_zero_and_partial_nak_preserve_actual_overlay_toggle() {
+fn interrupt_short_zero_and_partial_nak_preserve_overlay_toggle() {
     let (mut c, m, _, _, pipes) = attached_periodic(32, 2, 4);
     m.lock().unwrap().short_limit = Some(7);
     let short = c
@@ -219,7 +219,7 @@ fn periodic_failed_ack_drain_and_cache_ownership_keep_exact_dma_quarantined() {
 }
 
 #[test]
-fn periodic_cancel_stall_clear_and_stale_pipe_require_actual_acknowledgements() {
+fn periodic_cancel_stall_clear_and_stale_pipe_require_acknowledgements() {
     let (mut c, m, id, _, pipes) = attached_periodic(64, 1, 4);
     m.lock().unwrap().mode = Mode::Hold;
     let pending = c

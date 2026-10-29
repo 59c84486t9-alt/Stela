@@ -83,7 +83,7 @@ pub(in crate::net::wifi) mod tests {
         ]
     }
     #[test]
-    fn sae_selection_retains_bytes_and_requires_ap_offer() {
+    fn sae_selection_keeps_bytes_and_requires_ap_offer() {
         let bytes = selected();
         let selection = Selection::new(bytes.clone()).unwrap();
         assert_eq!(selection.elements(), bytes);

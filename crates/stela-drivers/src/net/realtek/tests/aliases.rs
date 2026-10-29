@@ -104,7 +104,7 @@ fn source_same_vendor_pci_aliases_still_require_exact_implemented_revision_and_l
 }
 
 #[test]
-fn pci_alias_aspm_selection_uses_actual_capability_before_clock_or_enable() {
+fn pci_alias_aspm_selection_uses_capability_before_clock_or_enable() {
     for device in [
         0x8169, 0x8129, 0x2502, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
     ] {

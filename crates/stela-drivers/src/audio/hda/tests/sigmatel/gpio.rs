@@ -149,7 +149,7 @@ fn startup_gpio_and_duplex() {
 }
 
 #[test]
-fn startup_failure_retains_owner() {
+fn startup_failure_keeps_owner() {
     for id in [0x8384_7690, 0x8384_7632] {
         for fault in 0..9 {
             let mut fixture = Fixture::new();

@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn intel_rsa_recipes_retain_complete_observed_usb_and_loader_identity() {
+    fn intel_rsa_recipes_keep_complete_observed_usb_and_loader_identity() {
         let revision = "37:14:01:03:dev-0005:otp-00-00-00:key-00-00:locks-00-00-00:min-00-00-00:loader-01-1e-1a-00:unlock-00";
         let value = serde_json::json!({"schema":1,"complete":true,"requirements":[{
             "name":"intel/ibt-20-1-3.sfi", "target":{"driver":"intel-bluetooth-usb-rsa","hardware":"usb:8087:0029:0001","revision":revision,"board":null},"minimum_bytes":645

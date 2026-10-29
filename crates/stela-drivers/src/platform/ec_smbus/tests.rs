@@ -190,7 +190,7 @@ fn battery() -> Address {
 }
 
 #[test]
-fn every_protocol_uses_actual_wire_fields_and_commits_only_completed_results() {
+fn every_protocol_uses_wire_fields_and_commits_only_completed_results() {
     for pec in [false, true] {
         for latency in [0, 1, 7] {
             for case in 0..9 {
@@ -385,7 +385,7 @@ fn stale_done_cannot_complete_a_new_silent_transaction_and_busy_is_never_killed(
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 #[test]
-fn every_native_status_and_every_before_after_effect_fault_preserves_authority_and_output() {
+fn every_native_status_and_every_before_after_effect_fault_preserves_permission_and_output() {
     for status in 0..=255u8 {
         let (mut host, state, _) = fixture();
         state.lock().unwrap().completion = status;
@@ -453,7 +453,7 @@ fn every_native_status_and_every_before_after_effect_fault_preserves_authority_a
     }
 }
 #[test]
-fn alarm_ack_retains_raw_bytes_and_never_erases_a_new_alarm_or_replays_uncertain_ack() {
+fn alarm_ack_keeps_raw_bytes_and_never_erases_a_new_alarm_or_replays_uncertain_ack() {
     let (mut host, state, _) = fixture();
     {
         let mut m = state.lock().unwrap();
@@ -620,7 +620,7 @@ impl ec::Registers for Ports {
     }
 }
 #[test]
-fn actual_ec_command_data_engine_drives_sbs_and_preserves_little_endian_native_bytes() {
+fn ec_command_data_engine_drives_sbs_and_preserves_little_endian_native_bytes() {
     let (host, state, drops) = fixture();
     let (space, timer) = host.release().ok().unwrap();
     let commands = Arc::new(AtomicUsize::new(0));
@@ -708,7 +708,7 @@ fn acknowledged_native_device_error_allows_a_distinct_future_operation_without_r
 }
 
 #[test]
-fn a_successful_read_crossing_deadline_retains_its_byte_without_publishing_output_or_ack() {
+fn a_successful_read_crossing_deadline_keeps_its_byte_without_publishing_output_or_ack() {
     let (mut baseline, state, _) = fixture();
     let mut output = 0;
     baseline
@@ -791,7 +791,7 @@ fn a_successful_read_crossing_deadline_retains_its_byte_without_publishing_outpu
 }
 
 #[test]
-fn lost_firmware_lock_before_any_command_retains_owner_without_claiming_publication() {
+fn lost_firmware_lock_before_any_command_keeps_owner_without_claiming_publication() {
     struct LostLock {
         _owner: Space,
     }

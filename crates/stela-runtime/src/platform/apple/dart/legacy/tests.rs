@@ -574,7 +574,7 @@ fn dma_fault_on_a_later_page_preserves_completed_bytes_and_first_fault() {
 }
 
 #[test]
-fn inaccessible_tables_and_unrepresentable_roots_do_not_fabricate_a_translation() {
+fn inaccessible_tables_and_unrepresentable_roots_do_not_invent_a_translation() {
     for profile in [Profile::T8020, Profile::T6000] {
         let (mut model, mut ram, mut sink) = setup(profile);
         let mut a = Access::new(0, 0, &mut sink);

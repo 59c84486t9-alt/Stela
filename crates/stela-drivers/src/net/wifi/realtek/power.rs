@@ -359,7 +359,7 @@ mod tests {
         }
     }
     #[test]
-    fn each_supported_cut_cold_or_firmware_left_on_runs_actual_power_events() {
+    fn each_supported_cut_cold_or_firmware_left_on_runs_power_events() {
         for cut in 0..7 {
             for powered in [false, true] {
                 for flash in [false, true] {

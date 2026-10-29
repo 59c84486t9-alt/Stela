@@ -427,7 +427,7 @@ fn initial_mt7925_wfsys_ack_precedes_dma_stop_and_every_queue_publication() {
 }
 
 #[test]
-fn initial_wfsys_failure_retains_controller_before_any_dma_publication_or_retry() {
+fn initial_wfsys_failure_keeps_controller_before_any_dma_publication_or_retry() {
     for fail in [None, Some(3), Some(4), Some(5), Some(6), Some(7)] {
         let mut f = NativeFixture::new(Chip::Mt7925);
         {
@@ -600,7 +600,7 @@ fn complete_source_bootstrap_owns_all_queues_and_real_runtime_transition() {
     }
 }
 #[test]
-fn partial_mac_and_initial_publication_failures_retain_actual_guard_and_context() {
+fn partial_mac_and_initial_publication_failures_keep_guard_and_context() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for fail in [0, 1] {
             let mut f = NativeFixture::new(chip);
@@ -643,7 +643,7 @@ fn dormant_foreign_queue_is_refused_before_any_dma_publication() {
 }
 
 #[test]
-fn actual_global_and_source_per_wcid_controls_match_receive_format() {
+fn global_and_source_per_wcid_controls_match_receive_format() {
     use crate::net::wifi::mediatek::{mcu::device::Context, rx};
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         let mut f = NativeFixture::new(chip);
@@ -839,7 +839,7 @@ fn composed_bootstrap_matches_source_mac_effects_and_all_initial_packet_bytes() 
 }
 #[test]
 #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
-fn all_actual_images_boot_the_full_native_layout_before_source_initialization() {
+fn all_images_boot_the_full_native_layout_before_source_initialization() {
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let mut f = NativeFixture::new(chip);

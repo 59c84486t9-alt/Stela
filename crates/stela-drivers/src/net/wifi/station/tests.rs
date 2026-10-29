@@ -290,7 +290,7 @@ pub(crate) fn edit_elements(mut bytes: &mut [u8], mut edit: impl FnMut(u8, &mut 
 }
 
 #[test]
-fn open_port_needs_actual_auth_association_and_firmware_ack() {
+fn open_port_needs_auth_association_and_firmware_ack() {
     let mut station = Station::new(LOCAL).unwrap();
     let config = configure(&mut station, PortPolicy::Open);
     assert_eq!(station.phase(), Phase::Configuring);
@@ -597,7 +597,7 @@ fn regulator_and_clock_failures_do_not_create_carrier_or_firmware_success() {
 }
 
 #[test]
-fn actual_peer_departure_closes_open_port_before_device_teardown() {
+fn peer_departure_closes_open_port_before_device_teardown() {
     let mut station = Station::new(LOCAL).unwrap();
     let config = configure(&mut station, PortPolicy::Open);
     station
@@ -879,7 +879,7 @@ fn host_nonce_exhaustion_closes_a_previously_authorized_data_port() {
 }
 
 #[test]
-fn modern_configuration_is_retained_bound_and_invalidated_before_removal() {
+fn modern_configuration_is_kept_bound_and_invalidated_before_removal() {
     let mut s = Station::new(LOCAL).unwrap();
     let j = modern_join();
     assert!(matches!(
@@ -929,7 +929,7 @@ fn modern_configuration_is_retained_bound_and_invalidated_before_removal() {
     s.validate_association_context(&next).unwrap();
 }
 #[test]
-fn modern_uncertainty_retains_configuration_but_never_usable_identity() {
+fn modern_uncertainty_keeps_configuration_but_never_usable_identity() {
     let mut s = Station::new(LOCAL).unwrap();
     let j = modern_join();
     let a = configuration(&mut s, j.clone(), beacon(&j)).unwrap();
@@ -1022,7 +1022,7 @@ fn admission_controlled_categories_downgrade_like_ieee80211_downgrade_queue() {
 }
 
 #[test]
-fn generic_missing_ht_vht_wmm_fallback_retains_actual_beacon_but_not_he_eht() {
+fn generic_missing_ht_vht_wmm_fallback_keeps_beacon_but_not_he_eht() {
     let j = modern_join();
     let b = beacon(&j);
     let elements = filtered(&modern_ies(true), |id, _| {
@@ -1099,7 +1099,7 @@ fn normal_basic_rules_keep_he_eht_and_real_rates_but_not_strict_only_ht_checks()
 }
 
 #[test]
-fn final_vht_operation_uses_actual_source_capability_width_not_raw_segments_alone() {
+fn final_vht_operation_uses_source_capability_width_not_raw_segments_alone() {
     let mut j = modern_join();
     j.request = wire::AssociationRequest::new_modern(
         1,
@@ -1556,7 +1556,7 @@ fn transmitted_bssid_ignores_opaque_nested_profiles_and_keeps_outer_facts() {
 }
 
 #[test]
-fn transmitted_bssid_retains_outer_bounds_and_refuses_profile_selection() {
+fn transmitted_bssid_keeps_outer_bounds_and_refuses_profile_selection() {
     let j = modern_join();
     let mut bss = beacon(&j);
     bss.elements.extend_from_slice(&[71, 5, 1]);

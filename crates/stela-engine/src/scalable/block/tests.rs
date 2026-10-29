@@ -161,7 +161,7 @@ mod fp8 {
     }
 
     #[test]
-    fn fixed_fp8_retains_exception_enables_and_commits_nothing_on_failure() -> Result<()> {
+    fn fixed_fp8_keeps_exception_enables_and_commits_nothing_on_failure() -> Result<()> {
         for bytes in LENGTHS {
             for streaming in [false, true] {
                 let prepared = prepare(BF1CVTL_V0_V1, bytes, streaming)?;
@@ -627,7 +627,7 @@ mod numerical22 {
     }
 
     #[test]
-    fn actual_owned_block_fast_path_returns_native_fallthrough_after_commit() -> Result<()> {
+    fn owned_block_fast_path_returns_native_fallthrough_after_commit() -> Result<()> {
         for bytes in LENGTHS {
             let prepared = prepare(bytes, FADD_Z0_S_P0_Z0_Z1, NumericalFeatures::default())?;
             assert_eq!(
@@ -737,7 +737,7 @@ mod numerical22 {
     }
 
     #[test]
-    fn unsupported_controls_retain_prefix_exact_pc_and_all_numerical_input_state() -> Result<()> {
+    fn unsupported_controls_keep_prefix_exact_pc_and_all_numerical_input_state() -> Result<()> {
         let features = NumericalFeatures::new(true, false, false);
         let prepared = prepare(64, FADD_Z0_S_P0_Z0_Z1, features)?;
         let mut fixture = Fixture::new(64, false)?;
@@ -951,7 +951,7 @@ mod numerical22 {
     }
 
     #[test]
-    fn new19_actual_admission_and_completion_rejections() -> Result<()> {
+    fn new19_admission_and_completion_rejections() -> Result<()> {
         use stela_compiler::block::scalable::{
             admit_scalable_numerical_instruction, decode_scalable_numerical_instruction,
         };

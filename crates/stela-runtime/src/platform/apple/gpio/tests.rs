@@ -117,7 +117,7 @@ fn s5l_lock_refuses_before_effects_while_t8101_lock_stays_monotonic() {
 }
 
 #[test]
-fn retained_clock_and_quiesce_preserve_pad_ownership_independently() {
+fn kept_clock_and_quiesce_preserve_pad_ownership_independently() {
     let net = Net::new();
     let input = net.open_drain().unwrap();
     let mut bank = Gpio::new(64, lines(), &[49], vec![(8, net)]).unwrap();

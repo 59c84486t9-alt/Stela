@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn records_preserve_actual_clock_code_tag_and_argument() {
+    fn records_preserve_clock_code_tag_and_argument() {
         let mut trace = Trace::new(24_000_000).unwrap();
         trace
             .record(1_234_567, 0xfeed_1234_5678, *b"SVFY", 17)

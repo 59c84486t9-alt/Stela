@@ -87,7 +87,7 @@ fn synchronous_callbacks_write_read_and_preserve_neighbors() {
 }
 
 #[test]
-fn actual_native_callbacks_cover_every_admitted_residue_and_width() {
+fn native_callbacks_cover_every_admitted_residue_and_width() {
     let target = TargetCpu::detect();
     let mut admitted = 0;
     let mut capability_declined = 0;

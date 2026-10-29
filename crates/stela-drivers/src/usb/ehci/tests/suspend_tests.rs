@@ -33,7 +33,7 @@ fn read(c: &mut Controller, id: &DeviceId, interrupt: bool) -> TransferId {
 }
 
 #[test]
-fn actual_root_suspend_resume_preserves_address_configuration_toggle_and_dma_with_fresh_owners() {
+fn root_suspend_resume_preserves_address_configuration_toggle_and_dma_with_fresh_owners() {
     for interrupt in [false, true] {
         let (mut c, m, mut id) = configured(interrupt);
         let address = c.arena.as_ref().unwrap().address;
@@ -119,7 +119,7 @@ fn root_suspend_busy_foreign_and_default_address_owners_have_no_link_effects() {
 }
 
 #[test]
-fn root_missing_suspend_remote_wake_and_resume_acknowledgements_retain_original_owner() {
+fn root_missing_suspend_remote_wake_and_resume_acknowledgements_keep_original_owner() {
     for fault in 0..5 {
         let (mut c, m, id) = configured(false);
         {
@@ -159,7 +159,7 @@ fn root_missing_suspend_remote_wake_and_resume_acknowledgements_retain_original_
 }
 
 #[test]
-fn root_suspend_waits_for_actual_requester_stop_drain_and_cpu_cache_ownership() {
+fn root_suspend_waits_for_requester_stop_drain_and_cpu_cache_ownership() {
     for fault in 0..3 {
         let (mut c, m, id) = configured(false);
         {

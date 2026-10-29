@@ -409,7 +409,7 @@ fn true_level_retriggers_after_eoi_until_cause_ack_then_shared_group_retires() {
     drop(reused);
 }
 #[test]
-fn failed_controller_eoi_or_read_retains_route_and_contributors_for_real_retry() {
+fn failed_controller_eoi_or_read_keeps_route_and_contributors_for_real_retry() {
     let (b, u, r, line) = fixture();
     // SAFETY: the fixture owns the stopped line and its contributors.
     let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
@@ -444,7 +444,7 @@ fn failed_controller_eoi_or_read_retains_route_and_contributors_for_real_retry()
     assert_eq!(u.quarantine_count(), 0);
 }
 #[test]
-fn electrical_route_mismatch_duplicate_claim_mask_failure_and_abandoned_pin_are_retained() {
+fn electrical_route_mismatch_duplicate_claim_mask_failure_and_abandoned_pin_are_kept() {
     let (b, u, r, line) = fixture();
     assert!(matches!(
         // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning

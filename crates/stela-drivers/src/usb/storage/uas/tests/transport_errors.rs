@@ -39,7 +39,7 @@ fn invalid_ready_tag_status_or_command_length_quarantines_without_reusing_dma() 
 }
 
 #[test]
-fn check_condition_drains_queued_data_and_reports_actual_sense() {
+fn check_condition_drains_queued_data_and_reports_sense() {
     for input in [false, true] {
         let mut memory = vec![0u64; 32 * 1024];
         let (io, mut dma) = model(&mut memory, 512, input, Fault::ErrorAfterReady);

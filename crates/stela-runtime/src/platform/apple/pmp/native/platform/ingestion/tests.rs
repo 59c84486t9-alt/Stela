@@ -171,7 +171,7 @@ fn run(
     owner.advance(frames, &mut Access::new(0, 100, latch))
 }
 #[test]
-fn actual_copied_frames_drive_bitfields_buffers_rates_and_query() {
+fn copied_frames_drive_bitfields_buffers_rates_and_query() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(1);
     let receipt = copied(&mut frames, &local, 1, 70 | (100 << 32), &mut latch);
@@ -206,7 +206,7 @@ fn actual_copied_frames_drive_bitfields_buffers_rates_and_query() {
     assert!(o.begin_postprocess(&frames, &d, c, 1).is_err());
 }
 #[test]
-fn source_zero_activity_reads_retained_storage_without_copying_or_consuming_pending_entries() {
+fn source_zero_activity_reads_kept_storage_without_copying_or_consuming_pending_entries() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(1);
     let mut o = Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
@@ -265,7 +265,7 @@ fn source_zero_activity_reads_retained_storage_without_copying_or_consuming_pend
     assert_eq!(o.products(), products);
 }
 #[test]
-fn source_no_counter_slice_skips_bulk_and_invalid_retained_constructors_preserve_state() {
+fn source_no_counter_slice_skips_bulk_and_invalid_kept_constructors_preserve_state() {
     let (frames, _, _) = setup();
     let d = descriptor(2);
     let mut o = Owner::initialized_software(Configuration::t8112(&d).unwrap(), TestBackend::new());
@@ -302,7 +302,7 @@ fn source_no_counter_slice_skips_bulk_and_invalid_retained_constructors_preserve
     assert_eq!(frames.progress().consumed, 0);
 }
 #[test]
-fn provider_tuple_sums_and_auxiliary_refusal_retain_exact_prefix() {
+fn provider_tuple_sums_and_auxiliary_refusal_keep_exact_prefix() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(4);
     let receipt = copied(&mut frames, &local, 4, 0, &mut latch);
@@ -381,7 +381,7 @@ fn retired_callback_refusal_never_replays_and_stale_receipts_never_read() {
     assert!(o.cells(&frames).is_err());
 }
 #[test]
-fn actual_tuple_callback_shape_and_cursor_exhaustion_fail_before_fabrication() {
+fn tuple_callback_shape_and_cursor_exhaustion_fail_before_fabrication() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(4);
     let receipt = copied(&mut frames, &local, 4, 0, &mut latch);
@@ -407,7 +407,7 @@ fn actual_tuple_callback_shape_and_cursor_exhaustion_fail_before_fabrication() {
     assert!(o.backend.calls.is_empty());
 }
 #[test]
-fn inactive_primary_timestamp_uses_actual_retained_frame_metadata() {
+fn inactive_primary_timestamp_uses_kept_frame_metadata() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(1);
     let receipt = copied(&mut frames, &local, 1, 41, &mut latch);
@@ -466,7 +466,7 @@ fn constructor_preflight_keeps_receipt_products_and_pending_post_intact() {
     assert!(o.cells(&frames).is_ok());
 }
 #[test]
-fn type4_coefficients_and_actual_output_range_precede_duration_publication() {
+fn type4_coefficients_and_output_range_precede_duration_publication() {
     let (mut frames, local, mut latch) = setup();
     let mut d = descriptor(2);
     d.raw[4] = 18;
@@ -501,7 +501,7 @@ fn type4_coefficients_and_actual_output_range_precede_duration_publication() {
     assert!(coefficients < layout && layout < publish);
 }
 #[test]
-fn source_activation_store_resets_only_capture_index_without_frame_authority() {
+fn source_activation_store_resets_only_capture_index_without_frame_permission() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(1);
     let receipt = copied(&mut frames, &local, 1, 42, &mut latch);
@@ -519,7 +519,7 @@ fn source_activation_store_resets_only_capture_index_without_frame_authority() {
     assert!(o.backend.calls.is_empty());
 }
 #[test]
-fn extended_integer_source_preserves_sum_and_actual_timestamp() {
+fn extended_integer_source_preserves_sum_and_timestamp() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(1);
     let receipt = copied(&mut frames, &local, 1, 1, &mut latch);
@@ -561,7 +561,7 @@ fn extended_integer_source_preserves_sum_and_actual_timestamp() {
     assert_eq!(calls, vec![0, 8, 16, 0]);
 }
 #[test]
-fn actual_provider_busy_and_foreign_frame_owner_preserve_identity() {
+fn provider_busy_and_foreign_frame_owner_preserve_identity() {
     let (mut frames, local, mut latch) = setup();
     let d = descriptor(4);
     let receipt = copied(&mut frames, &local, 4, 0, &mut latch);

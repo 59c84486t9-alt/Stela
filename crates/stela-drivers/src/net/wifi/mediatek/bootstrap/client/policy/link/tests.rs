@@ -182,7 +182,7 @@ fn incoming_control(model: &Model, pn: Option<u64>, marker: u8) {
     device_receive(&model.queues[&0xd4520], &raw, true, 0);
 }
 #[test]
-fn actual_link_routes_control_port_then_real_ethernet_and_retires_exact_packets() {
+fn link_routes_control_port_then_real_ethernet_and_retires_exact_packets() {
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     let original_epoch = link.station().association_epoch().unwrap();
@@ -607,7 +607,7 @@ fn the_link_carries_each_aes_cipher_like_mt7925_set_key() {
     }
 }
 #[test]
-fn full_data_and_control_queues_retain_native_batches_in_order() {
+fn full_data_and_control_queues_keep_native_batches_in_order() {
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -656,7 +656,7 @@ fn full_data_and_control_queues_retain_native_batches_in_order() {
     assert_eq!(provider.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn removal_waits_for_both_real_tx_facts_and_uncertain_stop_retains_frontend_owner() {
+fn removal_waits_for_both_real_tx_facts_and_uncertain_stop_keeps_frontend_owner() {
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -987,7 +987,7 @@ fn deferred_message(link: &TestLink) -> std::string::String {
     )
 }
 #[test]
-fn queued_valid_receive_alternates_exact_original_error_under_repeated_bad_rx() {
+fn queued_valid_receive_alternates_original_error_under_repeated_bad_rx() {
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);

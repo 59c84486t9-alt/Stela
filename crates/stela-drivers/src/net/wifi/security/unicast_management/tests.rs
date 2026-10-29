@@ -191,7 +191,7 @@ fn management_checks_do_not_consume_rejected_frames_or_data_counters() {
 }
 
 #[test]
-fn retained_iv_and_mic_are_removed_only_from_the_authenticated_body_view() {
+fn kept_iv_and_mic_are_removed_only_from_the_authenticated_body_view() {
     let mut slot = slot();
     let key = slot.installed().unwrap();
     let base = packet(key, 19, 0x112233445566);

@@ -50,7 +50,7 @@ fn unfinished_or_invalid_publications_are_unavailable() {
 }
 
 #[test]
-fn exhausted_sequence_retains_the_last_copy_without_wrapping() {
+fn exhausted_sequence_keeps_the_last_copy_without_wrapping() {
     let slot = Slot::default();
     slot.sequence.store(u64::MAX - 3, SeqCst);
     slot.publish(state(1));

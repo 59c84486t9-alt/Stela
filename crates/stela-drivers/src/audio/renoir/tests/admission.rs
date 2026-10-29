@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn genuine_same_function_presence_selector_and_all_source_board_exclusions() {
+fn same_function_presence_selector_and_all_source_board_exclusions() {
     for cfg in [
         Config {
             ownership: Ownership::Unknown,

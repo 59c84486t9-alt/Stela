@@ -328,7 +328,7 @@ fn key(services: &MemoryServices<'_>) -> *mut c_void {
 }
 
 #[test]
-fn original_ram_dma_and_cpu_views_hold_actual_resources_until_retirement() {
+fn original_ram_dma_and_cpu_views_hold_resources_until_retirement() {
     let source = Source::new(12);
     let domain = Domain::new();
     let state = State::new();

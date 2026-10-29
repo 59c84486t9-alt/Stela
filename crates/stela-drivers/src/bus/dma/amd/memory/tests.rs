@@ -151,7 +151,7 @@ fn entry(index: usize) -> PageEntry {
 }
 
 #[test]
-fn attested_native_granules_retain_the_complete_original_allocation() {
+fn attested_native_granules_keep_the_complete_original_allocation() {
     for (base, returned, backing_pages) in [(12, 12, 1), (13, 13, 1), (12, 13, 1), (12, 12, 2)] {
         let mut source = Source::new(returned);
         source.bytes *= backing_pages;
@@ -370,7 +370,7 @@ unsafe impl TableVisibility for Observe {
 }
 
 #[test]
-fn publication_observes_actual_stores_and_propagates_failure_without_release() {
+fn publication_observes_stores_and_propagates_failure_without_release() {
     let source = Source::new(13);
     let mut table = allocate(&source, 48).unwrap();
     let observer = Observe {

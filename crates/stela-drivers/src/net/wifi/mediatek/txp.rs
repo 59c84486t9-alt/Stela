@@ -142,7 +142,7 @@ mod tests {
     extern crate std;
     use std::sync::Mutex;
     #[test]
-    fn actual_canonical_iova_ranges_and_last_segment_are_encoded_without_cpu_substitution() {
+    fn canonical_iova_ranges_and_last_segment_are_encoded_without_cpu_substitution() {
         let memory = Arc::new(Mutex::new(Memory::default()));
         let domain: Arc<dyn DmaDomain> = Arc::new(Domain(memory.clone()));
         let pins = Source

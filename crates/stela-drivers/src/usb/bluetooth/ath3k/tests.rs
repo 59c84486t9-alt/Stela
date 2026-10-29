@@ -247,7 +247,7 @@ fn attempt(e: &Error) -> (&Error, &Attempt) {
     }
 }
 #[test]
-fn source_alias_revision_and_actual_raw_interface_selection_is_exact() {
+fn source_alias_revision_and_raw_interface_selection_is_exact() {
     assert_eq!(SOURCE_USB_IDS.len(), 62);
     assert_eq!(
         SOURCE_USB_IDS
@@ -376,7 +376,7 @@ fn crystal_selection_syscfg_always_loads_and_normal_mode_is_not_resubmitted() {
     }
 }
 #[test]
-fn every_operation_failure_is_terminal_and_retains_pending_bytes_and_first_error() {
+fn every_operation_failure_is_terminal_and_keeps_pending_bytes_and_first_error() {
     for kind in [Kind::Ar3011, Kind::Ar3012] {
         let (owner, _, _) = model(kind, 0, false, 0, 4097);
         let operations = owner.io.steps.len();
@@ -469,7 +469,7 @@ fn successful_upload_with_failed_retirement_keeps_full_historical_evidence() {
 }
 
 #[test]
-fn real_bind_configures_only_raw_output_and_retains_the_completed_uploader() {
+fn real_bind_configures_only_raw_output_and_keeps_the_completed_uploader() {
     use crate::bus::dma::RegionAllocator;
     let mut backing = vec![0u64; 64 * 1024];
     let start = backing.as_mut_ptr() as u64;

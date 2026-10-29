@@ -357,7 +357,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     #[test]
-    fn configuration_channel_owns_actual_ring_dma_and_wraps_sequence_and_rings() {
+    fn configuration_channel_owns_ring_dma_and_wraps_sequence_and_rings() {
         use super::super::{
             channel::{Error as ChannelError, Event},
             config::{Reply, Route},
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn full_ack_ring_retains_event_and_defers_rx_until_actual_tx_completion() {
+    fn full_ack_ring_keeps_event_and_defers_rx_until_tx_completion() {
         use super::super::{channel::Event, config::Route};
         let (_source, domain, model, mut channel) = channel();
         channel.start(0).unwrap();

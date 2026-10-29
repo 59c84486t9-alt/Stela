@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn endpoint_retirement_retains_or_quarantines_rings() {
+fn endpoint_retirement_keeps_or_quarantines_rings() {
     for failure in [
         None,
         Some(CONFIGURE_ENDPOINT),
@@ -87,7 +87,7 @@ fn endpoint_retirement_retains_or_quarantines_rings() {
 }
 
 #[test]
-fn stalled_cancellation_retains_buffers() {
+fn stalled_cancellation_keeps_buffers() {
     for silent in [STOP_ENDPOINT, SET_DEQUEUE] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;

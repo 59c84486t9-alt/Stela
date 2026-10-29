@@ -62,7 +62,7 @@ mod tests {
     struct Storage([u64; 8]);
 
     #[test]
-    fn actual_supported_cx16_replaces_only_the_aligned_half_and_reports_compare_failure() {
+    fn supported_cx16_replaces_only_the_aligned_half_and_reports_compare_failure() {
         if !supported() {
             // The public owner's fixtures assert UnsupportedAtomic on this
             // host; no software fallback pretends to execute CX16.

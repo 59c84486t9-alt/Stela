@@ -15,7 +15,7 @@ fn group_received(driver: &mut Native, model: &Model, index: u8, key: u8, pn: u6
 }
 
 #[test]
-fn native_live_igtk_update_revokes_old_envelopes_and_retains_both_real_rx_windows() {
+fn native_live_igtk_update_revokes_old_envelopes_and_keeps_both_real_rx_windows() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, ptk, gtk) = keys(&mut driver);
@@ -98,7 +98,7 @@ fn native_live_igtk_update_revokes_old_envelopes_and_retains_both_real_rx_window
 }
 
 #[test]
-fn native_live_igtk_overlap_never_clears_actual_hardware_integrity_failures() {
+fn native_live_igtk_overlap_never_clears_hardware_integrity_failures() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -129,7 +129,7 @@ fn native_live_igtk_overlap_never_clears_actual_hardware_integrity_failures() {
 }
 
 #[test]
-fn native_live_igtk_requires_actual_tx_descriptor_free_and_unmap_drain() {
+fn native_live_igtk_requires_tx_descriptor_free_and_unmap_drain() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);

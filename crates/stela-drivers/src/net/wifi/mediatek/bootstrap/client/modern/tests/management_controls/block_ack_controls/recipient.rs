@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn recipient_response_retains_session() {
+fn recipient_response_keeps_session() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let proof = observe(&mut driver, &model, &request(), 101, NOW);

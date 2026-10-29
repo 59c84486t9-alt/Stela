@@ -79,7 +79,7 @@ fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
 }
 
 #[test]
-fn hcmd_publication_faults_retain_real_owner_and_all_exposed_dma() {
+fn hcmd_publication_faults_keep_real_owner_and_all_exposed_dma() {
     // Alloc/map/initial visibility/TB0 visibility precede descriptor
     // publication; descriptor visibility or producer failure is uncertain.
     for failure in 0..6 {

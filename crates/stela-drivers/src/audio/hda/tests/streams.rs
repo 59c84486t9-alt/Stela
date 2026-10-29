@@ -129,7 +129,7 @@ fn split_bdl_streaming() {
 }
 
 #[test]
-fn failed_stop_retains_buffer_ownership() {
+fn failed_stop_keeps_buffer_ownership() {
     for fault in [SD_FIFO_ERROR, SD_DESC_ERROR] {
         let mut fixture = Fixture::new();
         let model = Model::new(16);

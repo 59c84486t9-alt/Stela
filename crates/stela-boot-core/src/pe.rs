@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_inventory_retains_rva_geometry_and_distinct_page_rights() {
+    fn complete_inventory_keeps_rva_geometry_and_distinct_page_rights() {
         let sections = parse(&pe()).unwrap();
         assert_eq!(
             sections,

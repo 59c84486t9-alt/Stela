@@ -115,8 +115,7 @@ mod tests {
     const IOVA: u64 = 0x10000004000;
 
     #[test]
-    fn native_commands_and_retained_shutdown_drive_actual_dma_without_losing_configuration_or_faults()
-     {
+    fn native_commands_and_kept_shutdown_drive_dma_without_losing_configuration_or_faults() {
         let context = Context::from_vm_range(IOVA, 0xffff0000).unwrap();
         let handoff = Handoff::new(0x300, 1, context).unwrap();
         let indices = context.transfer(IOVA, IOVA + 3).unwrap();

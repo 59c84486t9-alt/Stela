@@ -581,7 +581,7 @@ fn refused_submit_reply_preflight_preserves_started_swap() {
 }
 
 #[test]
-fn surface_and_sink_faults_retain_swap_order_and_abort_cancels_without_completion() {
+fn surface_and_sink_faults_keep_swap_order_and_abort_cancels_without_completion() {
     struct Sink {
         attempts: Rc<RefCell<usize>>,
         frames: Rc<RefCell<Vec<Vec<u8>>>>,

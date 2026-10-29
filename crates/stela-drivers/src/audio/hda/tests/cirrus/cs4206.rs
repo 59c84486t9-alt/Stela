@@ -179,7 +179,7 @@ fn unsupported_layout_rejected() {
 }
 
 #[test]
-fn startup_failure_retains_owner() {
+fn startup_failure_keeps_owner() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = device(0x1013_4207, 7);

@@ -329,7 +329,7 @@ mod tests {
     use super::*;
     use stela_contracts::interrupt::InterruptLatch;
     #[test]
-    fn all_three_banks_preserve_unknownness_actual_table_stride_and_disabled_samples() {
+    fn all_three_banks_preserve_unknownness_table_stride_and_disabled_samples() {
         let mut irq = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut irq);
         for complex in [
@@ -447,7 +447,7 @@ mod original {
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_KERNELCACHE"]
-    fn original_three_complexes_mount_actual_views_and_preserve_a_committed_prefix() {
+    fn original_three_complexes_mount_views_and_preserve_a_committed_prefix() {
         let bytes = original(
             "STELA_TEST_PMGR_M1_KERNELCACHE",
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90",

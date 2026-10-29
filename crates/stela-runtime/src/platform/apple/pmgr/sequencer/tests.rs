@@ -21,7 +21,7 @@ fn cursor(words: &[u32], format: AddressFormat) -> PacketCursor {
 }
 
 #[test]
-fn checked_mmio_refusal_retains_committed_prefix_and_original_error() {
+fn checked_mmio_refusal_keeps_committed_prefix_and_original_error() {
     // Two native stores in one packet, offsets 0/8 in the same 1KiB bank.
     let mut cursor = cursor(
         &[0x105, 0x200, 0x1000000f, 0x1000000f, 0],
@@ -109,7 +109,7 @@ fn checked_mmio_refusal_retains_committed_prefix_and_original_error() {
 }
 
 #[test]
-fn actual_pmgr_coverage_refusal_cannot_be_acknowledged_as_a_write() {
+fn pmgr_coverage_refusal_cannot_be_acknowledged_as_a_write() {
     let mut cursor = cursor(&[0x101, 0, 4, 0], AddressFormat::Compact);
     let mut pmgr = Pmgr::new([PowerState {
         address: 0x1000,
@@ -143,7 +143,7 @@ fn actual_pmgr_coverage_refusal_cannot_be_acknowledged_as_a_write() {
 }
 
 #[test]
-fn actual_ram_keeps_wide_values_and_running_sequence_alignment() {
+fn ram_keeps_wide_values_and_running_sequence_alignment() {
     // The first packet occupies three words. The following wide packet
     // needs padding at word5; aligning each packet in isolation is wrong.
     let mut cursor = cursor(
@@ -289,7 +289,7 @@ fn exclusive_claim_cancellation_and_distinct_cursor_identity_reject_stale_result
 }
 
 #[test]
-fn retained_suspend_preserves_in_flight_effect_and_forbids_image_substitution() {
+fn kept_suspend_preserves_in_flight_effect_and_forbids_image_substitution() {
     let mut cursor = cursor(&[0x105, 0, 0xf, 4, 0], AddressFormat::Compact);
     let claim = cursor.begin_write().unwrap();
     cursor.set_suspended(true);
@@ -530,7 +530,7 @@ fn every_malformed_or_unknown_packet_refuses_before_any_effect() {
 }
 
 #[test]
-fn full_sixteen_write_batch_reaches_actual_ram_in_offset_order() {
+fn full_sixteen_write_batch_reaches_ram_in_offset_order() {
     let mut words = vec![0x13d, 0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c];
     words.extend(0x80..0x90);
     words.push(0);

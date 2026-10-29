@@ -300,7 +300,7 @@ fn unusable_native_clock_returns_original_owners_before_busy_register_access() {
     assert_eq!(state.borrow().drops, 1);
 }
 #[test]
-fn both_engines_write_read_actual_changed_payload_and_command_only_completion() {
+fn both_engines_write_read_changed_payload_and_command_only_completion() {
     for profile in [Profile::V1, Profile::V2] {
         let (mut h, s) = host(profile);
         let mut tx = vec![37];
@@ -429,7 +429,7 @@ fn invalid_requests_have_no_accesses_or_owner_poisoning() {
     drop(h.release().ok().unwrap());
 }
 #[test]
-fn every_access_before_after_failure_retains_first_diagnostic_output_and_actual_owner() {
+fn every_access_before_after_failure_keeps_first_diagnostic_output_and_owner() {
     for profile in [Profile::V1, Profile::V2] {
         let (mut h, baseline) = host(profile);
         h.command(device(), 0x90, &[4, 5, 6], &mut [0; 7]).unwrap();

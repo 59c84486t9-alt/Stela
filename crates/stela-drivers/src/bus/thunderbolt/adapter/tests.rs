@@ -117,7 +117,7 @@ fn unchanged_linux_adapter_controls_and_nfc_register_effects_match() {
 }
 
 #[test]
-fn adapter_lane_configured_and_credit_changes_use_actual_dma_ack_and_readback() {
+fn adapter_lane_configured_and_credit_changes_use_dma_ack_and_readback() {
     use super::super::adapter::{Control, Event, Operation};
     let before = 0x86454007;
     for (operation, offset, after) in [
@@ -174,7 +174,7 @@ fn adapter_lane_configured_and_credit_changes_use_actual_dma_ack_and_readback() 
 }
 
 #[test]
-fn adapter_failed_readback_and_lost_write_ack_retain_exact_active_reservation() {
+fn adapter_failed_readback_and_lost_write_ack_keep_exact_active_reservation() {
     use super::super::adapter::{Control, Error, Operation};
     for lost_ack in [false, true] {
         let (_source, domain, model, mut channel) = channel();

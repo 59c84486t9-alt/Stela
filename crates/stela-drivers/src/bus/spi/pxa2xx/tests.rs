@@ -318,7 +318,7 @@ fn atom_firmware_selection_is_translated_without_underflow() {
 }
 
 #[test]
-fn every_lpss_layout_initializes_actual_defaults_private_cs_and_hardware_caps() {
+fn every_lpss_layout_initializes_defaults_private_cs_and_hardware_caps() {
     for profile in PROFILES {
         let (mut h, hw) = host(profile);
         hw.borrow_mut().rx.extend([9, 8, 7]);
@@ -338,7 +338,7 @@ fn every_lpss_layout_initializes_actual_defaults_private_cs_and_hardware_caps() 
     }
 }
 #[test]
-fn all_word_sizes_modes_full_duplex_and_null_directions_execute_actual_serial_words() {
+fn all_word_sizes_modes_full_duplex_and_null_directions_execute_serial_words() {
     for profile in PROFILES {
         let (mut h, hw) = host(profile);
         h.initialize().unwrap();
@@ -410,7 +410,7 @@ fn all_word_sizes_modes_full_duplex_and_null_directions_execute_actual_serial_wo
     }
 }
 #[test]
-fn actual_cs_selection_latch_and_dynamic_gate_workaround_preserve_other_bits() {
+fn cs_selection_latch_and_dynamic_gate_workaround_preserve_other_bits() {
     for profile in [Profile::Braswell, Profile::Broxton, Profile::CannonLake] {
         let (mut h, hw) = host(profile);
         h.initialize().unwrap();
@@ -442,7 +442,7 @@ fn actual_cs_selection_latch_and_dynamic_gate_workaround_preserve_other_bits() {
     }
 }
 #[test]
-fn multi_transfer_cs_hold_changes_delay_and_zero_length_have_actual_pin_effects() {
+fn multi_transfer_cs_hold_changes_delay_and_zero_length_have_pin_effects() {
     let (mut h, hw) = host(Profile::CannonLake);
     h.initialize().unwrap();
     let mut first = transfer(Some(&[1, 2]), None, 2, 8);
@@ -598,7 +598,7 @@ fn geometry_and_clock_refusals_precede_effects_and_hardware_cs_caps_narrow_board
     assert_eq!(hw.borrow().drops, 1);
 }
 #[test]
-fn actual_fifo_errors_stall_and_unexpected_receive_never_publish_or_replay() {
+fn fifo_errors_stall_and_unexpected_receive_never_publish_or_replay() {
     for fault in 0..3 {
         let (mut h, hw) = host(Profile::CannonLake);
         h.initialize().unwrap();
@@ -632,7 +632,7 @@ fn actual_fifo_errors_stall_and_unexpected_receive_never_publish_or_replay() {
 }
 
 #[test]
-fn initialization_failures_before_and_after_each_effect_retain_the_original_device() {
+fn initialization_failures_before_and_after_each_effect_keep_the_original_device() {
     for profile in PROFILES {
         let (mut h, hw) = host(profile);
         h.initialize().unwrap();

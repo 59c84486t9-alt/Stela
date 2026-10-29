@@ -407,7 +407,7 @@ mod tests {
         );
     }
     #[test]
-    fn descriptor_bounds_and_actual_capacity_refuse_invalid_mandatory_values() {
+    fn descriptor_bounds_and_capacity_refuse_invalid_mandatory_values() {
         for (offset, value) in [(1, 128), (2, 2), (7, 4)] {
             let (d, mut decoder, mut a) = fixture();
             update(&d, &mut decoder, &mut a, &raw(1, 1, 2, 1));

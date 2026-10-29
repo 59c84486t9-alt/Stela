@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_enables_require_caller_execution_profile_handling() {
+    fn kept_enables_require_caller_execution_profile_handling() {
         let fpcr = EXCEPTIONS << FPCR_EXCEPTION_ENABLE_SHIFT;
         let expected = Err(UnsupportedControl {
             enabled_exceptions: EXCEPTIONS,

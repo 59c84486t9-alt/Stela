@@ -17,7 +17,7 @@ fn lifecycle() -> LifecycleState {
 }
 
 #[test]
-fn t8112_implements_256_entries_inside_its_larger_actual_alias() {
+fn t8112_implements_256_entries_inside_its_larger_alias() {
     let geometry = Geometry::new((0x23b3c0000, 0x20000), (0x23b3d0000, 0x4000)).unwrap();
     assert_eq!(geometry.entries(), 2048);
     assert_eq!(NativeProfile::T8112.entries(), 256);
@@ -168,7 +168,7 @@ fn write(
 }
 
 #[test]
-fn each_local_route_tracks_actual_publication_and_consumption_without_ap_wires() {
+fn each_local_route_tracks_publication_and_consumption_without_ap_wires() {
     let (mut bank, notifications) = Ptd::initialized_local(384, &ranges(), lifecycle()).unwrap();
     assert!(notifications.owns(&bank));
     assert!(notifications.owns(&bank.clone()));
@@ -220,7 +220,7 @@ fn each_local_route_tracks_actual_publication_and_consumption_without_ap_wires()
 }
 
 #[test]
-fn local_levels_follow_mask_route_overwrite_and_retained_lifecycle_on_same_object() {
+fn local_levels_follow_mask_route_overwrite_and_kept_lifecycle_on_same_object() {
     let (mut bank, notifications) = Ptd::initialized_local(384, &ranges(), lifecycle()).unwrap();
     let mut latch = InterruptLatch::new();
     write(&mut bank, UPDATE_OFFSET, Width::Double, 41, 1, &mut latch).unwrap();

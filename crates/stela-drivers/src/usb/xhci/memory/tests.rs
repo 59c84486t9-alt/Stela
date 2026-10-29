@@ -287,7 +287,7 @@ fn memory(peer: &Arc<Peer>) -> Rc<Native> {
 }
 
 #[test]
-fn native_ring_publishes_real_iova_td_before_first_cycle_and_retains_failed_visibility() {
+fn native_ring_publishes_real_iova_td_before_first_cycle_and_keeps_failed_visibility() {
     for failure in [None, Some(0), Some(1)] {
         let peer = Peer::new();
         let memory = memory(&peer);
@@ -461,7 +461,7 @@ fn native_core_uses_real_dcbaa_erst_scratchpads_and_coherent_owned_event_trbs() 
 }
 
 #[test]
-fn native_missing_coherence_refuses_before_pointer_publication_or_run_and_retains_original_maps() {
+fn native_missing_coherence_refuses_before_pointer_publication_or_run_and_keeps_original_maps() {
     let peer = Peer::new();
     peer.state.lock().unwrap().coherent = false;
     let registers = Rc::new(RefCell::new(RegistersState::default()));

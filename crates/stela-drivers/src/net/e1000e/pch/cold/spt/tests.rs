@@ -290,7 +290,7 @@ fn ulp_mode_switch_recovers_only_the_specific_mdi_transition_and_verifies_state(
     }
 }
 #[test]
-fn each_mode_switch_access_failure_is_terminal_and_retains_actual_owner() {
+fn each_mode_switch_access_failure_is_terminal_and_keeps_owner() {
     let (state, _, io, timer) = fixture_spt();
     state.borrow_mut().smb_hidden_after_power = true;
     let controller = start_spt(0x156f, io, timer).unwrap();
@@ -310,7 +310,7 @@ fn each_mode_switch_access_failure_is_terminal_and_retains_actual_owner() {
     }
 }
 #[test]
-fn every_spt_cold_access_failure_retains_actual_owner_and_prevents_packet_dma() {
+fn every_spt_cold_access_failure_keeps_owner_and_prevents_packet_dma() {
     let (state, _, io, timer) = fixture_spt();
     let controller = start_spt(0x1570, io, timer).unwrap();
     let count = state.borrow().accesses;

@@ -428,7 +428,7 @@ mod tests {
         Plan::prepare_ap_frontend(&parts.0, &parts.1, &parts.3, &parts.2, [None; 4], &parts.4)
     }
     #[test]
-    fn input_free_source_retains_reg0_and_does_not_borrow_separate_pmp_readiness() {
+    fn input_free_source_keeps_reg0_and_does_not_borrow_separate_pmp_readiness() {
         for count in [4, 8, 16] {
             let parts = components(count);
             let plan = plan(&parts).unwrap();
@@ -480,7 +480,7 @@ mod tests {
         }
     }
     #[test]
-    fn actual_pmgr_input_is_sampled_instead_of_accepting_a_caller_on_boolean() {
+    fn pmgr_input_is_sampled_instead_of_accepting_a_caller_on_boolean() {
         let mut parts = components(16);
         parts.3.resources[0].clocks.push(id(1));
         let plan = plan(&parts).unwrap();
@@ -538,7 +538,7 @@ mod tests {
         assert!(plan.validate(Some(&parts.0), None, None).is_err());
     }
     #[test]
-    fn actual_alias_inputs_and_all_physical_ancestors_are_retained() {
+    fn alias_inputs_and_all_physical_ancestors_are_kept() {
         let mut parts = components(4);
         parts.3.registers.push(SUPPLY + 4);
         parts.3.domains[0].parents[0] = Some(id(2));
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(plan.input_domains(), &[SUPPLY, SUPPLY + 4]);
     }
     #[test]
-    fn independently_gated_owned_aperture_aliases_require_an_actual_separate_join() {
+    fn independently_gated_owned_aperture_aliases_require_an_separate_join() {
         let mut parts = components(16);
         for address in [parts.1.apertures[8], parts.1.updates.0, parts.1.auxiliary.0] {
             let mut alias = parts.3.resources[0].clone();

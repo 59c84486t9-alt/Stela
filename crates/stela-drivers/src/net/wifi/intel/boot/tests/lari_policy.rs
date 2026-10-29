@@ -5,13 +5,13 @@
 use super::*;
 
 #[test]
-fn lari_actual_bios_source_commands_and_dma_retirement_both_families() {
+fn lari_bios_source_commands_and_dma_retirement_both_families() {
     exercise_lari_bios(false);
 }
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn lari_actual_images_drive_lari6_without_extension_and_lari8_with_extension() {
+fn lari_images_drive_lari6_without_extension_and_lari8_with_extension() {
     exercise_lari_bios(true);
 }
 

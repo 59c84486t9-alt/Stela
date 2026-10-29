@@ -332,7 +332,7 @@ fn power_change(
 }
 
 #[test]
-fn retained_gates_pause_live_and_parked_owners_without_consuming_pending_state() {
+fn kept_gates_pause_live_and_parked_owners_without_consuming_pending_state() {
     let mut machine = pair();
     machine
         .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
@@ -444,7 +444,7 @@ fn a_stale_settlement_cannot_touch_cpu_reservations_or_clock_accounting() {
 }
 
 #[test]
-fn every_actual_owner_is_preflighted_before_any_retained_transaction_effect() {
+fn every_owner_is_preflighted_before_any_kept_transaction_effect() {
     for broken in 0..3 {
         let mut machine = pair();
         machine
@@ -497,7 +497,7 @@ fn every_actual_owner_is_preflighted_before_any_retained_transaction_effect() {
 }
 
 #[test]
-fn synchronous_write_settles_actual_pe_and_native_owners_before_controller_ack() {
+fn synchronous_write_settles_pe_and_native_owners_before_controller_ack() {
     let mut machine = pair();
     machine
         .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
@@ -800,7 +800,7 @@ fn paused_timer_events_and_timeouts_remain_pending_without_idle_skip_spinning() 
 }
 
 #[test]
-fn retained_monitors_exclude_pause_time_and_preserve_fractional_cycles_and_pmi() {
+fn kept_monitors_exclude_pause_time_and_preserve_fractional_cycles_and_pmi() {
     use crate::machine::{
         amu::Amu,
         pmu::{self, Context, Pmu},
@@ -877,7 +877,7 @@ fn retained_monitors_exclude_pause_time_and_preserve_fractional_cycles_and_pmi()
 }
 
 #[test]
-fn a_start_cannot_bypass_a_retained_clock_blocker() {
+fn a_start_cannot_bypass_a_kept_clock_blocker() {
     let mut machine = board(&[], Board::default(), alloc::vec![identity(0), identity(1)]);
     let mut binding = core_binding(1, 1);
     binding.initial = RETAINED_GATED;

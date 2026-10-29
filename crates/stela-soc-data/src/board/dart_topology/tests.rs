@@ -236,7 +236,7 @@ fn t6000_remaps_do_not_admit_an_unselected_translation_owner() {
 }
 
 #[test]
-fn mapper_sid_and_multi_instance_dma_require_actual_native_routing() {
+fn mapper_sid_and_multi_instance_dma_require_native_routing() {
     let mapper = |sid: u32| {
         encode(
             &[

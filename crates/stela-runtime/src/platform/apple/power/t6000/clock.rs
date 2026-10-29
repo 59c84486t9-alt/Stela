@@ -327,7 +327,7 @@ mod tests {
         );
     }
     #[test]
-    fn actual_bus_and_computed_inputs_preserve_unknownness_and_refuse_programming() {
+    fn bus_and_computed_inputs_preserve_unknownness_and_refuse_programming() {
         let image = Image::new(Input::Captured(vec![
             Observation {
                 register: Register::Selection,

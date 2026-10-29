@@ -77,7 +77,7 @@ fn quick_errors_and_late_completion_never_succeed_or_replay() {
 }
 
 #[test]
-fn quick_does_not_steal_a_busy_host_and_retains_failed_kill_or_mode_owners() {
+fn quick_does_not_steal_a_busy_host_and_keeps_failed_kill_or_mode_owners() {
     for status in [INUSE, HOST_BUSY, INUSE | HOST_BUSY] {
         let mut f = fixture(0x7e22, true);
         f.state.borrow_mut().status = status | ALERT;

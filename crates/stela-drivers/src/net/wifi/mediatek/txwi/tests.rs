@@ -86,7 +86,7 @@ fn distinct_raw_data_layouts_keep_firmware_sequence_and_pn_ownership_explicit() 
     }
 }
 #[test]
-fn fixed_management_multicast_paths_require_actual_chip_rate_context() {
+fn fixed_management_multicast_paths_require_chip_rate_context() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         let mut c = base(chip);
         c.frame.kind = Kind::Management;
@@ -260,7 +260,7 @@ fn bar_and_action_require_the_unimplemented_body_specific_profile() {
     }
 }
 #[test]
-fn actual_block_ack_action_body_selects_source_request_or_normal_management_tid() {
+fn block_ack_action_body_selects_source_request_or_normal_management_tid() {
     for action in 0..=2u8 {
         let mut bytes = [0; 33];
         bytes[..2].copy_from_slice(&0x00d0u16.to_le_bytes());

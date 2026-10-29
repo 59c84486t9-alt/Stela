@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_high_bits_are_retained_and_invalid_flushes_have_no_prefix() {
+    fn opaque_high_bits_are_kept_and_invalid_flushes_have_no_prefix() {
         let controller = controller();
         let offset = DCS_BASE + DCS_STRIDE + DCS_DRAIN;
         // An explicit software-owned control image, not a hardware sample.

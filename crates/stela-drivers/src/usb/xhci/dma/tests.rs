@@ -115,7 +115,7 @@ fn register_offsets_outside_the_bar_refuse_the_controller() {
 }
 
 #[test]
-fn actual_constructor_pads_command_and_event_segments_without_extra_trbs() {
+fn constructor_pads_command_and_event_segments_without_extra_trbs() {
     for overfetch in [false, true] {
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -233,7 +233,7 @@ fn every_initial_allocation_failure_precedes_all_pointer_publication_and_run() {
 }
 
 #[test]
-fn controller_applies_actual_ac64_and_pci_masks_before_pointer_publication() {
+fn controller_applies_ac64_and_pci_masks_before_pointer_publication() {
     for (ac64, profile) in [
         (false, Profile::SPEC),
         (true, Profile::pci(0x1b21, 0x3242)),
@@ -300,7 +300,7 @@ fn pci_profiles_match_exact_aperture_and_segment_quirks() {
 }
 
 #[test]
-fn complete_extents_cannot_wrap_or_cross_actual_apertures() {
+fn complete_extents_cannot_wrap_or_cross_apertures() {
     for bits in [32, 36, 64] {
         let profile = Profile {
             bits,

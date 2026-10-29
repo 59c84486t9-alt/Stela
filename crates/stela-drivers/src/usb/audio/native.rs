@@ -313,7 +313,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn native_audio_retains_raw_origin_for_wrapping_elapsed_clock() {
+    fn native_audio_keeps_raw_origin_for_wrapping_elapsed_clock() {
         let time = NativeTime {
             clock: crate::Clock {
                 ticks_per_microsecond: 3,

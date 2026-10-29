@@ -946,7 +946,7 @@ fn narrowing_places_result_in_requested_half_and_preserves_only_upper_form_low_h
 }
 
 #[test]
-fn narrowing_unions_status_and_odd_rounding_retains_a_low_significand_bit() {
+fn narrowing_unions_status_and_odd_rounding_keeps_a_low_significand_bit() {
     let mut state = conversion_state();
     state.v[1] = [0x0080_0000_7f7f_ffff, 0x3f80_0000_7f80_0001];
     let mut expected = state.clone();

@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_geometry_retains_every_supported_user_component_and_full_size() {
+    fn standard_geometry_keeps_every_supported_user_component_and_full_size() {
         let layout = layout();
         assert_eq!(layout.abi.image_bytes, 2688);
         assert_eq!(
@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn osxsave_enable_boundary_retains_legacy_sse_without_manufacturing_xcr0() {
+    fn osxsave_enable_boundary_keeps_legacy_sse_without_manufacturing_xcr0() {
         let layout = layout();
         let mut actual = controls();
         actual.cr4 |= CR4_OSXSAVE;

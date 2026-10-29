@@ -212,7 +212,7 @@ fn mixed_f11_f12_consume_one_observed_attention_in_pdt_order() {
 }
 
 #[test]
-fn resume_rezero_waits_on_actual_clock_and_late_effect_error_never_replays() {
+fn resume_rezero_waits_on_clock_and_late_effect_error_never_replays() {
     let h = hardware();
     install(&h, 0, 0, &[]);
     let mut d = control_device(&h);

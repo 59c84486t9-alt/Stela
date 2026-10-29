@@ -156,7 +156,7 @@ fn unchanged_linux_router_adapter_bitfields_and_helpers_match() {
 }
 
 #[test]
-fn inspector_reads_actual_router_adapter_and_capability_dma_without_control_adapter_zero() {
+fn inspector_reads_router_adapter_and_capability_dma_without_control_adapter_zero() {
     use super::super::{
         config::Route,
         topology::{AdapterKind, AdapterObservation, Event, Inspector},

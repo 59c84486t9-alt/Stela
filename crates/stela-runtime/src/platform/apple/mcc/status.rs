@@ -38,7 +38,7 @@ mod tests {
         }
     }
     #[test]
-    fn created_views_read_one_actual_selector_without_cache_completion() {
+    fn created_views_read_one_selector_without_cache_completion() {
         let owner = Controller::initialized(
             Configuration {
                 dram: vec![[0; 4]; 2],

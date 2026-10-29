@@ -77,7 +77,7 @@ fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
 }
 
 #[test]
-fn missing_mld_peer_ack_retains_binding_and_pending_dma() {
+fn missing_mld_peer_ack_keeps_binding_and_pending_dma() {
     for target in [1, 2, 3, 4] {
         let bytes = mld_image(2);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

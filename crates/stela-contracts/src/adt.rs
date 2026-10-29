@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn extent_translation_refuses_malformed_zero_and_overflowing_authority() {
+    fn extent_translation_refuses_malformed_zero_and_overflowing_permission() {
         for ranges in [
             vec![],
             vec![(0, 0, 0)],

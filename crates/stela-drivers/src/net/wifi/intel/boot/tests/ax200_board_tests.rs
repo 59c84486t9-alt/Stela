@@ -71,12 +71,12 @@ fn board_bytes() -> Vec<u8> {
     bytes
 }
 #[test]
-fn board_power_commands_use_actual_bios_and_original_reclaimed_dma() {
+fn board_power_commands_use_bios_and_original_reclaimed_dma() {
     exercise(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_ax200_board_schema_and_native_owner() {
+fn ax200_board_schema_and_native_owner() {
     exercise(true);
 }
 fn exercise(actual: bool) {

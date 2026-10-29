@@ -388,7 +388,7 @@ fn native_parent_table_programming_keeps_client_vector_zero_masked() {
 }
 
 #[test]
-fn uncertain_table_effect_and_abandoned_live_host_retain_actual_owner() {
+fn uncertain_table_effect_and_abandoned_live_host_keep_owner() {
     let mut model = Model::new(0x28c0);
     model.msix();
     let drops = model.drops.clone();
@@ -500,7 +500,7 @@ impl crate::bus::irq::Handler for ChildHandler {
 }
 
 #[test]
-fn actual_child_providers_gate_parent_owner_return_and_uncertain_stop_retention() {
+fn child_providers_gate_parent_owner_return_and_uncertain_stop_retention() {
     use crate::bus::irq::{Handler, MsiMessage, Route, Source};
     for fail_stop in [false, true] {
         let mut model = Model::new(0x9a0b);

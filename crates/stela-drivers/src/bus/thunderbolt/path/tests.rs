@@ -6,7 +6,7 @@ use crate::bus::thunderbolt::ring::{self, TX_DESCRIPTOR, model::*};
 use alloc::vec::Vec;
 
 #[test]
-fn path_actual_link_two_directions_credit_modes_stale_drain_and_retained_lifetime() {
+fn path_link_two_directions_credit_modes_stale_drain_and_kept_lifetime() {
     use super::super::path::{Activate, Direction, LaneCredits};
     for direction in [Direction::Downstream, Direction::Upstream] {
         for credits in [LaneCredits::LegacyBonded, LaneCredits::RouterAllocated(23)] {
@@ -62,7 +62,7 @@ fn path_actual_link_two_directions_credit_modes_stale_drain_and_retained_lifetim
 }
 
 #[test]
-fn path_invalid_actual_grants_hop_bounds_and_mapping_refuse_before_publication() {
+fn path_invalid_grants_hop_bounds_and_mapping_refuse_before_publication() {
     use super::super::path::{Activate, Direction, LaneCredits};
     for case in 0..13 {
         let PathFixture {
@@ -257,7 +257,7 @@ fn path_header_credit_refusal_and_stale_pending_deadline_cannot_claim_restoratio
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_PATH_ORACLE"]
-fn unchanged_linux_path_usb3_complete_write_trace_matches_actual_dma() {
+fn unchanged_linux_path_usb3_complete_write_trace_matches_dma() {
     use super::super::path::{Activate, Direction, LaneCredits};
     let text = std::fs::read_to_string(
         std::env::var("STELA_THUNDERBOLT_PATH_ORACLE").expect("set oracle trace path"),

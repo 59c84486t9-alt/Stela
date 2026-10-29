@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn phy_lmac_routing_follows_source_cdb_and_actual_band() {
+    fn phy_lmac_routing_follows_source_cdb_and_band() {
         // Pinned binding.c::iwl_mvm_get_lmac_id and context.h LMAC indices.
         // These four source cases are also covered in the C trace.
         for (cdb, band, number, frequency_mhz, expected_lmac) in [

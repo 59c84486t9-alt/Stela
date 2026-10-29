@@ -142,7 +142,7 @@ fn native_abort_task_requires_response_and_separate_pending_data_retirement() {
     }
 }
 #[test]
-fn native_abort_task_negative_short_old_tag_and_missing_responses_retain_original_dma() {
+fn native_abort_task_negative_short_old_tag_and_missing_responses_keep_original_dma() {
     use model::UasAbortFault as F;
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for fault in [

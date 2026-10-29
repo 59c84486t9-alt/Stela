@@ -683,7 +683,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     }
 
     #[test]
-    fn native_services_reuse_empty_storage_after_actual_close_and_release() {
+    fn native_services_reuse_empty_storage_after_close_and_release() {
         let (mut machine, _) = memory_service_machine(false);
         let mut allocation = None;
         let mut previous_generation = 0;
@@ -758,7 +758,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     }
 
     #[test]
-    fn public_begin_end_keep_actual_sessions_and_clear_selection() {
+    fn public_begin_end_keep_sessions_and_clear_selection() {
         let (mut machine, _) = memory_service_machine(false);
         let held = machine.hold_native_services().unwrap();
         assert!(machine.host.select_native_service(WorkerId(17)));
@@ -789,7 +789,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
 
     #[test]
     #[should_panic(expected = "native service buffer is not empty after close")]
-    fn service_buffer_cannot_retain_unclosed_sessions() {
+    fn service_buffer_cannot_keep_unclosed_sessions() {
         let (mut machine, _) = memory_service_machine(false);
         let _held = machine.hold_native_services().unwrap();
         let sessions = machine.host.end_services();
@@ -1052,7 +1052,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     }
 
     #[test]
-    fn held_ram_service_uses_actual_copyout_owner_and_explicit_settlement() {
+    fn held_ram_service_uses_copyout_owner_and_explicit_settlement() {
         let (mut machine, ram) = memory_service_machine(false);
         let before = (
             machine.cpu.state.clone(),
@@ -1095,7 +1095,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         drop(ram.domain().execution_loan().unwrap());
     }
     #[test]
-    fn abandoned_ram_service_fails_owner_and_never_releases_actual_workers() {
+    fn abandoned_ram_service_fails_owner_and_never_releases_workers() {
         let (mut machine, ram) = memory_service_machine(false);
         // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
         // worker or other writer admitted.
@@ -1121,7 +1121,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         assert_eq!(bytes, [0xa5; 8]);
     }
     #[test]
-    fn refused_copyout_retains_committed_prefix_and_actual_stopped_owners() {
+    fn refused_copyout_keeps_committed_prefix_and_stopped_owners() {
         let (mut machine, ram) = memory_service_machine(true);
         let before = (
             machine.cpu.state.clone(),
@@ -1290,7 +1290,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     }
 
     #[test]
-    fn native_breakpoint_releases_stopped_services_and_trace_captures_actual_frame() {
+    fn native_breakpoint_releases_stopped_services_and_trace_captures_frame() {
         let mut machine = branch_source_machine();
         let pc = machine.cpu.pc;
         machine.cpu.state.x[..4].copy_from_slice(&[0x10, 0x20, 0x30, 0x40]);

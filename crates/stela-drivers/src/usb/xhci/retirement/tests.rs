@@ -26,7 +26,7 @@ fn configured(
 }
 
 #[test]
-fn whole_slot_retirement_stops_actual_ordinary_and_stream_dma_before_disable() {
+fn whole_slot_retirement_stops_ordinary_and_stream_dma_before_disable() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
             let mut memory = vec![0u64; 512 * 1024];
@@ -349,7 +349,7 @@ fn failed_real_descriptor_enumeration_stops_ep0_before_returning_unpublished_slo
 }
 
 #[test]
-fn failed_real_descriptor_cleanup_retains_ep0_dma_on_stop_reset_and_dequeue_faults() {
+fn failed_real_descriptor_cleanup_keeps_ep0_dma_on_stop_reset_and_dequeue_faults() {
     for (fault, stall) in [
         (Fault::Stop(1), false),
         (Fault::SilentStop(1), false),
@@ -466,7 +466,7 @@ impl Registers for AdditionalOperation {
 }
 
 #[test]
-fn whole_slot_retirement_drains_actual_iso_service_and_retains_dma_on_failure() {
+fn whole_slot_retirement_drains_iso_service_and_keeps_dma_on_failure() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
             for fault in [
@@ -535,7 +535,7 @@ fn whole_slot_retirement_drains_actual_iso_service_and_retains_dma_on_failure() 
 }
 
 #[test]
-fn failed_actual_address_device_retires_disabled_ep0_without_illegal_stop_or_dequeue() {
+fn failed_address_device_retires_disabled_ep0_without_illegal_stop_or_dequeue() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
         let (shared, old, hardware, mut dma) =
@@ -570,7 +570,7 @@ fn failed_actual_address_device_retires_disabled_ep0_without_illegal_stop_or_deq
 }
 
 #[test]
-fn fatal_status_after_actual_disable_ack_preserves_dcbaa_and_retained_allocation() {
+fn fatal_status_after_disable_ack_preserves_dcbaa_and_kept_allocation() {
     let mut memory = vec![0u64; 512 * 1024];
     let (shared, old, hardware, _dma) = configured(&mut memory, HIGH_SPEED, 32);
     let mut c = shared.borrow_mut();

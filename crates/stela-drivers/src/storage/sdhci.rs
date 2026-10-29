@@ -1113,7 +1113,7 @@ mod owned_tests {
     }
 
     #[test]
-    fn o2_owned_config_drives_actual_pll_pio_empty_insertion_and_power_cycles() {
+    fn o2_owned_config_drives_pll_pio_empty_insertion_and_power_cycles() {
         for device in [0x8220, 0x8221, 0x8320, 0x8321] {
             for kind in [Kind::Sd, Kind::Mmc] {
                 let mut backing = vec![0u64; 128 * 1024];

@@ -88,7 +88,7 @@ impl Registers for Unused {
 }
 
 #[test]
-fn unpublished_retry_reuses_one_resource_set_after_actual_disable_and_physical_reset() {
+fn unpublished_retry_reuses_one_resource_set_after_disable_and_physical_reset() {
     for (context, profile) in [
         (32, dma::Profile::SPEC),
         (64, dma::Profile::SPEC),

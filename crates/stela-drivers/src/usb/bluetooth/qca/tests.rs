@@ -442,7 +442,7 @@ fn bulk_splitting_and_rom_patch_version_guards_cover_all_boundaries() {
     assert!(RampatchVersion::parse(&[0; 39], &v, p).is_err());
 }
 #[test]
-fn every_usb_failure_retains_pending_or_completed_ownership_and_closes_once() {
+fn every_usb_failure_keeps_pending_or_completed_ownership_and_closes_once() {
     let before = version(0x00130201, 1, 0, 0, 0, 0);
     let after = version(0x00130201, 2, 0, 0, 0, 0);
     let (probe, _, _) = model(before.clone(), after.clone(), 0, 4097, 4097);
@@ -569,7 +569,7 @@ fn wcn_debug_acl_is_reclassified_exactly_across_usb_fragment_boundaries() {
 }
 
 #[test]
-fn event_acl_and_truncated_dump_signatures_retain_first_fault_and_quarantine() {
+fn event_acl_and_truncated_dump_signatures_keep_first_fault_and_quarantine() {
     use crate::usb::bluetooth::{ErrorKind, Packet};
     let event = vec![0xff, 9, 1, 8, 0, 0, 0, 0x20, 0, 0, 0];
     let short_event = vec![0xff, 2, 1, 8];

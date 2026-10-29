@@ -71,7 +71,7 @@ mod tests {
     use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
-    fn capture_count_matches_the_absent_store_and_never_fabricates_a_dump() {
+    fn capture_count_matches_the_absent_store_and_never_invents_a_dump() {
         let mut sink = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut sink);
         let mut smmu = SmmuBlock;

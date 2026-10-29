@@ -135,7 +135,7 @@ fn invalid_reply_crc_late_data_or_lost_pci_never_publish_or_replay_the_request()
 }
 
 #[test]
-fn failed_crc_cleanup_or_kill_retains_original_request_and_configuration_owners() {
+fn failed_crc_cleanup_or_kill_keeps_original_request_and_configuration_owners() {
     for fault in 0..3 {
         let mut f = fixture(0x7e22, true);
         match fault {

@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(clock.snapshot().cycles, u128::MAX);
     }
     #[test]
-    fn source_computed_stopped_clock_has_no_timer_deadline_or_fabricated_cycles() {
+    fn source_computed_stopped_clock_has_no_timer_deadline_or_invented_cycles() {
         let input = super::super::tests::image(0, 0, 0, 0, 0);
         let mut clock = Clock::new(
             input,

@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn nonroot_upstream_requires_actual_present_lane_without_mutating_observations() {
+    fn nonroot_upstream_requires_present_lane_without_mutating_observations() {
         let mut domain = Domain::new(identity(), 20).unwrap();
         domain.observe(inventory(0, true)).unwrap();
         let history = domain.history().to_vec();

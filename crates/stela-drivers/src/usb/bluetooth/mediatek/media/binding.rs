@@ -273,7 +273,7 @@ mod tests {
     use super::*;
     use crate::usb::bluetooth::mediatek::media::tests::binding;
     #[test]
-    fn selects_actual_same_device_alternates_and_source_voice_policy() {
+    fn selects_same_device_alternates_and_source_voice_policy() {
         let binding = binding();
         let b = Bindings::new(&binding).unwrap();
         assert_eq!(

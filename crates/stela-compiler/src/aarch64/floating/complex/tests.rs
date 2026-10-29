@@ -263,7 +263,7 @@ fn fused_residual_is_not_rounded_as_a_separate_product() {
 }
 
 #[test]
-fn rotated_signed_zero_products_retain_component_rounding_boundaries() {
+fn rotated_signed_zero_products_keep_component_rounding_boundaries() {
     for format in FORMATS {
         let negative = format.sign_mask();
         for ah in [0, FPCR_AH] {
@@ -383,7 +383,7 @@ fn pair_arithmetic_ignores_ahp_nep_and_narrow_lane_poison() {
 }
 
 #[test]
-fn all_retained_enables_refuse_under_both_alternative_modes() {
+fn all_kept_enables_refuse_under_both_alternative_modes() {
     for format in FORMATS {
         for ah in [0, FPCR_AH] {
             for enabled in [

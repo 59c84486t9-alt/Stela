@@ -674,7 +674,7 @@ fn failed_stop_prevents_d3() {
 }
 
 #[test]
-fn failed_power_write_retains_snapshot() {
+fn failed_power_write_keeps_snapshot() {
     for fault in 0..3 {
         let (mut function, mmio, clock, state, mut ram) = fixture(0x2668);
         let mut c = controller(&mut function, mmio, clock, &mut ram);
@@ -703,7 +703,7 @@ fn failed_power_write_retains_snapshot() {
 }
 
 #[test]
-fn failed_resume_retains_owner() {
+fn failed_resume_keeps_owner() {
     for fault in 0..6 {
         let (mut function, mmio, clock, state, mut ram) = fixture(0x7728);
         let mut c = controller(&mut function, mmio, clock, &mut ram);

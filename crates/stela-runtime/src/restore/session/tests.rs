@@ -402,7 +402,7 @@ fn one_poll_moves_every_frame_a_ready_stream_takes() {
     assert!(stream.0.len() > data.len());
 }
 #[test]
-fn unknown_updater_recovery_policy_and_failure_status_retain_full_context() {
+fn unknown_updater_recovery_policy_and_failure_status_keep_full_context() {
     for kind in [
         "RecoveryOSLocalPolicy",
         "FirmwareUpdaterData",
@@ -558,7 +558,7 @@ fn fdr_fixture(store: &Fixture, records: Value) -> super::super::fdr::Diagnostic
 }
 
 #[test]
-fn fdr_commit_is_durable_before_acknowledgement_and_retains_binding() {
+fn fdr_commit_is_durable_before_acknowledgement_and_keeps_binding() {
     use crate::pc::fdr_store::{self, Journal};
     use alloc::rc::Rc;
     use core::cell::RefCell;

@@ -384,7 +384,7 @@ fn low_bytes(vector: [u64; 2]) -> [u8; 16] {
 }
 
 #[test]
-fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes() {
+fn callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes() {
     fn set_mxcsr(value: u32) {
         // SAFETY: tests use only allocated SSE control/status bits, mask
         // every exception, and restore the original environment.
@@ -440,7 +440,7 @@ fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes()
 }
 
 #[test]
-fn actual_native_staging_defers_all_destinations_and_writeback_on_later_faults() {
+fn native_staging_defers_all_destinations_and_writeback_on_later_faults() {
     for load in [false, true] {
         for pair in [false, true] {
             for bytes in [1, 2, 4, 8, 16] {
@@ -569,7 +569,7 @@ fn actual_native_staging_defers_all_destinations_and_writeback_on_later_faults()
 }
 
 #[test]
-fn actual_literal_loads_zero_upper_bits_and_commit_only_after_the_complete_read() {
+fn literal_loads_zero_upper_bits_and_commit_only_after_the_complete_read() {
     for bytes in [DWORD_BYTES, QWORD_BYTES, VECTOR_BYTES] {
         for destination in 0..VECTOR_REGISTER_COUNT {
             for residue in [0, 4, 8, 12] {
@@ -675,7 +675,7 @@ fn original_sp_fault_precedes_offset_and_callback() {
 }
 
 #[test]
-fn actual_register_extensions_and_zero_index_keep_original_inputs() {
+fn register_extensions_and_zero_index_keep_original_inputs() {
     use crate::aarch64::simd::memory;
     for load in [false, true] {
         for bytes in [1u8, 2, 4, 8, 16] {
@@ -782,7 +782,7 @@ fn actual_register_extensions_and_zero_index_keep_original_inputs() {
 }
 
 #[test]
-fn actual_non_temporal_pairs_stage_duplicate_store_sources() {
+fn non_temporal_pairs_stage_duplicate_store_sources() {
     for load in [false, true] {
         for bytes in [4, 8, 16] {
             let vectors = if load { [3, 31] } else { [31, 31] };
@@ -847,7 +847,7 @@ fn actual_non_temporal_pairs_stage_duplicate_store_sources() {
 }
 
 #[test]
-fn actual_checked_adapter_keeps_disabled_sp_unaligned_read_capability() {
+fn checked_adapter_keeps_disabled_sp_unaligned_read_capability() {
     use crate::aarch64::{Operation, Register};
     let operation = Operation::Simd(Operand::Memory {
         load: true,

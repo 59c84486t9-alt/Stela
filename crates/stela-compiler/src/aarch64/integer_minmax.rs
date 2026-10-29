@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn every_immediate_and_each_register_role_retains_raw_bits() {
+    fn every_immediate_and_each_register_role_keeps_raw_bits() {
         for (_, opcode, kind) in FORMS {
             for (width_bit, width) in [(0, Width::W32), (WIDTH_BIT, Width::X64)] {
                 for immediate in 0..=u8::MAX {

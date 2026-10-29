@@ -346,9 +346,9 @@ fn run(forget: bool) {
     assert_eq!(memory.provider_drops.load(Ordering::Relaxed), 0);
 }
 #[test]
-fn original_resources_release_per_task_state_and_retain_kernel_after_drop() {
+fn original_resources_release_per_task_state_and_keep_kernel_after_drop() {
     if !isolated(
-        "gpu::linux::resources::tests::original_resources_release_per_task_state_and_retain_kernel_after_drop",
+        "gpu::linux::resources::tests::original_resources_release_per_task_state_and_keep_kernel_after_drop",
     ) {
         run(false);
     }

@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn dp_mdio_guard_preserves_actual_identity_and_relocks_on_timeout() {
+fn dp_mdio_guard_preserves_identity_and_relocks_on_timeout() {
     for version in [28, 31] {
         let time = Time::default();
         let mut model = Model::dp(&time, version, false);

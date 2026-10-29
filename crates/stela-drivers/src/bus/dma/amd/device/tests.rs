@@ -416,7 +416,7 @@ fn root() -> PhysicalAddress {
 }
 
 #[test]
-fn all_policy_metadata_is_retained_without_turning_permission_into_ats_enable() {
+fn all_policy_metadata_is_kept_without_turning_permission_into_ats_enable() {
     let monitor = Monitor::new();
     let mut flags: Vec<u8> = (0..REQUESTERS).map(|requester| requester as u8).collect();
     let Some(mut table) = construct(&monitor, &flags) else {
@@ -591,7 +591,7 @@ fn updates_preserve_policy_and_flush_observed_aliases_and_old_domain() {
 }
 
 #[test]
-fn width_policy_and_actual_unsupported_atomic_refuse_before_allocation() {
+fn width_policy_and_unsupported_atomic_refuse_before_allocation() {
     for (flags, bits, expected) in [
         (
             policies(),
@@ -684,7 +684,7 @@ fn provider_contiguity_dma32_cache_size_and_geometry_errors_roll_back() {
 }
 
 #[test]
-fn native_eight_k_larger_granules_and_distinct_fresh_allocations_are_retained() {
+fn native_eight_k_larger_granules_and_distinct_fresh_allocations_are_kept() {
     for shift in [13, 22] {
         let monitor = Monitor::new();
         {

@@ -156,7 +156,7 @@ mod tests {
         actions
     }
     #[test]
-    fn both_source_branches_reach_actual_controls_in_order_without_native_retirement() {
+    fn both_source_branches_reach_controls_in_order_without_native_retirement() {
         for (stage, kind) in [(3, 0), (10, 1)] {
             let owner = owner(false);
             let mut bus = mount(&owner);
@@ -221,7 +221,7 @@ mod tests {
         assert!(matches!(sequence(3, 3), Err(Error::UnqualifiedKind(3))));
     }
     #[test]
-    fn unknown_actual_rmw_and_uncertain_join_preserve_the_committed_prefix() {
+    fn unknown_rmw_and_uncertain_join_preserve_the_committed_prefix() {
         let owner = owner(true);
         let mut bus = mount(&owner);
         let mut sink = InterruptLatch::new();

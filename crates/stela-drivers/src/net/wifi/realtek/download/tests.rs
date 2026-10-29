@@ -479,7 +479,7 @@ fn forged_diagnostic_profile_cannot_rebind_another_requesters_provider_image() {
 }
 #[test]
 #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES, STELA_REALTEK_WIFI_TRANSPORT_ORACLE"]
-fn actual_firmware_download_register_and_packet_trace_matches_unchanged_c() {
+fn firmware_download_register_and_packet_trace_matches_unchanged_c() {
     let root = std::env::var("STELA_REALTEK_WIFI_IMAGES").unwrap();
     let c =
         catalog(std::fs::read(std::path::Path::new(&root).join("rtw88/rtw8822c_fw.bin")).unwrap());
@@ -495,7 +495,7 @@ fn actual_firmware_download_register_and_packet_trace_matches_unchanged_c() {
 }
 #[test]
 #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES, STELA_REALTEK_WIFI_TRANSPORT_ORACLE"]
-fn actual_download_uses_native_pinned_beacon_dma_with_each_new_completion() {
+fn download_uses_native_pinned_beacon_dma_with_each_new_completion() {
     use super::super::beacon::tests::Harness;
     struct Combined {
         control: ModelIo,

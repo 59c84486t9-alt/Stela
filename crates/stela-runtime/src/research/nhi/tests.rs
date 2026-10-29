@@ -234,7 +234,7 @@ fn programmed_dma_wraps_and_preserves_owned_index_halves() {
 }
 
 #[test]
-fn completion_fault_retains_acceptance_and_dart_fault_is_separate() {
+fn completion_fault_keeps_acceptance_and_dart_fault_is_separate() {
     let (mut nhi, state) = make(1);
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 100, &mut latch);

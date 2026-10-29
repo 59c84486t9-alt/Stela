@@ -301,7 +301,7 @@ fn partial_initialization_requires_reset() {
 }
 
 #[test]
-fn shutdown_failure_retains_amplifiers() {
+fn shutdown_failure_keeps_amplifiers() {
     for case in 0..3 {
         let mut fixture = Fixture::new();
         let model = device(0x14f1_5098, 3);

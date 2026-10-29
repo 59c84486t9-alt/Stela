@@ -40,7 +40,7 @@ fn write(aic: &mut Aic2, latch: &mut InterruptLatch, offset: u64, value: u32) {
     .unwrap();
 }
 #[test]
-fn retained_clock_pause_preserves_pending_levels_masks_and_timestamp_history() {
+fn kept_clock_pause_preserves_pending_levels_masks_and_timestamp_history() {
     let mut aic = aic(2);
     let mut latch = InterruptLatch::new();
     let (word, bit) = position(usize::from(UART.irq));

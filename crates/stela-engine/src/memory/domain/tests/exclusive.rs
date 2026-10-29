@@ -500,7 +500,7 @@ fn exclusive_joined() -> (Arc<MemoryBacking>, Arc<MemoryDomain>, Arc<MemoryView>
 }
 
 #[test]
-fn exclusive_service_second_view_retirement_and_mapdead_gap_clear_actual_global_mark() {
+fn exclusive_service_second_view_retirement_and_mapdead_gap_clear_global_mark() {
     let (backing, domain, second) = exclusive_joined();
     let (mut thread, mut endpoint, events) = exclusive_bound(&domain);
     // The mapping is dead but its first-generation view is live, so the load
@@ -646,7 +646,7 @@ fn exclusive_service_inflight_load_refuses_retirement_until_original_finalizatio
 }
 
 #[test]
-fn exclusive_service_contended_width4_has_one_actual_native_winner() {
+fn exclusive_service_contended_width4_has_one_native_winner() {
     let backing = backing();
     let domain = domain(vec![view(&backing, 0, STORAGE_BYTES, RIGHTS)]);
     let barrier = Arc::new(std::sync::Barrier::new(2));

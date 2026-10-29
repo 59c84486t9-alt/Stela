@@ -109,7 +109,7 @@ fn standard_el2_key_names_join_typed_bank_without_inventing_halves_or_lower_bank
 }
 
 #[test]
-fn physical_count_alias_uses_actual_supplied_time_without_virtual_offset_or_tuning_coupling() {
+fn physical_count_alias_uses_supplied_time_without_virtual_offset_or_tuning_coupling() {
     for chip in super::super::Chip::ALL {
         let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
         cpu.registers.set(Register::CNTVOFF_EL2, 0, 0x1234);
@@ -931,7 +931,7 @@ fn sprr_locks_bind_outside_the_guarded_level() {
 }
 
 #[test]
-fn qualified_pmu_registers_trap_before_mutation_and_stay_undefined_at_el0() {
+fn checked_pmu_registers_trap_before_mutation_and_stay_undefined_at_el0() {
     for chip in super::super::Chip::ALL {
         let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
         cpu.pmu = Pmu::for_chip(chip, 1_000_000_000, 24_000_000);

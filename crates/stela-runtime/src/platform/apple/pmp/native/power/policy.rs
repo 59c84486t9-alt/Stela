@@ -380,7 +380,7 @@ mod tests {
         );
     }
     #[test]
-    fn native_inventory_and_property_shape_are_qualified_before_resolution() {
+    fn native_inventory_and_property_shape_are_checked_before_resolution() {
         assert!(Policy::t8112(table(), Some(&[0; 3])).is_err());
         let mut wrong = table();
         wrong.records.swap(0, 1);

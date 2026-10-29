@@ -89,7 +89,7 @@ fn bip_gmac_igtks_are_kept_in_software_as_mt7925_set_key_leaves_them() {
 }
 
 #[test]
-fn actual_acknowledged_igtk_authenticates_source_mic_without_hardware_flag_bypass() {
+fn acknowledged_igtk_authenticates_source_mic_without_hardware_flag_bypass() {
     let response = Arc::new(Mutex::new(Response {
         key_execution: true,
         ..Response::default()
@@ -209,7 +209,7 @@ fn actual_acknowledged_igtk_authenticates_source_mic_without_hardware_flag_bypas
 }
 
 #[test]
-fn actual_owned_gtk_igtk_batch_preserves_original_data_key_replay_and_exact_retry() {
+fn owned_gtk_igtk_batch_preserves_original_data_key_replay_and_exact_retry() {
     let response = Arc::new(Mutex::new(Response {
         key_execution: true,
         ..Response::default()
@@ -430,7 +430,7 @@ fn invalid_igtk_admission_never_publishes_or_changes_the_original_key() {
 }
 
 #[test]
-fn uncertain_igtk_batch_revokes_data_and_retains_actual_namespace() {
+fn uncertain_igtk_batch_revokes_data_and_keeps_namespace() {
     for fault in 0..4 {
         let response = Arc::new(Mutex::new(Response {
             key_execution: true,

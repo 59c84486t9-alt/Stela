@@ -65,7 +65,7 @@ fn terminal_stop_releases_original_owners() {
     }
 }
 #[test]
-fn retirement_access_faults_retain_owners() {
+fn retirement_access_faults_keep_owners() {
     for wide in [false, true] {
         for mask in [false, true] {
             let (mut baseline, model) = attach(fixture(wide, mask));
@@ -219,7 +219,7 @@ fn owned_mapping_retirement_and_abandonment() {
 }
 
 #[test]
-fn failed_stop_retains_owners() {
+fn failed_stop_keeps_owners() {
     let f = fixture(true, true);
     let configs = f.config_drops.clone();
     let roots = f.root_drops.clone();

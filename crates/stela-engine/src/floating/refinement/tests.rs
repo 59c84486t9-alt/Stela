@@ -380,7 +380,7 @@ fn tiny_half_outputs_flush_without_losing_prior_status_or_ah_suppression() {
 }
 
 #[test]
-fn ah0_refuses_and_ah1_accepts_each_retained_enable_without_status_loss() {
+fn ah0_refuses_and_ah1_accepts_each_kept_enable_without_status_loss() {
     for kind in KINDS {
         for (format, one, _, _, _, _) in VALUES {
             for shape in [Shape::Scalar, Shape::Vector128] {

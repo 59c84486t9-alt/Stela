@@ -535,7 +535,7 @@ pub(crate) fn reduced_hardware_fixture(extra_aml: &[u8]) -> Services {
 }
 
 #[test]
-fn failed_actual_hardware_activation_never_publishes_success_or_retries() {
+fn failed_hardware_activation_never_publishes_success_or_retries() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let (mut provider, counts) = fixture();
     // The real legacy-hardware C path is entered; the existing provider
@@ -688,7 +688,7 @@ fn service_abi_rejects_wrong_version_or_extent_before_provider_publication() {
 }
 
 #[test]
-fn removal_preflight_retains_real_region_and_notification_on_refusal() {
+fn removal_preflight_keeps_real_region_and_notification_on_refusal() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let (provider, counts) = fixture();
     // SAFETY: serialized fixture keeps firmware and real ACPICA services.
@@ -865,7 +865,7 @@ fn activated_events_take_only_gpes_acpica_has() {
 }
 
 #[test]
-fn successful_hardware_witness_is_revoked_by_actual_namespace_unload() {
+fn successful_hardware_witness_is_revoked_by_namespace_unload() {
     let _serial = TEST_SERIAL.lock().unwrap();
     // SAFETY: reduced-hardware provider enters C activation without
     // inventing legacy hardware; singleton serialized for this whole test.
@@ -910,7 +910,7 @@ fn successful_hardware_witness_is_revoked_by_actual_namespace_unload() {
 }
 
 #[test]
-fn actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup() {
+fn acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup() {
     let _serial = TEST_SERIAL.lock().unwrap();
     if std::env::var_os("STELA_ACPI_EC_LOCK_CHILD").is_some() {
         use super::super::ec::FirmwareLock;
@@ -1222,14 +1222,26 @@ fn actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup() {
     assert!(counts.destroyed.load(Ordering::SeqCst));
     assert_eq!(counts.allocations.load(Ordering::SeqCst), 0);
     assert_eq!(counts.mappings.load(Ordering::SeqCst), 0);
-    let status=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","platform::acpi::tests::actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup"]).env("STELA_ACPI_QUARANTINE_CHILD","1").status().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "platform::acpi::tests::acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup",
+        ])
+        .env("STELA_ACPI_QUARANTINE_CHILD", "1")
+        .status()
+        .unwrap();
     assert!(
         status.success(),
         "failed quiescence must retain all callback-owned state"
     );
     let lock_child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "platform::acpi::tests::actual_acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup"])
-            .env("STELA_ACPI_EC_LOCK_CHILD", "1").status().unwrap();
+        .args([
+            "--exact",
+            "platform::acpi::tests::acpica_abi_namespace_dsm_regions_failures_notify_and_cleanup",
+        ])
+        .env("STELA_ACPI_EC_LOCK_CHILD", "1")
+        .status()
+        .unwrap();
     assert!(
         lock_child.success(),
         "unreleased EC firmware owner must quarantine ACPICA"

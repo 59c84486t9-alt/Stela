@@ -329,7 +329,7 @@ fn software_keys_encrypt_cbc_store_the_chain_and_flag_completion() {
 }
 
 #[test]
-fn retained_gates_preserve_keys_chaining_queued_dma_and_completed_interrupts() {
+fn kept_gates_preserve_keys_chaining_queued_dma_and_completed_interrupts() {
     let mut bench = Bench::new(Some([0x69; 32]));
     let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
     bench

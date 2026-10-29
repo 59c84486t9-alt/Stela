@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn native_pending_and_address_registers_never_fabricate_a_complete_fault_dump() {
+    fn native_pending_and_address_registers_never_invent_a_complete_fault_dump() {
         let mut capture = Capture::new(64).unwrap();
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);

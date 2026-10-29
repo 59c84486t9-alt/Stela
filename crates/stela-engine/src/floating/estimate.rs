@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn ah1_accepts_retained_enables_and_preserves_every_existing_status_bit() {
+    fn ah1_accepts_kept_enables_and_preserves_every_existing_status_bit() {
         for kind in FLOATING_KINDS {
             for (format, infinity, signaling, quiet) in VALUES {
                 for shape in [Shape::Scalar, Shape::Vector128] {

@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_original_selected_metadata_and_manifest_artifact_survive_live_patches() {
+    fn original_selected_metadata_and_manifest_artifact_survive_live_patches() {
         let original = tree(0, 0);
         let prepared = tree(0x6000, 8);
         let json = fixture(&original, &prepared);
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_boot_cpu_record_binds_source_identity_and_retained_runtime_position() {
+    fn verified_boot_cpu_record_binds_source_identity_and_kept_runtime_position() {
         let original = tree(0, 0);
         let prepared = tree(0x6000, 8);
         let base = fixture(&original, &prepared);

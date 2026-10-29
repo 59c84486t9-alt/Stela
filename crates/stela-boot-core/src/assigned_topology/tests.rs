@@ -29,7 +29,7 @@ fn cpuid_identity(maximum: u32, vendor: [u32; 3]) -> native::Cpuid {
 }
 
 #[test]
-fn actual_bsp_collector_retains_maxima_and_zero_extended_apic_identity() {
+fn bsp_collector_keeps_maxima_and_zero_extended_apic_identity() {
     use stela_compiler::TargetCpu;
     let mut queries = Vec::new();
     let snapshot = current_identity(|leaf, subleaf| {
@@ -80,7 +80,7 @@ fn actual_bsp_collector_retains_maxima_and_zero_extended_apic_identity() {
 }
 
 #[test]
-fn actual_bsp_collector_does_not_probe_beyond_either_observed_maximum() {
+fn bsp_collector_does_not_probe_beyond_either_observed_maximum() {
     use stela_compiler::TargetCpu;
     for vendor in [TargetCpu::INTEL_VENDOR, TargetCpu::AMD_VENDOR] {
         let mut queries = Vec::new();
@@ -108,7 +108,7 @@ fn actual_bsp_collector_does_not_probe_beyond_either_observed_maximum() {
 }
 
 #[test]
-fn actual_bsp_collector_keeps_amd_full_width_identity_and_vendor_gate() {
+fn bsp_collector_keeps_amd_full_width_identity_and_vendor_gate() {
     use stela_compiler::TargetCpu;
     for vendor in [TargetCpu::AMD_VENDOR, TargetCpu::INTEL_VENDOR, [0; 3]] {
         let snapshot = current_identity(|leaf, subleaf| match (leaf, subleaf) {
@@ -633,7 +633,7 @@ fn original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources()
 }
 #[test]
 #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
-fn original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission() {
+fn original_mode1_factory_projects_live_tree_without_public_pmgr_admission() {
     use {stela_contracts::adt, stela_soc_data::board};
     let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
     let raw = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_PREPARED_DT").unwrap()).unwrap();
@@ -878,7 +878,7 @@ fn original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe() {
     }
 }
 #[test]
-fn actual_selected_bsp_only_does_not_start_captured_aps() {
+fn selected_bsp_only_does_not_start_captured_aps() {
     let capture = capture();
     let roster = BspRoster::observed(&capture, 37, 42).unwrap();
     assert_eq!(roster.cores().len(), 1);
@@ -899,7 +899,7 @@ fn actual_selected_bsp_only_does_not_start_captured_aps() {
     assert!(BspRoster::observed(&altered, 37, 42).is_err());
 }
 #[test]
-fn one_plan_projects_the_source_slot_profile_counts_and_exact_owner_joins() {
+fn one_plan_projects_the_source_slot_profile_counts_and_owner_joins() {
     let capture = capture();
     let roster = BspRoster::observed(&capture, 37, 42).unwrap();
     let (tree, owner, nodes, profile) = fixture();

@@ -1177,7 +1177,7 @@ fn reset_failures_keep_tombstones_and_never_publish_fresh_handles() {
     }
 }
 #[test]
-fn single_slot_reset_reuses_its_slot_and_fresh_allocation_failure_retains_grants() {
+fn single_slot_reset_reuses_its_slot_and_fresh_allocation_failure_keeps_grants() {
     let mut memory = vec![0u64; 512 * 1024];
     let (shared, old, endpoints, hardware, mut dma) = prepared(&mut memory, HIGH_SPEED, 32, 1);
     // One slot is enough: the reset retires the old device's grant and

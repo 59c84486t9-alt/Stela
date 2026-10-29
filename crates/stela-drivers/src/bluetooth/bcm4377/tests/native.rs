@@ -828,7 +828,7 @@ fn every_constructor_config_read_fault_returns_the_same_original_unmodified_owne
     }
 }
 #[test]
-fn effect_then_failed_msi_enable_admission_retains_registry_and_original_epoch() {
+fn effect_then_failed_msi_enable_admission_keeps_registry_and_original_epoch() {
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     state.fail_enable_ack.store(true, Ordering::Relaxed);
     let first = t.start(&catalog(&device, false)).unwrap_err();

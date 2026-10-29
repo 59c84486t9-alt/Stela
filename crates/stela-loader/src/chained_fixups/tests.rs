@@ -492,7 +492,7 @@ fn decodes_all_bind_formats_import_addends_weak_flags_and_signed_extrema() {
 }
 
 #[test]
-fn mixed_bind_rebase_chain_shares_slot_validation_and_retains_import_order() {
+fn mixed_bind_rebase_chain_shares_slot_validation_and_keeps_import_order() {
     for format in [1, 2, 6, 9, 12] {
         let (mut data, mut image) = fixture(format);
         imports(&mut data, &mut image, 1, 0, b"_fixture\0");

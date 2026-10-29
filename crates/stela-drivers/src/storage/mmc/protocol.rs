@@ -725,7 +725,7 @@ mod tests {
         }
     }
     #[test]
-    fn actual_ready_or_ocr_command_failure_survives_elapsed_poll_budget() {
+    fn ready_or_ocr_command_failure_survives_elapsed_poll_budget() {
         for command in [13, 41] {
             let mut host = SlowHost::new(false, command);
             let primary = BlockError::Device { status: 1 << 21 };

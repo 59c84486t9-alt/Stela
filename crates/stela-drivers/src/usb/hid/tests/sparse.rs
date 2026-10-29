@@ -127,7 +127,7 @@ fn key(usage: u8, pressed: bool) -> Input {
 }
 
 #[test]
-fn actual_mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder() {
+fn mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: this backing outlives both real controller and input DMA owners.
@@ -228,7 +228,7 @@ fn actual_mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder()
 }
 
 #[test]
-fn actual_unsigned32_selector_retains_canonical_report_protocol_and_complete_values() {
+fn unsigned32_selector_keeps_canonical_report_protocol_and_complete_values() {
     // Preserved native canonical parity: this all-keyboard table already kept
     // REPORT protocol. The legacy selector bounds are the corrected behavior.
     let bytes = [
@@ -273,7 +273,7 @@ fn actual_unsigned32_selector_retains_canonical_report_protocol_and_complete_val
 }
 
 #[test]
-fn actual_stall_retirement_keeps_sparse_binding_and_original_dma_until_ack() {
+fn stall_retirement_keeps_sparse_binding_and_original_dma_until_ack() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: RAM keeps every native controller/DMA owner.
@@ -340,7 +340,7 @@ fn stale_sparse_binding_cannot_touch_current_native_dma_or_consume_its_completio
 }
 
 #[test]
-fn actual_rejected_boot_descriptor_retains_original_bytes_and_standard_boot_table() {
+fn rejected_boot_descriptor_keeps_original_bytes_and_standard_boot_table() {
     let bytes = [5, 7, 0x19, 9, 0x29, 4, 0x75, 8, 0x95, 1, 0x81, 0];
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;

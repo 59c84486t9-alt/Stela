@@ -418,7 +418,7 @@ fn dma_host(
 }
 
 #[test]
-fn native_gl9750_normal_shutdown_stops_actual_vendor_pll_before_card_rail_off() {
+fn native_gl9750_normal_shutdown_stops_vendor_pll_before_card_rail_off() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: the original card and all aliases keep their model DMA RAM.
@@ -482,7 +482,7 @@ fn native_gl9750_v4_adma_64bit_legacy_and_modern_capabilities_transfer_real_payl
 }
 
 #[test]
-fn native_gl9750_uncertain_dma_grant_never_posts_a_command_and_retains_failed_owner() {
+fn native_gl9750_uncertain_dma_grant_never_posts_a_command_and_keeps_failed_owner() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: no native grant failure can release the original DMA allocations.
@@ -813,7 +813,7 @@ fn native_gl9750_pci_dma_grant_uses_acknowledged_word_stores_and_never_regrants_
 }
 
 #[test]
-fn native_gl9750_actual_pci_power_cycle_restores_bars_and_masks_source_aer_event() {
+fn native_gl9750_pci_power_cycle_restores_bars_and_masks_source_aer_event() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: PCI source model and native controller keep all allocation epochs.

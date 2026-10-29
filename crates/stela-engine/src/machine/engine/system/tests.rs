@@ -217,7 +217,7 @@ fn ctrr_fetch_faults_report_instruction_permission_and_preserve_faulting_state()
 }
 
 #[test]
-fn core_monitor_construction_needs_a_qualified_layout_and_an_explicit_pe_clock() {
+fn core_monitor_construction_needs_a_checked_layout_and_an_explicit_pe_clock() {
     use {crate::machine::pmu, stela_contracts::identity::Identity};
     for chip in Chip::ALL {
         let mut machine = machine_on(chip, &[]);

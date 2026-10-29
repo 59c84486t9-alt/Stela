@@ -63,7 +63,7 @@ fn release(function: Function<OwnedConfig>, counters: &Arc<Counters>) {
 }
 
 #[test]
-fn actual_owned_config_binds_full_segment_rid_and_retains_original_epoch() {
+fn owned_config_binds_full_segment_rid_and_keeps_original_epoch() {
     let (mut config, counters) = fixture(ADDRESS);
     configure(&mut config);
     let function = Function::new(ADDRESS, config).unwrap();
@@ -100,7 +100,7 @@ fn bound_fixture() -> (StoppedRequester, RequesterBinding, Arc<Counters>) {
 }
 
 #[test]
-fn binding_retains_exact_original_config_and_native_root_until_explicit_release() {
+fn binding_keeps_original_config_and_native_root_until_explicit_release() {
     let (mut claim, binding, counters) = bound_fixture();
     assert_eq!(claim.check_stopped(), Ok(()));
     let (error, claim) = match claim.into_dma_binding() {

@@ -109,7 +109,7 @@ fn ep_failed_notification_and_fp_missing_or_failed_mac_firmware_never_publish_dm
 }
 
 #[test]
-fn ep_fp_mac_masks_and_actual_ring_publication_follow_complete_backend_setup() {
+fn ep_fp_mac_masks_and_ring_publication_follow_complete_backend_setup() {
     use crate::bus::dma::RegionAllocator;
     for xid in [0x502, 0x54b] {
         let rev = revision::detect(xid << 20).unwrap();

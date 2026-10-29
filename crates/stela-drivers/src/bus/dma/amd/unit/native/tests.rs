@@ -299,7 +299,7 @@ fn queue_wrap_and_completion_store() {
 }
 
 #[test]
-fn failed_unmap_retains_payload() {
+fn failed_unmap_keeps_payload() {
     let (mut unit, peer) = model::unit();
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
     // submits DMA or work, and the unit keeps the matching configuration/root epoch.
@@ -643,7 +643,7 @@ fn guard_unwind_quarantines_resources() {
 }
 
 #[test]
-fn failed_dte_attach_retains_requester() {
+fn failed_dte_attach_keeps_requester() {
     let (mut unit, peer) = model::unit();
     let (function, counters) = function_with_counters(0x20);
     let references = Rc::strong_count(&unit.engine);

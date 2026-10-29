@@ -51,7 +51,7 @@ fn write(
 }
 
 #[test]
-fn initialized_backing_never_fabricates_readiness_power_ack_or_quota() {
+fn initialized_backing_never_invents_readiness_power_ack_or_quota() {
     let mut bank = bank();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
@@ -115,7 +115,7 @@ fn overwrite_dropped_timestamp_and_consume_are_actual_transport_effects() {
 }
 
 #[test]
-fn aliases_share_identity_and_retained_pause_keeps_the_complete_prefix() {
+fn aliases_share_identity_and_kept_pause_keeps_the_complete_prefix() {
     let mut bank = bank();
     let mut alias = bank.clone();
     let mut latch = InterruptLatch::new();
@@ -164,7 +164,7 @@ fn aliases_share_identity_and_retained_pause_keeps_the_complete_prefix() {
 }
 
 #[test]
-fn qualified_routes_aggregate_same_wire_and_unqualified_routes_roll_back() {
+fn checked_routes_aggregate_same_wire_and_unqualified_routes_roll_back() {
     let wire = Wire::Aic(AicInput::new(0, 77));
     let mut bindings = [None; ROUTES];
     bindings[1] = Some(wire);

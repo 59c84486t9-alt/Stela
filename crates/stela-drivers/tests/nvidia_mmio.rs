@@ -268,7 +268,7 @@ fn rejected(
 }
 
 #[test]
-fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() {
+fn original_global_abi_keeps_real_canonical_leases_and_quarantines_failures() {
     // Separate integration process preserves canonical production singleton.
     // SAFETY: no installed services; hooks must refuse without a provider call.
     unsafe {

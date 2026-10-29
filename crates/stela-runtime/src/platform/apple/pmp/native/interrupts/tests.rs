@@ -4,7 +4,7 @@ use core::cell::RefCell;
 use stela_contracts::interrupt::InterruptLatch;
 
 #[test]
-fn mapped_bounds_refuse_before_borrowing_the_supplied_actual_view() {
+fn mapped_bounds_refuse_before_borrowing_the_supplied_view() {
     struct View;
     impl MmioDevice for View {
         fn name(&self) -> &'static str {
@@ -115,7 +115,7 @@ fn retired(result: Completion<Outcome>) -> Outcome {
     }
 }
 #[test]
-fn initialization_uses_actual_count_and_enable_reads_and_retains_no_reset_image() {
+fn initialization_uses_count_and_enable_reads_and_keeps_no_reset_image() {
     let (mut o, s) = owner(0xf234);
     let mut l = InterruptLatch::new();
     let mut a = Access::new(0, 1, &mut l);
@@ -141,7 +141,7 @@ fn initialization_uses_actual_count_and_enable_reads_and_retains_no_reset_image(
     );
 }
 #[test]
-fn signals_retain_target_read_write_prefix_tokens_and_actual_source_bound() {
+fn signals_keep_target_read_write_prefix_tokens_and_source_bound() {
     let (mut o, s) = owner(512);
     let (mut foreign, _) = owner(512);
     let mut l = InterruptLatch::new();
@@ -228,7 +228,7 @@ impl Handler for Callback {
     }
 }
 #[test]
-fn actual_pending_read_and_registry_flag_clear_precede_busy_callback_and_disable() {
+fn pending_read_and_registry_flag_clear_precede_busy_callback_and_disable() {
     let (mut o, s) = owner(512);
     let mut l = InterruptLatch::new();
     let mut a = Access::new(0, 4, &mut l);
@@ -283,7 +283,7 @@ fn actual_pending_read_and_registry_flag_clear_precede_busy_callback_and_disable
     assert_eq!(o.snapshot().current_enabled, 0);
 }
 #[test]
-fn ordinary_callback_reenable_uses_actual_source_words_without_old_mask_read() {
+fn ordinary_callback_reenable_uses_source_words_without_old_mask_read() {
     let (mut o, s) = owner(512);
     let mut l = InterruptLatch::new();
     let mut a = Access::new(0, 5, &mut l);
@@ -444,7 +444,7 @@ fn registration_status_preserves_reached_flag_prefix_and_source_noop() {
 }
 
 #[test]
-fn out_of_range_actual_iack_does_not_invent_source_completion_tail() {
+fn out_of_range_iack_does_not_invent_source_completion_tail() {
     let (mut o, s) = owner(32);
     let mut l = InterruptLatch::new();
     let mut a = Access::new(0, 9, &mut l);

@@ -489,7 +489,7 @@ fn a_name_keeps_its_address_and_falls_back_to_it_when_a_lookup_fails() {
 }
 
 #[test]
-fn raw_stream_retains_partial_dynamic_writes_and_opaque_replies() {
+fn raw_stream_keeps_partial_dynamic_writes_and_opaque_replies() {
     let clock = TestClock::default();
     let mut lan = Lan::new(0, clock.clone());
     lan.raw = true;

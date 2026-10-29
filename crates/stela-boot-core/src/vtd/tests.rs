@@ -303,7 +303,7 @@ fn stopped_claim(rid: u16) -> RequesterClaim {
 }
 
 #[test]
-fn coherent_words_observe_only_the_live_domains_actual_pins() {
+fn coherent_words_observe_only_the_live_domains_pins() {
     let registers = ModelRegisters::new();
     let unit =
             // SAFETY: the model registers stand in for the unit, and this test is the only
@@ -505,7 +505,7 @@ fn withheld_drain_bad_granularity_and_write_buffer_fault_keep_all_backing() {
     }
 }
 #[test]
-fn scatter_maps_retained_native_subranges_and_releases_only_after_invalidation() {
+fn scatter_maps_kept_native_subranges_and_releases_only_after_invalidation() {
     use stela_drivers::bus::dma::pages::PageRange;
     let source = source();
     let registers = ModelRegisters::new();
@@ -621,7 +621,7 @@ fn covered_requesters_reach_only_the_window_until_attached_to_their_own_domain()
 }
 
 #[test]
-fn actual_contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
+fn contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
     let source = source();
     let registers = ModelRegisters::new();
     {
@@ -1252,7 +1252,7 @@ fn native_page_array_maps_through_real_tables_and_reclaims_after_acknowledged_un
 }
 
 #[test]
-fn failed_translation_disable_retains_tables_until_actual_acknowledgement() {
+fn failed_translation_disable_keeps_tables_until_acknowledgement() {
     let registers = ModelRegisters::new();
     let source = source();
     // SAFETY: exclusively stopped model unit, with real allocated tables.

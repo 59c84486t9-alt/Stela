@@ -74,7 +74,7 @@ fn stop(driver: &mut Native, model: &Model) {
 }
 
 #[test]
-fn actual_initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry() {
+fn initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, ptk, gtk) = keys(&mut driver);
@@ -123,7 +123,7 @@ fn actual_initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry(
 }
 
 #[test]
-fn actual_unicast_management_rx_authenticates_without_automatic_departure_or_data_replay() {
+fn unicast_management_rx_authenticates_without_automatic_departure_or_data_replay() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -168,7 +168,7 @@ fn actual_unicast_management_rx_authenticates_without_automatic_departure_or_dat
 }
 
 #[test]
-fn actual_group_bip_rx_enforces_original_mic_ipn_and_peer_lookup_before_os_consumption() {
+fn group_bip_rx_enforces_original_mic_ipn_and_peer_lookup_before_os_consumption() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -237,7 +237,7 @@ fn actual_group_bip_rx_enforces_original_mic_ipn_and_peer_lookup_before_os_consu
 }
 
 #[test]
-fn actual_protected_tx_retains_session_until_descriptor_free_and_unmap_before_peer_removal() {
+fn protected_tx_keeps_session_until_descriptor_free_and_unmap_before_peer_removal() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, ptk, _) = keys(&mut driver);
@@ -402,7 +402,7 @@ fn deferred_management_and_os_reply_are_revoked_before_mmio_after_disconnect_and
 }
 
 #[test]
-fn uncertain_actual_igtk_publication_quarantines_complete_owner_without_transport_or_drop() {
+fn uncertain_igtk_publication_quarantines_complete_owner_without_transport_or_drop() {
     for dropped in [false, true] {
         let (mut driver, model) = setup();
         associated(&mut driver, &model, 0);
@@ -602,7 +602,7 @@ fn protected_departure_and_query_request_bytes_use_current_ptk_without_local_pol
 }
 
 #[test]
-fn actual_protected_tx_unmap_failure_retains_session_and_refuses_further_management() {
+fn protected_tx_unmap_failure_keeps_session_and_refuses_further_management() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);

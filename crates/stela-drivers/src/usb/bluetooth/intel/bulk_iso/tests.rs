@@ -148,7 +148,7 @@ fn session(variant: u8) -> Session<Model> {
 }
 
 #[test]
-fn intel_bulk_iso_uses_actual_initialized_capabilities_and_retains_original_responses() {
+fn intel_bulk_iso_uses_initialized_capabilities_and_keeps_original_responses() {
     for variant in [0x18, 0x1c] {
         let owner = session(variant);
         assert_eq!(owner.report().hardware_variant, variant);
@@ -242,7 +242,7 @@ fn intel_bulk_iso_matches_source_capability_handle_flags_and_preserves_bulk_fram
 }
 
 #[test]
-fn intel_bulk_iso_validation_has_no_effects_and_delivery_failure_retains_debit_and_bytes() {
+fn intel_bulk_iso_validation_has_no_effects_and_delivery_failure_keeps_debit_and_bytes() {
     let mut owner = session(0x18);
     let good = vec![0, 9, 1, 0, 0xaa];
     for (packet, mut credits) in [
@@ -279,7 +279,7 @@ fn intel_bulk_iso_validation_has_no_effects_and_delivery_failure_retains_debit_a
 }
 
 #[test]
-fn intel_bulk_iso_zero_credits_require_actual_nop_and_complete_never_status_only() {
+fn intel_bulk_iso_zero_credits_require_nop_and_complete_never_status_only() {
     let mut h = hci(0x18);
     h.io.configuration(0x20, 0);
     h.io.script[0].1.push(cc(0, 1, &[]));
@@ -343,7 +343,7 @@ fn intel_bulk_iso_reset_reprobes_real_capability_and_partial_frames_refuse_befor
 }
 
 #[test]
-fn intel_bulk_iso_uses_real_native_bulk_dma_and_retains_failed_short_transfer() {
+fn intel_bulk_iso_uses_real_native_bulk_dma_and_keeps_failed_short_transfer() {
     use crate::bus::dma::RegionAllocator;
     use alloc::rc::Rc;
     use core::cell::RefCell;
@@ -406,7 +406,7 @@ fn intel_bulk_iso_uses_real_native_bulk_dma_and_retains_failed_short_transfer() 
 }
 
 #[test]
-fn intel_shutdown_keeps_actual_zero_credit_reset_and_async_before_any_close_failure() {
+fn intel_shutdown_keeps_zero_credit_reset_and_async_before_any_close_failure() {
     for failed_close in [false, true] {
         let mut owner = session(0x18);
         let before = owner.hci.io.reads;

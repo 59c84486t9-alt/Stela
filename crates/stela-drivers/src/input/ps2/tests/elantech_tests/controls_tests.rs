@@ -32,7 +32,7 @@ fn mouse_wire(h: &Hardware, from: usize) -> Vec<u8> {
 }
 
 #[test]
-fn hardware_register_mutations_force_only_v1_bits_and_preserve_actual_progress() {
+fn hardware_register_mutations_force_only_v1_bits_and_preserve_progress() {
     for hardware in 1..=4 {
         let (mut c, h) = configured(hardware);
         for address in [7, 0x10, 0x11, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26] {
@@ -103,7 +103,7 @@ fn mutable_register_bad_attribute_and_full_retention_queue_refuse_before_effects
 }
 
 #[test]
-fn pending_bad_packet_before_live_control_retains_fragment_without_stale_response_or_new_command() {
+fn pending_bad_packet_before_live_control_keeps_fragment_without_stale_response_or_new_command() {
     for write in [false, true] {
         let (mut c, h) = configured(4);
         let raw = [8, 0x21, 0x43, 0x11, 0x65, 0x87];
@@ -135,7 +135,7 @@ fn pending_bad_packet_before_live_control_retains_fragment_without_stale_respons
 }
 
 #[test]
-fn mutable_register_quiesce_write_and_resume_failures_retain_acknowledged_effects_without_replay() {
+fn mutable_register_quiesce_write_and_resume_failures_keep_acknowledged_effects_without_replay() {
     for hardware in 1..=4 {
         for stage in 0..3 {
             let (mut c, h) = configured(hardware);
@@ -172,7 +172,7 @@ fn mutable_register_quiesce_write_and_resume_failures_retain_acknowledged_effect
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_REGISTER_ORACLE"]
-fn unchanged_linux_mutable_register_values_and_transactions_match_actual_native_controls() {
+fn unchanged_linux_mutable_register_values_and_transactions_match_native_controls() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_REGISTER_ORACLE").unwrap()).unwrap();

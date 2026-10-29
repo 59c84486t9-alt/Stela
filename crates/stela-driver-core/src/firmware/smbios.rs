@@ -605,7 +605,7 @@ mod tests {
         entry(raw, format).unwrap()
     }
     #[test]
-    fn snapshot_retains_one_canonical_image_and_rejects_provider_redirection() {
+    fn snapshot_keeps_one_canonical_image_and_rejects_provider_redirection() {
         struct Redirect<'a> {
             image: Image<'a>,
         }

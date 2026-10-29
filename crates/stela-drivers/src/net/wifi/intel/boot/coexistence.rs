@@ -145,7 +145,7 @@ mod tests {
     use crate::net::wifi::{Band, Channel};
     use alloc::vec::Vec;
     #[test]
-    fn actual_profile_errors_latch_and_uninitialized_state_grants_no_antenna() {
+    fn profile_errors_latch_and_uninitialized_state_grants_no_antenna() {
         let mut state = Coexistence::new();
         assert_eq!(state.activity(), Err(CoexistenceError::Uninitialized));
         state.initialized();

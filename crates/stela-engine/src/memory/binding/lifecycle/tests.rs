@@ -35,7 +35,7 @@ fn controls() -> crate::memory::policy::MemoryControls {
 }
 
 #[test]
-fn actual_service_guard_spans_allocation_copyout_and_data_protection() {
+fn service_guard_spans_allocation_copyout_and_data_protection() {
     let page = host_page_size().unwrap() as u64;
     let (mut owner, pointer) = owned();
     let (mut facade, other) = owned();
@@ -271,7 +271,7 @@ fn native_loan_excludes_all_service_effects_until_pc_settlement_drop() {
 }
 
 #[test]
-fn pending_allocation_excludes_entry_and_publishes_actual_128k_storage_once() {
+fn pending_allocation_excludes_entry_and_publishes_128k_storage_once() {
     let (mut main, _) = owned();
     // SAFETY: the test owns this anonymous storage alone: no other backing, writer or Rust
     // reference reaches it.

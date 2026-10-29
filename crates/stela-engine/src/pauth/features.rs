@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn lr_capability_retains_exact_shared_snapshot_and_named_missing_ids_decline() {
+    fn lr_capability_keeps_exact_shared_snapshot_and_named_missing_ids_decline() {
         let values = [
             (
                 Register::IdAa64Isar1El1,
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn qarma5_lr_requires_actual_full_pacm_and_rejects_absent_trivial_reserved_values() {
+    fn qarma5_lr_requires_full_pacm_and_rejects_absent_trivial_reserved_values() {
         for pacm in 0..=ID_FIELD_MASK {
             let source = Snapshot::declared(
                 "lr-capability-pacm-coherence",

@@ -304,7 +304,7 @@ mod tests {
         s.advance(&mut Access::new(0, 999, &mut irq)).unwrap();
     }
     #[test]
-    fn real_endpoint_start_gates_native_initialization_and_actual_trace_input() {
+    fn real_endpoint_start_gates_native_initialization_and_trace_input() {
         let (mut services, mut endpoints, _dispatcher) = fixture();
         assert_eq!(services.deadline(), None);
         advance(&mut services);
@@ -333,7 +333,7 @@ mod tests {
         assert!(services.check_reset().is_err());
     }
     #[test]
-    fn trace_work_waits_for_actual_initializer_return_after_software_flag_write() {
+    fn trace_work_waits_for_initializer_return_after_software_flag_write() {
         let (mut services, mut endpoints, _dispatcher) = fixture();
         let endpoint = endpoints.trace.as_mut().unwrap();
         let mut output = Vec::new();

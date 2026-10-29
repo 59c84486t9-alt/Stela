@@ -609,7 +609,7 @@ fn native_gl9767_absent_card_debounce_never_accepts_allones_after_effect_readbac
 }
 
 #[test]
-fn native_gl9767_ocp_primary_survives_secondary_power_authority_loss_without_stale_mmio() {
+fn native_gl9767_ocp_primary_survives_secondary_power_permission_loss_without_stale_mmio() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: the lost native power epoch keeps every original model DMA allocation.

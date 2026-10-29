@@ -248,7 +248,7 @@ fn wideband_hci(project: super::super::Project, model: Model, mask: u8) -> Hci<M
     h
 }
 #[test]
-fn realtek_wideband_uses_observed_mtu_source_alternates_and_actual_capability() {
+fn realtek_wideband_uses_observed_mtu_source_alternates_and_capability() {
     for project in [
         super::super::Project::Rtl8761Bu,
         super::super::Project::Rtl8852Bu,
@@ -475,7 +475,7 @@ fn realtek_all_initialized_profiles_select_source_cvsd_alternates_without_vendor
     }
 }
 #[test]
-fn realtek_split_coalesced_sco_and_loss_retain_hci_and_retire_partials() {
+fn realtek_split_coalesced_sco_and_loss_keep_hci_and_retire_partials() {
     let mut s = session(Model::default());
     s.set_voice(voice(1, 0), &mut NoDma).unwrap();
     s.0.hci.io.events.push_back(vec![0xff, 1, 0x55]);

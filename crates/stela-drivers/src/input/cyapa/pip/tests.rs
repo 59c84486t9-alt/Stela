@@ -421,7 +421,7 @@ fn touch(count: u8, first: u8, event: u8, orientation: u8) -> Vec<u8> {
     packet
 }
 #[test]
-fn gen5_actual_descriptor_wake_active_info_proximity_and_boot_exit_have_real_replies() {
+fn gen5_descriptor_wake_active_info_proximity_and_boot_exit_have_real_replies() {
     for boot in [false, true] {
         for platform in [0, 1, 2, 15] {
             let h = hardware(boot, platform);
@@ -551,7 +551,7 @@ fn gen5_pending_reports_before_command_response_remain_in_real_fifo_order() {
     assert!(d.poll().unwrap().is_none());
 }
 #[test]
-fn gen5_actual_button_wake_proximity_and_retained_startup_notices_are_distinct() {
+fn gen5_button_wake_proximity_and_kept_startup_notices_are_distinct() {
     let h = hardware(false, 1);
     h.borrow_mut().queue.push_back(vec![0, 0]);
     h.borrow_mut().queue.push_back(vec![6, 0, 0x1f, 0, 0x88, 0]);
@@ -734,7 +734,7 @@ fn gen5_failed_status_timeout_boot_exit_and_irq_do_not_become_successful_transit
     assert_eq!(h.borrow().effects.len(), before);
 }
 #[test]
-fn gen5_late_report_and_power_writes_retain_consumed_state_and_preceding_packets() {
+fn gen5_late_report_and_power_writes_keep_consumed_state_and_preceding_packets() {
     let h = hardware(false, 2);
     let mut d = device(&h);
     d.initialize().unwrap();
@@ -791,7 +791,7 @@ fn gen5_liftoff_keeps_unavailable_record_bytes_without_fake_active_coordinates()
     assert_eq!(raw.as_slice(), &packet[7..]);
 }
 #[test]
-fn gen5_old_replies_never_acknowledge_new_writes_and_overflow_retains_every_read() {
+fn gen5_old_replies_never_acknowledge_new_writes_and_overflow_keeps_every_read() {
     let h = hardware(false, 2);
     let mut d = device(&h);
     d.initialize().unwrap();
@@ -821,7 +821,7 @@ fn gen5_old_replies_never_acknowledge_new_writes_and_overflow_retains_every_read
     assert!(h.borrow().effects.iter().all(|(bytes, _)| bytes.is_empty()));
 }
 #[test]
-fn gen5_late_wake_failures_keep_previous_capabilities_and_actual_power_effects() {
+fn gen5_late_wake_failures_keep_previous_capabilities_and_power_effects() {
     let baseline = hardware(false, 2);
     let mut sample = device(&baseline);
     sample.initialize().unwrap();
@@ -1055,7 +1055,7 @@ mod gen6_tests {
         }
     }
     #[test]
-    fn gen6_actual_query_layout_admission_boot_launch_irq_power_intervals_and_proximity() {
+    fn gen6_query_layout_admission_boot_launch_irq_power_intervals_and_proximity() {
         for boot in [false, true] {
             for platform in [0, 1, 2, 15] {
                 for rotated in [0, 1] {
@@ -1173,7 +1173,7 @@ mod gen6_tests {
         }
     }
     #[test]
-    fn gen6_all_initialization_and_wake_late_errors_keep_actual_effects_without_replay() {
+    fn gen6_all_initialization_and_wake_late_errors_keep_effects_without_replay() {
         for boot in [false, true] {
             let h = hardware6(boot, 2);
             device6(&h).initialize().unwrap();

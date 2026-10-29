@@ -5,7 +5,7 @@ use crate::bus::thunderbolt::config::PacketType;
 use crate::bus::thunderbolt::ring::{Direction, model::*};
 
 #[test]
-fn router_setup_actual_dma_root_child_policy_modes_and_hotplug_complete() {
+fn router_setup_dma_root_child_policy_modes_and_hotplug_complete() {
     use super::super::router::Setup;
     for route in [0, 1, 0x201] {
         for mask in [0, 15, 47, 127] {
@@ -50,7 +50,7 @@ fn router_setup_actual_dma_root_child_policy_modes_and_hotplug_complete() {
 
 #[test]
 #[ignore = "oracle: STELA_THUNDERBOLT_ROUTER_ORACLE"]
-fn unchanged_linux_router_full_write_trace_matches_actual_dma_engine() {
+fn unchanged_linux_router_full_write_trace_matches_dma_engine() {
     use super::super::router::Setup;
     use std::{env, fs};
     let trace =
@@ -281,7 +281,7 @@ fn router_ready_and_configured_deadlines_start_at_write_ack_and_never_extend() {
 }
 
 #[test]
-fn router_lost_ack_rejected_enumeration_and_unconsumed_receipt_retain_owner() {
+fn router_lost_ack_rejected_enumeration_and_unconsumed_receipt_keep_owner() {
     use super::super::router::{Error, Setup};
     for mode in 0..3 {
         let (_source, domain, model, mut channel) = channel();

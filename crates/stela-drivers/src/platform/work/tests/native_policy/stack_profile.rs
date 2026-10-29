@@ -42,7 +42,7 @@ fn descriptors_reject_invalid_size_alignment_guard_and_counts() {
     }
 }
 #[test]
-fn all_mixed_roles_use_their_actual_geometry_with_rust_workers_first() {
+fn all_mixed_roles_use_their_geometry_with_rust_workers_first() {
     let f = Fixture::new();
     let (executor, cpu, dropped) = support::executor(f.clone());
     let r = executor.runtime();
@@ -234,7 +234,7 @@ fn wrong_counts_size_alignment_overlap_and_guard_leave_real_queue_unclaimed() {
 }
 
 #[test]
-fn oldest_compatible_jobs_preserve_order_within_each_actual_pool() {
+fn oldest_compatible_jobs_preserve_order_within_each_pool() {
     let f = Fixture::new();
     let (executor, cpu, dropped) = support::executor(f.clone());
     let r = executor.runtime();

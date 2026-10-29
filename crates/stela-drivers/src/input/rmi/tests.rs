@@ -349,7 +349,7 @@ fn smb_transport(h: &Rc<RefCell<Hardware>>) -> Smbus<SmbusBus, Ps2, Time> {
 }
 
 #[test]
-fn paged_i2c_has_actual_page_effects_bounded_packets_and_no_error_replay() {
+fn paged_i2c_has_page_effects_bounded_packets_and_no_error_replay() {
     let h = hardware();
     let mut bus = i2c_transport(&h);
     bus.activate().unwrap();
@@ -411,7 +411,7 @@ fn smbus_chunking_round_trips_every_length_and_preserves_mapping_permissions() {
 }
 
 #[test]
-fn smbus_versions_and_actual_companion_ownership_are_required() {
+fn smbus_versions_and_companion_ownership_are_required() {
     for version in [0u8, 1, 2, 3, 255] {
         let h = hardware();
         h.borrow_mut().version = version;
@@ -522,7 +522,7 @@ fn control_device(h: &Rc<RefCell<Hardware>>) -> Device<I2c<I2cBus>, Attn, Time> 
 }
 
 #[test]
-fn f01_control_has_actual_reset_configuration_irq_ownership_and_power_effects() {
+fn f01_control_has_reset_configuration_irq_ownership_and_power_effects() {
     let h = hardware();
     let mut d = control_device(&h);
     d.initialize_control().unwrap();
@@ -577,7 +577,7 @@ fn f01_adjustable_power_registers_skip_lts_and_preserve_unrelated_bits() {
 }
 
 #[test]
-fn f01_can_run_over_actual_smbus_mapping_and_restores_ps2_on_stop() {
+fn f01_can_run_over_smbus_mapping_and_restores_ps2_on_stop() {
     let h = hardware();
     h.borrow_mut().require_mask = true;
     let mut d = Device::new(
@@ -721,7 +721,7 @@ fn i2c_function_streaming_windows_use_one_complete_burst_without_page_splits() {
 }
 
 #[test]
-fn smbus_waits_for_firmware_after_each_actual_companion_reset_before_mode_read() {
+fn smbus_waits_for_firmware_after_each_companion_reset_before_mode_read() {
     let h = hardware();
     h.borrow().time.set(u64::MAX - 50_000); // settling handles clock wrap
     let mut bus = smb_transport(&h);

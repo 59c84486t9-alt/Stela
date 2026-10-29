@@ -424,7 +424,7 @@ fn mailbox_last_atomic_read_order_rotation_and_real_owner_lifetime() {
     assert!(!m.lock().unwrap().events.iter().any(|e| e[0] == 1));
 }
 #[test]
-fn fresh_start_and_sticky_finish_are_distinct_from_actual_completion() {
+fn fresh_start_and_sticky_finish_are_distinct_from_completion() {
     let (mut c, m, _, _) = fixture();
     {
         let mut s = m.lock().unwrap();
@@ -499,7 +499,7 @@ fn missing_clock_stale_status_deadline_and_uncertain_reads_cannot_start_calibrat
     assert!(c.quarantined());
 }
 #[test]
-fn every_start_finish_io_error_unwind_and_shutdown_retains_actual_control_owner() {
+fn every_start_finish_io_error_unwind_and_shutdown_keeps_control_owner() {
     let (mut c, m, _, _) = fixture();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.

@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn alias_firmware_catalog_binds_actual_pci_identity_and_borrows_exact_bytes() {
+fn alias_firmware_catalog_binds_pci_identity_and_borrows_exact_bytes() {
     use resources::{Catalog, Provenance, Resource, Target};
     let digest = [
         0x23, 0xc3, 0xcf, 0xd9, 0x9c, 0xa0, 0x28, 0xa0, 0xba, 0x72, 0xe8, 0x92, 0x40, 0xe4, 0xb4,

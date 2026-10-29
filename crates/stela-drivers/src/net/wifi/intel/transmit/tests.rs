@@ -248,7 +248,7 @@ fn source_short_header_full_queue_echo_and_exact_three_dma_ranges() {
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
-fn actual_images_negotiate_source_rate2_and_family9_10_layouts() {
+fn images_negotiate_source_rate2_and_family9_10_layouts() {
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     for family in [Family::Ax200, Family::Ax210] {
         let b = std::fs::read(std::path::Path::new(&root).join(family.firmware_name())).unwrap();

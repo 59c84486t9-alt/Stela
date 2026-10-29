@@ -234,7 +234,7 @@ fn allocation_and_mapping_faults_do_not_publish_or_leak_completed_pins() {
 }
 
 #[test]
-fn failed_visibility_or_invalidation_retains_exact_mapping_for_retry() {
+fn failed_visibility_or_invalidation_keeps_exact_mapping_for_retry() {
     let model = Arc::new(Model::default());
     let mut backing = allocate(&[0xa5; 5000], &model).unwrap();
     model.sync_failure.store(true, Ordering::Relaxed);

@@ -430,7 +430,7 @@ fn map_memory(root: &mut RootComplex, access: &mut Access<'_>) {
     root.write(0x20, Width::Word, 0xc000_c000, access).unwrap();
 }
 #[test]
-fn actual_bar_bank_and_service_receive_effects_and_preserve_native_errors() {
+fn bar_bank_and_service_receive_effects_and_preserve_native_errors() {
     let mut root = machine();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 120, &mut latch);
@@ -507,7 +507,7 @@ fn whole_port_preflight_preserves_bridge_config_and_every_native_owner_on_refusa
     );
 }
 #[test]
-fn retained_clock_quiesce_and_peer_loss_pause_without_resetting_actual_work() {
+fn kept_clock_quiesce_and_peer_loss_pause_without_resetting_work() {
     let mut root = machine();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
@@ -621,7 +621,7 @@ fn armed_irq_pause_and_cold_root_reset_refuse_without_dropping_pending_levels() 
     assert!(latch.is_asserted(stela_contracts::interrupt::Wire::Aic(AicInput::new(0, 1))));
 }
 #[test]
-fn peer_presence_requires_actual_complete_bar_and_lifecycle_ownership() {
+fn peer_presence_requires_complete_bar_and_lifecycle_ownership() {
     let p = Port::new(
         Layout::T8103,
         16,

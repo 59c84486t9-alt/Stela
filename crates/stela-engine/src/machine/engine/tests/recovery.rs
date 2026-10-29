@@ -126,7 +126,7 @@ fn undeclared_body_patch_is_not_accepted_as_chain_ownership() {
     );
 }
 #[test]
-fn portable_guest_tag_on_internal_frame_cannot_mint_projection_authority() {
+fn portable_guest_tag_on_internal_frame_cannot_mint_projection_permission() {
     let (mut machine, index, _) = fixture();
     let owner = machine.fault_recovery.get_mut(&index).unwrap();
     owner.test_make_pending();
@@ -248,7 +248,7 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
     assert_eq!(machine.cpu.retired, before + 1 + u64::from(landing_pad));
 }
 #[test]
-fn direct_chain_to_actual_first_load_retains_completed_prefix_and_zero_btype() {
+fn direct_chain_to_first_load_keeps_completed_prefix_and_zero_btype() {
     chained_load_case(0x14000003, 0, false);
 }
 #[test]
@@ -261,7 +261,7 @@ fn guarded_landing_pad_retires_and_clears_btype_before_later_load_fault() {
 }
 
 #[test]
-fn load_before_native_terminal_adapters_retains_qualified_fault_plan() {
+fn load_before_native_terminal_adapters_keeps_checked_fault_plan() {
     for (terminal_word, expected) in [
         (0xd538_d088, recovery::NativeAdapter::MirroredRead),
         (0xdac1_47f1, recovery::NativeAdapter::PointerAuthentication),
@@ -363,7 +363,7 @@ fn helper_capture(offset: usize) -> NativeFault {
     }
 }
 #[test]
-fn deliberate_translation_helper_return_qualifies_exact_descriptor_before_projection() {
+fn deliberate_translation_helper_return_checks_exact_descriptor_before_projection() {
     let (mut machine, index, offset) = translated_fixture();
     machine.cpu.state.x[2] = 0x0040_0000_0000_0000;
     machine
@@ -377,7 +377,7 @@ fn deliberate_translation_helper_return_qualifies_exact_descriptor_before_projec
     assert_eq!(machine.cpu.retired, 7);
 }
 #[test]
-fn helper_origin_vector_direction_and_return_token_are_independent_authorities() {
+fn helper_origin_vector_direction_and_return_token_are_independent_permissions() {
     for mutation in 0..6 {
         let (machine, index, offset) = translated_fixture();
         let mut fault = helper_capture(offset);

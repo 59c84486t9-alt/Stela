@@ -440,7 +440,7 @@ mod tests {
         (patch, ram)
     }
     #[test]
-    fn exact_semaphore_download_scatter_skip_and_start_order_is_retained() {
+    fn exact_semaphore_download_scatter_skip_and_start_order_is_kept() {
         let (p, r) = images();
         let (p, r) = (Patch::parse(&p).unwrap(), Ram::parse(&r).unwrap());
         let model = Rc::new(RefCell::new(Model::default()));
@@ -559,7 +559,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_MT792X_FIRMWARE, STELA_MT792X_ORACLE"]
-    fn actual_pinned_download_matches_every_unchanged_donor_command_byte() {
+    fn pinned_download_matches_every_unchanged_donor_command_byte() {
         extern crate std;
         use super::super::firmware::tests::{catalog, requests};
         use sha2::{Digest, Sha256};

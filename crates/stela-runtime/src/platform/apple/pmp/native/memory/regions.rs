@@ -29,7 +29,7 @@ pub(super) fn parse(table: &[u8; TABLE_BYTES]) -> Vec<Region> {
 mod tests {
     use super::*;
     #[test]
-    fn native_prefix_copy_keeps_order_and_stops_only_at_actual_zero_size() {
+    fn native_prefix_copy_keeps_order_and_stops_only_at_zero_size() {
         let mut table = [0u8; TABLE_BYTES];
         for index in 0..32 {
             let at = index * 24;

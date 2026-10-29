@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn source_usable_band_union_never_turns_flags_into_probe_authority() {
+    fn source_usable_band_union_never_turns_flags_into_probe_permission() {
         use crate::net::wifi::mediatek::identity::Chip;
         let blocked = domain::Channel {
             hardware_value: 1,

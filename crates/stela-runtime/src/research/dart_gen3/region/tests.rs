@@ -117,7 +117,7 @@ fn native_dead_index_end_adjustment_wraps_before_projection_without_range_repair
 }
 
 #[test]
-fn complete_tz_handoff_preserves_opaque_bytes_and_verifies_actual_register_observations() {
+fn complete_tz_handoff_preserves_opaque_bytes_and_verifies_register_observations() {
     let regions = [[0x1000, 0x2000, 0], [0x8000, 0xc000, 0], [0; 3]];
     let bytes = property(1, 3, regions, 0x8_0000_4000);
     let tagger = Tagger::parse(&bytes, false).unwrap();
@@ -229,7 +229,7 @@ fn observations(region: AddressRegion) -> AddressRegisters {
 }
 
 #[test]
-fn address_region_construction_retains_signed_offsets_and_final_page_inclusion() {
+fn address_region_construction_keeps_signed_offsets_and_final_page_inclusion() {
     let region = AddressRegion::construct(AddressRequest::Range {
         input: 1 << 40,
         output: 0x8_0000_0000,

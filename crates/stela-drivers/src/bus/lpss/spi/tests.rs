@@ -131,7 +131,7 @@ fn model(device: u16, clock: u32) -> (Model, Time, Rc<RefCell<Hardware>>) {
     (Model(h.clone()), Time(Rc::new(Cell::new(0))), h)
 }
 #[test]
-fn actual_spi_ids_select_source_clock_and_not_i2c_profiles() {
+fn spi_ids_select_source_clock_and_not_i2c_profiles() {
     let profile = Profile::select(Identity {
         vendor: 0x8086,
         device: 0xa0aa,
@@ -153,7 +153,7 @@ fn actual_spi_ids_select_source_clock_and_not_i2c_profiles() {
 }
 
 #[test]
-fn retained_private_reset_remap_fractional_clock_and_real_pio_compose_before_retirement() {
+fn kept_private_reset_remap_fractional_clock_and_real_pio_compose_before_retirement() {
     for (device, root) in [
         (0x9d29, 120_000_000),
         (0x31c2, 100_000_000),
@@ -315,7 +315,7 @@ fn unknown_identity_caps_clock_and_bad_native_time_never_program_hardware() {
 }
 
 #[test]
-fn every_shutdown_access_failure_and_refused_gate_reset_retains_original_owners() {
+fn every_shutdown_access_failure_and_refused_gate_reset_keeps_original_owners() {
     let (r, t, h) = model(0xa0aa, 1 << 1 | 2 << 16);
     // SAFETY: original isolated kept controller, no prior user.
     let spi = unsafe { Spi::attach(r, t, 1, 10_000) }.ok().unwrap();

@@ -432,7 +432,7 @@ pub(super) mod tests {
         assert_eq!(Rtw88::parse(&no_emem).unwrap().sections.len(), 2);
     }
     #[test]
-    fn ax_sections_retain_checksum_security_signatures_flags_and_raw_addresses() {
+    fn ax_sections_keep_checksum_security_signatures_flags_and_raw_addresses() {
         let b = ax_fixture();
         let p = AxImage::parse(&b).unwrap();
         assert_eq!(p.sections.len(), 2);
@@ -508,7 +508,7 @@ pub(super) mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES"]
-    fn actual_vendor_layouts_are_borrowed_complete_and_versioned() {
+    fn vendor_layouts_are_borrowed_complete_and_versioned() {
         extern crate std;
         let root = std::path::PathBuf::from(std::env::var("STELA_REALTEK_WIFI_IMAGES").unwrap());
         let b = std::fs::read(root.join("rtw88/rtw8822c_fw.bin")).unwrap();

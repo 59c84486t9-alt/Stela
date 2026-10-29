@@ -61,7 +61,7 @@ fn controls(mode: TagCheckFaultMode) -> MemoryControls {
 }
 
 #[test]
-fn address_increment_requires_qualified_features_and_matching_specialization() {
+fn address_increment_requires_checked_features_and_matching_specialization() {
     use crate::system::{process_memory::ProcessMemoryFeatures, profile::BaseSpeAbsence};
     use stela_compiler::context::memory::address::{
         AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,

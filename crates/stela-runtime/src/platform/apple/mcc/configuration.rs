@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_is_supplied_independently_and_retained_pause_keeps_the_created_image() {
+    fn lifecycle_is_supplied_independently_and_kept_pause_keeps_the_created_image() {
         let configuration = Configuration::zeroed_control_image(1, [127; 32]).unwrap();
         let mut pins = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut pins);

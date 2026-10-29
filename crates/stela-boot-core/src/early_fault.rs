@@ -183,7 +183,7 @@ mod tests {
         );
     }
     #[test]
-    fn incomplete_records_never_become_actual_exception_evidence() {
+    fn incomplete_records_never_become_exception_evidence() {
         let mut record = Record {
             seal: AtomicU32::new(0),
             vector: 13,

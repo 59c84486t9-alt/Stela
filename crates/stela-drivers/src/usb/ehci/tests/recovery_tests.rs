@@ -30,8 +30,7 @@ fn current(interrupt: bool) -> (Controller, Arc<Mutex<Shared>>, DeviceId, Transf
 }
 
 #[test]
-fn actual_controller_recovery_retires_ordinary_and_periodic_dma_and_requires_fresh_root_enumeration()
- {
+fn controller_recovery_retires_ordinary_and_periodic_dma_and_requires_fresh_root_enumeration() {
     for interrupt in [false, true] {
         let (mut c, m, id, old) = current(interrupt);
         let serial = c.next_transfer;
@@ -84,7 +83,7 @@ fn actual_controller_recovery_retires_ordinary_and_periodic_dma_and_requires_fre
 }
 
 #[test]
-fn recovery_missing_halt_engine_bme_drain_or_unmap_ack_retains_original_pending_dma() {
+fn recovery_missing_halt_engine_bme_drain_or_unmap_ack_keeps_original_pending_dma() {
     for fault in 0..5 {
         let (mut c, m, id, old) = current(fault % 2 != 0);
         let original = c.arena.as_ref().unwrap().address;

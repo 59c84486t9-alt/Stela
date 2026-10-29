@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_and_preentry_requirements_use_actual_element_widths() {
+    fn descriptors_and_preentry_requirements_use_element_widths() {
         use crate::aarch64::sve::memory_multi::decode;
         const LD1B_PAIR_X5: u32 = 0xa040_00a0;
         const LD1D_PAIR_X5: u32 = 0xa040_60a0;

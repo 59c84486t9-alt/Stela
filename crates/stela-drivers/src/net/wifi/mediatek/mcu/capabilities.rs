@@ -321,7 +321,7 @@ mod tests {
         bytes
     }
     #[test]
-    fn owned_report_retains_missing_duplicate_unknown_zero_and_trailing_observations() {
+    fn owned_report_keeps_missing_duplicate_unknown_zero_and_trailing_observations() {
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
             let empty = Capabilities::parse(chip, &[0, 0, 0, 0]).unwrap();
             assert_eq!(empty.mac(), None);
@@ -502,7 +502,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_MT792X_CAPABILITIES_ORACLE"]
-    fn unchanged_full_capability_helpers_match_actual_report_observations() {
+    fn unchanged_full_capability_helpers_match_report_observations() {
         let root = std::path::PathBuf::from(
             std::env::var_os("STELA_MT792X_CAPABILITIES_ORACLE").expect("capability parser oracle"),
         );

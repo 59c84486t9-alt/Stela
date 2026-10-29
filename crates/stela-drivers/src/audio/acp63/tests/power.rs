@@ -36,7 +36,7 @@ fn peer_power_request_validation_is_independent_of_completion() {
 }
 
 #[test]
-fn power_zsc_and_actual_iova_limit_failures_do_not_publish_dma() {
+fn power_zsc_and_iova_limit_failures_do_not_publish_dma() {
     let (mut controller, device, source) = fixture(0x63);
     device.lock().unwrap().power_never = true;
     assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));

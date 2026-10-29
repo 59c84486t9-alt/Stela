@@ -391,7 +391,7 @@ fn scalar_and_pair_retire_once_and_preserve_consumed_data_on_settlement_failure(
     }
 }
 #[test]
-fn original_scalar_pair_address_and_sign_modes_retain_full_state_and_exact_writeback() {
+fn original_scalar_pair_address_and_sign_modes_keep_full_state_and_exact_writeback() {
     // Unchanged source encodings through the shared decoder; closed model
     // only. The QEMU cold fixture separately executes the real pair path.
     for (word, base, first, second, writeback) in [
@@ -439,7 +439,7 @@ fn original_scalar_pair_address_and_sign_modes_retain_full_state_and_exact_write
     }
 }
 #[test]
-fn changed_actual_frame_controls_or_source_refuses_before_device_consumption() {
+fn changed_frame_controls_or_source_refuses_before_device_consumption() {
     for tamper in 0..5 {
         let (mut machine, ram) = pending(LDR, false);
         match tamper {
@@ -561,7 +561,7 @@ fn new_host_points_preserve_an_already_entered_bus_continuation() {
     }
 }
 #[test]
-fn sequential_memory_and_actual_processor_leases_complete_under_one_stop() {
+fn sequential_memory_and_processor_leases_complete_under_one_stop() {
     let (mut machine, _) = pending(0xf9000020, false);
     machine.devices.clock = true;
     // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device

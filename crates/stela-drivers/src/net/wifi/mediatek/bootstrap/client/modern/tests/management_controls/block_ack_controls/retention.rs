@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn command_and_unmap_failures_retain_owners() {
+fn command_and_unmap_failures_keep_owners() {
     for command_failure in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);

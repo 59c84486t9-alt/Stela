@@ -215,7 +215,7 @@ mod tests {
             .fold(TAG, |word, (field, shift)| word | u32::from(field) << shift)
     }
     #[test]
-    fn all_five_source_fields_and_raw_zero_change_actual_context_without_target_admission() {
+    fn all_five_source_fields_and_raw_zero_change_context_without_target_admission() {
         for index in 0..5 {
             for value in 0..16 {
                 let mut fields = [0; 5];
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(cursor.committed_writes(), 0);
     }
     #[test]
-    fn qualification_is_exclusive_to_one_effect_ticket_cursor_and_retained_context() {
+    fn qualification_is_exclusive_to_one_effect_ticket_cursor_and_kept_context() {
         let mut cursor = cursor(&[0x101, 0, 0, 7, encoded([1, 2, 3, 4, 5]), 0x201, 0, 0, 9, 0]);
         cursor
             .bind_initial_control(Initial::Captured(test_fields()))
@@ -329,7 +329,7 @@ mod tests {
         );
     }
     #[test]
-    fn polls_and_both_copy_phases_carry_the_same_actual_context_and_cannot_share_a_permit() {
+    fn polls_and_both_copy_phases_carry_the_same_context_and_cannot_share_a_permit() {
         let raw = encoded([2, 3, 4, 5, 6]);
         let mut cursor = cursor(&[
             raw,

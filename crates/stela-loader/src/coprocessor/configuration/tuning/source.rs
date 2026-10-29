@@ -298,7 +298,7 @@ pub(in crate::coprocessor) mod tests {
         Table::select(&b, input(&b), width)?.context("missing synthetic selected table")
     }
     #[test]
-    fn selection_retains_native_order_width_and_masked_offsets() -> Result<()> {
+    fn selection_keeps_native_order_width_and_masked_offsets() -> Result<()> {
         for width in [Width::Bits32, Width::Bits64] {
             let b = fixture(width);
             let t = Table::select(&b, input(&b), width)?.unwrap();

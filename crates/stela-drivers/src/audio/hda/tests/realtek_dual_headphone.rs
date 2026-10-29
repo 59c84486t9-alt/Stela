@@ -403,7 +403,7 @@ fn pin_capability_validation() {
 }
 
 #[test]
-fn partial_second_route_retains_owner() {
+fn partial_second_route_keeps_owner() {
     for conflict in [true, false] {
         let mut fixture = Fixture::new();
         let model = realtek_two_sense_model(0x10ec0295, false, false);

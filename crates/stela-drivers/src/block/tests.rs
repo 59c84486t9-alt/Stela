@@ -154,7 +154,7 @@ fn callback_profile_times_returned_direct_errors_without_changing_them() {
 }
 
 #[test]
-fn callback_profile_counts_queued_work_per_actual_advance() {
+fn callback_profile_counts_queued_work_per_advance() {
     let _clock = crate::test_clock::virtualize();
     let (delayed, (released, _, _)) = Delayed::new(RamDisk::new("profile", 64, 512), 1);
     let disk = Shared::new(Box::new(delayed));

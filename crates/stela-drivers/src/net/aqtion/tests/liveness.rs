@@ -2,7 +2,7 @@
 //! Original alive register distinguishes data from removal.
 use super::*;
 #[test]
-fn actual_allones_programmed_mac_padding_initializes_and_transfers_on_both_generations() {
+fn allones_programmed_mac_padding_initializes_and_transfers_on_both_generations() {
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         if peer.profile.generation == Generation::Atlantic {
@@ -29,7 +29,7 @@ fn actual_allones_programmed_mac_padding_initializes_and_transfers_on_both_gener
     }
 }
 #[test]
-fn actual_allones_data_requires_independent_alive_access_and_retains_failed_initialization() {
+fn allones_data_requires_independent_alive_access_and_keeps_failed_initialization() {
     for device in [0x07b1, 0x04c0] {
         for unavailable in [false, true] {
             let (mut owner, peer, domain, dropped) = setup(device);
@@ -64,7 +64,7 @@ fn actual_allones_data_requires_independent_alive_access_and_retains_failed_init
     }
 }
 #[test]
-fn actual_live_antigua_allones_boot_status_is_not_a_boot_started_acknowledgement() {
+fn live_antigua_allones_boot_status_is_not_a_boot_started_acknowledgement() {
     let (mut owner, peer, domain, dropped) = setup(0x04c0);
     peer.fault.set(Fault::BootAllOnes);
     assert_eq!(owner.start(), Err(Error::Timeout { register: 0x3040 }));

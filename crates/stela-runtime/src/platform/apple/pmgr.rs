@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn request_preview_is_pure_and_matches_committed_target_not_guest_actual_bits() {
+    fn request_preview_is_pure_and_matches_committed_target_not_guest_bits() {
         let mut pmgr = pmgr();
         pmgr.bind_lifecycle(AIC).unwrap();
         let mut latch = InterruptLatch::new();

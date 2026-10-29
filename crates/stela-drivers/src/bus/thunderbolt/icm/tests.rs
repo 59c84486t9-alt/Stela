@@ -193,7 +193,7 @@ fn unchanged_linux_icm_driver_ready_and_command_wire_agree() {
 }
 
 #[test]
-fn icm_actual_dma_driver_ready_and_raw_notification_wrap_rings() {
+fn icm_dma_driver_ready_and_raw_notification_wrap_rings() {
     use super::super::icm::{Event, Security};
     let (_source, domain, model, mut host) = icm(0x15e8);
     host.start(0).unwrap();

@@ -345,7 +345,7 @@ fn smbus_real_cold_boot_fixed_security_and_operational_encoded_query_power() {
     }
 }
 #[test]
-fn smbus_actual_counts_are_required_and_complete_malformed_blocks_remain_owned() {
+fn smbus_counts_are_required_and_complete_malformed_blocks_remain_owned() {
     for command in [0xc1, 0x99, 0x81] {
         for count in 0..=33 {
             let h = hardware([0x0c, 8, 0], 0x17);
@@ -424,7 +424,7 @@ fn smbus_all_source_contact_counts_ids_buttons_and_pressure_keep_exact_raw_paylo
     }
 }
 #[test]
-fn smbus_recovered_probe_contract_retains_original_and_other_failures_never_fallback() {
+fn smbus_recovered_probe_contract_keeps_original_and_other_failures_never_fallback() {
     for kind in [
         smbus::ErrorKind::Device,
         smbus::ErrorKind::Timeout(smbus::Phase::Completion),

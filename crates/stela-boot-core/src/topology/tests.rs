@@ -201,7 +201,7 @@ fn placement_is_a_permutation_with_the_boot_worker_fixed() {
 }
 
 #[test]
-fn placement_searches_all_retained_workers_when_guest_has_fewer_slots() {
+fn placement_searches_all_kept_workers_when_guest_has_fewer_slots() {
     use CoreClass::{Efficiency as E, Performance as P, Unknown as U};
     assert_eq!(placement(&[P, E], &[P, P, P, E], 0), Ok(vec![0, 3]));
     assert_eq!(placement(&[E, P], &[P, P, P, E], 1), Ok(vec![3, 0]));
@@ -238,7 +238,7 @@ fn placement_rejects_invalid_rosters() {
 }
 
 #[test]
-fn default_assignment_uses_all_actual_cores_and_only_explicit_counts_narrow_it() {
+fn default_assignment_uses_all_cores_and_only_explicit_counts_narrow_it() {
     for available in 1..=MAX_CORES {
         assert_eq!(assignment_count(None, available), Ok(available));
         for selected in 1..=available {
@@ -594,7 +594,7 @@ fn identity_selection_checks_observed_maxima_low16_counts_and_amd_vendor() {
 }
 
 #[test]
-fn common_target_retains_only_features_present_on_every_assigned_worker() {
+fn common_target_keeps_only_features_present_on_every_assigned_worker() {
     use stela_compiler::TargetCpu;
     let rich = target_snapshot(TargetCpu::INTEL_VENDOR);
     let mut weaker = target_snapshot(TargetCpu::AMD_VENDOR);
@@ -676,7 +676,7 @@ fn common_target_obeys_leaf_maxima_vendor_atomicity_and_complete_sse_tiers() {
 }
 
 #[test]
-fn actual_core_floor_and_la57_are_required_independently_of_bsp() {
+fn core_floor_and_la57_are_required_independently_of_bsp() {
     let baseline = native_snapshot();
     assert_eq!(baseline.qualify_native(true), Ok(()));
     for bit in [0, 9, 13, 19, 20, 23] {

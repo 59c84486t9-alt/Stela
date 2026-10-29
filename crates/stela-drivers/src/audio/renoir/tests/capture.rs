@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
+fn pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
     for (revision, period) in [(1, 4096), (1, 8192), (1, 5000)] {
         let (mut controller, device, source) = ready(revision, period);
         let ring = period * 4;
