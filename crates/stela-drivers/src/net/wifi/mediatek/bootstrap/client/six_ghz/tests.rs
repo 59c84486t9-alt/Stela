@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 //! The 6 GHz transport over the modeled native controller, with simulated
-//! board and OS providers. These grant no physical-radio qualification.
+//! board and OS providers. These grant no physical-radio validation.
 use super::super::tests::*;
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::tests::*;

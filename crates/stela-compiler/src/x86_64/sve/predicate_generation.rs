@@ -170,7 +170,7 @@ fn emit_first(
         read_predicate_chunk(code, governing, chunk, length);
         stage(code, 4 + chunk as u8);
         code.asm().mov(Size::Qword, R11, Rax);
-        // Shorter profiles retain the baseline recipe: some measured short
+        // Shorter profiles keep the baseline recipe: some measured short
         // cohorts regressed with BMI1, while the maximum profile improved.
         if target.supports(TargetCpu::Bmi1) && length.bytes() == MAX_VECTOR_BYTES {
             code.asm().blsi(Size::Qword, R9, R11);
@@ -519,7 +519,7 @@ mod breaks {
 mod whiles {
     //! Baseline WHILE count and PN emission. Parent owns the P/PP chunk writer.
     //!
-    //! Count is retained in R8D across state helpers; RAX/RCX/RDX are scratch.
+    //! Count is held in R8D across state helpers; RAX/RCX/RDX are scratch.
     //! No callee-saved register is used. Scalar inputs are read before guest writes.
     use crate::x86_64::asm::Gpr::{R8, Rax, Rcx, Rdi, Rdx};
     use crate::x86_64::asm::{Alu, Code, Cond, Mem, ShiftOp, Size, Unary};

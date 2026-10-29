@@ -64,8 +64,8 @@ impl core::error::Error for Error {}
 /// before unmapping a ring. Queue register readback alone is not that proof.
 ///
 /// # Safety
-/// Implementors must own the actual selected PCI requester and mapped queue
-/// registers for this object's lifetime. `device_index` must be an actual
+/// Implementors must own the selected PCI requester and mapped queue
+/// registers for this object's lifetime. `device_index` must be a
 /// volatile hardware read and `publish` an ordered MMIO doorbell after prior
 /// DMA visibility operations; successful writes are completed register stores.
 /// Errors may be uncertain and must never manufacture a completion index.
@@ -76,7 +76,7 @@ pub unsafe trait QueueIo: 'static {
     fn publish(&mut self, head: u16) -> Result<(), Error>;
 }
 
-/// Native queue MMIO, retaining the actual owned BAR/requester context.
+/// Native queue MMIO, keeping the owned BAR/requester context.
 /// Construct it only after PCI ownership, full BAR bounds and UC mapping are
 /// established. This is not a PCI function claim or an interrupt allocation.
 pub struct MmioQueue {
@@ -85,12 +85,12 @@ pub struct MmioQueue {
 }
 impl MmioQueue {
     /// # Safety
-    /// `window` names the four actual uncached queue registers of the claimed
-    /// requester. `owner` must retain the real exclusive PCI function claim
+    /// `window` names the four uncached queue registers of the claimed
+    /// requester. `owner` must keep the real exclusive PCI function claim
     /// and BAR mapping/reservation through its final Drop; the window remains
     /// mapped and excludes competing accesses for that entire lifetime.
     /// No unrelated token or owner whose Drop releases another reservation
-    /// meets this contract. Uncertain ring Drop deliberately retains this Arc.
+    /// meets this contract. Uncertain ring Drop keeps this Arc.
     pub unsafe fn from_window(window: NonNull<[u32; 4]>, owner: Arc<dyn core::any::Any>) -> Self {
         Self {
             // SAFETY: covered by this function's own safety contract.
@@ -99,7 +99,7 @@ impl MmioQueue {
         }
     }
 }
-// SAFETY: construction requires the actual exclusive mapped queue window;
+// SAFETY: construction requires the exclusive mapped queue window;
 // volatile accesses use the donor's exact four-register offsets.
 unsafe impl QueueIo for MmioQueue {
     fn configure(&mut self, address: u32, count: u16) -> Result<(), Error> {
@@ -135,7 +135,7 @@ impl Allocation {
         bytes: usize,
         direction: Direction,
     ) -> Result<Self, Error> {
-        // The unsafe installer requires actual hardware-coherent WB DMA for
+        // The unsafe installer requires hardware-coherent WB DMA for
         // this requester, with NoSnoop/ATS disabled. WB alone proves nothing.
         let (cpu, dma) = crate::net::wifi::allocation::allocate_32bit::<Error>(
             source, domain, bytes, direction,
@@ -155,14 +155,14 @@ impl Allocation {
     }
     fn write32(&self, at: usize, value: u32) -> Result<(), Error> {
         let ptr = self.pointer(at, 4)?.cast::<u32>();
-        // SAFETY: bounded aligned qualified-coherent WB allocation, serialized ring owner, descriptor
+        // SAFETY: bounded aligned checked-coherent WB allocation, serialized ring owner, descriptor
         // is CPU-owned when written; no Rust reference aliases a device access.
         unsafe { ptr.write_volatile(value.to_le()) };
         Ok(())
     }
     fn read32(&self, at: usize) -> Result<u32, Error> {
         let ptr = self.pointer(at, 4)?.cast::<u32>();
-        // SAFETY: bounded aligned qualified-coherent WB descriptor polling.
+        // SAFETY: bounded aligned checked-coherent WB descriptor polling.
         Ok(u32::from_le(unsafe { ptr.read_volatile() }))
     }
     unsafe fn release(&mut self) -> Result<(), Error> {
@@ -180,7 +180,7 @@ impl Drop for Allocation {
     fn drop(&mut self) {
         if !self.published && !self.unmapped {
             // SAFETY: unpublished allocations were never exposed to the requester;
-            // unmap failures remain retained by DmaMapping's quarantine Drop.
+            // unmap failures remain held by DmaMapping's quarantine Drop.
             let _ = unsafe { self.dma.unmap() };
         }
     }
@@ -210,13 +210,13 @@ pub struct TxRing<Q: QueueIo> {
 }
 impl<Q: QueueIo> TxRing<Q> {
     /// # Safety
-    /// The caller must hold exclusive PCI/WFDMA ownership, with the actual TX
-    /// engine disabled and idle before queue register mutation, and retain it
+    /// The caller must hold exclusive PCI/WFDMA ownership, with the TX
+    /// engine disabled and idle before queue register mutation, and keep it
     /// through this ring's destruction/quarantine. `domain` must belong to that
-    /// same requester. Ordinary WB DMA must be genuinely cache coherent for
+    /// same requester. Ordinary WB DMA must be cache coherent for
     /// volatile completion polling on this exact platform/requester, with PCIe
     /// NoSnoop and ATS disabled. A WB cache attribute or compiler fence alone
-    /// is not that proof. This qualification must remain true until acknowledged
+    /// is not that proof. This validation must remain true until acknowledged
     /// quiescence and final unmap, including every quarantined mapping.
     /// Polling mode must keep device IRQ sources masked and
     /// exclude every other submit/cleanup/reset owner.
@@ -256,7 +256,7 @@ impl<Q: QueueIo> TxRing<Q> {
             released: false,
         };
         // Construct the guard before the first potentially publishing store.
-        // Any later error retains both Q's actual requester/BAR owner and DMA.
+        // Any later error keeps both Q's requester/BAR owner and DMA.
         ring.descriptors.published = true;
         ring.io
             .as_mut()
@@ -276,7 +276,7 @@ impl<Q: QueueIo> TxRing<Q> {
         self.poisoned
     }
     /// Submit one complete MCU/headerless-scatter transfer. `Ok` means queued,
-    /// not completed; the caller must retain its command epoch until completion.
+    /// not completed; the caller must keep its command epoch until completion.
     pub fn submit(&mut self, cookie: u64, payload: &[u8]) -> Result<(), Error> {
         if self.poisoned || self.released {
             return Err(Error::Poisoned);
@@ -324,7 +324,7 @@ impl<Q: QueueIo> TxRing<Q> {
             .expect("retained queue")
             .publish(self.head as u16)
     }
-    /// Read the actual hardware DMA index and release at most one completed
+    /// Read the hardware DMA index and release at most one completed
     /// transfer. Enqueue or software head progression never grants CPU ownership.
     pub fn poll(&mut self) -> Result<Option<Completion>, Error> {
         if self.poisoned || self.released {
@@ -351,7 +351,7 @@ impl<Q: QueueIo> TxRing<Q> {
         }
         fence(Ordering::SeqCst);
         let descriptor = self.tail * DESC_BYTES;
-        // SAFETY: the observed actual hardware DMA index passed this entry,
+        // SAFETY: the observed hardware DMA index passed this entry,
         // completing descriptor fetch/writeback for this exact queue slot.
         unsafe {
             self.descriptors
@@ -360,7 +360,7 @@ impl<Q: QueueIo> TxRing<Q> {
         };
         let slot = &mut self.slots[self.tail];
         let (cookie, bytes) = slot.pending.ok_or(Error::OwnershipMismatch)?;
-        // SAFETY: Actual DMA index passed this slot; the requester has completed reads.
+        // SAFETY: DMA index passed this slot; the requester has completed reads.
         unsafe { slot.data.dma.sync_for_cpu(0..bytes)? };
         slot.pending = None;
         self.tail = (self.tail + 1) % count;
@@ -368,11 +368,11 @@ impl<Q: QueueIo> TxRing<Q> {
         Ok(Some(Completion { cookie, bytes }))
     }
     /// # Safety
-    /// The actual owning controller must have disabled submissions and IRQs,
+    /// The owning controller must have disabled submissions and IRQs,
     /// drained workers, and observed acknowledged WFDMA idle/reset such that no
     /// current or stale device access can touch any queue or payload mapping.
     /// Software timeout, disabled PCI command bit or a write without readback
-    /// is not this proof. Failed unmaps retain/quarantine remaining mappings.
+    /// is not this proof. Failed unmaps keep/quarantine remaining mappings.
     pub unsafe fn release_after_quiesce(&mut self) -> Result<(), Error> {
         self.poisoned = true;
         for slot in &mut self.slots {
@@ -388,7 +388,7 @@ impl<Q: QueueIo> TxRing<Q> {
     }
 }
 
-/// Retain the queue/BAR/requester context of an uncertain publication or
+/// Keep the queue/BAR/requester context of an uncertain publication or
 /// Drop; this does not claim hardware reset or reclamation.
 fn retain_queue<Q>(io: Option<Q>) {
     if let Some(io) = io {
@@ -428,7 +428,7 @@ pub(crate) mod tests {
     unsafe impl Send for Pages {}
     // SAFETY: same model allocation rule; no concurrently exposed Rust slices.
     unsafe impl Sync for Pages {}
-    // SAFETY: model allocation retains its owned zeroed RAM and mapping until
+    // SAFETY: model allocation keeps its owned zeroed RAM and mapping until
     // Drop; modeled physical pages are distinct from modeled IOVA addresses.
     unsafe impl PageBacking for Pages {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -496,7 +496,7 @@ pub(crate) mod tests {
     }
     pub(crate) struct Domain(pub(crate) Arc<Mutex<Memory>>);
     // SAFETY: this domain is a stateful test IOVA/page-pin map, not a claim of
-    // privileged IOMMU effects. It retains pins and serializes every access.
+    // privileged IOMMU effects. It keeps pins and serializes every access.
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
             &self,
@@ -570,7 +570,7 @@ pub(crate) mod tests {
         }
     }
     // SAFETY: serialized test device queues; completions advance only when the
-    // device model actually reads its separately mapped IOVA payload/descriptor.
+    // device model reads its separately mapped IOVA payload/descriptor.
     unsafe impl QueueIo for Io {
         fn configure(&mut self, address: u32, count: u16) -> Result<(), Error> {
             let mut s = self.0.lock().unwrap();
@@ -727,7 +727,7 @@ pub(crate) mod tests {
         ring.submit(9, &[9]).unwrap();
         drop(ring);
         // Three never-published payload allocations unmap; active descriptor and
-        // payload mappings retain their domain and pins through canonical Drop.
+        // payload mappings keep their domain and pins through canonical Drop.
         assert_eq!(
             state.lock().unwrap().memory.lock().unwrap().mappings.len(),
             2
@@ -776,7 +776,7 @@ pub(crate) mod tests {
         ring.submit(20, &[20]).unwrap();
         state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);
         assert_eq!(
-            // SAFETY: hardware model stopped; injected invalidation error retains the still-mapped
+            // SAFETY: hardware model stopped; injected invalidation error keeps the still-mapped
             // resources for the explicit later retry.
             unsafe { ring.release_after_quiesce() },
             Err(Error::Dma(DmaError::InvalidationFailed))

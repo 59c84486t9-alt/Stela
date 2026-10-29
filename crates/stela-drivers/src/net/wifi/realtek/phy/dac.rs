@@ -11,7 +11,7 @@ const BACKUP: [u32; 16] = [
     0x180c, 0x1810, 0x410c, 0x4110, 0x1c3c, 0x1c24, 0x1d70, 0x9b4, 0x1a00, 0x1a14, 0x1d58, 0x1c38,
     0x1e24, 0x1e28, 0x1860, 0x4160,
 ];
-/// Completed bounded initial ADCK/DACK, retaining actual calibrated vectors.
+/// Completed bounded initial ADCK/DACK, keeping calibrated vectors.
 /// This is not an operational/calibrated-channel or transmit-policy credential.
 #[derive(Debug)]
 pub struct DacCalibrated {
@@ -34,22 +34,22 @@ impl DacCalibrated {
     pub fn dck(&self) -> [[[u8; 2]; 2]; 2] {
         self.dck
     }
-    /// Actual final signed ten-bit offset observations before absolute testing.
+    /// Final signed ten-bit offset observations before absolute testing.
     pub fn residual(&self) -> [[u32; 2]; 2] {
         self.residual
     }
 }
 impl InitialPhy {
-    /// Perform initial source ADC/DAC calibration with actual samples,
+    /// Perform initial source ADC/DAC calibration with samples,
     /// handshakes and convergence. No old cached vectors can enter this path.
     ///
     /// # Safety
-    /// Same genuine retained native requester and uninterrupted reset/firmware
-    /// epoch as this initial state/Report; actual prior table/TRX/dynamic phases
-    /// still valid. Full BAR/native clocks, queues/pins/claims retained; all
+    /// Same kept native requester and uninterrupted reset/firmware
+    /// epoch as this initial state/Report; prior table/TRX/dynamic phases
+    /// still valid. Full BAR/native clocks, queues/pins/claims kept; all
     /// operational TX and competing IRQ/reset/PHY/RF workers quiesced. The
-    /// source-required board/power/calibration prerequisites must be qualified
-    /// on this actual device; no raw OTP country or guessed policy suffices.
+    /// source-required board/power/calibration prerequisites must be checked
+    /// on this device; no raw OTP country or guessed policy suffices.
     /// Run once in exclusive initial process/deferred context. Uncertainty
     /// quarantines the real owner; no rollback or DMA-stop proof is implied.
     pub unsafe fn calibrate_dac<I: Io>(
@@ -75,7 +75,7 @@ impl InitialPhy {
             *out = a.io.read32(reg)?;
         }
         // Source path*i+i aliases both paths when RF register count is one.
-        // Preserve the two actual independent RF values instead.
+        // Preserve the two independent RF values instead.
         let mut saved_rf = [0; 2];
         for (p, out) in [Path::A, Path::B].into_iter().zip(saved_rf.iter_mut()) {
             *out = a.dac_rf_read(report, p, 0x8f)?;
@@ -183,7 +183,7 @@ type Vectors = [[[u16; 15]; 2]; 2];
 type Dck = [[[u8; 2]; 2]; 2];
 impl<I: Io> Attempt<'_, I> {
     fn dac_rf_read(&mut self, report: &Report, p: Path, reg: u8) -> Result<u32, Error> {
-        // SAFETY: caller's consumed initial-phase contract retains this exact
+        // SAFETY: caller's consumed initial-phase contract keeps this exact
         // control owner/epoch and exclusive live BB/RF domain throughout.
         Ok(unsafe { rf::Registers::new(self.io, report) }?.read(p, reg, 0xfffff)?)
     }
@@ -195,7 +195,7 @@ impl<I: Io> Attempt<'_, I> {
         mask: u32,
         value: u32,
     ) -> Result<(), Error> {
-        // SAFETY: same genuine retained owner/exclusive initial-phase contract.
+        // SAFETY: same owner/exclusive initial-phase contract.
         Ok(unsafe { rf::Registers::new(self.io, report) }?.write(p, reg, mask, value)?)
     }
     fn dac_delay(&mut self, us: u64) {
@@ -236,7 +236,7 @@ impl<I: Io> Attempt<'_, I> {
         Err(Error::DacSamples { accepted })
     }
     fn dac_measure(&mut self, report: &Report) -> Result<[u32; 2], Error> {
-        // These source diagnostic RF reads remain actual hardware operations.
+        // These source diagnostic RF reads remain hardware operations.
         self.dac_rf_read(report, Path::A, 0)?;
         self.dac_rf_read(report, Path::B, 0)?;
         let mut v = self.dac_sample()?;
@@ -464,7 +464,7 @@ impl<I: Io> Attempt<'_, I> {
             }
         }
         // Source B-I high and B-Q low assignments are transposed. Preserve
-        // the distinct actual fields in the layout its restore path expects.
+        // the distinct fields in the layout its restore path expects.
         self.modify32(0x1830, 1 << 30, 1)?;
         self.modify32(0x4130, 1 << 30, 1)?;
         for (r, v) in [0x1860, 0x4160, 0x9b4].into_iter().zip(temp) {

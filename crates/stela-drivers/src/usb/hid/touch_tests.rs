@@ -153,7 +153,7 @@ fn feed(input: &mut UsbInput, peer: &Rc<RefCell<model::CancelModel>>, raw: Vec<u
 fn actual_descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_events() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM outlives the actual controller and every retained DMA owner.
+    // SAFETY: RAM outlives the controller and every DMA owner.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let mut composite = SINGLE.to_vec();
     let mut other = SINGLE.to_vec();
@@ -196,7 +196,7 @@ fn actual_descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_e
         panic!("genuine DMA report")
     };
     assert_eq!(raw.bytes, first);
-    // An actual second app/report passes the native decoder without taking
+    // A second app/report passes the native decoder without taking
     // over the pending report1/app0 prefix or becoming its continuation.
     let mut foreign = packet(70, true, 1, 65535);
     foreign[0] = 3;
@@ -249,7 +249,7 @@ fn actual_descriptor_feature_ack_and_dma_reports_assemble_without_changing_raw_e
 fn actual_maximum_refusal_keeps_raw_poll_and_requires_fresh_ack_after_set_report() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: retained controller owners are dropped before RAM.
+    // SAFETY: controller owners are dropped before RAM.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut input, peer, _) = fixture(&mut dma);
     for value in [0, 9, 65] {
@@ -284,7 +284,7 @@ fn actual_maximum_refusal_keeps_raw_poll_and_requires_fresh_ack_after_set_report
 fn actual_truncation_and_acknowledged_stop_restart_cannot_finish_old_hybrid_frame() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: retained controller owners are dropped before RAM.
+    // SAFETY: controller owners are dropped before RAM.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut input, peer, _) = fixture(&mut dma);
     enable(&mut input, &peer, 2).unwrap();
@@ -328,7 +328,7 @@ fn actual_truncation_and_acknowledged_stop_restart_cannot_finish_old_hybrid_fram
 fn stale_native_identity_discards_pending_before_mmio_or_current_completion() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: both actual controller owners retain this exclusive live RAM.
+    // SAFETY: both controller owners keep this exclusive live RAM.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut old, old_peer, _) = fixture(&mut dma);
     let (mut current, peer, trap) = fixture(&mut dma);
@@ -371,7 +371,7 @@ fn stale_native_identity_discards_pending_before_mmio_or_current_completion() {
 fn actual_feature_length_id_and_descriptor_minimum_are_checked_before_authority() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM outlives all retained native DMA owners.
+    // SAFETY: RAM outlives all kept native DMA owners.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let mut bytes = SINGLE.to_vec();
     let id = bytes
@@ -418,13 +418,13 @@ fn actual_feature_length_id_and_descriptor_minimum_are_checked_before_authority(
 fn actual_stall_recovery_abandons_pending_frame_and_retains_original_dma_owner() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM outlives all retained native DMA owners.
+    // SAFETY: RAM outlives all kept native DMA owners.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut input, peer, _) = fixture(&mut dma);
     enable(&mut input, &peer, 2).unwrap();
     assert!(input.poll_hid().reports.is_empty());
     let physical = input.buffer.physical();
-    // The existing genuine TD completes the first contact. The next actual
+    // The existing TD completes the first contact. The next
     // submission stalls, so endpoint reset/dequeue must invalidate that prefix.
     peer.borrow_mut().halt_transfer = Some(3);
     let first = feed(&mut input, &peer, packet(70, true, 2, 1));

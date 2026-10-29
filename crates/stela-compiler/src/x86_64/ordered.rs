@@ -272,7 +272,7 @@ fn acquire_snapshot(code: &mut Code, bytes: u8, extension: LoadExtension, target
 }
 
 /// A known SP residue avoids a runtime boundary branch and variable shift setup.
-/// Generic crossings retain their established CL recipe and output bytes.
+/// Generic crossings keep their established CL recipe and output bytes.
 fn snapshot_value(
     code: &mut Code,
     bytes: u8,

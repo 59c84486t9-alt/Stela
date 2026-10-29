@@ -19,8 +19,8 @@ struct MappedStack {
     bytes: usize,
     dropped: Arc<AtomicU64>,
 }
-// SAFETY: actual exclusive private OS mmap, guard has PROT_NONE, and the
-// owning runtime retains this exact mapping through every continuation.
+// SAFETY: exclusive private OS mmap, guard has PROT_NONE, and the
+// owning runtime keeps this exact mapping through every continuation.
 unsafe impl StackBacking for MappedStack {
     fn bounds(&self) -> Range<usize> {
         self.base + 4096..self.base + self.bytes
@@ -33,7 +33,7 @@ impl Drop for MappedStack {
     fn drop(&mut self) {
         // SAFETY: base and bytes are this object's successful mmap extent. A rejected
         // constructor has not started a continuation; started stacks drop only after
-        // retirement. Quarantined continuations keep this owner and mapping retained.
+        // retirement. Quarantined continuations keep this owner and mapping kept.
         assert_eq!(unsafe { munmap(self.base as *mut c_void, self.bytes) }, 0);
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -78,10 +78,10 @@ struct Fixture {
 impl Fixture {
     /// # Safety
     /// setup must have published the live pinned Executor runtime, and that
-    /// Executor must remain retained while this reference is used.
+    /// Executor must remain held while this reference is used.
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
         // SAFETY: setup wrote this pointer from the already pinned Runtime before
-        // callback admission. The Executor retains that allocation through every use here.
+        // callback admission. The Executor keeps that allocation through every use here.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>))
         }
@@ -99,16 +99,16 @@ impl Fixture {
     }
 }
 /// # Safety
-/// p must be the queue-retained Arc pointer for Fixture; the returned borrow
+/// p must be the queue-kept Arc pointer for Fixture; the returned borrow
 /// must end before that owner can be released.
 unsafe fn fixture<'a>(p: *mut c_void) -> &'a Fixture {
     // SAFETY: The caller supplies the aligned Arc::as_ptr allocation of this fixture
-    // type. Its queue retains the Arc while callbacks use this shared reference.
+    // type. Its queue keeps the Arc while callbacks use this shared reference.
     unsafe { &*p.cast::<Fixture>() }
 }
 unsafe extern "C" fn notify_one(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     f.event(20);
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
@@ -118,15 +118,15 @@ unsafe extern "C" fn notify_one(p: *mut c_void) {
 }
 unsafe extern "C" fn notify_two(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     unsafe { fixture(p) }.event(22);
 }
 unsafe extern "C" fn general_one(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     f.event(30);
-    // Model actual interrupt-entry metadata while hardware RSP still
+    // Model interrupt-entry metadata while hardware RSP still
     // belongs to a real task stack. IF/stack membership alone must
     // never authorize a thread ID or context switch from an ISR.
     f.cpu.irq.store(true, Ordering::Release);
@@ -166,7 +166,7 @@ unsafe extern "C" fn general_one(p: *mut c_void) {
 }
 unsafe extern "C" fn general_two(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     // SAFETY: The hosted x86-64 process has x87/SSE enabled. read_controls only
     // snapshots their control registers into local storage; it performs no privileged access.
@@ -177,22 +177,22 @@ unsafe extern "C" fn general_two(p: *mut c_void) {
 }
 unsafe extern "C" fn foreground(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     f.event(10);
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
     let r = unsafe { f.runtime() };
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::Notify, notify_one, p) }.unwrap();
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::Notify, notify_two, p) }.unwrap();
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::General, general_one, p) }.unwrap();
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::General, general_two, p) }.unwrap();
     assert_eq!(
@@ -226,7 +226,7 @@ fn setup_with_reservations(
         done: AtomicBool::new(false),
         parked: Mutex::new(Vec::new()),
     });
-    // SAFETY: The queue retains the fixture Arc and same-thread CpuModel. setup stores
+    // SAFETY: The queue keeps the fixture Arc and same-thread CpuModel. setup stores
     // the pinned runtime pointer before admitting any callback that can read it.
     let q = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
@@ -259,7 +259,7 @@ fn setup_with_reservations(
 }
 unsafe extern "C" fn reserved_service(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
@@ -276,7 +276,7 @@ fn reserved_service_stack() {
     let runtime = ordinary.runtime();
     assert_eq!(
         // SAFETY: noop is static and ignores the null context. This unreserved Runtime
-        // rejects service admission before retaining or invoking the callback.
+        // rejects service admission before keeping or invoking the callback.
         unsafe { runtime.start_service(noop, core::ptr::null_mut()) },
         Err(WorkError::Unavailable)
     );
@@ -290,16 +290,16 @@ fn reserved_service_stack() {
     let (executor, f, cpu, dropped) = setup_with_service(true);
     let runtime = executor.runtime();
     let context = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: The service callback receives the queue-retained fixture Arc pointer.
+    // SAFETY: The service callback receives the queue-kept fixture Arc pointer.
     // The pinned executor and its dedicated service stack survive until service join.
     let service = unsafe { runtime.start_service(reserved_service, context) }.unwrap();
     assert!(f.events.lock().unwrap().is_empty());
-    // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+    // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
     // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
     unsafe { runtime.call_foreground(foreground, context, 10000) }.unwrap();
     assert!(runtime.queue().completed(service).unwrap());
     assert_eq!(
-        // SAFETY: The service callback receives the queue-retained fixture Arc pointer.
+        // SAFETY: The service callback receives the queue-kept fixture Arc pointer.
         // The pinned executor and its dedicated service stack survive until service join.
         unsafe { runtime.start_service(reserved_service, context) },
         Err(WorkError::Busy)
@@ -335,7 +335,7 @@ fn continuation_stacks_and_control_state() {
     // SAFETY: The hosted x86-64 process has x87/SSE enabled. read_controls only
     // snapshots their control registers into local storage; it performs no privileged access.
     let original = unsafe { context::read_controls() };
-    // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+    // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
     // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
     unsafe { r.call_foreground(foreground, Arc::as_ptr(&f) as *mut c_void, 10000) }.unwrap();
     // SAFETY: The hosted x86-64 process has x87/SSE enabled. read_controls only
@@ -404,12 +404,12 @@ fn executor_binding_is_exclusive() {
 
 unsafe extern "C" fn serial_drain(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
     let r = unsafe { f.runtime() };
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::Notify, notify_two, p) }.unwrap();
     assert_eq!(r.drain(10000), Err(WorkError::WouldDeadlock));
@@ -417,7 +417,7 @@ unsafe extern "C" fn serial_drain(p: *mut c_void) {
 }
 unsafe extern "C" fn cyclic_drain(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
@@ -431,13 +431,13 @@ fn drain_cycles_do_not_deadlock() {
     let (executor, f, _, _) = setup();
     let r = executor.runtime();
     let context = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::Notify, serial_drain, context) }.unwrap();
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::General, cyclic_drain, context) }.unwrap();
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { r.queue.execute(Kind::General, cyclic_drain, context) }.unwrap();
     r.drain(20000).unwrap();
@@ -452,7 +452,7 @@ fn drain_cycles_do_not_deadlock() {
 }
 unsafe extern "C" fn suspended(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { fixture(p) };
     while !f.done.load(Ordering::Acquire) {
         // SAFETY: setup published this pinned Runtime pointer before callback admission.
@@ -466,7 +466,7 @@ fn timeout_quarantines_executor() {
     let raw = executor.runtime().get_ref() as *const Runtime<16>;
     let view = executor.runtime().queue.clone();
     assert_eq!(
-        // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+        // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
         // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
         unsafe {
             executor
@@ -493,7 +493,7 @@ fn timeout_quarantines_executor() {
     let retained = unsafe { Pin::new_unchecked(&*raw) };
     assert_eq!(retained.step(), Err(WorkError::Closed));
 }
-// Genuine switched-stack fixtures for the generic binding contract.
+// Switched-stack fixtures for the generic binding contract.
 // This is a hosted state/IRQ model, not a native Linux/C task producer.
 mod bound;
 

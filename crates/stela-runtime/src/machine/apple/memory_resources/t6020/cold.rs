@@ -1,10 +1,10 @@
-//! Source-retained T602x cold placement over the actual canonical RAM owner.
+//! Source-kept T602x cold placement over the canonical RAM owner.
 //!
 //! Original26A434 all8 MCC reg0 is the PTD bank; reg2 starts the controller
 //! apertures (mac14j KC file2ecb674/2ecc068). The original trees have no MCC
 //! clock/power arrays. PMP ASC gates0x49/0x4a belong to its separate owner.
 //! Parent provider recipes, absent arrays and caller booleans are never
-//! controller/PMP/cache completion. Full source PowerStates remain retained.
+//! controller/PMP/cache completion. Full source PowerStates remain held.
 use super::Configuration;
 use super::MemoryController;
 use super::Prepared;
@@ -23,7 +23,7 @@ use stela_soc_data::pmgr::coverage;
 use stela_soc_data::pmgr::coverage::Consumer;
 use stela_soc_data::pmgr::coverage::LifecycleSinks;
 
-/// Private inputs retain actual source identities. Construction supplies no
+/// Private inputs keep source identities. Construction supplies no
 /// lifecycle status, native topology, firmware PTD service or cache grant.
 pub struct Plan {
     controller: MemoryController,
@@ -38,8 +38,8 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Retain independently decoded original descriptors. Source admission
-    /// must already positively associate MCC reg0 with the actual joint owner;
+    /// Keep independently decoded original descriptors. Source admission
+    /// must already positively associate MCC reg0 with the joint owner;
     /// a hidden/unmodeled owner=None resource cannot satisfy this requirement.
     pub fn prepare_ap_frontend(
         controller: &MemoryController,
@@ -128,7 +128,7 @@ impl Plan {
             .bus
             .device::<Pmgr>(id)
             .ok_or("cold T602x has a foreign PMGR owner")?;
-        // Even an input-free MCC cannot borrow a merely numerically matching
+        // Even an input-free MCC cannot borrow a numerically matching
         // PMGR state table with absent/foreign physical routes.
         for &address in &self.power.registers {
             if devices.bus.route(address, Width::Word).ok() != Some((id, address))
@@ -144,7 +144,7 @@ impl Plan {
             // in every positively owned alias. This is only the initial state
             // of the NEW synchronous software frontend, not a hardware power,
             // cache-ready or private PMP acknowledgement. Unrelated PMP gates
-            // keep their actual state and are never sampled as MCC readiness.
+            // keep their state and are never sampled as MCC readiness.
             return Ok(LifecycleState {
                 powered: true,
                 clocked: true,
@@ -171,9 +171,9 @@ impl Plan {
         })
     }
 
-    /// After actual PMGR placement and before complete power connection, install
+    /// After PMGR placement and before complete power connection, install
     /// one joint owner and register its source reg0 lifecycle identity. The caller
-    /// retains stopped native/all-writer ownership through this cold placement.
+    /// keeps stopped native/all-writer ownership through this cold placement.
     /// No controller request is retired and no PTD publication service is made.
     pub fn install(self, devices: &mut AppleDevices) -> Result<(), String> {
         if devices.power_configured
@@ -196,8 +196,8 @@ impl Plan {
         let id = devices
             .memory_controller
             .ok_or("cold T602x lost its actual installed owner")?;
-        // The ID is newly installed, the owner has an actual Lifecycle hook,
-        // and the exclusive borrow retained power_configured=false above.
+        // The ID is newly installed, the owner has a Lifecycle hook,
+        // and the exclusive borrow kept power_configured=false above.
         devices.register_power_device(physical, id, true)
     }
 }

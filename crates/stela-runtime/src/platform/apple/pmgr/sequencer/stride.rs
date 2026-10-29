@@ -1,9 +1,9 @@
-//! Actual repeated constant writes, not a saved-register image.
+//! Repeated constant writes, not a saved-register image.
 //!
 //! Original RCfg1d dispatches4827c ->47e78 ->fc2c. Its own source assertion
 //! names STRIDE_WRITE_ALL_AMCC_REGS. The top row supplies address/stride; the
 //! continuation supplies count/value. Each target remains a checked physical
-//! store using the ordinary exclusive write claims and retained prefix.
+//! store using the ordinary exclusive write claims and kept prefix.
 use super::{AddressFormat, Error, MAX_PHYSICAL, Packet, PhysicalWrite, Sram, Width};
 use alloc::vec::Vec;
 
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn original_stride_shape_uses_real_mounted_targets_and_keeps_a_refused_prefix() {
         // Same source shape as RCfg64 at5adc0/5add8: two physical channels,
-        // repeated constant20080, spacing400000. Actual test registers supplied.
+        // repeated constant20080, spacing400000. Test registers supplied.
         let base = 0x20046c560;
         let mut cursor = cursor(base, 0x400000, 2, 0x20080, AddressFormat::HighWord);
         assert_eq!(cursor.packet_kind(), Ok(PacketKind::Write));
@@ -293,7 +293,7 @@ mod tests {
             (quad(0x5adc8), quad(0x5add0), quad(0x5ade0), quad(0x5ade8)),
             (0x20046c560, 0x400000, 2, 0x20080)
         );
-        // These are actual named source input fields, not a heuristic mapping
+        // These are named source input fields, not a heuristic mapping
         // of register save/restore data to tag6. No physical reset is inferred.
     }
 }

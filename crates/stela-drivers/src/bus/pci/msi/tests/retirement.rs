@@ -11,16 +11,16 @@ fn terminal_stop_releases_original_owners() {
             let roots = f.root_drops.clone();
             let (mut helper, model) = attach(f);
             // SAFETY: MESSAGE names the synthetic fixture route; its RAM config/root
-            // guards are retained and no device source or IRQ callback is active.
+            // guards are held and no device source or IRQ callback is active.
             unsafe { helper.program(MESSAGE) }.unwrap();
-            // SAFETY: The synchronous RAM model retains the programmed route and
+            // SAFETY: The synchronous RAM model keeps the programmed route and
             // owners; it has no device source or asynchronous callback to race
             // unmask.
             unsafe { helper.unmask() }.unwrap();
             // Ordinary admission masking remains reversible.
             helper.mask().unwrap();
             // SAFETY: Only reversible masking occurred; the same RAM route and owners
-            // remain retained, and no asynchronous source can restart.
+            // remain held, and no asynchronous source can restart.
             unsafe { helper.unmask() }.unwrap();
             let mut terminal = helper.begin_device_retirement().unwrap();
             assert_terminal(&mut helper, &model);
@@ -31,7 +31,7 @@ fn terminal_stop_releases_original_owners() {
                 assert_ne!(m.get(COMMAND, 2) & u32::from(INTX_DISABLE), 0);
                 assert_eq!(m.get(STATUS, 2), 0xa510);
             }
-            // SAFETY: synchronous actual config model, no device/IRQ users;
+            // SAFETY: synchronous config model, no device/IRQ users;
             // this is the single terminal stop, with no BM/MSI re-enable.
             let original = unsafe {
                 terminal.with_device_stop(|config| {
@@ -43,11 +43,11 @@ fn terminal_stop_releases_original_owners() {
             .unwrap();
             assert_ne!(original & 4, 0);
             assert_eq!(model.lock().unwrap().get(COMMAND, 2) & 4, 0);
-            // The original config transport can now be genuinely inaccessible.
+            // The original config transport can now be inaccessible.
             model.lock().unwrap().transport_dead = true;
             let before = model.lock().unwrap().events.len();
             // SAFETY: isolated fixture has no DMA/posted/IRQ/deferred users;
-            // their actual empty completion is independent of BM-clear.
+            // their empty completion is independent of BM-clear.
             let owners = unsafe { terminal.release_after_drain() }.unwrap();
             assert_eq!(model.lock().unwrap().events.len(), before);
             drop(owners);
@@ -72,24 +72,24 @@ fn retirement_access_faults_retain_owners() {
             // SAFETY: The baseline RAM config owns this synthetic route; no device,
             // posted message or callback exists during programming.
             unsafe { baseline.program(MESSAGE) }.unwrap();
-            // SAFETY: The baseline retains the programmed route and backing Arc;
+            // SAFETY: The baseline keeps the programmed route and backing Arc;
             // unmask changes only the mutex-protected RAM config.
             unsafe { baseline.unmask() }.unwrap();
             model.lock().unwrap().events.clear();
             let terminal = baseline.begin_device_retirement().unwrap();
             let count = model.lock().unwrap().events.len();
-            drop(terminal); // live terminal abandonment retains both real guards.
+            drop(terminal); // live terminal abandonment keeps both real guards.
             for access in 1..=count {
                 for after in [false, true] {
                     let f = fixture(wide, mask);
                     let configs = f.config_drops.clone();
                     let roots = f.root_drops.clone();
                     let (mut helper, model) = attach(f);
-                    // SAFETY: This fresh fault fixture retains its own config/root
+                    // SAFETY: This fresh fault fixture keeps its own config/root
                     // guards and has no source activity; fault injection begins only
                     // after setup.
                     unsafe { helper.program(MESSAGE) }.unwrap();
-                    // SAFETY: The fresh fixture retains its programmed route and
+                    // SAFETY: The fresh fixture keeps its programmed route and
                     // owners; injected transport loss has not begun yet.
                     unsafe { helper.unmask() }.unwrap();
                     {
@@ -127,7 +127,7 @@ fn stop_unwind_prevents_replay_and_release() {
     let (mut helper, model) = attach(f);
     let mut terminal = helper.begin_device_retirement().unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: isolated actual config model, one terminal stop with a
+        // SAFETY: isolated config model, one terminal stop with a
         // deliberate post-effect unwind; no configuration escape/re-enable.
         unsafe {
             terminal.with_device_stop::<()>(|config| {
@@ -143,7 +143,7 @@ fn stop_unwind_prevents_replay_and_release() {
     );
     let before = model.lock().unwrap().events.len();
     assert_eq!(
-        // SAFETY: The previous synchronous stop already unwound. The retained
+        // SAFETY: The previous synchronous stop already unwound. The kept
         // terminal owner must reject this callback before invoking it.
         unsafe { terminal.with_device_stop::<()>(|_| panic!("replay after unwind")) },
         Err(MsiError::StopAlreadyAttempted)
@@ -176,14 +176,14 @@ fn owned_mapping_retirement_and_abandonment() {
         let root_drops = Arc::new(AtomicU64::new(0));
         let root: RetainedOwner = Arc::new(Root(root_drops.clone()));
         // SAFETY: original isolated registry-owned RAM config epoch, no
-        // device, IRQ delivery, worker or production qualification exists.
+        // device, IRQ delivery, worker or production validation exists.
         let mut helper = match unsafe { MsiConfig::new(function, root) } {
             Ok(helper) => helper,
             Err((error, _)) => panic!("valid actual owned transport: {error:?}"),
         };
         let mut terminal = helper.begin_device_retirement().unwrap();
         assert_eq!(terminal.address(), Ok(address));
-        // SAFETY: single synchronous stop of this isolated actual owner.
+        // SAFETY: single synchronous stop of this isolated owner.
         let stopped = unsafe {
             terminal.with_device_stop(|config| {
                 let command = config.read16(COMMAND);
@@ -207,7 +207,7 @@ fn owned_mapping_retirement_and_abandonment() {
             // device/IRQ completion is known independently of config bits.
             let (function, root) = unsafe { terminal.release_after_drain() }.unwrap();
             let mut mapping = function.into_config().into_mapping();
-            // SAFETY: exact original mapping, all synchronous users ended.
+            // SAFETY: original mapping, all synchronous users ended.
             unsafe { mapping.retire() }.unwrap();
             drop(root);
             assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
@@ -225,7 +225,7 @@ fn failed_stop_retains_owners() {
     let roots = f.root_drops.clone();
     let (mut helper, model) = attach(f);
     let mut terminal = helper.begin_device_retirement().unwrap();
-    // SAFETY: one actual isolated model stop; its precise failure remains
+    // SAFETY: one isolated model stop; its precise failure remains
     // caller-visible, and supplies no quiescence or release authorization.
     let original: Result<(), u32> = unsafe {
         terminal.with_device_stop(|config| {
@@ -237,7 +237,7 @@ fn failed_stop_retains_owners() {
     assert_eq!(original, Err(0x4377_00ff));
     let before = model.lock().unwrap().events.len();
     assert_eq!(
-        // SAFETY: The failed stop retained its terminal owner; this second callback
+        // SAFETY: The failed stop kept its terminal owner; this second callback
         // must be rejected without retrying the stop or touching config.
         unsafe { terminal.with_device_stop(|_| panic!("reset replay")) },
         Err::<(), _>(MsiError::StopAlreadyAttempted)

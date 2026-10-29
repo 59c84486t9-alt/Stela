@@ -1,4 +1,4 @@
-//! Retained T602x MCC/AMCC views over actual registered canonical RAM.
+//! T602x MCC/AMCC views over registered canonical RAM.
 //!
 //! The complete PTD and auxiliary windows are owned but explicitly refuse:
 //! their service/interrupt state is not inferred from the original ADT's
@@ -30,7 +30,7 @@ const PTD_OFFSET: u64 =
     stela_soc_data::mcc::t6020::MAX_APERTURES as u64 * stela_soc_data::mcc::t6020::APERTURE_BYTES;
 const AUXILIARY_OFFSET: u64 = PTD_OFFSET + stela_soc_data::ptd::PTD_BYTES;
 
-/// One actual RAM owner and one shared controller/lock state. Numeric geometry
+/// One RAM owner and one shared controller/lock state. Numeric geometry
 /// cannot substitute for this Arc identity or a later live canonical service.
 pub struct Prepared {
     descriptor: T6020Memory,
@@ -43,11 +43,11 @@ pub struct Prepared {
     generation: u64,
 }
 impl Prepared {
-    /// Retains actual reservations supplied by the canonical boot owner. The
+    /// Keeps reservations supplied by the canonical boot owner. The
     /// explicit initial controls/lifecycle describe newly owned Stela state;
     /// they are not observed Apple reset or acknowledged PMGR/PMP effects.
-    /// Source power-graph resolution/actual placed PMGR sampling must precede
-    /// production placement, and root must retain all writers through teardown.
+    /// Source power-graph resolution/placed PMGR sampling must precede
+    /// production placement, and root must keep all writers through teardown.
     pub fn new(
         descriptor: T6020Memory,
         source_locks: MemoryController,
@@ -78,7 +78,7 @@ impl Prepared {
         let registers = controller.register_offsets();
         let mut lock_layout = source_locks.layout;
         // A standalone AMCC disabled-bit image must not answer for this
-        // controller's still-unqualified cache state. The actual MCC owns all
+        // controller's still-unchecked cache state. The MCC owns all
         // four source cache-status words and refuses without a real producer.
         lock_layout.cache_status = None;
         for group in lock_layout.groups.into_iter().flatten() {
@@ -157,7 +157,7 @@ impl Prepared {
         ));
         bindings
     }
-    /// Owned extent, including refused PTD effects. This is deliberately not
+    /// Owned extent, including refused PTD effects. This is not
     /// an implemented publication binding or a display alias grant.
     pub(super) fn publication_footprint(&self) -> (u64, u64, u64) {
         (
@@ -201,7 +201,7 @@ impl Prepared {
                 .requires_ram_read(offset % stela_soc_data::mcc::t6020::APERTURE_BYTES, width)
     }
     /// # Safety
-    /// Actual native workers/jobs are stopped and fenced, and the same actual
+    /// Native workers/jobs are stopped and fenced, and the same
     /// Host/Devices producer cohort is exclusively held through this borrow.
     /// Every synchronous transfer has completed; no raw/unjoined DMA, firmware
     /// or autonomous producer can touch the RAM. Free writer gates alone do not
@@ -390,7 +390,7 @@ impl MmioDevice for Prepared {
 }
 
 impl crate::machine::apple::AppleDevices {
-    /// Place the actual joint lock/controller owner, retaining every physical
+    /// Place the joint lock/controller owner, keeping every physical
     /// bank even where its operations refuse. This is structural placement:
     /// a source power join, native topology and controller/PMP effects remain
     /// separate requirements before a production mount may adopt this owner.
@@ -440,7 +440,7 @@ pub(in crate::machine::apple) mod tests {
             bytes: 0x10000,
         };
         // SAFETY: cfg(test) only. This checks owner identity/geometry and is
-        // deliberately not the production CPL0 registration constructor.
+        // not the production CPL0 registration constructor.
         Arc::new(unsafe { fixture(&[range], storage) })
     }
     fn running() -> LifecycleState {
@@ -535,7 +535,7 @@ pub(in crate::machine::apple) mod tests {
         )
         .unwrap()
     }
-    /// Authored structural fixture only; never production native authority.
+    /// Authored structural fixture only; never production native permission.
     pub(in crate::machine::apple) fn fixture_owner(count: usize) -> Prepared {
         prepared(count, ram(RAM))
     }
@@ -576,7 +576,7 @@ pub(in crate::machine::apple) mod tests {
         assert!(unsafe { owner.read_ram_drain(offset, Width::Word, &foreign) }.is_err());
         let service = ram.try_service().unwrap().unwrap();
         assert_eq!(
-            // SAFETY: this exact joined fixture has no frames/independent producer.
+            // SAFETY: this joined fixture has no frames/independent producer.
             unsafe { owner.read_ram_drain(offset, Width::Word, &service) },
             Ok(0)
         );
@@ -718,7 +718,7 @@ pub(in crate::machine::apple) mod tests {
             unsafe { resource.read_ram_drain(offset, Width::Word, &service) },
             Ok(0)
         );
-        // SAFETY: the same exact joined fixture producer hold is still live.
+        // SAFETY: the same joined fixture producer hold is still live.
         assert!(unsafe { resource.write_ram_drain(offset, Width::Word, 0, 7, &service) }.is_ok());
         drop(service);
         let mut latch = InterruptLatch::new();

@@ -127,8 +127,8 @@ impl MemoryProfile {
         {
             return Err(MemoryStatus::InvalidRequest);
         }
-        // Actual host admission belongs to the domain/prepared entry. This
-        // profile checks storage geometry and the retained target's recipes.
+        // Host admission belongs to the domain/prepared entry. This
+        // profile checks storage geometry and the target's recipes.
         if requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
             && !target.supports(TargetCpu::AtomicLoad16)
             || requirements.required_host_caps & host_caps::CX16 != 0
@@ -173,7 +173,7 @@ impl MemoryProfile {
 
 /// The resolver joins adjacent fragments of one atomic quantity only when
 /// physical storage and attributes agree. Guest permissions remain checked
-/// separately, in reached order. Gaps retain their architectural translation
+/// separately, in reached order. Gaps keep their architectural translation
 /// fault and are not replaced by a platform-layout decline.
 fn fragments_compatible(views: &[(Arc<MemoryView>, MappingAttributes)], quantity: usize) -> bool {
     views.windows(2).all(|pair| {
@@ -238,12 +238,12 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
         }
         // SAFETY: the caller binds the checked body's exact requirements and
         // inherits the low-level callback's staging and lifetime contract. The
-        // actual current-owner proof remains borrowed through finalization.
+        // current-owner proof remains borrowed through finalization.
         let result = match self.session {
             // SAFETY: same checked requirements; the matching real session
             // loan is borrowed through invocation and finalization.
             Some(session) => unsafe { self.thread.with_checked_view_in(session, callback) },
-            // SAFETY: The caller retains the recorded callback requirements and staging
+            // SAFETY: The caller keeps the recorded callback requirements and staging
             // borrows. Without a shared session, with_checked_view takes its own loan.
             None => unsafe { self.thread.with_checked_view(callback) },
         };

@@ -41,7 +41,7 @@ fn backing_with_residue(residue: usize) -> Arc<MemoryBacking> {
     let storage = Arc::new(Storage(UnsafeCell::new([0; STORAGE_BYTES])));
     // The optional residue models a valid raw backing with no native alignment.
     let pointer = NonNull::new(storage.0.get().cast::<u8>().wrapping_add(residue)).unwrap();
-    // SAFETY: the retained owner supplies aligned stable raw storage; tests
+    // SAFETY: the owner supplies aligned stable raw storage; tests
     // never create references to its bytes or change its native rights.
     unsafe { MemoryBacking::new(pointer, STORAGE_BYTES - residue, RIGHTS, storage) }.unwrap()
 }
@@ -368,7 +368,7 @@ fn data_granules_use_writer_invalidation_and_never_request_logical_tag_checks() 
             .unwrap();
         // SAFETY: exact stable raw parts with no concurrent byte observers.
         let low = unsafe { access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline) }.unwrap();
-        // SAFETY: the second scalar part stays inside the retained backing.
+        // SAFETY: the second scalar part stays inside the backing.
         let high =
             unsafe { access::read_part(pointer.as_ptr().add(8), 8, TargetCpu::Baseline) }.unwrap();
         assert_eq!(
@@ -897,7 +897,7 @@ fn cached_profile_declines_native_or_tag_plane_misalignment_before_first_effect(
         for backing in [&first, &second] {
             for offset in 0..backing.bytes() {
                 let pointer = backing.host_pointer(offset, 1, AccessKind::Read).unwrap();
-                // SAFETY: declined execution, retained private raw backing byte.
+                // SAFETY: declined execution, kept private raw backing byte.
                 assert_eq!(unsafe { pointer.as_ptr().read() }, 0);
             }
         }
@@ -989,7 +989,7 @@ fn incompatible_physical_fragments_decline_before_an_earlier_granule_changes() {
                 backing.allocation_tags().write(0, tag(9)).unwrap();
                 for offset in 0..backing.bytes() {
                     let pointer = backing.host_pointer(offset, 1, AccessKind::Write).unwrap();
-                    // SAFETY: private retained raw storage before execution.
+                    // SAFETY: private kept raw storage before execution.
                     unsafe { pointer.as_ptr().write(0xa5) };
                 }
             }

@@ -138,7 +138,7 @@ struct Mailboxes {
 }
 
 /// Polled held-D0 owner. Any failed operation after publication poisons further
-/// submission; shutdown remains available and retains every uncertain resource.
+/// submission; shutdown remains available and keeps every uncertain resource.
 pub struct Controller<R, T> {
     registers: R,
     timer: T,
@@ -316,7 +316,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     /// Full controller reset, processing and SPIB discovery. Admission requires
-    /// all host streams, command rings and DSP cores actually stopped first.
+    /// all host streams, command rings and DSP cores stopped first.
     pub fn initialize(&mut self) -> Result<(), Error> {
         self.guard(&[State::Claimed])?;
         let result = (|| {
@@ -440,7 +440,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.iccmax = Some(iccmax);
         let result = (|| {
             self.program_stream(true, true)?;
-            // 95us in the source is intentionally truncated by the 6-bit
+            // 95us in the source is truncated by the 6-bit
             // field (0x1f); preserve the remaining vendor byte.
             let guard = self.registers.read8(Bar::Hda, LTRP)?;
             self.registers
@@ -535,8 +535,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
-    /// Disable engines and core0 before actual remapper drain/unmap. Failed
-    /// acknowledgements retain mappings and the native PCI/MMIO owners.
+    /// Disable engines and core0 before remapper drain/unmap. Failed
+    /// acknowledgements keep mappings and the native PCI/MMIO owners.
     pub fn shutdown(&mut self) -> Result<(), Error> {
         if self.state == State::Shutdown {
             return Ok(());

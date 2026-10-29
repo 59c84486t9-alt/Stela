@@ -21,13 +21,13 @@ pub(super) const ATC_PHY_LAYOUTS: [(&str, usize); 4] = [
 /// The ADT views every [`ATC_PHY_LAYOUTS`] layout starts with.
 const ATC_PHY_BASE_VIEWS: usize = 28;
 
-/// Qualified Apple I2C register families. The original 26A434 ADTs use
+/// Checked Apple I2C register families. The original 26A434 ADTs use
 /// these first compatibles ahead of `i2c,s5l8940x` and `iic,soft`; the latter
 /// fallback strings alone do not establish a modelled Apple register file.
-/// T6000 and T6020 retain the same one-bank byte-FIFO interface (`i2c`).
+/// T6000 and T6020 keep the same one-bank byte-FIFO interface (`i2c`).
 const I2C_COMPATIBLES: &[&str] = &["i2c,t8101", "i2c,t6000", "i2c,t6020"];
 
-/// USB DRD families whose nine-view layout is qualified. The original
+/// USB DRD families whose nine-view layout is checked. The original
 /// 26A434 ADTs give M1/T6000
 /// a 0x1800-byte `reg[2]`, versus 0x5800 on M2/T6020 and M3/T8122. In each,
 /// `reg[2]` begins at `reg[0]`+0xc000 and `reg[8]` at `reg[0]`+0xd000.
@@ -59,7 +59,7 @@ pub fn i2c_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
         })
 }
 
-/// Whether the full property selects a qualified nine-view USB DRD family.
+/// Whether the full property selects a checked nine-view USB DRD family.
 pub fn usb_controller_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
     USB_DRD_LAYOUTS.iter().any(|&(family, _)| family == name)
         && compatibles.is_none_or(|raw| {
@@ -69,7 +69,7 @@ pub fn usb_controller_compatible(name: &str, compatibles: Option<&[u8]>) -> bool
         })
 }
 
-/// Whether the full property selects a qualified ATC PHY register layout.
+/// Whether the full property selects a checked ATC PHY register layout.
 pub fn atc_phy_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
     ATC_PHY_LAYOUTS.iter().any(|&(family, _)| family == name)
         && compatibles.is_none_or(|raw| {
@@ -116,7 +116,7 @@ pub(super) fn is_typec_phy(node: &Node<'_>) -> bool {
         .is_some_and(|raw| atc_layout(raw).is_some())
 }
 
-/// Recognize candidates independently of qualification so unsupported families
+/// Recognize candidates independently of validation so unsupported families
 /// produce a named refusal, including malformed lists with a known fallback.
 fn family_candidate(node: &Node<'_>, prefix: &[u8]) -> bool {
     node.property("compatible").is_some_and(|raw| {
@@ -136,7 +136,7 @@ pub struct UsbController {
     pub ranges: [(u64, u64); 9],
     pub irqs: [u32; 5],
     pub iommu: usize,
-    /// Actual owner identities; context survives native incoming assignment.
+    /// Owner identities; context survives native incoming assignment.
     pub phandle: Option<u32>,
     pub mapper: u32,
     pub mapper_context: u32,
@@ -145,7 +145,7 @@ pub struct UsbController {
     pub port: u32,
     /// Ordinary controller state survives supply gating only when declared.
     pub retention: bool,
-    /// Actual digital PHY provider (`atc-phy-parent`), never inferred from
+    /// Digital PHY provider (`atc-phy-parent`), never inferred from
     /// the connector's display name or ordinal.
     pub phy: u32,
 }
@@ -462,7 +462,7 @@ pub(super) fn typec_devices(
     Ok((i2cs, phys))
 }
 
-/// Every qualified early-family USB DRD, in DeviceTree order, with its
+/// Every checked early-family USB DRD, in DeviceTree order, with its
 /// original reg/interrupts/iommu-parent (research transport section 1).
 pub(super) fn usb_controllers(
     io: &Node<'_>,

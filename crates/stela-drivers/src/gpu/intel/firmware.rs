@@ -139,7 +139,7 @@ fn identity_labels(identity: PciIdentity, facts: Facts) -> Result<(Label<16>, La
     Ok((hardware, revision))
 }
 
-/// Exact default request from the actual retained root main-GT device.
+/// Exact default request from the root main-GT device.
 /// The setup manifest must use this same filename and exact target tuple.
 pub struct Request<'device> {
     device: &'device Device,
@@ -333,7 +333,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// Actual retained root-main-GT default. Missing role/catalog never performs a
+/// Root-main-GT default. Missing role/catalog never performs a
 /// Provider lookup, while failure of a selected image remains a real error.
 /// Every request borrows the same live Device; no copied identity is a device.
 pub struct HucRequest<'device> {
@@ -361,7 +361,7 @@ impl<'device> HucRequest<'device> {
             wanted: Version::default(),
             full_version: 0,
         };
-        // SAFETY: actual device facts and exact private C scalar output layout.
+        // SAFETY: device facts and exact private C scalar output layout.
         let status = unsafe {
             stela_intel_huc_select_default(
                 facts.platform,
@@ -473,10 +473,10 @@ impl<'device> HucRequest<'device> {
     }
 }
 
-/// Format-checked host HuC image retaining canonical provenance and the same
+/// Format-checked host HuC image keeping canonical provenance and the same
 /// Device/provider borrows. This is neither cryptographic authentication nor
 /// AVAILABLE/LOADABLE, BO/GGTT storage, DMA completion or WOPCM admission.
-/// A later Device-owned bootstrap can retain the independent Image borrow
+/// A later Device-owned bootstrap can keep the independent Image borrow
 /// (like GuC preparation) before consuming mutable device ownership; no lifetime
 /// erasure or replacement physical/native identity is needed.
 pub struct HucImage<'device, 'provider> {

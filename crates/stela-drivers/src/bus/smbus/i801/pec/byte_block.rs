@@ -7,7 +7,7 @@ use super::*;
 
 impl<R: Registers, T: Timer> I801<R, T> {
     /// The caller has already enabled CRC and started this block transaction.
-    /// Return only private payload; the common PEC finish and actual PCI guard
+    /// Return only private payload; the common PEC finish and PCI guard
     /// still own cleanup, the final deadline and caller publication.
     pub(super) fn pec_block_bytes(
         &mut self,

@@ -3,10 +3,10 @@
 //! Original Apple ring writers use sixteen-byte descriptors, POSTED bit22,
 //! COMPLETED bit21 and interrupt-request bit23. The ACIO register layout and
 //! native-frame boundary are documented in `docs/research/usb4-acio.md`.
-//! A required [`Consumer`] owns actual router/wire protocol, framing, CRC,
+//! A required [`Consumer`] owns router/wire protocol, framing, CRC,
 //! E2E/isochronous behavior and notifications. No successful consumer, router
 //! capability template, CIO readiness or machine admission is supplied here.
-//! DMA completion is a separate retained phase so a fault cannot replay an
+//! DMA completion is a separate phase so a fault cannot replay an
 //! already accepted frame. Payload and timestamp precede completion ownership.
 use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
 pub use ring::Direction;
@@ -76,7 +76,7 @@ pub struct Options {
     pub receive_capacity: usize,
 }
 
-/// A completed native NHI frame, including actual receive error/time effects.
+/// A completed native NHI frame, including receive error/time effects.
 /// The consumer must implement CRC/PDF assembly according to its configured
 /// options; setting `crc_error` is a result, not an instruction to skip CRC.
 #[derive(Debug, Clone)]
@@ -112,7 +112,7 @@ impl Frame {
 }
 
 /// A transmit presented once to the real native router/wire owner. Raw mode,
-/// isochronous scheduling and PDF values retain their programmed meanings.
+/// isochronous scheduling and PDF values keep their programmed meanings.
 pub struct Transmit<'a> {
     pub hop: usize,
     pub bytes: &'a [u8],
@@ -135,7 +135,7 @@ pub struct Accepted {
 /// effects. Configuration must implement every requested mode or refuse it;
 /// raw/E2E/isochronous/no-snoop fields are never successful held placeholders.
 /// Incoming frames must obey the active PDF/CRC framing contract and consume
-/// at most the supplied receive credits. The peer retains wire traffic under
+/// at most the supplied receive credits. The peer keeps wire traffic under
 /// backpressure; this boundary does not invent an unbounded hardware FIFO.
 pub trait Consumer {
     fn configure(

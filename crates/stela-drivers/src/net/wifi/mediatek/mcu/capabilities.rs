@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Actual per-chip NIC capability requests and bounded owned observations.
+//! Per-chip NIC capability requests and bounded owned observations.
 //! Firmware-reported capabilities do not allocate resources, establish board
 //! calibration/regulatory policy or authorize unsupported radio modes.
 use super::{Encoder, Event};
@@ -68,13 +68,13 @@ impl Encoder {
         bytes[39] = sequence;
         if connac3 {
             bytes[34..36].copy_from_slice(&14u16.to_le_bytes()); // UNI CHIP_CONFIG
-            bytes[43] = 6; // EXT_ACK7 with ACKbit0 cleared by actual source
+            bytes[43] = 6; // EXT_ACK7 with ACKbit0 cleared by source
             bytes[52..54].copy_from_slice(&3u16.to_le_bytes()); // NIC_CAPA
             bytes[54..56].copy_from_slice(&4u16.to_le_bytes());
         } else {
             bytes[34..36].copy_from_slice(&0x8000u16.to_le_bytes());
             bytes[36] = 0x8a; // CE GET_NIC_CAPAB, no QUERY modifier
-            bytes[38] = 1; // actual source CE set_query=SET1
+            bytes[38] = 1; // source CE set_query=SET1
         }
         Packet {
             chip,
@@ -84,7 +84,7 @@ impl Encoder {
     }
 }
 impl Event<'_> {
-    /// Match the actual chip-specific capability event, rather than accepting
+    /// Match the chip-specific capability event, rather than accepting
     /// a station UNI status ACK or unrelated same-sequence notification.
     pub fn capability_payload<'a>(&'a self, packet: &Packet) -> Result<&'a [u8], Error> {
         if self.unsolicited || self.sequence == 0 {
@@ -96,7 +96,7 @@ impl Event<'_> {
                 actual: self.sequence,
             });
         }
-        // Connac2's actual source matches only the owned sequence here; its
+        // Connac2's source matches only the owned sequence here; its
         // CE command number is not an independently specified event ID. Never
         // invent EID0x8a from CID0x8a. Connac3 has an explicit NIC_CAPAB event.
         let expected = 0x43;
@@ -127,7 +127,7 @@ pub struct Phy {
     pub eht: Option<u8>,
 }
 impl Phy {
-    /// Exact source HW-path facts, independent of negotiated MAC/radio support.
+    /// Source HW-path facts, independent of negotiated MAC/radio support.
     pub fn has_2ghz(self) -> bool {
         self.hw_path & 1 != 0
     }
@@ -351,7 +351,7 @@ mod tests {
             assert_eq!(parsed.trailing(), &[0xf1, 0xf2]);
             assert_eq!(parsed.elements()[4].tag, 0xbeef);
             assert_eq!(parsed.elements()[4].body, [9, 8]);
-            assert_eq!(parsed.mac(), Some(Mac([0; 6]))); // last observed, no fabricated fallback
+            assert_eq!(parsed.mac(), Some(Mac([0; 6]))); // last observed, no invented fallback
             assert_eq!(parsed.six_ghz(), Some(false));
             assert_eq!(parsed.chip_flags(), Some(0x0807060504030201));
             let phy = parsed.phy().unwrap();

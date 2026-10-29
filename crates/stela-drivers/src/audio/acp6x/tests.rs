@@ -33,11 +33,11 @@ struct Backing {
 unsafe impl Send for Backing {}
 // SAFETY: same stable UnsafeCell storage, raw volatile access only.
 unsafe impl Sync for Backing {}
-// SAFETY: actual owned CPU RAM, immutable symbolic non-contiguous physical
+// SAFETY: owned CPU RAM, immutable symbolic non-contiguous physical
 // labels used only by the model domain, never dereferenced as CPU addresses.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
-        // SAFETY: stable retained allocation, UnsafeCell permits DMA writes.
+        // SAFETY: stable allocation, UnsafeCell permits DMA writes.
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
     }
     fn physical_pages(&self) -> &[u64] {
@@ -305,7 +305,7 @@ impl Device {
                 assert!(iova >= translation.token.address);
                 let mapped = (iova - translation.token.address) as usize + offset % 4096;
                 assert!(mapped + 4 <= translation.token.bytes);
-                // These physical pages are deliberately not contiguous;
+                // These physical pages are not contiguous;
                 // only the attached domain constructs the contiguous IOVA.
                 assert_eq!(
                     translation.pages.physical_pages()[mapped / 4096],
@@ -317,7 +317,7 @@ impl Device {
                     self.posted.push((mapped, sample));
                 } else {
                     // SAFETY: this synchronous model owns DMA while active;
-                    // actual retained CPU RAM is reached through its domain.
+                    // CPU RAM is reached through its domain.
                     unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
                 }
             }
@@ -359,7 +359,7 @@ impl Registers for Model {
 }
 struct Domain(Arc<Mutex<Device>>);
 // SAFETY: isolated synchronous model, real owned CPU RAM and symbolic
-// physical/IOVA labels. Device accesses walk actual programmed ACP PTEs
+// physical/IOVA labels. Device accesses walk programmed ACP PTEs
 // through this domain; no identity DMA or production hardware is claimed.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
@@ -472,7 +472,7 @@ unsafe impl DmaDomain for Domain {
             let translation = device.translation.as_ref().unwrap();
             let pointer = translation.cpu.address(offset, 4).unwrap();
             // SAFETY: this independent fabric completion finishes its
-            // queued writes into the exact retained domain mapping.
+            // queued writes into the exact domain mapping.
             unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
         }
         Ok(())
@@ -537,11 +537,11 @@ fn actual_pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
         let ring = period * 4;
         assert_eq!(controller.buffer_bytes(), Some(ring));
         let capture = controller.capture.as_ref().unwrap();
-        // SAFETY: prepared DMA has never started; take actual CPU cache
+        // SAFETY: prepared DMA has never started; take CPU cache
         // ownership before poisoning, then start must hand it back.
         unsafe { capture.dma.sync_for_cpu(0..capture.cpu.bytes()) }.unwrap();
         for offset in 0..capture.cpu.bytes() {
-            // SAFETY: DMA has not started; poison the actual CPU allocation.
+            // SAFETY: DMA has not started; poison the CPU allocation.
             unsafe {
                 capture
                     .cpu
@@ -638,7 +638,7 @@ fn source_presence_ownership_exact_identity_and_pin_mode_are_not_inferred() {
     ] {
         let device = Arc::new(Mutex::new(Device::new(0x60)));
         assert!(
-            // SAFETY: same isolated model as fixture; deliberately invalid grant.
+            // SAFETY: same isolated model as fixture; invalid grant.
             unsafe {
                 Controller::claim(
                     Model(device.clone()),
@@ -908,7 +908,7 @@ fn power_clock_and_actual_iova_limit_failures_do_not_publish_dma() {
 #[test]
 fn successful_but_late_power_and_reset_accesses_do_not_advance_initialization() {
     // Both a successful request effect and its successful ready read must
-    // fit the phase budget. The clock advances inside that actual access.
+    // fit the phase budget. The clock advances inside that access.
     for write in [false, true] {
         for (offset, request, ready, phase) in [
             (0x1024, 1, 0, Phase::PowerOn),
@@ -1016,7 +1016,7 @@ fn successful_but_late_dma_and_reset_completion_retains_pins_until_fresh_recover
             assert_eq!(device.lock().unwrap().unmaps, 0);
             assert!(controller.capture.is_some());
             if phase == Phase::DmaStop {
-                // A late actual stop must not silently advance to PDM/FIFO
+                // A late stop must not silently advance to PDM/FIFO
                 // quiet or unmap within the failed operation.
                 assert_eq!(device.lock().unwrap().words[0x2c04 / 4], 1);
             }
@@ -1069,11 +1069,11 @@ fn active_drop_quarantines_real_domain_and_nonidentity_ram_pins() {
     drop(controller);
     assert_eq!(source.drops.load(Ordering::Relaxed), 0);
     assert!(device.lock().unwrap().translation.is_some());
-    // No fake reset/unmap is supplied for this deliberately quarantined DMA.
+    // No fake reset/unmap is supplied for this quarantined DMA.
     device.lock().unwrap().advance(64);
     assert_eq!(device.lock().unwrap().unmaps, 0);
 }
-// Source-only P1 regression models. Cache-command readback is deliberately
+// Source-only P1 regression models. Cache-command readback is
 // unspecified; its self-clearing fixture behavior is not physical evidence.
 #[test]
 fn atu_cache_command_has_no_sticky_enable_or_completion_readback() {

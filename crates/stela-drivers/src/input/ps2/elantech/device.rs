@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original Elantech notices are retained in ../elantech.rs and input/THIRD_PARTY.md.
+// Original Elantech notices are held in ../elantech.rs and input/THIRD_PARTY.md.
 //! Elantech touchpad commands and register access over the PS/2 auxiliary port.
 use super::*;
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -9,7 +9,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 Ok(()) => return Ok(()),
                 Err(error @ ErrorKind::ResendLimit { .. }) => {
                     // Source retries this single-byte service after500ms.
-                    // Only actual RESEND rejection proves this byte did not
+                    // Only RESEND rejection proves this byte did not
                     // apply. Timeout/unknown effects must never replay.
                     let start = self.timer.start();
                     while !self.expired(start, 500_000) {
@@ -481,7 +481,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Read a genuine source-qualified register while reporting is quiesced.
+    /// Read a source-checked register while reporting is quiesced.
     /// Full raw reply bytes survive read/resume failure. Successful observations
     /// follow source register-read admission without inventing an echo check.
     pub fn read_elantech_register(&mut self, address: u8) -> Result<[u8; 3], super::super::Error> {

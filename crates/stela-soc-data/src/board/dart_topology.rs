@@ -4,8 +4,8 @@ use crate::dart::Profile;
 use alloc::{format, string::String, vec::Vec};
 
 /// Every visible DART requirement, preserving separate translation windows.
-/// Modern t8110 and qualified T6000 paired capture retain distinct cacheless
-/// owners; FPAD and unqualified DMA routing remain explicit requirements.
+/// Modern t8110 and checked T6000 paired capture keep distinct cacheless
+/// owners; FPAD and unchecked DMA routing remain explicit requirements.
 pub(super) fn iommus(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,

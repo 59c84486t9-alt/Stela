@@ -1,4 +1,4 @@
-//! Retained class lifetime and permanent per-publication media validity.
+//! Class lifetime and permanent per-publication media validity.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux sd.c::sd_check_events/media_not_present/sd_revalidate_disk and
 // scsi_lib.c::scsi_io_completion_action. See THIRD_PARTY.md.
@@ -284,7 +284,7 @@ pub(super) fn scan_uas<T: Scsi<Lun = uas::Lun>>(
     })
 }
 
-/// A configured storage interface retained independently of inserted media.
+/// A configured storage interface kept independently of inserted media.
 /// Clones share the same serialized transport and permanent disk validity.
 #[derive(Clone)]
 pub struct UsbStorage {
@@ -303,7 +303,7 @@ impl UsbStorage {
             TransportOwner::Uas(owner) => owner.borrow().prefix.clone(),
         }
     }
-    /// Poll actual LUN inventory/readiness and revalidate current media. The
+    /// Poll LUN inventory/readiness and revalidate current media. The
     /// caller replaces its disk inventory with this result. Existing aliases
     /// remain valid only for unchanged media without an observed change event.
     /// This synchronous operation does not install a polling/hotplug scheduler.
@@ -355,8 +355,8 @@ impl UsbStorage {
             TransportOwner::Uas(owner) => owner.borrow().transport.requires_rebind(),
         }
     }
-    /// Actual device reset followed by fresh transport, descriptors and media
-    /// probes. This owner retains the new interface even when no LUN is ready.
+    /// Device reset followed by fresh transport, descriptors and media
+    /// probes. This owner keeps the new interface even when no LUN is ready.
     /// Other copies of the old owner and all its disks remain quarantined.
     pub fn reset_and_rebind(
         &mut self,
@@ -414,7 +414,7 @@ impl UsbStorage {
     }
 }
 impl UsbDisk {
-    /// Retain the configured interface for later rescan, even after removing
+    /// Keep the configured interface for later rescan, even after removing
     /// every published disk from the caller's inventory.
     pub fn storage(&self) -> UsbStorage {
         UsbStorage {

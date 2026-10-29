@@ -39,14 +39,14 @@ pub struct Table {
 }
 
 /// The original compiled provider returns no override. A required dynamic
-/// provider is refused until its distinct format and selection are qualified.
-/// Absence must be explicitly established by the actual provider.
+/// provider is refused until its distinct format and selection are checked.
+/// Absence must be explicitly established by the provider.
 pub enum Override {
     Absent(Provenance),
     Required(Provenance),
 }
 pub struct Phase {
-    /// None is permitted only for a source-qualified empty provider, whose
+    /// None is permitted only for a source-checked empty provider, whose
     /// output is independent of its runtime phase bit.
     pub enabled: Option<bool>,
     pub provenance: Provenance,
@@ -101,7 +101,7 @@ impl Proposal {
 impl Staged {
     /// iBoot 0x113954 copies the entire TUNS range, runs 0x1133a8 and copies back.
     /// Its parser preserves the header/capacity and untouched tail, clears the
-    /// upper five source offset bits, and stores the actual count at header +3.
+    /// upper five source offset bits, and stores the count at header +3.
     /// Unknown kinds/flags and capacity overflow are explicit unsupported cases.
     pub fn tuning_proposal(&self, input: Input) -> Result<Proposal> {
         let (address_record, address) = source_record(self, ADDRESS)?;

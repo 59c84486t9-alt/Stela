@@ -35,7 +35,7 @@ pub enum InitializationStage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PropertyReceipt {
     pub name: &'static str,
-    /// Original actual firmware-node property bytes, without normalization.
+    /// Original firmware-node property bytes, without normalization.
     pub bytes: Vec<u8>,
     pub sha256: [u8; 32],
 }
@@ -47,8 +47,8 @@ pub enum PropertyDiagnostic {
     Unavailable {
         name: &'static str,
     },
-    /// Exact original length/hash, with no truncated raw value represented as
-    /// a complete property and no >budget duplicate retained in the attempt.
+    /// Original length/hash, with no truncated raw value represented as
+    /// a complete property and no >budget duplicate kept in the attempt.
     Rejected {
         name: &'static str,
         bytes: usize,
@@ -63,14 +63,14 @@ pub struct CommandReceipt {
     pub packet_sha256: [u8; 32],
     /// None after a refused or uncertain effect; never guessed from an ACK.
     pub submission: Option<Submission>,
-    /// Actual HCI return parameters, starting with status. Packet-transfer ACKs
+    /// HCI return parameters, starting with status. Packet-transfer ACKs
     /// cannot populate this field. Original raw events remain in observations.
     pub returned: Option<Vec<u8>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PtbDisposition {
     Accepted,
-    /// The donor deliberately ignores BCM4377 PTB status rejection. Retain it
+    /// The donor ignores BCM4377 PTB status rejection. Keep it
     /// explicitly; this is not evidence of accepted regulatory/calibration data.
     Rejected {
         status: u8,
@@ -215,7 +215,7 @@ impl<P: Platform> Engine<'_, P> {
             self.bounded(deadline)?;
             self.transport.service()?;
             let mut completed = None;
-            // All actual packets remain in the transport-owned transcript on
+            // All packets remain in the transport-owned transcript on
             // every exit, including a later malformed event or MMIO failure.
             while self.cursor < self.transport.observations.packets.len() {
                 let packet = &self.transport.observations.packets[self.cursor];

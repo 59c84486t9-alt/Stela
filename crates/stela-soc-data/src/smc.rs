@@ -1,5 +1,5 @@
 //! Immutable SMC key/wake geometry and original RTC helper interface.
-//! These fields grant no oscillator, wake-delivery or SRAM authority.
+//! These fields grant no oscillator, wake-delivery or SRAM permission.
 pub const SRAM_BYTES: u64 = 0x4000;
 pub const WATCHDOG_BYTES: u64 = 0x14;
 pub const fn code(name: &[u8; 4]) -> u32 {

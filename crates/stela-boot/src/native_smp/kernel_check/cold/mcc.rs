@@ -1,4 +1,4 @@
-//! Authored controller fixture over the actual registered native RAM owner.
+//! Authored controller fixture over the registered native RAM owner.
 //! Geometry follows the model's direct resource contract; these configuration
 //! words are explicit fixture policy, never Apple boot-state measurements.
 use alloc::{sync::Arc, vec};
@@ -100,7 +100,7 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
         ram,
     )?;
     let lock_owner = owner.initialize_amcc_locks(locks, [None; 4], lifecycle)?;
-    // Authored input deliberately has no outer-cache allocation path. No
+    // Authored input has no outer-cache allocation path. No
     // original command line, capacity, reset image or PMP grant is supplied.
     let cache = EmptyResource::initialized(
         lock_owner,

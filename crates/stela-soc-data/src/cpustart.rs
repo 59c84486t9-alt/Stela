@@ -1,5 +1,5 @@
 //! CPU-start register extent and decoded physical core coordinates.
-//! Describing a core grants no release or native-processor lifecycle authority.
+//! Describing a core grants no release or native-processor lifecycle permission.
 const START: u64 = 0x8;
 
 /// The registers' span for `clusters` clusters.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained single-queue BCM5720/5761/5762 A0 copper Ethernet backend.
+//! Single-queue BCM5720/5761/5762 A0 copper Ethernet backend.
 use super::{Delay, Error, Hardware, ReceiveFilter, Registers};
 use crate::{
     bus::dma::{
@@ -25,8 +25,8 @@ enum State {
     Stopped,
     PhySuspended,
 }
-/// Actual PCI/config/MMIO ownership, isolated requester domain and pinned rings
-/// form one lifetime. An uncertain epoch retains all of them. No IRQs or worker
+/// PCI/config/MMIO ownership, isolated requester domain and pinned rings
+/// form one lifetime. An uncertain epoch keeps all of them. No IRQs or worker
 /// callbacks are registered by this polled backend.
 pub struct Packet<R: Registers, D: Delay> {
     hardware: Hardware<R, D>,
@@ -45,30 +45,30 @@ pub struct Packet<R: Registers, D: Delay> {
     /// True only after all preconditions for attempted device containment have
     /// been observed; arbitrary unsupported hardware is never stopped here.
     identified: bool,
-    /// An attach error can retain partial DMA allocations. Only a fully
+    /// An attach error can keep partial DMA allocations. Only a fully
     /// initialized packet owner may rebuild those rings for another epoch.
     restartable: bool,
     geometry: Geometry,
     receive_filter: ReceiveFilter,
 }
 impl<R: Registers, D: Delay> Packet<R, D> {
-    /// Attach an actual exclusively owned stopped requester, with real NVM
-    /// bootcode already present. Errors return the whole retained epoch.
+    /// Attach an exclusively owned stopped requester, with real NVM
+    /// bootcode already present. Errors return the whole epoch.
     ///
     /// # Safety
-    /// `hardware` owns the actual BCM5720/5761/5762 function/config/UC MAC/APE resources
-    /// described by `Registers`, powered in PCI D0. `domain` is the actual
-    /// isolated requester domain for that function/aliases; it retains its root
+    /// `hardware` owns the BCM5720/5761/5762 function/config/UC MAC/APE resources
+    /// described by `Registers`, powered in PCI D0. `domain` is the
+    /// isolated requester domain for that function/aliases; it keeps its root
     /// and performs real invalidation, coherence and payload write drain.
-    /// `pages` supplies retained pins, never synthetic physical addresses.
+    /// `pages` supplies kept pins, never synthetic physical addresses.
     /// Inherited DMA is stopped/drained, BusMaster clear, MSI/MSI-X disabled and
     /// posted messages/CPU vectors/workers drained before this call. Those
-    /// original interrupt exclusions remain retained in the actual register
+    /// original interrupt exclusions remain held in the register
     /// owner through retirement; no other provider may re-enable them.
-    /// The retained timer is the original provider's actually calibrated clock;
+    /// The kept timer is the original provider's calibrated clock;
     /// its rate and CPU/power context remain valid through all settling waits.
-    /// All calls/releases run in the original provider's qualified context.
-    /// A numeric BDF, arbitrary Arc or fake domain cannot grant this authority.
+    /// All calls/releases run in the original provider's checked context.
+    /// A numeric BDF, arbitrary Arc or fake domain cannot grant this permission.
     #[allow(
         clippy::result_large_err,
         reason = "attach failure returns the complete original hardware/DMA epoch without a fallible error-path allocation"
@@ -133,7 +133,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     }
     /// Program an acknowledged hardware receive policy in this live epoch.
     /// Already completed frames are not retracted. On error, the uncertain
-    /// original epoch is retained and packet publication remains fenced.
+    /// original epoch is held and packet publication remains fenced.
     pub fn set_receive_filter(&mut self, filter: ReceiveFilter) -> Result<(), Error> {
         self.check()?;
         filter.validate()?;
@@ -210,7 +210,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
         let result = (|| {
             self.hardware.packet_stop()?;
             // SAFETY: real engines acknowledged stopped, original BME clear;
-            // retained isolated domain and every packet/status target remain.
+            // isolated domain and every packet/status target remain.
             unsafe {
                 self.domain.drain_posted_writes()?;
             }
@@ -226,7 +226,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     }
     /// Stop/drain packets and put the admitted copper PHY into its real low
     /// power state. The original PCI function stays in D0 with every mapping
-    /// retained. This supplies no PCI/system sleep or wake-on-LAN operation.
+    /// kept. This supplies no PCI/system sleep or wake-on-LAN operation.
     pub fn suspend_phy(&mut self) -> Result<(), Error> {
         if self.state == State::PhySuspended {
             return Ok(());
@@ -246,7 +246,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
         }
     }
     /// Restore this same PHY and packet epoch through the full PHY/core reset
-    /// and queue rebuild. The retained platform owner must still hold PCI D0.
+    /// and queue rebuild. The kept platform owner must still hold PCI D0.
     pub fn resume_phy(&mut self) -> Result<(), Error> {
         if self.state != State::PhySuspended {
             return Err(Error::Stopped);
@@ -281,9 +281,9 @@ impl<R: Registers, D: Delay> Packet<R, D> {
         }
     }
     /// Rebuild an explicitly stopped or failed packet queue in the same held-D0
-    /// hardware owner. Outstanding frames are discarded only after actual
+    /// hardware owner. Outstanding frames are discarded only after
     /// engine stop, BusMaster-clear readback and posted-write drain. A failure
-    /// retains every mapping and prohibits packet I/O; another containment or
+    /// keeps every mapping and prohibits packet I/O; another containment or
     /// restart attempt cannot bypass uncertain transport/reset ownership.
     pub fn restart(&mut self) -> Result<(), Error> {
         if !self.restartable {

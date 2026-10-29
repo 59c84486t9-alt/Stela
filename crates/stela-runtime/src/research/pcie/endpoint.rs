@@ -1,4 +1,4 @@
-//! Actual endpoint bank ownership. Configuration alone cannot back a peer.
+//! Endpoint bank ownership. Configuration alone cannot back a peer.
 use super::{ConfigSpace, MmioDevice};
 use alloc::{boxed::Box, vec::Vec};
 use core::cell::RefCell;
@@ -6,7 +6,7 @@ use {
     stela_contracts::bus::Access, stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
 };
 
-/// Exact offset of a function's whole memory BAR within its actual device.
+/// Exact offset of a function's whole memory BAR within its device.
 /// Explicit overlapping offsets may describe aliases of the same real bank.
 #[derive(Debug, Clone, Copy)]
 pub struct BarMapping {

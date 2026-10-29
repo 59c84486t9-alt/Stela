@@ -18,7 +18,7 @@ fn next_write(family: Family, write: u16) -> u16 {
 
 #[derive(Clone, Debug)]
 pub struct CommandTicket {
-    // API identity only, never the actual PCI/BAR ownership guard. Retaining
+    // API identity only, never the PCI/BAR ownership guard. Retaining
     // this Arc prevents a different ROM object reusing a ticket's identity.
     epoch: Arc<()>,
     serial: u64,
@@ -52,7 +52,7 @@ pub struct FirmwareNotification {
     pub sequence: u16,
     pub raw: Vec<u8>,
 }
-/// Canonical actual packet retained once after completed-RB CPU handoff.
+/// Canonical packet kept once after completed-RB CPU handoff.
 /// Caller-mutable public diagnostics can never be restored into this queue.
 pub(super) struct CapturedNotification {
     pub(super) epoch: Arc<()>,
@@ -252,7 +252,7 @@ impl Queue {
         }
         let descriptor = usize::from(pending.slot) * 256;
         let first = usize::from(pending.slot) * 64;
-        // The matching actual RX response ends device ownership of this
+        // The matching RX response ends device ownership of this
         // descriptor and its bidirectional TB0, including possible writeback.
         // Preserve successful handoffs across a later visibility failure.
         if !pending.descriptor_cpu {
@@ -267,8 +267,8 @@ impl Queue {
                 .map_err(Error::CommandReclaim)?;
             pending.first_cpu = true;
         }
-        // SAFETY: Actual source RX command completion transfers this descriptor back
-        // to the CPU. Restore the retained invalid target before reuse.
+        // SAFETY: Source RX command completion transfers this descriptor back
+        // to the CPU. Restore the invalid target before reuse.
         unsafe {
             command
                 .write_owned(descriptor, self.invalid_tfd.bytes())
@@ -288,17 +288,17 @@ impl Queue {
 }
 
 impl<'a, Q: BootIo> RomBoot<'a, Q> {
-    /// Submit one synchronous host command using the actual caller-selected
+    /// Submit one synchronous host command using the caller-selected
     /// firmware API. No success is reported until real RX command completion;
     /// that raw transport response is not command-specific status/acceptance.
     /// # Safety
-    /// Source supplies fresh exclusive pages under this epoch's retained real
-    /// domain/coherency qualification. Only this polling owner can submit or
-    /// reset, and the relevant firmware command's actual API was selected.
-    /// Caller establishes command-specific prerequisites and retains every
-    /// indirect DMA allocation/firmware object through its actual device
+    /// Source supplies fresh exclusive pages under this epoch's real
+    /// domain/coherency validation. Only this polling owner can submit or
+    /// reset, and the relevant firmware command's API was selected.
+    /// Caller establishes command-specific prerequisites and keeps every
+    /// indirect DMA allocation/firmware object through its device
     /// completion or stopped/drained teardown. This raw transport supplies no
-    /// station, queue, key or indirect-resource authority. A raw HCMD response
+    /// station, queue, key or indirect-resource permission. A raw HCMD response
     /// alone never ends ownership of a persistent indirect DMA allocation.
     pub unsafe fn submit_command(
         &mut self,
@@ -310,7 +310,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         unsafe { self.submit_command_with_policy(id, payload, source, false) }
     }
     // Only source-backed control commands whose Linux flags contain
-    // CMD_SEND_IN_RFKILL may use true. The RF kill never becomes RF authority.
+    // CMD_SEND_IN_RFKILL may use true. The RF kill never becomes RF permission.
     pub(super) unsafe fn submit_command_with_policy(
         &mut self,
         id: Id,
@@ -353,7 +353,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         };
         let tfd = command.tfd(first, remainder.as_ref().map(Chunk::region))?;
         // SAFETY: TB0 remains coherent and pinned for the queue's lifetime. It is
-        // initially unused, or its prior actual command response completed.
+        // initially unused, or its prior command response completed.
         unsafe {
             self.hcmd
                 .first
@@ -379,7 +379,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             allow_rfkill,
         });
         let result = (|| {
-            // SAFETY: Retained pending payload/owner precedes even this descriptor
+            // SAFETY: Pending payload/owner precedes even this descriptor
             // pointer store, as well as the later producer doorbell.
             unsafe {
                 self.command
@@ -422,8 +422,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             return Err(Error::CommandTicket);
         }
         let result = self.poll_command_inner();
-        // A failed invalidation after actual completion remains retryable,
-        // with its payload/response retained and no new command admitted.
+        // A failed invalidation after completion remains retryable,
+        // with its payload/response kept and no new command admitted.
         if result.is_err() && !matches!(result, Err(Error::CommandReclaim(_))) {
             self.state = State::Poisoned;
         }
@@ -462,7 +462,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     fn dispatch_command_packets(&mut self, bytes: &[u8]) -> Result<(), Error> {
         for packet in Packets::new(self.profile.family(), 0, bytes)? {
             let packet = packet?;
-            // MVM's actual no-reclaim list is legacy TX_CMD0x1c only.
+            // MVM's no-reclaim list is legacy TX_CMD0x1c only.
             let reclaim = !packet.unsolicited() && !(packet.group == 0 && packet.command == 0x1c);
             if reclaim {
                 let pending = self
@@ -504,15 +504,15 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         }
         result
     }
-    /// One actual fixed 4 KiB RB contains at most 64 AX200 packets (one on AX210). Leave
+    /// One fixed 4 KiB RB contains at most 64 AX200 packets (one on AX210). Leave
     /// that complete capacity before taking DMA ownership of another RB.
     /// Backpressure performs no MMIO, completion read or ownership transfer.
     pub(super) fn poll_one_notification_buffer(&mut self) -> Result<NotificationPoll, Error> {
         self.poll_one_notification_buffer_with_policy(false)
     }
     // Only source-backed control owners may process RX during RF-kill. This
-    // does not authorize transmission; actual command publication still checks
-    // its independent source-specific CMD_SEND_IN_RFKILL qualification.
+    // does not authorize transmission; command publication still checks
+    // its independent source-specific CMD_SEND_IN_RFKILL validation.
     pub(super) fn poll_one_notification_buffer_with_policy(
         &mut self,
         allow_rfkill: bool,

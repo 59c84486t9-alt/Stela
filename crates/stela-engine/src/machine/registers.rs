@@ -165,7 +165,7 @@ pub mod encodings {
         CNTVCT_ALIAS_EL0 = 3, 4, 15, 10, 6;
         // m1n1 apple_regs.json ACNTPCT_EL0, physical timer counter
         // (pre-spec CNTPCTSS_EL0); matching original LLB/iBoot read it
-        // beside CNTP_TVAL/CTL and CNTFRQ. Source-qualified here at EL2.
+        // beside CNTP_TVAL/CTL and CNTFRQ. Source-checked here at EL2.
         ACNTPCT_EL0 = 3, 4, 15, 10, 5;
         // m1n1 `cpu_regs.h` "Lockdown registers"; the commit register has no
         // public name (see `Apple::SprLockdown`).
@@ -214,7 +214,7 @@ pub struct Changes {
 /// the mode per thread at context switch, 3 for a thread its
 /// `siq_realtime_thread_mode` selects unless the CPU runs its idle thread
 /// (kernelcache.release.mac14g 0xfffffe000bd7c388..0xfffffe000bd7c3d0).
-/// Only modes 0/2/3 with zero upper bits are qualified; `impdef::Registers`
+/// Only modes 0/2/3 with zero upper bits are checked; `impdef::Registers`
 /// rejects other writes before accounting, storage or steering changes.
 pub const SIQ_CFG_MODE: u64 = impdef::SIQ_CFG_MODE;
 pub const SIQ_CFG_NO_IRQ: u64 = 0b11;
@@ -947,7 +947,7 @@ impl Cpu {
     /// This establishes the user ABI, not nonzero AFP semantics or new banks.
     /// XNU's `user_msrs.c` permits writable registers that reset by a context
     /// switch; absence from its whitelist does not prove UNDEFINED. The
-    /// censused TRACE_CLEARED's EL0 permissions and effects remain unqualified
+    /// censused TRACE_CLEARED's EL0 permissions and effects remain unchecked
     /// on these Macs (qemu-t8030's PL0_RW entry establishes A13 alone).
     fn apple_el0(&mut self, encoding: Encoding, read: bool, value: u64, physical: u64) -> Outcome {
         if let Some(agt::Name::View(architectural)) = agt::decode(encoding, self.registers.chip()) {
@@ -1413,7 +1413,7 @@ mod tests {
         for chip in super::super::Chip::ALL {
             let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
             cpu.registers.set(Register::CNTVOFF_EL2, 0, 0x1234);
-            // SIQ_CFG is a separate retained tuning word, not a count reset.
+            // SIQ_CFG is a separate tuning word, not a count reset.
             let siq = impdef::SIQ_CFG_EL1;
             for tuning in [0, 2, 0] {
                 cpu.state.x[5] = tuning;
@@ -1706,7 +1706,7 @@ mod tests {
                         ..Changes::default()
                     })
                 );
-                // Test each upper bit with every otherwise-qualified mode.
+                // Test each upper bit with every otherwise-checked mode.
                 // Refused writes produce no Changes, including no steering.
                 for value in [1, u64::MAX]
                     .into_iter()
@@ -1795,7 +1795,7 @@ mod tests {
     }
 
     /// Bounded original-source integrity fixture. It decodes the original
-    /// accesses; it does not execute Apple code or qualify hardware effects.
+    /// accesses; it does not execute Apple code or check hardware effects.
     #[cfg(feature = "std")]
     #[test]
     #[ignore = "oracle: STELA_TEST_EL0_OS_FILES"]
@@ -1976,7 +1976,7 @@ mod tests {
             assert_eq!(cpu.apple.impdef.used().count(), 0);
             cpu.registers.set(Register::HCR_EL2, 0, 0);
             // Original M1/M2 XNU can still clear the register at a
-            // context switch. Non-censused chips retain the census inference.
+            // context switch. Non-censused chips keep the census inference.
             let expected = if consumed {
                 Outcome::Written(Changes::default())
             } else {

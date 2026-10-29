@@ -1,9 +1,9 @@
-//! Actual foreground stack/root context for synchronous firmware calls.
+//! Foreground stack/root context for synchronous firmware calls.
 use super::*;
 use crate::engine::host::local::context::ProcessRootScope;
 
-/// Read-only stack view retaining the SAME original allocation claim and all
-/// qualified mappings as Runtime's mutable stack backing. It cannot create a
+/// Read-only stack view keeping the SAME original allocation claim and all
+/// checked mappings as Runtime's mutable stack backing. It cannot create a
 /// second Stack, export bytes, or mint a cold/C stack grant.
 pub(super) struct Foreground {
     pub(super) reservation: Arc<Reservation>,
@@ -13,7 +13,7 @@ pub(super) struct Foreground {
     pub(super) physical: u64,
 }
 
-/// Borrowed, non-Send synchronous callback context. Only KernelWork's actual
+/// Borrowed, non-Send synchronous callback context. Only KernelWork's
 /// foreground callback can construct it. Map observations confer no allocation,
 /// runtime-service, clock, interpreter or arbitrary pointer access permission.
 pub(crate) struct FirmwareContext<'a> {
@@ -43,7 +43,7 @@ impl<'a> FirmwareContext<'a> {
     pub(crate) fn id(&self) -> u64 {
         self.id.get()
     }
-    /// Descriptive bounds of the actual retained full usable foreground stack.
+    /// Descriptive bounds of the full usable foreground stack.
     pub(crate) fn stack_bounds(&self) -> Range<usize> {
         self.stack.bounds.clone()
     }
@@ -55,7 +55,7 @@ impl<'a> FirmwareContext<'a> {
             .entered_original(&self.stack.reservation._handoff.native_loader_tables)
             .map_err(Error::Work)?;
         let rsp: usize;
-        // SAFETY: pure current-stack observation on this actual qualified CPU;
+        // SAFETY: pure current-stack observation on this checked CPU;
         // no stack bytes are read and no pointer/borrow escapes this callback.
         unsafe {
             asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));

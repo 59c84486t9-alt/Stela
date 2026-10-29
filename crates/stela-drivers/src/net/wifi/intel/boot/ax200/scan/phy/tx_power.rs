@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
-//! Actual unbound MAC0 transmit-power ceiling, not permission to transmit.
+//! Unbound MAC0 transmit-power ceiling, not permission to transmit.
 //! Source: mvm/mac80211.c::iwl_mvm_set_tx_power and fw/api/power.h.
 use super::*;
 mod binding;
@@ -39,7 +39,7 @@ pub enum Ax200TransmitPowerError {
     Deadline,
     State,
 }
-/// Historical actual programmed ceiling after command completion/reclaim.
+/// Historical programmed ceiling after command completion/reclaim.
 /// No public construction or copied observation can program another device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransmitPowerLimit {
@@ -183,7 +183,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q
         self.phase = Ax200TransmitPowerPhase::Failed;
     }
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the retained native
+    /// `source` supplies fresh exclusive coherent pages for the native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -285,7 +285,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q
             .rule(u32::from(self.phy.channel.frequency_mhz) * 1000, 20_000)
             .ok_or(Ax200TransmitPowerError::Channel)?
             .max_eirp_mbm;
-        // Source's per-link API accepts whole dBm. Floor the actual country's
+        // Source's per-link API accepts whole dBm. Floor the country's
         // ceiling so quantization can never relax its fractional dBm limit.
         let effective_dbm = u16::from(self.requested_dbm).min(max_eirp / 100) as u8;
         let bytes = encode(
@@ -322,9 +322,9 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q
         let admission = owner
             .admit(operation)
             .map_err(Ax200TransmitPowerError::Regulatory)?;
-        // SAFETY: this exact retained MAC is still unbound, with no station or
+        // SAFETY: this exact MAC is still unbound, with no station or
         // transmit queues. The command only programs its ceiling under both
-        // genuine current receive guards; it cannot authorize later emission.
+        // current receive guards; it cannot authorize later emission.
         let publication = unsafe {
             owner.publish(admission, operation, |guard| {
                 guard.submit(COMMAND, &bytes, source)

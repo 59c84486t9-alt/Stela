@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 
 /// An oracle without named file/value/output/program prerequisites must
-/// declare why it is intentionally outside the default suite.
+/// declare why it is outside the default suite.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Precondition {

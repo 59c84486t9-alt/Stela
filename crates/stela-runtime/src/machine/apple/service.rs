@@ -1,9 +1,9 @@
-//! Retained board-service inputs. Taking a model's queue transfers ownership;
+//! Board-service inputs. Taking a model's queue transfers ownership;
 //! a later refusal must neither drop its tail nor replay its committed prefix.
 use super::*;
 use crate::platform::apple::pmgr::DomainTransition;
 
-/// An actual reached wire edge, with the context of its first service attempt.
+/// A reached wire edge, with the context of its first service attempt.
 /// Retrying delivery must not move an AIC timestamp to a later counter value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AicDelivery {
@@ -33,10 +33,10 @@ impl ServiceInput {
     }
 }
 
-/// An incomplete service batch belonging to this board's actual device owners.
+/// An incomplete service batch belonging to this board's device owners.
 /// Prefixes are already committed, not instructions to replay. Starts and the
 /// first reset remain in the independent engine-output queues; lifecycle effects
-/// remain on their actual clients. This receipt cannot roll back any of them.
+/// remain on their clients. This receipt cannot roll back any of them.
 #[derive(Debug, Default)]
 pub struct ServiceBatch {
     inputs: Vec<ServiceInput>,
@@ -113,9 +113,9 @@ impl AppleDevices {
             );
     }
 
-    /// Forward queued wires and CPU releases, retaining exact progress on any
+    /// Forward queued wires and CPU releases, keeping exact progress on any
     /// refusal. AIC validation and CPU-release resolution refuse before effects;
-    /// advancing the cursor follows the actual successful effect only.
+    /// advancing the cursor follows the successful effect only.
     pub(super) fn settle(
         &mut self,
         cpu: CpuIndex,
@@ -133,7 +133,7 @@ impl AppleDevices {
         result
     }
 
-    /// Retain reached outputs even when the producing register operation
+    /// Keep reached outputs even when the producing register operation
     /// subsequently refuses. Capturing never delivers an input or retries a
     /// peripheral effect, and keeps its original CPU/counter context.
     pub(super) fn capture_reached(&mut self, cpu: CpuIndex, now: u64, reset: Option<Reset>) {
@@ -269,7 +269,7 @@ mod tests {
             assert_eq!(batch.committed(), 1);
             assert_eq!(batch.inputs().len(), 4);
             assert!(batch.failure().is_some());
-            // Change the actual first input directly. A replay of the committed
+            // Change the first input directly. A replay of the committed
             // prefix would wrongly set it again even though the cursor says 1.
             let mut access = Access::new(0, 20, &mut board.latch);
             match board.aic.unwrap() {
@@ -371,7 +371,7 @@ mod tests {
             transition: Transition::Restart,
             reason: "first reached reset".into(),
         };
-        // Queue releases through the actual register, before service observes it.
+        // Queue releases through the register, before service observes it.
         let starter = board.cpu_start.as_ref().unwrap().device;
         let mut access = Access::new(0, 10, &mut board.latch);
         board
@@ -403,7 +403,7 @@ mod tests {
         );
         assert_eq!(board.take_reset(), Some(first));
         assert_eq!(board.take_reset(), None);
-        // Add missing actual RVBAR owners; service resumes at PE1, not PE0.
+        // Add missing RVBAR owners; service resumes at PE1, not PE0.
         rvbar(&mut board, 1);
         rvbar(&mut board, 2);
         assert!(board.settle(0, 30, None).is_err()); // Missing AIC, after starts.
@@ -496,7 +496,7 @@ mod tests {
             domains: vec![(SUPPLY, initial)],
             retention: false,
         });
-        // The actual PMGR accepts and retains this edge before board service.
+        // The PMGR accepts and keeps this edge before board service.
         let mut access = Access::new(0, 12, &mut board.latch);
         board
             .bus
@@ -546,7 +546,7 @@ mod tests {
         rvbar(&mut board, 0);
         edge(&mut board, 1, true);
         assert!(board.settle(0, 1, None).is_err());
-        // This conflicts with the actual RVBAR owner. No unmounted controller
+        // This conflicts with the RVBAR owner. No unmounted controller
         // may become the target of a subsequent pending-edge delivery.
         assert!(board.add_aic(0x1000_5000, 32, AicLayout::V1).is_err());
         assert!(board.aic.is_none());

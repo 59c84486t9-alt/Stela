@@ -464,7 +464,7 @@ mod tests {
             let mut latch = InterruptLatch::new();
             {
                 let mut access = Access::new(0, 0, &mut latch);
-                // Actual source safe-reconfiguration order: old receiver0,
+                // Source safe-reconfiguration order: old receiver0,
                 // intermediate plain-input0, then receiver9. Do not sample an
                 // invented DATA value from the intermediate hardware state.
                 bank.write(12, Width::Word, 0, &mut access).unwrap();
@@ -735,7 +735,7 @@ mod tests {
         )
         .unwrap();
         // An aggregate preflight must check every real bank before committing
-        // either one. AIC is idle, but the GPIO wake/edge path is unqualified.
+        // either one. AIC is idle, but the GPIO wake/edge path is unchecked.
         let paused = LifecycleState {
             powered: true,
             clocked: false,
@@ -761,7 +761,7 @@ mod tests {
                 .set_input(line, level, &mut Access::new(0, 1, &mut latch))
                 .unwrap();
         }
-        // Unmask source 3 and enable the actual mapped AIC. The earlier
+        // Unmask source 3 and enable the mapped AIC. The earlier
         // refused lifecycle preflight changed neither bank or input level.
         bus.write(
             0x20000 + AIC2_IRQ_CFG + 4 * 32 + 12,

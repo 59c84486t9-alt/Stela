@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn owned_mapping_windows() {
-    // Authority is a process singleton; isolate this Box-backed mapping provider
+    // Permission is a process singleton; isolate this Box-backed mapping provider
     // from other registry activation tests.
     const CHILD: &str = "STELA_MSIX_MAPPED_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -29,7 +29,7 @@ fn owned_mapping_windows() {
     use core::ptr::NonNull;
     struct Backing;
     // SAFETY: this immutable symbolic span belongs only to the private child
-    // provider; its mappings are backed by the retained aligned Box pages below.
+    // provider; its mappings are backed by the aligned Box pages below.
     unsafe impl ResourceBacking for Backing {
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BYTES).unwrap()
@@ -82,7 +82,7 @@ fn owned_mapping_windows() {
     }
     let platform = Arc::new(Platform(Mutex::new(Vec::new())));
     // SAFETY: This exact child test is the only registry activator. The platform
-    // retains page-aligned Box buffers by mapping ID until acknowledged unmap.
+    // keeps page-aligned Box buffers by mapping ID until acknowledged unmap.
     let authority = unsafe {
         Authority::activate(
             platform.clone(),
@@ -114,7 +114,7 @@ fn owned_mapping_windows() {
             Protection::ReadWrite,
         )
         .unwrap();
-    // SAFETY: Supplied windows refer to this isolated Box-backed resource and retain
+    // SAFETY: Supplied windows refer to this isolated Box-backed resource and keep
     // their aligned buffers. Rejected read-only windows are returned without device access.
     let mut bar = match unsafe {
         MappedBar::new(
@@ -138,7 +138,7 @@ fn owned_mapping_windows() {
     assert_eq!(bar.read32(TABLE + 1), Err(IoError));
     assert_eq!(bar.write32(4096, 1), Err(IoError));
     // Reuse these owned windows through the indexed API. Entry64 crosses the
-    // 63/64 pending-word boundary within the first retained buffer. The fixture
+    // 63/64 pending-word boundary within the first buffer. The fixture
     // has no pending interrupt source during this mapping check.
     let f = fixture(65);
     f.model.lock().unwrap().publish(64);
@@ -153,10 +153,10 @@ fn owned_mapping_windows() {
         Err(_) => panic!("actual UC indexed owner rejected"),
     };
     let actual_message = message(64);
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(64, actual_message) }.unwrap();
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[64]) }.unwrap();
     {
@@ -170,7 +170,7 @@ fn owned_mapping_windows() {
         assert_eq!(words[(TABLE / 4) as usize + 3], 1);
     }
     // SAFETY: All model deliveries finish synchronously while holding the peripheral
-    // mutex. No hardware or background callback can race release of these retained owners.
+    // mutex. No hardware or background callback can race release of these owners.
     let (_, _, mut actual_bars) = unsafe { owner.release() }.unwrap();
     let bar = actual_bars[0].take().unwrap();
     let mut windows = bar.into_mappings();
@@ -189,7 +189,7 @@ fn owned_mapping_windows() {
             Protection::ReadOnly,
         )
         .unwrap();
-    // SAFETY: Supplied windows refer to this isolated Box-backed resource and retain
+    // SAFETY: Supplied windows refer to this isolated Box-backed resource and keep
     // their aligned buffers. Rejected read-only windows are returned without device access.
     let mut returned = match unsafe {
         MappedBar::new(
@@ -227,15 +227,15 @@ fn separate_pending_bar_layouts() {
         });
         let drops = f.bar_drops.clone();
         let (mut owner, m) = attach(f);
-        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-        // callbacks stay retained; table writes and message emission run synchronously.
+        // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+        // callbacks stay held; table writes and message emission run synchronously.
         unsafe { owner.program(MESSAGE) }.unwrap();
         m.lock().unwrap().callback_published = true;
-        // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+        // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
         // under its mutex, including failures injected after a modeled hardware effect.
         unsafe { owner.unmask() }.unwrap();
         // SAFETY: All model deliveries finish synchronously while holding the peripheral
-        // mutex. No hardware or background callback can race release of these retained owners.
+        // mutex. No hardware or background callback can race release of these owners.
         let owners = unsafe { owner.release() }.unwrap();
         drop(owners);
         assert_eq!(drops.load(Ordering::Relaxed), 2);
@@ -245,12 +245,12 @@ fn separate_pending_bar_layouts() {
 #[test]
 fn relocated_bar_rejects_stale_access() {
     let (mut owner, m) = attach(fixture(2));
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     unsafe { owner.program(MESSAGE) }.unwrap();
     m.lock().unwrap().put(0x10, 4, (BASE as u32 + 0x10000) | 4);
     let start = m.lock().unwrap().events.len();
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     assert_eq!(unsafe { owner.unmask() }, Err(Error::Mapping));
     assert!(owner.needs_reset());

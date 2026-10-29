@@ -51,8 +51,8 @@ fn raw_opaque_markers_cross_divided_rollover_and_bound_the_actual_controller() {
             origin,
         };
         let raw = I801::new(registers, timer, info, HOST_ENABLED | CONFIG_OTHER, config).unwrap();
-        // SAFETY: the exact original model Function/register/root owners remain
-        // retained; only their explicit timer service has changed.
+        // SAFETY: the original model Function/register/root owners remain
+        // kept; only their explicit timer service has changed.
         let mut host = unsafe { Controller::claim(raw, configuration) }
             .ok()
             .unwrap();

@@ -22,7 +22,7 @@ fn native_uas_admission_rejects_foreign_generation_before_configuration_or_dma()
         let first_accesses = first_hardware.borrow().accesses;
         let second_accesses = second_hardware.borrow().accesses;
         let remaining = first_dma.remaining();
-        // Deliberately mismatch two independently valid enumerated owners.
+        // Mismatch two independently valid enumerated owners.
         // The checked setup boundary rejects this before class configuration
         // or DMA; the unsafe Host::new grant requires a matched attachment.
         assert!(

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Actual UAC3 high-capability cluster requests, bounded and stable across the
+//! UAC3 high-capability cluster requests, bounded and stable across the
 //! required header/full-descriptor transactions. Linux stream.c is the reference.
 use super::super::{Control, Error};
 use crate::{bytes::le16, usb::xhci::setup};

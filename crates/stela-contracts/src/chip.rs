@@ -123,7 +123,7 @@ impl AdmitTable {
     const SHIFT: u32 = 21;
     const PREFIXES: usize = 1 << (32 - Self::SHIFT);
 
-    /// The actual immutable chip policy used to construct this table.
+    /// The immutable chip policy used to construct this table.
     pub fn chip(&self) -> Chip {
         self.chip
     }

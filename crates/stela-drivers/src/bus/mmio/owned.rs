@@ -1,8 +1,8 @@
-//! Owned native physical-device mappings. This service reserves actual device
+//! Owned native physical-device mappings. This service reserves device
 //! resources and cache aliases; it does not allocate RAM or construct DMA IOVAs.
 //!
 //! The mount must supply the real page-table/PAT/MTRR and cross-core TLB adapter.
-//! An activated authority is not itself proof that such an adapter exists.
+//! An activated permission is not itself proof that such an adapter exists.
 mod registry;
 
 pub use crate::bus::dma::memory::CacheAttribute;
@@ -72,7 +72,7 @@ impl PhysicalSpan {
     }
 }
 
-/// Actual native address-space/root-set metadata, not an address or an inferred
+/// Native address-space/root-set metadata, not an address or an inferred
 /// identity map. `Authority::activate` establishes its real platform meaning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressSpace {
@@ -113,8 +113,8 @@ pub enum ResourceKind {
     PrefetchableMemory,
 }
 
-/// Device-qualified permission for one complete page-aligned subrange of an
-/// actual exclusive resource. This is not proof of the CPU's effective policy.
+/// Device-checked permission for one complete page-aligned subrange of an
+/// exclusive resource. This is not proof of the CPU's effective policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceCacheRegion {
     pub physical: PhysicalSpan,
@@ -122,14 +122,14 @@ pub struct DeviceCacheRegion {
 }
 
 /// Real, exclusive platform/PCI resource owner. Metadata cannot change while
-/// retained. A BAR address and size alone do not implement this ownership.
+/// kept. A BAR address and size alone do not implement this ownership.
 ///
 /// # Safety
-/// The entire span is an actual device resource exclusively reserved from all
-/// other drivers, firmware and RAM/guest allocators. Retain its device/reset
+/// The entire span is a device resource exclusively reserved from all
+/// other drivers, firmware and RAM/guest allocators. Keep its device/reset
 /// epoch, parent bridge/resource assignment and physical reservation until Drop.
-/// No resource relocation, reset or removal may invalidate a retained mapping.
-/// `PrefetchableMemory` must reflect the actual hardware resource; it does not
+/// No resource relocation, reset or removal may invalidate a mapping.
+/// `PrefetchableMemory` must reflect the hardware resource; it does not
 /// by itself establish WC support. Implementations must keep metadata immutable.
 /// Final Drop is process/deferred context, never implicitly IRQ-safe.
 pub unsafe trait ResourceBacking: Any + Send + Sync {
@@ -137,7 +137,7 @@ pub unsafe trait ResourceBacking: Any + Send + Sync {
     fn kind(&self) -> ResourceKind;
 }
 
-/// Cloneable pin on one actual exclusive resource reservation.
+/// Cloneable pin on one exclusive resource reservation.
 #[derive(Clone)]
 pub struct Resource {
     backing: Arc<dyn ResourceBacking>,
@@ -154,17 +154,17 @@ impl Resource {
             cache_regions: None,
         }
     }
-    /// Retain one original resource with explicit, immutable UC/WC subranges.
+    /// Keep one original resource with explicit, immutable UC/WC subranges.
     /// Gaps and requests crossing region boundaries are not authorized. The
-    /// actual resource kind is preserved; default permissions are replaced.
+    /// resource kind is preserved; default permissions are replaced.
     ///
     /// # Safety
-    /// `backing` binds the actual native requester identity, exclusive whole
+    /// `backing` binds the native requester identity, exclusive whole
     /// device resource and current reset/assignment epoch. Every region's
-    /// UC/WC permission must be qualified from that actual device family's
+    /// UC/WC permission must be checked from that device family's
     /// source-backed hardware register/aperture layout and valid for this
-    /// retained epoch. A numeric BAR tuple or prefetchable flag alone does not
-    /// qualify a WC exception. This cannot authorize RAM, cached firmware or
+    /// epoch. A numeric BAR tuple or prefetchable flag alone does not
+    /// check a WC exception. This cannot authorize RAM, cached firmware or
     /// system-memory ranges, nor relabel the hardware resource classification.
     /// The native platform must still prove the complete effective PTE/PAT/MTRR
     /// policy, compatible aliases, all participating roots and TLB/cache drains.
@@ -198,8 +198,8 @@ impl Resource {
         resource.cache_regions = Some(regions);
         Ok(resource)
     }
-    /// Explicit device permissions, if supplied by the actual native owner.
-    /// None retains the conservative default for the original resource kind.
+    /// Explicit device permissions, if supplied by the native owner.
+    /// None keeps the conservative default for the original resource kind.
     pub fn device_cache_regions(&self) -> Option<&[DeviceCacheRegion]> {
         self.cache_regions.as_deref().map(Vec::as_slice)
     }
@@ -223,19 +223,19 @@ impl Resource {
     pub fn kind(&self) -> ResourceKind {
         self.kind
     }
-    /// The native adapter may downcast its genuine reservation implementation;
+    /// The native adapter may downcast its reservation implementation;
     /// it must refuse reservations from a different owner/platform.
     pub fn backing(&self) -> &dyn Any {
         self.backing.as_ref()
     }
 }
 
-/// Imported mapping (including generic physical-map RAM aliases). The authority
+/// Imported mapping (including generic physical-map RAM aliases). The permission
 /// rounds it to complete pages before comparing effective cache policies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExistingAlias {
     pub physical: PhysicalSpan,
-    /// Actual combined PAT/MTRR/PTE policy; None is unknown/unsupported and
+    /// Combined PAT/MTRR/PTE policy; None is unknown/unsupported and
     /// blocks every overlapping new mapping until acknowledged removal.
     pub attribute: Option<CacheAttribute>,
 }
@@ -257,7 +257,7 @@ pub struct MapRequest {
     pub protection: Protection,
 }
 
-/// An actual platform mapping and unique native page-table reservation token.
+/// A platform mapping and unique native page-table reservation token.
 #[derive(Clone, Copy, Debug)]
 pub struct InstalledMapping {
     pub token: u64,
@@ -275,7 +275,7 @@ pub enum MapFailure {
     Uncertain(Error),
 }
 
-/// Actual native page-table and effective-cache adapter. No implementation is
+/// Native page-table and effective-cache adapter. No implementation is
 /// supplied here; the mount owns real root publication and TLB acknowledgements.
 ///
 /// # Safety
@@ -283,28 +283,28 @@ pub enum MapFailure {
 /// It is a pure admission observation: no allocation, device-register/DMA operation,
 /// root/cache mutation, Linux reentry, waiting or unwinding is permitted.
 /// Architectural CPU/root/control-register observations are permitted.
-/// Map validates the genuine ResourceBacking/epoch and maps the exact reserved
+/// Map validates the ResourceBacking/epoch and maps the reserved
 /// full span into every participating native root, writable iff requested and
-/// always NX. It must prove the *effective* requested UC/WC type across actual
+/// always NX. It must prove the *effective* requested UC/WC type across
 /// PAT/MTRRs, caches and all aliases over the entire span, not just set PTE
 /// cache bits. A WB PTE may have effective UC policy through MTRRs; a
 /// prefetchable BAR alone never authorizes WC. Explicit device-cache-region
-/// permissions qualify device access, not the actual CPU mapping policy.
+/// permissions check device access, not the CPU mapping policy.
 /// Unknown/conflicting effective policy must refuse the request, never report
 /// guessed WC/UC. Returned CPU
 /// addresses must be live, canonical, page-aligned and mapped to precisely the
 /// given physical pages in every participating context. Tokens and virtual
 /// ranges must be unique until acknowledged unmap. Concurrent calls for
 /// disjoint reservations must be safe. New roots/outside mapping changes must
-/// serialize with this same authority and preserve its alias inventory.
+/// serialize with this same permission and preserve its alias inventory.
 ///
 /// Unchanged failure may be returned only before changes, or after complete
-/// rollback/TLB acknowledgement with no retained native mapping. An uncertain
-/// failure retains all partial table/virtual reservations and native root-set
-/// owners; the authority retains its resource/physical reservation permanently.
+/// rollback/TLB acknowledgement with no kept native mapping. An uncertain
+/// failure keeps all partial table/virtual reservations and native root-set
+/// owners; the permission keeps its resource/physical reservation permanently.
 /// `unmap` success proves CPU accesses, posted writes, cache/write-combining
 /// effects and all participating CPU TLBs/root changes have drained, and the
-/// actual mapping/table/virtual reservation is removed. Failure must retain
+/// mapping/table/virtual reservation is removed. Failure must keep
 /// every possibly live table/virtual reservation; successful retry targets the
 /// same exact token. A provider's final release never invalidates a live lease.
 ///
@@ -318,8 +318,8 @@ pub unsafe trait MappingPlatform: Send + Sync {
     /// mapping now, including from an interrupt handler.
     fn check_context(&self, address_space: AddressSpace) -> Result<(), Error>;
     /// # Safety
-    /// The one active authority already atomically reserved this request's
-    /// complete physical/cache span and retains the actual resource owner.
+    /// The one active permission already atomically reserved this request's
+    /// complete physical/cache span and keeps the resource owner.
     unsafe fn map(
         &self,
         resource: &Resource,
@@ -328,6 +328,6 @@ pub unsafe trait MappingPlatform: Send + Sync {
     /// # Safety
     /// The token was returned by this provider for this exact request; all
     /// consumers and callback/worker access are stopped/drained, and no new
-    /// access can begin. The authority still retains the resource reservation.
+    /// access can begin. The permission still keeps the resource reservation.
     unsafe fn unmap(&self, request: MapRequest, mapping: InstalledMapping) -> Result<(), Error>;
 }

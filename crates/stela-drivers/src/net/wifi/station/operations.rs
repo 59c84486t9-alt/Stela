@@ -2,7 +2,7 @@
 // Adapted from pinned Linux mac80211/util.c, wireless/chan.c and IEEE headers.
 // Copyright 2009 Johannes Berg; 2013-2014 Intel Mobile Communications GmbH;
 // 2018-2026 Intel Corporation. Full source notices in THIRD_PARTY.md.
-//! Actual single-link AP BSS operation observations, never radio/TX authority.
+//! Single-link AP BSS operation observations, never radio/TX permission.
 //! Unselected AP Multi-Link IEs do not select another link's operation. Their
 //! opaque bytes remain in peer Capabilities and the original beacon/response;
 //! this parser never parses local/outgoing association intent.
@@ -35,7 +35,7 @@ pub struct HeOperation {
     pub six_ghz: Option<[u8; 5]>,
 }
 impl HeOperation {
-    /// Actual encoded value; vendor source transformations remain explicit.
+    /// Encoded value; vendor source transformations remain explicit.
     pub fn packet_extension(&self) -> u8 {
         (self.parameters & 7) as u8
     }
@@ -57,7 +57,7 @@ pub struct EhtOperation {
     pub punctured: u16,
 }
 
-/// Source-valid geometry only. Regulatory/provider authority, actual NIC
+/// Source-valid geometry only. Regulatory/provider permission, NIC
 /// support and applied per-rate power remain independently required.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChannelDefinition {

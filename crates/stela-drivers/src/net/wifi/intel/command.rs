@@ -45,7 +45,7 @@ pub struct Command {
     bytes: Vec<u8>,
 }
 impl Command {
-    /// Caller selects the actual negotiated command API. No missing command
+    /// Caller selects the negotiated command API. No missing command
     /// version is replaced with a guessed default here. queue/index are the
     /// source queue/host write pointer; only its low8 bits enter the sequence.
     pub fn encode(id: Id, queue: u8, index: u16, payload: &[u8]) -> Result<Self, Error> {
@@ -78,7 +78,7 @@ impl Command {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    /// TB0 is actual coherent bidirectional DMA, up to20 copied header/body
+    /// TB0 is coherent bidirectional DMA, up to20 copied header/body
     /// bytes. The remaining command bytes use a separate ToDevice mapping.
     pub fn first_tb(&self) -> &[u8] {
         &self.bytes[..self.bytes.len().min(FIRST_TB_BYTES)]
@@ -86,7 +86,7 @@ impl Command {
     pub fn remainder(&self) -> &[u8] {
         &self.bytes[self.bytes.len().min(FIRST_TB_BYTES)..]
     }
-    /// Match exact lengths to this command, with no fabricated padding/TB.
+    /// Match exact lengths to this command, with no invented padding/TB.
     /// These Regions are serialization inputs, never mapping/visibility proof.
     pub fn tfd(&self, first: Region, remainder: Option<Region>) -> Result<Tfd, Error> {
         if first.bytes != self.first_tb().len() {
@@ -108,7 +108,7 @@ pub struct Tfd {
 impl Tfd {
     /// Exact iwl_tfh_tfd: LE16 count,25 packed {LE16 len,LE64 address}
     /// entries and the trailing reserved word. No alignment is invented for a
-    /// TB address; actual streaming offsets need not be page aligned.
+    /// TB address; streaming offsets need not be page aligned.
     pub fn encode(regions: &[Region]) -> Result<Self, Error> {
         if regions.is_empty() || regions.len() > 25 {
             return Err(Error::BufferCount);

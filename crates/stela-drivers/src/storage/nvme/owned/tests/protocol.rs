@@ -1,12 +1,12 @@
-//! Reuse the independent SQ/PRP/CQ peer with an actual model hierarchy observer.
+//! Reuse the independent SQ/PRP/CQ peer with a model hierarchy observer.
 //! This is cfg(test) support, never a native provider or domain-identity proof.
 use super::*;
 
-/// Use the same retained attachment sequence with a captured finite test budget.
+/// Use the same attachment sequence with a captured finite test budget.
 ///
 /// # Safety
 /// The caller provides the same exclusive original-controller and requester
-/// authority required by `owned::attach`; this only shortens model timeouts.
+/// permission required by `owned::attach`; this only shortens model timeouts.
 pub(crate) unsafe fn attach(
     registers: Box<dyn Registers>,
     lifecycle: Box<dyn Lifecycle>,
@@ -15,7 +15,7 @@ pub(crate) unsafe fn attach(
     clock: Clock,
     location: String,
 ) -> Result<Attached, BlockError> {
-    // SAFETY: forwarded unchanged retained-owner attachment contract.
+    // SAFETY: forwarded unchanged kept-owner attachment contract.
     unsafe {
         super::super::attach_with_timeout(
             registers, lifecycle, source, domain, clock, location, 1_000,
@@ -23,7 +23,7 @@ pub(crate) unsafe fn attach(
     }
 }
 
-/// Read the actual independent configuration storage at each protocol boundary.
+/// Read the independent configuration storage at each protocol boundary.
 /// Implementors must not substitute a lifecycle's cached phase or intended write.
 pub(crate) trait Access: Send + Sync {
     fn registers_available(&self) -> bool;

@@ -1,4 +1,4 @@
-//! Independent SD host/card register model: actual-width writes, FIFO and ADMA
+//! Independent SD host/card register model: width writes, FIFO and ADMA
 //! payload effects, card states, command/response completion and removal faults.
 use super::*;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -647,7 +647,7 @@ impl Hardware {
                     _ => panic!("unmodeled card bus width"),
                 };
                 if host_width > self.wired_width || host_width != card_width {
-                    self.status |= 1 << 21 | 1 << 15; // actual DATA_CRC interrupt
+                    self.status |= 1 << 21 | 1 << 15; // DATA_CRC interrupt
                     return;
                 }
             }
@@ -693,7 +693,7 @@ impl Hardware {
                 0
             };
         assert!(table > 65536 && table.is_multiple_of(4));
-        // SAFETY: fixture hardware consumes only the driver's retained descriptor DMA.
+        // SAFETY: fixture hardware consumes only the driver's descriptor DMA.
         let (attributes, length, low, high) = unsafe {
             (
                 (table as *const u16).read_volatile(),
@@ -728,12 +728,12 @@ impl Hardware {
             return;
         }
         if self.transfer_read {
-            // SAFETY: descriptor grants this exact live device-write range.
+            // SAFETY: descriptor grants this live device-write range.
             unsafe {
                 core::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, length);
             }
         } else {
-            // SAFETY: descriptor grants this exact live device-read range.
+            // SAFETY: descriptor grants this live device-read range.
             let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, length) };
             assert!(self.storage_write);
             self.disk[self.destination..self.destination + length].copy_from_slice(bytes);

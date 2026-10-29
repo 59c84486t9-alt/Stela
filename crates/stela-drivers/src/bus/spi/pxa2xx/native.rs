@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Original native UC mapping and actual platform/device resource retention.
+//! Original native UC mapping and platform/device resource retention.
 use super::{Description, IoError, Registers};
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
 
@@ -11,14 +11,14 @@ pub struct NativeRegisters<P> {
 }
 impl<P: 'static> NativeRegisters<P> {
     /// # Safety
-    /// `platform` retains the original unique physical LPSS SSP PCI/ACPI device,
+    /// `platform` keeps the original unique physical LPSS SSP PCI/ACPI device,
     /// clock/power/reset epoch, board pins and native CS/firmware arbitration.
-    /// `mapping` is its actual complete exclusive register resource. Reset/remap
+    /// `mapping` is its complete exclusive register resource. Reset/remap
     /// and the enabled SSP input clock have been established by that real owner;
     /// Description is observed from those same resources, not guessed from IDs.
     /// Prior DMA, IRQ and deferred users are stopped/drained and cannot restart.
     /// No other owner can reset, revoke or relocate this epoch; deliberate leak
-    /// retains all actual grants. A short-lived external guard is insufficient.
+    /// keeps all grants. A short-lived external guard is insufficient.
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,
@@ -54,7 +54,7 @@ impl<P: 'static> NativeRegisters<P> {
         Ok(self.platform)
     }
 }
-// SAFETY: claim binds immutable actual device/clock/pin ownership to its
+// SAFETY: claim binds immutable device/clock/pin ownership to its
 // original aligned UC mapping. Every DWORD checks bounds and ordered volatility;
 // failed accesses may follow effects. The controller serializes all users.
 unsafe impl<P: 'static> Registers for NativeRegisters<P> {

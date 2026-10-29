@@ -147,7 +147,7 @@ fn custom_metadata_reaches_all_three_native_band_commands_without_phy_substituti
         assert_eq!(&ies[ies.len() - 3..], &metadata[metadata.len() - 3..]);
         assert!(position(10, &[0xbb]) > position(221, &[0x12, 0x34, 0x56, 0x99]));
     }
-    // Receive ownership and BSS routing still use the actual scan generation.
+    // Receive ownership and BSS routing still use the scan generation.
     beacon(&model, 73);
     link.service().unwrap();
     assert!(

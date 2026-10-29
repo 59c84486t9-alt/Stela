@@ -1,8 +1,8 @@
 //! T6000's ordered native-program configuration effects.
 //!
 //! Original LLB 1337c/1366c/47090/471b8/49ec8/4b104 supplies a
-//! different program family from T8112. Actual counted/emitted images and the
-//! retained firmware binding flag are inputs. This installs their physical
+//! different program family from T8112. Counted/emitted images and the
+//! firmware binding flag are inputs. This installs their physical
 //! configuration only; compilation's live AP reads/effects, later activation,
 //! request-to-PC selection and native execution/retirement are not performed.
 use super::{Error, History, Installation, NativeImage, Placement, Step, align, write};
@@ -24,7 +24,7 @@ pub struct Sequence {
 }
 
 /// Every descriptor admitted by the original T6000 revision masks8/40/40000,
-/// in the ascending object order used by its actual allocator and binder.
+/// in the ascending object order used by its allocator and binder.
 pub fn sequences() -> Vec<Sequence> {
     let mut rows = Vec::new();
     for (id, group, slot) in [
@@ -90,8 +90,8 @@ pub fn sequences() -> Vec<Sequence> {
 }
 
 /// Source physical publication only. The caller exclusively owns the real
-/// controller/SRAM while this transaction is retained, including on refusal.
-/// `binding_history` is the actual firmware flag (bit0), never a cold default.
+/// controller/SRAM while this transaction is held, including on refusal.
+/// `binding_history` is the firmware flag (bit0), never a cold default.
 /// The resulting legacy `history()` fields remain unknown: they describe the
 /// separate T8112 constructor and are not T6000 firmware RAM observations.
 pub fn programs(
@@ -163,7 +163,7 @@ pub fn programs(
     }
     let mut steps = Vec::new();
     // Native group initialization precedes every initial zero pointer/control
-    // publication. The zeros here are actual source stores, not handoff inputs.
+    // publication. The zeros here are source stores, not handoff inputs.
     for group in 0..GROUPS {
         let table = TABLE_BASE + u64::from(group) * 0x100;
         if group < 2 {
@@ -191,7 +191,7 @@ pub fn programs(
         }
     }
     // Compilation and its live AP effects are separate supplied obligations.
-    // This phase publishes only the actual counted/emitted immutable words.
+    // This phase publishes only the counted/emitted immutable words.
     for placement in &placements {
         if placement.bytes == 0 {
             continue;
@@ -270,8 +270,8 @@ fn bind(steps: &mut Vec<Step>, placement: Placement, code: u64, bound: &mut bool
     }
     if matches!(id, 36 | 40 | 44 | 48) && !*bound {
         // Source sets its private firmware byte before this blind write. That
-        // RAM write is not fabricated here. The supplied history owns entry;
-        // this immutable plan retains the pending physical write on refusal.
+        // RAM write is not invented here. The supplied history owns entry;
+        // this immutable plan keeps the pending physical write on refusal.
         *bound = true;
         write(steps, GPCE_BINDINGS + 0x28, Width::Word, u64::from(slot));
     }

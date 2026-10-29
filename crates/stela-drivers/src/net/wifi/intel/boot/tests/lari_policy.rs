@@ -31,7 +31,7 @@ fn lari_schema_missing_services_rfkill_and_uncertain_command_keep_original_owner
         let init = drive_nvm(boot, &source, &domain, &state);
         let (cold, sequence, entry) = drive_cold_prefix(init, &source, &domain);
         // SAFETY: RadioBios supplies this same modeled function's namespace responses;
-        // the owned value and drop counter are moved with cold through retained teardown.
+        // the owned value and drop counter are moved with cold through kept teardown.
         let mut lari = unsafe {
             cold.begin_lari(RadioBios {
                 drops: bios_drops.clone(),
@@ -49,7 +49,7 @@ fn lari_schema_missing_services_rfkill_and_uncertain_command_keep_original_owner
             let mut r = domain.records.lock().unwrap();
             r.sync_fail = Some(r.syncs + 2);
         }
-        // SAFETY: The LARI owner retains that original model domain and exclusive Source;
+        // SAFETY: The LARI owner keeps that original model domain and exclusive Source;
         // all missing-service/RF-kill/visibility failures are serialized model operations.
         let result = unsafe { lari.advance(&source) };
         match case {
@@ -93,7 +93,7 @@ fn lari_schema_missing_services_rfkill_and_uncertain_command_keep_original_owner
                     ),
                 );
                 assert_eq!(
-                    // SAFETY: The wrong response completed synchronously in retained receive RAM;
+                    // SAFETY: The wrong response completed synchronously in kept receive RAM;
                     // the same LARI/source/domain owners remain live through response refusal.
                     unsafe { lari.advance(&source) },
                     Err(LariError::Boot(Error::InitializationResponse {
@@ -109,7 +109,7 @@ fn lari_schema_missing_services_rfkill_and_uncertain_command_keep_original_owner
                 assert_eq!(response.ticket.sequence(), sequence);
                 let doorbell = state.lock().unwrap().registers[&0x460];
                 assert_eq!(
-                    // SAFETY: Refusal retained the original BIOS and DMA owners; this failed-state
+                    // SAFETY: Refusal kept the original BIOS and DMA owners; this failed-state
                     // reentry has no competing reset/submission worker or new source mapping.
                     unsafe { lari.advance(&source) },
                     Err(LariError::Boot(Error::State))

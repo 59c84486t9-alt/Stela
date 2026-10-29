@@ -1,4 +1,4 @@
-//! Actual pinned system-RAM backing after native WOPCM preparation.
+//! Pinned system-RAM backing after native WOPCM preparation.
 //! This copies the complete selected image, as xe_managed_bo_create_from_data
 //! does, but supplies neither a Linux BO nor GGTT binding, upload or authentication.
 use super::Preparation;
@@ -30,7 +30,7 @@ impl From<DmaError> for Error {
 }
 
 struct Backing {
-    // The canonical mapping itself retains the exact page pin/CPU mapping
+    // The canonical mapping itself keeps the exact page pin/CPU mapping
     // through failed invalidation. No second pin or public CPU writer is needed.
     mapping: DmaMapping,
 }
@@ -61,7 +61,7 @@ impl Backing {
         let cpu = pages.cpu_mapping(CacheAttribute::WriteBack)?;
         let destination = cpu.address(0, bytes.len())?;
         // SAFETY: newly allocated exclusive native RAM is zeroed/pinned by the
-        // actual PageSource. The immutable provider image cannot alias that new
+        // PageSource. The immutable provider image cannot alias that new
         // allocation. The complete checked span has no device address or writer.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), destination.as_ptr(), bytes.len());
@@ -74,36 +74,36 @@ impl Backing {
         Ok(())
     }
     /// # Safety
-    /// Every actual device/GGTT/IRQ/submission reference has ended; no new
+    /// Every device/GGTT/IRQ/submission reference has ended; no new
     /// access can begin. The domain's process/context restrictions still apply.
     unsafe fn retire(&mut self) -> Result<(), Error> {
-        // SAFETY: caller retains the same native preparation and establishes
+        // SAFETY: caller keeps the same native preparation and establishes
         // complete quiescence, or has never exposed any IOVA through this API.
         unsafe { self.mapping.unmap()? };
         Ok(())
     }
 }
 
-/// Complete selected image in actual WB RAM and a private requester mapping.
-/// No IOVA has escaped this API. Drop retains an uncertain mapping through the
+/// Complete selected image in WB RAM and a private requester mapping.
+/// No IOVA has escaped this API. Drop keeps an uncertain mapping through the
 /// canonical DMA quarantine; explicit rollback can return the same preparation.
 pub struct Unpublished<'device, 'provider> {
     preparation: Preparation<'device, 'provider>,
     backing: Backing,
 }
 impl<'device, 'provider> Preparation<'device, 'provider> {
-    /// Preserve the actual WOPCM/device/provider ownership on every failure.
+    /// Preserve the WOPCM/device/provider ownership on every failure.
     /// The image includes the original CSS, microcode, RSA and trailing bytes;
     /// the rounded page tail stays zero. Neither IOVA nor GGTT address escapes.
     ///
     /// # Safety
-    /// `domain` is the actual isolated requester domain of this SAME device,
-    /// WOPCM/power/reset epoch and retained native owner, not another function
+    /// `domain` is the isolated requester domain of this SAME device,
+    /// WOPCM/power/reset epoch and kept native owner, not another function
     /// with matching PCI IDs. Its ownership remains stable through retirement
     /// or canonical quarantine. Page/domain operations run in their real allowed
     /// CPU/process context. No other owner publishes these allocations/IOVAs or
     /// starts device/firmware accesses. The canonical domain has no checked
-    /// device-identity query: a genuine native producer must establish this
+    /// device-identity query: a native producer must establish this
     /// relationship; caller booleans or numeric-address agreement cannot do so.
     #[allow(
         clippy::result_large_err,
@@ -136,8 +136,8 @@ impl<'device, 'provider> Unpublished<'device, 'provider> {
     pub fn preparation(&self) -> &Preparation<'device, 'provider> {
         &self.preparation
     }
-    /// Actual cache/ordering visibility precedes publication of the IOVA.
-    /// Failure retains the same mapping/preparation for retry or rollback.
+    /// Cache/ordering visibility precedes publication of the IOVA.
+    /// Failure keeps the same mapping/preparation for retry or rollback.
     #[allow(
         clippy::result_large_err,
         reason = "Failure must return the retained native owner without allocating or inventing rollback."
@@ -154,8 +154,8 @@ impl<'device, 'provider> Unpublished<'device, 'provider> {
             Err(error) => Err((self, error)),
         }
     }
-    /// Remove the never-published mapping, then return the same actual WOPCM
-    /// preparation. Failed invalidation retains every lease for a real retry.
+    /// Remove the never-published mapping, then return the same WOPCM
+    /// preparation. Failed invalidation keeps every lease for a real retry.
     #[allow(
         clippy::result_large_err,
         reason = "Failure must return the retained native owner without allocating or inventing rollback."
@@ -196,11 +196,11 @@ impl<'device, 'provider> Published<'device, 'provider> {
     /// # Safety
     /// Original upload/authentication and every device access have completed;
     /// firmware/engines, submissions and IRQ/work users are stopped/drained,
-    /// restoring the actual probe owner's no-DMA/no-firmware-access contract.
+    /// restoring the probe owner's no-DMA/no-firmware-access contract.
     /// The same WOPCM/power/reset epoch remains valid. Real GGTT mappings
     /// are removed with acknowledged GT invalidation, no future use can begin,
-    /// and the actual device/domain context restrictions are satisfied.
-    /// Errors retain the whole owner for retry. No reset/drain is synthesized.
+    /// and the device/domain context restrictions are satisfied.
+    /// Errors keep the whole owner for retry. No reset/drain is synthesized.
     #[allow(
         clippy::result_large_err,
         reason = "Failure must return the retained native owner without allocating or inventing rollback."
@@ -211,7 +211,7 @@ impl<'device, 'provider> Published<'device, 'provider> {
         if let Err(error) = self.preparation()._device.gsm_check_context() {
             return Err((self, Error::Device(error)));
         }
-        // SAFETY: caller establishes actual complete device/GGTT/user quiescence.
+        // SAFETY: caller establishes complete device/GGTT/user quiescence.
         if let Err(error) = unsafe { self.backing.as_mut().expect("live firmware").retire() } {
             return Err((self, error));
         }
@@ -223,9 +223,9 @@ impl Drop for Published<'_, '_> {
     fn drop(&mut self) {
         if self.backing.is_some() {
             // An escaped IOVA cannot certify device/GGTT completion. Close the
-            // same actual device epoch before its mutable borrow ends; Device
-            // Drop retains its native power/reset/MMIO owner. DmaMapping Drop
-            // independently quarantines the exact requester mapping and pins.
+            // same device epoch before its mutable borrow ends; Device
+            // Drop keeps its native power/reset/MMIO owner. DmaMapping Drop
+            // independently quarantines the requester mapping and pins.
             self.preparation
                 .as_mut()
                 .expect("retained preparation")

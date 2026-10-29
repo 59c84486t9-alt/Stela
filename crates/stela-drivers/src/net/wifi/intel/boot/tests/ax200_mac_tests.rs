@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Actual unbound MAC object and owned command DMA; no PHY/scan substitution.
+//! Unbound MAC object and owned command DMA; no PHY/scan substitution.
 use super::{ax200_country_tests::Os, ax200_scan_tests::finish_mcc, ax200_tests::*, *};
 use core::sync::atomic::AtomicBool;
 #[path = "ax200_mld_mac_tests.rs"]

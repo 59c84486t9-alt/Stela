@@ -87,7 +87,7 @@ pub struct Ax200Phy<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'a, Q, B, O> {
     /// Move only the idle original scan owner. A pending or retiring request,
     /// including its deferred RX users, cannot become a PHY configuration.
-    /// The channel remains an input until actual hardware and OS admission.
+    /// The channel remains an input until hardware and OS admission.
     pub fn begin_phy_context(self, channel: Channel) -> Result<Ax200Phy<'a, Q, B, O>, Box<Self>> {
         if self.phase != Ax200ScanPhase::NotStarted
             || self.scanner.phase() != protocol::Phase::Idle
@@ -258,7 +258,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
         Ok(())
     }
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the retained native
+    /// `source` supplies fresh exclusive coherent pages for the native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -381,7 +381,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
             let operation = Operation::Receive(self.channel);
             let admission = owner.admit(operation).map_err(Ax200PhyError::Regulatory)?;
             // SAFETY: held same-owner hardware then OS leases cover the exact
-            // unbound receive configuration, including actual DMA visibility.
+            // unbound receive configuration, including DMA visibility.
             unsafe {
                 owner.publish(admission, operation, |guard| {
                     guard.submit(command.id, &command.bytes, source)
@@ -438,7 +438,7 @@ fn configuration(
         return Err(Ax200PhyError::UnsupportedBand);
     }
     // The source capability selects channel-info geometry independently
-    // of PHY command version. PHY3/4 always retains its full 32-byte size.
+    // of PHY command version. PHY3/4 always keeps its full 32-byte size.
     let band = u8::from(channel.band == Band::Ghz2);
     if fw.supports_capability(48) {
         bytes[8..12].copy_from_slice(&u32::from(channel.number).to_le_bytes());
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn phy_lmac_routing_follows_source_cdb_and_actual_band() {
         // Pinned binding.c::iwl_mvm_get_lmac_id and context.h LMAC indices.
-        // These four source cases are also covered in the retained C trace.
+        // These four source cases are also covered in the C trace.
         for (cdb, band, number, frequency_mhz, expected_lmac) in [
             (false, Band::Ghz2, 1, 2412, 0u32),
             (true, Band::Ghz2, 1, 2412, 0),

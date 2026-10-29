@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Separate BCM5761 A0 copper peer: actual 512-entry rings, source controls,
-//! nonidentity requester DMA, and retained failure lifetimes. No hardware claim.
+//! Separate BCM5761 A0 copper peer: 512-entry rings, source controls,
+//! nonidentity requester DMA, and kept failure lifetimes.
 use super::*;
 
 const STRAPS: [u32; 16] = [
@@ -327,7 +327,7 @@ fn actual_5761_required_clock_and_fifo_readback_failures_never_allow_packet_io()
         peer.lock().unwrap().ignore_write = None;
         if at == 0x360c {
             // A failed PHY reset-clock restoration is not cleared by a later
-            // stop acknowledgement; the original hardware owner is retained.
+            // stop acknowledgement; the original hardware owner is held.
             assert_eq!(packet.stop(), Err(Error::Poisoned));
             drop(packet);
             assert_eq!(peer.lock().unwrap().drops, 0);

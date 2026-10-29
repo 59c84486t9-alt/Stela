@@ -89,13 +89,13 @@ pub struct Ax200LegacyPeer<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     first_error: Option<Ax200LegacyPeerError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O> {
-    /// Install only the original single legacy AP station. The same genuine
-    /// service must retain restrictive revocation for every configured legacy
-    /// rate plus the cold response union, through actual removal or stop.
+    /// Install only the original single legacy AP station. The same
+    /// service must keep restrictive revocation for every configured legacy
+    /// rate plus the cold response union, through removal or stop.
     /// # Safety
     /// begin_binding's original provider, exclusive-owner and requester
     /// contracts remain in force. Peer capabilities must be the OS-selected
-    /// AP's actual legacy capabilities. No external station, queue, key, modern
+    /// AP's legacy capabilities. No external station, queue, key, modern
     /// negotiation, action-frame state update or MAC mutation may race this
     /// owner. This method does not authorize transmitting an authentication.
     pub unsafe fn begin_legacy_peer(
@@ -124,10 +124,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
             first_error: None,
         })
     }
-    /// Install the original selected MLD station0 on this actual active link0,
-    /// retaining only the OS-selected peer's finite legacy-rate capabilities.
+    /// Install the original selected MLD station0 on this active link0,
+    /// keeping only the OS-selected peer's finite legacy-rate capabilities.
     /// # Safety
-    /// begin_legacy_peer's genuine provider, restrictive-revocation and unique
+    /// begin_legacy_peer's provider, restrictive-revocation and unique
     /// native ownership contracts apply unchanged. No station, session, key,
     /// queue or negotiated HT/HE/association state may be changed externally.
     pub unsafe fn begin_mld_peer(
@@ -137,8 +137,8 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
         if !self.mld {
             return Err(Box::new(self));
         }
-        // SAFETY: same complete finite-rate/provider lifetime, with actual
-        // selected protocol qualified again before any device publication.
+        // SAFETY: same complete finite-rate/provider lifetime, with
+        // selected protocol checked again before any device publication.
         unsafe { self.begin_legacy_peer(peer) }.map(|mut owner| {
             owner.mld = true;
             owner
@@ -161,7 +161,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
     pub fn ticket(&self) -> Option<&CommandTicket> {
         self.ticket.as_ref()
     }
-    /// Actual acknowledged firmware identity, with no queue/association claim.
+    /// Acknowledged firmware identity.
     pub fn station_id(&self) -> Option<u8> {
         (self.phase == Ax200LegacyPeerPhase::ManagementQueueRequired).then_some(0)
     }
@@ -227,7 +227,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         let firmware = &radio.initialized.boot.firmware;
         // Source's48-byte station body requires new-RX68 or STA_TYPE API30.
         // MLD110 selects another station owner, even if earlier cold setup
-        // legitimately used it only to qualify firmware-internal aux activity.
+        // legitimately used it only to check firmware-internal aux activity.
         // This initial profile
         // has only LMAC0, no previous host peer, queues, keys or rate command.
         // Firmware's auxiliary station is source-owned, not allocated as STA0.
@@ -366,7 +366,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         Ok(self.binding)
     }
     /// # Safety
-    /// The original genuine native requester/domain and begin_legacy_peer
+    /// The original native requester/domain and begin_legacy_peer
     /// service contracts must hold through every visibility and completion.
     pub unsafe fn advance(
         &mut self,
@@ -378,7 +378,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         if self.phase == Ax200LegacyPeerPhase::Stopped {
             return Err(Ax200LegacyPeerError::State);
         }
-        // SAFETY: unchanged actual native owner and genuine provider contract.
+        // SAFETY: unchanged native owner and provider contract.
         let result = unsafe { self.advance_inner(source) };
         if let Err(error) = &result
             && !matches!(
@@ -511,7 +511,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
                 .phy
                 .capture_idle_receive()
                 .map_err(Ax200LegacyPeerError::Phy)?;
-            // SAFETY: actual programmed rate bitmap plus cold responses; held
+            // SAFETY: programmed rate bitmap plus cold responses; held
             // original hardware then OS leases span this native HCMD.
             unsafe {
                 admission::publish_legacy(

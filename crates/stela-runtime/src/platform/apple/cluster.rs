@@ -23,24 +23,24 @@
 //! ACC counters (`get/setCPUPerfCounter`, kernel file 0x2fa009c/0x2fa01c4,
 //! T8112 P override 0x2fa4c38/0x2fa4ad8) are paired full64 banks at +20400
 //! and +20480. The driver capacity is 16 (ApplePMGR constructor 0x2b67d80),
-//! not the enclosing MMIO span. The P map at +20500 retains every full64
+//! not the enclosing MMIO span. The P map at +20500 keeps every full64
 //! logical-state entry (`mapCPUPerfCounters`, 0x2fa7cb4); the first entry's
 //! low32 determines software's remap and must read back the programmed 1.
 //! Special event pairs at +20580+8*n are selected by DT events types2/7.
-//! +20660 retains enable bits0/2/4/36 and other full64 RMW fields.
+//! +20660 keeps enable bits0/2/4/36 and other full64 RMW fields.
 //!
 //! Stela hands off counters, map and enables zero/disabled. Its emulated die
 //! has no physical residency/transition event source or known scaling, so
-//! counts retain software saves. No physical activity rate is invented.
+//! counts keep software saves. No physical activity rate is invented.
 //!
 //! CPU state command +20020 (`setPerfState`, 0x2f9f238) uses low5, SET25,
 //! BUSY31; fixed-frequency relock changes bit42 (0x2b8b490). Stela selects
 //! state0 at handoff and completes supported SET requests at once, clearing
 //! SET/BUSY and APSC/DVMR pending flags. No clock frequency is synthesized:
-//! consumers use this selected state and the same retained state table.
+//! consumers use this selected state and the same state table.
 //! APSC disable configuration bit23 holds; snooze bit40 at +200f8 holds
 //! (`_initAPSC`, 0x2f9cf8c), as do the selected-table scratch words at
-//! +7ffe8/+7fff0. The P throttler enable +20078 (0x2fa5100) retains full64
+//! +7ffe8/+7fff0. The P throttler enable +20078 (0x2fa5100) keeps full64
 //! configuration. No physical snooze or overload cause is invented.
 //!
 //! Every other register refuses.

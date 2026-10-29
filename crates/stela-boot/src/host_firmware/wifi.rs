@@ -8,7 +8,7 @@ use uefi::{
     runtime::{VariableAttributes, VariableVendor},
 };
 
-/// Preserve the actual EFI status and DataSize on every outcome. The safe
+/// Preserve the EFI status and DataSize on every outcome. The safe
 /// convenience wrapper discards DataSize on errors other than BUFFER_TOO_SMALL
 /// and slices its buffer before the caller can validate a returned size.
 fn read(variable: Variable, buffer: &mut [u8]) -> Read {

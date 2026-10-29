@@ -98,7 +98,7 @@ const COMMANDS: [(Command, usize); 16] = [
     (Command::GetCrcData, 0x30),
 ];
 
-/// The actual fixed monitor state, shared by IOMFB and its IOAV controller.
+/// The fixed monitor state, shared by IOMFB and its IOAV controller.
 #[derive(Debug)]
 pub struct DisplayState {
     /// Configured initial model power, not an Apple boot-state observation.
@@ -149,7 +149,7 @@ impl Controller {
     }
 
     /// Transport termination closes the client; it does not power off the
-    /// physical display. Retained IOP sleep does not call this operation.
+    /// physical display. IOP sleep does not call this operation.
     pub fn transport_closed(&mut self) {
         self.opened = false;
     }
@@ -211,7 +211,7 @@ impl Controller {
                 write_u32(&mut reply, HEADER_BYTES, SUCCESS);
             }
             Command::GetParticipatesPowerManagement => {
-                // Backed by actual power control and the shared scanout gate.
+                // Backed by power control and the shared scanout gate.
                 write_u32(&mut reply, HEADER_BYTES, SUCCESS);
                 write_u64(&mut reply, VALUE, 1);
             }

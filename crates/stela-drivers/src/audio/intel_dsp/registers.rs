@@ -8,20 +8,20 @@ pub enum Bar {
     Hda,
     Dsp,
 }
-/// One exclusive stopped DSP/HDA assignment. Native implementations must retain
-/// real mappings and requester authority; test models must be isolated.
+/// One exclusive stopped DSP/HDA assignment. Native implementations must keep
+/// real mappings and requester permission; test models must be isolated.
 ///
 /// # Safety
 /// The provider must exclude firmware/other drivers, keep D0/power/clocks and
-/// qualified coherent DMA active, bind the same requester to all supplied DMA
+/// checked coherent DMA active, bind the same requester to all supplied DMA
 /// domains, and perform accesses at exactly the named native widths. Errors
-/// after writes can have effects and must retain ownership. No active Drop
+/// after writes can have effects and must keep ownership. No active Drop
 /// may release registers, resource reservations, power or DMA isolation.
 pub unsafe trait Registers {
     fn identity(&mut self) -> Result<Identity, Error>;
     fn bytes(&self, bar: Bar) -> usize;
-    /// Clear/set the actual requester Command.BM and verify its posted native
-    /// readback. A failed or ambiguous write must retain the complete owner.
+    /// Clear/set the requester Command.BM and verify its posted native
+    /// readback. A failed or ambiguous write must keep the complete owner.
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error>;
     fn misc_clock_gate(&mut self, enabled: bool) -> Result<(), Error>;
     fn hold_d0(&mut self) -> Result<(), Error>;

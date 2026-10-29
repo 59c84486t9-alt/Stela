@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Actual ACPICA installation, OSL port transport and retained handler lifecycle.
+// ACPICA installation, OSL port transport and kept handler lifecycle.
 mod ec_binding_tests {
     #[test]
     fn native_installed_ec_unlock_preserves_exact_original_native_io_cause() {
@@ -126,8 +126,8 @@ mod ec_binding_tests {
                 completion: Some(completed(0x55)),
             })
         );
-        // B's actual release failed first. Its immutable diagnostic does not
-        // replace A's independently returned actual data/effect receipt.
+        // B's release failed first. Its immutable diagnostic does not
+        // replace A's independently returned data/effect receipt.
         assert_eq!(binding.failed_completion(), Some(completed(0x55)));
         assert_eq!(binding.synchronization_error(), Some(LIMIT));
         let before = EC.lock().unwrap().as_ref().unwrap().commands.len();
@@ -151,8 +151,8 @@ mod ec_binding_tests {
             unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
         NESTED_SEMAPHORE.store(binding.semaphore_for_test() as usize, Ordering::Release);
         NESTED_CONTEXT.store(binding.context_for_test() as usize, Ordering::Release);
-        // The actual validation releases its semaphore. Before that release
-        // returns, the provider runs another actual read whose unlock fails.
+        // The validation releases its semaphore. Before that release
+        // returns, the provider runs another read whose unlock fails.
         assert!(binding.supplier().is_err());
         assert_eq!(
             *NESTED_FAILURE.lock().unwrap(),
@@ -372,8 +372,8 @@ mod ec_binding_tests {
             let context = binding.context_for_test();
             let actual_locks = device.handle.ec_lock_count();
             assert_eq!(actual_locks.load(Ordering::Acquire), 0);
-            // Admit an actual native work callback while the provider is live.
-            // It acquires/retains the real ACPICA token + namespace lease only
+            // Admit a native work callback while the provider is live.
+            // It acquires/keeps the real ACPICA token + namespace lease only
             // when shutdown quiescence drains it after Session's initial check.
             assert_eq!(
                 // SAFETY: the provider context is live and the queued callback takes the binding's
@@ -440,7 +440,7 @@ mod ec_binding_tests {
         let flags = u32::from_le_bytes(fadt[112..116].try_into().unwrap());
         fadt[112..116].copy_from_slice(&(flags | (1 << 20)).to_le_bytes());
         checksum(fadt, 9);
-        // Reduced-hardware fixture genuinely needs no legacy SCI/PM register
+        // Reduced-hardware fixture needs no legacy SCI/PM register
         // callbacks; unsupported legacy requests still fail in the provider.
         provider.capabilities = FULL_CAPABILITIES;
         // SAFETY: the fixture provider's tables and callbacks are valid, and the serial lock keeps
@@ -467,7 +467,7 @@ mod ec_binding_tests {
             Ok(Some(Value::Integer(0)))
         );
         assert!(!session.hardware_enabled());
-        // This must compile with the retained Binding/Handle still borrowing
+        // This must compile with the Binding/Handle still borrowing
         // Session: activation mutates only the BSP facade's existing Cell state.
         session.enable_hardware().unwrap();
         assert!(session.hardware_enabled());
@@ -619,7 +619,7 @@ mod ec_binding_tests {
             let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
             let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
             // Target-validation and registration namespace leases succeed;
-            // retained-context allocation fails, then actual semaphore deletion.
+            // kept-context allocation fails, then semaphore deletion.
             ALLOCATION_ATTEMPTS.store(0, Ordering::Release);
             FAIL_ALLOCATION.store(3, Ordering::Release);
             REJECT_NEW_SEMAPHORE_DELETE.store(true, Ordering::Release);
@@ -772,7 +772,7 @@ mod ec_binding_tests {
     static REJECT_AFTER_SIGNAL: AtomicBool = AtomicBool::new(false);
     static NESTED_RAM_VALUE: AtomicUsize = AtomicUsize::new(256);
     static NESTED_OUTER_ERROR: AtomicUsize = AtomicUsize::new(0);
-    // Actual mapped FACS storage has interior-mutability and native u32
+    // Mapped FACS storage has interior-mutability and native u32
     // alignment. ACPICA's production CAS operates directly on word 4.
     static FACS: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
     struct Legacy {
@@ -889,7 +889,7 @@ mod ec_binding_tests {
         // SAFETY: forwards this callback's own arguments under the same provider contract.
         let status = unsafe { signal_semaphore(p, semaphore, units) };
         if status == 0 && rejected {
-            return SUPPORT.0; // The actual release applied before its error.
+            return SUPPORT.0; // The release applied before its error.
         }
         let context =
             if status == 0 && NESTED_SEMAPHORE.load(Ordering::Acquire) == semaphore as usize {
@@ -900,7 +900,7 @@ mod ec_binding_tests {
         if context != 0 {
             let value = NESTED_RAM_VALUE.load(Ordering::Acquire);
             if value <= 255 {
-                // Authored peripheral change between the two actual EC reads.
+                // Authored peripheral change between the two EC reads.
                 EC.lock().unwrap().as_mut().unwrap().ram[0] = value as u8;
             }
             REJECT_SIGNAL.store(semaphore as usize, Ordering::Release);
@@ -1326,7 +1326,7 @@ mod ec_binding_tests {
                 // SAFETY: the fixture's simulated EC owns these ports alone, and this test runs in
                 // process context.
                 unsafe { Binding::install(found, config, Scope::FirstController) }.err(),
-                Some(Failure::Firmware(Error(0x19))), // actual ACPICA AE_SAME_HANDLER
+                Some(Failure::Firmware(Error(0x19))), // ACPICA AE_SAME_HANDLER
             );
             assert_eq!(
                 SEMAPHORES.load(Ordering::SeqCst),

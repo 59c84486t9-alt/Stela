@@ -9,7 +9,7 @@ type PrefixBits = [[u64; GROUP_WORDS]; PREFIXES];
 
 // This temporary bitmap exists only during constant evaluation. Enumerating
 // each form's feasible unmasked prefixes avoids scanning every form for every
-// prefix, and deduplicates groups without retaining a runtime bitmap.
+// prefix, and deduplicates groups without keeping a runtime bitmap.
 const GROUP_REFERENCES: usize = group_references();
 
 struct Index {
@@ -144,7 +144,7 @@ mod tests {
                     compare(form.value | bit);
                     free &= free - 1;
                 }
-                // Both SingleImm5 classes and every lane encoding retain the
+                // Both SingleImm5 classes and every lane encoding keep the
                 // original variant selection after the prefix narrows groups.
                 if form
                     .variants

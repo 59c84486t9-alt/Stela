@@ -130,8 +130,8 @@ pub struct Model {
     /// T8112, 42 on T600x and T602x, whose DRAM lies at 1 TiB).
     pub uat_output_bits: u32,
     /// The native ASC control word required by a recovered firmware callback.
-    /// Only G14G's global callback has this qualified binding (26A434
-    /// armfw_g14g startup 0x371b0..0x371f8 and retained wake 0x378d0..0x37904).
+    /// Only G14G's global callback has this checked binding (26A434
+    /// armfw_g14g startup 0x371b0..0x371f8 and kept wake 0x378d0..0x37904).
     /// Other families' unrecovered callbacks remain protocol refusals; their
     /// SGX apertures must not inherit G14G's private physical requirement.
     pub native_asc_control: Option<u64>,

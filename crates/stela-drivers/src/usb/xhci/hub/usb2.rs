@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! External USB2 reset/debounce through actual parent-hub EP0 requests.
+//! External USB2 reset/debounce through parent-hub EP0 requests.
 use super::*;
 
 const POWER: u16 = 1 << 8;
@@ -140,7 +140,7 @@ mod tests {
                     BTreeMap::from([(0, Node::hub(HIGH_SPEED, 1)), (1, Node::leaf(HIGH_SPEED))]);
                 let mut backing = vec![0u64; 256 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: actual model commands and TDs stay in retained RAM.
+                // SAFETY: model commands and TDs stay in kept RAM.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut c, model) = controller(&mut dma, context, nodes);

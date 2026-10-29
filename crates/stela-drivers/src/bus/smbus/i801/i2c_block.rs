@@ -3,7 +3,7 @@
 // Copyright (c) 1998-2002 Frodo Looijaard, Philip Edelbrock,
 // Mark D. Studebaker; (c) 2007-2014 Jean Delvare; (c) 2010 Intel Corporation,
 // David Woodhouse. See bus/THIRD_PARTY.md.
-//! Fixed-length I²C blocks with actual retained PCI host-configuration authority.
+//! Fixed-length I²C blocks with kept PCI host-configuration permission.
 use super::*;
 use crate::bus::{
     pci::{ConfigSpace, Function},
@@ -15,25 +15,25 @@ const SPD_WRITE_DISABLE: u8 = 1 << 4;
 const PROTOCOL_I2C_BLOCK: u8 = 0x18;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfigurationError;
-/// Actual function configuration, retained through every temporary mode change.
+/// Function configuration, kept through every temporary mode change.
 /// # Safety
-/// The provider exclusively owns the same actual PCI function/reset epoch and
+/// The provider exclusively owns the same PCI function/reset epoch and
 /// host-configuration byte as the I801 register owner. Accesses are ordered and
-/// byte-width; errors can follow effects. It retains native root/mapping/firmware
+/// byte-width; errors can follow effects. It keeps native root/mapping/firmware
 /// arbitration leases when leaked and cannot borrow an ephemeral owner.
 pub unsafe trait HostConfiguration {
     fn device_id(&self) -> u16;
     fn read(&mut self) -> Result<u8, ConfigurationError>;
     fn write(&mut self, value: u8) -> Result<(), ConfigurationError>;
 }
-/// Concrete PCI function and actual platform/root ownership guard.
+/// Concrete PCI function and platform/root ownership guard.
 pub struct OwnedConfiguration<C: ConfigSpace, G> {
     function: Function<C>,
     _guard: G,
 }
 impl<C: ConfigSpace, G> OwnedConfiguration<C, G> {
     /// # Safety
-    /// Function and guard carry actual exclusive, powered configuration/root
+    /// Function and guard carry exclusive, powered configuration/root
     /// ownership for the full host lifetime. The same guard also excludes
     /// firmware/AML/SMM host accesses. This is not an identity-only grant.
     pub unsafe fn claim(function: Function<C>, guard: G) -> Result<Self, (Function<C>, G)> {
@@ -54,8 +54,8 @@ impl<C: ConfigSpace, G> OwnedConfiguration<C, G> {
         }
     }
 }
-// SAFETY: construction retains the actual Function/guard under its explicit
-// exclusive native authority contract. ConfigSpace requires narrow real writes.
+// SAFETY: construction keeps the Function/guard under its explicit
+// exclusive native permission contract. ConfigSpace requires narrow real writes.
 unsafe impl<C: ConfigSpace + 'static, G: 'static> HostConfiguration for OwnedConfiguration<C, G> {
     fn device_id(&self) -> u16 {
         self.function.device
@@ -89,9 +89,9 @@ pub struct Failure {
     pub transfer: Option<Error>,
     pub configuration: Option<ConfigurationFailure>,
 }
-/// Sole owner of the ordinary SMBus engine and actual PCI mode authority.
+/// Sole owner of the ordinary SMBus engine and PCI mode permission.
 /// Uncertain restoration or KILL poisons both I²C-block and normal SMBus entry
-/// points; Drop then retains the actual owners for platform reset/retirement.
+/// points; Drop then keeps the owners for platform reset/retirement.
 pub struct Controller<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static> {
     owners: Option<(I801<R, T>, C)>,
     original: u8,
@@ -231,7 +231,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
             return Err(self.fault(transfer.err(), Some(failure)));
         }
         self.active = false;
-        // Preserve the original transfer failure while always restoring actual
+        // Preserve the original transfer failure while always restoring
         // configuration. Successful hardware cleanup and its final observation
         // are part of the transaction bound; the bounded private CPU copy is not.
         transfer?;
@@ -327,7 +327,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         transaction: Transaction<'_>,
         pec: bool,
     ) -> Result<(), Error> {
-        // PEC is admitted only by this retained actual configuration owner.
+        // PEC is admitted only by this configuration owner.
         // Unsupported protocols/profiles refuse before configuration or host I/O.
         if pec {
             if self.failure.is_some() {
@@ -362,7 +362,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
     /// Request and reply counts are independently 1..=32. This requires source-
     /// listed ICH5+ block-process capability and enabled E32B policy; no byte-
     /// handshake fallback or automatic replay exists. The reply remains private
-    /// through CRC/mode cleanup, the actual PCI guard and the final deadline.
+    /// through CRC/mode cleanup, the PCI guard and the final deadline.
     pub fn process_block(
         &mut self,
         address: Address,
@@ -403,7 +403,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
 
     /// SMBus Quick: one address/direction and ACK, with no command, payload or
     /// PEC. This is not an arbitrary empty I²C transfer. Completion still passes
-    /// the original host cleanup, actual PCI guard and whole-operation deadline.
+    /// the original host cleanup, PCI guard and whole-operation deadline.
     pub fn quick(&mut self, address: Address, read: bool) -> Result<(), Error> {
         if self.failure.is_some() {
             return Err(ErrorKind::NeedsReset.into());
@@ -466,7 +466,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         transaction: Transaction<'_>,
         pec: bool,
     ) -> Result<(), Error> {
-        // Stage all native read outputs until the actual PCI guard succeeds.
+        // Stage all native read outputs until the PCI guard succeeds.
         match transaction {
             Transaction::ReceiveByte(output) => {
                 let mut value = 0;
@@ -747,7 +747,7 @@ mod tests {
         device: u16,
         _lease: Lease,
     }
-    // SAFETY: fixture's actual function/configuration is shared for inspection only;
+    // SAFETY: fixture's function/configuration is shared for inspection only;
     // the controller owns the sole native configuration lease and host engine.
     unsafe impl HostConfiguration for Config {
         fn device_id(&self) -> u16 {
@@ -861,7 +861,7 @@ mod tests {
         )
         .ok()
         .unwrap();
-        // SAFETY: fixture's actual powered/exclusive host and actual configuration
+        // SAFETY: fixture's powered/exclusive host and configuration
         // use the same hardware and own distinct real register/config guards.
         let host = unsafe { Controller::claim(host, cfg) }.ok().unwrap();
         state.borrow_mut().config_count = 0;
@@ -1156,7 +1156,7 @@ mod tests {
             space,
         )
         .unwrap();
-        // SAFETY: native configuration model and its actual retained root lease
+        // SAFETY: native configuration model and its root lease
         // are exclusively owned by this provider; no bus request is pending.
         let mut cfg = unsafe { OwnedConfiguration::claim(function, Lease(drops.clone())) }
             .ok()
@@ -1180,8 +1180,8 @@ mod tests {
         let f = fixture(0x7e22, false);
         let (host, mut cfg) = f.host.release().ok().unwrap();
         cfg.device = 0x24d3;
-        // SAFETY: same retained real resources as fixture; wrong scalar pairing
-        // must return those actual owners without attempting hardware changes.
+        // SAFETY: same real resources as fixture; wrong scalar pairing
+        // must return those owners without attempting hardware changes.
         let (kind, (host, cfg)) = unsafe { Controller::claim(host, cfg) }.err().unwrap();
         assert_eq!(kind, ErrorKind::InvalidConfiguration);
         assert_eq!(f.state.borrow().config_count, 0);
@@ -1245,7 +1245,7 @@ mod tests {
                         HOST_DATA1
                     };
                     let count = if stage == 1 {
-                        // prepare reads twice; cleanup reads the actual modes
+                        // prepare reads twice; cleanup reads the modes
                         // while verifying quiescence before final config read.
                         f.state.borrow().read_counts[usize::from(offset)] + 4
                     } else if block {

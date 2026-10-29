@@ -62,7 +62,7 @@ fn body_and_header_alias_preflight() {
             }
             let (error, owners) = match
             // SAFETY: These overlapping headers remain backed by live RAM with the
-            // exact config/root owners retained; no native IRQ or concurrent config
+            // exact config/root owners kept; no native IRQ or concurrent config
             // writer exists.
             unsafe { MsiConfig::new(f.function, f.root) } {
                 Err(e) => e,
@@ -85,7 +85,7 @@ fn body_and_header_alias_preflight() {
         }
     }
     // Unknown two-byte headers remain occupied even inside MSI data or
-    // either actual per-vector Pending bitmap, in either list order.
+    // either per-vector Pending bitmap, in either list order.
     for (wide, mask, header) in [
         (false, false, 0x58),
         (false, true, 0x60),

@@ -2,7 +2,7 @@
 // Copyright (C) 2005-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Actual AX200 MCC query and BIOS selection, retaining the original requester.
+//! AX200 MCC query and BIOS selection, keeping the original requester.
 //! Returned profiles remain observations until fully applied radio/OS policy.
 use super::*;
 use crate::net::wifi::intel::mcc::{
@@ -111,10 +111,10 @@ impl<Q: BootIo, B: BiosIo> Ax200Mcc<'_, Q, B> {
             }
         }
     }
-    /// Advance cold MCC initialization from genuine firmware RX responses.
+    /// Advance cold MCC initialization from firmware RX responses.
     /// This grants no receive/scan/TX or OS/location permission.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the exact retained
+    /// `source` supplies fresh exclusive coherent pages for the kept
     /// native requester/domain under RomBoot's publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -123,7 +123,7 @@ impl<Q: BootIo, B: BiosIo> Ax200Mcc<'_, Q, B> {
         if let Some(error) = self.first_error.as_ref() {
             return Err(error.clone());
         }
-        // SAFETY: the caller's exact retained native page-source contract.
+        // SAFETY: the caller's native page-source contract.
         let result = unsafe { self.advance_inner(source) };
         if let Err(error) = &result
             && !matches!(error, Ax200MccError::Boot(Error::CommandReclaim(_)))

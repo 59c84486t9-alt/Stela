@@ -3,13 +3,13 @@
 // Copyright (c) 2026 Stela contributors
 //! Cypress CCGx HPI transport, adapted from pinned Linux ucsi_ccg.c.
 //!
-//! The platform supplies the actual powered I²C adapter/target and exclusive
+//! The platform supplies the powered I²C adapter/target and exclusive
 //! HPI ownership. Polling drains the same real interrupt-status register as
 //! Linux's threaded handler, copying CCI and MESSAGE_IN before W1C. No cached
 //! notification can complete a newly submitted command. CCG's fixed 16-byte
 //! operation region supports UCSI 1.x; larger layouts are explicitly refused.
 //! Firmware flashing, NVIDIA alternate-mode rewriting and runtime PM policy
-//! are separate; raw firmware/alternate-mode data is retained.
+//! are separate; raw firmware/alternate-mode data is held.
 
 use super::{Cci, Timer, Transport, TransportError};
 use crate::bus::i2c::{Address, Bus, Operation};
@@ -66,7 +66,7 @@ pub struct Ccg<B: Bus> {
     last_interrupt: u8,
 }
 impl<B: Bus> Ccg<B> {
-    /// Start the real HPI UCSI interface. `max_read` comes from the actual
+    /// Start the real HPI UCSI interface. `max_read` comes from the
     /// adapter capability; chunking preserves repeated START and advances RAB.
     /// This does not discover or power NVIDIA GPU/DesignWare I²C hardware.
     pub fn start(

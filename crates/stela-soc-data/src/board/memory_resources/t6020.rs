@@ -234,7 +234,7 @@ pub fn from_io(
         quota_response_entries: scalar(&nub, "mc_quota_rsp_ptd_count")?,
     };
     descriptor.validate_source().map_err(String::from)?;
-    // Every field/physical extent is retained above. Full AMCC and canonical
+    // Every field/physical extent is held above. Full AMCC and canonical
     // resource validation belongs to prepare; this returns source facts only.
     Ok(Some(descriptor))
 }

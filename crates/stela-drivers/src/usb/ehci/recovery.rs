@@ -5,16 +5,16 @@
 use super::*;
 
 impl Controller {
-    /// Abandon this controller epoch and perform actual contained recovery.
+    /// Abandon this controller epoch and perform contained recovery.
     /// Every old device, pipe, transfer and suspended capability becomes stale
     /// before the first register effect. Outstanding transfers have unknown
     /// completion/USB effects and are never credited or automatically replayed.
     ///
     /// HALT/ASS0/PSS0, original BME-clear and posted-write drain precede old DMA
-    /// unmap. Full reset/fresh schedule allocation and actual PE0 isolation of
+    /// unmap. Full reset/fresh schedule allocation and PE0 isolation of
     /// every inherited root precede reuse. Callers must explicitly reset,
     /// enumerate/configure and resynchronize their real devices afterward.
-    /// Failure retains unresolved resources under this same original owner.
+    /// Failure keeps unresolved resources under this same original owner.
     /// Explicit shutdown/retirement cannot be reversed by this method.
     /// Privately suspended roots require their explicit resume first; this
     /// method supplies no reset-on-resume or platform power transition.
@@ -28,7 +28,7 @@ impl Controller {
             ));
         }
         self.state = State::Failed;
-        // Retain pending TD and original arena through every stop/drain/unmap
+        // Keep pending TD and original arena through every stop/drain/unmap
         // failure. Revoking public identity alone cannot free their resources.
         self.ports.iter_mut().for_each(|port| *port = None);
         let result = (|| {
@@ -44,9 +44,9 @@ impl Controller {
             self.hw().bus_master(false)?;
             self.hw().drain()?;
             if let Some(arena) = self.arena.as_mut() {
-                // SAFETY: actual full HALT, both engines stopped, original
+                // SAFETY: full HALT, both engines stopped, original
                 // BME clear and original requester payload drain. The native
-                // resource producer retains masked/drained IRQ exclusion.
+                // resource producer keeps masked/drained IRQ exclusion.
                 unsafe {
                     arena.dma.unmap()?;
                 }
@@ -54,9 +54,9 @@ impl Controller {
             self.arena = None;
             self.pending = None;
             self.default_port = None;
-            // This reuses the original retained native resources/domain. It
+            // This reuses the original native resources/domain. It
             // does not borrow a new domain to assert old-path retirement.
-            // Generation and transfer counters deliberately never reset.
+            // Generation and transfer counters never reset.
             self.initialize_inner()
         })();
         self.guard(result)?;

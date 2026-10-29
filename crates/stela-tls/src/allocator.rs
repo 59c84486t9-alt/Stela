@@ -1,4 +1,4 @@
-//! Fixed Mbed allocation ABI over Rust's actual global allocator.
+//! Fixed Mbed allocation ABI over Rust's global allocator.
 #[cfg(test)]
 use core::sync::atomic::Ordering;
 use core::{
@@ -26,7 +26,7 @@ unsafe extern "C" fn stela_mbedtls_calloc(count: usize, size: usize) -> *mut c_v
     let Ok(layout) = Layout::from_size_align(bytes, 16) else {
         return core::ptr::null_mut();
     };
-    // SAFETY: checked layout; the actual platform Rust allocator supplies its
+    // SAFETY: checked layout; the platform Rust allocator supplies its
     // lifetime/thread/context guarantees, as it does for all Rustls allocations.
     let raw = unsafe { alloc::alloc::alloc_zeroed(layout) };
     if raw.is_null() {
@@ -34,14 +34,14 @@ unsafe extern "C" fn stela_mbedtls_calloc(count: usize, size: usize) -> *mut c_v
     }
     #[cfg(test)]
     OUTSTANDING.fetch_add(1, Ordering::AcqRel);
-    // SAFETY: exact live allocation includes aligned size header and payload.
+    // SAFETY: live allocation includes aligned size header and payload.
     unsafe {
         raw.cast::<usize>().write(bytes);
         raw.add(16).cast()
     }
 }
 /// # Safety
-/// Pointer is null or the exact live payload returned by this backend's calloc,
+/// Pointer is null or the live payload returned by this backend's calloc,
 /// with no surviving callers/references; its preserved header is not modified.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_mbedtls_free(pointer: *mut c_void) {
@@ -87,7 +87,7 @@ unsafe extern "C" fn stela_mbedtls_free(pointer: *mut c_void) {
 /// Both pointers name complete readable NUL-terminated C strings for this call.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_mbedtls_strcmp(a: *const c_char, b: *const c_char) -> c_int {
-    // SAFETY: exact live C strings are supplied by the documented ABI caller.
+    // SAFETY: live C strings are supplied by the documented ABI caller.
     let (a, b) = unsafe { (CStr::from_ptr(a), CStr::from_ptr(b)) };
     match a.to_bytes().cmp(b.to_bytes()) {
         core::cmp::Ordering::Less => -1,

@@ -145,7 +145,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(changes)
     }
 
-    // alc_auto_init_amp enables its actual EAPD pins before these default
+    // alc_auto_init_amp enables its EAPD pins before these default
     // amplifier coefficients. Keep this separate from pre-init/PLL controls
     // so an unacknowledged EAPD enable cannot reach the amplifier write.
     pub(super) fn realtek_default_amplifier_coefficient(

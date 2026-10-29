@@ -19,7 +19,7 @@ impl Packed {
 }
 
 /// Source40-byte software interpolation state (10198b0..98dc), owned locally.
-/// Units are retained source table/tick units, not physical MHz or voltage.
+/// Units are held source table/tick units, not physical MHz or voltage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Interpolation {
     table: Vec<u32>,

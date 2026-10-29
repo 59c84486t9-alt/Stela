@@ -296,7 +296,7 @@ fn checked_exclusive_widths_preserve_source_quantity_and_host_requirements() {
                 requirements.required_profile,
                 profile_requirements::NATIVE_ACCESS | profile_requirements::TAG_GRANULES
             );
-            // Actual emission must preserve the same consumed plan and source map.
+            // Emission must preserve the same consumed plan and source map.
             let native = plan.compile().unwrap();
             assert!(!native.native.x86_64_code.is_empty());
             assert_eq!(native.native.source_map.len(), 2);

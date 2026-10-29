@@ -9,8 +9,8 @@
 //! stays visible and its DART (dart-dcpext, dart-dispext0) resolves for its
 //! clients — but gives no register a modeled meaning: an access by the AP is
 //! an explicit, named refusal that records the exact register for the owning
-//! doc, never a fabricated value. This is the spec-first boundary; the
-//! registers the restored_external boot actually touches are closed from its
+//! doc, never an invented value. This is the spec-first boundary; the
+//! registers the restored_external boot touches are closed from its
 //! trace, not guessed here.
 use alloc::vec::Vec;
 use {
@@ -35,7 +35,7 @@ impl Region {
     }
 
     /// One physical owner for a complete set of possibly contained aliases.
-    /// Child DART/ASC routes are retained by the bus, not implemented here.
+    /// Child DART/ASC routes are held by the bus, not implemented here.
     pub fn physical(views: Vec<(&'static str, u64, u64)>) -> Result<Self, &'static str> {
         if views.is_empty()
             || views.iter().any(|(name, base, bytes)| {

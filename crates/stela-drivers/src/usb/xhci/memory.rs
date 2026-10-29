@@ -1,7 +1,7 @@
 //! Distinct CPU and device views for xHCI-owned storage.
 //!
 //! The boot allocator remains an explicitly separate lifetime. Native storage
-//! retains the original domain and pins; no IOVA is interpreted as a pointer.
+//! keeps the original domain and pins; no IOVA is interpreted as a pointer.
 use super::*;
 use crate::bus::dma::{
     DmaValue,
@@ -158,7 +158,7 @@ impl Buffer {
 
     fn word<T: DmaValue>(&self, at: usize) -> *mut T {
         assert!(at <= self.len() && size_of::<T>() <= self.len() - at);
-        // SAFETY: checked complete range into the actual CPU mapping.
+        // SAFETY: checked complete range into the CPU mapping.
         let pointer = unsafe { self.as_ptr().add(at) }.cast::<T>();
         assert!((pointer as usize).is_multiple_of(align_of::<T>()));
         pointer
@@ -199,7 +199,7 @@ impl Buffer {
         Ok(())
     }
 
-    /// Actual completion establishes CPU ownership of this exact range.
+    /// Completion establishes CPU ownership of this exact range.
     pub(super) unsafe fn sync_cpu(&self, range: Range<usize>) -> Result<(), BlockError> {
         match &self.backing {
             Backing::Boot(_) => Ok(()),

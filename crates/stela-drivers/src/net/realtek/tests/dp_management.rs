@@ -21,7 +21,7 @@ fn dp_mdio_guard_preserves_actual_identity_and_relocks_on_timeout() {
         {
             let s = model.state.borrow();
             assert_eq!(s.phy[&(0, 3)], 0xc800);
-            assert_eq!(s.phy[&(0, 14)], 0); // actual RTL8211B resume quirk.
+            assert_eq!(s.phy[&(0, 14)], 0); // RTL8211B resume quirk.
             assert_eq!(s.phy[&(0, 0)], 0x1200);
             assert_eq!(
                 Model::raw32(&s, DP_MDIO_GATE) & DP_MDIO_GATED,

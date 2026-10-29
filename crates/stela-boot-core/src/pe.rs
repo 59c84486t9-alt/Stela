@@ -1,5 +1,5 @@
-//! Bounded inventory of the actual firmware-loaded PE32+ image. Reads address
-//! loaded RVAs, never file offsets. The callback must read from the retained
+//! Bounded inventory of the firmware-loaded PE32+ image. Reads address
+//! loaded RVAs, never file offsets. The callback must read from the kept
 //! UEFI allocation; bounds are checked here before every callback.
 use alloc::vec::Vec;
 

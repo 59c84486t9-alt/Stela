@@ -1,4 +1,4 @@
-//! Native IOMMU backends. Discovery/ownership must supply a qualified unit;
+//! Native IOMMU backends. Discovery/ownership must supply a checked unit;
 //! there is no identity-mapping substitute for an unavailable domain.
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;

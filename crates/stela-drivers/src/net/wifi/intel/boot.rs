@@ -82,13 +82,13 @@ pub struct ProductResetObservation {
     pub coordination: ProductResetCoordination,
 }
 
-/// Exclusive actual requester/BAR owner plus ordered CSR writes.
+/// Exclusive requester/BAR owner plus ordered CSR writes.
 /// # Safety
-/// Implementors retain the actual exclusive PCI function and uncached BAR
+/// Implementors keep the exclusive PCI function and uncached BAR
 /// reservation through final Drop, excluding other firmware/OS/reset/IRQ users.
 /// This is an owned reservation, never a borrowed token. Accesses must use the
-/// actual device and complete ordered MMIO stores; errors may be uncertain.
-/// Uncertain transport Drop deliberately retains this entire object.
+/// device and complete ordered MMIO stores; errors may be uncertain.
+/// Uncertain transport Drop keeps this entire object.
 pub unsafe trait BootIo: Csr + 'static {
     fn write8(&mut self, register: u32, value: u8) -> Result<(), power::AccessError>;
 }
@@ -99,10 +99,10 @@ pub struct NativeBootIo {
 }
 impl NativeBootIo {
     /// # Safety
-    /// `window` is the actual claimed AX200/AX210 function's aligned uncached BAR
-    /// mapping covering all8192 bytes. `owner` retains that real exclusive PCI
+    /// `window` is the claimed AX200/AX210 function's aligned uncached BAR
+    /// mapping covering all8192 bytes. `owner` keeps that real exclusive PCI
     /// claim and BAR reservation, with all old DMA/IRQs stopped and drained and
-    /// PCI interrupt routes disabled; no unrelated/dummy owner qualifies.
+    /// PCI interrupt routes disabled; no unrelated/dummy owner checks.
     /// The clock is calibrated and advancing. The window stays mapped through
     /// the owner's final Drop, including deliberate quarantine on failure.
     pub unsafe fn from_window(
@@ -140,7 +140,7 @@ impl Csr for NativeBootIo {
         Ok(())
     }
 }
-// SAFETY: construction requires the actual owned exclusive requester/BAR.
+// SAFETY: construction requires the owned exclusive requester/BAR.
 unsafe impl BootIo for NativeBootIo {
     fn write8(&mut self, register: u32, value: u8) -> Result<(), power::AccessError> {
         if register >= 8192 {
@@ -276,7 +276,7 @@ pub struct AliveReport {
     pub platform_id: Option<u64>,
     pub raw: Vec<u8>,
 }
-/// Raw notification status, deliberately not a radio/calibration success enum.
+/// Raw notification status, not a radio/calibration success enum.
 /// Linux's helper logs this word without defining a success-value contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PnvmNotification {
@@ -299,9 +299,9 @@ struct Buffer {
     allocation: Chunk,
     device_owned: bool,
 }
-/// One firmware/reset epoch, retaining actual CSR owner, native pins, CPU views
+/// One firmware/reset epoch, keeping CSR owner, native pins, CPU views
 /// and isolated device DMA mappings. Polling mode never unmasks IRQ sources.
-/// Dropping an active/uncertain epoch quarantines the actual BAR/requester too.
+/// Dropping an active/uncertain epoch quarantines the BAR/requester too.
 pub struct RomBoot<'a, Q: BootIo> {
     io: Option<Q>,
     profile: Profile,
@@ -345,13 +345,13 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     /// Start the standalone AX200 context protocol.
     /// # Safety
     /// PCI Memory Space is enabled and bus mastering has been enabled only
-    /// after actual isolated domain attachment by the qualified platform owner.
-    /// Source allocations are fresh/exclusive and domain is actually attached
-    /// to this exact requester. Actual platform/requester WB DMA is coherent,
+    /// after isolated domain attachment by the checked platform owner.
+    /// Source allocations are fresh/exclusive and domain is attached
+    /// to this requester. Platform/requester WB DMA is coherent,
     /// PCIe NoSnoop, ATS and relaxed ordering are disabled, and aligned16/32-bit
     /// volatile completion observations plus acquire ordering see prior device
     /// payload writes. A WB attribute/compiler fence alone proves none of this.
-    /// Qualification remains true through every quarantined lease. No IRQ route
+    /// Validation remains true through every quarantined lease. No IRQ route
     /// or competing submission/reset worker can run during this polling epoch.
     /// General production PCI/IOMMU/coherency attachment is not supplied here.
     pub unsafe fn start(
@@ -361,18 +361,18 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         domain: Option<Arc<dyn DmaDomain>>,
         entries: u16,
     ) -> Result<Self, Error> {
-        // SAFETY: the caller supplies the complete documented qualification.
+        // SAFETY: the caller supplies the complete documented validation.
         unsafe { Self::start_inner(power, staged, None, source, domain, entries, None) }
     }
-    /// Start the distinct AX210 IML/context-v2 protocol, preserving the actual
+    /// Start the distinct AX210 IML/context-v2 protocol, preserving the
     /// checked STEP resource receipt through this epoch. No absent default is
-    /// manufactured; actual EFI_NOT_FOUND must have been recorded by its loader.
+    /// manufactured; EFI_NOT_FOUND must have been recorded by its loader.
     /// # Safety
     /// The same requester/domain/coherency/exclusive polling obligations as
-    /// `start` apply, for the actual standalone AX210 function. NoIwlmei is
-    /// an explicit unmanaged platform mode: the caller retains genuine
-    /// exclusive controller/reset ownership and no retained active SAP owner.
-    /// It does not assert AMT is disabled or fabricate a PLDR acknowledgement.
+    /// `start` apply, for the standalone AX210 function. NoIwlmei is
+    /// an explicit unmanaged platform mode: the caller keeps
+    /// exclusive controller/reset ownership and no kept active SAP owner.
+    /// It does not assert AMT is disabled or invent a PLDR acknowledgement.
     /// ManagedSap requires a real session/PLDR/END provider and is refused.
     pub unsafe fn start_ax210(
         power: Power<Q>,
@@ -478,7 +478,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             let scratch = allocate(context_v2::SCRATCH_BYTES, Direction::Bidirectional)?;
             let info = allocate(context_v2::INFO_BYTES, Direction::Bidirectional)?;
             // Keep donor dma_alloc_coherent permissions; IML remains pinned
-            // until actual current-epoch ALIVE or acknowledged device stop.
+            // until current-epoch ALIVE or acknowledged device stop.
             let iml = Chunk::allocate(
                 source,
                 domain.clone(),
@@ -573,7 +573,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         boot.publish()?;
         Ok(boot)
     }
-    /// Exact canonical image identity, integrity and provenance retained across
+    /// Exact canonical image identity, integrity and provenance kept across
     /// publication/completion; no parsed-input or diagnostic-image substitution.
     pub fn firmware_source(&self) -> resources::Image<'a> {
         self.image
@@ -585,7 +585,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 coordination: ProductResetCoordination::NotPerformedNoIwlmei,
             })
     }
-    /// Actual observed STEP receipt used by AX210 scratch, retained without
+    /// Observed STEP receipt used by AX210 scratch, kept without
     /// copying its original resource bytes. AX200 has no context-v2 input.
     pub fn step_configuration(&self) -> Option<&StepConfiguration<'a>> {
         self.ax210.as_ref().map(|memory| &memory.step)
@@ -662,8 +662,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         if self.read_register(0x24)? & 0x08000000 == 0 {
             return Err(Error::RfKilled);
         }
-        // CONFIG_IWLMEI-disabled Linux performs no PLDR coordination. Retain
-        // the actual SB value even when0x80, under this explicit unmanaged
+        // CONFIG_IWLMEI-disabled Linux performs no PLDR coordination. Keep
+        // the SB value even when0x80, under this explicit unmanaged
         // ownership mode. Never infer mode or a fictional ACK from that flag.
         if self.profile.family() == Family::Ax210 {
             if self.product_reset_policy != Some(ProductResetPolicy::NoIwlmei) {
@@ -694,7 +694,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         }
         self.io().write8(4, 0x40)?;
         self.set(0xa8, 0x800fffff)?;
-        // Retain the complete guard before the FIRST context pointer write;
+        // Keep the complete guard before the FIRST context pointer write;
         // even its low half/error can be an uncertain DMA publication.
         self.images.expose_for_context()?;
         self.context.expose();
@@ -764,7 +764,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         self.write(0x1c80, u32::from(published))
     }
     fn completed_buffer(&mut self) -> Result<Option<Vec<u8>>, Error> {
-        // SAFETY: start qualified shared coherent producer polling, retained
+        // SAFETY: start checked shared coherent producer polling, kept
         // pins/domain/CPU view, aligned width; this is NOT streaming sync_cpu.
         let family = self.profile.family();
         let mask = if family == Family::Ax200 {
@@ -810,7 +810,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         buffer.device_owned = false;
         self.credits -= 1;
         self.read = (self.read + 1) & (self.entries - 1);
-        // SAFETY: the actual closed producer and unique submitted VID
+        // SAFETY: the closed producer and unique submitted VID
         // transfer this complete RB to CPU ownership. Explicit rearm is only
         // allowed after this visibility/copy completes successfully.
         let bytes = unsafe { buffer.allocation.snapshot_completed()? };
@@ -841,8 +841,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                     platform_id: alive.platform_id,
                     raw: alive.raw().to_vec(),
                 };
-                // SAFETY: actual valid ALIVE was decoded only from completed
-                // DMA in this exclusively retained context/firmware/reset epoch.
+                // SAFETY: valid ALIVE was decoded only from completed
+                // DMA in this exclusively context/firmware/reset epoch.
                 unsafe {
                     self.images.release_after_alive()?;
                     if let Some(memory) = self.ax210.as_mut() {
@@ -862,7 +862,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         Ok(None)
     }
     /// Derive conditional resource requirements only from this transport's
-    /// actual completed ALIVE; caller-mutated report metadata cannot choose
+    /// completed ALIVE; caller-mutated report metadata cannot choose
     /// another board/default. Acquisition/upload/status remain a later phase.
     pub fn post_alive_plan(&self) -> Result<super::platform::PostAlivePlan, Error> {
         if !matches!(
@@ -878,12 +878,12 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     }
     /// Acquire exactly the current ALIVE SKU's canonical resources, prepare
     /// DMA, then publish scratch and the source PNVM doorbell once. Actual
-    /// missing/failed observations remain visible in the retained receipts.
+    /// missing/failed observations remain visible in the receipts.
     /// # Safety
-    /// Source returns fresh exclusive native RAM under the same actual domain
-    /// and coherent requester qualification as start. Observations are the
-    /// actual pre-EBS GetVariable results, retained in protected canonical
-    /// handoff storage; no invented/default observation qualifies.
+    /// Source returns fresh exclusive native RAM under the same domain
+    /// and coherent requester validation as start. Observations are the
+    /// pre-EBS GetVariable results, kept in protected canonical
+    /// handoff storage; no invented/default observation checks.
     pub unsafe fn begin_pnvm(
         &mut self,
         provider: &'a dyn resources::Provider,
@@ -932,7 +932,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 tables.push(table);
             }
         }
-        // Retain the whole real requester and every table before even the
+        // Keep the whole real requester and every table before even the
         // first possibly visible scratch field store (not just the doorbell).
         self.platform = Some(PlatformPhase {
             receipts: prepared.receipts,
@@ -979,7 +979,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     pub fn pnvm_notification(&self) -> Option<&PnvmNotification> {
         self.platform.as_ref().and_then(|p| p.notification.as_ref())
     }
-    /// Observe only the actual retained-epoch group0xc/op0xfe/version1 packet.
+    /// Observe only the epoch group0xc/op0xfe/version1 packet.
     /// A timeout/requested cancel is never a completion or DMA release proof.
     pub fn poll_pnvm(&mut self) -> Result<PnvmProgress, Error> {
         if self.state != State::PnvmWaiting {
@@ -1029,7 +1029,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         }
         Ok(PnvmProgress::Waiting)
     }
-    /// Poll actual CSR causes and DMA producer state once in process context.
+    /// Poll CSR causes and DMA producer state once in process context.
     /// CSR_ALIVE only allows restocking; only completed RX ALIVE returns data.
     pub fn poll(&mut self) -> Result<Option<AliveReport>, Error> {
         if !matches!(self.state, State::Published | State::Restocked) {
@@ -1059,9 +1059,9 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             Ok(None)
         }
     }
-    /// Actual source bus-master stop acknowledgement plus reset, followed by
+    /// Source bus-master stop acknowledgement plus reset, followed by
     /// invalidations. Failed acknowledgements never free device-visible pages;
-    /// failed invalidations remain retryable with the exact owner retained.
+    /// failed invalidations remain retryable with the owner kept.
     pub fn stop(&mut self) -> Result<(), Error> {
         if self.state == State::Stopped {
             return Err(Error::State);
@@ -1081,7 +1081,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             self.state = State::Quiescent;
         }
         // SAFETY: IRQs were never enabled, the exclusive polling owner has no
-        // queued workers and actual master-disable/reset acknowledged all DMA.
+        // queued workers and master-disable/reset acknowledged all DMA.
         unsafe {
             if !self.images_stopped {
                 self.images.release_after_stop()?;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are retained in ../elantech.rs and input/THIRD_PARTY.md.
-//! Integrated pointing-stick I/O under the actual shared native byte owner.
+// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
+//! Integrated pointing-stick I/O under the shared native byte owner.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl Engine {
     }
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// Require an actually present integrated v3/v4 pointing stick. Ordinary
+    /// Require a present integrated v3/v4 pointing stick. Ordinary
     /// attachment already admits a queried child under this same native grant;
     /// this variant additionally refuses absence. A firmware identity never
     /// grants another transport or a competing byte owner.

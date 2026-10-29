@@ -30,12 +30,12 @@ fn hcmd_real_tfd_writeback_and_rx_completion_own_payload_lifetime() {
         assert_eq!(device_read(&domain, ring, slot * 256, 256), sentinel);
     }
     let payload: Vec<_> = (0..100u8).collect();
-    // SAFETY: The AX210 model retains its exact domain and fresh exclusive Source RAM;
+    // SAFETY: The AX210 model keeps its exact domain and fresh exclusive Source RAM;
     // this serialized direct-payload command carries no indirect firmware objects.
     let ticket = unsafe { boot.submit_command(command_id(), &payload, &source) }.unwrap();
     let pending_live = domain.records.lock().unwrap().live.len();
     assert!(matches!(
-        // SAFETY: The first command's backing remains retained by this same polling owner;
+        // SAFETY: The first command's backing remains held by this same polling owner;
         // Source/domain stay exclusive while the second direct payload is refused.
         unsafe { boot.submit_command(command_id(), &payload, &source) },
         Err(Error::CommandPending)
@@ -121,7 +121,7 @@ fn hcmd_source_no_reclaim_and_all_notifications_in_completed_rb_are_preserved() 
     );
     assert!(boot.take_firmware_notification().is_none());
     assert_eq!(state.lock().unwrap().ops.len(), before);
-    // SAFETY: The sole model polling owner retains the original domain and exclusive
+    // SAFETY: The sole model polling owner keeps the original domain and exclusive
     // Source; the selected fixture API has no indirect allocations or device users.
     let ticket = unsafe { boot.submit_command(command_id(), &[0; 40], &source) }.unwrap();
     for (index, id, sequence) in [
@@ -208,7 +208,7 @@ fn hcmd_completion_reclaim_retries_without_releasing_or_resubmitting() {
         ));
         assert_eq!(domain.records.lock().unwrap().live.len(), live);
         assert!(matches!(
-            // SAFETY: Reclaim failure left this same epoch/source and all pending DMA retained;
+            // SAFETY: Reclaim failure left this same epoch/source and all pending DMA kept;
             // there is no concurrent submit/reset owner or indirect resource to release.
             unsafe { boot.submit_command(command_id(), &[], &source) },
             Err(Error::CommandPending)

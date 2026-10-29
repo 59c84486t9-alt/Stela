@@ -5,7 +5,7 @@
 //!
 //! Adapted from Linux ucsi.c/ucsi.h at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md for source
-//! hashes. Polling uses the actual transport, including ACPI _DSM refreshes;
+//! hashes. Polling uses the transport, including ACPI _DSM refreshes;
 //! an interrupt notification is not treated as command completion by itself.
 //! Platform ACPI discovery, SCI/EC service, mux/retimer programming and policy
 //! remain separate. No guest Apple transport is implemented here.
@@ -29,7 +29,7 @@ const COMMAND_POLL_US: u64 = 1_000;
 pub trait Timer {
     fn now_us(&self) -> u64;
     fn delay_us(&self, microseconds: u64);
-    /// Providers retain a stable timebase and support the complete requested
+    /// Providers keep a stable timebase and support the complete requested
     /// interval. Native raw counters additionally validate their half-period.
     fn supports_duration(&self, _microseconds: u64) -> bool {
         true
@@ -169,7 +169,7 @@ impl fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// A reviewed wire command. Its constructors retain all requested effects;
+/// A reviewed wire command. Its constructors keep all requested effects;
 /// neither completion nor an accepted role request proves a role transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -500,7 +500,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
     }
     fn acknowledge(&mut self, connector: Option<ConnectorNumber>) -> Result<(), Error> {
         // Clear the old software latch before observing ACK_COMPLETE. A new
-        // firmware event, including the same connector again, is then retained.
+        // firmware event, including the same connector again, is then kept.
         if let Some(number) = connector {
             if self.pending != Some(number) {
                 return Err(self.poison(Error::UnexpectedCompletion {
@@ -804,7 +804,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
         }
         Ok(self.pending)
     }
-    /// Return only after the actual status and connector-change ACK complete.
+    /// Return only after the status and connector-change ACK complete.
     /// A role command's completion alone never updates this snapshot.
     pub fn service_change(&mut self) -> Result<Option<ConnectorSnapshot>, Error> {
         if !self.initialized {

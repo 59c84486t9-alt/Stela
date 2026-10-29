@@ -2,7 +2,7 @@
 // Copyright (C) 2015 Endless Mobile, Inc.
 //! EPATCH v2 adapted from the pinned btrtl iovec/section/priority-list parser.
 //! Unknown section bodies are skipped by that format policy, with metadata and
-//! whole-body hashes retained. Nonzero key/security selection is not implemented.
+//! whole-body hashes kept. Nonzero key/security selection is not implemented.
 use super::{Configuration, FormatError, Project, Staged};
 use crate::bytes::le32;
 use alloc::vec::Vec;
@@ -149,7 +149,7 @@ impl<'a> V2Patch<'a> {
             });
             at = end;
         }
-        // This slice supports the actually observed one-byte extension records,
+        // This slice supports the observed one-byte extension records,
         // completely, followed by the canonical terminal project instruction.
         // Other extension programs are explicit unsupported input, not guessed.
         if bytes.get(at) != Some(&0xff) || at >= tail {

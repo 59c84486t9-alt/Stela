@@ -1,4 +1,4 @@
-//! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB authority is
+//! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB permission is
 //! manufactured here and no engine mount is enabled by constructing this object.
 use crate::platform::apple::amcc::Amcc;
 use crate::platform::apple::mcc::Configuration;
@@ -19,7 +19,7 @@ use stela_soc_data::amcc::Register;
 use stela_soc_data::board::DirectMemoryCache;
 use stela_soc_data::board::MemoryController;
 
-// The mount configures these actual resources; it must be able to name their
+// The mount configures these resources; it must be able to name their
 // typed configuration, lifecycle and original register/publication geometry.
 pub use crate::platform::apple::amcc;
 pub use crate::platform::apple::mcc;
@@ -35,10 +35,10 @@ pub mod t6000_cold;
 pub mod t6020;
 pub mod t8112;
 
-/// One prepared software resource with immutable placement and actual shared
+/// One prepared software resource with immutable placement and shared
 /// controller identity. A caller must still bind canonical RAM, all writers,
 /// execution ownership, DSB retirement and paired PTD reads before mounting it.
-/// Engine adoption is deliberately separate: neither descriptor parsing nor a
+/// Engine adoption is separate: neither descriptor parsing nor a
 /// cacheless boot argument supplies that admission proof.
 pub struct Prepared {
     router: Router,
@@ -73,7 +73,7 @@ impl Prepared {
             ram: None,
         })
     }
-    /// Build one actual local-notification bank, returning its receiver for
+    /// Build one local-notification bank, returning its receiver for
     /// the native PMP owner. No AP interrupt binding or service ACK is inferred.
     pub fn new_local(
         descriptor: DirectMemoryCache,
@@ -129,8 +129,8 @@ impl Prepared {
     pub fn publication_bank(&self) -> &Ptd {
         &self.ptd
     }
-    /// The SAME actual receiver initialized with the local PTD. Borrowing it
-    /// creates no service/callback/IRQ owner or ready/ACK authority.
+    /// The SAME receiver initialized with the local PTD. Borrowing it
+    /// creates no service/callback/IRQ owner or ready/ACK permission.
     pub fn local_notifications(&self) -> Option<&LocalNotifications> {
         self.local.as_ref()
     }
@@ -146,7 +146,7 @@ impl Prepared {
         self.router.locks.locked_regions()
     }
     /// Complete aperture bindings, not a permission to publish them yet. One
-    /// bus device owns both register interpretations and every actual aperture.
+    /// bus device owns both register interpretations and every aperture.
     pub fn bindings(&self) -> Vec<(u64, u64, u64)> {
         let mut bindings: Vec<_> = self
             .descriptor
@@ -162,10 +162,10 @@ impl Prepared {
         self.publication_layout().binding()
     }
     /// A declared physical display view may cover the PTD update alias and its
-    /// unimplemented tail. It must start at the actual update bank, cover every
+    /// unimplemented tail. It must start at the update bank, cover every
     /// update slot and stay inside this owner's complete publication aperture.
     /// The returned device offset routes to this exact Ptd, without increasing
-    /// its qualified register geometry or allocating another backing.
+    /// its checked register geometry or allocating another backing.
     pub(super) fn display_publication_view(
         &self,
         physical: u64,
@@ -177,7 +177,7 @@ impl Prepared {
         self.descriptor.apertures.len() as u64 * mcc::APERTURE_BYTES
     }
     /// A pair is consuming only at a complete publication entry. The update
-    /// alias, scalar halves and unknown tail retain their own MMIO semantics.
+    /// alias, scalar halves and unknown tail keep their own MMIO semantics.
     pub(super) fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
         self.publication_layout().entry(offset, bytes)
     }
@@ -292,7 +292,7 @@ impl Router {
         controller: Controller,
         apertures: usize,
     ) -> Result<Self, &'static str> {
-        // J314s 26A434 iBoot builder0x38660 declares the actual plane
+        // J314s 26A434 iBoot builder0x38660 declares the plane
         // way-command word as cache-status (mask0x1f, disabled value0).
         // Builder0x3862c separately names +0x10000c as broadcast control.
         if layout.cache_status
@@ -312,7 +312,7 @@ impl Router {
         {
             return Err("joint MCC/AMCC geometry has no original direct-controller contract");
         }
-        // The MCC owns every plane's actual way-command backing. Remove
+        // The MCC owns every plane's way-command backing. Remove
         // Amcc's independent disabled bit: source cache-status reads must
         // observe that same command image, not a copied healthy value.
         layout.cache_status = None;
@@ -325,7 +325,7 @@ impl Router {
             return Err("MCC owner has extra unplaced apertures");
         }
         let offsets = controller.register_offsets();
-        // A lock word colliding with an MCC word needs one source-qualified
+        // A lock word colliding with an MCC word needs one source-checked
         // protocol, not priority-based fallback between independent devices.
         for register in layout.groups.into_iter().flatten().flat_map(|group| {
             [
@@ -374,7 +374,7 @@ impl Lifecycle for Router {
     }
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
         assert!(self.check_lifecycle(proposed).is_ok());
-        // Views share the actual Controller. Commit once, after full preflight.
+        // Views share the Controller. Commit once, after full preflight.
         self.views[0].set_lifecycle(proposed, access);
     }
 }
@@ -543,7 +543,7 @@ mod tests {
                 .value,
             1
         );
-        // The extra Stela status views share the actual selector; no
+        // The extra Stela status views share the selector; no
         // independent Amcc disabled/ready values exist behind these addresses.
         for plane in 1..4 {
             assert_eq!(
@@ -578,7 +578,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(controller.requests(), before);
-        // The second aperture reaches the same actual owner's separate bank.
+        // The second aperture reaches the same owner's separate bank.
         bus.write(
             base + mcc::APERTURE_BYTES + 0xa000,
             Width::Word,
@@ -759,7 +759,7 @@ mod tests {
             apertures: original.descriptor.apertures.clone(),
             layout: original.router.lock_layout,
         };
-        // Router removed this alias from Amcc because the actual MCC
+        // Router removed this alias from Amcc because the MCC
         // controller owns it. Reconstruct the source descriptor, not that
         // already-normalized private lock-only view.
         locks.layout.cache_status = Some(Register {
@@ -818,7 +818,7 @@ mod tests {
             .bus
             .write(0x28e3d0000, Width::Double, 0x5678, &mut access)
             .unwrap();
-        // This genuinely queued wire has no AIC receiver. Its failed
+        // This queued wire has no AIC receiver. Its failed
         // forwarding follows consumption and must not erase the read result.
         board.latch.set_level(Wire::Aic(AicInput::new(0, 3)), true);
         let pair = board.read_pair(0, 0x28e3c0000, 8, 17).unwrap().unwrap();
@@ -863,7 +863,7 @@ mod tests {
             assert_eq!(wide.values, [0x0000000200000001, 2]);
             assert_eq!(wide.settlement, Ok(()));
         }
-        // The last status pair cannot extend past the twelve actual words.
+        // The last status pair cannot extend past the twelve words.
         assert_eq!(board.read_pair(0, status + 40, 8, 17), Ok(None));
         // Only a publication read consumes its pending flag.
         assert_eq!(

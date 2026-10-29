@@ -91,12 +91,12 @@ fn evaluate(fpcr: u32, bits: u64, square_root: bool) -> Outcome {
     }
 }
 
-/// Increased-precision FPRecipEstimate for Single + AH; retained enables cannot trap.
+/// Increased-precision FPRecipEstimate for Single + AH; enables cannot trap.
 pub fn reciprocal(fpcr: u32, bits: u64) -> Outcome {
     evaluate(fpcr, bits, false)
 }
 
-/// Increased-precision FPRSqrtEstimate for Single + AH; retained enables cannot trap.
+/// Increased-precision FPRSqrtEstimate for Single + AH; enables cannot trap.
 pub fn reciprocal_sqrt(fpcr: u32, bits: u64) -> Outcome {
     evaluate(fpcr, bits, true)
 }

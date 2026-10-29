@@ -115,7 +115,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// One actual function, shared only by the two serialized private transports.
+/// One function, shared only by the two serialized private transports.
 /// Neither adapter escapes the controller, so another user cannot reset it or
 /// sequence flash while a PHY operation is in progress.
 struct Bus<R>(Rc<RefCell<R>>);
@@ -124,7 +124,7 @@ impl<R> Clone for Bus<R> {
         Self(self.0.clone())
     }
 }
-// SAFETY: the owning constructor requires one actual same-function owner and
+// SAFETY: the owning constructor requires one same-function owner and
 // complete serialization. Each short borrow performs exactly one real access.
 unsafe impl<R: Registers> Registers for Bus<R> {
     fn read32(&mut self, at: u32) -> Result<u32, Fault> {
@@ -134,7 +134,7 @@ unsafe impl<R: Registers> Registers for Bus<R> {
         self.0.borrow_mut().write32(at, value)
     }
 }
-// SAFETY: the same retained owner implements both actual window contracts;
+// SAFETY: the same owner implements both window contracts;
 // private adapters never issue overlapping operations or expose another user.
 unsafe impl<R: nvm::Registers> nvm::Registers for Bus<R> {
     fn read_mac32(&mut self, at: u32) -> Result<u32, nvm::Error> {
@@ -169,9 +169,9 @@ pub struct Controller<R: Registers + nvm::Registers, D: Delay + Clone> {
 }
 impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     /// # Safety
-    /// `device` is the actual PCI device ID of an exclusively claimed Intel
+    /// `device` is the PCI device ID of an exclusively claimed Intel
     /// Ethernet function (vendor 8086, class 020000). Both register traits on
-    /// `io` access the same actual powered MAC/flash function and retain its
+    /// `io` access the same powered MAC/flash function and keep its
     /// real reservation/mappings. Native DMA, IRQs, firmware/SMM and all other
     /// users are already excluded/drained. This is a new cold reset epoch;
     /// `delay` and its clones provide real minimum elapsed hardware delays.
@@ -183,9 +183,9 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         }
         let bus = Bus(Rc::new(RefCell::new(io)));
         // SAFETY: the constructor supplies one real same-function reset grant;
-        // only these two private serialized adapters retain it.
+        // only these two private serialized adapters keep it.
         let nvm = unsafe { nvm::Nvm::new(nvm::Layout::Pch2, bus.clone(), delay.clone()) }?;
-        // SAFETY: exact PCI cohort and the same retained grant as the NVM.
+        // SAFETY: exact PCI cohort and the same grant as the NVM.
         let phy = unsafe { Phy::new(Kind::I82579, bus, delay) };
         let mut this = Self {
             phy,
@@ -419,7 +419,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         words.resize(length as usize, 0);
         self.nvm.read(base as u16, &mut words)?;
         // Prevalidate the complete immutable LCD script before its first PHY
-        // write. This intentionally strengthens donor streaming error behavior.
+        // write. This strengthens donor streaming error behavior.
         let mut page = 0u16;
         for pair in words.as_chunks::<2>().0 {
             if pair[1] == 31 {
@@ -478,7 +478,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         Ok(())
     }
     fn oem(&mut self) -> Result<(), Error> {
-        // Source D0 policy: apply actual MAC-strapped LPLU/Gbe-disable bits.
+        // Source D0 policy: apply MAC-strapped LPLU/Gbe-disable bits.
         // Never manufacture a faster mode by ignoring an OEM restriction.
         self.phy.transaction(|p| {
             if p.read_mac(FEXTNVM)? & SW_CONFIG == 0 {
@@ -666,7 +666,7 @@ mod tests {
             self.1.fetch_add(1, Ordering::SeqCst);
         }
     }
-    // SAFETY: exclusively serialized model, no actual resources or hardware.
+    // SAFETY: exclusively serialized model, no resources or hardware.
     unsafe impl Registers for Io {
         fn read32(&mut self, at: u32) -> Result<u32, Fault> {
             let mut m = self.0.borrow_mut();
@@ -783,10 +783,10 @@ mod tests {
                         (crate::net::ring::DESCRIPTORS * crate::net::ring::DESCRIPTOR) as u32
                     );
                     let descriptor = (address as usize + previous as usize * 16) as *const u8;
-                    // SAFETY: the queue model's actual published ring belongs
+                    // SAFETY: the queue model's published ring belongs
                     // to its live synchronous Memory owner, aligned and512B.
                     let buffer = unsafe { core::ptr::read_volatile(descriptor.cast::<u64>()) };
-                    // SAFETY: same actual descriptor's aligned lower dword.
+                    // SAFETY: same descriptor's aligned lower dword.
                     let lower =
                         unsafe { core::ptr::read_volatile(descriptor.add(8).cast::<u32>()) };
                     assert_eq!(buffer, address);
@@ -803,7 +803,7 @@ mod tests {
             Ok(())
         }
     }
-    // SAFETY: actual config words in the same single Function/reset model as
+    // SAFETY: config words in the same single Function/reset model as
     // the MAC/PHY/flash registers. No separate owner/token supplies values.
     unsafe impl super::lpt::LptRegisters for Io {
         fn read_config16(&mut self, at: u16) -> Result<u16, Fault> {
@@ -938,7 +938,7 @@ mod tests {
         let bus = Bus(Rc::new(RefCell::new(io)));
         // SAFETY: raw single-function model before any PHY/DMA operation.
         let nvm = unsafe { nvm::Nvm::new(nvm::Layout::Pch2, bus.clone(), timer.clone()) }.unwrap();
-        // SAFETY: the exact same isolated model reset epoch.
+        // SAFETY: the same isolated model reset epoch.
         let phy = unsafe { Phy::new(Kind::I82579, bus, timer) };
         Controller {
             phy,
@@ -1049,7 +1049,7 @@ mod tests {
         }
         let (_, released, io, timer) = fixture();
         assert!(matches!(
-            // SAFETY: deliberately test exact-cohort refusal with a fresh model.
+            // SAFETY: test exact-cohort refusal with a fresh model.
             unsafe { Controller::new(0x153a, io, timer) },
             Err(Error::UnsupportedDevice(0x153a))
         ));
@@ -1125,9 +1125,9 @@ mod tests {
             state.borrow_mut().operations.clear();
             state.borrow_mut().master_busy = busy as usize;
             controller.global_reset().unwrap();
-            // The source oracle's declared reset prefix compares all actual
+            // The source oracle's declared reset prefix compares all
             // stores, STATUS observations and delays. Extra Stela read-only
-            // qualification/CTRL-reset-clear checks are covered separately.
+            // validation/CTRL-reset-clear checks are covered separately.
             let actual: Vec<_> = state
                 .borrow()
                 .operations

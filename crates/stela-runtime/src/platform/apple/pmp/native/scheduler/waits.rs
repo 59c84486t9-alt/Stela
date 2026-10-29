@@ -30,7 +30,7 @@ pub struct Wait {
     runtime: Weak<RefCell<State>>,
     waiting: Rc<Waiting>,
 }
-/// Actual recursive queue acquisition. Non-Clone and no Drop-time unlock:
+/// Recursive queue acquisition. Non-Clone and no Drop-time unlock:
 /// source unlock must execute at its reached cursor. An abandoned lease leaves
 /// the callback unable to claim retirement, preserving the unfinished effect.
 pub struct Lease {
@@ -72,7 +72,7 @@ impl Runtime {
         }
     }
     /// Source1030048/1030210 recursive acquisition. Contention blocks this
-    /// actual thread rather than spinning a high-priority callback and starving
+    /// thread rather than spinning a high-priority callback and starving
     /// the lower-priority owner which must release the mutex.
     pub fn lock(&self, queue: &Queue, invocation: &Invocation) -> Completion<Lease> {
         if self
@@ -114,12 +114,12 @@ impl Runtime {
             refusal: None,
         }
     }
-    /// Actual source-key wait, retaining held queue locks. Reporting publication
+    /// Source-key wait, keeping held queue locks. Reporting publication
     /// uses an independent immediate ACK callback to notify this same key.
     pub fn wait(&self, invocation: &Invocation, key: &Key) -> Result<Wait> {
         self.register_wait(invocation, key, None)
     }
-    ///1030250 atomically registers the actual waiter BEFORE dropping every
+    ///1030250 atomically registers the waiter BEFORE dropping every
     /// recursive acquisition of this queue. Other queue work/immediate callbacks
     ///can then execute; returning Wait alone is not wait completion.
     pub fn drain_wait(&self, queue: &Queue, invocation: &Invocation, key: &Key) -> Result<Wait> {
@@ -173,9 +173,9 @@ impl Runtime {
             waiting,
         })
     }
-    ///1023624/10302bc wakes ALL actual waiters of the same identity. No numeric
+    ///1023624/10302bc wakes ALL waiters of the same identity. No numeric
     /// key alias, remembered notify credit, source-predicate update or callback
-    /// completion is created. A later wait needs another actual notification.
+    /// completion is created. A later wait needs another notification.
     pub fn notify(&self, key: &Key) -> Result<usize> {
         self.check_runtime(&key.runtime)?;
         let mut s = self.state.borrow_mut();
@@ -202,7 +202,7 @@ impl Runtime {
     }
 }
 impl Wait {
-    /// Actual source wait completion/reacquisition, callable only by its same
+    /// Source wait completion/reacquisition, callable only by its same
     /// executing native invocation. Notification alone never advances source
     /// predicates or makes this a transferable success receipt.
     pub fn advance(&mut self) -> Completion<()> {
@@ -341,8 +341,8 @@ mod tests {
             self.calls.set(self.calls.get() + 1);
             if self.wait.is_none() {
                 self.wait = Some(self.runtime.wait(i, &self.key).unwrap());
-                // Actual reentrant endpoint callback executes while this DB
-                // invocation/recursive global mutex is retained.
+                // Reentrant endpoint callback executes while this DB
+                // invocation/recursive global mutex is held.
                 let handle = self.immediate.borrow();
                 assert!(matches!(
                     self.runtime.invoke(handle.as_ref().unwrap(), a).unwrap(),

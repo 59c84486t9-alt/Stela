@@ -1,4 +1,4 @@
-//! The actual resource adapter over boot-core's firmware HPET decoder.
+//! The resource adapter over boot-core's firmware HPET decoder.
 use stela_boot_core::hpet;
 use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 

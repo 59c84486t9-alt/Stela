@@ -197,7 +197,7 @@ fn rtl8822c_tables_match_linux() {
         offset += 0x5000;
         assert_eq!(m.quarantined, 0);
     }
-    // Actual unchanged source one-PHY case selects B and ignores the
+    // Unchanged source one-PHY case selects B and ignores the
     // helper's rejection. Native preflight test above refuses before I/O.
     let mut rejected = [0; 5];
     for (i, value) in rejected.iter_mut().enumerate() {

@@ -5,11 +5,11 @@ use crate::bus::Access;
 
 /// Guest RAM by physical address. The boolean methods serve callers that do
 /// not resume a transfer. Stateful DMA owners use the progress methods to
-/// retain any committed prefix, including a terminal coherence failure.
+/// keep any committed prefix, including a terminal coherence failure.
 pub trait Memory {
     fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
     fn write(&mut self, physical: u64, data: &[u8]) -> bool;
-    /// Validate actual physical RAM and access permission without transferring
+    /// Validate physical RAM and access permission without transferring
     /// bytes. An unavailable range owner is an explicit refusal.
     fn check_range(&mut self, _physical: u64, _bytes: usize, _write: bool) -> Result<(), DmaError> {
         Err(DmaError::Unsupported(
@@ -26,7 +26,7 @@ pub trait Memory {
                 completed: 0,
             })
     }
-    /// Same contract as `read_progress`, for the actual committed write prefix.
+    /// Same contract as `read_progress`, for the committed write prefix.
     fn write_progress(&mut self, physical: u64, data: &[u8]) -> Result<(), TransferFault> {
         self.write(physical, data)
             .then_some(())
@@ -38,7 +38,7 @@ pub trait Memory {
 }
 
 /// A fault after exactly `completed` bytes of this transfer. A nonzero prefix
-/// must never be replayed merely because a later translation or writer failed.
+/// must never be replayed because a later translation or writer failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferFault {
     pub error: DmaError,
@@ -114,7 +114,7 @@ impl Port<'_, '_> {
         self.write_progress(iova, data).map_err(|fault| fault.error)
     }
 
-    /// Walk every reached IOMMU page and check its actual RAM owner. This does
+    /// Walk every reached IOMMU page and check its RAM owner. This does
     /// not cache translations or authorize a later access after a remap.
     pub fn check(&mut self, iova: u64, bytes: usize, write: bool) -> Result<(), TransferFault> {
         self.each_page(iova, bytes, write, |memory, physical, range| {
@@ -175,8 +175,8 @@ impl Port<'_, '_> {
                 .translate(self.memory, self.stream, address, last, write, self.access)
                 .map_err(fault)?;
             if let Err(partial) = transfer(self.memory, physical, done..done + chunk) {
-                // A violated owner contract makes the actual prefix unknown;
-                // fail stopped instead of manufacturing replay authority.
+                // A violated owner contract makes the prefix unknown;
+                // fail stopped instead of manufacturing replay permission.
                 assert!(
                     partial.completed <= chunk,
                     "DMA RAM owner reported an invalid committed prefix"

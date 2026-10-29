@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native HPET power qualification and private actual-CPU TSC calibration.
+//! Native HPET power validation and private CPU TSC calibration.
 //! TSC remains a candidate: no Cpu/Clock/Idle implementation,
 //! Prepared variant or service grant can be constructed from this observation.
 //! Absent ADJUST remains an explicit owned-watchdog requirement; a temporary
@@ -55,12 +55,12 @@ pub(crate) struct Candidate {
     failure: Option<Error>,
     _local: PhantomData<*mut ()>,
 }
-// Baseline CPUID is genuinely serializing on admitted x86-64. Do not presume
-// AMD LFENCE ordering or use unqualified RDTSCP/TSC_AUX as an affinity lease.
+// Baseline CPUID is serializing on admitted x86-64. Do not presume
+// AMD LFENCE ordering or use unchecked RDTSCP/TSC_AUX as an affinity lease.
 pub(super) fn ordered() -> u64 {
     let _ = __cpuid_count(0, 0);
     let (low, high): (u32, u32);
-    // SAFETY: only called after actual retained-CPU TSC feature admission.
+    // SAFETY: only called after kept-CPU TSC feature admission.
     // Default memory clobber and both CPUIDs enclose the exact ordered sample.
     unsafe {
         asm!("rdtsc",out("eax")low,out("edx")high,options(nostack,preserves_flags));
@@ -90,7 +90,7 @@ fn live_policy(
                 (value.eax, value.ebx, value.ecx, value.edx);
         }
     }
-    // Never probe an absent control: only the actual live ADJUST feature gates
+    // Never probe an absent control: only the live ADJUST feature gates
     // this privileged read. Missing/changed records remain explicit failures.
     if live.get(7, 0).is_some_and(|leaf| leaf.ebx & (1 << 1) != 0) {
         let records = live
@@ -98,7 +98,7 @@ fn live_policy(
             .get_mut(..live.msr_count as usize)
             .ok_or(tsc::Error::MalformedCapture)?;
         for record in records.iter_mut().filter(|record| record.index == 0x3b) {
-            // SAFETY: actual CPL0 retained CPU, live CPUID gates TSC_ADJUST.
+            // SAFETY: CPL0 kept CPU, live CPUID gates TSC_ADJUST.
             record.value = unsafe { crate::cpu::msr::TSC_ADJUST.read() };
         }
     }
@@ -106,8 +106,8 @@ fn live_policy(
 }
 impl Candidate {
     /// # Safety
-    /// Actual original post-EBS handoff/capture/HostOwner identity and native
-    /// HPET exclusive handoff are retained, not reconstructed records. IF0 on
+    /// Original post-EBS handoff/capture/HostOwner identity and native
+    /// HPET exclusive handoff are held, not reconstructed records. IF0 on
     /// that BSP, no migration/suspend/reset/control writer or reference wrap;
     /// no native/helper frame, external HPET route or overlapping source user.
     /// Reference is bounded active-spin only; retire it before any later HLT.
@@ -117,7 +117,7 @@ impl Candidate {
         reference: &HpetCounter,
     ) -> Result<Self, Error> {
         identity.check_dispatch()?;
-        // SAFETY: caller retains the genuine sealed loader record and physmap.
+        // SAFETY: caller keeps the sealed loader record and physmap.
         let capture = unsafe { firmware::captured(handoff.native_processors) }
             .map_err(|_| Error::Inventory)?;
         let bsp = capture
@@ -143,7 +143,7 @@ impl Candidate {
             return Err(Error::ChangedControl);
         }
         // Reference authenticity before any raw access, but not from a numeric
-        // base/table digest alone. The method checks actual native owner/Arc.
+        // base/table digest alone. The method checks native owner/Arc.
         reference.calibration_sample(&identity)?;
         let period = reference.period_fs();
         let calibration = tsc::calibrate_hpet::<Error>(period, || {
@@ -181,7 +181,7 @@ impl Candidate {
             _local: PhantomData,
         })
     }
-    /// Reobserve actual control/rate/affinity and monotonicity; first failure is
+    /// Reobserve control/rate/affinity and monotonicity; first failure is
     /// permanent. This is calibration evidence, never a continuous-time grant.
     pub(crate) fn recheck(&mut self) -> Result<u64, Error> {
         if let Some(error) = self.failure {

@@ -13,12 +13,12 @@
 //! enabling streams (VA270bce64..bcecc); mapper entry270be1e0..be22c
 //! rejects remapped sources. DMA therefore remaps the incoming SID once,
 //! before context enable/TCR/TTBR. Remapped-fault SID provenance remains
-//! unqualified and refuses instead of inventing captured metadata.
+//! unchecked and refuses instead of inventing captured metadata.
 //! A separate T6000 UMMS owner exposes the native absent capture store and
 //! disabled performance state. Unsupported SMMU context selection
 //! (TCR23:16), active performance, APF filtering, auxiliary fault/capture
 //! fields and the different 64-SID USB4 interface refuse explicitly.
-//! This module does not qualify those board configurations by constructing a
+//! This module does not check those board configurations by constructing a
 //! successful-looking superset. Translation is cacheless and DMA synchronous.
 use super::{Profile, SMMU_BYTES, SMMU_OFFSET, descriptor::Format, legacy_umms};
 use alloc::{rc::Rc, vec, vec::Vec};
@@ -1259,7 +1259,7 @@ mod tests {
             let (mut model, mut ram, mut sink) = setup(profile);
             let mut a = Access::new(0, 0, &mut sink);
             // A valid root within the profile but outside backing RAM is
-            // an actual memory failure, with no guessed hardware AXI code.
+            // a memory failure, with no guessed hardware AXI code.
             model
                 .write(
                     TTBR + 16,

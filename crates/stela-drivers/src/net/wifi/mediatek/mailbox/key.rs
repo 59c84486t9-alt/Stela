@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Canonical key ownership bound to the actual serialized WFDMA command owner.
+//! Canonical key ownership bound to the serialized WFDMA command owner.
 //! This does not allocate stations or admit a physical controller. A successful
-//! command programs a key; old users and actual radio/data attachment stay with
-//! their retained native owner.
+//! command programs a key; old users and radio/data attachment stay with
+//! their native owner.
 use super::{Mailbox, QueueIo, UnifiedReply};
 use crate::net::wifi::{
     mediatek::{
@@ -65,13 +65,13 @@ struct Owned<C> {
     candidate: Option<KeyIdentity>,
     reply: Option<UnifiedReply>,
 }
-/// Retains the actual WCID/association resource and canonical material/nonce
+/// Keeps the WCID/association resource and canonical material/nonce
 /// guard on uncertain or still-live Drop. No vendor-local key generation or
 /// digest substitutes for canonical KeySlot.
 pub struct HardwareKey<C: 'static> {
     owned: Option<Box<Owned<C>>>,
 }
-/// Actual successful remove-command receipt. Not a hardware-user drain proof.
+/// Successful remove-command receipt. Not a hardware-user drain proof.
 /// It is private, single-use and bound to this exact canonical key/command owner.
 pub struct Removal {
     key: KeyIdentity,
@@ -80,17 +80,17 @@ pub struct Removal {
 
 impl<C: 'static> HardwareKey<C> {
     /// # Safety
-    /// Caller exclusively owns this actual WCID and acknowledged BSS/OMAC/peer
-    /// context on this mailbox's actual requester/firmware epoch. The physical
+    /// Caller exclusively owns this WCID and acknowledged BSS/OMAC/peer
+    /// context on this mailbox's requester/firmware epoch. The physical
     /// key slot is empty, with all previous hardware RX/TX, notifications, IRQ
-    /// and deferred users drained. `resource` must retain the actual requester/
+    /// and deferred users drained. `resource` must keep the requester/
     /// function/controller claim, station, association and WCID allocation for
     /// every future hardware/key user, including a quarantined owner after the
     /// mailbox itself is dropped or its DMA queues are released.
     /// Caller must preserve this owner across retries and prevent prior temporal
     /// material from being installed with reset PN after creating any new owner.
     /// No other owner or raw command may mutate this slot; all removal and key
-    /// publication must serialize through this object and the actual controller.
+    /// publication must serialize through this object and the controller.
     /// A mailbox identity is a native owner binding, not an on-wire generation.
     pub unsafe fn claim<W: QueueIo, F: QueueIo, R: QueueIo>(
         mailbox: &Mailbox<W, F, R>,
@@ -109,8 +109,8 @@ impl<C: 'static> HardwareKey<C> {
         if mailbox.is_poisoned() {
             return Err(Error::PoisonedMailbox);
         }
-        // SAFETY: inherited actual exclusive empty/drained slot and nonce-epoch
-        // contract; resource and this object retain that actual physical owner.
+        // SAFETY: inherited exclusive empty/drained slot and nonce-epoch
+        // contract; resource and this object keep that physical owner.
         let slot = unsafe { KeySlot::new(wcid) }.map_err(Error::Security)?;
         Ok(Self {
             owned: Some(Box::new(Owned {
@@ -145,7 +145,7 @@ impl<C: 'static> HardwareKey<C> {
         &mut self.owned_mut().slot
     }
     /// # Safety
-    /// The old key and peer generation are actually removed and all RX/TX,
+    /// The old key and peer generation are removed and all RX/TX,
     /// firmware, IRQ/deferred users drained. The same physical slot remains
     /// exclusively owned; the new scope/context belongs to its real acknowledged
     /// peer. Preserve this owner and all material history across rebinding.
@@ -166,7 +166,7 @@ impl<C: 'static> HardwareKey<C> {
         s.scope = scope;
         Ok(())
     }
-    /// Apply canonical replay checks to an actual normalized vendor RX frame.
+    /// Apply canonical replay checks to a normalized vendor RX frame.
     /// The controller must bind its real association/key generation and decoded
     /// integrity/PN observations before this call; this creates no RX evidence.
     pub fn authorize<'a>(
@@ -175,8 +175,8 @@ impl<C: 'static> HardwareKey<C> {
     ) -> Result<security::AuthenticatedData<'a>, security::Error> {
         self.owned_mut().slot.authorize(mpdu)
     }
-    /// Apply the separate PTK management replay boundary to actual normalized
-    /// RX. Caller retains actual DMA, local-interface and current-peer provenance;
+    /// Apply the separate PTK management replay boundary to normalized
+    /// RX. Caller keeps DMA, local-interface and current-peer provenance;
     /// the resulting proof does not authorize a delayed station transition.
     pub fn authorize_unicast_management<'a>(
         &mut self,
@@ -211,8 +211,8 @@ impl<C: 'static> HardwareKey<C> {
         }
         Ok(())
     }
-    /// Program only the canonical actual scope; use this exact material borrow
-    /// for both canonical issuance and the actual source-defined wire command.
+    /// Program only the canonical scope; use this exact material borrow
+    /// for both canonical issuance and the source-defined wire command.
     /// An identical already-installed retry returns its existing identity
     /// without issuing a command, changing replay floors or resetting firmware PN.
     pub fn install<W: QueueIo, F: QueueIo, R: QueueIo>(
@@ -245,7 +245,7 @@ impl<C: 'static> HardwareKey<C> {
         {
             Ok(request) => request,
             Err(e) => {
-                // No command or material was published. This is actual proof
+                // No command or material was published. This is proof
                 // that this attempt did not install/use it, not a removal ACK.
                 state
                     .slot
@@ -296,7 +296,7 @@ impl<C: 'static> HardwareKey<C> {
         }
     }
     /// Invalidate before source removal. A zero result only permits the caller
-    /// to perform and prove actual old-user drain; it does not retire this slot.
+    /// to perform and prove old-user drain; it does not retire this slot.
     pub fn remove<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
         mailbox: &mut Mailbox<W, F, R>,
@@ -334,7 +334,7 @@ impl<C: 'static> HardwareKey<C> {
     }
     /// # Safety
     /// After this exact removal ACK, every previous firmware/DMA RX/TX,
-    /// completion, IRQ and deferred key/station user is actually drained, and
+    /// completion, IRQ and deferred key/station user is drained, and
     /// no delayed frame/status can be attributed to a later key. The controller
     /// serializes this step with all old users and new publication. Removal
     /// does not prove temporal material was unused or allow resetting its PN.
@@ -346,7 +346,7 @@ impl<C: 'static> HardwareKey<C> {
         {
             return Err(Error::WrongRemoval);
         }
-        // SAFETY: exact successful receipt is checked and actual old-user drain
+        // SAFETY: exact successful receipt is checked and old-user drain
         // is inherited from caller; canonical material history remains owned.
         unsafe { state.slot.retire_after_drain() };
         state.phase = Phase::Empty;
@@ -364,7 +364,7 @@ impl<C: 'static> Drop for HardwareKey<C> {
             && owned.phase != Phase::Empty
         {
             // Firmware can still reference this real WCID, association and
-            // material/nonce state. Retain the whole owner, not just an ID.
+            // material/nonce state. Keep the whole owner, not just an ID.
             core::mem::forget(owned);
         }
     }

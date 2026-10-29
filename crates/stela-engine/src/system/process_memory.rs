@@ -287,9 +287,9 @@ impl FixedProcessMemoryControls {
     }
 
     /// Construct a fresh scope whose memory features and EL10 regime are
-    /// derived from this exact retained identification allocation. Dynamic
+    /// derived from this exact identification allocation. Dynamic
     /// CurrentEL/PSTATE and scalable access controls remain separate owners.
-    /// This does not qualify PFAR or any other exception-entry optional effect.
+    /// This does not check PFAR or any other exception-entry optional effect.
     pub fn new_with_identification(
         identification: Arc<Snapshot>,
         sctlr_el1: u64,
@@ -375,7 +375,7 @@ impl FixedProcessMemoryControls {
     }
 
     #[cfg(feature = "std")]
-    /// Existing entry validation separately binds exact source, execution/debug
+    /// Existing entry validation separately binds source, execution/debug
     /// state and compiler-derived requirements. This does not prewalk accesses.
     /// The backend supplies its live endpoint; an ASID is not PE identity.
     pub fn prepare<'run>(
@@ -516,7 +516,7 @@ impl FixedProcessMemoryControls {
         MemoryControls::new(
             self.lower_address,
             system.current_el() == ExceptionLevel::El1,
-            false, // The actual feature declaration requires MTE absent.
+            false, // The feature declaration requires MTE absent.
             system.tag_check_override(),
             TagCheckFaultMode::Ignore,
             false, // Constructor rejects TCMA0 in this MTE-absent scope.
@@ -535,10 +535,10 @@ const fn requires_event_endpoint(requirements: MemoryRequirements) -> bool {
 #[cfg(feature = "std")]
 /// Checked CPU facts for the fixed EL0/LE/LSE2/A0/CPA-absent/MTE-absent
 /// Normal-WB/SCA16 data contract. Source Normal-WB attributes come only from
-/// the retained same-domain witness. Native backing, geometry and host capability
+/// the same-domain witness. Native backing, geometry and host capability
 /// eligibility remain the existing domain/profile admission; this does not
 /// infer source attributes from SCTLR or prewalk permissions.
-/// Actual SA0/TBI and dynamic EL/PSTATE/TCO remain in these retained owners.
+/// SA0/TBI and dynamic EL/PSTATE/TCO remain in these owners.
 /// Only the private token may install a temporary typed policy from this proof.
 pub(crate) struct ExclusiveProcessMemoryAuthorization<'run> {
     system: &'run SystemState,
@@ -596,7 +596,7 @@ impl PreparedProcessMemory<'_> {
         }
     }
 
-    /// Exact compiler requirements retained by the typed entry factory.
+    /// Exact compiler requirements kept by the typed entry factory.
     pub(crate) const fn requirements(&self) -> MemoryRequirements {
         self.requirements
     }
@@ -637,7 +637,7 @@ impl PreparedProcessMemory<'_> {
         };
         let loan = PolicyLoan::new(self.thread, policy);
         if let Some(endpoint) = self.endpoint {
-            // Actual retained same-PE identity, rechecked immediately before
+            // Same-PE identity, rechecked immediately before
             // native entry; no bind/rebind can be performed by this path.
             loan.thread.check_event_endpoint(endpoint)?;
         }
@@ -1217,7 +1217,7 @@ mod tests {
 
         fn reserved_memory() -> (Arc<MemoryDomain>, MemoryThread<MemoryControls>) {
             let layout = Layout::from_size_align(STORAGE_BYTES, SCA_BYTES).unwrap();
-            // SAFETY: nonempty valid layout retained by the matching storage owner.
+            // SAFETY: nonempty valid layout kept by the matching storage owner.
             let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
             let storage = Arc::new(Storage { pointer, layout });
             // SAFETY: stable raw storage, coherent single domain, no byte references.
@@ -1266,7 +1266,7 @@ mod tests {
                 pc: SOURCE_PC.0,
             };
             // SAFETY: complete initialized aligned ExclusiveData and valid request/view;
-            // all staging is private and disjoint from retained native backing.
+            // all staging is private and disjoint from kept native backing.
             let status = unsafe { (view.callback)(view, &request) };
             assert_eq!(MemoryStatus::from_code(status), Some(MemoryStatus::Success));
             data
@@ -1293,7 +1293,7 @@ mod tests {
                 let events = EventDomain::new();
                 let endpoint = events.register(false, None).unwrap();
                 let (domain, mut thread) = reserved_memory();
-                // This private component declares the retained source RAM mapping as
+                // This private component declares the source RAM mapping as
                 // effective NormalWB, EL0 RW and InnerShareable; host WB is not proof.
                 let controls = controls(&domain);
                 thread.bind_events(&endpoint.producer()).unwrap();

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained native same-function MAC and APE mappings; no physical-address casts.
+//! Native same-function MAC and APE mappings; no physical-address casts.
 use super::{Error, Registers};
 use crate::bus::pci::{ConfigSpace, Function};
 use alloc::sync::Arc;
@@ -24,7 +24,7 @@ impl Window {
         if at & 3 != 0 || at.checked_add(4).is_none_or(|end| end > self.bytes) {
             return Err(Error::Bounds);
         }
-        // SAFETY: constructor's actual retained mapping and complete bounds.
+        // SAFETY: constructor's mapping and complete bounds.
         Ok(unsafe { self.base.as_ptr().add(at).cast() })
     }
     fn read(&self, at: u32) -> Result<u32, Error> {
@@ -32,7 +32,7 @@ impl Window {
         Ok(u32::from_le(unsafe { self.pointer(at)?.read_volatile() }))
     }
     fn write(&mut self, at: u32, value: u32) -> Result<(), Error> {
-        // SAFETY: same actual retained UC mapping and checked aligned word.
+        // SAFETY: same UC mapping and checked aligned word.
         unsafe { self.pointer(at)?.write_volatile(value.to_le()) };
         Ok(())
     }
@@ -50,14 +50,14 @@ pub type WindowFailure<C> = (Error, Function<C>, Arc<dyn core::any::Any>);
 
 impl<C: ConfigSpace> Mmio<C> {
     /// # Safety
-    /// `function` is the actual exclusively reserved powered PCI function.
-    /// `mac` and `ape` are its actual complete UC BAR0/BAR2 mappings, and `owner`
-    /// retains both mappings, PCI reservation and power. The whole `Registers`
+    /// `function` is the exclusively reserved powered PCI function.
+    /// `mac` and `ape` are its complete UC BAR0/BAR2 mappings, and `owner`
+    /// keeps both mappings, PCI reservation and power. The whole `Registers`
     /// contract holds. Firmware and IRQ users are excluded. Config access must
     /// remain usable while core reset temporarily disables MAC memory decoding.
     /// The function and mapped windows must never be rebound by another owner.
     /// Validation failure returns these same original owners without dropping
-    /// either. The caller retains their actual DMA/IRQ/power obligations.
+    /// either. The caller keeps their DMA/IRQ/power obligations.
     pub unsafe fn from_owned_windows(
         function: Function<C>,
         mac: NonNull<u8>,
@@ -86,7 +86,7 @@ impl<C: ConfigSpace> Mmio<C> {
 
 #[cfg(test)]
 mod tests;
-// SAFETY: construction requires the retained actual same-function ownership;
+// SAFETY: construction requires the same-function ownership;
 // consuming it keeps the sole config access and checked UC windows together.
 unsafe impl<C: ConfigSpace> Registers for Mmio<C> {
     fn function_number(&self) -> u8 {
@@ -115,7 +115,7 @@ unsafe impl<C: ConfigSpace> Registers for Mmio<C> {
         if at & 1 != 0 || at > 4094 {
             return Err(Error::Bounds);
         }
-        // Native ConfigSpace overrides this with an actual narrow store,
+        // Native ConfigSpace overrides this with a narrow store,
         // never a dword RMW that could acknowledge adjacent W1C status.
         self.function.config().write16(at, value);
         self.config_read32(0)?;

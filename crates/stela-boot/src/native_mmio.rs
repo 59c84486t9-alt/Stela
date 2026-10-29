@@ -35,7 +35,7 @@ fn failed<T>(_: T) -> Error {
     Error::Unavailable
 }
 
-/// Borrow only the exact reserved capture produced by this actual handoff.
+/// Borrow only the reserved capture produced by this handoff.
 ///
 /// # Safety
 /// The real post-EBS main owns this handoff and native physmap. Its loader
@@ -49,8 +49,8 @@ pub(crate) unsafe fn captured(handoff: &crate::handoff::Handoff) -> Result<&'sta
     {
         return Err(Error::Unavailable);
     }
-    // SAFETY: actual loader reserved this exact owned region; caller retains
-    // its actual physmap rather than treating the numeric PA as permission.
+    // SAFETY: loader reserved this exact owned region; caller keeps
+    // its physmap rather than treating the numeric PA as permission.
     let wire = unsafe { &*(crate::layout::physical(region.physical) as *const Wire) };
     if !wire.valid()
         || wire.root != handoff.root

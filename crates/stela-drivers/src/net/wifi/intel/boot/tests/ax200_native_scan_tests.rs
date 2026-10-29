@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Original AX200 command/RX/DMA ownership under a modeled genuine OS lease.
+//! Original AX200 command/RX/DMA ownership under a modeled OS lease.
 use super::{
     ax200_country_tests::Os,
     ax200_mac_tests::{self, Native},
@@ -30,7 +30,7 @@ struct ScanOs {
     policy: Arc<PolicyState>,
 }
 // SAFETY: isolated authored model, delegated to the same original modeled OS
-// source. No location/OS service or physical radio qualification is claimed.
+// source. No location/OS service or physical radio validation is claimed.
 unsafe impl CountryIo for ScanOs {
     fn country(&mut self) -> Result<SelectedCountry, CountryIoError> {
         self.country.country()
@@ -83,7 +83,7 @@ impl OsLease for Lease<'_> {
     }
 }
 // SAFETY: synchronous modeled service with a unique mutable held lease through
-// the actual modeled DMA publication; this is not a production OS attachment.
+// the modeled DMA publication; this is not a production OS attachment.
 unsafe impl OsPolicy for ScanOs {
     type Lease<'a> = Lease<'a>;
     fn acquire(&mut self, _: regulatory::NativeContext) -> Option<Self::Lease<'_>> {
@@ -178,7 +178,7 @@ fn ready<'a>(
         sequence += 1;
         entry += 1;
     }
-    // SAFETY: both modeled OS interfaces above share this exact original
+    // SAFETY: both modeled OS interfaces above share this original
     // selection/database and synchronous native-owner fixture.
     let scan = unsafe { mac.begin_scan() }.unwrap_or_else(|_| panic!("scan"));
     (scan, sequence, entry)
@@ -329,7 +329,7 @@ fn exercise_completion(actual: bool) {
     assert_eq!(&payload[584..596], &[0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(&payload[616 + 26..616 + 31], &[221, 3, 0x12, 0x34, 0x56]);
     assert!(payload[1128..].iter().all(|byte| *byte == 0));
-    // Verify bytes actually visible through the split device IOVA descriptor.
+    // Verify bytes visible through the split device IOVA descriptor.
     let descriptor = device_read(
         &native.domain,
         boot(&scan).command.region().address,
@@ -668,7 +668,7 @@ fn beacon_packet() -> Vec<u8> {
     let mut payload = vec![0; 48];
     payload[..2].copy_from_slice(&(frame.len() as u16).to_le_bytes());
     payload[7] = 1 << 6;
-    payload[12..16].copy_from_slice(&3u32.to_le_bytes()); // actual CRC/overrun OK
+    payload[12..16].copy_from_slice(&3u32.to_le_bytes()); // CRC/overrun OK
     payload[16..20].copy_from_slice(&(127u32 << 24).to_le_bytes());
     payload[28..32].copy_from_slice(&(3u32 << 14).to_le_bytes());
     payload[32..35].copy_from_slice(&[44, 56, 1]);
@@ -745,7 +745,7 @@ fn actual_completed_mpdu_is_policy_checked_and_precedes_same_rb_scan_completion(
             Ax200ScanPhase::DrainRequired
         );
         scan.replenish_completed_receive().unwrap();
-        // Immutable actual RX bytes survive rearming/writes to the old RB.
+        // Immutable RX bytes survive rearming/writes to the old RB.
         assert_eq!(
             observation.observed().raw_packet(),
             &packet[..original_packet_len]
@@ -1044,7 +1044,7 @@ fn prepublication_completed_rbs_and_backpressure_never_relabel_old_rx_as_new_sca
                 _ => 128,
             }
         );
-        // Quiet original RX has now actually been observed. Only a fresh exact
+        // Quiet original RX has now been observed. Only a fresh exact
         // request can enter Submitted; old captures remain raw historical data.
         assert_eq!(
             // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
@@ -1110,7 +1110,7 @@ fn prepublication_second_rb_reserved_events_remain_canonical_and_block_admission
             MpduProgress::Pending
         ));
         // Neither diagnostic path can consume the canonical event or reopen
-        // admission, even though all unrelated traffic has actually drained.
+        // admission, even though all unrelated traffic has drained.
         assert_eq!(boot(&scan).hcmd.notification_count(), 1);
         assert!(
             boot(&scan)

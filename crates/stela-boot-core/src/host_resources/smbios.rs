@@ -94,7 +94,7 @@ pub struct Span {
     pub kind: MemoryType,
     pub attributes: u64,
 }
-/// Prove full source extent against a fresh actual firmware memory map. No
+/// Prove full source extent against a fresh firmware memory map. No
 /// address is converted to a pointer until this grant succeeds. Only published
 /// data/ACPI RAM is eligible; overlapping descriptors are ambiguous, not grants.
 pub fn grant(

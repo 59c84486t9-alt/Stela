@@ -63,7 +63,7 @@ pub struct EnergyBank {
     pub cpm: bool,
 }
 
-/// Independently qualified PMGR register families. A missing optional family
+/// Independently checked PMGR register families. A missing optional family
 /// does not revoke power-state ownership or another family's register model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PmgrBank {
@@ -75,13 +75,13 @@ pub enum PmgrBank {
     Performance,
     CpuEnergy,
     Services,
-    /// Source-qualified protocol, awaiting actual native controller effects.
+    /// Source-checked protocol, awaiting native controller effects.
     Dvfs(dvfs::Controller),
 }
 
 /// A visible register family whose semantics have not been established.
 /// The mount reports these through its unsupported-operation policy; no register
-/// or lifecycle effect is supplied by retaining this descriptor.
+/// or lifecycle effect is supplied by keeping this descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PmgrBankRefusal {
     pub bank: PmgrBank,
@@ -157,7 +157,7 @@ fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
 
 /// The SoC's optional register families, independently of its common
 /// power-state table and CPU-start bank. Driver matching comes from the SoC
-/// row; each family's qualified layout remains a separate requirement.
+/// row; each family's checked layout remains a separate requirement.
 pub(super) fn pmgr_registers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
@@ -253,7 +253,7 @@ pub(super) fn pmgr_registers(
         None
     };
     // Without the cluster layout, an absolute DPE address cannot be classified
-    // as a CPM accumulator merely because it lies inside a broad reg window.
+    // as a CPM accumulator because it lies inside a broad reg window.
     if result.clusters.is_empty() && node.property("hw-dpe-reg").is_some() {
         refuse(
             PmgrBank::CpuEnergy,

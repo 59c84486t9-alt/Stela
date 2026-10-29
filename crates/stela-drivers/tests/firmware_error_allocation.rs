@@ -177,7 +177,7 @@ fn global_allocator_failure_child() {
     };
 
     // All setup and test-harness work is complete. Every global allocation now
-    // returns null. A direct probe verifies the allocator is actually armed.
+    // returns null. A direct probe verifies the allocator is armed.
     FAIL.store(true, Ordering::SeqCst);
     // SAFETY: the layout has a nonzero size.
     let probe = unsafe { std::alloc::alloc(Layout::new::<u64>()) };

@@ -5,7 +5,7 @@
 //! controller part of the DART's physical supply. Hardware resources inherit
 //! their ADT ancestors' activated gates, including nubs and firmware endpoints.
 //! Source PMGR provider gate-index metadata remains inventoried separately from
-//! the consumer dependencies its IOService start actually activates.
+//! the consumer dependencies its IOService start activates.
 use super::{IOMMU_MAPPER, Node, PMGR2_ARCH, PMGR2_IMPLEMENTATION, SOCS, name_of};
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use {
@@ -32,13 +32,13 @@ pub(super) const PMGR_DEVICE: usize = records::BYTES;
 pub(super) const PMGR_VIRTUAL: u32 = 0x10;
 
 /// Hardware owners, indexed in the board's corresponding placement vectors.
-/// Logical mapper and root-port views share their actual controller owner.
+/// Logical mapper and root-port views share their controller owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerOwner {
     Dart(usize),
     Usb(usize),
     Phy(usize),
-    /// Candidate canonical physical aperture; only an actual registered
+    /// Candidate canonical physical aperture; only a registered
     /// type-erased lifecycle object can satisfy this ownership key.
     Mmio(u64),
 }
@@ -49,7 +49,7 @@ pub enum PowerOwner {
 pub struct PowerResource {
     pub name: String,
     pub clocks: Vec<DomainId>,
-    /// Source-qualified driver use; provider metadata alone activates no gate.
+    /// Source-checked driver use; provider metadata alone activates no gate.
     pub clock_role: ClockRole,
     pub power: Vec<DomainId>,
     pub owner: Option<PowerOwner>,
@@ -59,7 +59,7 @@ pub struct PowerResource {
 }
 
 impl PowerResource {
-    /// Actual start/lifecycle requirements, retaining passive provider indices
+    /// Start/lifecycle requirements, keeping passive provider indices
     /// in clocks for source accounting and later explicit gate operations.
     pub fn activated_clocks(&self) -> &[DomainId] {
         match &self.clock_role {
@@ -77,13 +77,13 @@ pub struct PowerStates {
     pub registers: Vec<u64>,
     pub domains: Vec<Domain>,
     pub resources: Vec<PowerResource>,
-    /// Source-qualified requirements absent from the original gate arrays.
+    /// Source-checked requirements absent from the original gate arrays.
     /// Keep the original inventory unchanged for admission and source review.
     pub(crate) implicit: Vec<implicit::Requirement>,
 }
 
 impl PowerStates {
-    /// Positively qualified physical CPU owners. The effective harvesting
+    /// Positively checked physical CPU owners. The effective harvesting
     /// setting must include supplied start-time overrides; this method supplies
     /// no initial LifecycleState and never registers a participant or ACKs PMGR.
     pub fn processor_associations(
@@ -159,8 +159,8 @@ impl PowerStates {
             .map_err(|error| format!("CPU PMGR associations: {error:?}"))
     }
 
-    /// Original power gates plus independently qualified physical ownership.
-    /// Stable resource indices also identify the actual lifecycle owner.
+    /// Original power gates plus checked physical ownership.
+    /// Stable resource indices also identify the lifecycle owner.
     pub fn power_requirements(&self) -> Result<Vec<Vec<DomainId>>, String> {
         implicit::power_requirements(self)
     }
@@ -317,10 +317,10 @@ impl ResourceInventory<'_> {
 /// way and passes only `& 0xffff` (0xfffffe0009b8b7d8, 0xfffffe0009b8b82c) to
 /// the per-die `(device, die)` entry points such as `_enableDeviceGated`.
 const GATE_DIE_SHIFT: u32 = 28;
-/// Bits `27:16` reach no 16-bit device record; no qualified meaning.
+/// Bits `27:16` reach no 16-bit device record; no checked meaning.
 const GATE_RESERVED: u32 = 0x0fff_0000;
 
-/// Decode each gate word into its die-qualified device. The record tables
+/// Decode each gate word into its die-checked device. The record tables
 /// hold die 0's devices; [`decode_domain_table`] places every other die's
 /// copy, so a die without a placed PMGR remains an unknown requirement.
 pub(super) fn gate_ids(
@@ -675,7 +675,7 @@ pub(super) fn register_node<'a>(io: &Node<'a>, parent: &Node<'a>) -> Result<Node
 }
 
 /// Normalize firmware records while preserving complete graph validation.
-/// Optional CPU/bridge register models are independently qualified.
+/// Optional CPU/bridge register models are checked.
 fn decode_power_states(
     root: &Node<'_>,
     node: &Node<'_>,
@@ -687,7 +687,7 @@ fn decode_power_states(
 }
 
 /// Complete original metadata, without granting lifecycle coverage. Private
-/// resource preparation retains any independent graph requirement explicitly.
+/// resource preparation keeps any independent graph requirement explicitly.
 pub(super) fn source_power_states(
     root: &Node<'_>,
     node: &Node<'_>,

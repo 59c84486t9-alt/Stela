@@ -14,14 +14,14 @@ fn guard_revalidation_before_block_ack_changes() {
         state.allowed.set(false);
         let mut retained = Some(proof);
         let result = if begin_exchange {
-            // SAFETY: The session and native backing remain retained, but policy was
+            // SAFETY: The session and native backing remain held, but policy was
             // revoked after preflight. Fresh guard acquisition must deny initiation
             // before modifying BA state or publishing a packet.
             unsafe {
                 driver.begin_management_block_ack(&mut owner, permit, &session, TID, 0, NOW + 1)
             }
         } else {
-            // SAFETY: The authenticated envelope remains in retained storage while
+            // SAFETY: The authenticated envelope remains in kept storage while
             // its current OS policy is revoked. Guard checks must deny consumption
             // before taking that envelope or changing canonical BA state.
             unsafe {
@@ -50,9 +50,9 @@ fn stale_block_ack_observation() {
         if disconnect {
             driver.disconnect().unwrap();
         } else {
-            // SAFETY: The old RX envelope is retained but not being consumed, and no
+            // SAFETY: The old RX envelope is held but not being consumed, and no
             // asynchronous model key user exists. Current leases serialize rotation
-            // and retain the original requester/backing through its acknowledgement.
+            // and keep the original requester/backing through its acknowledgement.
             unsafe {
                 driver.rotate_management_key_modern(
                     &mut owner,
@@ -71,7 +71,7 @@ fn stale_block_ack_observation() {
         let log = model.bar.0.lock().unwrap().log.len();
         let mut retained = Some(proof);
         assert!(
-            // SAFETY: The retained envelope belongs to a retired key namespace or
+            // SAFETY: The kept envelope belongs to a retired key namespace or
             // removed context. Fresh admission must reject it without retagging or
             // consuming its original owned frame.
             unsafe {
@@ -114,7 +114,7 @@ fn queued_action_policy_revocation() {
         let maps = model.memory.lock().unwrap().mappings.len();
         state.allowed.set(false);
         assert!(
-            // SAFETY: The queued BA action and original session retain their native
+            // SAFETY: The queued BA action and original session keep their native
             // resources. Revoked policy must be rechecked before the next
             // command/allocation, without releasing or rewriting the pending action.
             unsafe {

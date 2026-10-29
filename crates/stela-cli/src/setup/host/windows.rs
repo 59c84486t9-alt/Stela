@@ -388,7 +388,7 @@ fn volumes() -> Result<Vec<WinVolume>> {
     let mut volumes = Vec::new();
     let mut name = [0u16; 64];
     // SAFETY: name is a writable UTF-16 buffer of the supplied capacity;
-    // Windows retains no pointer after creating the independent search handle.
+    // Windows keeps no pointer after creating the independent search handle.
     let search = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
     if search == INVALID_HANDLE_VALUE {
         return Err(last_error()).context("cannot list this computer's volumes");

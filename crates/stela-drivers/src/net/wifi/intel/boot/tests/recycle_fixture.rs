@@ -68,7 +68,7 @@ pub(super) fn exercise_rx_recycling(oracle: Option<&str>) {
         assert_eq!(state.lock().unwrap().registers.get(&0x1c80), Some(&0));
         let mut preserved = None;
         for n in 0..520u16 {
-            // SAFETY: Every previous command completed before this model iteration, retaining
+            // SAFETY: Every previous command completed before this model iteration, keeping
             // the same Source/Domain; direct payloads have no indirect DMA or concurrent worker.
             let ticket = unsafe { boot.submit_command(command_id(), &[n as u8], &source) }.unwrap();
             let slot = (n + 1) & 31;

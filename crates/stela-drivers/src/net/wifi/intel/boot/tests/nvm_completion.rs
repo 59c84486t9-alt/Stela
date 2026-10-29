@@ -29,7 +29,7 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
         let boot = start(&catalog, &source, &domain, &state, &drops);
         let boot = command_ready(boot, &empty, &source, &domain, &state);
         let mut init = boot.initialize_on_device_nvm();
-        // SAFETY: The retained model epoch/domain own all DMA allocations, and Source
+        // SAFETY: The kept model epoch/domain own all DMA allocations, and Source
         // supplies exclusive RAM for the first initialization publication.
         unsafe { init.advance(&source) }.unwrap();
         let id = if failure == 0 {
@@ -53,7 +53,7 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
                 })
             ));
         } else {
-            // SAFETY: The extended-configuration ACK is complete in retained model RAM;
+            // SAFETY: The extended-configuration ACK is complete in kept model RAM;
             // the original requester/domain and exclusive Source remain live.
             unsafe { init.advance(&source) }.unwrap();
             let mut packet = command_packet(Request::AccessComplete.id(), 1, &[]);
@@ -67,7 +67,7 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
             packet[128..132].copy_from_slice(&0x55550000u32.to_le_bytes());
             complete(&init.boot, &domain, 2, 3, &packet);
             // SAFETY: The combined ACK/notification bytes were published synchronously;
-            // the same initializer/domain retain their receive and command mappings.
+            // the same initializer/domain keep their receive and command mappings.
             unsafe { init.advance(&source) }.unwrap();
             // SAFETY: The prior completion remains in that owned model epoch while the
             // initializer advances stages; Source has no competing device or worker.
@@ -86,7 +86,7 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
             );
             assert!(matches!(
                 // SAFETY: The malformed or rejected NVM response is synchronously completed
-                // model data; the original owner/source retain its backing during refusal.
+                // model data; the original owner/source keep its backing during refusal.
                 unsafe { init.advance(&source) },
                 Err(Error::Nvm(_))
             ));
@@ -130,7 +130,7 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
     alive[256..260].copy_from_slice(&0x55550000u32.to_le_bytes());
     complete(&boot, &domain, 0, 1, &alive);
     boot.poll().unwrap().unwrap();
-    // SAFETY: phase_catalog belongs to this retained model profile/SKU; Source
+    // SAFETY: phase_catalog belongs to this model profile/SKU; Source
     // provides exclusive RAM within the same original requester/domain.
     unsafe { boot.begin_pnvm(&platform, observations, &source) }.unwrap();
     let mut pnvm = pnvm_packet(0x42);
@@ -153,7 +153,7 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
         .registers
         .extend([(0x388, 0x02123456), (0x38c, 0x789a)]);
     let mut init = boot.initialize_on_device_nvm();
-    // SAFETY: PNVM observation retained this original model epoch and its mappings;
+    // SAFETY: PNVM observation kept this original model epoch and its mappings;
     // Source remains exclusive while the initializer stages its first command.
     unsafe { init.advance(&source) }.unwrap();
     complete(
@@ -173,11 +173,11 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
         4,
         &command_packet(Request::AccessComplete.id(), 1, &[]),
     );
-    // SAFETY: The access-complete ACK completed in that same retained model domain;
+    // SAFETY: The access-complete ACK completed in that same model domain;
     // the initializer keeps the original source and receive mapping alive.
     unsafe { init.advance(&source) }.unwrap();
     assert_eq!(
-        // SAFETY: The early init notification is retained by this exact model owner;
+        // SAFETY: The early init notification is held by this model owner;
         // Source and the pending DMA buffers have no concurrent device access.
         unsafe { init.advance(&source) }.unwrap(),
         InitializationProgress::Pending(InitializationPhase::NvmInformation)
@@ -191,7 +191,7 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
     );
     assert_eq!(
         // SAFETY: The NVM response was completed synchronously and its source/domain
-        // remain retained until observation and pending notifications are extracted.
+        // remain held until observation and pending notifications are extracted.
         unsafe { init.advance(&source) }.unwrap(),
         InitializationProgress::Observed
     );

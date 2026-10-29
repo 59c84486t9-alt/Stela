@@ -1,4 +1,4 @@
-//! Source-qualified ARM data translation with architectural TLB maintenance.
+//! Source-checked ARM data translation with architectural TLB maintenance.
 use super::*;
 use crate::memory::{
     backing::AccessKind,
@@ -44,7 +44,7 @@ pub enum Failure {
 pub enum Refusal {
     UnalignedQuantity,
     Translation(mmu::Unsupported),
-    /// Exact effective output of the reached walk, retained only on refusal.
+    /// Exact effective output of the reached walk, kept only on refusal.
     /// The diagnostic must not require another walk after the source stopped.
     MemoryAttributes {
         physical: u64,
@@ -154,11 +154,11 @@ impl DataPolicy for Policy {
         class: MemoryOperationClass,
     ) -> Result<(), MemoryStatus> {
         // Ordered scalar transfers use the same checked physical RAM path as
-        // ordinary quantities. The cold callback retains the machine's Device
+        // ordinary quantities. The cold callback keeps the machine's Device
         // serializer and MFENCE pair; typed ordered staging adds acquire/release
         // semantics. Arm 2026-06 LDAPRB/LDAR/STLR use Mem with acquire/release
         // descriptors; aligned Device memory is not an instruction refusal.
-        // This does not qualify LSE or exclusive Device transfers.
+        // This does not check LSE or exclusive Device transfers.
         if self.controls.cold_m0() && class == MemoryOperationClass::Atomic {
             Err(MemoryStatus::Unsupported)
         } else {
@@ -259,7 +259,7 @@ impl DataPolicy for Policy {
             AccessKind::Execute => return Err((MemoryStatus::Unsupported, part.address)),
         };
         // Match Arm Mem, including its ASIMD-pair alignment override. All
-        // other pieces retain the original instruction's alignment result;
+        // other pieces keep the original instruction's alignment result;
         // DEVPAGE2 takes FAULT when a later byte reaches Device memory.
         let alignment = if request.operation == DataOperation::Ordinary
             && request.bytes == 32
@@ -369,11 +369,11 @@ impl DataPolicy for Policy {
         }
         // Normal cacheability, allocation and transience describe the guest
         // translation, not a new host mapping. Every observer still reaches
-        // the same qualified coherent WB reservation below. Existing SCA,
+        // the same checked coherent WB reservation below. Existing SCA,
         // monitor, publication and barrier services supply its memory effects;
         // Normal Non-cacheable is not Device memory and needs no Device lock.
         // Mapping the data quantity to an unowned device/aperture cannot acquire
-        // canonical-RAM authority just because its ARM descriptor was Normal.
+        // canonical-RAM permission just because its ARM descriptor was Normal.
         if let Err(status) = self.ram.check_physical(translated.physical, part.bytes) {
             return Err((
                 if status == MemoryStatus::Domain {
@@ -456,7 +456,7 @@ pub(super) mod tests {
     #[repr(align(4096))]
     struct Storage(UnsafeCell<[u8; 6 * PAGE]>);
     // SAFETY: tests never create racing Rust references; the canonical owner
-    // retains these exact bytes and every writer uses its physical system.
+    // keeps these exact bytes and every writer uses its physical system.
     unsafe impl Send for Storage {}
     // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
@@ -473,7 +473,7 @@ pub(super) mod tests {
             host_base: NonNull::new(storage.0.get().cast()).unwrap(),
             bytes: 6 * PAGE,
         };
-        // SAFETY: test-only actual byte owner, no production CPL0 claim.
+        // SAFETY: test-only byte owner.
         let ram = Arc::new(unsafe { ram_fixture(&[range], storage) });
         for (address, descriptor) in [
             (BASE, (BASE + PAGE as u64) | 3),
@@ -844,7 +844,7 @@ pub(super) mod tests {
                 );
                 let mut read = alloc::vec![0xa5; bytes];
                 let result = ordinary_transfer(&mut thread, address, &mut read, flags);
-                // Baseline deliberately lacks AtomicLoad16. A scalar quantity
+                // Baseline lacks AtomicLoad16. A scalar quantity
                 // spanning host8 within source SCA16 must not silently tear.
                 let needs_atomic16 = bytes <= 8
                     && residue as usize + bytes <= 16
@@ -905,7 +905,7 @@ pub(super) mod tests {
             policy.validate_data_request(pair),
             Err(MemoryStatus::Alignment)
         );
-        // Restoring a valid walk leaves a genuinely aligned pair legal even
+        // Restoring a valid walk leaves an aligned pair legal even
         // when its later eight-byte pieces are not whole-Q aligned.
         policy.failure = None;
         policy.controls.translation.ttbr0 = BASE;
@@ -1142,8 +1142,8 @@ pub(super) mod tests {
                 (status, completed),
                 (MemoryStatus::Success as u32, u64::from(bytes))
             );
-            // Both the RCsc and RCpc load categories must return actual bytes;
-            // RCpc retains its real captured source-feature admission.
+            // Both the RCsc and RCpc load categories must return bytes;
+            // RCpc keeps its real captured source-feature admission.
             for (order, feature) in [
                 (MemoryOrder::AcquireRcsc, OrderedFeature::Base),
                 (MemoryOrder::AcquireRcpc, OrderedFeature::Rcpc),

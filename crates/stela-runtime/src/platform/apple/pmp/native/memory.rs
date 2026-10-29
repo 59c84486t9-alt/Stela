@@ -1,7 +1,7 @@
 //! Native class1 AP-memory client. Original PMP25d34..25ea4,3a3f8..3a540,
-//! 3c6fc..3ca18 and ApplePMPv2 memory handlers retain the contracts below.
-//! A wire reply is not local mapping authority. The backend must retain the
-//! actual canonical RAM/DMA mapping and retire each real map/unmap operation.
+//! 3c6fc..3ca18 and ApplePMPv2 memory handlers keep the contracts below.
+//! A wire reply is not local mapping permission. The backend must keep the
+//! canonical RAM/DMA mapping and retire each real map/unmap operation.
 use super::{Progress, Step};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
@@ -14,7 +14,7 @@ use wire::{Kind, PAGE, TABLE_BYTES};
 
 type Error = &'static str;
 
-/// Unique admission to the actual native owner's class1 callback/mutex slot.
+/// Unique admission to the native owner's class1 callback/mutex slot.
 /// No Clone, reset, replacement or drop-time remote cleanup is provided.
 pub struct Claim {
     owner: Rc<()>,
@@ -33,8 +33,8 @@ impl Claim {
     }
 }
 
-/// Exact original native4ab08 inputs. Mode2 is retained as a source encoding;
-/// it does not assert an unqualified cacheability or access-permission meaning.
+/// Original native4ab08 inputs. Mode2 is held as a source encoding;
+/// it does not assert an unchecked cacheability or access-permission meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MapRequest {
     pub bus: u64,
@@ -63,7 +63,7 @@ impl Request {
     }
 }
 
-/// An actual retained mapping, not an IOVA or copied region-table row. Reads
+/// A kept mapping, not an IOVA or copied region-table row. Reads
 /// and writes must use that mapping's live canonical resource and original
 /// fault/prefix semantics; dropping it must not pretend to unmap/free remotely.
 pub trait Mapping {
@@ -82,8 +82,8 @@ pub enum MapStep<M> {
     Refused(Error),
 }
 /// Backend effects remain under the same request through Busy/refusal. Map
-/// refusal may not discard a published mapping; return Retired with its actual
-/// object instead. Unmap retirement requires actual local mapping removal,
+/// refusal may not discard a published mapping; return Retired with its
+/// object instead. Unmap retirement requires local mapping removal,
 /// preceding the AP free request, never an enqueued unmap command.
 pub trait Backend {
     type Mapping: Mapping;
@@ -102,7 +102,7 @@ pub trait Backend {
 }
 
 /// Identity survives bus-address reuse. Access requires this same live client
-/// and its retained allocation record. Dropping a handle does not free memory.
+/// and its allocation record. Dropping a handle does not free memory.
 #[derive(Clone)]
 pub struct Allocation {
     owner: Rc<()>,
@@ -150,16 +150,16 @@ impl<M> Pending<M> {
 }
 
 pub enum Completion {
-    /// None is the actual AP zero-address failure, distinct from a read empty
-    /// table. Table descriptors are retained separately, never dynamic-freed.
+    /// None is the AP zero-address failure, distinct from a read empty
+    /// table. Table descriptors are held separately, never dynamic-freed.
     Initialized(Option<Vec<Region>>),
     Allocated(Option<Allocation>),
     Freed(Allocation),
 }
 
 /// One native class transaction at a time, as original3a3f8's class mutex and
-/// saved callback slot require. There is no wire nonce: transport must retain
-/// the same ordered actual endpoint session. A replay matching a later same-
+/// saved callback slot require. There is no wire nonce: transport must keep
+/// the same ordered endpoint session. A replay matching a later same-
 /// kind request is wire-indistinguishable and cannot be authenticated here.
 pub struct Client<B: Backend> {
     claim: Claim,
@@ -240,7 +240,7 @@ impl<B: Backend> Client<B> {
         }
         Ok(())
     }
-    /// Commit a request exactly once to the actual endpoint's outgoing queue.
+    /// Commit a request exactly once to the endpoint's outgoing queue.
     /// Free is withheld until real local unmap retirement. No callback is
     /// credited before publication, and no fallible work follows this push.
     pub fn emit(&mut self, outbox: &mut Vec<u64>) -> Result<bool, Error> {

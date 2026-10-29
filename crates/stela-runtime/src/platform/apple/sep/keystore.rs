@@ -660,7 +660,7 @@ pub(crate) mod tests {
             request,
         );
         assert_eq!(identity_after, identity_before);
-        // Generation cannot proceed without actual provisioned machine roots.
+        // Generation cannot proceed without provisioned machine roots.
         let create = system_request_with_operation(2, 0, REFERENCE_CREATE);
         let (reply, output) = ask(
             &mut KeyStore::default(),

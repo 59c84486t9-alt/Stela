@@ -1,4 +1,4 @@
-//! Storage preparation retained under one real mapping-exclusion loan. This
+//! Storage preparation kept under one real mapping-exclusion loan. This
 //! caches no guest permissions, effective policy or successful health checks.
 use super::*;
 
@@ -9,7 +9,7 @@ pub(crate) struct MemoryExecutionSession {
     profile: MemoryProfile,
 }
 impl MemoryExecutionSession {
-    /// Borrow the actual mapping pin after checking membership and live health.
+    /// Borrow the mapping pin after checking membership and live health.
     /// This grants neither guest permissions nor exclusion of RAM/PTE writers.
     pub(crate) fn checked_execution<P: DataPolicy>(
         &self,
@@ -30,7 +30,7 @@ impl MemoryExecutionSession {
 impl<P: DataPolicy> MemoryThread<P> {
     pub(crate) fn execution_session(&self) -> Result<MemoryExecutionSession, MemoryStatus> {
         let execution = self.execution_loan()?;
-        // Clone while the actual loan excludes mapping/profile publication.
+        // Clone while the loan excludes mapping/profile publication.
         // The owning Arc and this copy outlive every subsequent body borrow.
         let profile = self.domain.profile()?;
         Ok(MemoryExecutionSession { execution, profile })
@@ -59,7 +59,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         Ok(entry)
     }
 
-    /// As with_checked_view, using the caller's authentic retained domain pin.
+    /// As with_checked_view, using the caller's authentic domain pin.
     /// All live health and callback finalization checks still run each call.
     ///
     /// # Safety
@@ -71,8 +71,8 @@ impl<P: DataPolicy> MemoryThread<P> {
     ) -> Result<R, MemoryStatus> {
         self.domain.check_data_execution()?;
         session.check_thread(self)?;
-        // SAFETY: the actual matching loan outlives callback finalization and
-        // excludes publication; the caller retains disjoint staging/policy.
+        // SAFETY: the matching loan outlives callback finalization and
+        // excludes publication; the caller keeps disjoint staging/policy.
         let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
         finalization.map(|()| result)
     }
@@ -112,7 +112,7 @@ mod tests {
         for value in [19, 37] {
             assert_eq!(domain.state.lock().unwrap().native_loans, 1);
             assert_eq!(
-                // SAFETY: no retained pointers or guest accesses in this callback.
+                // SAFETY: no kept pointers or guest accesses in this callback.
                 unsafe { thread.with_checked_view_in(&session, |_| value) },
                 Ok(value)
             );

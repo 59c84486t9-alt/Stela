@@ -12,7 +12,7 @@ pub struct Pi3usb30532<B: Bus> {
     orientation: Orientation,
 }
 impl<B: Bus> Pi3usb30532<B> {
-    /// The platform must select the real compatible, powered target and retain
+    /// The platform must select the real compatible, powered target and keep
     /// exclusive bus/device ownership; there is no chip-ID register to guess.
     pub fn probe(bus: B, address: Address) -> Result<Self, Error> {
         let mut registers = Registers::new(bus, address);

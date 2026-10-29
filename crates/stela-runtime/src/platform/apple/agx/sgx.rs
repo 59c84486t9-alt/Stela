@@ -203,9 +203,9 @@ impl Native {
                 }
                 self.sleep_request = value;
                 if value == 1 {
-                    // Execution is synchronous and no unit retains an in-flight
+                    // Execution is synchronous and no unit keeps an in-flight
                     // memory request at this hardware boundary. Completion is
-                    // visible only after the actual GPU agent has been gated.
+                    // visible only after the GPU agent has been gated.
                     self.gpu_awake.set(false);
                 }
             }
@@ -227,7 +227,7 @@ impl Native {
     }
 }
 
-/// Firmware access to the actual SGX instance, qualified by its physical banks.
+/// Firmware access to the SGX instance, checked by its physical banks.
 /// This is not an independent shadow register bank. Unsupported target registers
 /// remain refusals, including all protected reset and rail-loss operations.
 #[derive(Clone)]
@@ -239,10 +239,10 @@ pub struct FirmwarePower {
 }
 
 impl FirmwarePower {
-    /// Bind the ASC's actual configured wrapper physical base. RTBuddy writes
+    /// Bind the ASC's configured wrapper physical base. RTBuddy writes
     /// it into the WrAd firmware patch. A recovered family-specific callback
-    /// additionally qualifies its private control word against the SGX banks.
-    /// This qualifies ownership only; it does not model control-field effects.
+    /// additionally checks its private control word against the SGX banks.
+    /// This checks ownership only; it does not model control-field effects.
     pub fn with_asc_wrapper(mut self, physical: u64) -> Result<Self, &'static str> {
         physical
             .checked_add(super::super::asc::WRAPPER_BYTES)
@@ -275,7 +275,7 @@ impl FirmwarePower {
 
     /// The family's complete eight-byte native control word, if a recovered
     /// callback needs it. The mount must also check its final bus route.
-    /// Absence does not qualify any other family's native control effects.
+    /// Absence does not check any other family's native control effects.
     pub fn native_asc_control(&self) -> Option<u64> {
         self.asc_wrapper?
             .checked_add(self.family.model().ok()?.native_asc_control?)
@@ -353,7 +353,7 @@ impl FirmwarePower {
         Ok(logical)
     }
 
-    /// Read a source-qualified native callback register. Unknown registers
+    /// Read a source-checked native callback register. Unknown registers
     /// refuse; the RAM DMA port is used only for the UAT table walk.
     #[cfg(test)]
     pub fn read(
@@ -799,7 +799,7 @@ mod tests {
             assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
             assert!(access_native(&mut sgx, &mut ram, Some(8)).is_err());
             assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
-            // Retained PMGR gating inhibits this physical owner too.
+            // PMGR gating inhibits this physical owner too.
             let paused = LifecycleState {
                 clocked: false,
                 retention: true,
@@ -897,7 +897,7 @@ mod tests {
                 native_status(&mut sgx, &mut ram, &mut access),
                 Ok(GIFAF_SLEEP_COMPLETE)
             );
-            // A fault at the later wake PIO never clears retained inhibition.
+            // A fault at the later wake PIO never clears kept inhibition.
             ram.put_u64(pte, 0);
             assert!(native_write(&mut sgx, &mut ram, &mut access, 0x2020, 1).is_err());
             assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_err());
@@ -928,7 +928,7 @@ mod tests {
         assert!(bound.clone().with_asc_wrapper(0x206500000).is_err());
         assert!(power.clone().with_asc_wrapper(0x304000000).is_err());
         assert!(power.with_asc_wrapper(u64::MAX).is_err());
-        // The first byte alone cannot qualify an eight-byte native register.
+        // The first byte alone cannot check an eight-byte native register.
         let short = sgx.firmware_power(&[(0x204000000, 0x2540124, 0)]).unwrap();
         assert!(short.with_asc_wrapper(0x206400000).is_err());
         assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));

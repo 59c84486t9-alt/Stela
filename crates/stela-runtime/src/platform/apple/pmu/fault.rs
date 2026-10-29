@@ -1,4 +1,4 @@
-//! Retained history and the original AP's complete-snapshot acknowledgement.
+//! History and the original AP's complete-snapshot acknowledgement.
 //!
 //! mac13j26A434 `_readFaultLog` (VA 9d59cf4..9d59edc) reads the declared
 //! log, then writes it back outside scratch. Extended-long SPMI transports it
@@ -15,7 +15,7 @@ use stela_soc_data::pmu::history::FaultHistory;
 
 struct Snapshot {
     bytes: Vec<u8>,
-    /// The actual prefix consumed by successful SPMI commands.
+    /// The prefix consumed by successful SPMI commands.
     acknowledged: usize,
     /// The next chunk, including a possible whole-provider retry from base.
     next: usize,
@@ -109,7 +109,7 @@ impl FaultLog {
         Ok(())
     }
 
-    /// Each preflighted command consumes only its actual byte prefix. Retaining
+    /// Each preflighted command consumes only its byte prefix. Retaining
     /// the completed snapshot admits the source driver's exact retry after a
     /// lost response, without inventing new pending events or clearing new bits.
     pub fn acknowledge(&mut self, address: u16, bytes: usize) {
@@ -260,7 +260,7 @@ mod tests {
         pmu.read(0x1000, &mut snapshot, 100).unwrap();
         assert_eq!(snapshot.as_slice(), initial);
         // The driver owns any shadow copy. It remains ordinary canonical
-        // scratch storage, independent of acknowledgement of the actual latch.
+        // scratch storage, independent of acknowledgement of the latch.
         pmu.write(0x867b, &snapshot, 101).unwrap();
         pmu.write(0x1000, &snapshot, 102).unwrap();
         let mut shadow = [0; 10];
@@ -312,7 +312,7 @@ mod tests {
         assert!(!pmu.interrupt().asserted());
 
         // Even a mapped neighbouring storage byte must not be modified by an
-        // unqualified transfer spanning two distinct semantic owners.
+        // unchecked transfer spanning two distinct semantic owners.
         let config = Configuration::new(
             alloc::vec![Window {
                 base: 0x100a,
@@ -533,7 +533,7 @@ mod tests {
         }
         const REQUEST: u64 = 4;
         const RESPONSE: u64 = 8;
-        const RESPONSE_PENDING: u64 = 0x60 + 6 * 4; // Actual Gen1 vector192.
+        const RESPONSE_PENDING: u64 = 0x60 + 6 * 4; // Gen1 vector192.
         const ACK: u64 = 1 << 15;
         let initial: Vec<_> = (0..10).map(|index| 0x80 + index).collect();
         let configuration = Configuration::new(Vec::new(), None, 0)
@@ -615,7 +615,7 @@ mod tests {
             controller.read(RESPONSE_PENDING, Width::Word, &mut access),
             Ok(0)
         );
-        // The failed final word remains unconsumed; retry that actual payload,
+        // The failed final word remains unconsumed; retry that payload,
         // without another header or replaying the already retired prefix.
         put(&mut controller, &mut access, 0x8988);
         assert_ne!(pop(&mut controller, &mut access) & ACK, 0);

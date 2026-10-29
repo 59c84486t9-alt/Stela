@@ -3,10 +3,10 @@
 //! Original SPTM270bcf08..bcfac restores each bank's used TTBR0 from a common
 //! per-SID record;270bd234..bd290 similarly restores its TCR. Independent
 //! banks can nevertheless diverge through MMIO, lifecycle or table memory.
-//! Recheck actual successful translations before each DMA page/chunk.
+//! Recheck successful translations before each DMA page/chunk.
 //!
 //! This resource is an explicit native fabric assignment at controller
-//! construction, retaining client and mapper owners. DT properties alone
+//! construction, keeping client and mapper owners. DT properties alone
 //! are not that assignment. It does not recover Apple's physical USB
 //! LLT/BLK classifier: all banks and every current remap preimage of the
 //! assigned context must agree. A fault cannot identify its physical bank
@@ -23,7 +23,7 @@ const PAGE: u64 = 0x4000;
 
 /// An explicitly assigned native USB DMA owner, independent of any claimed
 /// Apple physical traffic classifier. Root placement must supply the full
-/// ordered pair of actual TRAD owners and retain them for this resource's
+/// ordered pair of TRAD owners and keep them for this resource's
 /// lifetime. Moving/replacing a bank requires assigning a new resource.
 pub struct T6000ContextRoute {
     client_phandle: u32,
@@ -35,7 +35,7 @@ pub struct T6000ContextRoute {
 impl T6000ContextRoute {
     /// Assign one Stela-owned native USB endpoint to its validated logical
     /// mapper context at controller creation. This is not DT admission.
-    /// The parent retains the actual client/mapper and bank device IDs.
+    /// The parent keeps the client/mapper and bank device IDs.
     pub fn assign_native_usb(
         client_phandle: u32,
         mapper_phandle: u32,
@@ -532,7 +532,7 @@ mod tests {
         };
         transfer(&route, &banks, &mut ram, &mut sink, IOVA, &[0x5a; 64]).unwrap();
         // Two independent banks * two incoming preimages * two levels;
-        // the actual payload is written exactly once after all checks.
+        // the payload is written exactly once after all checks.
         assert_eq!((ram.reads, ram.writes), (8, 1));
     }
 }

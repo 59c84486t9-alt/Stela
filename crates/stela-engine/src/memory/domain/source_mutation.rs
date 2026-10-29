@@ -60,7 +60,7 @@ pub(in crate::memory) struct SourceWriteGuard<'a> {
     finished: bool,
 }
 impl SourceWriteGuard<'_> {
-    /// Invoke immediately before the exact native write, inside its existing
+    /// Invoke immediately before the native write, inside its existing
     /// reservation gate. No fallible work separates this marker from that write.
     pub(in crate::memory) fn attempting(&mut self) {
         if self.state.is_some() {

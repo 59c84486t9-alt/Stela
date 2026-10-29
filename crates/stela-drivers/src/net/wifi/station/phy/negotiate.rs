@@ -157,7 +157,7 @@ impl NegotiatedHe {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommonEhtMcs {
     pub bw20: Option<[u8; 4]>,
-    /// Both peers actually advertise a non-20-only map for <=80MHz.
+    /// Both peers advertise a non-20-only map for <=80MHz.
     pub bw80: Option<[u8; 4]>,
     pub bw160: Option<[u8; 4]>,
     pub bw320: Option<[u8; 4]>,
@@ -168,8 +168,8 @@ pub struct NegotiatedEht {
     /// Common directional bounds for the explicitly selected width only.
     pub ranges: [u8; 4],
     pub common: CommonEhtMcs,
-    /// Exact source peer union; intentionally not intersected or synthesized
-    /// from `ranges`. Actual local limits remain required for rate execution.
+    /// Source peer union; not intersected or synthesized
+    /// from `ranges`. Local limits remain required for rate execution.
     pub peer_source_mcs_union: EhtMcsUnion,
 }
 
@@ -224,7 +224,7 @@ pub struct NegotiatedWmm {
     pub max_service_period: u8,
 }
 
-/// Explicit selected family/width with exact local/peer observations retained.
+/// Explicit selected family/width with exact local/peer observations kept.
 /// This does not choose a country/channel/center frequency, authenticate a peer,
 /// install keys or make a vendor's unsupported advanced mode operational.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,8 +243,8 @@ pub struct Negotiated {
     pub rx_nss: u8,
     pub tx_nss: u8,
     /// Source STA_PHY AF encoding from HT/VHT/HE6. This is only the base:
-    /// actual HE MAC3/EHT MAC1 extension effects must also be consumed from
-    /// retained peer capabilities by their firmware TLVs/aggregate executor.
+    /// HE MAC3/EHT MAC1 extension effects must also be consumed from
+    /// peer capabilities by their firmware TLVs/aggregate executor.
     pub peer_ampdu_base_exponent: u8,
     pub peer_mpdu_spacing: u8,
     pub max_tx_amsdu: u16,

@@ -1,4 +1,4 @@
-//! Retained boot files, final memory-map inventory and the engine transfer.
+//! Boot files, final memory-map inventory and the engine transfer.
 use super::*;
 
 pub(super) struct RetainedFiles {
@@ -102,7 +102,7 @@ pub(super) struct Transfer {
 impl Transfer {
     /// # Safety
     /// Boot services have ended. `root` maps this code and the trampoline,
-    /// and the engine's retained image, stack, handoff and shared physmap.
+    /// and the engine's image, stack, handoff and shared physmap.
     pub(super) unsafe fn enter(self) -> Result<core::convert::Infallible, &'static str> {
         let Self {
             placement,

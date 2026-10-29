@@ -18,13 +18,13 @@ impl CanonicalRamService<'_> {
     pub fn generation(&self) -> u64 {
         self.service.generation()
     }
-    /// Identity comparison of the actual retained owner, not matching geometry.
+    /// Identity comparison of the owner, not matching geometry.
     pub fn belongs_to(&self, ram: &RegisteredSystemRam) -> bool {
         core::ptr::eq(self.ram, ram)
     }
-    /// Permanently fail this exact retained RAM domain and its physical-writer
-    /// gate after an unqualified native fault. Future entry/service acquisition
-    /// refuses; this cannot restore authority or manufacture completion.
+    /// Permanently fail this exact RAM domain and its physical-writer
+    /// gate after an unchecked native fault. Future entry/service acquisition
+    /// refuses; this cannot restore permission or manufacture completion.
     pub fn fail(&self) {
         self.service.fail();
     }

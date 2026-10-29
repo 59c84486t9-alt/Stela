@@ -1,4 +1,4 @@
-//! Actual command effects, asynchronous responses and retained failure ownership.
+//! Command effects, asynchronous responses and kept failure ownership.
 use super::*;
 fn target(generation: Generation) -> (Rc<RefCell<Hardware>>, Device<Wire, Irq, Time>) {
     let (h, mut d) = if generation == Generation::Gen6 {

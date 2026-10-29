@@ -221,7 +221,7 @@ fn every_bus_error_prevents_partial_publication_and_failed_writes_never_replay()
             failed_writes += 1;
         }
     }
-    // Actual write and every uncertain validation/readback after it.
+    // Write and every uncertain validation/readback after it.
     assert_eq!(failed_writes, 4);
 }
 

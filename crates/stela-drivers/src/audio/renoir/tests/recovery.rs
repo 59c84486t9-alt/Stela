@@ -205,7 +205,7 @@ fn successful_but_late_dma_and_reset_completion_retains_pins_until_fresh_recover
             assert_eq!(device.lock().unwrap().unmaps, 0);
             assert!(controller.capture.is_some());
             if phase == Phase::DmaStop {
-                // A late actual stop must not silently advance to PDM/FIFO
+                // A late stop must not silently advance to PDM/FIFO
                 // quiet or unmap within the failed operation.
                 assert_eq!(device.lock().unwrap().words[0x2c04 / 4], 1);
             }
@@ -240,7 +240,7 @@ fn active_drop_quarantines_real_domain_and_nonidentity_ram_pins() {
     drop(controller);
     assert_eq!(source.drops.load(Ordering::Relaxed), 0);
     assert!(device.lock().unwrap().translation.is_some());
-    // No fake reset/unmap is supplied for this deliberately quarantined DMA.
+    // No fake reset/unmap is supplied for this quarantined DMA.
     device.lock().unwrap().advance(64);
     assert_eq!(device.lock().unwrap().unmaps, 0);
 }

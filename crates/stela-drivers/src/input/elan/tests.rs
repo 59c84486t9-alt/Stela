@@ -1,4 +1,4 @@
-//! Independent ELAN peripheral with actual command effects, ACK timing,
+//! Independent ELAN peripheral with command effects, ACK timing,
 //! physical attention, compressed reports and late fault injection.
 use super::*;
 use crate::bus::i2c::Operation;

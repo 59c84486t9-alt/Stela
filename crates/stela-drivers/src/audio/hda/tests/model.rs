@@ -338,7 +338,7 @@ impl Model {
                 let next = (rp + 1) % self.size(CORBSIZE);
                 let address = self.address(CORBLBASE, CORBUBASE);
                 assert_ne!(address, 0);
-                // SAFETY: the controller allocated this aligned CORB in retained
+                // SAFETY: the controller allocated this aligned CORB in kept
                 // fixture RAM. next is reduced to the selected ring size, and
                 // register polling serializes CPU and modeled device access.
                 let command =
@@ -420,7 +420,7 @@ impl Model {
         let next = (self.get(RIRBWP, 2) as u16 + 1) % self.size(RIRBSIZE);
         let address = self.address(RIRBLBASE, RIRBUBASE);
         assert_ne!(address, 0);
-        // SAFETY: address names the retained RIRB allocation. next is modulo
+        // SAFETY: address names the RIRB allocation. next is modulo
         // the ring size and its entry has two aligned u32 words; emission is
         // synchronous with the controller's register polling.
         unsafe {
@@ -586,7 +586,7 @@ impl Model {
         for entry in 0..=lvi {
             // SAFETY: bdl names the fixture-backed descriptor list. entry is
             // bounded by its programmed LVI, and the controller emits aligned
-            // 16-byte descriptors retained throughout this synchronous transfer.
+            // 16-byte descriptors kept throughout this synchronous transfer.
             let (address, len, ioc) = unsafe {
                 let ptr = (bdl as *const u8).add(entry * 16);
                 (
@@ -622,7 +622,7 @@ impl Model {
                 .unwrap();
             let address = (address + (position - start) as u64) as *mut u8;
             if index < 2 {
-                // SAFETY: position selects a byte within the retained PCM
+                // SAFETY: position selects a byte within the PCM
                 // descriptor above. Capture and CPU buffer access are serialized
                 // by the controller's synchronous polling and stopped-buffer API.
                 unsafe {
@@ -630,7 +630,7 @@ impl Model {
                 }
                 self.capture_counter = self.capture_counter.wrapping_add(1);
             } else {
-                // SAFETY: address is within the selected retained PCM extent;
+                // SAFETY: address is within the selected PCM extent;
                 // playback reads run synchronously with register polling.
                 self.playback.push(unsafe { address.read_volatile() });
             }

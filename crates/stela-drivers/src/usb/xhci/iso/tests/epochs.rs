@@ -163,7 +163,7 @@ fn stale_scheduled_identity() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma =
-    // SAFETY: This stale-schedule fixture retains both controller generations and
+    // SAFETY: This stale-schedule fixture keeps both controller generations and
     // their complete RAM allocations until every ticket check ends; the backing
     // vector is never resized.
     unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };

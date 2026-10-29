@@ -1,7 +1,7 @@
-//! Cooperative NORMAL/FIFO ordering for the optional retained kernel domain.
+//! Cooperative NORMAL/FIFO ordering for the optional kernel domain.
 //! No native preemption, RR quantum, DEADLINE or alternate NORMAL base is
 //! inferred from an integer rank. Original Linux PI commits use a captured
-//! actual job handle; default Runtime dispatch stays round-robin.
+//! job handle; default Runtime dispatch stays round-robin.
 use super::{ContextId, LeaveReason, WakeHandle, WorkError};
 use core::sync::atomic::Ordering;
 
@@ -57,7 +57,7 @@ struct Row {
     state: State,
     order: u64,
 }
-/// At most32 actual continuation records, embedded in the retained Queue.
+/// At most32 continuation records, embedded in the Queue.
 /// Only its existing IRQ-save lock accesses this state; no task/C pointer,
 /// provider callback, allocation or ref release is stored or invoked here.
 pub(super) struct Board {
@@ -244,7 +244,7 @@ impl Board {
         row.rank = after;
         Ok(())
     }
-    /// Both candidates are actual eligible Runtime tasks. Equal NORMAL keeps
+    /// Both candidates are eligible Runtime tasks. Equal NORMAL keeps
     /// the caller's round-robin scan order; equal effective RT uses ready order.
     pub(super) fn precedes(
         &self,
@@ -266,7 +266,7 @@ impl Board {
     }
 }
 
-/// Immutable actual queue/context/job generation. It contains no Runtime or C
+/// Immutable queue/context/job generation. It contains no Runtime or C
 /// task pointer. A stale handle cannot mutate a new job on the reused stack.
 #[derive(Clone)]
 pub struct SchedulingHandle<const N: usize> {
@@ -274,7 +274,7 @@ pub struct SchedulingHandle<const N: usize> {
 }
 impl<const N: usize> SchedulingHandle<N> {
     fn live(&self) -> Result<(), WorkError> {
-        self.wake.queue.current_id()?; // actual caller CPU/RSP, same Queue
+        self.wake.queue.current_id()?; // caller CPU/RSP, same Queue
         if self.wake.closed()? {
             return Err(WorkError::Closed);
         }
@@ -293,7 +293,7 @@ impl<const N: usize> SchedulingHandle<N> {
     /// The same serialized original Linux task/PI-lock mutation supplies these
     /// exact old/new admitted policies and effective priorities. C commits its
     /// corresponding priority and borrowed donor before releasing that lease.
-    /// Retain actual donor/task/waiter lifetimes; rank is not an ownership grant.
+    /// Keep donor/task/waiter lifetimes; rank is not an ownership grant.
     pub unsafe fn update(
         &self,
         before: Snapshot,

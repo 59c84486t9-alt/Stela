@@ -38,7 +38,7 @@ pub mod wifi;
 pub use services::{NativeServices, ServiceError};
 pub use wifi::{WifiConfig, WifiSecret, WifiSecretError};
 
-/// A controller refusal retains its original typed details for boot diagnostics.
+/// A controller refusal keeps its original typed details for boot diagnostics.
 /// In particular, firmware names and integrity/target errors are never replaced
 /// by a generic unsupported-device message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,7 +147,7 @@ impl fmt::Display for PlatformError {
     }
 }
 
-/// Nonfatal diagnostics retain controller-specific values through discovery.
+/// Nonfatal diagnostics keep controller-specific values through discovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     Message(&'static str),
@@ -362,14 +362,14 @@ pub struct Devices {
     pub usb_hosts: Vec<xhci::Host>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
-    /// Native Realtek socket owners, retained for empty/removable SD/MMC cards.
+    /// Native Realtek socket owners, kept for empty/removable SD/MMC cards.
     pub rtsx_hosts: Vec<rtsx::Host>,
     /// Storage class owners remain available for explicit media rescan.
     pub usb_storage: Vec<crate::usb::storage::UsbStorage>,
-    /// USB HCI transports with retained device-specific initialization results.
+    /// USB HCI transports with kept device-specific initialization results.
     /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
-    /// Raw firmware uploaders awaiting actual USB removal/fresh enumeration.
+    /// Raw firmware uploaders awaiting USB removal/fresh enumeration.
     pub bluetooth_bootloaders: Vec<crate::usb::bluetooth::ath3k::UsbBootloader>,
     /// Exact pre-EBS board-variable observation, including unavailable diagnostics.
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
@@ -422,7 +422,7 @@ pub struct Devices {
 }
 
 impl Devices {
-    /// Retained failures from attempted native vendor initialization. Unknown
+    /// Failures from attempted native vendor initialization. Unknown
     /// vendors remain raw, unverified transports; they are not failed attempts
     /// of a backend implemented here.
     pub fn bluetooth_failures(
@@ -763,7 +763,7 @@ pub unsafe fn probe_with_provider(
                         devices.audio.extend(found.audio);
                         devices.bluetooth_bootloaders.extend(found.bootloaders);
                         for mut device in found.bluetooth {
-                            // The retained result owns its evidence/errors;
+                            // The kept result owns its evidence/errors;
                             // no catalog borrow or firmware bytes escape.
                             let _ = device.initialize_with_provider(
                                 firmware,

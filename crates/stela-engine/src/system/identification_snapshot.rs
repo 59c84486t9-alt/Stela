@@ -40,7 +40,7 @@ pub enum Origin {
 }
 
 /// Where the snapshot came from. This identifies the input without
-/// authenticating hardware; the retained bytes and offsets allow the readbacks
+/// authenticating hardware; the bytes and offsets allow the readbacks
 /// to be verified later.
 pub struct Provenance {
     origin: Origin,
@@ -79,7 +79,7 @@ impl fmt::Debug for Provenance {
 }
 
 /// Non-Clone/non-Copy: consumers borrow this same immutable allocation. An Arc
-/// may retain its lifetime; equality of raw values does not imply source identity.
+/// may keep its lifetime; equality of raw values does not imply source identity.
 #[derive(Debug)]
 pub struct Snapshot {
     values: [Option<u64>; STATIC_ID_COUNT],
@@ -150,7 +150,7 @@ fn insert(
 }
 
 impl Snapshot {
-    /// Retained allocation capacities, including the containing Arc's two
+    /// Allocation capacities, including the containing Arc's two
     /// counters. Shared input is conservatively charged to each owner.
     pub(crate) fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()

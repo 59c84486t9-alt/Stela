@@ -81,8 +81,8 @@ pub struct Board {
     source: BoardSource,
 }
 impl Board {
-    /// Parse actual captured DMI observations. Only the source's three exact
-    /// qualified products select its formosa board; no generic Apple fallback.
+    /// Parse captured DMI observations. Only the source's three exact
+    /// checked products select its formosa board; no generic Apple fallback.
     pub fn from_dmi(vendor: &str, product: &str) -> Result<Self> {
         if vendor != "Apple Inc."
             || !matches!(
@@ -100,7 +100,7 @@ impl Board {
             },
         })
     }
-    /// Parse the actual board property. Platform construction must bind this
+    /// Parse the board property. Platform construction must bind this
     /// observation to the same physical Function, rather than inventing a board.
     pub fn from_property(bytes: &[u8]) -> Result<Self> {
         let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
@@ -127,7 +127,7 @@ pub struct Identity {
     pub board: Board,
     pub stepping: String,
     pub antenna_vendor: String,
-    /// Complete actual OTP, including unknown TLVs and padding.
+    /// Complete OTP, including unknown TLVs and padding.
     pub otp: [u8; OTP_BYTES],
 }
 impl Identity {

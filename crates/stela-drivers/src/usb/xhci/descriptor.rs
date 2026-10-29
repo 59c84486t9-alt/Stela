@@ -2,7 +2,7 @@
 //! configuration descriptor (USB 2.0 9.6, USB 3.2 9.6.7).
 use super::*;
 
-/// USB 3.x endpoint companion, retained with the endpoint it immediately follows.
+/// USB 3.x endpoint companion, kept with the endpoint it immediately follows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SuperSpeedCompanion {
     pub max_burst: u8,
@@ -112,7 +112,7 @@ pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
 #[derive(Clone, Debug)]
 pub struct Device {
     /// Complete original PLA_TCR0 read; matching uses the donor's normalized
-    /// version mask below while diagnostics retain every observed register bit.
+    /// version mask below while diagnostics keep every observed register bit.
     pub vendor_ethernet_tcr: Option<u32>,
     /// Read-only vendor Ethernet chip identity observed before configuration
     /// selection, matching Linux r8152's cfgselector preflight. None means no

@@ -1,4 +1,4 @@
-//! Reconstruct fault authority from admitted source and a complete code template.
+//! Reconstruct fault permission from admitted source and a complete code template.
 use super::{FaultRecovery, RecoveryBinding, RecoverySiteKind, RetirementPoint};
 use crate::{
     CompileError, GuestAddress,
@@ -6,7 +6,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-/// Persistable metadata; this carries no authority to project a guest fault.
+/// Persistable metadata; this carries no permission to project a guest fault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnqualifiedFaultRecovery {
     pub start: usize,
@@ -28,7 +28,7 @@ impl From<&FaultRecovery> for UnqualifiedFaultRecovery {
 }
 /// An immutable, unpatched template. The caller binds this to the installed
 /// executable owner and validates every live chain redirection against its
-/// retained patch plan. Mutated live code is never a substitute for this image.
+/// patch plan. Mutated live code is never a substitute for this image.
 pub struct RecoveryTemplate<'a> {
     pub code: &'a [u8],
     pub source_map: &'a [(GuestAddress, usize)],
@@ -63,7 +63,7 @@ impl CompilationPlan {
     /// complete immutable template agrees. This allocates and must run in the
     /// dispatcher, never in an ISR. Legacy cached blocks may defer it until a
     /// fault, before publishing any architectural change. Spill/EGPR execution
-    /// requires eager qualification before invocation and capture-plan exposure.
+    /// requires eager validation before invocation and capture-plan exposure.
     pub fn qualify_recovery(
         self,
         template: RecoveryTemplate<'_>,

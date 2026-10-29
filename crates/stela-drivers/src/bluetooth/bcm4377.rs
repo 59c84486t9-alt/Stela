@@ -2,7 +2,7 @@
 // Copyright (C) The Asahi Linux Contributors
 //! Source-ported Broadcom 4377/4378/4387/4388 PCIe IPC transport.
 //! Firmware/RTI/ring acknowledgments are distinct from HCI command completion.
-//! This library requires actual retained PCI/reset/coherent-DMA/MSI ownership;
+//! This library requires kept PCI/reset/coherent-DMA/MSI ownership;
 //! Source controller setup uses real board-bound properties and HCI events;
 //! native provisioning and guest/radio services remain separate.
 mod boot;
@@ -112,7 +112,7 @@ pub struct Packet {
     pub kind: Kind,
     pub bytes: Vec<u8>,
     pub completion: [u8; 16],
-    /// Entire actual completion footer, including original padding.
+    /// Entire completion footer, including original padding.
     pub footer: Vec<u8>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,11 +129,11 @@ pub struct Receipt {
 pub struct Observations {
     pub packets: Vec<Packet>,
     pub completions: Vec<Receipt>,
-    /// Actual whole-requester retirement ended these submissions without an
+    /// Whole-requester retirement ended these submissions without an
     /// observed ACK. This is cancellation evidence, never packet delivery.
     pub retired_without_ack: Vec<Submission>,
 }
-/// Last actual read or attempted native write, including late observations.
+/// Last read or attempted native write, including late observations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegisterAccess {
     Read {
@@ -164,32 +164,32 @@ pub struct Snapshot {
     pub native_access: Option<RegisterAccess>,
 }
 
-/// Actual exclusive Function/BARs/MSI/coherent-domain adapter, or explicit model.
+/// Exclusive Function/BARs/MSI/coherent-domain adapter, or explicit model.
 /// # Safety
-/// Identity and board observations bind the same actual retained requester and
+/// Identity and board observations bind the same requester and
 /// reset epoch. Former firmware/driver/CPU owners are independently drained;
 /// their DMA/domain/IRQ reservations cannot alias any new allocation. `prepare`
 /// performs acknowledged coordinated FLR/isolation, waits
 /// at least the donor's 100 ms before BAR accesses, establishes PCI D0/MEM/BM,
-/// and actually disables BCM4377 ASPM including its retained parent-link policy.
-/// `now_us` observes the actual monotonic microsecond clock; delayed native
+/// and disables BCM4377 ASPM including its parent-link policy.
+/// `now_us` observes the monotonic microsecond clock; delayed native
 /// effects and observations remain inside the same request deadline.
-/// Every access has its exact native width; config word writes never replay
+/// Every access has its native width; config word writes never replay
 /// adjacent W1C status through a DWORD RMW. BAR0/2 remain reserved UC mappings.
-/// CoherentAllocator resources belong to this actual requester and are fully
+/// CoherentAllocator resources belong to this requester and are fully
 /// coherent for source shared-index polling. MSI admission installs exactly one
-/// real qualified message/callback with every native owner retained; no INTx or
-/// MSI-X fallback. `retire` independently stops actual device DMA/posted writes,
+/// real checked message/callback with every native owner kept; no INTx or
+/// MSI-X fallback. `retire` independently stops device DMA/posted writes,
 /// drains root/domain/CPU/IRQ/callback/deferred work and excludes future access;
 /// ring-destroy replies, SLEEP3 and masking alone are not that proof. An error
-/// retains all uncertain native resources and forbids automatic retry/reopen.
+/// keeps all uncertain native resources and forbids automatic retry/reopen.
 pub unsafe trait Platform: 'static {
     fn identity(&self) -> PciIdentity;
     fn board(&self) -> Board;
-    /// Read this actual retained requester's firmware-node property. Values
+    /// Read this requester's firmware-node property. Values
     /// must come from its real bound node and remain immutable through setup;
     /// copied PCI/board labels never authorize another device's calibration.
-    /// Returned bytes retain original property order, including BD_ADDR order.
+    /// Returned bytes keep original property order, including BD_ADDR order.
     fn property(&self, _name: &'static str) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
@@ -303,7 +303,7 @@ impl<P: Platform> Transport<P> {
             Err(error) => Err(self.fail(error)),
         }
     }
-    /// Fresh boot plus source calibration/PTB/address setup over actual HCI.
+    /// Fresh boot plus source calibration/PTB/address setup over HCI.
     /// Raw inbound observations and the initialization attempt survive failure.
     /// This entry requires the untouched Allocated epoch; an arbitrary live
     /// transport does not grant initial HCI credits or a controller identity.
@@ -379,7 +379,7 @@ impl<P: Platform> Transport<P> {
             width: 1,
             value: u32::from(value),
         });
-        // Preserve the actual late byte before the outer deadline can refuse it.
+        // Preserve the late byte before the outer deadline can refuse it.
         self.snapshot.otp.push(value);
         self.check_budget()?;
         Ok(value)
@@ -456,7 +456,7 @@ impl<P: Platform> Drop for Transport<P> {
         }
         if self.state != State::Closed {
             // No destructor retries or releases a failed physical epoch. Keep
-            // terminal DMA bytes and every actual root/UC/IRQ/domain owner.
+            // terminal DMA bytes and every root/UC/IRQ/domain owner.
             if let Some(platform) = self.platform.take() {
                 core::mem::forget(platform);
             }
@@ -480,7 +480,7 @@ impl<P: Platform> Drop for Transport<P> {
 mod tests {
     // SPDX-License-Identifier: MIT
     //! Independent literal wire/device model. Device accesses resolve domain IOVAs
-    //! to retained CPU mappings; model physical pages and CPU pointers are above
+    //! to kept CPU mappings; model physical pages and CPU pointers are above
     //! 4GiB and are never used as the source's 32-bit DMA addresses.
     extern crate std;
     mod native;
@@ -507,11 +507,11 @@ mod tests {
         physical: Vec<u64>,
     }
     // SAFETY: single-threaded coherent model access is serialized through Model's
-    // mutex. This owner retains the actual aligned allocation until its last pin.
+    // mutex. This owner keeps the aligned allocation until its last pin.
     unsafe impl Send for Pages {}
     // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Pages {}
-    // SAFETY: `cpu_base` and `physical` describe the one retained, aligned test allocation for its
+    // SAFETY: `cpu_base` and `physical` describe the one kept, aligned test allocation for its
     // whole life.
     unsafe impl PageBacking for Pages {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -529,7 +529,7 @@ mod tests {
     }
     impl Drop for Pages {
         fn drop(&mut self) {
-            // SAFETY: original unique allocation, all retained pins ended.
+            // SAFETY: original unique allocation, all kept pins ended.
             unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
         }
     }
@@ -586,7 +586,7 @@ mod tests {
                 .unwrap();
             (0..bytes)
                 .map(|at| {
-                    // SAFETY: actual model mapping bounds checked; serialized DMA.
+                    // SAFETY: model mapping bounds checked; serialized DMA.
                     unsafe { pointer.as_ptr().add(at).read_volatile() }
                 })
                 .collect()
@@ -610,7 +610,7 @@ mod tests {
                 .address((address - lease.token.address) as usize, bytes.len())
                 .unwrap();
             for (at, byte) in bytes.iter().enumerate() {
-                // SAFETY: checked actual retained mapping, serialized device write.
+                // SAFETY: checked mapping, serialized device write.
                 unsafe { pointer.as_ptr().add(at).write_volatile(*byte) };
             }
         }
@@ -621,7 +621,7 @@ mod tests {
             self.write(address, &value.to_le_bytes());
         }
     }
-    // SAFETY: explicit coherent device model, retains supplied pins/CPU mapping,
+    // SAFETY: explicit coherent device model, keeps supplied pins/CPU mapping,
     // checks low IOVA extent and never releases used ranges before root stop.
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
@@ -630,8 +630,8 @@ mod tests {
             direction: Direction,
             limit: u64,
         ) -> core::result::Result<DomainMapping, DmaError> {
-            // This coherent CPU-view model deliberately admits one retained
-            // allocation; scatter mappings have no fabricated contiguous view.
+            // This coherent CPU-view model admits one kept
+            // allocation; scatter mappings have no invented contiguous view.
             let pages = pages.as_single().ok_or(DmaError::MappingFailed)?;
             assert_eq!(direction, Direction::Bidirectional);
             assert!(pages.physical_pages()[0] >= 0x1_0000_0000);
@@ -710,7 +710,7 @@ mod tests {
         domain: Arc<Domain>,
         physical: u64,
     }
-    // SAFETY: independent coherent model uses actual unique zeroed CPU pages,
+    // SAFETY: independent coherent model uses unique zeroed CPU pages,
     // separately modeled high physical pages and low IOVAs in one domain.
     unsafe impl CoherentAllocator for Allocator {
         fn allocate(&mut self, bytes: usize) -> Result<CoherentBuffer> {
@@ -732,7 +732,7 @@ mod tests {
                 4096,
             )
             .unwrap();
-            // SAFETY: model coherency and same retained domain described above.
+            // SAFETY: model coherency and same domain described above.
             unsafe { CoherentBuffer::map(pages, self.domain.clone()) }
         }
     }
@@ -884,7 +884,7 @@ mod tests {
             if fault == HciFault::StatusOnly(index) {
                 event = vec![0x0f, 4, 0, credits, opcode as u8, (opcode >> 8) as u8];
             }
-            // Retain unrelated real async traffic and all source footer padding.
+            // Keep unrelated real async traffic and all source footer padding.
             self.completion(2, 2, 0xffff, 0x82, &[0xff, 2, 0xa1, index as u8], false);
             if fault == HciFault::StatusThenComplete(index) {
                 self.completion(
@@ -1247,7 +1247,7 @@ mod tests {
                         .is_some_and(|s| s.fault == HciFault::LateSleep)
                         && d.tx[1].enabled =>
                 {
-                    // Observe the actual newly written descriptor. Startup's
+                    // Observe the newly written descriptor. Startup's
                     // control-ring wakeups leave the HCI descriptor empty.
                     let descriptor = d.domain.read(d.tx[1].address, 3);
                     if u16at(&descriptor, 1) != 0 {
@@ -2001,8 +2001,8 @@ mod tests {
     #[test]
     fn every_live_send_poll_and_close_mmio_effect_error_stops_once() {
         // Independent RX in the same service turn forces failure coverage for both
-        // actual RX credit doorbells and outbound descriptor doorbells. Closing
-        // exercises actual destroy ACKs plus snapshot reads before root stop.
+        // RX credit doorbells and outbound descriptor doorbells. Closing
+        // exercises destroy ACKs plus snapshot reads before root stop.
         for closing in [false, true] {
             let count = {
                 let (mut t, d) = active(0x5f69);
@@ -2624,8 +2624,8 @@ mod tests {
     #[test]
     fn initialization_transcript_bound_keeps_real_completion_before_terminal_refusal() {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
-        // Ten actual startup control ACKs, then actual async event+HCI CC fit;
-        // its actual transfer ACK is the observation crossing the bound.
+        // Ten startup control ACKs, then async event+HCI CC fit;
+        // its transfer ACK is the observation crossing the bound.
         transport.observation_bytes = OBSERVATION_BYTES - 160 - 585;
         assert_eq!(
             transport.initialize(&provider),
@@ -2658,7 +2658,7 @@ mod tests {
             transport.initialize(&provider).unwrap();
             d.lock().unwrap().operations
         };
-        // All command-phase accesses, including actual RX credit/doorbells,
+        // All command-phase accesses, including RX credit/doorbells,
         // are bounded independently of startup OTP/config coverage above.
         for operation in first..=last {
             for fail_retire in [false, true] {

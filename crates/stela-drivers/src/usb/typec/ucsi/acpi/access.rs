@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2017 Intel Corporation
 // Copyright (c) 2026 Stela contributors
-//! Scalar publication boundaries in the actual aligned UCSI shared mailbox.
+//! Scalar publication boundaries in the aligned UCSI shared mailbox.
 use core::ptr::NonNull;
 
 /// # Safety

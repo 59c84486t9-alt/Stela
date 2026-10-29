@@ -1,10 +1,10 @@
-//! Recovered gen3 table/data effects, with explicit context qualification.
+//! Recovered gen3 table/data effects, with explicit context validation.
 //!
 //! The original software walk/leaf builder and fault levels are pinned in
 //! `docs/research/dart-iommu.md`. This is not a gen3 MMIO profile: full VA
 //! context, untranslated/bypass, security/APF, remap, IRQ and ordering are
 //! still independently required. Explicit software contexts can bind their
-//! recovered bounds/geometry; native out-of-context faults remain unqualified.
+//! recovered bounds/geometry; native out-of-context faults remain unchecked.
 use super::context::{Context, Geometry, PAGE_BYTES as PAGE};
 use super::descriptor::Encoding;
 use super::handoff::Handoff;
@@ -47,7 +47,7 @@ impl Tables {
     }
 
     /// Bind the original builder's explicit RAM encoding. Native revision
-    /// and mode qualification belong to the profile owner; this constructor
+    /// and mode validation belong to the profile owner; this constructor
     /// does not infer them from software context or expose an MMIO profile.
     pub fn with_encoding(streams: usize, encoding: Encoding) -> Result<Self, &'static str> {
         let faults = Capture::new(streams)?;
@@ -81,7 +81,7 @@ impl Tables {
         self.configure_stream(sid, config, ttbr, Some(context))
     }
 
-    /// Use the original native-client root qualification for actual RAM
+    /// Use the original native-client root validation for RAM
     /// walks. This still exposes no native MMIO profile: filter, security,
     /// fault metadata and publication completion remain independent gates.
     pub fn configure_handoff(
@@ -159,8 +159,8 @@ impl Tables {
         Ok(())
     }
 
-    /// Execute the recovered retained stream shutdown after the owning
-    /// boundary's DSB SY. This saves actual enable words and disables only
+    /// Execute the recovered stream shutdown after the owning
+    /// boundary's DSB SY. This saves enable words and disables only
     /// translating streams. It does not claim physical power/reset effects,
     /// clear fault evidence or synthesize MMIO write/error completion.
     pub fn save_disable_translation(&mut self) -> Snapshot {
@@ -178,9 +178,9 @@ impl Tables {
         Snapshot::new(self.streams.len(), words)
     }
 
-    /// Execute the original set-side restore of actual saved words. This
+    /// Execute the original set-side restore of saved words. This
     /// ORs their bits; it does not replace or clear newly enabled streams.
-    /// The register owner must restore/qualify other state before calling.
+    /// The register owner must restore/check other state before calling.
     pub fn restore_enables(&mut self, snapshot: &Snapshot) -> Result<(), &'static str> {
         if snapshot.streams() != self.streams.len() {
             return Err("gen3 DART saved enable state belongs to a different SID geometry");
@@ -196,7 +196,7 @@ impl Tables {
     }
 
     /// Clear ordinary translation and pending capture state. The register
-    /// owner decides whether reset or a non-retained supply requires this.
+    /// owner decides whether reset or a non-kept supply requires this.
     pub fn clear(&mut self) {
         self.streams.fill(Stream::default());
         self.faults.clear();

@@ -53,7 +53,7 @@ fn negate_products(code: &mut Code, word: bool) {
 }
 
 /// Eight byte products fit in each signed-word half. Sixteen-bit inputs use
-/// PMULLW/PMULHW and interleave to retain every bit of each signed-dword product.
+/// PMULLW/PMULHW and interleave to keep every bit of each signed-dword product.
 fn narrow_high(code: &mut Code, element: ElementSize, rounding: bool, subtract: Option<bool>) {
     let bytes = element == ElementSize::Byte;
     if bytes {

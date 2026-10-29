@@ -1,4 +1,4 @@
-//! Qualified events and counter affinities, independent of event names on
+//! Checked events and counter affinities, independent of event names on
 //! later generations. Source pins are in `docs/research/core-pmu.md`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -688,7 +688,7 @@ impl ChannelMap {
         {
             return Err(Error::InvalidChannelMap);
         }
-        // FL/FR is the actual source's basic stereo configuration. An absent
+        // FL/FR is the source's basic stereo configuration. An absent
         // multichannel speaker block is not a grant to invent extra speakers.
         let available = advertised | 1;
         for entry in ALLOCATIONS {

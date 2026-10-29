@@ -1,21 +1,21 @@
-//! Full usable-range initialization of genuinely never-entered owned backings.
+//! Full usable-range initialization of never-entered owned backings.
 use super::*;
 mod pinned;
 pub use pinned::{PinnedColdStackPreparation, StackPinError};
 
-/// Owns excluded, zeroed cold backing through the genuine pinned Runtime.
+/// Owns excluded, zeroed cold backing through the pinned Runtime.
 /// It exposes no bytes, address, C descriptor, stack ref or callback commit.
-/// No entered guard is retained across creator suspension. Drop/forget keeps
+/// No entered guard is held across creator suspension. Drop/forget keeps
 /// the original ownership markers and cannot restore a frame under stale scope.
 #[must_use = "cancel under fresh authority; otherwise the whole owner remains retained"]
 pub struct ColdStackPreparation<'runtime, const N: usize> {
     escrow: OwnedGeneralEscrow<'runtime, N>,
-    // A returned actual pin is retained even when post-export authority/shape
+    // A returned pin is held even when post-export permission/shape
     // checks refuse it. Unknown-scope Drop must not release a platform owner.
     pin: Option<ManuallyDrop<PinnedPages>>,
 }
 impl<'runtime, const N: usize> OwnedGeneralEscrow<'runtime, N> {
-    /// Initialize only actual never-entered usable backing. Any fallible
+    /// Initialize only never-entered usable backing. Any fallible
     /// precheck returns the original escrow unchanged. Bootstrap return words
     /// are invalidated only while Preparing excludes all execution/reuse.
     /// This does not expose a C stack allocation or architecture fork frame.
@@ -31,8 +31,8 @@ impl<'runtime, const N: usize> OwnedGeneralEscrow<'runtime, N> {
             Ok(range) => range,
             Err(error) => return Err((self, error)),
         };
-        // SAFETY: fresh authority checked the exact creator/private ownership;
-        // the actual never-entered StackBacking retains immutable writable WB
+        // SAFETY: fresh permission checked the exact creator/private ownership;
+        // the never-entered StackBacking keeps immutable writable WB
         // usable bounds. Preparing excludes execution and every other mutable
         // owner. Native flags were restored; no callback/switch spans this exact
         // bounded usable-range write, and neither guard is included.
@@ -53,8 +53,8 @@ impl<'runtime, const N: usize> OwnedGeneralEscrow<'runtime, N> {
                 return Err(WorkError::Closed);
             }
             self.validate(state)?;
-            // SAFETY: exact reserved worker/nonce and actual creator checked at
-            // IF0; immutable backing is retained by this pinned Runtime lifetime.
+            // SAFETY: reserved worker/nonce and creator checked at
+            // IF0; immutable backing is held by this pinned Runtime lifetime.
             let task = unsafe { &mut *self.runtime.task(self.worker) };
             if task.ever_entered {
                 return Err(WorkError::Busy);
@@ -64,7 +64,7 @@ impl<'runtime, const N: usize> OwnedGeneralEscrow<'runtime, N> {
             task.state = TaskState::Preparing;
             Ok(range)
         })();
-        // SAFETY: exact enclosing flags; every metadata borrow/lock ended. The
+        // SAFETY: enclosing flags; every metadata borrow/lock ended. The
         // usable-range initialization happens only AFTER this restoration.
         unsafe { self.queue.cpu.restore(flags) };
         result
@@ -83,15 +83,15 @@ impl<const N: usize> ColdStackPreparation<'_, N> {
                 return Err(WorkError::Closed);
             }
             owner.validate_state(state, TaskState::Preparing)?;
-            // SAFETY: private worker/nonce/creator and IF0 qualified above;
-            // Preparing retains the entire actual backing and admits no peers.
+            // SAFETY: private worker/nonce/creator and IF0 checked above;
+            // Preparing keeps the entire backing and admits no peers.
             let task = unsafe { &mut *owner.runtime.task(owner.worker) };
             if task.ever_entered {
                 return Err(WorkError::CorruptContext);
             }
             let runtime = owner.runtime.get_ref() as *const Runtime<N> as usize;
-            // SAFETY: this same frame owner retains original valid controls,
-            // actual runtime/index and a never-entered, zeroed backing. No C
+            // SAFETY: this same frame owner keeps original valid controls,
+            // runtime/index and a never-entered, zeroed backing. No C
             // pointer/reference has been exposed. Only Frame::start reconstructs
             // its exact top bootstrap words and saved register metadata.
             unsafe {
@@ -101,12 +101,12 @@ impl<const N: usize> ColdStackPreparation<'_, N> {
             task.state = TaskState::Escrow;
             Ok(())
         })();
-        // SAFETY: exact enclosing flags; no task/queue borrow survives restore.
+        // SAFETY: enclosing flags; no task/queue borrow survives restore.
         unsafe { owner.queue.cpu.restore(flags) };
         result
     }
-    /// Restore the actual cold frame and release its original unpublished
-    /// reservation once, using fresh actual authority for that creator job.
+    /// Restore the cold frame and release its original unpublished
+    /// reservation once, using fresh permission for that creator job.
     /// A stale or uncertain failure drops only captured atomic queue views;
     /// it cannot reseed/release another native owner or treat a C exit as done.
     pub fn cancel(self, entered: &dyn EnteredProcess) -> Result<(), WorkError> {
@@ -114,9 +114,9 @@ impl<const N: usize> ColdStackPreparation<'_, N> {
         let Self { escrow, pin } = self;
         escrow.cancel(entered)?;
         if let Some(pin) = pin {
-            // No C descriptor/reference was exposed. Successful exact native
+            // No C descriptor/reference was exposed. Successful native
             // cancellation supplies the fresh owner context for this view's
-            // release; every failed path leaves ManuallyDrop retaining it.
+            // release; every failed path leaves ManuallyDrop keeping it.
             drop(ManuallyDrop::into_inner(pin));
         }
         Ok(())

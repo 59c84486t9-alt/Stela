@@ -39,7 +39,7 @@ fn reset_binding_preflight() {
     let timer = model.borrow().clock.clone();
     assert!(matches!(
         // SAFETY: The adapter and clock use this test's synchronous register model.
-        // fixture retains unique coherent DMA storage throughout controller use.
+        // fixture keeps unique coherent DMA storage throughout controller use.
         unsafe { Controller::new(registers, timer, &mut fixture.allocator, config()) },
         Err(Error::InvalidConfiguration)
     ));
@@ -70,7 +70,7 @@ fn clock_gate_brackets_each_reset() {
     };
     let mut controller =
         // SAFETY: The adapter and clock use this test's synchronous register model.
-        // fixture retains unique coherent DMA storage throughout controller use.
+        // fixture keeps unique coherent DMA storage throughout controller use.
         unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected) }.unwrap();
     controller.reinitialize().unwrap();
     model.borrow_mut().codec_ready_after_resets = 3;
@@ -119,7 +119,7 @@ fn reset_control_failure_attempts_cleanup() {
         let timer = model.borrow().clock.clone();
         assert!(matches!(
             // SAFETY: The adapter and clock use this test's synchronous register model.
-            // fixture retains unique coherent DMA storage throughout controller use.
+            // fixture keeps unique coherent DMA storage throughout controller use.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) },
             Err(Error::PciResetControl { offset: 0x48 })
         ));
@@ -156,7 +156,7 @@ fn failed_reset_retains_dma_until_recovery() {
         let timer = model.borrow().clock.clone();
         let mut controller =
             // SAFETY: The adapter and clock use this test's synchronous register model.
-            // fixture retains unique coherent DMA storage throughout controller use.
+            // fixture keeps unique coherent DMA storage throughout controller use.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
                 .unwrap();
         let id = controller

@@ -176,7 +176,7 @@ impl Profile {
 }
 
 /// Immutable declared FIFO and interrupt resources. This carries no physical
-/// address or native execution authority; placement must resolve the source DT.
+/// address or native execution permission; placement must resolve the source DT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Configuration {
     profile: Profile,

@@ -105,7 +105,7 @@ impl TestDevices {
             })?;
             memory.fence_cpu_memory();
         }
-        // Authored controller: both transactions commit while the actual
+        // Authored controller: both transactions commit while the
         // recovered cohort remains held, including the OTHER physical PE.
         let other = (pe + 1) % self.ready.len();
         let active = machine::apple::memory_resources::LifecycleState {
@@ -128,7 +128,7 @@ impl TestDevices {
                 DeviceError::TransferRefused(alloc::format!("fixture CPU preflight {e:?}"))
             })?;
         assert_eq!(paused.paused(other), Some(true));
-        self.cpu_commits += 1; // actual prepared-controller ACK inside lease
+        self.cpu_commits += 1; // prepared-controller ACK inside lease
         drop(paused);
         let settlement = (|| {
             let resumed = owners
@@ -181,9 +181,9 @@ fn reservation() -> Result<Arc<RegisteredSystemRam>, &'static str> {
             .map_err(|_| "native kernel mapping extent refused")?,
         bytes: source::BYTES,
     };
-    // SAFETY: actual exclusive heap page pin and qualified WB CPU mapping. No
-    // DMA/direct writer is admitted. Arc retains both through all native frames,
-    // callbacks, fault recovery and exact source-PC/publication settlement.
+    // SAFETY: exclusive heap page pin and checked WB CPU mapping. No
+    // DMA/direct writer is admitted. Arc keeps both through all native frames,
+    // callbacks, fault recovery and source-PC/publication settlement.
     let ram = Arc::new(
         unsafe {
             RegisteredSystemRam::register(
@@ -267,11 +267,11 @@ pub(crate) unsafe fn check(
 ) -> Result<(), &'static str> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 1 {
-        // SAFETY: same retained bootstrap/physical-owner fixture contract.
+        // SAFETY: same bootstrap/physical-owner fixture contract.
         return unsafe { cold::check(handoff, capture, executors, host_owner, sender) };
     }
     let ram = reservation()?;
-    // Deliberately preserve a nonzero guest boot PE while the physical BSP
+    // Preserve a nonzero guest boot PE while the physical BSP
     // remains worker0. Other identities and their source affinity stay ordered.
     let boot_processor = cores - 1;
     let mut cpu = Cpu::of(Chip::AppleM1, source::CODE, Pstate::reset(2));
@@ -303,8 +303,8 @@ pub(crate) unsafe fn check(
             worker: WorkerId(if pe == boot_processor { 0 } else { pe + 1 }),
         })
         .collect();
-    // SAFETY: every source byte belongs to this retained canonical fixture,
-    // all assigned actual BSP/AP Hosts are stopped, and no guest or DMA has
+    // SAFETY: every source byte belongs to this canonical fixture,
+    // all assigned BSP/AP Hosts are stopped, and no guest or DMA has
     // executed. This exercises the same cold constructor as original adoption.
     let mut machine = unsafe {
         super::canonical::prepare(super::canonical::Preparation {
@@ -336,7 +336,7 @@ pub(crate) unsafe fn check(
     }?;
     let started = crate::apic::rdtsc();
     while !ready(&machine, entry) {
-        // SAFETY: actual source-started Cpu loans and owner-local AP Hosts;
+        // SAFETY: source-started Cpu loans and owner-local AP Hosts;
         // no original guest, external publisher or raw guest execution exists.
         if let Err(stop) = unsafe { machine.native_round() } {
             crate::output::arguments(format_args!("NATIVE SCHEDULER cold startup {stop:?}\n"));
@@ -356,7 +356,7 @@ pub(crate) unsafe fn check(
     crate::output::arguments(format_args!(
         "NATIVE SCHEDULER source pc={entry:#x} bytes={program:02x?}\n"
     ));
-    // SAFETY: all actual frames are stopped before shared conversion; source
+    // SAFETY: all frames are stopped before shared conversion; source
     // and vector bytes have exact new artifact identities and no racing writer.
     unsafe { ram.publish_physical(entry, &program) }
         .map_err(|_| "native scheduler source publication refused")?;
@@ -379,7 +379,7 @@ pub(crate) unsafe fn check(
     loop {
         // SAFETY: the real fixed BSP/AP owners, canonical RAM and source bytes
         // stay pinned. The diagnostic admits no external DMA/debug/AMX writer;
-        // every actual frame and stopped Host effect is synchronously joined.
+        // every frame and stopped Host effect is synchronously joined.
         match unsafe { machine.native_round() } {
             Ok(_) => {}
             Err(stop) if machine.pending_native_device_access().is_some() => {
@@ -392,7 +392,7 @@ pub(crate) unsafe fn check(
         }
         max_pending = max_pending.max(machine.pending_native_device_access_count());
         while machine.pending_native_device_access().is_some() {
-            // SAFETY: closed synchronous fixture, same actual recovered cohort;
+            // SAFETY: closed synchronous fixture, same recovered cohort;
             // no external producer or direct writer can run between phases.
             match unsafe { machine.complete_native_device_access() } {
                 Ok(()) => {}

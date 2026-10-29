@@ -3,22 +3,22 @@
 //!
 //! Documented by Linux `drivers/pmdomain/apple/pmgr-pwrstate.c`, m1n1
 //! `src/pmgr.c` and `proxyclient/m1n1/hw/pmgr.py`: each 32-bit register holds
-//! the target state [3:0] and the actual state [7:4] (0 power-gated, 4
+//! the target state [3:0] and the state [7:4] (0 power-gated, 4
 //! clock-gated, 15 active), WAS_PWRGATED (8) and WAS_CLKGATED (9), which
 //! writers mask off, DEV_DISABLE (10), PARENT_OFF (11), the minimum state
 //! [19:16], the auto state [27:24], AUTO_ENABLE (28) and RESET (31). Drivers
-//! write the target and poll until the actual state equals it.
+//! write the target and poll until the state equals it.
 //!
-//! The model reflects every target into the actual state at the write, which
+//! The model reflects every target into the state at the write, which
 //! is the fastest permitted completion. Inferred, not documented: the WAS_*
-//! bits are write-one-to-clear and latch when the actual state enters the
+//! bits are write-one-to-clear and latch when the state enters the
 //! gated state; automatic power management never lowers a domain, so the
-//! actual state stays at the target. Other states remain explicit refusals.
-//! The complete-consumer mount requires actual checked sinks for every admitted
+//! state stays at the target. Other states remain explicit refusals.
+//! The complete-consumer mount requires checked sinks for every admitted
 //! consumer before lifecycle changes, including reset and DEV_DISABLE. Positive
 //! unavailable admission evidence permits controller-state completion without
-//! inventing a functional device. Uncovered domains retain named refusals. Parent
-//! arbitration is not modeled; coverage includes their actual consumers.
+//! inventing a functional device. Uncovered domains keep named refusals. Parent
+//! arbitration is not modeled; coverage includes their consumers.
 
 #[cfg(test)]
 pub mod install;
@@ -76,7 +76,7 @@ pub enum PmgrError {
 }
 
 /// State the machine must apply to every client of a physical PMGR domain.
-/// Quiescing inhibits client activity without discarding retained state;
+/// Quiescing inhibits client activity without discarding kept state;
 /// reset assertion restores the client's documented reset image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DomainState {
@@ -132,7 +132,7 @@ impl Pmgr {
         })
     }
     /// Enable controls after complete machine coverage: required clients have
-    /// actual sinks, unavailable clients have positive admission evidence.
+    /// sinks, unavailable clients have positive admission evidence.
     /// Mapping or candidate ownership alone is insufficient. Binding preserves
     /// the boot image and grants no functional-device support.
     pub fn bind_lifecycle(&mut self, address: u64) -> Result<(), PmgrError> {
@@ -149,7 +149,7 @@ impl Pmgr {
     }
 
     /// Keep a domain's lifecycle unchanged when complete consumer coverage
-    /// cannot connect it. The machine retains the named resource reasons.
+    /// cannot connect it. The machine keeps the named resource reasons.
     /// Harmless configuration and W1C writes remain available.
     pub fn refuse_lifecycle(&mut self, address: u64) -> Result<(), PmgrError> {
         if !self.registers.contains_key(&address) {
@@ -162,7 +162,7 @@ impl Pmgr {
         Ok(())
     }
 
-    /// Pure request preview used to check every actual consumer before the
+    /// Pure request preview used to check every consumer before the
     /// machine commits this PMGR register. Read-only ACTUAL/PARENT_OFF bits
     /// in a guest RMW are not lifecycle inputs.
     pub fn preview(&self, address: u64, value: u32) -> Result<DomainTransition, &'static str> {
@@ -206,7 +206,7 @@ impl Pmgr {
             .map(DomainState::decode)
     }
 
-    /// Retained control word for diagnostics, without an MMIO read or effect.
+    /// Control word for diagnostics, without an MMIO read or effect.
     /// This reports the model's state, not proof of a firmware handoff value.
     pub fn control_word(&self, address: u64) -> Option<u32> {
         self.registers.get(&address).copied()
@@ -220,7 +220,7 @@ impl Pmgr {
             .map(|value| ((value & ACTUAL) >> ACTUAL_SHIFT) as u8)
     }
 
-    /// Addresses whose actual state is not active, for diagnostics.
+    /// Addresses whose state is not active, for diagnostics.
     #[cfg(test)]
     pub fn inactive(&self) -> Vec<u64> {
         self.registers

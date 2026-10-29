@@ -4,8 +4,8 @@
 // 2005 Devicescape Software, Inc.; 2006-2007 Jiri Benc; 2007 Michael Wu;
 // 2013-2014 Intel Mobile Communications GmbH;
 // 2015-2017 Intel Deutschland GmbH; 2018-2026 Intel Corporation.
-//! Retained current-association configuration, built only from actual MLME input.
-//! This is not OS authentication, native completion or regulatory authority.
+//! Current-association configuration, built only from MLME input.
+//! This is not OS authentication, native completion or regulatory permission.
 use super::{
     Error, Join, Ticket,
     operations::{ChannelDefinition, Operations},
@@ -23,7 +23,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 /// Exact observation minted only by a native owner's completed scan RX path.
 /// Public protocol parsers cannot construct it. A native owner separately
-/// checks original Arc membership; providers retain this same opaque identity.
+/// checks original Arc membership; providers keep this same opaque identity.
 #[derive(Debug)]
 pub struct NativeBssObservation {
     pub(crate) bss: Bss,
@@ -34,7 +34,7 @@ impl NativeBssObservation {
     }
 }
 
-/// Explicit actual request/resource mode. No MLD constructor or authority is
+/// Explicit request/resource mode. No MLD constructor or permission is
 /// available; advertising ML or EHT cannot create a multi-link association.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssociationIntent {
@@ -199,8 +199,8 @@ impl AssociationContext {
         if definition.width != selection.width() {
             return Err(Error::Unsupported("selected/advertised width mismatch"));
         }
-        // Actual MT7925 uses Linux's normal non-STRICT profile. HT/VHT
-        // operation/basic observations remain retained, but their strict-only
+        // MT7925 uses Linux's normal non-STRICT profile. HT/VHT
+        // operation/basic observations remain held, but their strict-only
         // basic-MCS tests do not reject otherwise usable common rates.
         if let Some(he) = &operations.he
             && negotiated.he.is_some()
@@ -232,9 +232,9 @@ impl AssociationContext {
             native_observation: native_observation.cloned(),
         })
     }
-    /// Exact original OS-selected RSNE, validated against this actual BSS and
+    /// Original OS-selected RSNE, validated against this BSS and
     /// successful association response. This remains unauthenticated input
-    /// until the genuine OS service qualifies its protected-management policy.
+    /// until the OS service checks its protected-management policy.
     pub fn pmf_observation(&self) -> Option<&Arc<NativeBssObservation>> {
         self.native_observation.as_ref()
     }

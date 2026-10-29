@@ -1,10 +1,10 @@
-//! Source-qualified T8112 channels and live synchronous memory drainage.
+//! Source-checked T8112 channels and live synchronous memory drainage.
 //!
 //! 26A434 J473 KC SHA256 06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d:
 //! start saves +ed0/+ec8 at file2efac98..2efacf0, stride400000;
-//! _dcsWriteQueueFlush file2efde44..2efdf14 clears low16 of +a40, retains
+//! _dcsWriteQueueFlush file2efde44..2efdf14 clears low16 of +a40, keeps
 //! high16, delays330us and executes the final barrier. No ordinary read or
-//! saved ready bit establishes completion of the actual synchronous frontend.
+//! saved ready bit establishes completion of the synchronous frontend.
 //!
 //! `handleDCSOdtsEvent` reads each channel's +41c once a second: the latest
 //! LPDDR mode register 4 refresh rate of its two ranks in bits 4:0 and 9:5,
@@ -45,7 +45,7 @@ const NOMINAL_REFRESH: u64 = 0xa | 0xa << 5;
 const PERF_WORDS: usize = ((PERF.end - PERF.start) / 4) as usize;
 
 /// Caller-declared software backing, not physical reset/DRAM observations.
-/// Initial configuration is retained as opaque full32 words; drain high16 is
+/// Initial configuration is held as opaque full32 words; drain high16 is
 /// a separately declared controller image, never derived from an empty queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelConfiguration {
@@ -73,7 +73,7 @@ pub struct Request {
 
 /// Fixed-size per-channel progress, not an ever-growing event queue. Completed
 /// drainage is represented by an exact count and latest completion; pending
-/// configuration retains its complete request until an actual backend exists.
+/// configuration keeps its complete request until a backend exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChannelProgress {
     pub pending_configuration: Option<Request>,
@@ -120,7 +120,7 @@ impl State {
     }
 }
 
-/// One actual eight-channel frontend. Clones share control, lifecycle,
+/// One eight-channel frontend. Clones share control, lifecycle,
 /// pending effects and bounded completed progress; they are not copies.
 #[derive(Clone)]
 pub struct Controller {

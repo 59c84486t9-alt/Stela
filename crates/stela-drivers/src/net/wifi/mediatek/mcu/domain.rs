@@ -5,7 +5,7 @@
 // Copyright 2015-2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
 //! Source channel-domain wire requests. Raw Linux flags and source bandwidth
-//! header constants are not native radio, OS/location or power authority.
+//! header constants are not native radio, OS/location or power permission.
 use super::{Encoder, Event};
 use crate::net::wifi::mediatek::identity::Chip;
 use alloc::vec::Vec;
@@ -15,7 +15,7 @@ const DISABLED: u32 = 1; // pinned include/net/cfg80211.h IEEE80211_CHAN_DISABLE
 pub struct Channel {
     pub hardware_value: u16,
     /// Exact pinned Linux ieee80211_channel_flags wire ABI. A trusted native
-    /// composition must construct/intersect actual restrictions before use;
+    /// composition must construct/intersect restrictions before use;
     /// caller-provided raw flags alone never satisfy policy admission.
     pub flags: u32,
 }
@@ -45,9 +45,9 @@ pub struct Request {
     counts: [u8; 3],
 }
 impl Request {
-    /// Exact source order:2GHz→5GHz→6GHz, preserve each enabled channel's
+    /// Source order:2GHz→5GHz→6GHz, preserve each enabled channel's
     /// full raw flags, omit disabled channels. The source fixed BW0/3/3 fields
-    /// are protocol bytes only; they never override actual per-channel policy.
+    /// are protocol bytes only; they never override per-channel policy.
     /// Refuse count truncation/current transport overflow before publication.
     pub fn build(chip: Chip, input: Inputs<'_>) -> Result<Self, Error> {
         let bands = [

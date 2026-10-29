@@ -1,4 +1,4 @@
-//! Startup qualification of this private host's real context entry/recovery.
+//! Startup validation of this private host's real context entry/recovery.
 //! The translated GPR/faulting-service source and deliberate native UD2 fixture
 //! test host ABI ownership only; they do not admit guest SMP or RAM mappings.
 use core::{arch::naked_asm, ptr};
@@ -29,7 +29,7 @@ unsafe extern "sysv64" fn reject(
     request: *const MemoryRequest,
 ) -> u32 {
     // SAFETY: check() exclusively pins this private view/request/counter through
-    // the actual native call. No guest-memory reference or success is exposed.
+    // the native call. No guest-memory reference or success is exposed.
     unsafe {
         let context = &mut *context;
         let request = &*request;
@@ -39,7 +39,7 @@ unsafe extern "sysv64" fn reject(
     MemoryStatus::Unsupported as u32
 }
 
-// Check the actual ABI entry stack before a Rust prologue changes it. The tail
+// Check the ABI entry stack before a Rust prologue changes it. The tail
 // jump preserves the exact context/request arguments and normal return address.
 #[unsafe(naked)]
 unsafe extern "sysv64" fn aligned_reject(
@@ -159,7 +159,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
     let state_pointer = ptr::from_mut(&mut state) as u64;
     let context_pointer = ptr::from_mut(&mut context) as u64;
     // SAFETY: private installed fault-only context fixture, valid pinned inputs;
-    // this actual Host's native recovery path is the expected outcome.
+    // this Host's native recovery path is the expected outcome.
     let result = unsafe { host.execute_context(trap, &mut state, &mut context) };
     if !matches!(result, Some(NativeExit::Fault(fault)) if fault.offset == 0
         && fault.cause == FaultCause::InvalidOpcode && !fault.write && fault.address == 0
@@ -169,7 +169,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
         return Err("native context hardware recovery differs");
     }
     view.record(MemoryStatus::Success, 0, 0, 0);
-    // SAFETY: same retained artifact/frame; proves recovery did not lose the
+    // SAFETY: same artifact/frame; proves recovery did not lose the
     // owner-local stack or leave a stale native-fault observation behind.
     let result = unsafe { host.execute_context(code, &mut state, &mut context) };
     expected.x[0] += 1;

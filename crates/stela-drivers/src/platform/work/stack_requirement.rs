@@ -1,4 +1,4 @@
-//! Checked stack geometry and opt-in mixed-worker profiles; no execution authority.
+//! Checked stack geometry and opt-in mixed-worker profiles; no execution permission.
 #[cfg(target_arch = "x86_64")]
 use super::Stack;
 use super::{Lane, MAX_CONTINUATIONS, WorkError};
@@ -9,7 +9,7 @@ enum Usable {
     AtLeast(usize),
 }
 /// A callback's required real usable extent, base alignment and preceding guard.
-/// It describes geometry; only the retained StackBacking supplies actual ownership.
+/// It describes geometry; only the StackBacking supplies ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackRequirement {
     usable: Usable,
@@ -69,7 +69,7 @@ impl StackRequirement {
     }
 }
 /// Expected mixed geometry for an explicit bounded32-stack prototype.
-/// General counts are validated against actual unambiguously matching owners.
+/// General counts are validated against unambiguously matching owners.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackProfile {
     kernel: StackRequirement,

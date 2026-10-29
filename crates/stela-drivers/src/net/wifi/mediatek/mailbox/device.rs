@@ -23,7 +23,7 @@ pub enum Step {
 pub enum Disposition {
     Accepted,
     Rejected,
-    /// The actual source-defined WLAN_FAILURE while deactivating an already
+    /// The source-defined WLAN_FAILURE while deactivating an already
     /// inactive BSS. Preserve the raw status; this is not an ACK of DMA drain.
     AlreadyInactive,
 }
@@ -73,14 +73,14 @@ struct Owned<C> {
     replies: Vec<Reply>,
     interrupted: Option<UnifiedReply>,
 }
-/// Retains actual function/controller, interface and WCID resources through
+/// Keeps function/controller, interface and WCID resources through
 /// partial configuration and uncertain hardware users, including after mailbox
 /// teardown. No generic allocation/PCI admission framework is introduced.
 pub struct Interface<C: 'static> {
     owned: Option<Box<Owned<C>>>,
 }
-/// Exact two-command deactivation receipt; actual old-user retirement remains
-/// a separate unsafe operation. This contains no fabricated on-wire generation.
+/// Exact two-command deactivation receipt; old-user retirement remains
+/// a separate unsafe operation. This contains no invented on-wire generation.
 pub struct Deactivated {
     owner: u64,
     context: Context,
@@ -88,11 +88,11 @@ pub struct Deactivated {
 
 impl<C: 'static> Interface<C> {
     /// # Safety
-    /// Caller exclusively owns this actual non-MLO station interface's firmware
-    /// context/indices on this actual mailbox requester. Context fields follow
-    /// the actual per-chip source caller ordering and firmware resource selector;
+    /// Caller exclusively owns this non-MLO station interface's firmware
+    /// context/indices on this mailbox requester. Context fields follow
+    /// the per-chip source caller ordering and firmware resource selector;
     /// RF band is not a substitute. No previous registration/key/RX/TX/IRQ/work
-    /// users remain. `resource` retains the real function/controller claim,
+    /// users remain. `resource` keeps the real function/controller claim,
     /// BSS/OMAC/WMM/WCID/interface allocations and associated lifetime through
     /// quarantine, even if mailbox DMA queues are released or it is dropped.
     /// The caller serializes all raw context mutations and all future consumers
@@ -109,7 +109,7 @@ impl<C: 'static> Interface<C> {
         }
         let mut replies = Vec::new();
         // At most two activation and two deactivation replies; no allocation
-        // should be needed to retain real response evidence after publication.
+        // should be needed to keep real response evidence after publication.
         replies.try_reserve(4).map_err(|_| Error::NoMemory)?;
         Ok(Self {
             owned: Some(Box::new(Owned {
@@ -191,8 +191,8 @@ impl<C: 'static> Interface<C> {
                     });
                     return Err(Error::Firmware { step, status });
                 };
-                // The actual mailbox returns only after both the exact MCU
-                // response and actual TX DMA completion, never enqueue alone.
+                // The mailbox returns only after both the exact MCU
+                // response and TX DMA completion, never enqueue alone.
                 state.replies.push(Reply {
                     step,
                     disposition,
@@ -226,7 +226,7 @@ impl<C: 'static> Interface<C> {
         Ok(())
     }
     /// Reverse source order, at most once. An acknowledged already-inactive
-    /// BSS is preserved as that exact source disposition, never status zero.
+    /// BSS is preserved as that source disposition, never status zero.
     pub fn deactivate<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
         mailbox: &mut Mailbox<W, F, R>,
@@ -254,8 +254,8 @@ impl<C: 'static> Interface<C> {
     }
     /// # Safety
     /// After this exact deactivation, every interface-owned firmware key/WCID
-    /// has actual acknowledged removal/reset as required by its owner; every
-    /// old firmware/key, RX/TX DMA, completion, IRQ and deferred user is actually
+    /// has acknowledged removal/reset as required by its owner; every
+    /// old firmware/key, RX/TX DMA, completion, IRQ and deferred user is
     /// drained. No old
     /// event can touch later reused resources. The real controller serializes
     /// this operation with all old users/new publication. The source inactive

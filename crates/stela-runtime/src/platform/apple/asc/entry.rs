@@ -14,7 +14,7 @@
 //! word. Geometry checks here cannot authenticate or materialize that resource.
 //! All writes to a locked register refuse; no ignored hardware write is
 //! invented. Destructive lifecycle changes invalidate knowledge rather than
-//! fabricating a reset value. Native protocol firmware alone supplies no word.
+//! inventing a reset value. Native protocol firmware alone supplies no word.
 use alloc::rc::Rc;
 use core::cell::RefCell;
 use {
@@ -38,7 +38,7 @@ pub enum Origin {
 }
 
 /// One contiguous source/mapping interval, in three separate address domains.
-/// Geometry describes a requirement; the actual firmware backend must still
+/// Geometry describes a requirement; the firmware backend must still
 /// prove current allocation/mapping ownership and perform the instruction fetch.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryMapping {
@@ -51,8 +51,8 @@ pub struct EntryMapping {
     pub bytes: u64,
 }
 
-/// Actual result from a firmware backend's current owned instruction mapping.
-/// Protocol-only peers must retain Firmware::fetch_entry's default refusal.
+/// Result from a firmware backend's current owned instruction mapping.
+/// Protocol-only peers must keep Firmware::fetch_entry's default refusal.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryFetch {
     pub physical: u64,
@@ -75,7 +75,7 @@ pub struct EntryHandoff {
 impl EntryHandoff {
     /// Describe a complete entry instruction in a linked image interval, its
     /// physical backing and its IOP mapping. Original iBoot154cf4 programs the
-    /// TEXT remap/DVA. Zero is a valid IOP address when the actual backend owns
+    /// TEXT remap/DVA. Zero is a valid IOP address when the backend owns
     /// and fetches that mapping; neither PC0 nor PA alone establishes it.
     ///
     /// `word` is separately established/captured. Geometry and source bytes do

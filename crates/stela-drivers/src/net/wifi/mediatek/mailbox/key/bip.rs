@@ -2,7 +2,7 @@
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Initial source GTK/IGTK batch ownership and bound group BIP authentication.
 //! This grants no PMF negotiation, MMIE generation or current-association RX
-//! delivery authority; station/key-generation checks remain mandatory.
+//! delivery permission; station/key-generation checks remain mandatory.
 use super::*;
 use crate::net::wifi::{
     mediatek::{identity::Chip, mcu::key::bip as wire},
@@ -24,7 +24,7 @@ pub enum Error {
     Authentication(management::Error),
 }
 
-/// One acknowledged management-key batch, bound to the exact installed GTK,
+/// One acknowledged management-key batch, bound to the installed GTK,
 /// native mailbox owner and monotonically increasing management generation.
 /// This is never a data KeyIdentity or a MIC/association/port authorization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,8 +68,8 @@ pub(super) fn remember<C>(state: &mut Owned<C>, key: KeyIdentity, material: &[u8
     }
 }
 impl<C: 'static> HardwareKey<C> {
-    /// Actual successful initial IGTK batch, valid only while its original GTK
-    /// and this native owner remain installed. Copies grant no RX authority.
+    /// Successful initial IGTK batch, valid only while its original GTK
+    /// and this native owner remain installed. Copies grant no RX permission.
     pub fn installed_igtk(&self) -> Option<Identity> {
         let s = self.owned();
         let bip = s.igtk.as_ref()?;
@@ -87,11 +87,11 @@ impl<C: 'static> HardwareKey<C> {
         self.installed_igtk()?;
         Some(self.owned().igtk.as_ref()?.key.statistics())
     }
-    /// Authenticate a complete group robust-management frame under this actual
+    /// Authenticate a complete group robust-management frame under this
     /// acknowledged IGTK and original still-installed GTK. Software CMAC and IPN
     /// checks always run, independently of copied hardware integrity flags.
-    /// The returned frame proof grants no current association/port authority;
-    /// its eventual consuming station must recheck the exact retained association
+    /// The returned frame proof grants no current association/port permission;
+    /// its eventual consuming station must recheck the exact association
     /// and still-current GTK/IGTK before acting on a deferred frame.
     pub fn authenticate_bip<'a>(
         &mut self,
@@ -149,11 +149,11 @@ impl<C: 'static> HardwareKey<C> {
     /// `mt7925_set_key` leaves it to mac80211.
     ///
     /// # Safety
-    /// The caller owns this actual GTK/WCID/BSS namespace and has independently
+    /// The caller owns this GTK/WCID/BSS namespace and has independently
     /// drained all old GTK hardware RX/TX, DMA/IRQ/work and delayed key users.
     /// No data or management publication may use the namespace until this call
-    /// returns successfully; uncertain outcomes require the actual removal/reset
-    /// and drain path. `material` and `receive` come from the genuine authenticated
+    /// returns successfully; uncertain outcomes require the removal/reset
+    /// and drain path. `material` and `receive` come from the authenticated
     /// OS key exchange. This initial-batch API does not implement live IGTK rekey.
     pub unsafe fn install_igtk<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
@@ -287,7 +287,7 @@ fn hardware_request<C>(
     .map_err(super::Error::Request)
 }
 
-/// Management-material history survives actual removal/rebind: a new key index
+/// Management-material history survives removal/rebind: a new key index
 /// must not revive retired temporal material with a reset replay namespace.
 fn reserve_material<C>(s: &Owned<C>, digest: [u8; 32]) -> Result<usize, super::Error> {
     let mut empty = None;
@@ -306,7 +306,7 @@ fn reserve_material<C>(s: &Owned<C>, digest: [u8; 32]) -> Result<usize, super::E
 }
 
 impl<C: 'static> HardwareKey<C> {
-    /// Both actual retained management receive windows, indexed by MMIE 4/5.
+    /// Both kept management receive windows, indexed by MMIE 4/5.
     /// Firmware still has the source single cached-GTK||IGTK update command;
     /// these software windows do not prove physical firmware/air overlap.
     pub fn installed_igtks(&self) -> [Option<Identity>; 2] {
@@ -323,7 +323,7 @@ impl<C: 'static> HardwareKey<C> {
         keys
     }
 
-    /// Replay floor for that exact still-retained receive key, including the
+    /// Replay floor for that exact still receive key, including the
     /// previous index during overlap. A copied identity cannot create a window.
     pub fn retained_igtk_receive_floor(&self, identity: Identity) -> Option<PacketNumber> {
         self.installed_igtk()?;
@@ -335,10 +335,10 @@ impl<C: 'static> HardwareKey<C> {
     }
 
     /// Source-exact acknowledged live management-key update. Alternating 4/5
-    /// retains the other software MIC/IPN window; replacing the same index retires
-    /// only that original window. Exact installed retries retain its advanced
+    /// keeps the other software MIC/IPN window; replacing the same index retires
+    /// only that original window. Installed retries keep its advanced
     /// floor and issue no command, including retries of the other receive index.
-    /// All historical material is bounded to 64 unique keys per actual owner;
+    /// All historical material is bounded to 64 unique keys per owner;
     /// exhaustion refuses before publication rather than evicting replay history.
     ///
     /// # Safety
@@ -347,11 +347,11 @@ impl<C: 'static> HardwareKey<C> {
     /// that index's old material. Independently stop/drain all old GTK hardware
     /// RX/TX, DMA/IRQ/work and external deferred users before repeating the
     /// combined GTK batch; serialized empty CPU queues alone do not prove this.
-    /// Preserve actual requester/association/GTK ownership and material history.
+    /// Preserve requester/association/GTK ownership and material history.
     /// Firmware source exposes one cached-GTK||IGTK batch without an IGTK index;
     /// two receive keys authenticate only intact delivered native frames. Actual
-    /// firmware delivery/overlap is unqualified: never clear ICV/monitor errors,
-    /// infer protection negotiation or release an old peer key merely from ACK.
+    /// firmware delivery/overlap is unchecked: never clear ICV/monitor errors,
+    /// infer protection negotiation or release an old peer key from ACK.
     pub unsafe fn rotate_igtk<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
         mailbox: &mut Mailbox<W, F, R>,
@@ -392,7 +392,7 @@ impl<C: 'static> HardwareKey<C> {
         let key = management::BipKey::new(gtk, cipher, index, material, receive)
             .map_err(|e| super::Error::Bip(Error::Authentication(e)))?;
         // Reserve history and every old/new key before publication. Any negative,
-        // ambiguous or late reply retains the entire quarantined native owner.
+        // ambiguous or late reply keeps the entire quarantined native owner.
         s.igtk_history[history] = Some(digest);
         s.igtk_generation = generation;
         s.pending_igtk = Some(Installed {
@@ -481,7 +481,7 @@ mod tests {
         let (mut mailbox, wm, _, _) =
             setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
         let drops = Arc::new(AtomicUsize::new(0));
-        // SAFETY: exclusive empty source-modeled actual WCID and drained old users.
+        // SAFETY: exclusive empty source-modeled WCID and drained old users.
         let mut key = unsafe {
             HardwareKey::claim(
                 &mailbox,
@@ -502,7 +502,7 @@ mod tests {
             )
             .unwrap();
         let commands = wm.lock().unwrap().completed.len();
-        // SAFETY: actual initial modeled GTK request/ACK drained; no other key users exist.
+        // SAFETY: initial modeled GTK request/ACK drained; no other key users exist.
         let identity = unsafe {
             key.install_igtk(
                 &mut mailbox,
@@ -537,7 +537,7 @@ mod tests {
         assert!(key.installed_igtks().iter().all(Option::is_some));
         assert_eq!(wm.lock().unwrap().completed.len(), commands);
         let removed = key.remove(&mut mailbox).unwrap();
-        // SAFETY: actual removal ACK and complete model key/user drain.
+        // SAFETY: removal ACK and complete model key/user drain.
         unsafe { key.retire_after_drain(removed) }.unwrap();
     }
 
@@ -550,7 +550,7 @@ mod tests {
         let (mut mailbox, wm, _, _) =
             setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
         let drops = Arc::new(AtomicUsize::new(0));
-        // SAFETY: exclusive empty source-modeled actual WCID and drained old users.
+        // SAFETY: exclusive empty source-modeled WCID and drained old users.
         let mut key = unsafe {
             HardwareKey::claim(
                 &mailbox,
@@ -576,7 +576,7 @@ mod tests {
             key.authenticate_bip(&frame),
             Err(super::super::Error::Bip(Error::DataKeyRequired))
         ));
-        // SAFETY: actual initial modeled GTK request/ACK drained; no other key users exist.
+        // SAFETY: initial modeled GTK request/ACK drained; no other key users exist.
         let identity = unsafe {
             key.install_igtk(
                 &mut mailbox,
@@ -600,7 +600,7 @@ mod tests {
                 management::Error::Replay
             )))
         ));
-        // Fake copied hardware integrity must not bypass the actual software MIC.
+        // Fake copied hardware integrity must not bypass the software MIC.
         let mut bytes = frame.bytes().to_vec();
         bytes[30] = 102;
         let mut forged = crate::net::wifi::frame::Mpdu::new(
@@ -632,7 +632,7 @@ mod tests {
         ));
         key.authorize(&key_packet(gtk, 10)).unwrap();
         assert_eq!(
-            // SAFETY: unchanged actual drained namespace; identical retry must preserve advanced
+            // SAFETY: unchanged drained namespace; identical retry must preserve advanced
             // management IPN.
             unsafe {
                 key.install_igtk(
@@ -653,7 +653,7 @@ mod tests {
             key.authenticate_bip(&frame),
             Err(super::super::Error::Bip(Error::DataKeyRequired))
         ));
-        // SAFETY: successful actual whole-batch removal and complete old model user drain.
+        // SAFETY: successful whole-batch removal and complete old model user drain.
         unsafe { key.retire_after_drain(removed) }.unwrap();
         assert!(key.igtk_statistics().is_none());
         assert!(key.igtk_receive_floor().is_none());
@@ -671,7 +671,7 @@ mod tests {
         let (mut mailbox, wm, _, _) =
             setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
         let drops = Arc::new(AtomicUsize::new(0));
-        // SAFETY: genuine exclusive empty source-modeled WCID/BSS and old-user drain.
+        // SAFETY: exclusive empty source-modeled WCID/BSS and old-user drain.
         let mut key = unsafe {
             HardwareKey::claim(
                 &mailbox,
@@ -693,7 +693,7 @@ mod tests {
             .unwrap();
         key.authorize(&key_packet(gtk, 9)).unwrap();
         let before = wm.lock().unwrap().completed.len();
-        // SAFETY: every actual model GTK descriptor/ACK was consumed; no old key users remain.
+        // SAFETY: every model GTK descriptor/ACK was consumed; no old key users remain.
         let installed = unsafe {
             key.install_igtk(
                 &mut mailbox,
@@ -723,7 +723,7 @@ mod tests {
             Err(security::Error::Replay)
         ));
         key.authorize(&key_packet(gtk, 10)).unwrap();
-        // SAFETY: same actual drained namespace; this exact retry must not publish.
+        // SAFETY: same drained namespace; this exact retry must not publish.
         let retry = unsafe {
             key.install_igtk(
                 &mut mailbox,
@@ -754,7 +754,7 @@ mod tests {
         let removed = key.remove(&mut mailbox).unwrap();
         assert!(key.installed_igtk().is_none());
         assert!(!response.lock().unwrap().keys.contains_key(&7));
-        // SAFETY: whole source batch removal ACK and complete actual modeled-user drain.
+        // SAFETY: whole source batch removal ACK and complete modeled-user drain.
         unsafe { key.retire_after_drain(removed) }.unwrap();
         drop(key);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -775,7 +775,7 @@ mod tests {
             }));
             let (mut mailbox, wm, _, _) = setup_controlled(chip, true, false, 0, response.clone());
             let drops = Arc::new(AtomicUsize::new(0));
-            // SAFETY: exclusive empty/drained actual model WCID and peer context.
+            // SAFETY: exclusive empty/drained model WCID and peer context.
             let mut key = unsafe {
                 HardwareKey::claim(
                     &mailbox,
@@ -828,7 +828,7 @@ mod tests {
                     )
                 };
                 assert_eq!(
-                    // SAFETY: every actual initial descriptor/ACK drained, no external model users.
+                    // SAFETY: every initial descriptor/ACK drained, no external model users.
                     unsafe {
                         key.install_igtk(
                             &mut mailbox,
@@ -846,7 +846,7 @@ mod tests {
                 assert!(!key.is_quarantined());
             }
             if chip != Chip::Mt7925 || !group || cipher != Cipher::Ccmp128 {
-                // SAFETY: actual model namespace is drained; unsupported scope/chip stays explicit.
+                // SAFETY: model namespace is drained; unsupported scope/chip stays explicit.
                 let result = unsafe {
                     key.install_igtk(
                         &mut mailbox,
@@ -877,7 +877,7 @@ mod tests {
                 assert_eq!(key.slot().installed(), Some(gtk));
             }
             let removed = key.remove(&mut mailbox).unwrap();
-            // SAFETY: actual removal ACK and complete model key/user drain.
+            // SAFETY: removal ACK and complete model key/user drain.
             unsafe { key.retire_after_drain(removed) }.unwrap();
             drop(key);
             assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -894,7 +894,7 @@ mod tests {
             let (mut mailbox, _, _, _) =
                 setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
             let drops = Arc::new(AtomicUsize::new(0));
-            // SAFETY: genuine exclusive empty source-modeled WCID/BSS, with no old key users.
+            // SAFETY: exclusive empty source-modeled WCID/BSS, with no old key users.
             let mut key = unsafe {
                 HardwareKey::claim(
                     &mailbox,
@@ -921,7 +921,7 @@ mod tests {
                 _ => response.lock().unwrap().drop = true,
             }
             assert!(
-                // SAFETY: actual model initial key request is drained; late/invalid ACK must
+                // SAFETY: model initial key request is drained; late/invalid ACK must
                 // quarantine.
                 unsafe {
                     key.install_igtk(

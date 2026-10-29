@@ -20,7 +20,7 @@ pub use completion::CanonicalRamService;
 const GRANULE: usize = 16;
 const MAX_RANGES: usize = 4096;
 
-/// One actual reservation, with both the guest's physical placement and the
+/// One reservation, with both the guest's physical placement and the
 /// host physical/CPU mapping identities. Metadata never lends guest references.
 #[derive(Debug, Clone, Copy)]
 pub struct ReservedSystemRamRange {
@@ -63,14 +63,14 @@ impl RegisteredSystemRam {
     /// # Safety
     /// Each CPU mapping is coherent Normal-WB RAM with stable readable/writable
     /// host rights, exactly backed by the given host physical extent. `owner`
-    /// retains these actual reservations/mappings through their last backing,
+    /// keeps these reservations/mappings through their last backing,
     /// every native loan, recovery and final source-PC settlement. Ranges are
     /// disjoint from Rust references, Stela code/data/stacks and other consumers.
     /// This transfers all access discipline: every writer, including aliases,
     /// AF/DBM updates and host services, must participate in this one system.
     /// No firmware, SMI, external DMA or unjoined direct writer may access it.
     /// Called before any admitted concurrent execution with interrupts disabled
-    /// at CPL0. Per-worker effective guest controls and actual native target
+    /// at CPL0. Per-worker effective guest controls and native target
     /// admission are additional requirements; registration alone grants neither.
     pub unsafe fn register<O: Send + Sync + 'static>(
         ranges: &[ReservedSystemRamRange],
@@ -83,13 +83,13 @@ impl RegisteredSystemRam {
     }
 
     /// Register with a conservative common-worker target ceiling. A limit
-    /// cannot promote the actual BSP's admitted capabilities or enable DIT,
+    /// cannot promote the BSP's admitted capabilities or enable DIT,
     /// AVX state or another unknown native recipe. Every destination still
     /// requires its own live target and exact-control proof before entry.
     ///
     /// # Safety
     /// The complete reservation, mapping and all-writer contract of `register`
-    /// applies. A supplied limit is policy only, never execution authority.
+    /// applies. A supplied limit is policy only, never execution permission.
     pub unsafe fn register_with_target_limit<O: Send + Sync + 'static>(
         ranges: &[ReservedSystemRamRange],
         owner: Arc<O>,
@@ -114,7 +114,7 @@ impl RegisteredSystemRam {
         let target = limit.map_or(authority.target(), |limit| {
             crate::memory::domain::native_target::restrict(authority.target(), limit)
         });
-        // SAFETY: validate checked range geometry. The caller retains initialized
+        // SAFETY: validate checked range geometry. The caller keeps initialized
         // pinned mappings and all writers; bindings clones owner into each backing.
         let (regions, views, system) = unsafe { bindings(ranges, owner, erg_bytes, stripes) }?;
         let domain =
@@ -129,7 +129,7 @@ impl RegisteredSystemRam {
         })
     }
 
-    /// Retained source/host physical extents. Metadata does not lend host
+    /// Source/host physical extents. Metadata does not lend host
     /// pointers or authorize another RAM store/direct native writer.
     pub fn placements(&self) -> impl Iterator<Item = (u64, u64, usize)> + '_ {
         self.regions
@@ -142,12 +142,12 @@ impl RegisteredSystemRam {
     pub fn target(&self) -> TargetCpu {
         self.target
     }
-    /// Current generation of the actual retained canonical RAM domain.
+    /// Current generation of the canonical RAM domain.
     /// A failed or retired domain refuses rather than supplying stale identity.
     pub fn generation(&self) -> Result<u64, MemoryStatus> {
         self.domain.generation()
     }
-    /// Retain a real native-execution loan in reference tests so adapters can
+    /// Keep a real native-execution loan in reference tests so adapters can
     /// verify that physical service acquisition refuses while execution is live.
     #[cfg(any(test, feature = "test-support"))]
     pub fn reference_execution_loan(
@@ -168,13 +168,13 @@ impl RegisteredSystemRam {
         (offset < region.bytes).then_some((region, offset))
     }
 
-    /// Observe initialized physical RAM through exact native scalar reads.
+    /// Observe initialized physical RAM through native scalar reads.
     /// Instruction words and descriptors do not use racing Rust byte copies.
     /// Refused whole-range admission leaves the caller's buffer unchanged.
     ///
     /// # Safety
     /// The output is private/disjoint from this registered RAM, live native
-    /// frames and host metadata. The retained source mapping and all-writer
+    /// frames and host metadata. The kept source mapping and all-writer
     /// contract remain valid. This does not make a multiword snapshot atomic;
     /// instruction/cache publication still requires its own stopped-cohort
     /// protocol and immutable source-byte identity at native preparation.
@@ -183,11 +183,11 @@ impl RegisteredSystemRam {
         physical: u64,
         output: &mut [u8],
     ) -> Result<(), MemoryStatus> {
-        // SAFETY: the caller retains the same private output and live owner.
+        // SAFETY: the caller keeps the same private output and live owner.
         unsafe { self.read_physical_progress(physical, output) }.map_err(|fault| fault.status)
     }
 
-    /// Read through the same canonical scalar access path, retaining the exact
+    /// Read through the same canonical scalar access path, keeping the exact
     /// output prefix if a later access encounters a terminal owner failure.
     ///
     /// # Safety
@@ -218,7 +218,7 @@ impl RegisteredSystemRam {
                 .host_pointer(offset, count, AccessKind::Read)
                 .map_err(|_| fault(MemoryStatus::Domain))?;
             // Registration keeps this region and its backing envelope immutable.
-            // Reuse only that checked envelope within this call; each actual
+            // Reuse only that checked envelope within this call; each
             // scalar read still observes the canonical, concurrently mutable RAM.
             let mut advanced = 0;
             while advanced < count {
@@ -229,7 +229,7 @@ impl RegisteredSystemRam {
                     .into_iter()
                     .find(|width| remaining >= *width && (part as usize).is_multiple_of(*width))
                     .expect("a byte fits the admitted range");
-                // SAFETY: a pinned exact aligned scalar part, qualified baseline
+                // SAFETY: a pinned exact aligned scalar part, checked baseline
                 // host, no Rust reference into concurrently mutable guest storage.
                 let value = unsafe { access::read_part(part, width, TargetCpu::Baseline) }
                     .map_err(|_| PublicationFault {
@@ -316,7 +316,7 @@ impl RegisteredSystemRam {
         }
     }
 
-    /// Validate physical geometry and actual retained backing permissions for a
+    /// Validate physical geometry and kept backing permissions for a
     /// DMA descriptor. No bytes are copied and no translation is cached.
     pub fn check_dma_range(
         &self,
@@ -412,7 +412,7 @@ fn validate(ranges: &[ReservedSystemRamRange]) -> Result<(), RegistrationError> 
 
 type Views = Vec<(Arc<MemoryView>, MappingAttributes)>;
 /// # Safety
-/// Caller validated geometry and retains actual WB reservations under the full
+/// Caller validated geometry and keeps WB reservations under the full
 /// register contract. This never reads or changes guest bytes or creates a
 /// caller-selectable native admission shortcut.
 unsafe fn bindings<O: Send + Sync + 'static>(
@@ -430,7 +430,7 @@ unsafe fn bindings<O: Send + Sync + 'static>(
     let mut regions = Vec::with_capacity(ranges.len());
     let mut views = Vec::with_capacity(ranges.len());
     for range in ranges {
-        // SAFETY: the exact retained actual reservation contract is the caller's.
+        // SAFETY: the exact reservation contract is the caller's.
         let backing = unsafe {
             MemoryBacking::new(
                 range.host_base,
@@ -467,11 +467,11 @@ unsafe fn bindings<O: Send + Sync + 'static>(
 }
 
 /// Source-MMU fixtures use real pinned bytes/native scalar transfers but the
-/// legacy validation domain. This cannot construct production CPL0 entry authority.
+/// legacy validation domain. This cannot construct production CPL0 entry permission.
 ///
 /// # Safety
 /// Every source and host range must describe initialized, pinned mappings
-/// retained by `owner`; no Rust references or external writers may alias the
+/// by `owner`; no Rust references or external writers may alias the
 /// registered bytes outside the canonical memory synchronization protocol.
 #[cfg(any(test, feature = "test-support"))]
 pub unsafe fn fixture<O: Send + Sync + 'static>(
@@ -479,7 +479,7 @@ pub unsafe fn fixture<O: Send + Sync + 'static>(
     owner: Arc<O>,
 ) -> RegisteredSystemRam {
     validate(ranges).unwrap();
-    // SAFETY: The fixture caller retains initialized pinned mappings and excludes
+    // SAFETY: The fixture caller keeps initialized pinned mappings and excludes
     // external writers. Checked ranges and cloned owner pins outlive every backing.
     let (regions, views, system) = unsafe { bindings(ranges, owner, 64, 8) }.unwrap();
     let domain = MemoryDomain::new(Arc::clone(&system), views, TargetCpu::Baseline).unwrap();
@@ -520,7 +520,7 @@ mod tests {
         ReservedSystemRamRange {
             source_pa,
             host_pa: 0x1000_0000 + offset as u64,
-            // SAFETY: fixture geometry stays inside the retained test allocation.
+            // SAFETY: fixture geometry stays inside the test allocation.
             host_base: unsafe { NonNull::new_unchecked(storage.pointer().as_ptr().add(offset)) },
             bytes,
         }
@@ -528,10 +528,10 @@ mod tests {
 
     // A RAM ownership/access model using the real POSIX platform's target
     // admission. It does not manufacture a CPL0 native-system proof or assert
-    // freestanding/AP execution, which has its own boot qualification.
+    // freestanding/AP execution, which has its own boot validation.
     unsafe fn model(ranges: &[ReservedSystemRamRange], owner: Arc<Storage>) -> RegisteredSystemRam {
         validate(ranges).unwrap();
-        // SAFETY: the caller validated these ranges and `owner` retains their storage.
+        // SAFETY: the caller validated these ranges and `owner` keeps their storage.
         let (regions, views, system) = unsafe { bindings(ranges, owner, 64, 8) }.unwrap();
         let domain = MemoryDomain::new(Arc::clone(&system), views, TargetCpu::Baseline).unwrap();
         RegisteredSystemRam {
@@ -567,7 +567,7 @@ mod tests {
             crate::memory::domain::ExecutionLoanAttempt::ServiceBusy
         ));
         assert!(ram.try_service().unwrap().is_none());
-        // An independent physical domain still works; geometry is not authority.
+        // An independent physical domain still works; geometry is not permission.
         drop(other.try_service().unwrap().unwrap());
         drop(service);
         drop(ram.domain.execution_loan().unwrap());
@@ -602,9 +602,9 @@ mod tests {
                                 .unwrap()
                         );
                     } else {
-                        // Same retained physical backing through the host writer.
+                        // Same kept physical backing through the host writer.
                         // SAFETY: physical-system writes go through the registered owner, which
-                        // retains these bytes.
+                        // keeps these bytes.
                         unsafe { ram.system.publish(&ram.regions[0].backing, 0, &[9; 8]) }.unwrap();
                     }
                     finished.send(()).unwrap();
@@ -805,7 +805,7 @@ mod tests {
         let first_range = range(&first, 0x4000, 16, 64);
         let mut second_range = range(&second, 0x4040, 32, 64);
         second_range.host_pa = 0x2000_0020;
-        // These source-adjacent regions retain different actual allocations,
+        // These source-adjacent regions keep different allocations,
         // host offsets and physical placements; pointer arithmetic cannot cross
         // their boundary even though the requested source range is contiguous.
         // SAFETY: the test's storage backs every range, stays alive with the registration and has
@@ -850,10 +850,10 @@ mod tests {
         // SAFETY: the test's storage backs every range, stays alive with the registration and has
         // no other writer.
         let mut registered = unsafe { model(&ranges, Arc::clone(&storage)) };
-        // Deliberately inconsistent private metadata models a later envelope
+        // Inconsistent private metadata models a later envelope
         // refusal. Production registration never changes a backing's rights.
         // No failed read may expose bytes from that backing or erase the prefix.
-        // SAFETY: the replacement backing covers the same retained storage bytes.
+        // SAFETY: the replacement backing covers the same storage bytes.
         registered.regions[1].backing = unsafe {
             MemoryBacking::new(
                 ranges[1].host_base,
@@ -887,7 +887,7 @@ mod tests {
     fn long_physical_read_keeps_one_backing_and_the_original_scalar_observations() {
         #[repr(C, align(16))]
         struct LongStorage(UnsafeCell<[u8; 1024]>);
-        // SAFETY: the retained storage is accessed only through the canonical
+        // SAFETY: the storage is accessed only through the canonical
         // native scalar reader and same-system publication after registration.
         unsafe impl Sync for LongStorage {}
         let storage = Arc::new(LongStorage(UnsafeCell::new([0; 1024])));
@@ -924,7 +924,7 @@ mod tests {
                 for value in
                     (0..10_000).map(|iteration| if iteration & 1 == 0 { 0x55 } else { 0xaa })
                 {
-                    // SAFETY: physical-system writes go through the registered owner, which retains
+                    // SAFETY: physical-system writes go through the registered owner, which keeps
                     // these bytes.
                     unsafe {
                         registered

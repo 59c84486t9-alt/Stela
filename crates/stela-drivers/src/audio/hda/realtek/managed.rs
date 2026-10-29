@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained Realtek analog ownership. Family initialization and 200ms EAPD
+//! Realtek analog ownership. Family initialization and 200ms EAPD
 //! shutup adapt Linux realtek.c/alc662.c/alc882.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b (GPL-2.0-or-later).
 use super::{
@@ -25,24 +25,24 @@ pub struct RealtekReport {
     pub family: RealtekFamily,
     pub oem: RealtekOem,
     pub coefficient_zero: u16,
-    /// Source front/headphone EAPD endpoints actually found in the live graph.
+    /// Source front/headphone EAPD endpoints found in the live graph.
     pub eapd_pins: Vec<u8>,
-    /// Actual retained-controller PCI observation; never inferred from AFG f20.
+    /// Retained-controller PCI observation; never inferred from AFG f20.
     pub pci_subsystem: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AmplifierLevel {
-    /// Actual hardware gain step, not a percentage or an inferred dB value.
+    /// Hardware gain step, not a percentage or an inferred dB value.
     pub gain: u8,
     pub muted: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RealtekCaptureGain {
     pub input_index: u8,
-    /// Actual inherited/overridden input amplifier capabilities.
+    /// Inherited/overridden input amplifier capabilities.
     pub capabilities: u32,
-    /// Actual left, then optional right amplifier channel. A mono mixer with
+    /// Left, then optional right amplifier channel. A mono mixer with
     /// one stereo source has stereo input amplifiers, as in the Linux path.
     pub levels: Vec<AmplifierLevel>,
 }
@@ -112,7 +112,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     fn realtek_graph_authority(&mut self, graph: &CodecGraph) -> Result<(), Error> {
         // Full live re-enumeration prevents public cached defaults, amp, power,
-        // PCM or connection fields from manufacturing electrical authority.
+        // PCM or connection fields from manufacturing electrical permission.
         if !same_graph(graph, &self.enumerate_codec(graph.address)?) {
             return Err(Error::InvalidCodecGraph);
         }
@@ -178,9 +178,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(state)
     }
-    /// Cold source-qualified ALC882/ALC662-family initialization and retained
+    /// Cold source-checked ALC882/ALC662-family initialization and kept
     /// held-D0 ownership. Every GPIO/companion-amp policy remains unselected.
-    /// Unknown boards use only their actual firmware analog routes; this is
+    /// Unknown boards use only their firmware analog routes; this is
     /// not a claim that their speakers or headset wiring are ready.
     pub fn initialize_realtek_codec(&mut self, graph: &CodecGraph) -> Result<RealtekReport, Error> {
         self.initialize_realtek_owned(graph, false)
@@ -230,7 +230,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             })
             .collect();
         let index = self.realtek_codecs.len();
-        // Retain ownership before the first power/index/data mutation. Partial
+        // Keep ownership before the first power/index/data mutation. Partial
         // failure never lets a different backend replace this codec address.
         self.realtek_codecs.push(State {
             address: graph.address,
@@ -299,7 +299,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    /// Compose the source-qualified existing startup procedures with retained
+    /// Compose the source-checked existing startup procedures with kept
     /// ownership and the matching timed shutdown. ALC269's variant procedure
     /// uses its exact init hook rather than the default 30ms headphone hook.
     /// Optional pin16 PCM is accepted only by ALC285/295. No ULP, headset keys,
@@ -357,7 +357,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         // This local owner exists before startup mutates hardware. Exclusive
         // &mut self prevents interleaving while the earlier startup routines
-        // reserve their actual paths. It is inserted on success AND failure.
+        // reserve their paths. It is inserted on success AND failure.
         let mut state = State {
             address: graph.address,
             graph: graph.clone(),
@@ -509,10 +509,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    /// Change an actual reserved playback-path output amplifier, including
+    /// Change a reserved playback-path output amplifier, including
     /// while PCM runs. Gain is an advertised hardware step, not a percentage.
     /// Both stereo channels and every write readback are checked; unsupported
-    /// hardware mute never becomes a fabricated mute bit or discarded effect.
+    /// hardware mute never becomes an invented mute bit or discarded effect.
     pub fn set_realtek_output_gain(
         &mut self,
         graph: &CodecGraph,
@@ -572,7 +572,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<(Widget, u8, u8), Error> {
         self.realtek_guard(graph)?;
         // An old/foreign stream or unreserved node must not trigger even the
-        // live codec-authority reads, much less change an amplifier.
+        // live codec-permission reads, much less change an amplifier.
         if self.stream_direction(stream)? != crate::audio::Direction::Capture {
             return Err(Error::InvalidStream);
         }
@@ -616,7 +616,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if index > 15 {
             return Err(Error::UnsupportedTopology);
         }
-        // A selector that no longer names this retained path is a lost routing
+        // A selector that no longer names this path is a lost routing
         // epoch. Never adjust an inactive source and call it capture volume.
         if offset + 1 < route.nodes().len()
             && widget.kind != WidgetKind::Mixer
@@ -647,7 +647,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         };
         Ok((widget, amplifier_index, channels))
     }
-    /// Read the actual selected capture-path amplifier, including while PCM
+    /// Read the selected capture-path amplifier, including while PCM
     /// runs. Only an initialized live codec and this stream's reserved input
     /// path authorize the index. Other mixer inputs remain isolated.
     pub fn realtek_capture_gain(
@@ -689,9 +689,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    /// Set an actual reserved input amplifier's gain/mute on both channels and
+    /// Set a reserved input amplifier's gain/mute on both channels and
     /// acknowledge each channel independently. Unsupported mute never becomes
-    /// a fabricated bit or a silent minimum-gain substitute.
+    /// an invented bit or a silent minimum-gain substitute.
     pub fn set_realtek_capture_gain(
         &mut self,
         graph: &CodecGraph,

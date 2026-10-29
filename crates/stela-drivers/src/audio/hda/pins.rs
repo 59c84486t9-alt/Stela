@@ -191,7 +191,7 @@ impl CodecGraph {
 }
 
 /// Raw standard measurement; no debounce, jack inversion, headset type or ELD
-/// interpretation is inferred. Impedance is retained as a codec response code,
+/// interpretation is inferred. Impedance is held as a codec response code,
 /// without claiming calibrated ohms. An unavailable impedance code is None.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PinSense {
@@ -202,7 +202,7 @@ pub struct PinSense {
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Standard polling works without unsolicited interrupts. Trigger-required
     /// pins receive SET_PIN_SENSE before GET_PIN_SENSE, as in jack.c. Managed
-    /// SigmaTel codecs retain no-trigger sense; IDT83xxx also synchronizes its
+    /// SigmaTel codecs keep no-trigger sense; IDT83xxx also synchronizes its
     /// source port-power map. Standard polling changes no power or GPIO.
     pub fn poll_pin_sense(&mut self, graph: &CodecGraph, pin: u8) -> Result<PinSense, Error> {
         if self.manages_realtek_codec(graph.address) {

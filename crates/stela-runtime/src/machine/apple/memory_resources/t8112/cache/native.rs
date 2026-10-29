@@ -1,4 +1,4 @@
-//! Actual cache/PTD quota association and exclusive native callback borrow.
+//! Cache/PTD quota association and exclusive native callback borrow.
 use super::super::Prepared;
 use super::*;
 
@@ -24,7 +24,7 @@ impl EmptyResource {
     }
 }
 impl Prepared {
-    /// Bind exactly one native quota publisher to these actual component
+    /// Bind exactly one native quota publisher to these component
     /// owners. It neither admits startup/IRQs nor completes a source command.
     pub fn bind_quota_publisher(
         &self,
@@ -40,7 +40,7 @@ impl Prepared {
         cache.bind_quota_publisher(self.local.clone())
     }
 }
-/// An exclusive callback borrow of the actual cache, including its current
+/// An exclusive callback borrow of the cache, including its current
 /// lifecycle and shared quota words. The backing cannot be replaced while lent.
 pub struct QuotaView<'a>(&'a mut EmptyResource);
 impl publisher::Bank for QuotaView<'_> {
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(quota(&mut cache, 0), 0x4012_0040);
         assert_eq!(publisher.progress().programmed_words, 0);
         assert_eq!(memory.publication_bank().requests().len(), 1);
-        // Actual optional metric registration belongs to the service caller,
+        // Optional metric registration belongs to the service caller,
         // after defaults publication and before this separate allocation.
         publisher.allocate().unwrap();
         assert_eq!(publisher.policy().group(0).unwrap().hardware_target, 0);
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(publisher.policy().group(0).unwrap().ceiling, 64);
         let mut latch = InterruptLatch::new();
         advance(&mut publisher, &mut cache, &mut latch);
-        assert_eq!(cache.progress().quota_writes, 0); // actual seeded targets skip unchanged stores
+        assert_eq!(cache.progress().quota_writes, 0); // seeded targets skip unchanged stores
         assert_eq!(memory.publication_bank().requests().len(), 1);
         let packed = 16 | (17 << 16) | (18u64 << 32) | (19u64 << 48);
         for group in 0..4 {
@@ -333,7 +333,7 @@ mod tests {
         let publications = memory.publication_bank().requests();
         assert_eq!(publications.len(), 2);
         assert_eq!(publications[1].value, packed);
-        // The pending source store retains its exact prepared attributes/word.
+        // The pending source store keeps its exact prepared attributes/word.
         cache
             .quota_view()
             .write_quota(3, 0x4000_007f, &mut Access::new(0, 9, &mut latch))
@@ -559,7 +559,7 @@ mod tests {
         ] {
             assert_eq!(stela_formats::sha256(&pmp[start..end]), hash);
         }
-        // Defaults tail-calls the actual publisher before allocation.
+        // Defaults tail-calls the publisher before allocation.
         // Its full source window is also pinned by the pure policy test.
         assert_eq!(
             u32::from_le_bytes(pmp[0x4f7c..0x4f80].try_into().unwrap()),

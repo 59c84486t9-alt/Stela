@@ -48,7 +48,7 @@ pub enum ReferenceScale {
     PeriodFemtoseconds(u32),
 }
 /// A modular difference cannot prove that multiple wraps did not occur. The
-/// actual retained reference owner must independently establish that interval.
+/// reference owner must independently establish that interval.
 pub fn wrapped_delta(before: u64, after: u64, mask: u64) -> Result<u64, Error> {
     if !matches!(mask, 0x00ff_ffff | 0xffff_ffff | u64::MAX)
         || before & !mask != 0
@@ -62,7 +62,7 @@ pub fn wrapped_delta(before: u64, after: u64, mask: u64) -> Result<u64, Error> {
     }
     Ok(delta)
 }
-/// Frequency uncertainty from actual before/reference/after read brackets.
+/// Frequency uncertainty from before/reference/after read brackets.
 /// Safe arithmetic/model output does not attest reference continuity/ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RateWindow {

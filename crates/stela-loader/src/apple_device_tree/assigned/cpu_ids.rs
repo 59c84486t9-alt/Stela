@@ -1,4 +1,4 @@
-//! Explicit CPU-ID/count and watchdog-record projection. The caller qualifies
+//! Explicit CPU-ID/count and watchdog-record projection. The caller checks
 //! the original consumers; this recipe grants no hardware or execution owner.
 use super::*;
 use stela_soc_data::board::assigned::RegisterRange;
@@ -158,7 +158,7 @@ impl Prepared {
             "watchdog table differs from complete original per-PE records"
         );
         // This bounded recipe accounts for one complete watchdog consumer. A
-        // second such table must get its own jointly qualified recipe.
+        // second such table must get its own jointly checked recipe.
         fn tables(node: &Node) -> usize {
             usize::from(watchdog(node) && node.property(TRIGGER).is_some())
                 + node.children.iter().map(tables).sum::<usize>()

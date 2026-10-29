@@ -1,4 +1,4 @@
-//! Actual standalone mapping publication under retained allocated page tables.
+//! Standalone mapping publication under kept allocated page tables.
 use super::*;
 use crate::native_smp::{memory_types::Image, topology::Snapshot};
 use core::{
@@ -39,7 +39,7 @@ impl Platform {
     ) -> Result<Self, Error> {
         root.check_current().map_err(Error::Root)?;
         let leaves = prepared.leaves.take().ok_or(Error::ResourceInventory)?;
-        // SAFETY: actual retained CPL0 BSP/current root; no guest/AP runs.
+        // SAFETY: CPL0 BSP/current root; no guest/AP runs.
         let snapshot = unsafe { crate::native_smp::firmware::observe() }
             .map_err(|_| Error::ResourceInventory)?;
         let image = Image::from_snapshot(&snapshot).map_err(Error::Tables)?;
@@ -130,7 +130,7 @@ impl Platform {
         let _critical = self.critical().map_err(Error::Mapping)?;
         for slot in 0..SLOTS {
             if self.tokens[slot].load(Ordering::Acquire) != 0
-                    // SAFETY: actual privately owned leaf, bounded slot, IRQ excluded; this checks
+                    // SAFETY: privately owned leaf, bounded slot, IRQ excluded; this checks
                     // hardware table storage, not just registry metadata.
                 || unsafe { self.leaf(slot).read_volatile() } != 0
             {
@@ -164,7 +164,7 @@ impl Platform {
     fn critical(&self) -> Result<Critical<'_>, owned::Error> {
         self.check().map_err(|_| owned::Error::Unavailable)?;
         let flags: u64;
-        // SAFETY: actual CPL0 checked CPU, excluding same-BSP IRQ reentry
+        // SAFETY: CPL0 checked CPU, excluding same-BSP IRQ reentry
         // before taking the only mutation flag. No sleeping lock or callback.
         unsafe {
             asm!("pushfq","pop {}","cli",out(reg)flags);
@@ -190,11 +190,11 @@ impl Platform {
     }
     fn leaf(&self, slot: usize) -> *mut u64 {
         // Called only with bounded slot under Critical; leaves were consumed
-        // from this exact builder and remain genuine retained WB allocations.
+        // from this exact builder and remain held WB allocations.
         (self.leaves[slot / 512] as *mut u64).wrapping_add(slot % 512)
     }
     fn flush(&self, first: usize, pages: usize) {
-        // SAFETY: actual sole current root, PGE/PCID disabled and no AP/guest;
+        // SAFETY: sole current root, PGE/PCID disabled and no AP/guest;
         // all publications/removals hold this same IRQ-excluded mutation lease.
         unsafe {
             asm!("mfence", options(nostack, preserves_flags));
@@ -302,7 +302,7 @@ fn rights(request: MapRequest) -> u64 {
             0
         }
 }
-// SAFETY: this provider retains the actual consumed builder/allocation catalog,
+// SAFETY: this provider keeps the consumed builder/allocation catalog,
 // one fixed single-BSP root, all aliases and empty private aperture leaves.
 // IRQ exclusion precedes mutation; unknown contexts/cache/owners refuse. Tokens
 // and allocations survive every uncertain failure. No other root is admitted.
@@ -358,7 +358,7 @@ unsafe impl MappingPlatform for Platform {
         }
         for offset in 0..pages {
             self.tokens[first + offset].store(request.id, Ordering::Release);
-            // SAFETY: bounded empty actual owned PTE under exclusive IRQ lease;
+            // SAFETY: bounded empty owned PTE under exclusive IRQ lease;
             // no Rust reference aliases hardware A/D writes.
             unsafe {
                 self.leaf(first + offset).write_volatile(

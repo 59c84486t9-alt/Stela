@@ -320,7 +320,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         if eecd == u32::MAX {
             return Err(BlockError::Device { status: eecd });
         }
-        // igc_init_nvm_params_base: actual NVM word count bounds semaphore polls.
+        // igc_init_nvm_params_base: NVM word count bounds semaphore polls.
         let shift = (((eecd & 0x7800) >> 11) + 6).min(15);
         Ok(Self {
             registers,
@@ -443,7 +443,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             };
             if value & (mask | mask << 16) == 0 {
                 self.registers.write(SW_FW_SYNC, value | mask);
-                // Observe the actual software bit before giving up HW ownership.
+                // Observe the software bit before giving up HW ownership.
                 let observed = self.read(SW_FW_SYNC);
                 self.put_hw_semaphore()?;
                 return match observed {
@@ -571,7 +571,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             if upper == 0 || upper == u16::MAX || lower == u16::MAX {
                 return Err(BlockError::Unsupported("igc invalid internal PHY identity"));
             }
-            // Source igc_power_up_phy_copper, followed by actual advertisement.
+            // Source igc_power_up_phy_copper, followed by advertisement.
             let control = hw.mdio(PHY_CONTROL, None)?;
             hw.mdio(PHY_CONTROL, Some(control & !(1 << 11)))?;
             let adv = hw.mdio(PHY_ADVERTISEMENT, None)?;
@@ -961,7 +961,7 @@ pub(super) mod tests {
                 assert_eq!(hw.initialize(), Ok(0x67c9dc01), "device {device:04x}");
                 let state = model.state.borrow();
                 assert_eq!(state.phy[&0] & 0x1a00, 0x1200);
-                // Symmetric and asymmetric PAUSE, all 10/100 modes, other bits retained.
+                // Symmetric and asymmetric PAUSE, all 10/100 modes, other bits kept.
                 assert_eq!(state.phy[&4], 0xafe1);
                 assert_eq!(state.registers[&FCT], 0x8808);
                 assert_eq!(state.registers[&FCAH], 0x0100);
@@ -1350,7 +1350,7 @@ pub(super) mod tests {
         assert!(position((RCTL, rejecting)) < position((RCTL, rejecting | RCTL_EN)));
         assert!(position((RLPML, 0)) < position((RCTL, rejecting | RCTL_EN)));
         assert!(position((RFCTL, RFCTL_IPV6_EX_DIS)) < position((RCTL, rejecting | RCTL_EN)));
-        // Then every original setting returns, with the erratum retained.
+        // Then every original setting returns, with the erratum kept.
         assert_eq!(state.registers[&rxdctl(0)], RXDCTL_ENABLE | 0x0808);
         assert_eq!(state.registers[&rxdctl(2)], RXDCTL_ENABLE);
         assert_eq!(state.registers[&RCTL], RCTL_SBP | 1 << 15);

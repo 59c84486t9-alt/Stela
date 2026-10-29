@@ -1,6 +1,6 @@
 //! Model the post-return capture/publication boundary without CPL0 admission.
 //! Real source preparation and linear dispatch/recovery are used; this Host
-//! double supplies a simulated raw internal fault, never native CPU authority.
+//! double supplies a simulated raw internal fault, never native CPU permission.
 use super::super::terminal::FailureCapture;
 use super::*;
 use crate::machine::{
@@ -66,8 +66,8 @@ impl<'a> publication::NativeFrame for FailedFrame<'a> {
     type Returned = ReturnedRun<'a>;
     fn execute(self, host: &mut dyn Host) -> ReturnedRun<'a> {
         let code = host.install(&self.0.artifact.code).unwrap();
-        // SAFETY: ModelHost is a test double, retaining its Vec code ID and
-        // touching only this actual borrowed GuestState; no emitted native code.
+        // SAFETY: ModelHost is a test double, keeping its Vec code ID and
+        // touching only this borrowed GuestState; no emitted native code.
         let NativeExit::Fault(fault) = (unsafe { host.execute(code, self.0.state) }) else {
             panic!("model fault")
         };
@@ -115,7 +115,7 @@ fn ignored_recovered_fault_observation_cannot_readmit_the_actual_frame() {
         .accept_initial(owners[0].publish_initial(&mut host).unwrap())
         .unwrap();
     let boundary = (machine.cpu.pc, machine.cpu.retired);
-    // SAFETY: one actual exclusively borrowed canonical frame, no other workers
+    // SAFETY: one exclusively borrowed canonical frame, no other workers
     // or writers; the test wrapper models only terminal recovery, no native lane.
     let run = unsafe { machine.shared_native_run(binding) }.unwrap();
     let loan = inventory
@@ -126,7 +126,7 @@ fn ignored_recovered_fault_observation_cannot_readmit_the_actual_frame() {
         .unwrap_or_else(|_| panic!("return"));
     let observation = recover(&mut inventory, returned).unwrap_or_else(|_| panic!("recover"));
     assert_eq!(observation.status, Err(MemoryStatus::Domain));
-    drop(observation); // Deliberately skip scheduler validate/settlement.
+    drop(observation); // Skip scheduler validate/settlement.
     assert_eq!(machine.cpu.state.x[0], 0xdead, "no false rollback claim");
     assert_eq!((machine.cpu.pc, machine.cpu.retired), boundary);
     assert!(
@@ -195,7 +195,7 @@ fn already_prepared_frame_refuses_before_any_host_admission_after_peer_quarantin
         .accept_initial(owners[0].publish_initial(&mut host).unwrap())
         .unwrap();
     let boundary = (machine.cpu.pc, machine.cpu.retired);
-    // SAFETY: exclusive actual frame and canonical source; dispatch/recovery
+    // SAFETY: exclusive frame and canonical source; dispatch/recovery
     // below use the real linear protocol. No native permission is manufactured.
     let run = unsafe { machine.shared_native_run(binding) }.unwrap();
     // Model another holder of this same domain publishing a raw failure after

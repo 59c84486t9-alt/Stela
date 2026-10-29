@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
-//! Source-ordered firmware DMA using retained native RAM and device-domain
+//! Source-ordered firmware DMA using kept native RAM and device-domain
 //! leases. No CPU/physical pointer becomes an IOVA. The ROM context and RX/TX
 //! rings are separate allocations owned by the eventual transport.
 use super::{
@@ -98,7 +98,7 @@ impl Chunk {
         self.exposed = true;
     }
     /// Shared producer/descriptor access only for the owning transport's
-    /// explicitly qualified coherent requester. Never call on streaming DMA.
+    /// explicitly checked coherent requester. Never call on streaming DMA.
     pub(super) unsafe fn read16_coherent(&self, offset: usize) -> Result<u16, Error> {
         if !offset.is_multiple_of(2) {
             return Err(Error::AllocationContract);
@@ -128,7 +128,7 @@ impl Chunk {
             .sync_for_device(offset..offset + bytes.len())?;
         Ok(())
     }
-    /// Actual device completion has ended all device access to this range,
+    /// Device completion has ended all device access to this range,
     /// transferring exclusive ownership back to the CPU before further writes.
     /// Other live descriptor slots remain outside this completed range.
     pub(super) unsafe fn complete_for_cpu(
@@ -154,7 +154,7 @@ impl Chunk {
             .sync_for_device(0..self.region.bytes)?;
         Ok(())
     }
-    /// Actual device completion must transfer this entire payload to the CPU.
+    /// Device completion must transfer this entire payload to the CPU.
     pub(super) unsafe fn snapshot_completed(&self) -> Result<Vec<u8>, Error> {
         let mapping = self.mapping.as_ref().ok_or(Error::State)?;
         // SAFETY: covered by this function's own safety contract.
@@ -171,7 +171,7 @@ impl Chunk {
     }
     /// # Safety
     /// Hardware no longer accesses this allocation and submissions/IRQ work
-    /// referencing it are drained. Failed invalidations retain the lease.
+    /// referencing it are drained. Failed invalidations keep the lease.
     pub(super) unsafe fn release(&mut self) -> Result<(), DmaError> {
         if let Some(mapping) = self.mapping.as_mut() {
             // SAFETY: hardware quiescence is established by this method's caller.
@@ -239,9 +239,9 @@ enum State {
     Stopped,
 }
 
-/// Retains every uploaded section's native RAM pin and isolated DMA domain.
+/// Keeps every uploaded section's native RAM pin and isolated DMA domain.
 /// Dropping after exposure quarantines potentially active mappings. Explicit
-/// release requires actual device completion, never a timer or guessed ALIVE.
+/// release requires device completion, never a timer or guessed ALIVE.
 pub struct MappedFirmware {
     lmac: Bank,
     umac: Bank,
@@ -295,17 +295,17 @@ impl MappedFirmware {
         })
     }
     /// The donor releases LMAC/UMAC after ALIVE, while paging remains resident.
-    /// A failed invalidation retains unreleased mappings for explicit retry.
+    /// A failed invalidation keeps unreleased mappings for explicit retry.
     ///
     /// # Safety
-    /// A validated actual ALIVE response for this exact boot/firmware epoch
+    /// A validated ALIVE response for this exact boot/firmware epoch
     /// proves ROM self-load no longer reads LMAC/UMAC. No outstanding context
     /// submission or IRQ worker may still reference these allocations.
     pub unsafe fn release_after_alive(&mut self) -> Result<(), Error> {
         if self.state != State::Exposed {
             return Err(Error::State);
         }
-        // SAFETY: caller supplied the donor's actual image-read completion.
+        // SAFETY: caller supplied the donor's image-read completion.
         unsafe {
             self.lmac.release()?;
             self.umac.release()?;
@@ -362,8 +362,8 @@ pub(in crate::net::wifi::intel) mod tests {
     unsafe impl Send for Backing {}
     // SAFETY: no safe slices or concurrent model CPU/DMA writers are exposed.
     unsafe impl Sync for Backing {}
-    // SAFETY: actual uniquely owned host RAM models reserved physical pages;
-    // metadata stays immutable and the reservation outlives all retained pins.
+    // SAFETY: uniquely owned host RAM models reserved physical pages;
+    // metadata stays immutable and the reservation outlives all kept pins.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
             self.pointer
@@ -451,7 +451,7 @@ pub(in crate::net::wifi::intel) mod tests {
         pub(in crate::net::wifi::intel) records: Mutex<Records>,
     }
     // SAFETY: synchronous IOMMU fixture with distinct device IOVAs independent
-    // of CPU/physical addresses. Live pins and failed invalidations are retained.
+    // of CPU/physical addresses. Live pins and failed invalidations are held.
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
             &self,
@@ -516,7 +516,7 @@ pub(in crate::net::wifi::intel) mod tests {
             let cpu = r.live.get(&mapping.id).unwrap();
             let ptr = cpu.address(range.start, range.len()).unwrap();
             // SAFETY: fixture executes synchronously before any device exposure,
-            // and its real retained allocation was initialized by the driver.
+            // and its real allocation was initialized by the driver.
             let copied = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), range.len()) }.to_vec();
             r.copied.push(copied);
             Ok(())
@@ -639,7 +639,7 @@ pub(in crate::net::wifi::intel) mod tests {
                 }
             }
         }
-        // SAFETY: no actual device or asynchronous IRQ worker exists.
+        // SAFETY: no device or asynchronous IRQ worker exists.
         unsafe {
             mapped.release_after_stop().unwrap();
         }
@@ -725,7 +725,7 @@ pub(in crate::net::wifi::intel) mod tests {
         let mut mapped = prepare(&plan, &source, &domain).unwrap();
         mapped.expose_for_context().unwrap();
         assert_eq!(
-            // SAFETY: no real device exists; this deliberately fails invalidation.
+            // SAFETY: no real device exists; this fails invalidation.
             unsafe { mapped.release_after_alive() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );
@@ -797,7 +797,7 @@ pub(in crate::net::wifi::intel) mod tests {
                 domain.records.lock().unwrap().live.len(),
                 plan.paging().len()
             );
-            // SAFETY: no actual device accesses or IRQ workers exist.
+            // SAFETY: no device accesses or IRQ workers exist.
             unsafe {
                 mapped.release_after_stop().unwrap();
             }

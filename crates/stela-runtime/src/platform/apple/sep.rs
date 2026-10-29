@@ -92,11 +92,11 @@ impl Sep {
     }
 
     /// Explicit Stela entry policy: the native ROM is already running and
-    /// both actual ASC mailboxes are enabled. Original early firmware polls
+    /// both ASC mailboxes are enabled. Original early firmware polls
     /// and sends without enabling them first. This is not an observation of
     /// Apple's BootROM cold state, an authenticated sepOS, or a ready-bit shim.
-    /// Entropy, identity, security qualification and persistence remain the
-    /// caller's actual inputs, exactly as for `new`.
+    /// Entropy, identity, security validation and persistence remain the
+    /// caller's inputs, exactly as for `new`.
     #[cfg(test)]
     pub fn booted_rom(
         entropy: Box<dyn Entropy>,
@@ -179,8 +179,8 @@ fn named(error: MmioError) -> MmioError {
 
 impl MmioDevice for Sep {
     fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
-        // Same actual mailbox/firmware owner checks every proposed edge.
-        // In particular, delegation does not qualify SEP security-state loss.
+        // Same mailbox/firmware owner checks every proposed edge.
+        // In particular, delegation does not check SEP security-state loss.
         self.mailbox.lifecycle()
     }
     fn name(&self) -> &'static str {
@@ -461,7 +461,7 @@ mod tests {
                 .payload,
             )
             .unwrap();
-        // An unqualified security opcode gets SEPROM's failure reply, never
+        // An unchecked security opcode gets SEPROM's failure reply, never
         // an ACK.
         mounted.write(0x8808, Width::Double, 0).unwrap();
         let failure = mounted.read(0x8830, Width::Double).unwrap();

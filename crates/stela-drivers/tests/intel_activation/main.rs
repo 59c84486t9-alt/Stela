@@ -60,8 +60,8 @@ struct Platform {
     fail_map: AtomicUsize,
     calls: Mutex<Vec<(bool, u64)>>,
 }
-// SAFETY: test-only page-table model returns actual aligned live RAM and tracks
-// exact unique tokens. It does not qualify real PAT/MTRR/device mappings.
+// SAFETY: test-only page-table model returns aligned live RAM and tracks
+// exact unique tokens. It does not check real PAT/MTRR/device mappings.
 unsafe impl MappingPlatform for Platform {
     fn check_context(&self, _: AddressSpace) -> Result<(), bus::mmio::owned::Error> {
         Ok(())
@@ -97,7 +97,7 @@ unsafe impl MappingPlatform for Platform {
         }
         Ok(InstalledMapping {
             token: request.id,
-            // SAFETY: actual same-allocation subspan proved above; no fabricated
+            // SAFETY: same-allocation subspan proved above; no invented
             // CPU base for BAR+8MiB. Registers and GSM are distinct real leases.
             cpu_base: unsafe {
                 NonNull::new_unchecked(backing.memory.pointer.as_ptr().add(offset))
@@ -234,7 +234,7 @@ unsafe impl ProbeOwner for Owner {
         assert!((8 * 1024 * 1024..BYTES).contains(&offset));
         assert!(offset.is_multiple_of(8));
         self.counts.reads64.fetch_add(1, Ordering::SeqCst);
-        // SAFETY: same actual aligned GSM model allocation, no shared references.
+        // SAFETY: same aligned GSM model allocation, no shared references.
         Ok(unsafe { pointer.as_ptr().read_volatile() })
     }
     fn prepare(&self, registers: &MappingView, _: u32, _: u32, _: bool) -> Result<(), i32> {
@@ -271,7 +271,7 @@ unsafe impl ProbeOwner for Owner {
         if matches!(offset, 0xc050 | 0xc340) {
             self.counts.wopcm_reads.fetch_add(1, Ordering::SeqCst);
         }
-        // SAFETY: actual aligned bounded model RAM, no Rust references.
+        // SAFETY: aligned bounded model RAM, no Rust references.
         unsafe { pointer.as_ptr().read_volatile() }
     }
     unsafe fn write32(&self, pointer: NonNull<u32>, value: u32) {
@@ -294,15 +294,15 @@ unsafe impl ProbeOwner for Owner {
             assert!(index < 4 && offset == 0x4800 + index * 4);
             self.counts.pat_trace[index]
                 .store(((offset as u64) << 32) | u64::from(value), Ordering::SeqCst);
-            // SAFETY: same actual aligned bounded model UC mapping; ordered
-            // register writes only, no fabricated readback or GPU cache state.
+            // SAFETY: same aligned bounded model UC mapping; ordered
+            // register writes only, no invented readback or GPU cache state.
             unsafe { pointer.as_ptr().write_volatile(value) };
             return;
         }
         if matches!(offset, 0xc050 | 0xc340) {
             let index = self.counts.wopcm_writes.fetch_add(1, Ordering::SeqCst) + 1;
-            // SAFETY: exact aligned RAM model word; missing ACK still retains
-            // the exposed write, deliberately modeling uncertain partial state.
+            // SAFETY: exact aligned RAM model word; missing ACK still keeps
+            // the exposed write, modeling uncertain partial state.
             unsafe {
                 let current = pointer.as_ptr().read_volatile();
                 if current & 1 == 0 {
@@ -346,7 +346,7 @@ unsafe impl ProbeOwner for Owner {
         assert_eq!(status, 0);
     }
     fn finish(&self) -> Result<(), i32> {
-        // Record a genuine model drain side effect BEFORE the possible error.
+        // Record a model drain side effect BEFORE the possible error.
         // The owner/resource survive; a retry completes this same drain.
         self.counts.finished.fetch_add(1, Ordering::SeqCst);
         if self.counts.fail_finish.swap(0, Ordering::SeqCst) != 0 {
@@ -371,7 +371,7 @@ fn owner_with_registers(
 ) -> (Box<dyn ProbeOwner>, Arc<Counts>) {
     let layout = Layout::from_size_align(BYTES, 4096).unwrap();
     let memory = Arc::new(Memory {
-        // SAFETY: nonzero validated layout, actual host RAM test allocation.
+        // SAFETY: nonzero validated layout, host RAM test allocation.
         pointer: NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap(),
         layout,
     });
@@ -457,8 +457,8 @@ fn activation_owned_model_lifetime_and_failed_unmap_retry() {
         assert_eq!(counts.prepared.load(Ordering::SeqCst), 0);
         assert_eq!(counts.dropped.load(Ordering::SeqCst), 1);
     }
-    // Canonical uncertain-map quarantine must retain the separate native
-    // power/reset owner too; no prepare, CPU access or fabricated drain occurs.
+    // Canonical uncertain-map quarantine must keep the separate native
+    // power/reset owner too; no prepare, CPU access or invented drain occurs.
     let before = authority.status().unwrap().quarantined;
     platform.fail_map.store(1, Ordering::SeqCst);
     let (input, counts) = owner(NEXT.fetch_add(BYTES as u64, Ordering::SeqCst), 0x9a49);
@@ -624,7 +624,7 @@ mod allocation_failure {
         });
     }
     pub struct Allocator;
-    // SAFETY: delegates all actual storage operations to System with the exact
+    // SAFETY: delegates all storage operations to System with the exact
     // layout. The isolated test can deny an allocation by returning null; it
     // never changes successful pointer provenance, layout or deallocation.
     unsafe impl GlobalAlloc for Allocator {
@@ -681,7 +681,7 @@ fn activation_allocation_failure_child() {
     let index: usize = value.parse().unwrap();
     assert!(index < 2);
     let platform = Arc::new(Platform::default());
-    // SAFETY: a fresh process owns this test-only RAM mapping authority.
+    // SAFETY: a fresh process owns this test-only RAM mapping permission.
     let authority = unsafe {
         Authority::activate(
             platform.clone(),
@@ -789,7 +789,7 @@ fn gsm_owned_contract(authority: &Authority, platform: &Platform, next: &AtomicU
             counts.config_reads.load(Ordering::SeqCst),
             usize::from(pci == 0x9a49)
         );
-        // Prefix reads are intentionally admitted by original xe_ggtt_get_pte,
+        // Prefix reads are admitted by original xe_ggtt_get_pte,
         // even below allocator start. Raw PTE bits are never called valid/ready.
         assert_eq!(probe.read_pte(0), Ok(0xfedc_ba98_7654_3210));
         assert_eq!(
@@ -819,8 +819,8 @@ fn gsm_owned_contract(authority: &Authority, platform: &Platform, next: &AtomicU
         assert_eq!(counts.dropped.load(Ordering::SeqCst), 1);
         assert_eq!(counts.reservation_dropped.load(Ordering::SeqCst), 1);
     }
-    // Missing actual PCI access and original zero-GGMS refusal happen before
-    // mapping effects and do not fabricate geometry or permanently poison GT.
+    // Missing PCI access and original zero-GGMS refusal happen before
+    // mapping effects and do not invent geometry or permanently poison GT.
     for (unavailable, gmch, error) in [(1, 2 << 6, -95), (0, 0, -12)] {
         let (input, counts) = owner(next.fetch_add(BYTES as u64, Ordering::SeqCst), 0x9a49);
         let mut device = Device::open(authority, input, true).unwrap();
@@ -836,7 +836,7 @@ fn gsm_owned_contract(authority: &Authority, platform: &Platform, next: &AtomicU
         device.retire().unwrap();
     }
     // Real uncertain second-map retirement retries the SAME token, without
-    // finish/sleep/new reads or release of the actual reset/forcewake owner.
+    // finish/sleep/new reads or release of the reset/forcewake owner.
     let (input, counts) = owner(next.fetch_add(BYTES as u64, Ordering::SeqCst), 0x9a49);
     let mut device = Device::open(authority, input, true).unwrap();
     device.wake().unwrap();
@@ -862,7 +862,7 @@ fn gsm_owned_contract(authority: &Authority, platform: &Platform, next: &AtomicU
     assert_eq!(counts.sleep_writes.load(Ordering::SeqCst), 0);
     assert_eq!(counts.dropped.load(Ordering::SeqCst), 0);
     assert_eq!(counts.reservation_dropped.load(Ordering::SeqCst), 0);
-    // No explicit retirement: both leases quarantine; actual epoch stays pinned.
+    // No explicit retirement: both leases quarantine; epoch stays pinned.
     let before = authority.status().unwrap().quarantined;
     let (input, counts) = owner(next.fetch_add(BYTES as u64, Ordering::SeqCst), 0x9a49);
     let mut device = Device::open(authority, input, true).unwrap();
@@ -928,7 +928,7 @@ fn gsm_allocation_failure_child() {
         before,
         "fallible canonical metadata precedes map effects"
     );
-    // Canonical map Error does not attest rollback. Conservative poison retains
+    // Canonical map Error does not attest rollback. Conservative poison keeps
     // the original acknowledged wake and device owner, with no cleanup effects.
     assert_eq!(device.sleep(), Err(Error::Closing));
     drop(device);
@@ -995,7 +995,7 @@ fn pat_owned_contract(authority: &Authority, next: &AtomicU64) {
         assert_eq!(counts.dropped.load(Ordering::SeqCst), 1);
         assert_eq!(counts.reservation_dropped.load(Ordering::SeqCst), 1);
     }
-    // Same actual root device/GT ownership but genuinely unavailable MCR/
+    // Same root device/GT ownership but unavailable MCR/
     // modern ATS/PTA method; no substituted direct writes or fake ACK.
     for pci in [0x56a0, 0xe202] {
         let (input, counts) = owner(next.fetch_add(BYTES as u64, Ordering::SeqCst), pci);

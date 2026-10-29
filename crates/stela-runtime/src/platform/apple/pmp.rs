@@ -37,9 +37,9 @@
 //! fan whose speed could be measured, so the endpoint is not provided and
 //! ApplePMPThermal does not start.
 //!
-//! [`native`] separately retains T6000 startup/exit resources and the actual
+//! [`native`] separately keeps T6000 startup/exit resources and the
 //! local PTD recipient. This ping endpoint supplies none of that backend's
-//! memory, callback, power or readiness authority; [`duties`] models the PTD
+//! memory, callback, power or readiness permission; [`duties`] models the PTD
 //! duties the drivers wait for.
 use super::rtkit::Endpoint;
 use alloc::vec::Vec;

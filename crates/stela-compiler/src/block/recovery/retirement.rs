@@ -39,9 +39,9 @@ impl RetirementPoint {
     }
     /// Prove the listed instruction's sequential control-flow shape.
     /// The producer must separately prove all architectural results are complete
-    /// and recoverable at its exact native boundary. For memory, this witness
-    /// conveys no endianness, RAM, helper or access-effect authority: admission
-    /// and the retained compilation/profile/code proof must bind those conditions.
+    /// and recoverable at its native boundary. For memory, this witness
+    /// conveys no endianness, RAM, helper or access-effect permission: admission
+    /// and the compilation/profile/code proof must bind those conditions.
     /// Adding another family requires its continuation and completion proof.
     pub fn after_fallthrough(
         instruction: &Instruction,
@@ -72,11 +72,11 @@ impl RetirementPoint {
         point.position()?;
         Ok(point)
     }
-    /// Reconstruct persisted metadata from the matching retained source
+    /// Reconstruct persisted metadata from the matching source
     /// instruction, after its source hash, address and entry extent are checked.
-    /// A serialized phase byte alone never qualifies AfterFallthrough.
-    /// Reconstructing this shape witness supplies no memory-effect authority;
-    /// the retained compilation/profile/code proof remains required.
+    /// A serialized phase byte alone never checks AfterFallthrough.
+    /// Reconstructing this shape witness supplies no memory-effect permission;
+    /// the compilation/profile/code proof remains required.
     pub fn from_instruction(
         instruction: &Instruction,
         retired_before: u16,
@@ -89,7 +89,7 @@ impl RetirementPoint {
             }
         }
     }
-    /// Move a previously qualified point with its code's guest-PC relocation.
+    /// Move a previously checked point with its code's guest-PC relocation.
     /// The operation's sequential-continuation proof and phase are preserved.
     pub fn relocated(self, instruction_pc: GuestAddress) -> Result<Self, FaultRecoveryError> {
         let point = Self {

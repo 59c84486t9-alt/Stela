@@ -6,10 +6,10 @@
 //! 1023624/102380c owns keyed notification/wait;1030250 releases and restores
 //! queue recursion around a wait. Evidence: metrics-backend-destinations-r1.
 //!
-//! This executes mandatory native Rust callbacks with retained continuations;
+//! This executes mandatory native Rust callbacks with kept continuations;
 //! it never runs Apple firmware or invents a source thread pointer. Thread IDs
-//! are actual identities allocated by this cooperative runtime. Source stack
-//! bytes are retained configuration metadata, not a claim to execute the Apple
+//! are identities allocated by this cooperative runtime. Source stack
+//! bytes are held configuration metadata, not a claim to execute the Apple
 //! stack ABI. Rc ownership restricts this resource to one cooperative executor.
 use super::platform::owner::Completion;
 use alloc::{
@@ -41,7 +41,7 @@ pub struct QueueConfiguration {
     pub priority: u8,
 }
 impl QueueConfiguration {
-    ///1031064: actual global queue, distinct from the MC callback queue.
+    ///1031064: global queue, distinct from the MC callback queue.
     pub fn global_reporting() -> Self {
         Self {
             name: "rtk_ep_work".into(),
@@ -49,7 +49,7 @@ impl QueueConfiguration {
             priority: 57,
         }
     }
-    ///1003344/10165d4: actual MC queue, priority61-selector2.
+    ///1003344/10165d4: MC queue, priority61-selector2.
     pub fn mc_metrics() -> Self {
         Self {
             name: "mem-cache".into(),
@@ -58,8 +58,8 @@ impl QueueConfiguration {
         }
     }
 }
-/// A required actual callback, not a default completion or an unbound target ID.
-/// Busy/refusal retains the same Invocation and the callback's actual prefix.
+/// A required callback, not a default completion or an unbound target ID.
+/// Busy/refusal keeps the same Invocation and the callback's prefix.
 /// Retired value is the source return: nonzero requeues queued work. A callback
 /// may wake its own Work while Busy; retirement0 never clears that later wake.
 pub trait Callback {
@@ -128,7 +128,7 @@ impl Work {
     pub fn enabled(&self) -> bool {
         self.cells.enabled.get()
     }
-    /// Actual registered queue, not a local backend promise of registration.
+    /// Registered queue, not a local backend promise of registration.
     pub fn registered_queue(&self) -> Result<Option<Queue>> {
         let state = self
             .runtime
@@ -144,7 +144,7 @@ impl Work {
     pub fn same_work(&self, other: &Self) -> bool {
         self.runtime.ptr_eq(&other.runtime) && self.id == other.id
     }
-    /// Valid only inside this work's actual scheduler-entered callback. The
+    /// Valid only inside this work's scheduler-entered callback. The
     /// pending bit was already cleared; numeric flags are not dispatch proof.
     pub fn validate_dispatch(&self, invocation: &Invocation) -> Result<()> {
         invocation.check_current()?;
@@ -185,15 +185,15 @@ struct Frame {
     deadline: Cell<Option<u64>>,
     leases: Cell<u32>,
 }
-/// Execution context of an actual cooperative native callback.
+/// Execution context of a cooperative native callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Context {
-    /// Actual callback executes on this native cooperative thread, outside
+    /// Callback executes on this native cooperative thread, outside
     /// scheduler critical sections; it is not an Apple IRQ/firmware context.
     CooperativeThread { thread_id: u32, priority: u8 },
 }
-/// Opaque actual callback context, minted only by dispatch. Cloning retains
-/// identity, not completion/arrival authority. Stale/outside-execution contexts
+/// Opaque callback context, minted only by dispatch. Cloning keeps
+/// identity, not completion/arrival permission. Stale/outside-execution contexts
 /// fail validation. Thread ID belongs to the real cooperative owner, not a cast
 /// of a host or fictional Apple object address.
 #[derive(Clone)]
@@ -249,8 +249,8 @@ impl Invocation {
         Ok(())
     }
 }
-/// Actual callback outcome. Retired-with-refusal has already retired its real
-/// prefix and cannot be replayed. No public method fabricates this outcome.
+/// Callback outcome. Retired-with-refusal has already retired its real
+/// prefix and cannot be replayed. No public method invents this outcome.
 pub enum Progress {
     Idle,
     Busy {
@@ -415,7 +415,7 @@ impl Runtime {
         self.check_runtime(&queue.runtime)?;
         Ok(self.state.borrow().queues[queue.id].config.clone())
     }
-    ///10302c0 binds an actual callback, enabled1/pending0, not a fake resource ID.
+    ///10302c0 binds a callback, enabled1/pending0, not a fake resource ID.
     pub fn bind_work<C: Callback + 'static>(&self, priority: u8, callback: C) -> Result<Work> {
         let cells = Rc::new(WorkCells {
             enabled: Cell::new(true),
@@ -494,7 +494,7 @@ impl Runtime {
         }
     }
     /// Source10302e4: real enabled check, release boundary, sole pending cell
-    /// mutation and actual queue wake credit. Wake is scheduling, not completion.
+    /// mutation and queue wake credit. Wake is scheduling, not completion.
     pub fn wake(&self, work: &Work) -> Result<()> {
         self.check_runtime(&work.runtime)?;
         if !work.enabled() {

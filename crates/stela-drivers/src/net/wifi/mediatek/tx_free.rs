@@ -28,7 +28,7 @@ impl core::error::Error for Error {}
 pub struct Accounting {
     /// Raw firmware attempt count, including zero. This is not an ACK receipt.
     pub attempts: u16,
-    /// Zero is donor success, other values are firmware drops. Actual air
+    /// Zero is donor success, other values are firmware drops. Air
     /// outcome remains separately associated TXS/PID evidence.
     pub status: u8,
 }
@@ -55,11 +55,11 @@ pub struct Notification<'a> {
     pub header: [u32; 2],
     pub declared_tokens: u16,
     /// Connac3 accepts version >=4 under the pinned donor's compatibility
-    /// contract; Connac2's second header word is retained without guessing it.
+    /// contract; Connac2's second header word is held without guessing it.
     pub version: Option<u8>,
     pub events: Vec<Event>,
     pub consumed_bytes: usize,
-    /// Retained DMA packet bytes, including any unconsumed transport tail.
+    /// DMA packet bytes, including any unconsumed transport tail.
     pub raw: &'a [u8],
 }
 fn word(bytes: &[u8], offset: usize) -> Result<u32, Error> {
@@ -67,8 +67,8 @@ fn word(bytes: &[u8], offset: usize) -> Result<u32, Error> {
 }
 
 /// Parse the complete bounded notification before any token-table mutation.
-/// Headers are selected by actual observed chip, not guessed from packet bytes.
-/// The encoded byte count is retained; as in the donor, the completed DMA frame
+/// Headers are selected by observed chip, not guessed from packet bytes.
+/// The encoded byte count is held; as in the donor, the completed DMA frame
 /// length bounds parsing. Unknown/duplicate/old tokens must be checked against
 /// the owning live table and real firmware epoch before applying these events.
 pub fn parse(chip: Chip, bytes: &[u8]) -> Result<Notification<'_>, Error> {

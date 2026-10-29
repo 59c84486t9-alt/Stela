@@ -1,12 +1,12 @@
 //! Selected original T8112 resources. Membership is derived by the same
-//! normal-mode resolver for each PE, preserving the actual running boot PE.
+//! normal-mode resolver for each PE, preserving the running boot PE.
 //! Capacities stay inside the complete original eight-PE/two-complex envelope;
 //! this adapter cannot expand an Apple source profile to additional host cores.
 use super::*;
 
 impl<'a> BspSource<'a> {
-    /// Construct metadata for `count` actual assigned workers, BSP first. The
-    /// caller must retain a started physical roster and join native authority.
+    /// Construct metadata for `count` assigned workers, BSP first. The
+    /// caller must keep a started physical roster and join native permission.
     /// Selection keeps the source boot PE first and each complex contiguous
     /// for XNU's L2-sharing interval consumer, preserving source order within
     /// each complex after the boot member.
@@ -26,7 +26,7 @@ impl<'a> BspSource<'a> {
         let nodes = cpus
             .children()
             .ok_or("assigned original CPU list is malformed")?;
-        // The normal-mode association resolver qualifies this original family
+        // The normal-mode association resolver checks this original family
         // as two four-core complexes. Counts beyond this envelope require a
         // separate whole-consumer capacity proof, never cloning a source slot.
         if nodes.len() != 8 || count == 0 || count > nodes.len() {

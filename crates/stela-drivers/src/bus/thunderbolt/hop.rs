@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! Actual hop disable, bounded pending drain and flow-control clear.
+//! Hop disable, bounded pending drain and flow-control clear.
 //!
 //! Adapted from Linux path.c::__tb_path_deactivate_hop. This is one CM
 //! primitive, not a tunnel allocator or an endpoint/IOMMU DMA drain receipt.
@@ -62,7 +62,7 @@ impl Target {
             }
     }
 }
-/// Exact actual CM hop allocation, router lifetime and power reservation.
+/// Exact CM hop allocation, router lifetime and power reservation.
 ///
 /// # Safety
 /// The implementation owns this exact target exclusively until its last Arc
@@ -143,8 +143,8 @@ enum Stage {
     Fault,
 }
 /// Owns its channel while a single native hop is being disabled. Clock values
-/// use actual monotonic milliseconds, matching the containing Channel's clock.
-/// Uncertain failure permanently poisons that channel and retains the Owner.
+/// use monotonic milliseconds, matching the containing Channel's clock.
+/// Uncertain failure permanently poisons that channel and keeps the Owner.
 pub struct Teardown<R: Registers> {
     channel: Option<Channel<R>>,
     owner: Arc<dyn Owner>,
@@ -155,16 +155,16 @@ pub struct Teardown<R: Registers> {
     before: Option<Words>,
 }
 impl<R: Registers> Teardown<R> {
-    /// Transfer this exact native CM hop reservation into teardown.
+    /// Transfer this native CM hop reservation into teardown.
     ///
     /// # Safety
-    /// `owner` and `channel` refer to the exact same live physical NHI/requester
+    /// `owner` and `channel` refer to the same live physical NHI/requester
     /// and platform ownership/reset epoch. The owner's target route, adapter,
-    /// HopID and observed USB4/lane metadata belong to that channel's actual
+    /// HopID and observed USB4/lane metadata belong to that channel's
     /// topology and have not been recycled or changed since reservation. The
     /// channel is exclusively idle; no other engine owns a pending request.
-    /// The caller retains all independent endpoint/DMA/IOMMU ownership until
-    /// its own actual teardown, regardless of this local hop's receipt.
+    /// The caller keeps all independent endpoint/DMA/IOMMU ownership until
+    /// its own teardown, regardless of this local hop's receipt.
     ///
     /// Safe code cannot pair two independently obtained physical capabilities:
     /// ```compile_fail
@@ -495,7 +495,7 @@ mod tests {
                     target,
                     dropped: dropped.clone(),
                 });
-                // SAFETY: this exact synthetic Owner and Channel share the same
+                // SAFETY: this synthetic Owner and Channel share the same
                 // exclusive NHI/model requester, reservation and reset epoch;
                 // its observed adapter metadata is unchanged and channel idle.
                 let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
@@ -588,7 +588,7 @@ mod tests {
                 dropped: dropped.clone(),
             });
             let before = super::super::hop::quarantined_hops();
-            // SAFETY: this exact synthetic Owner and Channel share the same
+            // SAFETY: this synthetic Owner and Channel share the same
             // exclusive NHI/model requester, reservation and reset epoch;
             // its observed adapter metadata is unchanged and channel idle.
             let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
@@ -652,7 +652,7 @@ mod tests {
             target,
             dropped: dropped.clone(),
         });
-        // SAFETY: this exact synthetic Owner and Channel share the same
+        // SAFETY: this synthetic Owner and Channel share the same
         // exclusive NHI/model requester, reservation and reset epoch;
         // its observed adapter metadata is unchanged and channel idle.
         let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();

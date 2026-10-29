@@ -14,7 +14,7 @@ pub enum Algorithm {
 
 /// Pointer-free, bounded pool, with one successful firmware request per slot.
 /// The caller supplies capacities and the exact ordered native request widths.
-/// There is intentionally no Clone, Copy, Debug or serialization of its bytes.
+/// There is no Clone, Copy, Debug or serialization of its bytes.
 pub struct Pool<const BYTES: usize, const REQUESTS: usize> {
     bytes: [u8; BYTES],
     widths: [usize; REQUESTS],
@@ -77,7 +77,7 @@ impl<const BYTES: usize, const REQUESTS: usize> Pool<BYTES, REQUESTS> {
 
     /// Consume exactly the next independently captured native request. A width
     /// mismatch or exhausted pool leaves both destination and pool unchanged.
-    /// The caller owns/clears the output when its actual consumer has finished.
+    /// The caller owns/clears the output when its consumer has finished.
     pub fn fill(&mut self, destination: &mut [u8]) -> Result<(), &'static str> {
         let &width = self
             .widths

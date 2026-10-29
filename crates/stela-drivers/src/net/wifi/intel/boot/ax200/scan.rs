@@ -3,7 +3,7 @@
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Original-owner UMAC15 passive scanning. ACK, scan-complete and retirement
-//! are separate: no UID reuse before actual cold-unbound request retirement.
+//! are separate: no UID reuse before cold-unbound request retirement.
 //! The shared native RX owner stays live; whole-device extraction is separate.
 use super::super::hcmd::{CapturedNotification, NotificationPoll};
 use super::*;
@@ -32,7 +32,7 @@ pub enum Ax200ScanPhase {
     Scanning,
     WaitingAbort,
     Cancelling,
-    /// Actual completion observed; restoration/old-RB/user drain still required.
+    /// Completion observed; restoration/old-RB/user drain still required.
     DrainRequired,
     Failed,
     Stopped,
@@ -64,20 +64,20 @@ pub enum Ax200ScanError {
     Deadline,
     State,
 }
-/// Immutable actual completed-RB capture. No public constructor can rebind
+/// Immutable completed-RB capture. No public constructor can rebind
 /// caller-supplied bytes, copied firmware UID or another RX epoch to this scan.
 pub struct ScanCompletion {
     captured: CapturedNotification,
     outcome: protocol::Outcome,
 }
-/// Actual RX receipt plus an observed BSS or explicit normalization/policy
+/// RX receipt plus an observed BSS or explicit normalization/policy
 /// rejection. Neither branch authenticates the AP or permits association.
 pub struct ScanResult {
     observed: ObservedMpdu,
     result: Result<protocol::result::Bss, Ax200ScanError>,
     _user: Arc<()>,
 }
-/// Rejected bytes retain the same deferred scan-user lifetime as good results.
+/// Rejected bytes keep the same deferred scan-user lifetime as good results.
 pub struct ScanRejectedMpdu {
     rejected: RejectedMpdu,
     _user: Arc<()>,
@@ -146,15 +146,15 @@ pub struct Ax200Scan<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
     /// Attach the same live OS regulatory source to the original unbound MAC.
     /// # Safety
-    /// O's actual OsPolicy lease must pin this SAME retained CountryIo country
+    /// O's OsPolicy lease must pin this SAME CountryIo country
     /// selection, pinned database and selection revision through publication.
     /// Equal revision numbers or implementing both traits alone is insufficient.
     /// It must coordinate restrictive revocation with the original native owner
     /// to stop/cancel/drain pending scans or physically enforce restrictions
     /// before further activity, obeying hardware-before-OS acquisition order.
     /// No other path may publish scans or create firmware radio objects in this
-    /// retained epoch; UID0 has never been submitted. This is a real platform
-    /// attachment qualification, never an observation-derived radio grant.
+    /// epoch; UID0 has never been submitted. This is a real platform
+    /// attachment validation, never an observation-derived radio grant.
     pub unsafe fn begin_scan(self) -> Result<Ax200Scan<'a, Q, B, O>, Box<Self>> {
         if self.phase() != Ax200MacPhase::ScanRequired
             || self.first_error().is_some()
@@ -294,7 +294,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 (0xc1, 0),
             ])
     }
-    /// Drain a genuine pre-publication MPDU as an unattributed raw observation.
+    /// Drain a pre-publication MPDU as an unattributed raw observation.
     /// It can never acquire this Scanner's later request ticket or BSS result.
     pub fn poll_pre_scan_receive(&mut self) -> Result<MpduProgress, Ax200ScanError> {
         let result = self.poll_pre_scan_receive_inner();
@@ -344,8 +344,8 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             Ok(MpduProgress::Pending)
         }
     }
-    /// Consume actual queued scan MPDUs in RX order before the matching real
-    /// completion. No fabricated raw packet/current-ticket restoration path.
+    /// Consume queued scan MPDUs in RX order before the matching real
+    /// completion. No invented raw packet/current-ticket restoration path.
     pub fn poll_result(&mut self) -> Result<ScanResultProgress, Ax200ScanError> {
         let result = self.poll_result_inner();
         if let Err(error @ Ax200ScanError::Boot(_)) = &result {
@@ -453,11 +453,11 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             }
         }
     }
-    /// Publish one exact forced-passive request under the actual native and OS
-    /// leases. Active requests await genuine per-rate/probe power qualification.
+    /// Publish one exact forced-passive request under the native and OS
+    /// leases. Active requests await per-rate/probe power validation.
     /// A failed admission/allocation does not mark the protocol submitted.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for this retained native
+    /// `source` supplies fresh exclusive coherent pages for this native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn start(
         &mut self,
@@ -465,10 +465,10 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         budget_us: u64,
         source: &dyn PageSource,
     ) -> Result<Ax200ScanPhase, Ax200ScanError> {
-        // SAFETY: exact original requester/domain publication contract.
+        // SAFETY: original requester/domain publication contract.
         let result = unsafe { self.start_inner(request, budget_us, source) };
         // Pure admission/encoding failure remains unsubmitted and retryable;
-        // actual native I/O/visibility failure preserves the first real error.
+        // native I/O/visibility failure preserves the first real error.
         if let Err(error @ Ax200ScanError::Boot(_)) = &result {
             self.first_error.get_or_insert_with(|| error.clone());
             self.phase = Ax200ScanPhase::Failed;
@@ -574,7 +574,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         let phase = &mut self.phase;
         let command_bytes = &mut self.command_bytes;
         // SAFETY: exact admission-owned immutable request is encoded inside the
-        // actual original hardware+OS guard pair. Scanner is marked submitted
+        // original hardware+OS guard pair. Scanner is marked submitted
         // before HCMD descriptor visibility, including an uncertain failure.
         let result = unsafe {
             owner.publish_scan(admission, |guard, operation| {
@@ -593,7 +593,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                     .map_err(Ax200ScanError::Protocol)?;
                 *phase = Ax200ScanPhase::WaitingStart;
                 *command_bytes = Some(bytes);
-                // SAFETY: same exact request and retained native page contract.
+                // SAFETY: same exact request and kept native page contract.
                 guard
                     .submit(wire::REQUEST, command_bytes.as_deref().unwrap(), source)
                     .map_err(Ax200ScanError::Boot)
@@ -648,7 +648,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .radio
             .initialized
             .boot;
-        // A completion in the same RB cannot overtake earlier actual MPDUs;
+        // A completion in the same RB cannot overtake earlier MPDUs;
         // those must be observed/rejected by poll_result before terminal state.
         if boot
             .hcmd
@@ -695,8 +695,8 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             }
         }
     }
-    /// Advance actual start/abort ACK, original captured scan completion and
-    /// command DMA reclaim. Deadline/revocation never fabricates completion.
+    /// Advance start/abort ACK, original captured scan completion and
+    /// command DMA reclaim. Deadline/revocation never invents completion.
     /// # Safety
     /// `source` satisfies the same original requester/domain page contract.
     pub unsafe fn advance(
@@ -706,7 +706,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         if self.phase == Ax200ScanPhase::Failed {
             return Err(self.first_error.clone().unwrap_or(Ax200ScanError::State));
         }
-        // SAFETY: exact retained native page contract is forwarded unchanged.
+        // SAFETY: native page contract is forwarded unchanged.
         let result = unsafe { self.advance_inner(source) };
         if let Err(error) = &result
             && !matches!(error, Ax200ScanError::Boot(Error::CommandReclaim(_)))
@@ -840,7 +840,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 .poll_one_notification_buffer_with_policy(true)
                 .map_err(Ax200ScanError::Boot)?;
         }
-        // As with the existing command owner, genuine already-captured terminal
+        // As with the existing command owner, already-captured terminal
         // RX wins a host polling deadline. Host poll time cannot timestamp its
         // arrival. This records completion only; no radio/RX retirement follows.
         self.accept_completion()?;
@@ -849,7 +849,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             return Ok(self.phase);
         }
         // Abort ACK (including NOT_FOUND) does not end the original radio
-        // lifetime. Bound the remaining wait while retaining its real owner.
+        // lifetime. Bound the remaining wait while keeping its real owner.
         if self
             .completion_deadline
             .as_ref()
@@ -894,7 +894,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         if self.abort_requested && self.phase == Ax200ScanPhase::Scanning {
             self.completion_deadline = Some(options.clock.deadline(options.command_timeout_us));
             // SAFETY: source abort explicitly has CMD_SEND_IN_RFKILL and the
-            // actual UID0 belongs to this retained owner. It grants no RF use.
+            // UID0 belongs to this owner. It grants no RF use.
             self.command_ticket = Some(
                 unsafe {
                     self.mac

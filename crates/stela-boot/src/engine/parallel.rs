@@ -23,7 +23,7 @@ pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::exception::Pstate;
 use stela_runtime::machine::apple::AppleDevices;
 
-/// Budget for retained block buffers and index/FIFO metadata shared by the PEs
+/// Budget for kept block buffers and index/FIFO metadata shared by the PEs
 /// (`translations::share`).
 pub(crate) const SHARED_CODE_BYTES: usize = 64 << 20;
 
@@ -187,7 +187,7 @@ impl Pe {
 }
 
 /// The home and secondary PEs' records, including the PE that made each hit.
-/// Each machine retains at most TRACE_HITS and WATCH_HITS between drains;
+/// Each machine keeps at most TRACE_HITS and WATCH_HITS between drains;
 /// their last records report any overflow rather than hiding lost hits.
 pub(super) fn report_diagnostics<H: Host>(machine: &mut Machine<H, Board>) {
     for hit in machine.take_trace_hits() {

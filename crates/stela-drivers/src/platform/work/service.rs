@@ -1,7 +1,7 @@
-//! Retained clock/event boundary and reasons for a cooperative kernel service.
+//! Clock/event boundary and reasons for a cooperative kernel service.
 //!
 //! This is timing and lifecycle machinery, not a Timer continuation or Linux
-//! IRQ-work admission. The execution domain must bind its actual reserved task
+//! IRQ-work admission. The execution domain must bind its reserved task
 //! and run the original service bodies before acknowledging a captured batch.
 //! No clock is inferred from Cpu::ticks and no callback is invoked here.
 use super::{Cpu, QUARANTINED, Runtime, WakeHandle, WorkError};
@@ -22,10 +22,10 @@ pub enum IdleOutcome {
 const CLOSED: u64 = 1 << 63;
 static NEXT_DOMAIN: AtomicU64 = AtomicU64::new(1);
 
-/// Owned nanosecond clock over the exact retained CPU/root authority.
+/// Owned nanosecond clock over the exact CPU/root permission.
 ///
 /// # Safety
-/// Readings are monotonic nanoseconds on this CPU, including during its actual
+/// Readings are monotonic nanoseconds on this CPU, including during its
 /// idle/event wait. `now_ns` is bounded, nonblocking and invokes no callback or
 /// switch. The CPU, clock source and code remain valid through final release.
 pub unsafe trait Clock: Send + Sync {
@@ -33,16 +33,16 @@ pub unsafe trait Clock: Send + Sync {
     fn now_ns(&self) -> Result<u64, WorkError>;
 }
 
-/// Retained event/idle provider using that same clock and physical CPU.
+/// Event/idle provider using that same clock and physical CPU.
 ///
 /// # Safety
 /// `notify` publishes a real event without allocation, blocking, switching or
-/// inline service delivery, including from a qualified IRQ/foreign producer.
+/// inline service delivery, including from a checked IRQ/foreign producer.
 /// `wait_until_ns` atomically checks/consumes those events before sleeping, so a
 /// notify racing its entry cannot be lost. It uses the exact clock's absolute
 /// nanosecond deadline (None means event-only), may return spuriously, preserves
 /// incoming native flags and reports provider failures. It never enables IRQs
-/// to manufacture progress. Retain all actual native clock/idle/event roots.
+/// to manufacture progress. Keep all native clock/idle/event roots.
 pub unsafe trait Idle: Send + Sync {
     fn clock(&self) -> &Arc<dyn Clock>;
     fn notify(&self) -> Result<(), WorkError>;
@@ -84,7 +84,7 @@ impl RaisedWork {
                     WorkError::Exhausted
                 }
             })?;
-        // A failure retains the published reason; it never fabricates delivery.
+        // A failure keeps the published reason; it never invents delivery.
         self.signal.idle.notify()
     }
 }
@@ -92,8 +92,8 @@ impl Drop for RaisedWork {
     fn drop(&mut self) {
         let cpu = self.signal.idle.clock().cpu();
         if cpu.check_cpu().is_ok() && !cpu.in_interrupt() {
-            // SAFETY: qualified process release; a stale handle owns only these
-            // retained generic provider roots, never retired C metadata.
+            // SAFETY: checked process release; a stale handle owns only these
+            // generic provider roots, never retired C metadata.
             unsafe { ManuallyDrop::drop(&mut self.signal) };
         } else {
             QUARANTINED.fetch_add(1, Ordering::Relaxed);
@@ -209,7 +209,7 @@ impl Deadlines {
         self.tick = Some(deadline);
         Ok(())
     }
-    /// The owner copies the genuine original timerqueue's earliest deadline.
+    /// The owner copies the original timerqueue's earliest deadline.
     pub fn set_timer(&mut self, deadline: Option<u64>) -> Result<(), WorkError> {
         self.process()?;
         if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
@@ -240,7 +240,7 @@ impl Deadlines {
             return Err(WorkError::Busy);
         }
         let now = self.now()?;
-        // Capture BEFORE actual task/service inspection. A later raise is not
+        // Capture BEFORE task/service inspection. A later raise is not
         // cleared by finish and remains eligible even if its notify was early.
         let epoch = self.signal.epoch.load(Ordering::Acquire) & !CLOSED;
         let raised = epoch != self.delivered;
@@ -262,10 +262,10 @@ impl Deadlines {
         }))
     }
     /// # Safety
-    /// The actual retained service task delivered the captured original work
+    /// The kept service task delivered the captured original work
     /// and expiry batches without recursive pumping. `next_timer` is the real
     /// timerqueue minimum after that delivery. Callback/storage/provider leases
-    /// remain retained. This API cannot prove delivery from numerical reasons.
+    /// remain held. This API cannot prove delivery from numerical reasons.
     pub unsafe fn finish(
         &mut self,
         batch: Batch,
@@ -303,8 +303,8 @@ impl Deadlines {
     }
     /// # Safety
     /// Call only on the real taskless domain dispatcher, with no entered Linux
-    /// owner/critical state or mutable task borrow. The provider owns genuine
-    /// native idle/event authority; this method never installs that authority.
+    /// owner/critical state or mutable task borrow. The provider owns
+    /// native idle/event permission; this method never installs that permission.
     pub unsafe fn idle(&mut self) -> Result<IdleOutcome, WorkError> {
         self.process()?;
         if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
@@ -314,7 +314,7 @@ impl Deadlines {
             return Err(WorkError::Busy);
         }
         // Ordinary arrival between dispatcher inspection and idle is progress,
-        // not a failed provider. Keep it distinct from genuine Busy/errors.
+        // not a failed provider. Keep it distinct from Busy/errors.
         if self.due()? {
             return Ok(IdleOutcome::Ready);
         }
@@ -327,7 +327,7 @@ impl Deadlines {
         Ok(())
     }
     /// # Safety
-    /// Original producers, work/storage, waiter/RCU users and actual callbacks
+    /// Original producers, work/storage, waiter/RCU users and callbacks
     /// are stopped/drained. The reserved Timer task is joined before releasing
     /// its separate runtime/domain ownership. Numerical emptiness is no proof.
     pub unsafe fn retire(&mut self) -> Result<(), WorkError> {
@@ -358,7 +358,7 @@ impl Drop for Deadlines {
     }
 }
 
-/// Retains one clock/event domain and the genuine reserved task's immutable
+/// Keeps one clock/event domain and the reserved task's immutable
 /// wake. Dispatcher inspection publishes that wake; it never executes a batch.
 /// Linux task/storage admission and original callback delivery remain separate.
 pub struct Domain<const N: usize> {
@@ -370,11 +370,11 @@ pub struct Domain<const N: usize> {
     stopping: AtomicBool,
     retired: AtomicBool,
 }
-// SAFETY: every mutable access first validates the retained physical CPU and
+// SAFETY: every mutable access first validates the physical CPU and
 // process context. Providers invoke no callbacks or switches. IRQ views carry
 // only the separate atomic reason signal, never a Domain/Runtime/C task pointer.
 unsafe impl<const N: usize> Send for Domain<N> {}
-// SAFETY: same serialized CPU rule; no mutable borrow crosses actual delivery.
+// SAFETY: same serialized CPU rule; no mutable borrow crosses delivery.
 unsafe impl<const N: usize> Sync for Domain<N> {}
 impl<const N: usize> Domain<N> {
     pub fn new(clock: Arc<dyn Clock>, idle: Arc<dyn Idle>) -> Result<Arc<Self>, WorkError> {
@@ -410,7 +410,7 @@ impl<const N: usize> Domain<N> {
             .map_err(|_| WorkError::Busy)?;
         Ok(())
     }
-    /// Bind after actual task attachment, on the genuine reserved continuation.
+    /// Bind after task attachment, on the reserved continuation.
     /// Original IRQ-work/RT callers may be admitted only after this succeeds.
     pub fn bind_current(self: &Arc<Self>, runtime: Pin<&Runtime<N>>) -> Result<(), WorkError> {
         self.process()?;
@@ -426,7 +426,7 @@ impl<const N: usize> Domain<N> {
             return Err(WorkError::Busy);
         }
         let wake = runtime.wake_handle()?;
-        // SAFETY: qualified actual service task; single publication, no callback.
+        // SAFETY: checked service task; single publication, no callback.
         unsafe { *self.wake.get() = Some(wake) };
         self.bound.store(true, Ordering::Release);
         Ok(())
@@ -439,7 +439,7 @@ impl<const N: usize> Domain<N> {
         {
             return Err(WorkError::InvalidTicket);
         }
-        // SAFETY: acquired once-only initialization on the same qualified CPU.
+        // SAFETY: acquired once-only initialization on the same checked CPU.
         let wake = unsafe { (&*self.wake.get()).as_ref() }.ok_or(WorkError::CorruptContext)?;
         if wake.renew_current()?.sequence() != wake.sequence() {
             return Err(WorkError::Closed);
@@ -453,17 +453,17 @@ impl<const N: usize> Domain<N> {
     }
     pub fn set_timer(&self, deadline: Option<u64>) -> Result<(), WorkError> {
         self.process()?;
-        // SAFETY: same qualified CPU; provider call cannot reenter or switch.
+        // SAFETY: same checked CPU; provider call cannot reenter or switch.
         unsafe { &mut *self.deadlines.get() }.set_timer(deadline)
     }
     pub fn begin(&self, runtime: Pin<&Runtime<N>>) -> Result<Option<Batch>, WorkError> {
         self.current(runtime)?;
-        // SAFETY: actual retained service; no borrow survives delivery/return.
+        // SAFETY: service; no borrow survives delivery/return.
         unsafe { &mut *self.deadlines.get() }.begin()
     }
     /// # Safety
     /// The original work/expiry consumers completed this captured batch on the
-    /// actual service stack; next_timer is the genuine original timerqueue min.
+    /// service stack; next_timer is the original timerqueue min.
     pub unsafe fn finish(
         &self,
         runtime: Pin<&Runtime<N>>,
@@ -471,7 +471,7 @@ impl<const N: usize> Domain<N> {
         next_timer: Option<u64>,
     ) -> Result<(), WorkError> {
         self.current(runtime)?;
-        // SAFETY: caller supplies actual delivery/storage proof; borrow ends now.
+        // SAFETY: caller supplies delivery/storage proof; borrow ends now.
         unsafe { (&mut *self.deadlines.get()).finish(batch, next_timer) }
     }
     pub(super) fn inspect_and_wake(&self) -> Result<bool, WorkError> {
@@ -500,12 +500,12 @@ impl<const N: usize> Domain<N> {
         if !self.bound.load(Ordering::Acquire) {
             return Err(WorkError::Unavailable);
         }
-        // SAFETY: Runtime calls only on its actual taskless dispatcher.
+        // SAFETY: Runtime calls only on its taskless dispatcher.
         unsafe { (&mut *self.deadlines.get()).idle() }
     }
     pub fn stop_producers(&self) -> Result<(), WorkError> {
         self.process()?;
-        // SAFETY: actual serialized process owner closes atomic producers first.
+        // SAFETY: serialized process owner closes atomic producers first.
         unsafe { &mut *self.deadlines.get() }.stop_producers()?;
         self.stopping.store(true, Ordering::Release);
         if self.bound.load(Ordering::Acquire) {
@@ -524,24 +524,24 @@ impl<const N: usize> Domain<N> {
         self.retired.load(Ordering::Acquire)
     }
     /// # Safety
-    /// Original producers/storage/waiter/RCU users are truly drained. The actual
+    /// Original producers/storage/waiter/RCU users are truly drained. The
     /// reserved job completed and its separate task/binding lifetime is joined.
     pub unsafe fn retire(&self) -> Result<(), WorkError> {
         self.process()?;
         if !self.bound.load(Ordering::Acquire) {
             return Err(WorkError::Busy);
         }
-        // SAFETY: immutable actual-job handle; closed check invokes no provider.
+        // SAFETY: immutable job handle; closed check invokes no provider.
         let wake = unsafe { (&*self.wake.get()).as_ref() }.ok_or(WorkError::CorruptContext)?;
         if !wake.closed()? {
             return Err(WorkError::Busy);
         }
-        // SAFETY: caller supplies original storage/drain proof and actual join.
+        // SAFETY: caller supplies original storage/drain proof and join.
         unsafe { (&mut *self.deadlines.get()).retire()? };
         self.retired.store(true, Ordering::Release);
         // Break the explicit domain -> wake -> Queue/provider ownership cycle
-        // only after actual job closure and successful original-state drain.
-        // SAFETY: qualified process retirement; no callback/borrow is live.
+        // only after job closure and successful original-state drain.
+        // SAFETY: checked process retirement; no callback/borrow is live.
         let wake = unsafe { (&mut *self.wake.get()).take() };
         drop(wake);
         Ok(())
@@ -553,7 +553,7 @@ impl<const N: usize> Drop for Domain<N> {
             && self.clock.cpu().check_cpu().is_ok()
             && !self.clock.cpu().in_interrupt()
         {
-            // SAFETY: explicit actual join/drain and qualified process release.
+            // SAFETY: explicit join/drain and checked process release.
             unsafe {
                 ManuallyDrop::drop(&mut self.wake);
                 ManuallyDrop::drop(&mut self.deadlines);
@@ -576,7 +576,7 @@ mod tests {
     };
 
     struct ModelCpu(ThreadId);
-    // SAFETY: hosted same-thread model only; no native CPU/IRQ qualification.
+    // SAFETY: hosted same-thread model only.
     unsafe impl Cpu for ModelCpu {
         fn check_cpu(&self) -> Result<(), WorkError> {
             if thread::current().id() == self.0 {
@@ -607,7 +607,7 @@ mod tests {
         now: AtomicU64,
     }
     // SAFETY: explicit arithmetic input model; reads are bounded, same-thread,
-    // with no callback or claim of an actual native clockevent producer.
+    // with no callback or claim of a native clockevent producer.
     unsafe impl Clock for ManualClock {
         fn cpu(&self) -> &Arc<dyn Cpu> {
             &self.cpu
@@ -621,7 +621,7 @@ mod tests {
         cpu: Arc<dyn Cpu>,
         start: Instant,
     }
-    // SAFETY: actual hosted monotonic elapsed time; provider/code retained.
+    // SAFETY: hosted monotonic elapsed time; provider/code kept.
     unsafe impl Clock for RealClock {
         fn cpu(&self) -> &Arc<dyn Cpu> {
             &self.cpu
@@ -651,7 +651,7 @@ mod tests {
             })
         }
     }
-    // SAFETY: actual retained hosted park/unpark token, preserving an unpark
+    // SAFETY: hosted park/unpark token, preserving an unpark
     // before park without a notifier mutex. This model admits no native ISR;
     // notification invokes no C callback or inline switch.
     unsafe impl Idle for Events {
@@ -728,11 +728,11 @@ mod tests {
         assert_eq!(deadlines.next_deadline(), Ok(Some(17)));
         let raised = deadlines.raised_work().unwrap();
         raised.raise().unwrap();
-        // SAFETY: modeled dispatcher, no actual task or foreign mutable borrow.
+        // SAFETY: modeled dispatcher, no task or foreign mutable borrow.
         assert_eq!(unsafe { deadlines.idle() }, Ok(IdleOutcome::Ready));
         assert_eq!(events.waits.load(Ordering::Relaxed), 0);
         deadlines.stop_producers().unwrap();
-        // SAFETY: no original service; deliberately incomplete numerical state.
+        // SAFETY: no original service; incomplete numerical state.
         assert_eq!(unsafe { deadlines.retire() }, Err(WorkError::Busy));
         let batch = deadlines.begin().unwrap().unwrap();
         deadlines.finish_batch(batch, None).unwrap();

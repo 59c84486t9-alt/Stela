@@ -17,7 +17,7 @@
 //!   clears bits and writes it back, or saves and restores it.
 //!   The reset value is unknown and taken as 0 (inference). No bit has an
 //!   effect here.
-//! - `Prediction`: source-qualified predictor configuration. It preserves only
+//! - `Prediction`: source-checked predictor configuration. It preserves only
 //!   the named fields and refuses unknown bits before modifying state. A
 //!   prediction hint affects neither architectural results nor access permissions;
 //!   no speculative timing model is claimed. Reset 0 remains an inference.
@@ -58,7 +58,7 @@
 //! chip (UPMCR0's 24-counter layout on the M6) has one entry per layout. The
 //! entries cite the consumer on the chips whose components they were
 //! established from; on another chip whose census shows the encoding, the same
-//! behavior is an inference, except for the separately qualified predictor
+//! behavior is an inference, except for the separately checked predictor
 //! pair ([`objc`], `docs/research/objc-predictor.md`). Entries span CRn 15
 //! and CRn 11 (the M5 and M6 PL2 error records and M6 uncore selections).
 //! An encoding the chip's components never access is not looked up: without
@@ -559,7 +559,7 @@ const ACC_OVRD_EVIDENCE: &str = "m1n1 cpu_regs.h names it; XNU xnu-12377.121.6 \
     ARM64_REG_ACC_OVRD_*) before a deep-sleep power-down, which acts only when the cluster \
     powers down, and core power-down stops (CYC_OVRD)";
 
-/// The established SIQ_CFG_EL1 mode field. Only 0, 2 and 3 have qualified
+/// The established SIQ_CFG_EL1 mode field. Only 0, 2 and 3 have checked
 /// effects; mode 1 and every upper bit refuse before register mutation.
 pub const SIQ_CFG_MODE: u64 = 0b11;
 

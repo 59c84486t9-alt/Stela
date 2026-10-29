@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
-//! Owned on-device NVM unified initialization, after actual ALIVE and PNVM.
+//! Owned on-device NVM unified initialization, after ALIVE and PNVM.
 //! NVM observation is not regulatory permission, radio setup or association.
 use super::super::nvm::{HardwareAddress, Information, Request};
 use super::*;
@@ -28,8 +28,8 @@ pub struct InitializedNvm {
     pub address: HardwareAddress,
     pub init_complete: FirmwareNotification,
     pub response: CommandResponse,
-    /// Actual pre-ROM observation and explicit integration-mode receipt.
-    /// NoIwlmei records coordination not performed, never a fabricated ACK.
+    /// Pre-ROM observation and explicit integration-mode receipt.
+    /// NoIwlmei records coordination not performed, never an invented ACK.
     pub product_reset: Option<ProductResetObservation>,
 }
 pub struct UnifiedNvm<'a, Q: BootIo> {
@@ -41,7 +41,7 @@ pub struct UnifiedNvm<'a, Q: BootIo> {
 }
 impl<'a, Q: BootIo> RomBoot<'a, Q> {
     /// Consume the exclusive queue owner for source unified initialization
-    /// using the device's NVM. External NVM overrides require a separate actual
+    /// using the device's NVM. External NVM overrides require a separate
     /// resource/upload path and are not silently supplied by this method.
     pub fn initialize_on_device_nvm(self) -> UnifiedNvm<'a, Q> {
         UnifiedNvm {
@@ -70,10 +70,10 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
         Ok((self.boot, self.receipt.unwrap()))
     }
     /// Advance one source-backed command/notification phase. Pending responses
-    /// and notifications retain their exact real queue/requester epoch.
+    /// and notifications keep their real queue/requester epoch.
     /// # Safety
     /// Source returns fresh exclusive native pages under the boot owner's
-    /// actual retained requester/domain and coherent publication contract.
+    /// requester/domain and coherent publication contract.
     pub unsafe fn advance(
         &mut self,
         source: &dyn PageSource,
@@ -112,7 +112,7 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
         }
     }
     fn capture_init_complete(&mut self) {
-        // Select actual canonical bytes without converting/restoring unrelated
+        // Select canonical bytes without converting/restoring unrelated
         // traffic through caller-mutable public diagnostics.
         if self.init_complete.is_none() {
             self.init_complete = self.boot.take_matching_notification(4, 0);
@@ -149,8 +149,8 @@ impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
                 if self.boot.state != State::PnvmObserved {
                     return Err(Error::State);
                 }
-                // Qualify the exact response ABI before publishing even the
-                // first command. Reading zero channels grants no RF authority.
+                // Check the exact response ABI before publishing even the
+                // first command. Reading zero channels grants no RF permission.
                 let v = self
                     .boot
                     .firmware

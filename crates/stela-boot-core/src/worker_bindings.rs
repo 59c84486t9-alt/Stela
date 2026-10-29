@@ -1,6 +1,6 @@
 //! Effect-free validation of the guest-PE/physical-worker bijection. These
-//! records grant no execution authority; the real Hosts must still initialize
-//! their publication owners against the retained capture and executor roster.
+//! records grant no execution permission; the real Hosts must still initialize
+//! their publication owners against the capture and executor roster.
 use stela_engine::machine::engine::publication::WorkerBinding;
 
 pub fn validate(

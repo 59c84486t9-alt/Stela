@@ -93,7 +93,7 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
-    /// Stable native chaining allocation, retained even between PE owners.
+    /// Stable native chaining allocation, kept even between PE owners.
     chain: Arc<chain_control::Storage>,
     /// Unique owner epoch; zero is free and u64::MAX is detaching.
     owner: AtomicU64,
@@ -253,7 +253,7 @@ impl Hub {
         self.inboxes.get(pe)?.source.read()
     }
 
-    /// Bounded retained broadcast counters, enabled with owner observations.
+    /// Bounded kept broadcast counters, enabled with owner observations.
     /// These may already be stale and never authorize native reclamation.
     pub fn broadcast_profile(&self, pe: usize) -> Option<BroadcastProfile> {
         if !self.source_observations_enabled() {
@@ -539,7 +539,7 @@ impl Hub {
     }
 }
 
-/// Why a parallel PE cannot acquire its actual hub ownership.
+/// Why a parallel PE cannot acquire its hub ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParallelAdmissionError {
     MachineAttached,
@@ -569,8 +569,8 @@ impl core::fmt::Display for ParallelAdmissionError {
 }
 impl core::error::Error for ParallelAdmissionError {}
 
-/// One unique PE claim retained by its control owner through all native
-/// invocations. The inbox independently retains the budget allocation.
+/// One unique PE claim kept by its control owner through all native
+/// invocations. The inbox independently keeps the budget allocation.
 pub(super) struct Attached {
     hub: Arc<Hub>,
     pe: usize,
@@ -611,7 +611,7 @@ impl Attached {
         }
         let attached = Arc::new(attached);
         // SAFETY: this is the only writer minted for the newly acquired
-        // epoch. The Owner retains its claim independently of field drop order.
+        // epoch. The Owner keeps its claim independently of field drop order.
         let control = unsafe {
             chain_control::Owner::from_claimed(Arc::clone(&inbox.chain), Arc::clone(&attached))
         };
@@ -645,7 +645,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// No executing native GuestState or another PE's frame is inspected.
     /// This is optional stale diagnostic data, never a retirement receipt.
     pub fn observe_parallel_source(&mut self, phase: SourcePhase) {
-        // A failed native recipe can leave an unqualified partial frame. Keep
+        // A failed native recipe can leave an unchecked partial frame. Keep
         // the preceding materialized sample stale instead of publishing it as
         // a new safe boundary.
         if self.native_failure.is_some() {

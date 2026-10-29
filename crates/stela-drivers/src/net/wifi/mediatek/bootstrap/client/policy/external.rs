@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Owning-policy external authentication binds OS commands to actual scan BSS
+//! Owning-policy external authentication binds OS commands to scan BSS
 //! handles and serializes source/OS regulatory guards through real submission.
 use super::*;
 use station::external::Session;
@@ -116,7 +116,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             peer: self.peer,
         };
         self.protection.set(true, false);
-        // SAFETY: authority and client are private disjoint fields of this
+        // SAFETY: permission and client are private disjoint fields of this
         // same exclusive owning attachment, and the OS selected this network.
         unsafe {
             self.client.associate_external_pmf(

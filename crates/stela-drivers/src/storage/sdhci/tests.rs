@@ -31,7 +31,7 @@ fn started_transfers_finish_at_later_looks_like_waited_ones() {
     for pio in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing retains every native DMA descriptor and payload.
+        // SAFETY: backing keeps every native DMA descriptor and payload.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, model) = host(&mut dma, Kind::Sd, true, pio);
         let mut card = host.poll().unwrap().unwrap();
@@ -76,7 +76,7 @@ fn native_sd_and_mmc_initialize_actual_registers_and_complete_pio_and_adma_io() 
             for pio in [false, true] {
                 let mut backing = vec![0u64; 128 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: backing retains every native DMA descriptor and payload.
+                // SAFETY: backing keeps every native DMA descriptor and payload.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut host, model) = host(&mut dma, kind, sector, pio);
@@ -128,7 +128,7 @@ fn native_sd_and_mmc_initialize_actual_registers_and_complete_pio_and_adma_io() 
 fn removed_and_replaced_card_never_revives_old_disk_or_clone() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: removal retains original descriptors and bounce allocations.
+    // SAFETY: removal keeps original descriptors and bounce allocations.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, model) = host(&mut dma, Kind::Sd, true, false);
     let mut old = host.poll().unwrap().unwrap();
@@ -252,7 +252,7 @@ fn invalid_geometry_readonly_and_missing_base_clock_refuse_before_commands() {
 fn legacy_sd_and_mmc_bus_width_validation_do_not_invent_capabilities() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both controllers retain disjoint descriptor and payload ranges.
+    // SAFETY: both controllers keep disjoint descriptor and payload ranges.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut sd, model) = host(&mut dma, Kind::Sd, false, true);
     model.borrow_mut().legacy = true;
@@ -294,7 +294,7 @@ fn clock_divisors_never_exceed_requested_frequency_or_wrap_fields() {
 fn empty_socket_is_retained_and_generation_overflow_never_wraps() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the retained empty host and later card share one live fixture RAM.
+    // SAFETY: the empty host and later card share one live fixture RAM.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, model) = host(&mut dma, Kind::Sd, true, true);
     model.borrow_mut().present = false;
@@ -370,7 +370,7 @@ fn unchanged_linux_clock_divisors_and_card_capacity_match_native_decoders() {
 fn sd_command_class_and_live_write_tab_follow_actual_card_authority() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both fixtures retain disjoint buffers in this exclusive backing.
+    // SAFETY: both fixtures keep disjoint buffers in this exclusive backing.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, model) = host(&mut dma, Kind::Sd, true, true);
     let mut card = host.poll().unwrap().unwrap();
@@ -391,7 +391,7 @@ fn completed_host_data_does_not_override_actual_card_error_status() {
     for status in [1 << 18, 1 << 17, 1 << 3] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: device-completed DMA remains retained even when card status refuses it.
+        // SAFETY: device-completed DMA remains held even when card status refuses it.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, model) = host(&mut dma, Kind::Sd, true, false);
         let mut card = host.poll().unwrap().unwrap();
@@ -413,7 +413,7 @@ fn mmc_bus_width_validation_checks_every_source_immutable_field() {
     ] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed validation keeps its native DMA allocations retained.
+        // SAFETY: failed validation keeps its native DMA allocations kept.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, model) = host(&mut dma, Kind::Mmc, true, true);
         model.borrow_mut().corrupt_bus_field = Some(index);
@@ -426,7 +426,7 @@ fn mmc_bus_width_validation_checks_every_source_immutable_field() {
 fn mmc_power_off_notification_fences_aliases_without_post_notify_status_commands() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: notified cards keep all former payload/descriptor DMA retained.
+    // SAFETY: notified cards keep all former payload/descriptor DMA kept.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, model) = host(&mut dma, Kind::Mmc, true, false);
     let mut card = host.poll().unwrap().unwrap();
@@ -465,7 +465,7 @@ fn mmc_power_off_notification_fences_aliases_without_post_notify_status_commands
 fn initial_card_clock_runs_before_cmd0_and_unqualified_1v8_hosts_refuse() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both capability profiles retain disjoint fixture DMA allocations.
+    // SAFETY: both capability profiles keep disjoint fixture DMA allocations.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, model) = host(&mut dma, Kind::Sd, true, true);
     host.poll().unwrap().unwrap();
@@ -520,7 +520,7 @@ fn completed_data_with_perpetually_not_ready_card_retires_publication() {
         let mut card = host.poll().unwrap().unwrap();
         model.borrow_mut().never_ready = true;
         model.borrow_mut().reset_stuck = reset_stuck;
-        // Keep the admitted model's actual finite clock. Data completion is
+        // Keep the admitted model's finite clock. Data completion is
         // observed first; repeated not-ready CMD13 responses must consume the
         // real five-second logical card-status budget before retirement.
         let clock = host.inner.borrow().clock;
@@ -579,7 +579,7 @@ fn mmc_reserved_specifications_refuse_and_legacy_cid_keeps_manufacturer24_bits()
     for version in [5, 15] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: rejected card discovery retains its unexposed DMA allocations.
+        // SAFETY: rejected card discovery keeps its unexposed DMA allocations.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, model) = host(&mut dma, Kind::Mmc, true, true);
         put(&mut model.borrow_mut().csd, 122, 4, version);
@@ -601,7 +601,7 @@ fn mmc_reserved_specifications_refuse_and_legacy_cid_keeps_manufacturer24_bits()
         for manufacturer in [0xaa1122, 0xaa3344] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: each legacy card owns this iteration's retained register/PIO RAM.
+            // SAFETY: each legacy card owns this iteration's register/PIO RAM.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut host, model) = host(&mut dma, Kind::Mmc, false, true);
             {
@@ -628,13 +628,13 @@ fn ene_exact_pci_profiles_apply_real_power_pio_and_ios_reset_sequences() {
         for kind in [Kind::Sd, Kind::Mmc] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: each real PIO engine owns this retained native DMA region.
+            // SAFETY: each real PIO engine owns this native DMA region.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let model = Rc::new(RefCell::new(Hardware::new(kind, true)));
             {
                 let mut m = model.borrow_mut();
                 // Physical device rules are independent of the driver's profile.
-                // Advertised ADMA stays set: using it must actually fail here.
+                // Advertised ADMA stays set: using it must fail here.
                 m.single_power_write = true;
                 m.dma_broken = true;
                 m.reset_after_settings = device >= 0x0700;
@@ -719,7 +719,7 @@ fn ene_exact_pci_profiles_apply_real_power_pio_and_ios_reset_sequences() {
 fn ene_failed_post_settings_reset_retires_old_aliases_and_pins_controller() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: uncertain device retirement retains all original payload memory.
+    // SAFETY: uncertain device retirement keeps all original payload memory.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let model = Rc::new(RefCell::new(Hardware::new(Kind::Sd, true)));
     {
@@ -775,7 +775,7 @@ fn intel_exact_profiles_apply_declared_wiring_without_hispd_or_broken_adma() {
                 m.adma_broken = device != 0x08a7;
                 m.reject_high_speed_bit = true;
                 m.wired_width = if device == 0x0807 { 8 } else { 4 };
-                // The source board declaration supplies the authority even if
+                // The source board declaration supplies the permission even if
                 // the raw controller's separate capability bit is absent.
                 m.caps &= !CAP_8BIT;
                 m.ext[202] = 0xb3;
@@ -847,7 +847,7 @@ fn intel_exact_profiles_apply_declared_wiring_without_hispd_or_broken_adma() {
 fn intel_wide_bus_crc_failure_never_publishes_or_revives_legacy_alias() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: CRC failure keeps both the former and attempted DMA state retained.
+    // SAFETY: CRC failure keeps both the former and attempted DMA state kept.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let model = Rc::new(RefCell::new(Hardware::new(Kind::Mmc, false)));
     {

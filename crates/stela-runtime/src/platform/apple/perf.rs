@@ -10,7 +10,7 @@
 //! Stela's boot stage hands off with global control, every selected counter's
 //! control and counts zero: both gates disabled, polarity 0, mode 0, as a boot
 //! chain that programs none of them would. iBoot's conditional programming is
-//! not reproduced. Counts retain saved samples and share one 64-bit value
+//! not reproduced. Counts keep saved samples and share one 64-bit value
 //! across the two 32-bit words. This emulated die has no physical
 //! clock edges, voltage/thermal triggers or fabric events; those sources do
 //! not invent activity from elapsed host time. A source with known event

@@ -8,7 +8,7 @@ use core::hash::{Hash, Hasher};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-// Retaining an identity retains its allocation, preventing address reuse while
+// Retaining an identity keeps its allocation, preventing address reuse while
 // it can still participate in a reservation, cache key, or comparison.
 #[derive(Clone)]
 struct Identity(Arc<()>);
@@ -407,7 +407,7 @@ impl MemoryView {
     }
 }
 
-/// Exact access metadata retaining its mapping generation and physical owner.
+/// Exact access metadata keeping its mapping generation and physical owner.
 /// A resolution is not authorization to dereference without the native access
 /// contract. In particular, a current-generation check does not lock remapping.
 #[derive(Debug, Clone)]
@@ -452,7 +452,7 @@ impl ResolvedAccess {
     /// execution domain's synchronization, fault, and mapping-lifetime contract.
     pub fn host_ptr(&self) -> NonNull<u8> {
         // SAFETY: the constructor binds one live native extent; resolution
-        // checks this nonempty access lies wholly within it, retaining its owner.
+        // checks this nonempty access lies wholly within it, keeping its owner.
         unsafe { self.view.backing.host_base.add(self.backing_offset) }
     }
 }
@@ -491,10 +491,10 @@ mod tests {
 
     fn backing() -> Arc<MemoryBacking> {
         let layout = Layout::from_size_align(STORAGE_BYTES, STORAGE_ALIGNMENT).unwrap();
-        // SAFETY: the valid nonzero layout is retained for the matching dealloc.
+        // SAFETY: the valid nonzero layout is held for the matching dealloc.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let owner = Arc::new(Storage { pointer, layout });
-        // SAFETY: owner retains a raw allocation with read/write rights and no
+        // SAFETY: owner keeps a raw allocation with read/write rights and no
         // Rust references to its contents; tests do not perform native accesses.
         unsafe { MemoryBacking::new(pointer, STORAGE_BYTES, READ_WRITE, owner) }.unwrap()
     }

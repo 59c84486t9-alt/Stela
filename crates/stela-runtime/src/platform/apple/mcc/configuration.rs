@@ -4,11 +4,11 @@
 //! those saved words, while mode1 writes the first alternate dramcfg-data word
 //! to every channel. Neither consumer decodes capacity or validates initial
 //! bits. Creating zeroed control backing is a Stela policy, not recovered Apple
-//! DRAM timing, an alternate-mode selection or authority to settle later writes.
+//! DRAM timing, an alternate-mode selection or permission to settle later writes.
 use super::{CHANNELS, GROUPS};
 use alloc::{vec, vec::Vec};
 
-/// Actual software configuration for a newly owned controller. Quotas start
+/// Software configuration for a newly owned controller. Quotas start
 /// at zero; weights are a declared policy, not measured Apple reset values.
 #[derive(Debug, Clone)]
 pub struct Configuration {
@@ -22,8 +22,8 @@ impl Configuration {
     /// All 32 quota weights remain an explicit caller-selected policy.
     ///
     /// This grants no physical DRAM programming/settlement, power supply or
-    /// lifecycle authority. Pass the actual resource's lifecycle separately to
-    /// Controller::initialized_cacheless. Subsequent DRAM writes retain their
+    /// lifecycle permission. Pass the resource's lifecycle separately to
+    /// Controller::initialized_cacheless. Subsequent DRAM writes keep their
     /// ordinary pending-effect/readback contract, including a restore of zero.
     pub fn zeroed_control_image(
         apertures: usize,

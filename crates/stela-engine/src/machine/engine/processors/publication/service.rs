@@ -42,9 +42,9 @@ impl ServiceIdentity {
     }
 }
 
-/// A linear service session for one worker in one actual stopped cohort.
+/// A linear service session for one worker in one stopped cohort.
 /// Dropping it cannot release that cohort. Only one effect may be outstanding;
-/// its actual owner's receipt is required before another effect or close.
+/// its owner's receipt is required before another effect or close.
 #[derive(Debug)]
 #[must_use = "close the actual service session before releasing its cohort"]
 pub struct WorkerServices {
@@ -206,7 +206,7 @@ impl WorkerPublications {
             Ok(index) => {
                 services.session.open.store(false, Ordering::Release);
                 self.slots[index].services = None;
-                // Consume the actual completed session, after all existing
+                // Consume the completed session, after all existing
                 // generation/pending/receipt checks. The next open must prove
                 // that no reference to this closed identity survives.
                 self.slots[index].closed_services = Some(services.session);
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(inventory.require_all_held(&stopped), Ok(()));
         assert_eq!(inventory.require_held_members(&[1, 0]), Ok(()));
 
-        // Start with actual owner-fenced receipts, then corrupt only the test
+        // Start with owner-fenced receipts, then corrupt only the test
         // token. Its repeated member must not stand in for the omitted owner.
         stopped.request.members[1] = stopped.request.members[0];
         assert_eq!(
@@ -736,7 +736,7 @@ mod tests {
         let (mut inventory, mut owners, mut hosts, held) = held();
         let mut services = inventory.open_services(&held, 0).unwrap();
         let command = services.command(HostEffect::DiscardCode).unwrap();
-        // Retain an adversarial historical command reference. Production
+        // Keep an adversarial historical command reference. Production
         // commands are non-Clone; even a future alias must prevent recycling.
         let stale = HostEffectCommand {
             identity: Arc::clone(&command.identity),

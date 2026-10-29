@@ -51,7 +51,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.mac_ocp_modify(0xea84, 0, 3)?; // Extended tally counter.
         if self.revision.version == 70 {
             // Pinned rtl_disable_zrxdc_timeout's CSI fallback preserves the
-            // other three config bytes and the actual PCI function.
+            // other three config bytes and the PCI function.
             self.csi_modify(0x890, 1, 0)?;
         }
         self.latency()?;
@@ -63,7 +63,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             &[] // D/K/9151A/CP/BP/8126 have no donor EPHY table.
         };
         for &(address, clear, set) in entries {
-            // Retain source offsets and both transactions for aliases. The
+            // Keep source offsets and both transactions for aliases. The
             // pinned read/write accessors transmit only five address bits.
             self.ephy(address & 0x1f, clear, set)?;
         }

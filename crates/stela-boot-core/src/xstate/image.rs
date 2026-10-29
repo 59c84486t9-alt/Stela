@@ -1,4 +1,4 @@
-//! Pure interpretation of a retained, source-qualified XSAVE image.
+//! Pure interpretation of a kept, source-checked XSAVE image.
 use super::*;
 use core::fmt;
 
@@ -56,10 +56,10 @@ impl fmt::Display for ImageError {
 }
 impl core::error::Error for ImageError {}
 impl Layout {
-    /// Interpret R16..R31 only when component19 is enabled in this qualified
-    /// layout. No CPU admission, backing ownership or capture authority follows
-    /// from parsing bytes. The actual entry owner must supply the exact saved
-    /// mask/format and retain the complete image through this operation.
+    /// Interpret R16..R31 only when component19 is enabled in this checked
+    /// layout. No CPU admission, backing ownership or capture permission follows
+    /// from parsing bytes. The entry owner must supply the exact saved
+    /// mask/format and keep the complete image through this operation.
     ///
     /// A disabled bank is unavailable. An enabled bank whose XSTATE_BV bit is
     /// clear is architecturally initial zero, regardless of stale payload bytes.

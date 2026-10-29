@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Elantech source: Copyright (C) 2007-2009 Arjan Opmeer.
 // Trademarks are the property of their respective owners.
-//! Actual Elantech v1-v4 PS/2 configuration and input under the i8042 owner.
+//! Elantech v1-v4 PS/2 configuration and input under the i8042 owner.
 //! Queried v3/v4 pointing sticks share this owner; an optional attachment can
 //! require their presence. Board overrides and guest device binding are separate.
 //! Raw reports, accumulated positions and software tracking remain distinct.
@@ -118,8 +118,8 @@ pub struct Contact {
     pub primary: Option<(i32, i32)>,
     /// Present only when a separate second coordinate is encoded.
     pub secondary: Option<(i32, i32)>,
-    /// V3 two-finger primary references this actually observed head. Source
-    /// reconnect retains its historical cache; this sequence never implies a
+    /// V3 two-finger primary references this observed head. Source
+    /// reconnect keeps its historical cache; this sequence never implies a
     /// fresh coordinate was encoded in the tail. None also covers a missing head.
     pub head_sequence: Option<u64>,
     /// Advertised left/right/back/forward; parity bits do not invent middle keys.
@@ -133,7 +133,7 @@ pub enum Report {
     Contacts(Contact),
     Debounce,
     StartupSuppressed,
-    /// Actual first half of a v3 two-finger report; source emits no input yet.
+    /// First half of a v3 two-finger report; source emits no input yet.
     Head {
         point: (i32, i32),
     },
@@ -402,7 +402,7 @@ impl Engine {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Explicit ordinary Elantech attachment under the same native i8042 grant.
-    /// Actual firmware selects v1-v4 and queried v3/v4 pointing-stick presence.
+    /// Firmware selects v1-v4 and queried v3/v4 pointing-stick presence.
     /// Older integrated/board override profiles remain explicit unsupported
     /// operations, never silently generic mice.
     pub fn new_elantech(registers: R, timer: T, config: Config) -> Result<Self, super::Error> {
@@ -418,7 +418,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.elantech.as_ref()?.capabilities.as_ref()
     }
     /// Source software MT state. Tracking IDs and accumulated/default coordinates
-    /// are separate from actual absolute-head provenance in each slot.
+    /// are separate from absolute-head provenance in each slot.
     pub fn elantech_multitouch(&self) -> Option<&V4State> {
         let engine = self.elantech.as_ref()?;
         (engine.capabilities.as_ref()?.hardware == 4).then_some(&engine.multitouch)

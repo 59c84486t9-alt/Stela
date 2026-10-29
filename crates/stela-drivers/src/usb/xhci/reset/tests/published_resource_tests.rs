@@ -115,8 +115,8 @@ fn published_root_pool_reuses_all_ordinary_and_stream_dma_across_96_real_lifetim
                     if cycle % 2 == 0 {
                         assert_eq!(c.completed_ticket(&retired), Some(Ok(32)));
                     }
-                    // SAFETY: fixture exclusively owns every actual configured
-                    // endpoint; retained aliases are exercised only to prove refusal.
+                    // SAFETY: fixture exclusively owns every configured
+                    // endpoint; aliases are exercised only to prove refusal.
                     let fresh = selected(
                         unsafe { c.reset_and_reuse_root(&old, &endpoints, &mut dma) }.unwrap(),
                         &old,
@@ -220,7 +220,7 @@ fn published_iso_pool_reuses_real_queued_service_and_rejects_old_tickets_for_96_
                     .unwrap()
                     .submit_iso(3, payload.physical(), 64)
                     .unwrap();
-                // The peer has consumed the actual Isoch TRB into pending. Its
+                // The peer has consumed the Isoch TRB into pending. Its
                 // stopped event must precede Stop ACK; Disable checks full ERDP.
                 assert!(hardware.borrow().pending.contains_key(&(old.slot, 3, 0)));
                 let fresh = selected(
@@ -323,7 +323,7 @@ fn uncertain_published_retirement_or_settled_reset_keeps_original_storage_quaran
         assert_eq!(geometry(&c, old.slot), original);
         assert_eq!(dma.remaining(), remaining);
         assert!(c.slots[usize::from(old.slot)].as_ref().unwrap().retiring);
-        // Context state/producer pointers may change only through the actual
+        // Context state/producer pointers may change only through the
         // retirement commands; data segments and their padding are not erased.
         for (at, contents) in contents {
             if at != output {
@@ -373,7 +373,7 @@ fn changed_published_stream_geometry_refuses_before_allocation_or_context_public
             .bytes(),
         input
     );
-    // The refused request kept every actual stream/array owner for exact retry.
+    // The refused request kept every stream/array owner for exact retry.
     c.device(fresh.id)
         .unwrap()
         .configure_streams(&endpoints, &[0x82, 0x83, 4], 2, &mut dma)
@@ -564,8 +564,8 @@ fn unread_stream_read(
     let mut owner = c.device(id).unwrap();
     let cbw = owner.submit_ticket(2, command.physical(), 32).unwrap();
     let finish = owner.submit_stream(5, 1, status.physical(), 64).unwrap();
-    // Last publication creates both actual stream success events; no readiness
-    // read or drain follows before the caller probes its retained stale IDs.
+    // Last publication creates both stream success events; no readiness
+    // read or drain follows before the caller probes its stale IDs.
     let payload = owner.submit_stream(7, 1, data.physical(), 512).unwrap();
     (cbw, payload, finish)
 }
@@ -651,7 +651,7 @@ impl Registers for ObserveReinitialized {
             assert!(h.deferred.is_empty());
             assert_eq!(h.consumed, h.event_count);
             drop(h);
-            // Deliberately dirty ONLY the original fully retired storage,
+            // Dirty ONLY the original fully retired storage,
             // after the peer has acknowledged Disable and all ordered events.
             for (address, length) in &self.rings {
                 copy(*address, &vec![0xa5; *length]);

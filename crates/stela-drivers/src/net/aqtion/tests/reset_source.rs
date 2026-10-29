@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Exact original FLB/RBL writes and fixed settling through actual Hardware.
+//! Original FLB/RBL writes and fixed settling through Hardware.
 use super::*;
 struct Boundary {
     peer: Rc<Peer>,
     gsr: u32,
     effects: RefCell<Vec<(u32, u32, u32)>>,
 }
-// SAFETY: retained synchronous device model; exact register effects delegate to
-// the independent actual DMA peer. Reset control/status read bits are immutable
+// SAFETY: synchronous device model; exact register effects delegate to
+// the independent DMA peer. Reset control/status read bits are immutable
 // device-owned observations across the two possible reset stores.
 unsafe impl Registers for Rc<Boundary> {
     fn read(&self, at: usize) -> Result<u32> {

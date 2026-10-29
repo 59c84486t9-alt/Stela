@@ -279,7 +279,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.phy_write(PHY_PAGE, 0)?;
         let reported = (u32::from(self.phy_read(2)?) << 16) | u32::from(self.phy_read(3)?);
         // Upstream erratum 62bdc8fd1c21: these exact MACs integrate RTL8211B
-        // but can report the generic FE/GE ID. Preserve actual reads and make
+        // but can report the generic FE/GE ID. Preserve reads and make
         // the narrower, documented classification correction observable.
         let (id, mut warning) =
             if matches!(self.revision.version, 28 | 31) && reported == 0x001c_c800 {
@@ -404,7 +404,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             self.phy_reset()?;
             if matches!(self.revision.version, 40 | 42 | 44 | 46 | 51 | 52) {
                 // The generic PHY's AN EEE_ADV mapping is VEND2 a5d0.
-                // MAC40+ has actual direct PHY-OCP/C45 access. Clear it after
+                // MAC40+ has direct PHY-OCP/C45 access. Clear it after
                 // reset, before restarting autonegotiation; no EEE advertised.
                 self.phy_ocp_write(PHY_OCP_EEE_ADV, 0)?;
             }

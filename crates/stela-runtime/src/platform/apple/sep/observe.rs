@@ -12,7 +12,7 @@
 //! answered: the kernel client times out on its own and the run goes on to
 //! record the requests that follow (docs/design/runtime.md "Unsupported
 //! operations" names this diagnostic exception). Observation is
-//! off by default, and a run with it on qualifies nothing beyond its log.
+//! off by default, and a run with it on checks nothing beyond its log.
 //!
 //! The `scrd` capacities are Stela's broad diagnostic choice, one to 32 SEP
 //! pages each way, not recovered limits: a client whose registration falls

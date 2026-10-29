@@ -6,7 +6,7 @@
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
-// 1. Redistributions of source code must retain the above copyright notice,
+// 1. Redistributions of source code must keep the above copyright notice,
 //    this list of conditions and the following disclaimer.
 // 2. Redistributions in binary form must reproduce the above copyright notice,
 //    this list of conditions and the following disclaimer in the documentation
@@ -40,7 +40,7 @@
 //! <https://github.com/torvalds/linux/tree/a804c5742bff224d4cb4d25dd383554d598be32b/drivers/net/ethernet/intel/e1000e>.
 //! These portions are GPL-2.0-only; see `LICENSES/GPL-2.0-only.txt`.
 //! The descriptor datapath and Stela integration are independent Rust code.
-//! This is deliberately not a match for the I217/I218/I219 integrated PHYs.
+//! This is not a match for the I217/I218/I219 integrated PHYs.
 //!
 //! DMA allocations live until reboot, including after a transmit timeout;
 //! a descriptor is never reused until the device writes its done bit.
@@ -225,7 +225,7 @@ pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR && function.device == DEVICE && function.class == [2, 0, 0]
 }
@@ -427,7 +427,7 @@ impl E1000e {
     /// # Safety
     ///
     /// The caller must own the controller and PCI configuration access in
-    /// its segment exclusively. `handoff` must describe the actual machine's
+    /// its segment exclusively. `handoff` must describe the machine's
     /// mapped ECAM/MMIO and DMA ranges. No firmware or other driver may
     /// access these resources during initialization.
     pub unsafe fn new(
@@ -568,7 +568,7 @@ impl E1000e {
         // Linux's 82574 setup enables L1 activation without L0s receive.
         device.write32(GCR, device.read32(GCR) | GCR_REQUIRED | GCR_L1_WITHOUT_L0S);
         device.write32(GCR2, device.read32(GCR2) | GCR2_ERRATA);
-        // Other receive addresses and multicast hashes must not retain UNDI state.
+        // Other receive addresses and multicast hashes must not keep UNDI state.
         for entry in 1..RECEIVE_ADDRESSES {
             device.write32(RAL + entry * 8, 0);
             device.write32(RAH + entry * 8, 0);

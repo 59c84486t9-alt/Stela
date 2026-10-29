@@ -529,7 +529,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         Ok(transfer)
     }
 
-    /// Sends as much of one caller-retained raw payload as the stream accepts.
+    /// Sends as much of one caller-kept raw payload as the stream accepts.
     /// Zero is backpressure while the connection is opening or its send window
     /// is full; the caller must retry the unchanged bytes.
     pub fn write(&mut self, transfer: &mut Transfer, bytes: &[u8]) -> Result<usize, NetError> {

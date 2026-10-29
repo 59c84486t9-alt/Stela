@@ -212,7 +212,7 @@ impl Context {
     }
 
     /// InsertPAC with fixed VA47 instruction-TBI-off/data-TBI-on controls.
-    /// Data retains its tag in both QARMA input and output; it is not ignored by
+    /// Data keeps its tag in both QARMA input and output; it is not ignored by
     /// authentication. Null is signed. Classic invalid extension corrupts
     /// PAC bit62 (instruction) or54 (data), following June2026 Arm ASL, rather
     /// than the older Unicorn invalid-extension behavior. Enhanced profiles XOR the PAC field.
@@ -289,7 +289,7 @@ impl Context {
         ))
     }
 
-    /// The bits retained by XPAC in the lower and upper address ranges.
+    /// The bits kept by XPAC in the lower and upper address ranges.
     /// Strip selects both its TnSZ and effective TBI by pointer bit 55.
     /// These masks contain no key material and do not depend on key enables.
     pub(crate) fn stripping_masks(&self, data: bool) -> [u64; 2] {
@@ -850,7 +850,7 @@ mod tests {
                 }
             }
         }
-        // Distinct domain keys use the same independently verified QARMA
+        // Distinct domain keys use the same verified QARMA
         // primitive; no artificial IA/IB/DA/DB domain tag is added to the MAC.
         let context = Context::new(
             73,

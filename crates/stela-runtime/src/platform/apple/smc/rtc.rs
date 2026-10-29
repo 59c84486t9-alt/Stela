@@ -1,4 +1,4 @@
-//! Source-qualified monotonic PMU key, separate from mutable stored SMC keys.
+//! Source-checked monotonic PMU key, separate from mutable stored SMC keys.
 use super::code;
 use crate::platform::apple::pmu::RtcClock;
 

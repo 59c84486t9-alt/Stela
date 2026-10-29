@@ -39,16 +39,16 @@ pub(super) const PLL_CLOCK_GATE_GIGABIT: u16 = 0xfa;
 pub(super) const PLL_CLOCK_GATE_SLOW: u16 = 0x3e8;
 pub(super) const K1_CLOCK_REQUEST: u16 = 1 << 9;
 
-/// Same-function config access required by LPT's actual platform LTR limits.
+/// Same-function config access required by LPT's platform LTR limits.
 ///
 /// # Safety
-/// Both supertraits and these reads retain and access the **same actual PCI
+/// Both supertraits and these reads keep and access the **same PCI
 /// Function and reset epoch**, not a separate function or supplied substitute.
-/// Config offsets are bounded/aligned actual little-endian 16-bit reads;
+/// Config offsets are bounded/aligned little-endian 16-bit reads;
 /// access/removal errors never manufacture a value. The real reservation,
 /// power, config access and MAC/flash mappings remain owned together. LTR
 /// config words are immutable during this exclusive epoch: firmware/SMM,
-/// other users and config writes are excluded. SPT additionally uses actual
+/// other users and config writes are excluded. SPT additionally uses
 /// live reads at e4 for descriptor flush status; that status is never cached.
 /// No provider is supplied here.
 pub unsafe trait LptRegisters: Registers + nvm::Registers {
@@ -63,7 +63,7 @@ pub(super) struct Limits {
 impl Limits {
     pub(super) fn new(snoop: u16, nosnoop: u16) -> Result<Self, Error> {
         for value in [snoop, nosnoop] {
-            // Bits13:14 and scales6:7 are reserved. Bit15 is the actual
+            // Bits13:14 and scales6:7 are reserved. Bit15 is the
             // requirement indication and is preserved as in the source.
             if value & 0x6000 != 0 || ((value & LTR_SCALE) >> LTR_SCALE_SHIFT) > LTR_MAX_SCALE {
                 return Err(Error::LtrLimit(value));
@@ -113,8 +113,8 @@ impl<R: LptRegisters, D: Delay + Clone> Controller<R, D> {
     ///
     /// # Safety
     /// All `Controller::new` physical ownership, exclusion, reset and delay
-    /// requirements hold, with exact actual vendor8086/class020000 and one of
-    /// 153a/153b/15a0/15a1. `LptRegisters` binds actual immutable config limits
+    /// requirements hold, with exact vendor8086/class020000 and one of
+    /// 153a/153b/15a0/15a1. `LptRegisters` binds immutable config limits
     /// to the very same PCI Function/reset epoch as MAC/flash/PHY access. No
     /// config/MMIO/DMA provider, probe admission or identity fallback is implied.
     pub unsafe fn new_lpt(device: u16, io: R, delay: D) -> Result<Self, Error> {
@@ -142,16 +142,16 @@ impl<R: LptRegisters, D: Delay + Clone> Controller<R, D> {
         let limits = match limits {
             Ok(limits) => limits,
             Err(error) => {
-                // Keep the actual function/config/mapping owner on observed
+                // Keep the function/config/mapping owner on observed
                 // access failure or invalid platform limits, before mutation.
                 core::mem::forget(bus);
                 return Err(error);
             }
         };
-        // SAFETY: exact same retained LPT function/config/reset epoch, with
-        // exclusive serialized MAC/flash adapters and actual delay clones.
+        // SAFETY: same LPT function/config/reset epoch, with
+        // exclusive serialized MAC/flash adapters and delay clones.
         let nvm = unsafe { nvm::Nvm::new(nvm::Layout::Lpt, bus.clone(), delay.clone()) }?;
-        // SAFETY: observed exact PCI cohort selects the actual I217 PHY path.
+        // SAFETY: observed exact PCI cohort selects the I217 PHY path.
         let phy = unsafe { Phy::new(Kind::I217, bus, delay) };
         Ok(Self {
             phy,
@@ -227,7 +227,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         let beacon = self.read(FEXTNVM4)?;
         self.write(FEXTNVM4, (beacon & !7) | 7)?;
         self.lpt_platform_pm(status)?;
-        // SPT mirrors the actual analog K1-off enable bit. LPT preserves it;
+        // SPT mirrors the analog K1-off enable bit. LPT preserves it;
         // the LPT-LP/I218-3 hang workaround is a separate device profile.
         let value = self.read(FEXTNVM6)?;
         let value = if self.is_spt_mac() {
@@ -403,7 +403,7 @@ pub(super) mod tests {
                 m.config.insert(LTR_NOSNOOP, nosnoop as u16);
                 m.mac.insert(super::super::PBA, receive);
             }
-            // SAFETY: actual modeled config and registers share one owner/epoch.
+            // SAFETY: modeled config and registers share one owner/epoch.
             let mut controller = unsafe {
                 if let Some(device) = profile {
                     super::super::mtp::tests::claim_any(device, io, timer)

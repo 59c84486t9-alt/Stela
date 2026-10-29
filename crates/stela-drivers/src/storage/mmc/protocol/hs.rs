@@ -36,7 +36,7 @@ impl<H: Host> Session<'_, H> {
         ext: &mut [u8],
         info: &CardInfo,
     ) -> Result<(), BlockError> {
-        // Power tables describe actual VCC and the established bus rate,
+        // Power tables describe VCC and the established bus rate,
         // independently of the card's maximum advertised frequency.
         let index = match (voltage == OCR_180, info.clock_hz <= 26_000_000) {
             (true, true) => 201,

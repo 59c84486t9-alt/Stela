@@ -147,7 +147,7 @@ impl<H: Copy + Eq> Control<H> {
 
     /// The control handshake has supplied the separate connection port and
     /// is now waiting for commands. A scheduler may time out only earlier
-    /// phases; an established control is intentionally long-lived and idle.
+    /// phases; an established control is long-lived and idle.
     pub fn ready(&self) -> bool {
         matches!(
             self.phase,

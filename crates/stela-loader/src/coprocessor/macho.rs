@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn malformed_loads_and_chain_effects_are_refused() {
-        // All mutations retain correct outer hashes, reaching structural validation.
+        // All mutations keep correct outer hashes, reaching structural validation.
         for (at, width, v) in [
             (12, 4, 2),
             (16, 4, 5),

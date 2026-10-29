@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Wire descriptor bounds and source-qualified i2c-hid-core.c device quirks.
-//! Retained upstream notices are in input/THIRD_PARTY.md.
+//! Wire descriptor bounds and source-checked i2c-hid-core.c device quirks.
+//! Upstream notices are in input/THIRD_PARTY.md.
 use super::{DESCRIPTOR_BYTES, ErrorKind, MAX_BUFFER, MAX_DESCRIPTOR};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

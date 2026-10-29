@@ -204,7 +204,7 @@ fn fixture(state: u16) -> (Function<Model>, Clock, Bar) {
     )
 }
 
-/// Core-only profile fixture; mapped-entry tests exercise actual preparation.
+/// Core-only profile fixture; mapped-entry tests exercise preparation.
 pub(in crate::audio::hda) fn modern_prepared_model(address: Address) -> Prepared {
     let selected = identity(INTEL, 0xa170, CLASS).unwrap();
     Prepared {

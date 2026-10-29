@@ -1,4 +1,4 @@
-//! Exercise the public native modules and their actual linked C library.
+//! Exercise the public native modules and their linked C library.
 pub use stela_drivers::gpu::intel::{activation, firmware, wopcm};
 
 use crate::firmware::{Catalog, ErrorKind, Provenance, Provider, Requirement, Resource};
@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 pub(super) fn bytes(release: Version) -> Vec<u8> {
     // Original packed CSS128, uCode16 and RSA256; modulus/exponent lengths
-    // remain declared while those optional bytes are genuinely absent.
+    // remain declared while those optional bytes are absent.
     let mut bytes = vec![0; 400];
     for (word, value) in [
         (1, 32 + 64 + 64 + 1),
@@ -126,7 +126,7 @@ pub fn canonical_catalog_contract(device: &activation::Device) {
         }))
     ));
     // A safe Provider can ignore a requested lower bound while returning a
-    // genuine Image. The native parser must still enforce its readable span.
+    // Image. The native parser must still enforce its readable span.
     struct BelowMinimum<'a>(&'a Catalog);
     impl Provider for BelowMinimum<'_> {
         fn load(
@@ -422,7 +422,7 @@ pub fn huc_catalog_contract(device: &activation::Device) {
             if status == expected_status && diagnostics.bits() == expected_diagnostic));
     }
 
-    // Safe Provider can return another genuine image; exact filename/target
+    // Safe Provider can return another image; exact filename/target
     // are rechecked at the native consumer, even after catalog validation.
     let requirement = request.requirement().unwrap();
     let wrong = Catalog::from_handoff(vec![Resource {

@@ -34,7 +34,7 @@ impl Geometry {
         gmch: u16,
     ) -> Result<Self, Error> {
         let mut result = Self::default();
-        // SAFETY: CPU-only original policy and complete scalar ABI; actual live
+        // SAFETY: CPU-only original policy and complete scalar ABI; live
         // device facts, whole BAR extent and same-function configuration input.
         let status = unsafe {
             stela_intel_gsm_geometry(
@@ -53,7 +53,7 @@ impl Geometry {
         Ok(result)
     }
 }
-/// Exclusive live Device borrow retains forcewake/reset/power throughout reads
+/// Exclusive live Device borrow keeps forcewake/reset/power throughout reads
 /// and canonical teardown. No raw pointer escapes. Explicit successful retire
 /// releases this lease before the caller can sleep/finish the Device. Drop or
 /// uncertain teardown permanently poisons that epoch and quarantines ownership;
@@ -104,7 +104,7 @@ impl<'device> Probe<'device> {
         let mapping = self.mapping.as_mut().ok_or(Error::Closing)?;
         self.closing = true;
         drop(self.view.take());
-        // SAFETY: no escaped pointers or firmware/DMA/IRQ users; exclusive actual
+        // SAFETY: no escaped pointers or firmware/DMA/IRQ users; exclusive
         // owner remains awake/pinned, no outstanding CPU accesses after &mut.
         if let Err(error) = unsafe { mapping.retire() } {
             self.device.gsm_poison();

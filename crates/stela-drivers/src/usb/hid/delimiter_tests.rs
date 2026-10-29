@@ -5,7 +5,7 @@ use crate::usb::xhci::model::{self, RegionAllocator};
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
 
-// Two actual numbered reports. Common + preferred keyboard usages are E0,4,5;
+// Two numbered reports. Common + preferred keyboard usages are E0,4,5;
 // the second branch's Consumer aliases do not become extra keyboard fields.
 // Report 2 does the converse: preferred Consumer E9, alternate Keyboard 4.
 const ALTERNATIVES: &[u8] = &[
@@ -106,7 +106,7 @@ fn short_trailing_and_extended_usages_follow_pinned_linux_page_completion() {
         5, 1, 9, 6, 0xa1, 1, 0x15, 0, 0x25, 1, 0x75, 1, 0x95, 3, 5, 7, 0xa9, 1, 9, 4, 0x0b, 5, 0,
         7, 0, 9, 6, 0xa9, 0,
         // Ignored aliases still mutate the global environment. Extended
-        // preferred usage5 must retain page7; trailing short4/6 complete pageC.
+        // preferred usage5 must keep page7; trailing short4/6 complete pageC.
         0xa9, 1, 5, 0x0c, 9, 0xe9, 0xa9, 0, 0x81, 2, 0xc0,
     ];
     let d = Descriptor::parse(&bytes).unwrap();
@@ -352,7 +352,7 @@ fn malformed_ordinary_descriptors_refuse_before_hid_allocation_or_input_publicat
     for bytes in malformed() {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives the actual native controller and DMA owners.
+        // SAFETY: backing outlives the native controller and DMA owners.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, hardware) = model::cancellation_controller(&mut dma);
         hardware

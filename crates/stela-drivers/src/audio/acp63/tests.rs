@@ -251,8 +251,8 @@ fn fixture70(
 ) {
     let device = Arc::new(Mutex::new(Device::new(revision)));
     let clock = device.lock().unwrap().clock.clone();
-    // SAFETY: actual isolated model's exclusive firmware/child/controller
-    // epoch and domain supply the same authority as the ACP63 fixture.
+    // SAFETY: isolated model's exclusive firmware/child/controller
+    // epoch and domain supply the same permission as the ACP63 fixture.
     let controller = unsafe {
         crate::audio::acp70::Controller::claim(
             Model(device.clone()),

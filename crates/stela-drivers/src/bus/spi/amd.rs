@@ -41,7 +41,7 @@ const SPD7: u32 = 63 << 8;
 pub const MAX_MESSAGE: usize = 70;
 
 /// Shared microsecond timer with an explicit usable-clock admission check.
-/// `calibrated` must reflect the actual clock service, not controller clock
+/// `calibrated` must reflect the clock service, not controller clock
 /// power. While admitted, time is monotonic and eventually advances, including
 /// during `relax`; an unavailable/uncalibrated clock must return false.
 pub trait Timer: crate::bus::i2c::Timer {
@@ -78,12 +78,12 @@ impl Profile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoError;
 
-/// Ordered byte/32-bit little-endian register access and the actual owner.
+/// Ordered byte/32-bit little-endian register access and the owner.
 ///
 /// # Safety
-/// Retain the original exclusively reserved controller resource, UC mapping,
+/// Keep the original exclusively reserved controller resource, UC mapping,
 /// ACPI/firmware arbitration, powered clock/reset epoch and board pin ownership.
-/// `profile` describes that actual controller. The engine is initially stopped;
+/// `profile` describes that controller. The engine is initially stopped;
 /// no DMA, IRQ, firmware, AML or other CPU accesses it during this lifetime.
 /// Failed accesses may already have effects. Retention by deliberate leak must
 /// preserve every original resource/clock/reset owner; a numeric base is not
@@ -105,9 +105,9 @@ pub enum Mode {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Device {
-    /// Actual firmware/board chip select, 0..=3; never inferred from an ID.
+    /// Firmware/board chip select, 0..=3; never inferred from an ID.
     pub chip_select: u8,
-    /// Actual peripheral and board limit. Values below 800kHz are refused.
+    /// Peripheral and board limit. Values below 800kHz are refused.
     pub max_hz: u32,
     pub mode: Mode,
 }
@@ -144,8 +144,8 @@ const FREQUENCIES: [(u32, u32, u32); 9] = [
     (800_000, 5, 0),
 ];
 
-/// One retained controller. Only explicit successful release returns its
-/// original resources. Drop and every uncertain hardware error retain them.
+/// One kept controller. Only explicit successful release returns its
+/// original resources. Drop and every uncertain hardware error keep them.
 pub struct Controller<R: Registers, T: Timer = Clock> {
     owners: Option<(R, T)>,
     timeout_us: u64,
@@ -156,7 +156,7 @@ pub struct Controller<R: Registers, T: Timer = Clock> {
     last_status: Option<u32>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// The unsafe register provider supplies actual exclusive native admission.
+    /// The unsafe register provider supplies exclusive native admission.
     /// Invalid configuration returns all original owners without any access.
     pub fn new(registers: R, timer: T, timeout_us: u64) -> Result<Self, (ErrorKind, R, T)> {
         if timeout_us == 0 || !timer.calibrated() || timer.check_duration(timeout_us).is_err() {
@@ -368,7 +368,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
     /// Return the original stopped register/clock owners after successful
-    /// commands (or before first use). A faulted owner needs an actual platform
+    /// commands (or before first use). A faulted owner needs a platform
     /// reset and cannot be released by observing an idle bit after its deadline.
     pub fn release(mut self) -> Result<(R, T), Self> {
         if self.failed.is_some() {

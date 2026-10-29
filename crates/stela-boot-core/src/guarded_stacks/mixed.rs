@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Mixed page-backed layout data. No numeric extent grants physical ownership,
-//! page-table authority, initialization or execution permission. Native owners
-//! retain the complete raw allocation, qualify every actual root/cache alias,
-//! and keep each immediate guard page genuinely absent.
+//! page-table permission, initialization or execution permission. Native owners
+//! keep the complete raw allocation, check every root/cache alias,
+//! and keep each immediate guard page absent.
 use super::{Error, MAX_STACKS, PAGE, Slot};
 use core::ops::Range;
 
@@ -84,7 +84,7 @@ impl MixedLayout {
                 physical_offset,
             };
         }
-        // UEFI AllocateAnyPages guarantees only PAGE alignment. Retain enough
+        // UEFI AllocateAnyPages guarantees only PAGE alignment. Keep enough
         // *raw* pages to align the first backing without releasing its prefix.
         let raw_allocation_bytes = physical_bytes
             .checked_add(physical_alignment - PAGE)
@@ -133,9 +133,9 @@ impl MixedLayout {
     pub fn physical_offset(&self, index: usize) -> Result<u64, Error> {
         Ok(self.entry(index)?.physical_offset)
     }
-    /// Locate the payload in an actual page-aligned allocation. This arithmetic
+    /// Locate the payload in a page-aligned allocation. This arithmetic
     /// does not prove the allocation exists or authorize access to its pages.
-    /// The native owner retains the complete supplied raw allocation on every
+    /// The native owner keeps the complete supplied raw allocation on every
     /// success, failure, pause or quarantine; prefix/suffix are not free memory.
     pub fn backing(&self, raw: Range<u64>, index: usize) -> Result<Range<u64>, Error> {
         let entry = self.entry(index)?;

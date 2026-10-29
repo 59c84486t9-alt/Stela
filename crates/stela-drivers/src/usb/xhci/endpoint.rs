@@ -124,7 +124,7 @@ impl Context {
             (true, true) => 7,
         };
         // Bulk has no periodic payload. Keep the existing 3072-byte average
-        // transfer hint; periodic hints use the actual advertised service bytes.
+        // transfer hint; periodic hints use the advertised service bytes.
         Ok(Self {
             info: interval << 16,
             info2: 3 << 1 | kind << 3 | burst << 8 | packet << 16,

@@ -56,13 +56,13 @@ pub enum Pull {
 }
 
 /// Captured hardware effects survive a later failed consumer/access. A bit in
-/// `acknowledged` is an actual posted W1C, not an assertion that the peripheral
+/// `acknowledged` is a posted W1C, not an assertion that the peripheral
 /// consumed its cause. `delivered` requires the consumer to return success.
 #[derive(Debug)]
 #[must_use]
 pub struct ServiceReport {
     /// Publication was attempted; a failed write/flush may already have consumed
-    /// this cause. Retain this evidence even when confirmation is unavailable.
+    /// this cause. Keep this evidence even when confirmation is unavailable.
     pub acknowledgement_attempted: [u64; 8],
     pub acknowledged: [u64; 8],
     pub delivered: [u64; 8],
@@ -95,7 +95,7 @@ struct Saved {
 
 /// Serialized process/deferred protocol owner. No public constructor exists:
 /// native ACPI resource, pad/firmware exclusion and parent-line ownership are
-/// still required before an actual platform may expose attachment.
+/// still required before a platform may expose attachment.
 pub struct Controller<R: RegisterIo> {
     registers: ManuallyDrop<R>,
     profile: &'static Profile,
@@ -224,7 +224,7 @@ impl<R: RegisterIo> Controller<R> {
     pub(in crate::bus::gpio) fn is_claimed(&self, pin: u16) -> bool {
         self.saved.iter().any(|saved| saved.pin == pin)
     }
-    /// The native supplier's actual broker admits a line before this snapshot.
+    /// The native supplier's broker admits a line before this snapshot.
     /// Reserve storage before any later request can change hardware.
     pub(in crate::bus::gpio) fn capture(&mut self, pin: u16) -> Result<(), Error> {
         if self.retired {
@@ -256,7 +256,7 @@ impl<R: RegisterIo> Controller<R> {
         }
         self.debounce(pin, micros)
     }
-    /// Raw latch writes preserve the actual ACPI Preserve direction.
+    /// Raw latch writes preserve the ACPI Preserve direction.
     pub(in crate::bus::gpio) fn write_latch(&mut self, pin: u16, high: bool) -> Result<(), Error> {
         let (community, group) = self.check(pin)?;
         self.unlocked(community, group, pin, false, true)?;
@@ -674,7 +674,7 @@ impl<R: RegisterIo> Controller<R> {
         self.ack(community, group, pin)?;
         self.mask(community, group, pin, masked)
     }
-    /// One finite source snapshot per group. Actual edge ACK precedes the
+    /// One finite source snapshot per group. Edge ACK precedes the
     /// consumer, preserving a second edge arriving during its execution. Level
     /// delivery additionally masks through the callback and reports reassertion.
     pub fn service(&mut self, mut consumer: impl FnMut(u16) -> Result<(), Error>) -> ServiceReport {

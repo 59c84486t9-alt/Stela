@@ -13,7 +13,7 @@
 //! (Linux's hybrid polling). Nothing waits for the disk and nothing wakes
 //! while no transfer runs. A disk that runs nothing queued executes each
 //! command on the calling PE. One poll admits at most 64 commands, so larger
-//! transfers retain their partial progress until later polls.
+//! transfers keep their partial progress until later polls.
 use alloc::{boxed::Box, vec::Vec};
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Identity, Request, Submission};
 

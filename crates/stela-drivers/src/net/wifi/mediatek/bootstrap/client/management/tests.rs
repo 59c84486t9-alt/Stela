@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 //! Native software peers: firmware ACKs, requester-owned RX/TX DMA, key replay
-//! and actual descriptor/TX-free/unmap lifetimes. No physical cipher/air claim.
+//! and descriptor/TX-free/unmap lifetimes.
 use super::*;
 use crate::net::wifi::mediatek::{
     bootstrap::{
@@ -26,7 +26,7 @@ fn keys(driver: &mut Native) -> (u64, KeyIdentity, KeyIdentity) {
     (driver.station().association_epoch().unwrap(), ptk, gtk)
 }
 fn attach(driver: &mut Native, epoch: u64) -> Arc<Session> {
-    // SAFETY: actual model peer/key commands and both actual TX retirement
+    // SAFETY: model peer/key commands and both TX retirement
     // receipts are drained; no old hardware RX/IRQ/deferred GTK user exists.
     unsafe { driver.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
         .unwrap()
@@ -54,7 +54,7 @@ fn group() -> Vec<u8> {
         0, 76, 16, 4, 0, 101, 0, 0, 0, 0, 0, 0xc4, 0x80, 0xa2, 0x3a, 0x2c, 0x44, 0x77, 0x70,
     ];
     let mut raw = incoming_bytes(&bytes, None, false);
-    // Actual native source lookup is the peer WCID, mapped through its retained
+    // Native source lookup is the peer WCID, mapped through its kept
     // VIF to the GTK slot; a copied BCMC slot is not a peer lookup.
     raw[4] = 1;
     raw
@@ -63,13 +63,13 @@ fn stop(driver: &mut Native, model: &Model) {
     if driver.phase() == Phase::Associated {
         driver.disconnect().unwrap();
     }
-    // SAFETY: actual model removal ACKs and both queue receipts drained;
-    // retained CPU observations are inert and every later use revalidates.
+    // SAFETY: model removal ACKs and both queue receipts drained;
+    // CPU observations are inert and every later use revalidates.
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     driver.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
     model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
-    // SAFETY: actual model controller/IRQ/radio/DMA/work independently quiesced.
+    // SAFETY: model controller/IRQ/radio/DMA/work independently quiesced.
     unsafe { driver.stop_after_quiesce() }.unwrap();
 }
 
@@ -103,7 +103,7 @@ fn actual_initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry(
         commands + 1
     );
     assert!(matches!(
-        // SAFETY: unchanged actual drained namespace; stale OS epoch must not publish.
+        // SAFETY: unchanged drained namespace; stale OS epoch must not publish.
         unsafe {
             driver.install_management_key(epoch + 1, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
         },
@@ -176,7 +176,7 @@ fn actual_group_bip_rx_enforces_original_mic_ipn_and_peer_lookup_before_os_consu
     for fault in 0..5 {
         let mut raw = group();
         match fault {
-            0 => raw[4] = 19, // copied BCMC slot is not an actual peer lookup
+            0 => raw[4] = 19, // copied BCMC slot is not a peer lookup
             1 => raw[32 + 10] ^= 2,
             2 => raw[32 + 16] ^= 2,
             3 => {
@@ -285,13 +285,13 @@ fn actual_protected_tx_retains_session_until_descriptor_free_and_unmap_before_pe
         |index: usize| u32::from_le_bytes(txwi[index * 4..index * 4 + 4].try_into().unwrap());
     assert_eq!(word(0) >> 25, 16); // source management queue
     assert_eq!((word(1) >> 21) & 15, 0); // ordinary management, not ADDBA TID2
-    assert_eq!(word(3) & 2, 2); // actual selected PTK hardware protection
-    assert_eq!(word(3) & (1 << 30), 0); // no fabricated host PN/IV
+    assert_eq!(word(3) & 2, 2); // selected PTK hardware protection
+    assert_eq!(word(3) & (1 << 30), 0); // no invented host PN/IV
     assert_eq!(word(4), 0);
     drop(memory);
     drop(queue);
     assert!(matches!(
-        // SAFETY: the independently required external drain has not occurred; the actual queued
+        // SAFETY: the independently required external drain has not occurred; the queued
         // descriptor/token must refuse even a same-key retry.
         unsafe {
             driver.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
@@ -304,7 +304,7 @@ fn actual_protected_tx_retains_session_until_descriptor_free_and_unmap_before_pe
     assert_eq!(sent.len(), 1);
     assert_eq!(&sent[0][..2], &[0xd0, 0x40]);
     assert_eq!(&sent[0][24..], &[8, 1, 0xa5, 0x5a]);
-    // Descriptor consumption alone cannot release the actual key/session owner.
+    // Descriptor consumption alone cannot release the key/session owner.
     assert!(driver.poll_released().unwrap().is_empty());
     assert_eq!(driver.phase(), Phase::Removing);
     driver.poll(1_000_001, &Source, &mut Policy(true)).unwrap();
@@ -360,7 +360,7 @@ fn deferred_management_and_os_reply_are_revoked_before_mmio_after_disconnect_and
         model.response.lock().unwrap().client_commands.len(),
         commands
     );
-    // SAFETY: all actual old model hardware/DMA/work drained; held CPU-only
+    // SAFETY: all old model hardware/DMA/work drained; held CPU-only
     // observations are inert and their consumption always revalidates ownership.
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     associated(&mut driver, &model, 30);
@@ -413,7 +413,7 @@ fn uncertain_actual_igtk_publication_quarantines_complete_owner_without_transpor
             model.response.lock().unwrap().status = 9;
         }
         assert!(
-            // SAFETY: actual initial model GTK drain; genuine firmware failure/late ACK must retain
+            // SAFETY: initial model GTK drain; firmware failure/late ACK must keep
             // the entire native namespace, never mint a Session.
             unsafe {
                 driver.install_management_key(
@@ -522,7 +522,7 @@ fn foreign_native_session_and_current_modern_owner_are_refused_without_hardware_
     let log = modern.model.bar.0.lock().unwrap().log.len();
     let head = modern.model.queues[&0xd4300].lock().unwrap().head;
     assert!(matches!(
-        // SAFETY: the actual current model is drained. This API lacks the modern canonical
+        // SAFETY: the current model is drained. This API lacks the modern canonical
         // management admission, so no initial batch may be published.
         unsafe {
             modern.driver.install_management_key(

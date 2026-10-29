@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained Raven/Vangogh PTE/ring, serial format, PCM and stream lifecycle.
+//! Raven/Vangogh PTE/ring, serial format, PCM and stream lifecycle.
 //! Copyright (C) 2016, 2021, 2023 Advanced Micro Devices, Inc.
 use super::*;
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -102,7 +102,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<(), Error> {
         self.live()?;
         self.quiet_engines()?;
-        // Reconfiguration may replace a previously cached PTE. A whole actual
+        // Reconfiguration may replace a previously cached PTE. A whole
         // reset precedes releasing its old lease; cache-invalidate request1
         // alone is never interpreted as completion or as an engine stop.
         self.initialize_inner()?;
@@ -131,7 +131,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if let Some(payload) = initial_pcm {
             for (offset, byte) in payload.iter().enumerate() {
                 let pointer = cpu.address(offset, 1).map_err(Error::Memory)?;
-                // SAFETY: retained actual CPU RAM, not yet mapped/published for DMA.
+                // SAFETY: CPU RAM, not yet mapped/published for DMA.
                 unsafe { pointer.as_ptr().write_volatile(*byte) };
             }
         }
@@ -175,7 +175,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if port.direction() == Direction::Capture {
             stream.dma.read_coherent_u32(0).map_err(Error::Dma)?;
         }
-        // Retain before even a partial SRAM PTE store; errors never free a published IOVA.
+        // Keep before even a partial SRAM PTE store; errors never free a published IOVA.
         stream.published = true;
         self.streams[slot] = Some(stream);
         for other in PORTS {
@@ -294,7 +294,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     fn counter(&mut self, regs: StreamRegisters) -> Result<u64, Error> {
         for _ in 0..8 {
             // Counter halves legitimately contain all ones. PCI/BAR/live
-            // authority was checked first; do not reinterpret data as absence.
+            // permission was checked first; do not reinterpret data as absence.
             let high = self.registers.read32(regs.count_high());
             let low = self.registers.read32(regs.count_low());
             if self.registers.read32(regs.count_high()) == high {
@@ -488,7 +488,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         self.finish(result)
     }
-    /// Copy a fully stopped capture ring with actual CPU ownership; the whole
+    /// Copy a fully stopped capture ring with CPU ownership; the whole
     /// controller must be quiet so domain completion is a real device proof.
     pub fn copy_stopped_capture(
         &mut self,
@@ -513,12 +513,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.quiet_engines()?;
             self.drain()?;
             let stream = self.streams[port as usize].as_ref().unwrap();
-            // SAFETY: actual native engine disable/readback, no submissions,
+            // SAFETY: native engine disable/readback, no submissions,
             // all controller engines quiet and same-domain posted writes drained.
             unsafe { stream.dma.sync_for_cpu(0..stream.dma.bytes()) }.map_err(Error::Dma)?;
             for (offset, byte) in destination.iter_mut().enumerate() {
                 let pointer = stream.cpu.address(offset, 1).map_err(Error::Memory)?;
-                // SAFETY: actual retained CPU-owned RAM after the above proof.
+                // SAFETY: CPU-owned RAM after the above proof.
                 *byte = unsafe { pointer.as_ptr().read_volatile() };
             }
             Ok(())

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2021 Realtek Corporation
 //! RTL8822C calibrated channel/rate gains and source TXAGC programming.
-//! Calculations are observations, not OS/location, antenna or SAR authority.
+//! Calculations are observations, not OS/location, antenna or SAR permission.
 use super::{Attempt, FactoryBand, FactoryPower, FactorySheet, Io, PhyInitialized, Report};
 
 const SECTIONS: [(u8, u8); 6] = [(0, 4), (4, 8), (12, 8), (20, 8), (44, 10), (54, 10)];
@@ -29,7 +29,7 @@ pub enum Width {
     Mhz40,
     Mhz80,
 }
-/// Valid center/primary geometry only. DFS, location, actual tuning and TX
+/// Valid center/primary geometry only. DFS, location, tuning and TX
 /// permission must be established independently by the real radio/OS owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Geometry {
@@ -118,27 +118,27 @@ impl Geometry {
         self.centers[self.width as usize]
     }
 }
-/// Inputs supplied by the genuine platform policy/board service while holding
-/// its native then OS authority guards. Public values are useful for diagnostic
-/// calculations but cannot grant authority or qualify a shared applied policy.
+/// Inputs supplied by the platform policy/board service while holding
+/// its native then OS permission guards. Public values are useful for diagnostic
+/// calculations but cannot grant permission or check a shared applied policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub factory_sheet: FactorySheet,
     /// OS EIRP maximum, in hundredths of dBm.
     pub max_eirp_mbm: i32,
-    /// Qualified upper bound on antenna gain plus simultaneous-chain combining
+    /// Checked upper bound on antenna gain plus simultaneous-chain combining
     /// per path, in hundredths of dB. No zero/typical antenna default is chosen.
     pub antenna_and_combining_mbm: [i32; 2],
     /// Current source-compatible conducted SAR ceilings in quarter dBm. None
-    /// means genuine service determined no additional SAR limit, not unavailable
-    /// service. Missing/unknown authority must never reach native application.
+    /// means service determined no additional SAR limit, not unavailable
+    /// service. Missing/unknown permission must never reach native application.
     pub sar_quarter_dbm: Option<[i32; 2]>,
-    /// Actual current tracking remnants, in gain steps; zero is valid only for
-    /// the real initial tracking state or genuine observed zero compensation.
+    /// Current tracking remnants, in gain steps; zero is valid only for
+    /// the real initial tracking state or observed zero compensation.
     pub remnant_cck: i8,
     pub remnant_ofdm: [i8; 2],
 }
-/// Prepared bounded source register values. No authority, current-channel,
+/// Prepared bounded source register values. No permission, current-channel,
 /// applied-power revision, firmware fallback or on-air result is represented.
 #[derive(Debug)]
 pub struct Plan {
@@ -157,7 +157,7 @@ impl Plan {
     pub fn limits(&self) -> Limits {
         self.limits
     }
-    /// Only actual two-path hardware sections are present; 5 GHz CCK and
+    /// Only two-path hardware sections are present; 5 GHz CCK and
     /// unsupported 3/4-stream slots remain absent rather than valid zero gains.
     pub fn gain(&self, path: u8, rate: u8) -> Option<u8> {
         if path >= 2
@@ -170,7 +170,7 @@ impl Plan {
     }
 }
 impl FactoryPower {
-    /// Calculate the actual two-path rate table before any hardware mutation.
+    /// Calculate the two-path rate table before any hardware mutation.
     /// Source NVM signed nibbles, section references, factory limits, OS EIRP
     /// and SAR ceilings all participate. This function does not authenticate
     /// its inputs, select a country, tune a channel or grant TX permission.
@@ -280,7 +280,7 @@ impl FactoryPower {
         Ok(out)
     }
 }
-/// Source register stores completed under the caller's genuine held authority
+/// Source register stores completed under the caller's held permission
 /// and same owner; this is not operational radio or shared TX admission proof.
 #[derive(Debug)]
 pub struct Programmed {
@@ -294,7 +294,7 @@ impl Programmed {
     pub fn phy(&self) -> &PhyInitialized {
         &self.phy
     }
-    /// Consume this source power result for a later genuine channel/authority
+    /// Consume this source power result for a later channel/permission
     /// update. Old shared admissions and queued TX must be retired separately.
     pub fn into_phy(self) -> PhyInitialized {
         self.phy
@@ -305,22 +305,22 @@ impl PhyInitialized {
     /// words. A complete plan is checked before any register access.
     ///
     /// # Safety
-    /// Same genuine retained native requester/reset/firmware/board epoch as
-    /// self, Io, Report and Plan, not matching fingerprints alone. Hold actual
-    /// native control authority followed by genuine OS/location/SAR authority
+    /// Same kept native requester/reset/firmware/board epoch as
+    /// self, Io, Report and Plan, not matching fingerprints alone. Hold
+    /// native control permission followed by OS/location/SAR permission
     /// for this exact geometry and Limits through the complete batch; no
-    /// reverse-order waits. Limits must include qualified antenna/chain gain,
+    /// reverse-order waits. Limits must include checked antenna/chain gain,
     /// current SAR and real tracking remnants, and the OS-selected factory
     /// sheet. Missing policy/board knowledge must deny this call. Quiesce TX
     /// and all competing reset/IRQ/PHY/power workers and invalidate the old
-    /// applied policy first; actually stop/enforce/drain queued air work before
+    /// applied policy first; stop/enforce/drain queued air work before
     /// changing power. All earlier PHY/MAC/HCI prerequisites remain valid.
     ///
     /// This does not tune/observe the radio channel, run required IQK/DPK or
     /// EDCCA jurisdiction programming, constrain firmware retry/fallback, prove
     /// MMIO register readback, mint an applied policy revision or admit TX.
-    /// The real owner must qualify those effects before existing shared
-    /// regulatory::Owner can permit a matching operation. Errors/unwind retain
+    /// The real owner must check those effects before existing shared
+    /// regulatory::Owner can permit a matching operation. Errors/unwind keep
     /// the real quarantined owner and all DMA/pins; masking is not stop proof.
     pub unsafe fn program_channel_power<I: Io>(
         self,
@@ -564,10 +564,10 @@ mod tests {
             0
         );
         let blank = super::super::board_power::channel_fixture(0, [255; 168]);
-        // Genuine blank calibration is retained, never invented zero data.
+        // Blank calibration is held, never invented zero data.
         assert_eq!(blank.raw_gain_calibration(), &[255; 168]);
         assert!(blank.plan_channel_power(g, limits()).is_ok());
-        // Actual negative nibble with zero base causes the source u8 base to
+        // Negative nibble with zero base causes the source u8 base to
         // wrap. Reject before all later offsets/register preparation.
         let mut broken = [255; 168];
         broken[..11].fill(0);
@@ -631,7 +631,7 @@ mod tests {
                     _ => Width::Mhz80,
                 }
             };
-            // Private raw source-helper input, deliberately not operational
+            // Private raw source-helper input, not operational
             // geometry: the oracle also probes invalid CCK/5GHz combinations.
             let g = Geometry {
                 primary: ch,

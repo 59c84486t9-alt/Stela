@@ -123,7 +123,7 @@ pub enum PeerState<'a> {
     /// Powered down by a WFI in CYC_OVRD's power-down mode; its state is
     /// lost.
     Down,
-    /// Out of reset but not running, including a retained clock/quiesce
+    /// Out of reset but not running, including a clock/quiesce
     /// pause: its state, and whether it waits in WFI (`Some(true)`) or WFE
     /// (`Some(false)`).
     Parked {
@@ -135,7 +135,7 @@ pub enum PeerState<'a> {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// Qualified retained participants, separate from the live/parked Cpu
+    /// Checked kept participants, separate from the live/parked Cpu
     /// ownership slots. An unbound inventory grants no PMGR support credit.
     pub fn processors(&self) -> &Processors {
         &self.processor_power
@@ -172,13 +172,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .map(|_settled: SettledProcessorWrite<'_>| ())
     }
 
-    /// Borrow the actual scheduler and native-dispatch owners for one complete
+    /// Borrow the scheduler and native-dispatch owners for one complete
     /// synchronous transaction. Its consuming apply cannot queue work for later.
     pub fn processor_write(&mut self) -> ProcessorWrite<'_> {
         self.processor_write_parts().1
     }
 
-    /// Split the device receiver from the actual execution owners without a
+    /// Split the device receiver from the execution owners without a
     /// move, copied snapshot, unsafe alias or a borrow of the complete Machine.
     pub(super) fn processor_write_parts(&mut self) -> (&mut D, ProcessorWrite<'_>) {
         let processors = ProcessorWrite {
@@ -222,7 +222,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.current
     }
 
-    /// Completed guest instructions across retained PE incarnations, including
+    /// Completed guest instructions across kept PE incarnations, including
     /// stopped-service terminals and powered-down CPUs. No allocation or PE
     /// switching occurs. Each CPU's internal u64 retirement counter must not
     /// wrap within one incarnation; this is a performance counter, not PMU.
@@ -868,7 +868,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 }
 
-/// Check the actual scheduler ownership before a checked participant plan can
+/// Check the scheduler ownership before a checked participant plan can
 /// mutate its inventory, the clock or any live/parked Cpu. An off PE has no
 /// invented Cpu to settle; exactly one slot must refer to the live Cpu.
 fn check_owners(
@@ -965,7 +965,7 @@ mod tests {
             let settled = processors.apply(changes).map_err(|why| {
                 DeviceError::TransferRefused(alloc::format!("processor transaction: {why:?}"))
             })?;
-            // These are actual owners, still exclusively borrowed through ACK.
+            // These are owners, still exclusively borrowed through ACK.
             assert_eq!(settled.paused(0), Some(true));
             assert_eq!(settled.paused(1), Some(true));
             assert!(settled.owners.cpu.monitor.is_none());
@@ -1816,7 +1816,7 @@ mod tests {
     /// Original J873GAP decoded ADT SHA-256
     /// 3252a3f13dc025ffa8551c7a5da6a71501f76ea6c5d38aa35390f9268a6dc378:
     /// CPU6/7 P and CPU8..11 M share physical cluster 1. Only these affinity
-    /// coordinates are qualified: MIDR=0 is an explicit synthetic fixture,
+    /// coordinates are checked: MIDR=0 is an explicit synthetic fixture,
     /// and using a modeled cluster register does not admit that register or
     /// any complete M6 hardware profile.
     #[test]

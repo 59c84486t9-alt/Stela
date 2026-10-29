@@ -63,7 +63,7 @@ fn publishes_original_t6000_amcc_and_ioa_without_invented_registers() -> Result<
     let mut tree = chosen(true)?;
     let amcc = table(0x6000, None).unwrap();
     let ioa = ioa_table(0x6000, None).unwrap();
-    // Re-publication must remove T8112-only fields, not retain a fake 7f0.
+    // Re-publication must remove T8112-only fields, not keep a fake 7f0.
     publish(&mut tree, &T8112)?;
     publish(&mut tree, amcc)?;
     publish_ioa(&mut tree, ioa)?;

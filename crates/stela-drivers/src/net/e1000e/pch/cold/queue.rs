@@ -95,7 +95,7 @@ const EEE_PCS_STATUS: u16 = 0x182e;
 const EEE_ADVERTISEMENT: u16 = 0x040e;
 const LPI_ENABLE: u16 = 0x6000;
 
-/// The actual controller owner and DMA storage remain retained after an
+/// The controller owner and DMA storage remain held after an
 /// uncertain doorbell, timeout, removal or control failure. A fresh object is
 /// not a retry mechanism; only an external real reset/recovery grants one.
 pub struct Ethernet<R: Registers + nvm::Registers, D: Delay + Clone> {
@@ -112,12 +112,12 @@ pub struct Ethernet<R: Registers + nvm::Registers, D: Delay + Clone> {
 }
 impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
     /// # Safety
-    /// `dma` grants actual coherent boot-lifetime CPU/DMA RAM reachable by the
-    /// same retained PCI requester as `controller`, using the allocator's real
+    /// `dma` grants coherent boot-lifetime CPU/DMA RAM reachable by the
+    /// same PCI requester as `controller`, using the allocator's real
     /// addressability/identity mapping contract. PCI memory decoding and bus
     /// mastering are enabled by the exclusive platform owner, with firmware,
     /// SMM and native interrupts excluded. No failed epoch may be reconstructed
-    /// without actual reset/recovery. This constructor requires those grants;
+    /// without reset/recovery. This constructor requires those grants;
     /// it neither synthesizes PCI ownership nor enables a broad probe match.
     pub unsafe fn new(
         controller: Controller<R, D>,
@@ -328,7 +328,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         self.controller.write(RAH, high)?;
         self.controller.read(super::STATUS)?;
         // PCH2 preserves RAR1..6 and uses SHRA0..3 at5438. LPT's eleven SHRA
-        // slots begin at5408 and have actual FWSM ownership limits instead.
+        // slots begin at5408 and have FWSM ownership limits instead.
         let is_lpt = self.controller.profile.is_lpt_or_newer();
         let (low, high, count) = if is_lpt {
             (
@@ -423,8 +423,8 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         self.check()?;
         let status = self.controller.read(super::STATUS)? & LINK_SUMMARY;
         // IMC masks interrupts, but ICR still latches link-status changes.
-        // Consume that actual event so same-speed reconnects cannot bypass
-        // PHY/K1 workarounds merely because the MAC summary is unchanged.
+        // Consume that event so same-speed reconnects cannot bypass
+        // PHY/K1 workarounds because the MAC summary is unchanged.
         let event = self.controller.read(super::ICR)?;
         if self.link == Some(status) && event & LINK_EVENT == 0 {
             return Ok(status & LINK_UP != 0);
@@ -616,7 +616,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
             self.controller.phy.delay.delay(100);
             self.controller.write(super::RCTL, control & !ENABLE)?;
             // Source only rechecks after TX. An unresolved RX flush is not
-            // permission to reset/power down or release the actual owner.
+            // permission to reset/power down or release the owner.
             if self.controller.spt_config_status()? & spt::FLUSH_REQUIRED != 0 {
                 return Err(Error::DescriptorFlushRequired);
             }
@@ -624,7 +624,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         Ok(())
     }
     /// Stop both packet engines and observe PCIe master drain before releasing
-    /// native resources. Any failure permanently retains the actual owner.
+    /// native resources. Any failure permanently keeps the owner.
     pub fn shutdown(&mut self) -> Result<(), Error> {
         if self.stopped {
             return Ok(());
@@ -677,7 +677,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Drop for Ethernet<R, D> {
         if !self.stopped && !self.controller.is_poisoned() {
             let _ = self.shutdown();
         }
-        // A poisoned PHY's Drop retains the actual shared function owner.
+        // A poisoned PHY's Drop keeps the shared function owner.
         // DMA RAM is independently boot-lifetime, including after uncertainty.
     }
 }
@@ -801,7 +801,7 @@ pub(super) mod tests {
     use core::{cell::RefCell, sync::atomic::AtomicUsize};
 
     struct Memory {
-        // Actual native CPU RAM backs the model's published DMA addresses.
+        // Native CPU RAM backs the model's published DMA addresses.
         // No asynchronous actor accesses it after the model is stopped/dropped.
         _ram: Vec<u128>,
         allocator: RegionAllocator,
@@ -868,7 +868,7 @@ pub(super) mod tests {
         (state, released, controller)
     }
     fn open(controller: Controller<Io, Timer>, memory: &mut Memory) -> Net {
-        // SAFETY: the actual synchronous model's same native CPU RAM grant.
+        // SAFETY: the synchronous model's same native CPU RAM grant.
         unsafe { Ethernet::new(controller, memory) }.unwrap()
     }
     fn inject(net: &mut Net, index: usize, status: u32, length: usize, fill: u8) {
@@ -983,7 +983,7 @@ pub(super) mod tests {
     }
     #[test]
     fn only_the_actual_32_mta_words_are_cleared_before_packet_initialization() {
-        // Prove the hardware model refuses every word beyond the actual MTA
+        // Prove the hardware model refuses every word beyond the MTA
         // table instead of accepting all BAR-relative addresses as registers.
         for address in (0x5280..0x5400).step_by(4) {
             let (state, _, mut io, _) = fixture();
@@ -1049,7 +1049,7 @@ pub(super) mod tests {
                 net.transmit.descriptors.read::<u32>(index * DESCRIPTOR + 8),
                 size.max(MIN_FRAME) as u32 | TX_COMMAND
             );
-            // Actual hardware DD is the only retirement evidence. Head/tail
+            // Hardware DD is the only retirement evidence. Head/tail
             // equality and a doorbell write never substitute for completion.
             net.transmit
                 .descriptors
@@ -1170,7 +1170,7 @@ pub(super) mod tests {
                 let mut net = open(controller, &mut memory);
                 match failure {
                     0 => {
-                        // update_link's STATUS/ICR reads then the actual TDT store.
+                        // update_link's STATUS/ICR reads then the TDT store.
                         let at = state.borrow().accesses + 2;
                         state.borrow_mut().fail_at = Some(at);
                         assert!(net.transmit(&[0; 60]).is_err());
@@ -1238,7 +1238,7 @@ pub(super) mod tests {
             let (state, released, controller) = setup();
             state.borrow_mut().fail_at = Some(at);
             assert!(
-                // SAFETY: the same isolated actual native-RAM model grant.
+                // SAFETY: the same isolated native-RAM model grant.
                 unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                 "lost queue fault at {at}"
             );
@@ -1394,7 +1394,7 @@ pub(super) mod tests {
             if at < configured {
                 state.borrow_mut().fail_at = Some(at);
                 assert!(
-                    // SAFETY: isolated same-function model's actual native RAM.
+                    // SAFETY: isolated same-function model's native RAM.
                     unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                     "lost LPT queue fault at{at}"
                 );
@@ -2007,7 +2007,7 @@ pub(super) mod tests {
                     if at < configured {
                         state.borrow_mut().fail_at = Some(at);
                         assert!(
-                            // SAFETY: the same isolated model's actual native RAM.
+                            // SAFETY: the same isolated model's native RAM.
                             unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                             "lost config{family:?}:{at}"
                         );
@@ -2117,7 +2117,7 @@ pub(super) mod tests {
                     m.phy.insert((1, 770, 21), 0x1234);
                     m.mac.insert(0x18, 0x5a5a0008);
                 }
-                // SAFETY: one actual source-selected host/Function/reset model grant.
+                // SAFETY: one source-selected host/Function/reset model grant.
                 let controller =
                     unsafe { Controller::new_mtp(device, io, timer, mtp::tests::host(disable)) }
                         .unwrap();
@@ -2187,7 +2187,7 @@ pub(super) mod tests {
                             m.words[63] = 0xffff;
                         }
                     }
-                    // SAFETY: actual same-host modeled identity and Function grant.
+                    // SAFETY: same-host modeled identity and Function grant.
                     let result = unsafe {
                         Controller::new_mtp(device, io, timer, mtp::tests::host(disable))
                     };
@@ -2233,7 +2233,7 @@ pub(super) mod tests {
         for device in [0x550a, 0x57b3] {
             for disable in [false, true] {
                 let (state, _, io, timer) = spt::tests::fixture_spt();
-                // SAFETY: one actual same-host model and source-selected family.
+                // SAFETY: one same-host model and source-selected family.
                 let controller =
                     unsafe { Controller::new_mtp(device, io, timer, mtp::tests::host(disable)) }
                         .unwrap();
@@ -2275,7 +2275,7 @@ pub(super) mod tests {
                             "cold{device:x}/{disable}/{at}"
                         );
                     } else {
-                        // SAFETY: fresh actual same-host source-selected model.
+                        // SAFETY: fresh same-host source-selected model.
                         let controller = unsafe {
                             Controller::new_mtp(device, io, timer, mtp::tests::host(disable))
                         }
@@ -2289,7 +2289,7 @@ pub(super) mod tests {
                         if at < configured {
                             state.borrow_mut().fail_at = Some(at);
                             assert!(
-                                // SAFETY: actual live model requester and owned coherent model RAM.
+                                // SAFETY: live model requester and owned coherent model RAM.
                                 unsafe { Ethernet::new(controller, &mut memory) }.is_err(),
                                 "queue{device:x}/{disable}/{at}"
                             );

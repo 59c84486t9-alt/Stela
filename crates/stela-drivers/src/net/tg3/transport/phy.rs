@@ -24,7 +24,7 @@ pub(super) enum Speed {
 }
 impl<R: Registers, D: Delay> Hardware<R, D> {
     /// tg3_power_down_phy's ordinary non-WoL copper branch. The caller has
-    /// stopped and drained the actual packet epoch while retaining PCI D0.
+    /// stopped and drained the packet epoch while keeping PCI D0.
     pub(in crate::net::tg3) fn power_down_packet_phy(&mut self) -> Result<(), Error> {
         self.timer_ready()?;
         if !self.stopped || self.failure.is_some() || self.cleanup_failure.is_some() {
@@ -34,7 +34,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let unmanaged = self.unmanaged();
         self.record(unmanaged)?;
         // The source's KEEP_LINK_ON_PWRDN policy forbids this operation.
-        // Observe the actual signed board word again before any PHY effect.
+        // Observe the signed board word again before any PHY effect.
         // A policy refusal has made no PHY mutation and need not quarantine
         // the already stopped/drained packet mappings.
         let configuration = self.sram(NIC_SRAM_DATA_CFG_3, None);
@@ -55,7 +55,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             }
             if bcm5761 {
                 // tg3_power_down_phy: 5761_AX must use 12.5MHz before
-                // BMCR.PDOWN. The actual stopped/drained D0 owner remains.
+                // BMCR.PDOWN. The stopped/drained D0 owner remains.
                 let clock = self.read(TG3_CPMU_LSPD_1000MB_CLK)?;
                 self.write(
                     TG3_CPMU_LSPD_1000MB_CLK,
@@ -205,7 +205,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.aux_write(MII_TG3_AUXCTL_SHDWSEL_MISCTEST, value | (1 << 10))?;
         }
         // 10/100 half/full and 1000 full duplex, no pause. Carrier uses the
-        // actual negotiated PHY result to program MAC speed and duplex.
+        // negotiated PHY result to program MAC speed and duplex.
         self.pw(ADVERTISE, 0x01e1)?;
         self.pw(CTRL1000, 0x0200)?;
         if !bcm5761 {

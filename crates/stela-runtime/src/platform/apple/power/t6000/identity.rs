@@ -1,9 +1,9 @@
-//! Retained first-die T6000 physical identity and revision inputs.
+//! First-die T6000 physical identity and revision inputs.
 //!
 //! Matching J314s LLB readers consume complete 32-bit physical words, even
 //! where their result uses only a few bits. A capture may leave any bits
 //! unknown. A declared Stela input must explicitly supply the whole input
-//! family; neither authority fills omitted words from DT or reset guesses.
+//! family; neither permission fills omitted words from DT or reset guesses.
 //! This image owns no fuse programming, bit31 lock, PMGR supply, firmware RAM
 //! cache, native trigger or retirement. Those operations cannot mutate or
 //! replace it through this read interface.
@@ -64,7 +64,7 @@ pub struct Observation {
     pub known: u32,
 }
 
-/// The caller retains evidence for its supplied input authority. Naming a
+/// The caller keeps evidence for its supplied input permission. Naming a
 /// capture here does not authenticate it or turn a live observation into a
 /// cold firmware handoff. Stela declarations describe emulated resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +153,7 @@ impl Image {
         Ok(word.value)
     }
     /// Original `2e744`: low2 selects6000/6001/6002;3 takes the fatal branch.
-    /// Requires the complete word, as does its actual physical LDR.
+    /// Requires the complete word, as does its physical LDR.
     pub fn chip(&self) -> Result<u16, Error> {
         let low = (self.raw(Register::Chip)? & 3) as u16;
         if low == 3 {
@@ -395,7 +395,7 @@ mod tests {
             assert_eq!(hex::encode(Sha256::digest(&llb[lo..hi])), digest);
         }
         let word = |offset: usize| u32::from_le_bytes(llb[offset..offset + 4].try_into().unwrap());
-        assert_eq!(word(0x212958), u32::MAX); // actual copied file input, not BSS/reset
+        assert_eq!(word(0x212958), u32::MAX); // copied file input, not BSS/reset
         for (register, offsets, load) in [
             (Register::Chip, [0x2e744, 0x2e748, 0x2e74c], 0x2e750),
             (Register::Revision, [0x2e9b8, 0x2e9bc, 0x2e9c0], 0x2e9c4),
@@ -428,7 +428,7 @@ mod tests {
             assert_eq!(register.address(), address);
             assert_eq!(word(load) & 0xffffffe0, 0xb9400000 | destination << 5);
         }
-        // Exact native decoders, including the fatal low2==3 branch and the
+        // Native decoders, including the fatal low2==3 branch and the
         // discriminator's firmware-RAM cache. No synthetic initial cache value.
         for (offset, opcode) in [
             (0x2e754, 0x12000509), // AND low2
@@ -443,9 +443,9 @@ mod tests {
             (0x2e9f4, 0x3100041f), // cached discriminator == u32::MAX
             (0x2ea10, 0x530e5d20), // UBFX23:14
             (0x2eb08, 0x32010108), // original feature OR bit31
-            (0x2eb0c, 0xb90002a8), // actual physical write
+            (0x2eb0c, 0xb90002a8), // physical write
             (0x2eb10, 0x97ffda6f), // barrier helper
-            (0x2eb14, 0xb94002a8), // actual readback, not implicit completion
+            (0x2eb14, 0xb94002a8), // readback, not implicit completion
         ] {
             assert_eq!(word(offset), opcode, "source{offset:x}");
         }

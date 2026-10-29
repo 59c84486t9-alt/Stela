@@ -1649,8 +1649,8 @@ fn mark_boot_cpu(tree: &mut DeviceTree, selected: &BootCpu) -> Result<()> {
 }
 
 /// User overlays cannot replace the selected PE, rename/reorder CPUs or
-/// change a retained source affinity. Existing fused-variant filtering is
-/// independent of this selection and retains original relative order.
+/// change a source affinity. Existing fused-variant filtering is
+/// independent of this selection and keeps original relative order.
 fn verify_boot_cpu(tree: &DeviceTree, original: &DeviceTree, selected: &BootCpu) -> Result<()> {
     let cpus = cpu_identities(tree)?;
     let source = cpu_identities(original)?;
@@ -1963,7 +1963,7 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
     // Native IOMobileFramebufferAP::allocate_carveout reads these capacities
     // (original mac13j VA 0xfffffe000ad95600..ad95638).
     // The same runtime Framebuffer supplies Video and these scalar slots;
-    // never retain the physical board's 4096x2160 capacity for another GOP.
+    // never keep the physical board's 4096x2160 capacity for another GOP.
     for profile in stela_soc_data::board::EXTERNAL_OUTPUTS
         .iter()
         .filter(|p| p.admitted)
@@ -2179,7 +2179,7 @@ mod tests {
         for optional_images in [false, true] {
             let mut regions = ordered_region_fixture(optional_images);
             validate_sptm_region_order(&regions)?;
-            // A retained manifest precedes the first constrained image. SPTM
+            // A kept manifest precedes the first constrained image. SPTM
             // constrains adjacency, not the first image's absolute address.
             for region in &mut regions {
                 region.guest_pa += 7 * PAGE;
@@ -2542,7 +2542,7 @@ mod tests {
     #[test]
     fn boot_cpu_automatic_selection_preserves_original_order_and_publishes_one_running_node()
     -> Result<()> {
-        // Names and numeric affinities deliberately disagree with DT order.
+        // Names and numeric affinities disagree with DT order.
         let original = cpu_tree(&[
             ("cpu9", 0x902, b'P'),
             ("cpu88", 0, b'E'),
@@ -2693,7 +2693,7 @@ mod tests {
     #[test]
     fn boot_cpu_source_index_does_not_become_a_prepared_runtime_index() -> Result<()> {
         let original = cpu_tree(&[("source-removed", 0, b'E'), ("retained", 0x100, b'P')]);
-        // An independently qualified earlier variant projection may retain a
+        // A checked earlier variant projection may keep a
         // subset. Selection itself never removes or renames a CPU.
         let mut prepared = cpu_tree(&[("retained", 0x100, b'P')]);
         let selected = select_boot_cpu(&prepared, &original, None)?;
@@ -2970,7 +2970,7 @@ mod tests {
         assert_eq!(names, expected);
         // The M1 to M3 hand off no core lock registers.
         assert!(manifest.core_locks.is_none());
-        // The original input manifest is retained byte for byte in the
+        // The original input manifest is held byte for byte in the
         // read-only boot run, with an exact (not page-rounded) guest length.
         let manifest_region = manifest
             .regions

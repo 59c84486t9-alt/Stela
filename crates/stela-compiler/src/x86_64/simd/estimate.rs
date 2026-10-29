@@ -125,7 +125,7 @@ fn dword_constant(code: &mut Code, vector: u8, value: u32) {
 
 fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     if !operand.kind.is_unsigned() {
-        // AH suppresses every estimate exception, including retained enables.
+        // AH suppresses every estimate exception, including kept enables.
         test_control(code, FPCR_AH);
         let suppressed = branch(code, Condition::NotZero);
         test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
@@ -213,7 +213,7 @@ fn floating_denominator(code: &mut Code, sqrt: bool) {
         dword_constant(code, CONSTANT, ESTIMATE_UNIT + 1);
         packed(code, Host::AddDword, DENOMINATOR, CONSTANT);
         // Y=(fraction_top8 & ~1)+257. Odd exponent uses A=Y;
-        // even exponent uses A=2Y, matching both exact source table branches.
+        // even exponent uses A=2Y, matching both source table branches.
         packed(code, Host::MoveAligned, TEMP, COMPACT);
         ShiftOpcode::LeftDword.emit(code, TEMP, DWORD_BITS - SIGN_BITS - ESTIMATE_FRACTION_BITS);
         ShiftOpcode::ArithmeticDword.emit(code, TEMP, DWORD_BITS - SIGN_BITS);
@@ -342,7 +342,7 @@ fn floating_estimate(code: &mut Code, operand: &Operand, target: TargetCpu) {
         packed(code, Host::MoveAligned, RESULT, SAVED);
     }
     // The domain proves every host operation finite and safe for conversion.
-    // Approximation PE is deliberately discarded; no guest status arises.
+    // Approximation PE is discarded; no guest status arises.
     if !checked {
         restore_environment(code);
     }

@@ -1,11 +1,11 @@
-//! Source-derived T6000 bridge tuning under explicitly qualified platform guards.
+//! Source-derived T6000 bridge tuning under explicitly checked platform guards.
 //! Original J314s26A434 constructor supplies chip6000, board8, revision0.
 //! These ordered masks/values describe native software's RMW operands. They
 //! establish neither physical reset values nor electrical/counter completion.
 use alloc::{collections::BTreeMap, vec::Vec};
 
 /// The immutable identity facts used by native tuning guards. Other facts
-/// remain explicit requirements until their complete source paths qualify.
+/// remain explicit requirements until their complete source paths check.
 #[derive(Debug, Clone, Copy)]
 pub struct Profile(());
 impl Profile {
@@ -41,7 +41,7 @@ pub fn check_optional_mask(optional_mask: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// One actual full32 native RMW. Its input must be a real known register
+/// One full32 native RMW. Its input must be a real known register
 /// value; `apply` does not authorize a read or supply an unknown value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tuning {

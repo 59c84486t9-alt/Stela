@@ -45,7 +45,7 @@ pub(crate) fn asix_ids() -> Vec<(u16, u16)> {
 }
 
 /// Synchronous endpoint-zero requests. Success includes the exact transferred
-/// byte count; short replies/writes are errors, never fabricated register values.
+/// byte count; short replies/writes are errors, never invented register values.
 pub trait Control {
     fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError>;
     fn delay_us(&mut self, microseconds: u64);

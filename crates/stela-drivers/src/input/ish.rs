@@ -5,9 +5,9 @@
 //! The finite profile is 8086:9d35, ordinary nonfixed HID clients and mailbox
 //! payload transport. Startup requires the requester's DMA domain, isolated or
 //! the passthrough domain, and real MSI delivery. No host DMA address or firmware is supplied.
-//! Firmware clock synchronization lacks a genuine UTC service and is explicitly
+//! Firmware clock synchronization lacks an UTC service and is explicitly
 //! unsupported. Final armed-MSI retirement remains unsupported until the common
-//! root owner implements posted-MSI completion; all original owners are retained.
+//! root owner implements posted-MSI completion; all original owners are held.
 mod descriptor;
 mod native;
 mod protocol;

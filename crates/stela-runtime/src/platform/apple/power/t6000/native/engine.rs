@@ -1,4 +1,4 @@
-//! Retained Stela-native CIO execution over the canonical T6000 SRAM.
+//! Stela-native CIO execution over the canonical T6000 SRAM.
 //!
 //! LLB471b8 binds the four CIO groups to the shared slot at28e099068.
 //! Original RCfg36/40/44/48 publish their corresponding high-bit action to
@@ -65,13 +65,13 @@ impl Error {
     }
 }
 
-/// Actual compiler finalization metadata, supplied before accepting requests.
+/// Compiler finalization metadata, supplied before accepting requests.
 /// Bytes are read from the same physically installed SRAM, never this input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Program {
-    /// First-entry authority only. Later jobs inherit their actual retained
+    /// First-entry permission only. Later jobs inherit their kept
     /// Stela port context; a capture/declaration is never replayed as a reset.
-    /// None retains unknown context until a real tag1c executes.
+    /// None keeps unknown context until a real tag1c executes.
     pub initial_control: Option<sequencer::control::Initial>,
     pub port: u8,
     pub counted_words: u32,
@@ -139,7 +139,7 @@ pub enum Progress {
     Retired(Completion),
 }
 
-/// A handle to the controller-owned job; dropping it retains the cursor and
+/// A handle to the controller-owned job; dropping it keeps the cursor and
 /// all in-flight claims. A later handle resumes that same job, never replays it.
 pub struct Engine {
     effects: Effects,
@@ -158,7 +158,7 @@ impl DerefMut for Engine {
 }
 
 impl Controller {
-    /// Bind one complete admitted CIO program family after actual publication.
+    /// Bind one complete admitted CIO program family after publication.
     /// This explicitly chooses a Stela-owned native execution policy. It does
     /// not grant captured Apple state, GPCE action semantics, or PS ownership.
     pub fn bind_cio_engine(&self, programs: Vec<Program>) -> Result<(), NativeError> {
@@ -228,7 +228,7 @@ impl Controller {
             .clone())
     }
 
-    /// Start/resume the oldest actual accepted request. The job owns its PC,
+    /// Start/resume the oldest accepted request. The job owns its PC,
     /// immutable decode image and pending effects in this same Controller.
     pub fn cio_engine(&self) -> Result<Engine, NativeError> {
         let mut state = self.0.borrow_mut();
@@ -269,7 +269,7 @@ impl Controller {
             return Err(NativeError::Engine(Error::UnsupportedRequest));
         };
         // Original activation performs both real GPCE enable stores. Unknown
-        // inputs never become ready merely because a pointer is installed.
+        // inputs never become ready because a pointer is installed.
         for address in [0x28e09906c, 0x28e099074] {
             if native.read_control(address, Width::Word)? & 1 == 0 {
                 return Err(NativeError::Engine(Error::Activation));
@@ -378,9 +378,9 @@ impl State {
     }
 }
 impl Engine {
-    /// Commit the source's high-bit CIO action through its actual controller
+    /// Commit the source's high-bit CIO action through its controller
     /// owner. Only a dispatched claim of this job can submit it. Ordinary AP
-    /// writes have no such authority. Other physical targets return false and
+    /// writes have no such permission. Other physical targets return false and
     /// must use the mount's existing checked RAM/MMIO route with typed outcomes.
     pub fn commit_controller_write(&mut self, claim: &WriteClaim) -> Result<bool, NativeError> {
         let write = claim.write();
@@ -526,7 +526,7 @@ impl Engine {
             .context = retained;
         engine.completed.push(done);
         engine.job = None;
-        // Actual accepted command consumed only after its concrete effects and
+        // Accepted command consumed only after its concrete effects and
         // finalized end retired. This is Stela engine state, not a PS snapshot.
         let word = state
             .words
@@ -571,13 +571,13 @@ mod tests {
             0x28e09c01,
             0,
             0x30,
-            0, // actual CPM disable input
+            0, // CPM disable input
             0x28e09c02,
             0,
             0x30,
             0x80000000,
-            0,            // poll actual CPM input
-            4 | (3 << 6), // three actual native cycles
+            0,            // poll CPM input
+            4 | (3 << 6), // three native cycles
             0x28e09a01,
             0,
             0xd,
@@ -682,7 +682,7 @@ mod tests {
             })
             .collect();
         if let Some((address, bytes)) = data {
-            // Actual explicit initialization, before the shared native image is
+            // Explicit initialization, before the shared native image is
             // frozen for execution. No uninitialized source bytes are supplied.
             owner
                 .native_memory()
@@ -830,7 +830,7 @@ mod tests {
             0x28e09a01,
             0,
             0xd,
-            1 << 16, // actual controller action
+            1 << 16, // controller action
             0,
         ];
         let (owner, mut bus, requests) =
@@ -910,7 +910,7 @@ mod tests {
             .unwrap();
         assert_eq!(actual.address, DESTINATION);
         // A real declared destination reservation, distinct from the canonical
-        // immutable native code/source SRAM. Commit follows its actual store.
+        // immutable native code/source SRAM. Commit follows its store.
         let mut destination = vec![0; 128];
         destination.copy_from_slice(actual.bytes());
         engine
@@ -939,12 +939,12 @@ mod tests {
     #[test]
     fn actual_mounted_control_context_changes_survive_pause_and_require_exact_route_acceptance() {
         let words = vec![
-            0x30001c, // actual source18000, fields[0,0,0,3,0]
+            0x30001c, // source18000, fields[0,0,0,3,0]
             0x28e09c01,
             0,
             0x30,
-            0,    // actual CPM disable
-            0x1c, // actual source0, independently updates context
+            0,    // CPM disable
+            0x1c, // source0, independently updates context
             0x28e09a01,
             0,
             0xd,
@@ -1122,7 +1122,7 @@ mod tests {
             .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
             .unwrap();
         // Concrete target committed its request, then the physical route lost
-        // completion authority. That error must not authorize a second write.
+        // completion permission. That error must not authorize a second write.
         bus.write(actual.address, actual.width, actual.value, &mut access)
             .unwrap();
         assert_eq!(
@@ -1165,7 +1165,7 @@ mod tests {
             0x28e09c01,
             0,
             0x30,
-            0, // actual CPM write still required
+            0, // CPM write still required
             0,
         ];
         let (owner, mut bus, _) = fixture(Some(words), true);
@@ -1412,12 +1412,12 @@ mod tests {
         let word = |bytes: &[u8], offset| {
             u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
         };
-        assert_eq!(word(&kernel, 0x2b4b0fc), 0x6a15001f); // TST actual read/mask
+        assert_eq!(word(&kernel, 0x2b4b0fc), 0x6a15001f); // TST read/mask
         assert_eq!(word(&kernel, 0x2b4b100), 0x54000500); // exit when high bit CLEAR
-        assert_eq!(word(&llb, 0x11574), 0xb8286abf); // actual zero terminator store
+        assert_eq!(word(&llb, 0x11574), 0xb8286abf); // zero terminator store
         assert_eq!(word(&llb, 0x115b8), 0x6b0802bf); // compare counted/emitted words
-        // A control instruction exists even with source control0. Its actual
-        // flag/handshake effects are deliberately not treated as a no-op.
+        // A control instruction exists even with source control0. Its
+        // flag/handshake effects are not treated as a no-op.
         assert_eq!(word(&llb, 0x107c8), 0x321e0929);
     }
 }

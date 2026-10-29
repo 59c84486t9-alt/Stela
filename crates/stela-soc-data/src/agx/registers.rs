@@ -1,4 +1,4 @@
-//! Immutable AP register-coverage requirements of qualified AGX families.
+//! Immutable AP register-coverage requirements of checked AGX families.
 use super::generation::{Family, MMU_ENABLE};
 /// The GPC registers' offsets in the family's GPC block.
 const GPC_PERFORMANCE_STATE: u64 = 0;

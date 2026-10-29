@@ -7,7 +7,7 @@ fn update_retains_outstanding_packet() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
-    // SAFETY: The current association/key epoch and native owners remain retained
+    // SAFETY: The current association/key epoch and native owners remain held
     // under fresh data guards. The frame is borrowed only for submission; its queued
     // DMA owner survives the later independent EDCA update.
     unsafe {
@@ -49,7 +49,7 @@ fn uncertain_ack_quarantines_owner() {
         match failure {
             0 => model.response.lock().unwrap().edca_status = Some(0xbad),
             1 => model.response.lock().unwrap().pause_next_index_us = 3_100_000,
-            _ => model.response.lock().unwrap().command_delta = 1, // Actual unmatched ACK.
+            _ => model.response.lock().unwrap().command_delta = 1, // Unmatched ACK.
         }
         assert!(update(&mut driver, &mut owner, None).is_err());
         assert_eq!(commands(&model), before + 1);

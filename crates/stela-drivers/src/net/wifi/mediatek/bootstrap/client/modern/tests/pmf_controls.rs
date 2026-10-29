@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Actual firmware/DMA peers with a retained simulated OS PMF service.
-//! These controls supply no physical-radio or production OS qualification.
+//! Firmware/DMA peers with a simulated OS PMF service.
+//! These controls supply no physical-radio or production OS validation.
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::client::management::{Session, Transmit};
 use crate::net::wifi::security::PacketNumber;
@@ -155,7 +155,7 @@ impl reg::OsLease for ProtectedGuard {
         self.protection.authenticated.get() && self.protection.port.get()
     }
 }
-// SAFETY: actual single-threaded model requester and retained native resources;
+// SAFETY: single-threaded model requester and kept native resources;
 // revocation obeys the hardware→OS guard order. This grants no physical access.
 unsafe impl reg::HardwarePolicy for ProtectedHardware {
     type Lease<'a> = ProtectedHardwareGuard;
@@ -171,8 +171,8 @@ unsafe impl reg::HardwarePolicy for ProtectedHardware {
         })
     }
 }
-// SAFETY: a single retained modeled OS owns this original native observation,
-// actual selected request and subsequent real current context through both phases.
+// SAFETY: a single modeled OS owns this original native observation,
+// selected request and subsequent real current context through both phases.
 unsafe impl reg::OsPolicy for ProtectedOs {
     type Lease<'a> = ProtectedGuard;
     fn acquire(&mut self, native: reg::NativeContext) -> Option<Self::Lease<'_>> {
@@ -337,7 +337,7 @@ fn observe_at(
     done[50] = 4;
     device_receive(&model.queues[&0xd4500], &done, true, 0);
     driver.poll(start + 2, &Source, &mut Policy(true)).unwrap();
-    // SAFETY: actual modeled scan terminal event and all model RX/IRQ users drained.
+    // SAFETY: modeled scan terminal event and all model RX/IRQ users drained.
     unsafe { driver.retire_scan_after_drain() }.unwrap();
     observed
 }
@@ -377,7 +377,7 @@ fn awaiting_with(
     alter(&mut join, &mut bss, &mut response_elements);
     let observed = observe(&mut driver, &model, &bss);
     let (mut owner, state, protection) = authority_pmf(observed.clone(), &join, &model);
-    // SAFETY: original actual native scan and this same retained modeled OS selection.
+    // SAFETY: original native scan and this same modeled OS selection.
     unsafe {
         driver.join_modern_pmf(
             &mut owner,
@@ -393,7 +393,7 @@ fn awaiting_with(
     }?;
     finish_tx(&model);
     // SAFETY: The original scan observation, selected request and native-memory owner
-    // stay retained. This synchronous poll reacquires the same hardware-then-OS
+    // stay held. This synchronous poll reacquires the same hardware-then-OS
     // guards after the modeled authentication TX completes.
     unsafe {
         driver.poll_pmf_authentication(
@@ -424,7 +424,7 @@ fn awaiting_with(
             .windows(selected_rsn().len())
             .any(|v| v == selected_rsn())
     );
-    // SAFETY: The original owner and backing remain retained after modeled
+    // SAFETY: The original owner and backing remain held after modeled
     // association TX completion. This synchronous poll checks the current
     // authentication ticket under both guards before releasing resources.
     unsafe {
@@ -442,8 +442,8 @@ fn awaiting_with(
     body.extend_from_slice(&response_elements);
     incoming(&model, &response(0x10, &body), None, false);
     // SAFETY: The same scan owner and native backing remain live. Response elements
-    // may be deliberately invalid; their validation occurs under current model guards
-    // before any new association authority escapes.
+    // may be invalid; their validation occurs under current model guards
+    // before any new association permission escapes.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,
@@ -465,7 +465,7 @@ fn poll(
     now: u64,
 ) -> Result<Vec<Event>, ClientError> {
     let admission = permit(owner, driver, AssociationUse::Receive);
-    // SAFETY: exact modeled owner, original context and both real model guards.
+    // SAFETY: modeled owner, original context and both real model guards.
     unsafe {
         driver.poll_pmf(
             owner,
@@ -481,7 +481,7 @@ fn configured() -> (Native, Model, ProtectedOwner, Rc<PmfState>, Rc<Protection>)
     // wpa_supplicant registers for its SA Query responses.
     driver.register_action(&[8, 1]).unwrap();
     let admission = permit(&mut owner, &driver, AssociationUse::Configure);
-    // SAFETY: original actual modeled requester and explicitly selected OS policy.
+    // SAFETY: original modeled requester and explicitly selected OS policy.
     unsafe { driver.configure_modern(&mut owner, admission, 105) }.unwrap();
     assert_eq!(driver.completed_modern_requests(), 7);
     assert_eq!(
@@ -494,7 +494,7 @@ fn configured() -> (Native, Model, ProtectedOwner, Rc<PmfState>, Rc<Protection>)
 fn attach(driver: &mut Native, owner: &mut ProtectedOwner) -> Arc<Session> {
     for (pairwise, index, material) in [(true, 0, 1), (false, 2, 0x44)] {
         let admission = permit(owner, driver, AssociationUse::Management);
-        // SAFETY: this model OS supplied its actual authenticated key exchange.
+        // SAFETY: this model OS supplied its authenticated key exchange.
         unsafe {
             driver.install_key_modern(
                 owner,
@@ -509,7 +509,7 @@ fn attach(driver: &mut Native, owner: &mut ProtectedOwner) -> Arc<Session> {
     }
     let admission = permit(owner, driver, AssociationUse::Management);
     let epoch = driver.station().association_epoch().unwrap();
-    // SAFETY: actual model queues and external deferred/IRQ/key users are drained.
+    // SAFETY: model queues and external deferred/IRQ/key users are drained.
     unsafe {
         driver.install_management_key_modern(
             owner,

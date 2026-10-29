@@ -9,8 +9,8 @@
 //! not DER's encoded-pair order. `o=oskgp`, `skt=1`, `skg=1` requests the SIK.
 //!
 //! P-256 is Stela's system-identity policy, not a recovered Apple hardware
-//! KDF or an Apple-certified identity. The genuine private scalar is derived
-//! from provisioned machine roots, retained only here and zeroized on drop.
+//! KDF or an Apple-certified identity. The private scalar is derived
+//! from provisioned machine roots, kept only here and zeroized on drop.
 //! Key rotation and other key types are separate unsupported operations.
 use super::{
     super::der::{self, Cursor},
@@ -24,7 +24,7 @@ use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
 pub(super) const PERFORM_OPERATION: u8 = 0x22;
-/// Decoding the AP format does not qualify the security semantics of creation.
+/// Decoding the AP format does not check the security semantics of creation.
 pub(super) enum Operation<'a> {
     PublicIdentity,
     CreateReference {
@@ -91,11 +91,11 @@ impl SystemKeys {
                 let identity = &self.identity.as_ref().unwrap().0;
                 let signing = p256::ecdsa::SigningKey::from(identity);
                 use p256::ecdsa::signature::Signer;
-                // Stela policy: ECDSA/SHA-256 over the actual uncompressed
+                // Stela policy: ECDSA/SHA-256 over the uncompressed
                 // reference public key, deterministic RFC6979 nonce, DER
                 // signature output. No factory certificate or fuse/firmware
                 // assertion is created. Apple server format/trust acceptance
-                // is distinct from this genuine key-to-key signature.
+                // is distinct from this key-to-key signature.
                 let signature: p256::ecdsa::Signature = signing
                     .try_sign(&reference.public())
                     .map_err(|_| "SEP SIK reference signature failed")?;
@@ -278,7 +278,7 @@ pub(super) fn operation<'a>(
 
 /// Sanitized metadata for a refused, digest-validated perform-operation.
 /// Never render the session, unknown strings, parameter values or key bytes.
-/// This parser only describes the request; it grants no operation or authority.
+/// This parser only describes the request; it grants no operation or permission.
 pub(super) fn diagnostic(variant: u32, fields: &mut Fields<'_>) -> String {
     let (mut handle, mut operation) = (None, None);
     let mut parameters = None;

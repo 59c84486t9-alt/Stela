@@ -196,7 +196,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::InvalidCodecGraph);
         }
-        // These profiles use their actual standard AFG1 processing node20.
+        // These profiles use their standard AFG1 processing node20.
         let function = self.realtek_parameter(graph.address, 1, 5)?;
         let power = self.realtek_parameter(graph.address, 1, 0x0f)?;
         let nodes = self.realtek_parameter(graph.address, 1, 4)?;
@@ -239,7 +239,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// reserved route. D0 and every written coefficient are read back. Failure
     /// after programming begins blocks typed routing/start until reinitialize.
     /// This does not enable EAPD pins, choose PinOptions or apply an OEM fixup.
-    /// ALC2xx depop/headset/revision procedures are deliberately unsupported here.
+    /// ALC2xx depop/headset/revision procedures are unsupported here.
     pub fn initialize_realtek_common(
         &mut self,
         graph: &CodecGraph,

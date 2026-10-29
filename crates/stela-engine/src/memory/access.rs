@@ -6,7 +6,7 @@ pub(super) mod system;
 use stela_compiler::TargetCpu;
 
 /// Only coherent registered RAM, not an external MMIO bus. The caller has
-/// checked x86 and holds the actual machine's Device-RAM serializer. Like the
+/// checked x86 and holds the machine's Device-RAM serializer. Like the
 /// existing staged M0 RAM recipes, keep compiler memory effects on each MFENCE.
 pub(super) fn device_ram_fence() {
     #[cfg(target_arch = "x86_64")]
@@ -52,7 +52,7 @@ fn validate_part(address: usize, bytes: usize) -> Result<(), AccessError> {
     Ok(())
 }
 
-/// Actual host read footprint, for permission and lifetime preflight.
+/// Host read footprint, for permission and lifetime preflight.
 ///
 /// The coherent WB profile allows reading the enclosing aligned quantity. It
 /// excludes byte-granular permissions, device registers and debug watchpoints.
@@ -267,7 +267,7 @@ pub(super) unsafe fn add_part(
     }
     validate_part(pointer as usize, bytes)?;
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: caller guarantees exact live WB bytes and common physical gates;
+    // SAFETY: caller guarantees live WB bytes and common physical gates;
     // LOCK XADD publishes the old+operand value as one SCA operation.
     unsafe {
         let old = match bytes {
@@ -440,7 +440,7 @@ mod tests {
             read_footprint(0, QUADWORD_BYTES, TargetCpu::AtomicLoad16),
             Ok((0, SCA_BYTES))
         );
-        // Declines occur before touching a deliberately inaccessible pointer.
+        // Declines occur before touching an inaccessible pointer.
         assert_eq!(
             // SAFETY: `pointer` addresses this test's own live storage, with `bytes` in bounds and
             // no other access.

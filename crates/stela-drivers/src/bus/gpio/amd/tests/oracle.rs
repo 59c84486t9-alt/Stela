@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Exact original-C debounce controls; independent peer still owns W1C effects.
+//! Original-C debounce controls; independent peer still owns W1C effects.
 use super::*;
 
 #[test]

@@ -23,7 +23,7 @@ impl CpuModel {
     }
 }
 // SAFETY: this is an explicit same-OS-thread flag/IRQ model. It supplies no
-// physical CPU/root/interrupt qualification; actual continuations use exclusively
+// physical CPU/root/interrupt validation; continuations use exclusively
 // owned guarded mmap stacks, and no modeled lock invokes/switches callbacks.
 unsafe impl Cpu for CpuModel {
     fn check_cpu(&self) -> Result<(), WorkError> {
@@ -70,9 +70,9 @@ struct Mapping {
     guard: Range<usize>,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: each owner exclusively retains its complete successful private mmap;
+// SAFETY: each owner exclusively keeps its complete successful private mmap;
 // both guard pages are PROT_NONE before publication. Runtime retirement precedes
-// munmap; uncertain executor drop quarantines the mapping and actual owner.
+// munmap; uncertain executor drop quarantines the mapping and owner.
 unsafe impl StackBacking for Mapping {
     fn bounds(&self) -> Range<usize> {
         self.usable.clone()
@@ -177,7 +177,7 @@ pub(crate) fn executor_with_policy<const N: usize>(
     policy: ReservationPolicy,
 ) -> (Executor<N>, Arc<CpuModel>, Arc<AtomicUsize>) {
     let cpu = CpuModel::new();
-    // SAFETY: caller retains the actual fixture state via this queue's owner;
+    // SAFETY: caller keeps the fixture state via this queue's owner;
     // all access/switches stay on the modeled constructing thread until join.
     let queue = unsafe { Queue::new(cpu.clone(), owner) }.unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));

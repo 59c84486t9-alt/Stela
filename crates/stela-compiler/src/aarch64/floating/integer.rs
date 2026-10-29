@@ -116,7 +116,7 @@ fn source_value(source: Format, bits: u64) -> Quad {
 }
 
 /// Scale the exact input, round to an integer, then saturate. Invalid conversion
-/// suppresses inexact for this lane; unpacked input-denormal status is retained.
+/// suppresses inexact for this lane; unpacked input-denormal status is held.
 pub fn to_integer(
     source: Format,
     integer: IntegerFormat,
@@ -151,7 +151,7 @@ pub fn to_integer(
     ))
 }
 
-/// Shared wider-format conversion, also retained as the Half test reference.
+/// Shared wider-format conversion, also kept as the Half test reference.
 fn to_integer_ieee(
     source: Format,
     integer: IntegerFormat,

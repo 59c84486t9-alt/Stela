@@ -23,7 +23,7 @@ pub struct SpmiPmu {
     pub alarm_monitor: u8,
     pub rtc_helper: Option<smc::RtcKeyProfile>,
     pub identity: Option<crate::pmu::Window>,
-    /// Outside-scratch log, requiring explicit cold/retained history at placement.
+    /// Outside-scratch log, requiring explicit cold/kept history at placement.
     pub fault_log: Option<crate::pmu::Window>,
     /// Outside-scratch off-to-wake source, likewise.
     pub wake_source: Option<crate::pmu::Window>,
@@ -33,7 +33,7 @@ pub struct SpmiPmu {
 
 /// A PMIC firmware mailbox (`fw-mcom-address`, `fw-host-irq-address` and, on
 /// M4 and later, `fw-mcom-int-index`), served by PMIC firmware that does not
-/// execute: its registers are unqualified and its vector is never driven,
+/// execute: its registers are unchecked and its vector is never driven,
 /// so it stays unrouted (`crate::pmu::Configuration::with_unqualified_firmware_mailbox`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FirmwareMailbox {
@@ -44,7 +44,7 @@ pub struct FirmwareMailbox {
 
 impl SpmiPmu {
     /// This PMU's register owners, with `history`'s initial bytes for each
-    /// retained-history owner.
+    /// kept-history owner.
     pub fn configuration(
         &self,
         mut history: impl FnMut(crate::pmu::Retained, crate::pmu::Window) -> Result<Vec<u8>, String>,
@@ -64,7 +64,7 @@ impl SpmiPmu {
         Ok(configuration)
     }
 
-    /// The retained-history owners whose initial bytes placement supplies.
+    /// The kept-history owners whose initial bytes placement supplies.
     pub fn retained(
         &self,
     ) -> impl Iterator<Item = (crate::pmu::Retained, crate::pmu::Window)> + use<> {
@@ -80,7 +80,7 @@ impl SpmiPmu {
 
 use crate::spmi::Configuration;
 
-/// A source-qualified SPMI controller with independent FIFO/vector geometry.
+/// A source-checked SPMI controller with independent FIFO/vector geometry.
 /// `bank_c` is `reg[2]`: Gen1's optional fault-counter view or the Gen3 and
 /// Gen4 arbiter bank.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,7 +342,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     windows.extend(scratch);
     windows.extend(pair("info-fault_shadow")?);
     // A byte-counted history (`_readFaultLog`, `_readOff2WakeSource`) is its
-    // own retained owner outside scratch, and scratch storage inside it.
+    // own owner outside scratch, and scratch storage inside it.
     let retained = |name: &str| -> Result<Option<crate::pmu::Window>, String> {
         let Some(log) = pair(name)? else {
             return Ok(None);
@@ -515,7 +515,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         rtc,
     };
     // Validate geometry only. This temporary value never becomes a PMU;
-    // actual placement separately requires explicit resource history.
+    // placement separately requires explicit resource history.
     pmu.configuration(|_, window| Ok(alloc::vec![0; usize::from(window.bytes)]))?;
     Ok(pmu)
 }

@@ -10,7 +10,7 @@ use alloc::{
 };
 use core::cell::RefCell;
 
-/// Correlates one actual namespace inspection with its reservations. This is
+/// Correlates one namespace inspection with its reservations. This is
 /// identity only: native resource ownership still comes from MemoryBroker.
 #[derive(Clone)]
 pub(crate) struct DeviceIdentity(Arc<()>);
@@ -20,7 +20,7 @@ impl DeviceIdentity {
     }
 }
 
-/// CPU-affine snapshot from the actual namespace. Inspection also checks `_STA`;
+/// CPU-affine snapshot from the namespace. Inspection also checks `_STA`;
 /// missing `_STA` means the specification default, rather than an invented grant.
 pub struct DeviceResources<'a> {
     identity: DeviceIdentity,
@@ -62,12 +62,12 @@ impl<'a> DeviceResources<'a> {
     pub fn dependencies(&self) -> &[Handle<'a>] {
         &self.dependencies
     }
-    /// Use ACPICA's real `_HID`/`_CID`/`_STA` matching and exact retained handle.
+    /// Use ACPICA's real `_HID`/`_CID`/`_STA` matching and exact handle.
     pub fn matches_hid(&self, hid: &str) -> Result<bool, Error> {
         Ok(self.handle.session.devices(hid)?.contains(&self.handle))
     }
     /// Resource mutation or namespace replacement must not silently rebind a live
-    /// mapping. Owners retain the old resource and report the changed namespace.
+    /// mapping. Owners keep the old resource and report the changed namespace.
     pub fn revalidate(&self) -> Result<(), Error> {
         let current = Self::inspect(self.handle)?;
         if current.path != self.path
@@ -89,7 +89,7 @@ struct Pin {
     ordinal: usize,
 }
 struct Backing(Arc<Pin>);
-/// Inspect the actual retained native parent when a mapping adapter validates
+/// Inspect the native parent when a mapping adapter validates
 /// resource provenance. An unrecognized backing is never treated as a grant.
 pub fn reservation_parent(resource: &MmioResource) -> Option<&MmioResource> {
     resource
@@ -97,7 +97,7 @@ pub fn reservation_parent(resource: &MmioResource) -> Option<&MmioResource> {
         .downcast_ref::<Backing>()
         .map(|backing| &backing.0.parent)
 }
-// SAFETY: the original Resource retains the actual exclusive native allocation
+// SAFETY: the original Resource keeps the exclusive native allocation
 // and epoch. The broker admits only nonoverlapping subranges. This pin keeps its
 // parent and reservation live through the final clone/mapping's drop.
 unsafe impl ResourceBacking for Backing {
@@ -109,7 +109,7 @@ unsafe impl ResourceBacking for Backing {
     }
 }
 
-/// Firmware provenance joined to an actual native reservation, never an address
+/// Firmware provenance joined to a native reservation, never an address
 /// tuple or a caller-set admission flag. Clones pin the same reservation.
 #[derive(Clone)]
 pub struct MemoryReservation {
@@ -152,8 +152,8 @@ impl MemoryReservation {
     }
 }
 
-/// Suballocator of actual exclusive native MMIO root reservations. It is
-/// intentionally CPU-affine, as native discovery and ACPICA handles are.
+/// Suballocator of exclusive native MMIO root reservations. It is
+/// CPU-affine, as native discovery and ACPICA handles are.
 pub struct MemoryBroker {
     roots: Vec<MmioResource>,
     pins: RefCell<Vec<Weak<Pin>>>,
@@ -161,14 +161,14 @@ pub struct MemoryBroker {
 impl MemoryBroker {
     /// Import the real platform's already reserved device windows after firmware
     /// handoff. The original owners, their assignment epochs and exclusions stay
-    /// retained. AML alone can never construct these root resources.
+    /// kept. AML alone can never construct these root resources.
     ///
     /// # Safety
     /// This is the sole suballocator/admitter for every supplied root; no other
     /// holder of a root alias may map or operate subranges independently. The
     /// platform must have completed ExitBootServices and excluded RAM, firmware
     /// allocations, other drivers and unowned parent assignments, as required by
-    /// ResourceBacking. It must retain firmware/OS lifecycle ownership for the
+    /// ResourceBacking. It must keep firmware/OS lifecycle ownership for the
     /// epoch. No `_OSC` call, `_DEP` result or GPIO firmware-mutex rule is inferred.
     pub unsafe fn new(roots: Vec<MmioResource>) -> Result<Self, Error> {
         for (at, root) in roots.iter().enumerate() {
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn actual_crs_subpage_reservation_pins_whole_owned_pages_through_last_mapping_resource() {
         let _serial = TEST_SERIAL.lock().unwrap();
-        // SAFETY: actual OSL provider and singleton remain test-serialized.
+        // SAFETY: OSL provider and singleton remain test-serialized.
         let session =
             unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::InterpreterOnly) }
                 .unwrap();
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn crs_never_grants_unreserved_neighbor_pages_and_unknown_ordinals_refuse() {
         let _serial = TEST_SERIAL.lock().unwrap();
-        // SAFETY: actual provider and singleton remain serialized by TEST_SERIAL.
+        // SAFETY: provider and singleton remain serialized by TEST_SERIAL.
         let session =
             unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::InterpreterOnly) }
                 .unwrap();

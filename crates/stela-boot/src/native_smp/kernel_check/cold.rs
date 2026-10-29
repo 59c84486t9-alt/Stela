@@ -1,4 +1,4 @@
-//! Actual cold checked entry and consuming device reads on one physical BSP.
+//! Cold checked entry and consuming device reads on one physical BSP.
 //! No ARM warmup/legacy V1 instruction runs before canonical conversion.
 use super::*;
 use stela_engine::machine::engine::{
@@ -113,11 +113,11 @@ impl Devices for Device {
         {
             return Err(DeviceError::NoDevice);
         }
-        // Exact native scalar observation under the same all-writer guard,
-        // before the deliberately failed final board settlement poisons it.
+        // Native scalar observation under the same all-writer guard,
+        // before the failed final board settlement poisons it.
         let mut bytes = [0; 8];
-        // SAFETY: private output, actual canonical RAM, all frames held and no
-        // external producer. This read grants no new writer/device authority.
+        // SAFETY: private output, canonical RAM, all frames held and no
+        // external producer. This read grants no new writer/device permission.
         unsafe { self.ram.read_physical(source::DATA, &mut bytes) }
             .map_err(|_| DeviceError::TransferRefused("cold RAM observation refused".into()))?;
         self.observed_ram = Some(u64::from_le_bytes(bytes));
@@ -169,7 +169,7 @@ pub(super) unsafe fn check(
     // reaches it.
     let ram = unsafe { super::super::canonical::reserve(handoff, &[range]) }?;
     // SAFETY: before any frame, guest entry or other publisher; this exact
-    // registered allocation is retained by the following Machine.
+    // registered allocation is held by the following Machine.
     unsafe { tree::check(&ram) }?;
     let mut words = Vec::new();
     source::constant(&mut words, 0, VALUE);
@@ -188,7 +188,7 @@ pub(super) unsafe fn check(
     let done = source::CODE + words.len() as u64 * 4;
     words.push(BRANCH_SELF);
     let code: Vec<_> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
-    // SAFETY: before first guest entry, actual fixture owns the whole RAM.
+    // SAFETY: before first guest entry, fixture owns the whole RAM.
     unsafe { ram.publish_physical(source::CODE, &code) }
         .map_err(|_| "cold source publication refused")?;
     let mut cpu = Cpu::of(Chip::AppleM1, source::CODE, Pstate::reset(2));
@@ -203,7 +203,7 @@ pub(super) unsafe fn check(
         reads: 0,
         observed_ram: None,
     };
-    // SAFETY: true one-PE diagnostic interface and same actual BSP allocation.
+    // SAFETY: true one-PE diagnostic interface and same BSP allocation.
     // All bytes/providers are closed and synchronous; no original guest/DMA.
     let mut machine = unsafe {
         super::super::canonical::prepare(super::super::canonical::Preparation {
@@ -229,7 +229,7 @@ pub(super) unsafe fn check(
         source::CODE
     ));
     // SAFETY: same real one-BSP mount adapter, closed providers and source
-    // identity. Its consumed terminal error must retain the final read prefix.
+    // identity. Its consumed terminal error must keep the final read prefix.
     let stopped = unsafe { super::super::canonical::run_slice(&mut machine, 16) };
     if !matches!(stopped, Stop::Unsupported(_)) || machine.devices.reads != 3 {
         crate::output::arguments(format_args!(

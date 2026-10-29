@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-3-Clause
-//! Original ACP mapping and actual retained SoundWire sublink grants.
+//! Original ACP mapping and kept SoundWire sublink grants.
 use super::{IoError, Manager, Registers};
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
 
@@ -11,10 +11,10 @@ pub struct NativeRegisters<P> {
 }
 impl<P: 'static> NativeRegisters<P> {
     /// # Safety
-    /// `platform` is the actual original ACP parent/sublink grant. It retains
+    /// `platform` is the original ACP parent/sublink grant. It keeps
     /// the original device/mapping reservation, active initialized frame/link
     /// clocks, pins, reset/power and firmware/IRQ/work/sibling exclusion for
-    /// this observed manager. Leaking it must retain every real resource.
+    /// this observed manager. Leaking it must keep every real resource.
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,
@@ -40,16 +40,16 @@ impl<P: 'static> NativeRegisters<P> {
     /// # Safety
     /// Original command owner released and every parent/sibling stream, DMA,
     /// IRQ, wake/work and posted access is stopped and drained. No pointer may
-    /// survive successful retirement. Failed unmap retains remaining owners.
+    /// survive successful retirement. Failed unmap keeps remaining owners.
     pub unsafe fn retire(mut self) -> Result<P, Self> {
-        // SAFETY: caller retains/proves all original users' full retirement.
+        // SAFETY: caller keeps/proves all original users' full retirement.
         if unsafe { self.mapping.retire() }.is_err() {
             return Err(self);
         }
         Ok(self.platform)
     }
 }
-// SAFETY: claim retains original manager grants and bounded aligned UC memory;
+// SAFETY: claim keeps original manager grants and bounded aligned UC memory;
 // checked address formation and volatile accesses preserve exact DWORD width.
 unsafe impl<P: 'static> Registers for NativeRegisters<P> {
     fn manager(&self) -> Manager {

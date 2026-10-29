@@ -19,7 +19,7 @@
 //! that is not waiting for one, an answer nobody waits for, a payload
 //! outside its buffer, a length that disagrees with its header) refuses by
 //! name rather than being repaired.
-//! Accepted calls and taken callbacks are retained native owners until their
+//! Accepted calls and taken callbacks are held native owners until their
 //! entire transfer commits. A DMA retry never re-runs a method, takes another
 //! callback or consumes a continuation before its reply read succeeds. An
 //! external reply wait owns a stream but is not runnable DMA. Unsafe endpoint
@@ -426,7 +426,7 @@ impl<S: Service> Link<S> {
         Ok(())
     }
 
-    /// Validate and publish a retained native result. All fallible checks
+    /// Validate and publish a native result. All fallible checks
     /// and DMA precede stream-stack changes and the corresponding mailbox word.
     fn commit_pending(
         &mut self,

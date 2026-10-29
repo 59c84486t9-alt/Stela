@@ -53,7 +53,7 @@ fn round_result(
     tiny: bool,
     overflow: bool,
 ) -> Outcome {
-    // Widen the already-rounded representation exactly; retain the original
+    // Widen the already-rounded representation exactly; keep the original
     // BF operation's status. The shared output policy then uses Single's sign
     // position for both normal results and flushed zeros.
     let widened = StatusAnd {

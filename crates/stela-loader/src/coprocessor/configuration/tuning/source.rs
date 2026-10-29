@@ -9,7 +9,7 @@ use stela_formats::sha256;
 const GROUP_BYTES: usize = 0x38;
 const REVISION_BYTES: usize = 0x58;
 
-/// The actual native provider determines kind and group coordinates. The bank
+/// The native provider determines kind and group coordinates. The bank
 /// contains bounded source pointers, never live pointers into released UEFI RAM.
 pub struct Input {
     pub image_base: u64,
@@ -101,10 +101,10 @@ fn span<'a>(source: &'a [u8], raw: &[u8], at: usize, base: u64) -> Result<(Optio
 }
 
 impl Table {
-    /// Native 0x6eb8 selects the first row whose revision is <= actual revision
+    /// Native 0x6eb8 selects the first row whose revision is <= revision
     /// in source order. 0x1136b0 traverses narrow/wide tables to a low 27-bit all-one
     /// sentinel, strips flag bits and optionally filters signed offsets.
-    /// Hashes establish source integrity, not hardware/provider selection authority.
+    /// Hashes establish source integrity, not hardware/provider selection permission.
     /// No source identity, hardware ID or table contents select Rust behavior.
     pub fn select(source: &[u8], input: Input, width: Width) -> Result<Option<Self>> {
         input.source_provenance.validate()?;

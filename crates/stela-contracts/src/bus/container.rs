@@ -2,8 +2,8 @@
 use super::{Bus, DeviceId, MapError};
 use alloc::vec::Vec;
 
-/// An explicit existing subview. It retains no storage and authorizes no MMIO
-/// effects. The planner rechecks its actual owner and affine offsets each time.
+/// An explicit existing subview. It keeps no storage and authorizes no MMIO
+/// effects. The planner rechecks its owner and affine offsets each time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedView {
     device: DeviceId,
@@ -15,7 +15,7 @@ pub struct SharedView {
 impl Bus {
     /// Validate a complete already-owned view, including every byte and its
     /// device offset. Neither endpoint probes nor a matching device ID alone
-    /// qualify a subview. Adjacent bindings must preserve one affine mapping.
+    /// check a subview. Adjacent bindings must preserve one affine mapping.
     pub fn shared_view(
         &self,
         device: DeviceId,
@@ -61,7 +61,7 @@ impl Bus {
         })
     }
 
-    /// Coalesce physical aliases and leave complete actual child routes intact.
+    /// Coalesce physical aliases and leave complete child routes intact.
     /// Offsets in the returned bindings are physical addresses. Planning is
     /// read-only; callers install the complete result in one transaction.
     pub fn container_bindings(
@@ -73,7 +73,7 @@ impl Bus {
     }
 
     /// Partial intersections additionally require explicit, completely validated
-    /// shared views. These describe physical aliases of actual owners, never a
+    /// shared views. These describe physical aliases of owners, never a
     /// second model, storage allocation or relaxed gap/overlap admission.
     pub fn container_bindings_with_shared(
         &self,
@@ -184,7 +184,7 @@ impl Bus {
             })
     }
 
-    /// A diagnostic names the actual retained owner without accessing it.
+    /// A diagnostic names the owner without accessing it.
     pub fn device_name(&self, id: DeviceId) -> Option<&'static str> {
         self.devices.get(id.0).map(|device| device.name())
     }
@@ -365,7 +365,7 @@ mod tests {
         let view = bus.shared_view(id, 0x1400, 0x400, 0x440).unwrap();
         for (views, shared) in [
             (vec![(0x1400, 0x800)], vec![view]), // incomplete cut
-            (vec![(0x1400, 0x200)], vec![view]), // unused authority outside declared view
+            (vec![(0x1400, 0x200)], vec![view]), // unused permission outside declared view
             (vec![(0x1400, 0x400)], vec![view, view]),
             (vec![(0x1400, 0x400), (u64::MAX, 2)], vec![view]),
         ] {

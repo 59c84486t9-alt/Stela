@@ -106,7 +106,7 @@ impl Trace {
         })
     }
 
-    /// Append an actual observation. `pc` names the producer's native code,
+    /// Append an observation. `pc` names the producer's native code,
     /// not an invented guest ARM callsite; `tag` identifies that producer's
     /// event. Counts share the architectural counter's origin and frequency.
     /// Capacity exhaustion and a regressing clock leave the trace unchanged.

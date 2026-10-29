@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Repeated actual unpublished lifetimes, not manufactured cache-return tokens.
+//! Repeated unpublished lifetimes, not manufactured cache-return tokens.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,7 +113,7 @@ fn unpublished_retry_reuses_one_resource_set_after_actual_disable_and_physical_r
             observed: observed.clone(),
         });
         for retry in 1..=96 {
-            // Actual EP0 DMA dirties control storage and advances its producer.
+            // EP0 DMA dirties control storage and advances its producer.
             assert_eq!(
                 c.device(old)
                     .unwrap()
@@ -137,7 +137,7 @@ fn unpublished_retry_reuses_one_resource_set_after_actual_disable_and_physical_r
                 "Disable is not physical current retirement"
             );
             // Poison every byte of the exclusively retired allocation, proving
-            // actual reuse clears more than the context fields it overwrites.
+            // reuse clears more than the context fields it overwrites.
             copy(original.output, &vec![0xa5; 32 * context]);
             copy(original.input, &vec![0xa5; 33 * context]);
             copy(original.control, &vec![0xa5; CONTROL_BYTES]);
@@ -188,7 +188,7 @@ impl Registers for HaltControl {
         self.inner.write32(offset, value);
         if offset == 0x1000 + 4 * usize::from(self.slot) && value == 1 {
             // The peer has consumed the real Setup/Data/Status TD and written
-            // its event. Give that actual transfer a HALTED/STALL outcome.
+            // its event. Give that transfer a HALTED/STALL outcome.
             self.hardware
                 .borrow_mut()
                 .stall_completed_control(self.slot);

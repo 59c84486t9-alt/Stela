@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Copyright (C) 2020-2023 MediaTek Inc.
 // Channel geometry/policy follows Linux cfg80211/mac80211; see THIRD_PARTY.md.
-//! Concrete policy owner for the actual retained MT7925 controller. The normal
+//! Concrete policy owner for the MT7925 controller. The normal
 //! OS/setup input is a pinned database and explicit country/environment. This
 //! wrapper owns the only client and exposes no raw mutable escape. Every method
-//! serializes policy validation with actual publication; revocation performs
-//! real cancel/remove/disable work and retains all resources through drain.
+//! serializes policy validation with publication; revocation performs
+//! real cancel/remove/disable work and keeps all resources through drain.
 
 use super::*;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -69,7 +69,7 @@ struct Programmed {
 struct Snapshot {
     context: reg::NativeContext,
     channels: Vec<Programmed>,
-    // All actual source power rows include wide/center-channel indices not
+    // All source power rows include wide/center-channel indices not
     // present in the domain's enabled20MHz channel list.
     powers: Vec<(Channel, i8)>,
 }
@@ -112,8 +112,8 @@ struct Check<'a> {
 }
 
 /// Fully owning, source-programmed single-interface client. The underlying
-/// Controller/Execution retains board/SAR/CLC inputs under their existing native
-/// bootstrap contract. The selected country must match its actual programmed
+/// Controller/Execution keeps board/SAR/CLC inputs under their existing native
+/// bootstrap contract. The selected country must match its programmed
 /// domain; a new country requires stop/drain and a new programmed attachment.
 pub struct ManagedClient<I: BarIo, Q: QueueIo, C: 'static> {
     client: Client<I, Q, C>,
@@ -302,7 +302,7 @@ impl Snapshot {
         };
         let start = def.center1_mhz.checked_sub(bw / 2)?;
         let end = def.center1_mhz.checked_add(bw / 2)?;
-        // Include every actual programmed primary/secondary/center SKU that
+        // Include every programmed primary/secondary/center SKU that
         // firmware can select within this footprint. No guessed mapping of a
         // firmware wide-rate slot can bypass the most restrictive rule. The
         // 10MHz center grid excludes overlapping neighboring 2GHz 20MHz channels
@@ -422,9 +422,9 @@ impl reg::HardwareLease for HardwareGuard<'_> {
     }
 }
 // SAFETY: private provider exists only inside the exclusive ManagedClient. Its
-// immutable snapshot comes from that exact retained completed Execution. No raw
+// immutable snapshot comes from that exact completed Execution. No raw
 // controller/policy mutation escapes. Native operations/revocation take &mut
-// that same owner, and its client retains all physical resources through drain.
+// that same owner, and its client keeps all physical resources through drain.
 unsafe impl reg::HardwarePolicy for Hardware {
     type Lease<'a> = HardwareGuard<'a>;
     fn acquire(&mut self) -> Option<Self::Lease<'_>> {
@@ -544,7 +544,7 @@ impl reg::OsLease for OsGuard<'_> {
                 })
     }
 }
-// SAFETY: selected source bytes/country/environment are immutable and retained
+// SAFETY: selected source bytes/country/environment are immutable and kept
 // privately by the same exclusive live owner. All native publications and the
 // real stop/drain path serialize on its &mut borrow; country cannot be replaced
 // underneath autonomous firmware work. Context is minted only for this owner.
@@ -614,7 +614,7 @@ impl station::RegulatoryPolicy for Check<'_> {
     }
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
-    /// Consume the actual exclusive native client; verify selected source
+    /// Consume the exclusive native client; verify selected source
     /// policy against its completed source programming before accepting work.
     // Preserve the original owner even for allocation failure: boxing this
     // error would itself require an allocation while reporting NoMemory.
@@ -734,7 +734,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         };
         let events = match self.client.phase() {
             Phase::Joining if self.protected() => {
-                // SAFETY: authority and client are private disjoint fields of
+                // SAFETY: permission and client are private disjoint fields of
                 // this same exclusive owning attachment.
                 unsafe {
                     self.client.poll_pmf_authentication(
@@ -844,7 +844,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         let beacon = self.native_beacon(handle)?;
         self.peer = Some(join.channel);
         self.protection.set(true, false);
-        // SAFETY: authority and client are private disjoint fields of this
+        // SAFETY: permission and client are private disjoint fields of this
         // same exclusive owning attachment, and the OS selected this network.
         unsafe {
             self.client.join_modern_pmf(
@@ -907,7 +907,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 reg::AssociationUse::Configure,
             )
             .map_err(PolicyError::Regulatory)?;
-        // SAFETY: authority and client are private disjoint fields of this same
+        // SAFETY: permission and client are private disjoint fields of this same
         // exclusive owning attachment. No controller/policy mutator escapes.
         unsafe {
             self.client
@@ -1064,7 +1064,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
     /// Consume the latest native current-peer observation using this owner's
-    /// actual immutable country rule and same association publication authority.
+    /// immutable country rule and same association publication permission.
     pub fn update_edca(&mut self) -> Result<(), PolicyError> {
         self.live()?;
         let context = self
@@ -1090,7 +1090,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 reg::AssociationUse::Management,
             )
             .map_err(PolicyError::Regulatory)?;
-        // SAFETY: private client, programmed country and authority belong to
+        // SAFETY: private client, programmed country and permission belong to
         // this same exclusive attachment and serialize all native publication.
         unsafe {
             self.client
@@ -1128,7 +1128,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 reg::AssociationUse::Management,
             )
             .map_err(PolicyError::Regulatory)?;
-        // SAFETY: same exclusive privately retained controller and authority.
+        // SAFETY: same exclusive privately kept controller and permission.
         unsafe {
             self.client.install_key_modern(
                 &mut self.authority,
@@ -1173,7 +1173,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 reg::AssociationUse::Management,
             )
             .map_err(PolicyError::Regulatory)?;
-        // SAFETY: same exclusive privately retained controller and authority;
+        // SAFETY: same exclusive privately kept controller and permission;
         // the OS installed this association's keys after its handshake.
         unsafe {
             self.client
@@ -1237,7 +1237,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             revoked: false,
             peer: self.peer,
         };
-        // SAFETY: same exclusive privately retained controller and authority.
+        // SAFETY: same exclusive privately kept controller and permission.
         unsafe {
             self.client.transmit_modern(
                 &mut self.authority,
@@ -1304,7 +1304,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             let _ = if self.protected()
                 && self.client.station().phase() != station::Phase::ExternalAuthenticating
             {
-                // SAFETY: authority and client are private disjoint fields of
+                // SAFETY: permission and client are private disjoint fields of
                 // this same exclusive owning attachment.
                 unsafe {
                     self.client.transmit_join_deauthentication_pmf(
@@ -1342,8 +1342,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 // A frame that cannot be built or sent, like a failed
                 // `ieee80211_tx_skb`, does not hold up the departure; an
                 // uncertain submission quarantines the client.
-                // SAFETY: same exclusive privately retained controller and
-                // authority.
+                // SAFETY: same exclusive privately kept controller and
+                // permission.
                 let _ = unsafe {
                     self.client.transmit_deauthentication(
                         &mut self.authority,
@@ -1361,9 +1361,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         // WLAN_REASON_DISASSOC_DUE_TO_INACTIVITY
         self.deauthenticate(4, source)
     }
-    /// Deny new work before initiating actual cancel/remove/disable commands.
+    /// Deny new work before initiating cancel/remove/disable commands.
     /// This return never claims completed retirement. Continue polling/draining
-    /// the retained owner; no country replacement or raw mutator is exposed.
+    /// the owner; no country replacement or raw mutator is exposed.
     pub fn revoke(&mut self) -> Result<(), PolicyError> {
         self.revoked = true;
         self.observed.clear();
@@ -1381,7 +1381,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
     /// # Safety
-    /// The actual scan radio restoration and DMA/IRQ/late notifications meet
+    /// The scan radio restoration and DMA/IRQ/late notifications meet
     /// Client::retire_scan_after_drain, independently of its terminal event.
     pub unsafe fn retire_scan_after_drain(&mut self) -> Result<scan::Outcome, PolicyError> {
         // SAFETY: caller establishes the unchanged native scan fence contract.
@@ -1393,7 +1393,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         Ok(result)
     }
     /// # Safety
-    /// All actual peer/key/radio/DMA/IRQ/late users meet the native peer fence.
+    /// All peer/key/radio/DMA/IRQ/late users meet the native peer fence.
     pub unsafe fn retire_peer_after_drain(&mut self) -> Result<(), PolicyError> {
         // SAFETY: caller establishes the unchanged native peer fence contract.
         unsafe { self.client.retire_peer_after_drain() }.map_err(PolicyError::Client)?;
@@ -1470,7 +1470,7 @@ mod tests {
                 })
             },
         );
-        // SAFETY: actual modeled completed bootstrap, source policy and owner.
+        // SAFETY: modeled completed bootstrap, source policy and owner.
         unsafe { f.controller.initialize_mac() }.unwrap();
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
@@ -1530,7 +1530,7 @@ mod tests {
         let (client, model) = setup();
         let mut driver = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
         let count = model.response.lock().unwrap().client_commands.len();
-        // This actual programmed domain has NO_IR. A normal source country
+        // This programmed domain has NO_IR. A normal source country
         // does not widen it into active-scan or autonomous transmit permission.
         assert!(
             driver
@@ -1563,7 +1563,7 @@ mod tests {
         done(&model);
         driver.poll(2, &Source).unwrap();
         assert_eq!(driver.phase(), Phase::ScanCompleted);
-        // SAFETY: actual modeled terminal/notifications/DMA drained.
+        // SAFETY: modeled terminal/notifications/DMA drained.
         unsafe { driver.retire_scan_after_drain() }.unwrap();
         assert_eq!(driver.phase(), Phase::ControllerDrain);
         assert_eq!(model.drops.load(Ordering::Relaxed), 0);
@@ -1713,7 +1713,7 @@ mod tests {
             .unwrap()
             .select(*b"US")
             .unwrap();
-        // Actual primary36/center rows20dBm; secondary40/44/48 rows10dBm.
+        // Primary36/center rows20dBm; secondary40/44/48 rows10dBm.
         // Each enabled20MHz channel fits its own rule. EHT80 must still not
         // enable those20dBm wide/primary rows across the10dBm secondary rule.
         let (mut driver, model) = awaiting(client, model, country);
@@ -2071,7 +2071,7 @@ mod tests {
         drop(corrected);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
         let (client, model) = setup();
-        // Actual SKU -1.5dBm fits zero dBm but not a hypothetical copied
+        // SKU -1.5dBm fits zero dBm but not a hypothetical copied
         // high-power value: directly verify every real used slot, not padding.
         assert_eq!(
             sku_max(

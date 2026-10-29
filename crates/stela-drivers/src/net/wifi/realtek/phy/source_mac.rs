@@ -19,23 +19,23 @@ impl Initialized {
         self.rx_filter_map1
     }
 }
-/// Execute the actual source post-download FIFO, chip protocol initialization,
+/// Execute the source post-download FIFO, chip protocol initialization,
 /// RX PHY-status/driver-info configuration and PCI cut-dependent interface bit.
 ///
 /// # Safety
-/// Same genuine retained native requester/reset/firmware epoch and Report/Io,
-/// not matching fingerprints alone. Actual firmware download/ready and full
+/// Same kept native requester/reset/firmware epoch and Report/Io,
+/// not matching fingerprints alone. Firmware download/ready and full
 /// native HCI descriptor/index/domain setup with all live rings/pins completed;
-/// all FIFO::configure safety requirements hold. Retain full BAR/claims/DMA
+/// all FIFO::configure safety requirements hold. Keep full BAR/claims/DMA
 /// pins/native calibrated clock. This runs once before source PHY tables;
 /// competing reset/IRQ/PHY/RF/FIFO/firmware workers and operational RX/TX are
-/// genuinely stopped. Hold a real emission gate independent of TXPAUSE/CR/RCR
-/// and autonomous ACK/beacon/retry controls modified here, e.g. the genuinely
+/// stopped. Hold a real emission gate independent of TXPAUSE/CR/RCR
+/// and autonomous ACK/beacon/retry controls modified here, e.g. the
 /// disabled prior PHY/RF domain. Numeric policy or IRQ masking is not a gate.
-/// Maintain that gate until real channel/power/RFK/EDCCA, actual retry/fallback
-/// restrictions and genuine OS policy are qualified. Source TXPAUSE=0 and
+/// Maintain that gate until real channel/power/RFK/EDCCA, retry/fallback
+/// restrictions and OS policy are checked. Source TXPAUSE=0 and
 /// beacon/filter/response setup confer no permission or DMA-stop proof.
-/// Uncertainty/unwind retains the quarantined actual owner. No boot/control
+/// Uncertainty/unwind keeps the quarantined owner. No boot/control
 /// owner, policy service or IRQ framework is created by this function.
 pub unsafe fn initialize<I: Io>(io: &mut I, report: &Report) -> Result<Initialized, Error> {
     let profile = io.profile();
@@ -49,7 +49,7 @@ pub unsafe fn initialize<I: Io>(io: &mut I, report: &Report) -> Result<Initializ
     if cap.rf_phys != 2 || cap.rf_paths != 2 {
         return Err(Error::UnsupportedRfLayout);
     }
-    // SAFETY: caller supplies the actual retained native HCI/rings/domain and
+    // SAFETY: caller supplies the native HCI/rings/domain and
     // stopped firmware/IRQ workers, not an empty descriptor-base substitute.
     let fifo = unsafe { fifo::configure(io) }.map_err(Error::Fifo)?;
     let mut a = Attempt {
@@ -77,7 +77,7 @@ fn update32<I: Io>(a: &mut Attempt<'_, I>, r: u32, set: u32, clear: u32) -> Resu
     Ok(())
 }
 /// Exact chip MAC body followed by source driver-info and PCI interface phases.
-/// The genuine prior FIFO/HCI ordering is established by initialize, not here.
+/// The prior FIFO/HCI ordering is established by initialize, not here.
 pub(super) fn protocol<I: Io>(a: &mut Attempt<'_, I>) -> Result<u16, Error> {
     macro_rules! w8 {
         ($r:expr,$v:expr) => {
@@ -232,7 +232,7 @@ pub(super) fn protocol<I: Io>(a: &mut Attempt<'_, I>) -> Result<u16, Error> {
     );
     update8(a, REG_SND_PTCL_CTRL, BIT_DIS_CHK_VHTSIGB_CRC, 0)?;
     w32!(REG_INT_MIG, WLAN_MAC_INT_MIG_CFG);
-    // Actual 3081 chip driver-info phase after protocol, before interface setup.
+    // 3081 chip driver-info phase after protocol, before interface setup.
     w8!(REG_RX_DRVINFO_SZ, 4);
     let old = a.io.read8(REG_TRXFF_BNDY + 1)?;
     w8!(REG_TRXFF_BNDY + 1, (old & 0xf0) | 0xf);

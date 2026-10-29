@@ -74,7 +74,7 @@ impl Slot {
         let sequence = self.sequence.load(SeqCst);
         let Some(next) = sequence.checked_add(2).filter(|_| sequence & 1 == 0) else {
             // Never wrap and make a newer copy appear to have an old sequence.
-            // Retain the last observation, which remains explicitly stale.
+            // Keep the last observation, which remains explicitly stale.
             return;
         };
         // Do not wait if an accidental duplicate attachment also publishes.

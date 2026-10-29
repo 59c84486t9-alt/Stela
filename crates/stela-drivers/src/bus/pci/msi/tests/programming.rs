@@ -16,7 +16,7 @@ fn programming_order_and_register_widths() {
                 MESSAGE
             };
             // SAFETY: this message belongs to the synthetic fixture route; its exact
-            // RAM config/root owners remain retained and no source is active.
+            // RAM config/root owners remain held and no source is active.
             unsafe { helper.program(message) }.unwrap();
             {
                 let m = model.lock().unwrap();
@@ -51,7 +51,7 @@ fn programming_order_and_register_widths() {
                     assert_eq!(m.get(if wide { 0x60 } else { 0x5c }, 4), 0xa5a5_0003);
                 }
             }
-            // SAFETY: programming retained the synthetic route and original RAM
+            // SAFETY: programming kept the synthetic route and original RAM
             // config/root guards. No physical callback or device source exists.
             unsafe { helper.unmask() }.unwrap();
             {
@@ -62,7 +62,7 @@ fn programming_order_and_register_widths() {
                 }
             }
             helper.mask().unwrap();
-            // SAFETY: Reversible masking kept the same programmed route and retained
+            // SAFETY: Reversible masking kept the same programmed route and kept
             // owners; this RAM model has no source or callback to race re-enabling.
             unsafe { helper.unmask() }.unwrap();
             helper.disable().unwrap();
@@ -89,7 +89,7 @@ fn mask_bitmap_preserves_other_vectors() {
     // the synthetic fixture route and no source is active.
     unsafe { helper.program(MESSAGE) }.unwrap();
     assert_eq!(model.lock().unwrap().get(0x60, 4), u32::MAX);
-    // SAFETY: The programmed fixture route and owners remain retained; unmask only
+    // SAFETY: The programmed fixture route and owners remain held; unmask only
     // updates the mutex-protected modeled vector-zero bit.
     unsafe { helper.unmask() }.unwrap();
     assert_eq!(model.lock().unwrap().get(0x60, 4), !1u32);
@@ -105,7 +105,7 @@ fn mask_bitmap_preserves_other_vectors() {
 fn message_and_authorization_preflight() {
     let (mut helper, model) = attach(fixture(false, false));
     assert_eq!(
-        // SAFETY: The live fixture retains its route/config owners but has no programmed
+        // SAFETY: The live fixture keeps its route/config owners but has no programmed
         // message; this negative call must fail without enabling delivery.
         unsafe { helper.unmask() },
         Err(MsiError::NotProgrammed)

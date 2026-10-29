@@ -534,7 +534,7 @@ fn packed_chunk(code: &mut Code, conversion: Conversion, target: TargetCpu) {
     }
 }
 
-/// Caller retains instruction availability and the streaming entry guard.
+/// Caller keeps instruction availability and the streaming entry guard.
 /// Unsupported forms leave `code` unchanged. No guest state is changed
 /// until numerical::finish, including when source aliases destination.
 pub(in crate::x86_64) fn emit(

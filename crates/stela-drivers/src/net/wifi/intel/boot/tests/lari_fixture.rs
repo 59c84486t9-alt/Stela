@@ -94,8 +94,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 6 + i as u16,
                 &command_packet(id, 3 + i as u16, &[]),
             );
-            // SAFETY: Each prefix response completed synchronously in that retained domain;
-            // cold and Source retain all mapped RAM through reclaim and next publication.
+            // SAFETY: Each prefix response completed synchronously in that domain;
+            // cold and Source keep all mapped RAM through reclaim and next publication.
             unsafe { cold.advance(&source) }.unwrap();
         }
         // SAFETY: bios is the original modeled service returned by refusal, with no owner
@@ -127,7 +127,7 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 6
             }
         );
-        assert_eq!(lari.platform_reads().len(), 3); // actual GLAI, GeneralCfg, WBEM
+        assert_eq!(lari.platform_reads().len(), 3); // GLAI, GeneralCfg, WBEM
         let mut copied = lari.plan().unwrap().clone();
         let copied_inputs = *copied.inputs();
         copied = crate::net::wifi::intel::radio::lari::Plan::prepare(
@@ -136,7 +136,7 @@ pub(super) fn exercise_lari_bios(actual: bool) {
             copied_inputs,
         )
         .unwrap();
-        assert_eq!(copied.commands().count(), commands.len()); // no owner/advancement authority
+        assert_eq!(copied.commands().count(), commands.len()); // no owner/advancement permission
         let base = expected.commands().len() as u16;
         for (i, (id, payload)) in commands.iter().enumerate() {
             let sequence = 3 + base + i as u16;
@@ -160,7 +160,7 @@ pub(super) fn exercise_lari_bios(actual: bool) {
             let bell = state.lock().unwrap().registers[&0x460];
             assert_eq!(
                 // SAFETY: No completion has been injected since publication; the original LARI
-                // owner/domain retain pending mappings and Source while polling without resend.
+                // owner/domain keep pending mappings and Source while polling without resend.
                 unsafe { lari.advance(&source) }.unwrap(),
                 LariPhase::Waiting { command: id.opcode }
             );
@@ -178,7 +178,7 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 drop(r);
                 assert!(matches!(
                     // SAFETY: The response completed synchronously, and injected CPU-sync failure
-                    // cannot release its backing: this same LARI owner/source retain the mapping.
+                    // cannot release its backing: this same LARI owner/source keep the mapping.
                     unsafe { lari.advance(&source) },
                     Err(LariError::Boot(Error::CommandReclaim(_)))
                 ));
@@ -187,7 +187,7 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 domain.records.lock().unwrap().cpu_sync_fail = None;
             }
             assert_eq!(
-                // SAFETY: The failed reclaim retained all original owner/domain mappings; clearing
+                // SAFETY: The failed reclaim kept all original owner/domain mappings; clearing
                 // the model injection permits retry with the same exclusive Source and response.
                 unsafe { lari.advance(&source) }.unwrap(),
                 commands

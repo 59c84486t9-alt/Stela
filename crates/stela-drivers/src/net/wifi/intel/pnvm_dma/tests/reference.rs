@@ -50,7 +50,7 @@ fn actual_pnvm_skus_preserve_payloads_in_both_layouts() {
             }
             drop(records);
             // SAFETY: the source-backed bytes were staged into a synchronous
-            // model domain only; no device or worker can retain DMA access.
+            // model domain only; no device or worker can keep DMA access.
             unsafe {
                 table.release_after_stop().unwrap();
             }
@@ -71,7 +71,7 @@ fn pnvm_and_reduced_power_tables_match_linux_for_both_layouts() {
         let id = (address - 0x100000) / 0x10000;
         let p = r.live[&id].address(0, n).unwrap();
         // SAFETY: address() checked this range within a live initialized
-        // allocation. The domain lock retains its mapping through the copy,
+        // allocation. The domain lock keeps its mapping through the copy,
         // and this synchronous model has no device or concurrent writer.
         unsafe { core::slice::from_raw_parts(p.as_ptr(), n) }.to_vec()
     }

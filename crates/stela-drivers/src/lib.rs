@@ -3,18 +3,18 @@
 //!
 //! Native backends supply physical operations for Apple-compatible guest
 //! devices and the mount's own clients. macOS keeps its guest drivers. Backend
-//! attachment, guest integration and physical qualification are separate facts.
+//! attachment, guest integration and physical validation are separate facts.
 //! Native C/C++ ports use explicit ABI wrappers and the driver requirements
 //! determine their allocation, DMA, interrupt and lifecycle services.
 //!
 //! The mount passes PCI windows, mappings, firmware, clocks and owned native
 //! services through [`Handoff`] and [`probe::NativeServices`]. [`probe::probe`]
-//! records devices, refusals and retained owners. [`firmware`] supplies its
+//! records devices, refusals and kept owners. [`firmware`] supplies its
 //! device image catalog.
 //!
 //! The generated [hardware route table](https://github.com/tylertms/Stela/blob/main/docs/design/hardware.md)
 //! is the shared inventory of attached, check-only and planned routes. It is
-//! derived from probe admission and actual dispatch, with per-route limits;
+//! derived from probe admission and dispatch, with per-route limits;
 //! an ID match or library implementation grants no operational support claim.
 #![no_std]
 #[macro_use]
@@ -150,7 +150,7 @@ pub enum ClockError {
     DurationTooLong,
 }
 
-/// Microsecond waits from an actual producer-calibrated time-stamp counter.
+/// Microsecond waits from a producer-calibrated time-stamp counter.
 /// The producer must preserve a stable TSC rate and processor/clock context.
 /// Native attachment must check its maximum duration before device effects.
 #[derive(Clone, Copy, Debug)]
@@ -194,7 +194,7 @@ impl Clock {
         self.duration_ticks(microseconds).map(|_| ())
     }
 
-    /// Retain an opaque raw-counter origin for a wrapping elapsed-time timer.
+    /// Keep an opaque raw-counter origin for a wrapping elapsed-time timer.
     /// The same calibrated clock/context must own every later observation.
     pub fn try_start(&self) -> Result<u64, ClockError> {
         self.check_duration(0)?;
@@ -240,7 +240,7 @@ impl Clock {
         })
     }
 
-    /// A checked interval retaining its raw start counter and full duration.
+    /// A checked interval keeping its raw start counter and full duration.
     /// No absolute counter addition or saturation can shorten this interval.
     pub fn try_deadline(&self, microseconds: u64) -> Result<Deadline, ClockError> {
         self.deadline_with(microseconds, Self::ticks)
@@ -304,7 +304,7 @@ impl Clock {
         }
     }
 
-    /// Poll until ready or elapsed timeout, retaining the final observation at
+    /// Poll until ready or elapsed timeout, keeping the final observation at
     /// expiry. Invalid timing fails before invoking the device predicate.
     pub fn try_wait(
         &self,

@@ -368,7 +368,7 @@ pub unsafe extern "C" fn stela_metal_input_open(
 }
 
 /// # Safety
-/// Live retained input and disjoint complete initialized output/error records;
+/// Live kept input and disjoint complete initialized output/error records;
 /// no destruction may race this call or subsequent borrowed-view use.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stela_metal_input_info(
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn stela_metal_input_info(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
-            // SAFETY: complete caller-owned output header, retained immutable input.
+            // SAFETY: complete caller-owned output header, kept immutable input.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<Info>(o.size, o.abi)?;
             // SAFETY: `out` is the caller's complete record, whose header was checked above.
@@ -406,7 +406,7 @@ pub unsafe extern "C" fn stela_metal_input_entry(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
-            // SAFETY: `input` is a live retained handle and `out` a complete caller-owned record,
+            // SAFETY: `input` is a live handle and `out` a complete caller-owned record,
             // per this function's contract.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<Entry>(o.size, o.abi)?;
@@ -419,7 +419,7 @@ pub unsafe extern "C" fn stela_metal_input_entry(
 }
 /// # Safety
 /// Same storage/lifetime contract as stela_metal_input_info. Facts are from the
-/// canonical parser, not reflection qualification; raw AIR has no archive facts.
+/// canonical parser, not reflection validation; raw AIR has no archive facts.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stela_metal_input_entry_metadata(
     input: *const Input,
@@ -433,7 +433,7 @@ pub unsafe extern "C" fn stela_metal_input_entry_metadata(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
-            // SAFETY: `input` is a live retained handle and `out` a complete caller-owned record,
+            // SAFETY: `input` is a live handle and `out` a complete caller-owned record,
             // per this function's contract.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<EntryMetadata>(o.size, o.abi)?;
@@ -463,7 +463,7 @@ unsafe fn view(
             if input.is_null() || out.is_null() {
                 return Err(failure(INVALID));
             }
-            // SAFETY: `input` is a live retained handle and `out` a complete caller-owned record,
+            // SAFETY: `input` is a live handle and `out` a complete caller-owned record,
             // per this function's contract.
             let (i, o) = unsafe { (&*input, &*out) };
             header::<View>(o.size, o.abi)?;
@@ -561,7 +561,7 @@ mod tests {
         out.extend_from_slice(&(value.len() as u16).to_le_bytes());
         out.extend_from_slice(value);
     }
-    // Original synthetic MTLB framing; its bytes are deliberately not LLVM IR.
+    // Original synthetic MTLB framing; its bytes are not LLVM IR.
     fn archive(duplicate: bool) -> Vec<u8> {
         archive_metadata(duplicate, None, None, None, None)
     }

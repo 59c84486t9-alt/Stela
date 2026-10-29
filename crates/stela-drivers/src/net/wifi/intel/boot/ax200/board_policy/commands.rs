@@ -108,7 +108,7 @@ pub(super) fn tas_approved(identity: &service::DmiIdentity) -> bool {
 fn command(kind: BoardCommandKind, id: Id, bytes: Vec<u8>) -> BoardCommand {
     BoardCommand { kind, id, bytes }
 }
-/// Whether an actual SMBIOS read is necessary for a potentially emitted command.
+/// Whether a SMBIOS read is necessary for a potentially emitted command.
 pub(super) fn needs_identity(fw: &Firmware<'_>, tables: &power::Tables) -> bool {
     (fw.supports_capability(PPAG_CAPABILITY) && tables.ppag.is_some())
         || (fw.supports_capability(TAS_CAPABILITY) && tables.tas.is_some())

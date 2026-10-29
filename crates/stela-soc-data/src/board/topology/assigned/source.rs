@@ -1,11 +1,11 @@
 //! Source metadata for selected physical-PE construction envelopes. No
 //! lifecycle sink, PS value, CPU-start ACK or native worker is created here.
 //! T6000 normal mode1 takes the first CPU perf complex and bounds its core
-//! records by the derived kernel cluster's one actual PE. Original26A434 mac13j
+//! records by the derived kernel cluster's one PE. Original26A434 mac13j
 //! SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90:
 //! file2b0bf10 copies table123ae08 to self+1d50; entry123b438 names
 //! acc-harvesting, and2b0c54c..570 publishes its u32 at self+238c.
-//! Mode1 complex2b16e08..16f68 and core2b190e4..19228 bound actual
+//! Mode1 complex2b16e08..16f68 and core2b190e4..19228 bound
 //! perf-complex/core records by kernel topology.2b18acc..18c08 classifies
 //! core/CPM prefixes and stores the normalized source DeviceID, independently
 //! of the function-enable_core bitmask consumed at2b5686c/2b2dcb0.
@@ -18,7 +18,7 @@ use alloc::{format, string::String, vec, vec::Vec};
 use stela_crypto::{Sha256, digest::Digest};
 use {crate::board, crate::board::PowerStates, stela_contracts::adt::Node};
 
-/// Actual selected restore/bundle identity, supplied by its retained owner.
+/// Selected restore/bundle identity, supplied by its owner.
 /// Original chosen IDs may be templates; this record never observes hardware
 /// identity or authenticates a manifest. The digest binds bytes, not behavior.
 #[derive(Debug, Clone, Copy)]
@@ -27,8 +27,8 @@ pub struct SourceIdentity {
     pub original_tree_sha256: [u8; 32],
 }
 
-/// Retains the immutable source and full original PMGR graph. Opaque local IDs
-/// index this actual view; they are not invented Apple device IDs. Physical
+/// Keeps the immutable source and full original PMGR graph. Opaque local IDs
+/// index this view; they are not invented Apple device IDs. Physical
 /// PMGR IDs/addresses are copied only from canonical normalized source records.
 pub struct BspSource<'a> {
     source: &'a [u8],
@@ -135,12 +135,12 @@ fn retained(original: &Node<'_>, prepared: &Node<'_>, mutable: &[&str]) -> Resul
 }
 
 impl<'a> BspSource<'a> {
-    /// Qualifies metadata for an actual one-BSP owner. `original` is retained
+    /// Checks metadata for a one-BSP owner. `original` is held
     /// unchanged input; `prepared` belongs to the selected bundle. The caller
-    /// supplies its actual restore identity, never converts template chosen0
-    /// into an observed chip/board, and retains both sources through adoption.
+    /// supplies its restore identity, never converts template chosen0
+    /// into an observed chip/board, and keeps both sources through adoption.
     /// Mode1 is the original acc-harvesting input before later overrides. Such
-    /// an override needs a new qualified view. No PS/lifecycle state is granted.
+    /// an override needs a new checked view. No PS/lifecycle state is granted.
     pub fn t6000(
         original: &'a [u8],
         prepared: &[u8],

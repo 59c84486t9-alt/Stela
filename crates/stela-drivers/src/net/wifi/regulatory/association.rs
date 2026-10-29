@@ -1,8 +1,8 @@
-//! Context-bound admission for actual source-enabled station radio work.
+//! Context-bound admission for source-enabled station radio work.
 //!
 //! This permission does not authenticate a peer, open the controlled port,
 //! install keys or bypass per-MPDU/replay checks. Native packet owners must
-//! independently retain and validate those exact existing capabilities.
+//! independently keep and validate those exact existing capabilities.
 
 use super::{Error, HardwareLease, HardwarePolicy, OsLease, OsPolicy, Owner};
 use crate::net::wifi::Channel;
@@ -18,16 +18,16 @@ pub enum AssociationUse {
     /// Current receive/authentication service, including pre-key EAPOL. This
     /// does not authorize protected management TX or authenticated MLME effects.
     Receive,
-    /// Actual canonical EAPOL control-port submission before authentication.
+    /// Canonical EAPOL control-port submission before authentication.
     Authentication,
     Management,
     Data,
     /// Move the association to a channel its AP announced: the operation's
-    /// definition is the target, which the whole profile must qualify on.
+    /// definition is the target, which the whole profile must check on.
     ChannelSwitch,
 }
 
-/// Exact borrowed profile for providers to qualify; this is not a permit.
+/// Exact borrowed profile for providers to check; this is not a permit.
 /// Providers must inspect the complete enabled source envelope, including basic
 /// rates and autonomous responses, not just the selected width/MCS or one MPDU.
 #[derive(Debug)]
@@ -53,9 +53,9 @@ impl AssociationOperation<'_> {
     }
 }
 
-/// Exact current AP queue observation and derived local queues, borrowed only
+/// Current AP queue observation and derived local queues, borrowed only
 /// inside both held providers. Values are inspection inputs, never RX provenance
-/// or completion evidence; the native owner must independently retain those.
+/// or completion evidence; the native owner must independently keep those.
 #[derive(Debug)]
 pub struct EdcaOperation<'a> {
     association: AssociationOperation<'a>,
@@ -78,7 +78,7 @@ impl EdcaOperation<'_> {
     }
 }
 
-/// A private, single-use preflight result retaining the exact current context.
+/// A private, single-use preflight result keeping the current context.
 /// Publication must reacquire both real providers and revalidate station state.
 ///
 /// ```compile_fail
@@ -104,7 +104,7 @@ impl AssociationAdmission {
     }
 }
 
-/// Sealed by crate visibility: implementations expose their actual Station,
+/// Sealed by crate visibility: implementations expose their Station,
 /// never a copied context. Exclusive borrowing spans the complete native effect.
 pub(crate) trait AssociationOwner {
     fn association_station(&self) -> &Station;
@@ -159,8 +159,8 @@ fn check(
 }
 
 impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
-    /// Check actual current context identity, phase and the entire enabled
-    /// profile with both genuine providers. No native effects occur here.
+    /// Check current context identity, phase and the entire enabled
+    /// profile with both providers. No native effects occur here.
     pub fn admit_association(
         &mut self,
         station: &Station,
@@ -213,14 +213,14 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         })
     }
 
-    /// Reacquire the original current association and independently qualify the
-    /// exact new AP/local queues with both providers before actual publication.
+    /// Reacquire the original current association and independently check the
+    /// exact new AP/local queues with both providers before publication.
     /// The country clamp is derived while both policy guards are held.
     ///
     /// # Safety
-    /// Submit must program only this exact operation on the same retained native
-    /// controller and retain its private current completed-RX provenance, peer,
-    /// keys and DMA owner through actual ACK/retirement and uncertain outcomes.
+    /// Submit must program only this exact operation on the same native
+    /// controller and keep its private current completed-RX provenance, peer,
+    /// keys and DMA owner through ACK/retirement and uncertain outcomes.
     /// Neither public queue arrays nor the returned closure value prove native
     /// observation or completion. `limit` is the current control-channel rule;
     /// both providers must inspect the complete dynamic queue operation.
@@ -276,7 +276,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     /// separately revalidate its original context, keys and deferred owner.
     ///
     /// # Safety
-    /// The consumer must belong to this exact retained requester and original
+    /// The consumer must belong to this requester and original
     /// authenticated association. The OS supplies negotiated management policy;
     /// these regulatory guards do not authenticate input or grant PMF/MLME.
     pub(crate) unsafe fn consume_association<T>(
@@ -309,7 +309,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         Ok(result)
     }
 
-    /// Mutate the exact retained native owner while both current providers are
+    /// Mutate the native owner while both current providers are
     /// held. The Station borrow ends before the exclusive native callback; no
     /// reference, copied permit or pointer circumvents Rust aliasing.
     ///
@@ -356,7 +356,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
                 .association_station()
                 .protected_port_authorized()
         {
-            // One receive batch may release deferred/reordered data. Qualify
+            // One receive batch may release deferred/reordered data. Check
             // Data independently while these same current guards remain held.
             let data = AssociationOperation {
                 context: operation.context,
@@ -374,13 +374,13 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     /// Recheck the exact context and purpose at native publication, holding the
     /// immutable station plus hardware then OS guards through `submit`.
     /// Closure return is not command ACK, association success, air completion or
-    /// retirement. Keep the context/policy/key/queue alive through actual native
+    /// retirement. Keep the context/policy/key/queue alive through native
     /// completions and uncertainty; revocation must disable/drain or enforce
     /// restrictions on previously armed/queued autonomous and packet work.
     ///
     /// # Safety
-    /// Submit must use this concrete guard's same retained physical controller
-    /// and encode only this exact context/purpose through its actual qualified
+    /// Submit must use this concrete guard's same physical controller
+    /// and encode only this exact context/purpose through its checked
     /// source path. It must not defer publication beyond the held guards, target
     /// another device, substitute legacy commands, or widen enabled effects.
     /// The backend must preserve the providers' revocation/stop/drain contract
@@ -517,7 +517,7 @@ mod tests {
                 && self.0.os_mask.get() & mask(op.purpose()) != 0
         }
     }
-    // SAFETY: synthetic model has no physical authority; its only modeled mutation
+    // SAFETY: synthetic model has no physical permission; its only modeled mutation
     // and submission are serialized by the held flags and acquisition ordering.
     unsafe impl reg::HardwarePolicy for Hardware {
         type Lease<'a> = HardwareGuard;
@@ -530,7 +530,7 @@ mod tests {
             Some(HardwareGuard(Rc::clone(&self.0)))
         }
     }
-    // SAFETY: same pure model; acquire checks the exact native context and retains
+    // SAFETY: same pure model; acquire checks the native context and keeps
     // the modeled OS guard strictly inside its hardware guard's lifetime.
     unsafe impl reg::OsPolicy for Os {
         type Lease<'a> = OsGuard;
@@ -793,7 +793,7 @@ mod tests {
             }
             m.native.set(n);
             assert_eq!(
-                // SAFETY: changed authority must reject before modeled publication.
+                // SAFETY: changed permission must reject before modeled publication.
                 unsafe {
                     owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!())
                 }
@@ -861,7 +861,7 @@ mod tests {
                 }
             };
             assert_eq!(
-                // SAFETY: revoked modeled authority cannot execute this publication.
+                // SAFETY: revoked modeled permission cannot execute this publication.
                 unsafe {
                     owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!())
                 }
@@ -935,7 +935,7 @@ mod tests {
         let permit = owner
             .admit_association(&station, context.clone(), Use::Management)
             .unwrap();
-        // SAFETY: the actual pure provider fixture owns this Station exclusively.
+        // SAFETY: the pure provider fixture owns this Station exclusively.
         unsafe {
             owner.consume_association(permit, &mut station, |station, operation| {
                 assert!(model.hw_held.get() && model.os_held.get());
@@ -987,7 +987,7 @@ mod tests {
             }
             let phase = station.phase();
             assert!(
-                // SAFETY: each rejected actual provider boundary must avoid the effect.
+                // SAFETY: each rejected provider boundary must avoid the effect.
                 unsafe {
                     owner.consume_association::<()>(permit, &mut station, |_, _| {
                         panic!("denied management consumer reached canonical state")

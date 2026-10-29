@@ -19,8 +19,8 @@ pub enum Deadline {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reliability {
-    /// Actual adjustment observation; native code still checks instability,
-    /// retained controls/epoch and changes, not just this feature combination.
+    /// Adjustment observation; native code still checks instability,
+    /// controls/epoch and changes, not just this feature combination.
     AdjustmentMonitored {
         observed: u64,
     },
@@ -44,7 +44,7 @@ pub struct CounterPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HpetPowerConstraint {
     NoPc10Indication,
-    /// Preserve this actual power/control lease; a later limit change requires
+    /// Preserve this power/control lease; a later limit change requires
     /// requalification/source transition, not disabling deep idle as a workaround.
     RequiresStablePackageLimit {
         observed: u64,
@@ -107,7 +107,7 @@ pub fn deadline_policy(snapshot: &Snapshot) -> Result<Deadline, Error> {
 fn intel(identity: Cpuid) -> bool {
     [identity.ebx, identity.edx, identity.ecx] == INTEL
 }
-/// Classify actual observations or authored model input. Caller/package data is
+/// Classify observations or authored model input. Caller/package data is
 /// not trusted native ownership; native admission independently binds it to the
 /// current CPU, original capture, resource/control owner and reliability policy.
 pub fn counter_policy(snapshot: &Snapshot, packages: u32) -> Result<CounterPolicy, Error> {

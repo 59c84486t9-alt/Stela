@@ -49,7 +49,7 @@ pub fn verify(
     soc: u32,
     board: u32,
 ) -> Result<Vec<String>, String> {
-    // Only the actual selected variant pass proves which overlay paths go.
+    // Only the selected variant pass proves which overlay paths go.
     // This derived copy supplies CLPC class membership, never CPU provenance:
     // the source CPU indices are still checked against the immutable input.
     let mut projected = original.clone();

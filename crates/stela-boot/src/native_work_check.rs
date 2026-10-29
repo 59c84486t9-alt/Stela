@@ -1,5 +1,5 @@
 //! Opt-in native work execution proof, never an installed ACPICA provider.
-//! Uses genuine reserved LoaderData stack pages and the host-check's retained
+//! Uses reserved LoaderData stack pages and the host-check's kept
 //! BSP/root/IDT ownership. No interpreter, AP bootstrap, or mapper is invented.
 use crate::{
     apic,
@@ -25,7 +25,7 @@ use stela_drivers::{
 };
 use stela_engine::freestanding::BootArena;
 use stela_runtime::pc::acpi;
-// Reuse the actual read-only native PAT/MTRR/translation qualifier unchanged.
+// Reuse the read-only native PAT/MTRR/translation qualifier unchanged.
 use crate::native_memory::cache;
 const CHUNK: usize = 2 * 1024 * 1024;
 const STACK_BYTES: usize = 128 * 1024;
@@ -59,9 +59,9 @@ struct Backing {
     reservation: Arc<Reservation>,
     bounds: Range<usize>,
 }
-// SAFETY: exact current root has these independently owned LoaderData pages
-// RW+NX/WB, preceding guard is genuinely absent. The source reservation and
-// root stay retained for the complete bounded BSP fixture, including failures.
+// SAFETY: current root has these independently owned LoaderData pages
+// RW+NX/WB, preceding guard is absent. The source reservation and
+// root stay held for the complete bounded BSP fixture, including failures.
 // LoaderData reservation remains owned until VM stop; this proof does not
 // claim a dynamic physical page allocator or live all-root unmap capability.
 unsafe impl StackBacking for Backing {
@@ -95,7 +95,7 @@ impl Prepared {
             return Err("native work proof requires one QEMU TCG BSP");
         }
         let rsdp = crate::storage::rsdp().ok_or("native work fixture RSDP missing")?;
-        // SAFETY: actual firmware tables are mapped and retained before EBS.
+        // SAFETY: firmware tables are mapped and kept before EBS.
         let madt = unsafe { acpi::find(rsdp, b"APIC") }.map_err(|_| "work MADT unavailable")?;
         fixture::one_processor(madt, apic_id())?;
         let start = crate::firmware::pages(2 * CHUNK / PAGE)?;
@@ -190,8 +190,8 @@ impl Prepared {
             cpu: cpu.clone(),
             baseline: controls(),
         });
-        // SAFETY: genuine provider state/code/root retained by this queue;
-        // only this BSP and retained proof callbacks produce work.
+        // SAFETY: provider state/code/root kept by this queue;
+        // only this BSP and kept proof callbacks produce work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), state.clone()) }.map_err(error)?;
         let make_stacks = |first| -> Result<Vec<Stack>, String> {
             (first..first + 4)
@@ -266,23 +266,23 @@ impl Prepared {
                 return Err(format!("actual drain-cycle result {event} missing"));
             }
         }
-        // SAFETY: all actual proof callbacks finished, no real source exists;
+        // SAFETY: all proof callbacks finished, no real source exists;
         // this fixture has no producer/work/reset path that can restart them.
         unsafe { runtime.retire() }.map_err(error)?;
         drop(executor);
         if self.reservation.released.load(Ordering::Acquire) != 4 {
             return Err(String::from("idle stack leases not released"));
         }
-        // Timeout leaves a genuine foreground continuation on the other four
-        // owned stacks. Abandonment must retain the entire runtime allocation.
-        // SAFETY: `state` is the queue's retained owner, and only this BSP produces work.
+        // Timeout leaves a foreground continuation on the other four
+        // owned stacks. Abandonment must keep the entire runtime allocation.
+        // SAFETY: `state` is the queue's owner, and only this BSP produces work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), state.clone()) }.map_err(error)?;
         let executor = Executor::new(queue, make_stacks(4)?).map_err(error)?;
         let runtime = executor.runtime();
         let raw = runtime.get_ref() as *const Runtime<16>;
         state.runtime.store(raw as usize, Ordering::Release);
         let deadline = next_deadline(self.clock, 1000)?;
-        // SAFETY: `suspended` and `state` stay retained after the timeout: the pending runtime is
+        // SAFETY: `suspended` and `state` stay held after the timeout: the pending runtime is
         // quarantined, never freed.
         if unsafe {
             runtime.call_foreground(suspended, Arc::as_ptr(&state) as *mut c_void, deadline)
@@ -297,12 +297,12 @@ impl Prepared {
         drop(executor);
         if self.reservation.released.load(Ordering::Acquire) != 4
             || work::quarantined_owners() <= quarantined
-                // SAFETY: the quarantined runtime at `raw` is retained and never moved or freed.
+                // SAFETY: the quarantined runtime at `raw` is held and never moved or freed.
             || unsafe { Pin::new_unchecked(&*raw) }.step() != Err(WorkError::Closed)
         {
             return Err(String::from("pending runtime/stack quarantine failed"));
         }
-        // SAFETY: `state` is the queue's retained owner, and only this BSP produces work.
+        // SAFETY: `state` is the queue's owner, and only this BSP produces work.
         let queue = unsafe { Queue::<2>::new(cpu, state.clone()) }.map_err(error)?;
         // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
         // it.
@@ -363,10 +363,10 @@ fn apic_id() -> u32 {
 struct NativeCpu {
     apic_id: u32,
 }
-// SAFETY: only this actual source-bound QEMU BSP executes this bounded proof;
-// actual CLI/POPFQ and TSC are used. No autonomous/IRQ OSL provider is installed.
-// All current callers are retained process callbacks. No IRQ producer invokes
-// this adapter yet; actual source IRQ metadata/delivery remains unqualified.
+// SAFETY: only this source-bound QEMU BSP executes this bounded proof;
+// CLI/POPFQ and TSC are used. No autonomous/IRQ OSL provider is installed.
+// All current callers are held process callbacks. No IRQ producer invokes
+// this adapter yet; source IRQ metadata/delivery remains unchecked.
 unsafe impl Cpu for NativeCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
         if apic_id() == self.apic_id {
@@ -377,8 +377,8 @@ unsafe impl Cpu for NativeCpu {
     }
     fn in_interrupt(&self) -> bool {
         // Restricted fixture call graph: neither this private adapter nor its
-        // queue/runtime is published to any ISR. All actual callers are the
-        // retained dispatcher/process callbacks. This is not IRQ metadata and
+        // queue/runtime is published to any ISR. All callers are the
+        // dispatcher/process callbacks. This is not IRQ metadata and
         // must never be installed as a production/IRQ-reachable Cpu adapter.
         false
     }
@@ -480,7 +480,7 @@ unsafe fn probe<'a>(p: *mut c_void) -> &'a Probe {
 unsafe extern "C" fn abi_dispatch_body(p: *mut c_void) {
     // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
-    // SAFETY: the published runtime is alive and `foreground` and `p` stay retained through
+    // SAFETY: the published runtime is alive and `foreground` and `p` stay held through
     // completion.
     f.require(unsafe {
         f.runtime()
@@ -547,7 +547,7 @@ unsafe extern "C" fn abi_yield(p: *mut c_void) {
         asm!("ldmxcsr [{}]",in(reg)&changed_mx,options(nostack));
         asm!("fldcw [{}]",in(reg)&changed_cw,options(nostack));
     }
-    // This continuation deliberately differs from the dispatcher's incoming
+    // This continuation differs from the dispatcher's incoming
     // IF state in phase 1. Resumption must restore the task's saved IF=0;
     // another task may still execute with IF=1 in between.
     let saved_flags = f.require(f.cpu.save_disable());
@@ -578,7 +578,7 @@ fn controls() -> (u32, u16) {
     }
     (mxcsr, fcw)
 }
-/// Actual Win64 callback: touch all four caller-provided home slots, preserve
+/// Win64 callback: touch all four caller-provided home slots, preserve
 /// all nonvolatile registers it changes, and check them across a yielding C
 /// helper (which crosses the explicit SysV context-switch boundary).
 macro_rules! abi_callback {

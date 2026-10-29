@@ -4,9 +4,9 @@ use super::*;
 use station::external::Session;
 
 impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
-    /// Begin against a retained actual scan BSS. Authentication observations and
+    /// Begin against a scan BSS. Authentication observations and
     /// terminal notices are delivered through take_notice with their session.
-    /// The link stays down; no OS credential provider is fabricated here.
+    /// The link stays down; no OS credential provider is invented here.
     pub fn begin_external_authentication(
         &mut self,
         bss: BssHandle,

@@ -12,7 +12,7 @@ pub trait CanonicalDeviceWrite: sealed::Sealed {
     fn processors(&mut self) -> Result<ProcessorWrite<'_>, DeviceError>;
 }
 
-/// Real canonical all-writer gates, retained until this phase ends. Every
+/// Real canonical all-writer gates, kept until this phase ends. Every
 /// assigned physical owner already completed its fence and remains held in the
 /// same generation. Only the selected source owner/BSP helper can act here.
 pub struct CanonicalWriteMemory<'a> {
@@ -35,7 +35,7 @@ impl CanonicalDeviceMemory for CanonicalWriteMemory<'_> {
         &self.memory
     }
     fn fence_cpu_memory(&mut self) {
-        // Other workers' actual fences remain completed under the unchanged
+        // Other workers' fences remain completed under the unchanged
         // hold; no external/queued producer or device reentrancy is admitted.
         self.host.memory_barrier();
     }

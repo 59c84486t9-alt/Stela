@@ -54,7 +54,7 @@ pub struct StackAdmission<'catalog, 'runtime, P: Provider, const N: usize> {
     ticket: Option<NativeTicket>,
 }
 impl<P: Provider> Catalog<P> {
-    /// Retain the original cold pin for a descriptor admission attempt.
+    /// Keep the original cold pin for a descriptor admission attempt.
     /// This wrapper alone makes no C call and publishes no marker.
     pub fn prepare_stack<'catalog, 'runtime, const N: usize>(
         &'catalog self,
@@ -104,7 +104,7 @@ impl<P: Provider, const N: usize> StackAdmission<'_, '_, P, N> {
                     physical_pages: pages.physical_pages().as_ptr(),
                     page_count: pages.physical_pages().len(),
                 };
-                // SAFETY: this value retains the actual cold pin, physical list
+                // SAFETY: this value keeps the cold pin, physical list
                 // and CPU mapping through the synchronous call. Header lengths
                 // match their repr(C) objects. C copies only descriptor markers,
                 // and returns an opaque generation/index/nonce, never a page.
@@ -115,7 +115,7 @@ impl<P: Provider, const N: usize> StackAdmission<'_, '_, P, N> {
             match result {
                 Ok(Ok(0)) => {
                     // No fallible operation separates marker creation from
-                    // retaining its ticket, including C-owner exit callbacks.
+                    // keeping its ticket, including C-owner exit callbacks.
                     self.ticket = Some(native_ticket);
                     Ok(())
                 }
@@ -125,20 +125,20 @@ impl<P: Provider, const N: usize> StackAdmission<'_, '_, P, N> {
             }
         };
         // C-owner exit may finish other service callbacks. Recheck after that
-        // complete boundary while retaining any successfully created marker.
+        // complete boundary while keeping any successfully created marker.
         self.cold.check_pin(entered).map_err(AdmissionError::Work)?;
         result
     }
 
-    /// Remove this unpublished marker under fresh work authority, keeping its
+    /// Remove this unpublished marker under fresh work permission, keeping its
     /// RuntimeStack extent reserved, then restore/cancel the cold frame once.
-    /// Refusal retains/quarantines the catalog and Runtime owners.
+    /// Refusal keeps/quarantines the catalog and Runtime owners.
     pub fn cancel(self, entered: &dyn EnteredProcess) -> Result<(), AdmissionError> {
         self.cold.check_pin(entered).map_err(AdmissionError::Work)?;
         if let Some(ticket) = self.ticket {
             let result = {
                 let _owner = Entered::try_new().map_err(AdmissionError::Catalog)?;
-                // SAFETY: private ticket belongs to this retained catalog and
+                // SAFETY: private ticket belongs to this catalog and
                 // cold pin. C validates its fixed header/generation/nonce and
                 // every unpublished marker before changing any of them.
                 unsafe { stela_linux_page_stack_cancel(&ticket) }

@@ -43,7 +43,7 @@ unsafe extern "C" fn stela_nvidia_dma_map(
     read_only: u8,
     private: *mut *mut c_void,
 ) -> Status {
-    // SAFETY: the C shim checks slots; the caller supplies this exact live
+    // SAFETY: the C shim checks slots; the caller supplies this live
     // native Allocation kind, not another import or a previous DMA token.
     let allocation = unsafe { &*(*private).cast::<Allocation>() };
     let Some(origin) = allocation.origin.as_ref() else {
@@ -129,14 +129,14 @@ unsafe extern "C" fn stela_nvidia_dma_map(
     let address = match lease.address() {
         Ok(address) => address,
         Err(error) => {
-            // This cannot occur for the retained unmodified lease. Dropping
-            // it still quarantines actual pins rather than assuming teardown.
+            // This cannot occur for the unmodified lease. Dropping
+            // it still quarantines pins rather than assuming teardown.
             // SAFETY: the private metadata storage never escaped.
             unsafe { memory::free(storage.as_ptr()) };
             return dma_error(error);
         }
     };
-    // SAFETY: distinct aligned metadata owns this actual lease through the
+    // SAFETY: distinct aligned metadata owns this lease through the
     // single original unmap call. It has not been published to the caller.
     unsafe {
         storage.cast::<Token>().as_ptr().write(Token {
@@ -162,7 +162,7 @@ unsafe extern "C" fn stela_nvidia_dma_map(
 
 /// # Safety
 /// Return this device's live DMA token once, with matching count, only after
-/// actual device completion, removed GPU bindings and stopped/drained native
+/// device completion, removed GPU bindings and stopped/drained native
 /// submission/IRQ workers. No new device access may start. Context must permit
 /// the real domain/backing/global-heap operations and their final release.
 #[unsafe(no_mangle)]
@@ -171,7 +171,7 @@ unsafe extern "C" fn stela_nvidia_dma_unmap(
     count: u64,
     private: *mut *mut c_void,
 ) -> Status {
-    // SAFETY: the shim checked slots; the caller returns the exact live token
+    // SAFETY: the shim checked slots; the caller returns the live token
     // kind created by dma_map. Never dereference the untrusted device key.
     let token = unsafe { &*(*private).cast::<Token>() };
     if token.device_key != device_key || token.count != count {
@@ -189,15 +189,15 @@ unsafe extern "C" fn stela_nvidia_dma_unmap(
     // SAFETY: `private` is the caller's valid handle slot, read just above.
     let storage = unsafe { private.replace(ptr::null_mut()) };
     // Match real dma_unmap's CPU visibility before releasing translations.
-    // SAFETY: the caller establishes actual exclusive CPU ownership/completion.
+    // SAFETY: the caller establishes exclusive CPU ownership/completion.
     let result = unsafe { token.lease.sync_for_cpu(0..token.lease.bytes()) }.and_then(|()| {
         // SAFETY: the same caller-supplied complete quiescence applies.
         unsafe { token.lease.unmap() }
     });
     // Official osIovaUnmap logs an error then clears pOsData unconditionally.
     // Consume a failed live lease into canonical observable quarantine here;
-    // never rely on that original caller retaining a retry token. Drop retains
-    // the actual domain/pins on any uncertain sync/removal/invalidation error.
+    // never rely on that original caller keeping a retry token. Drop keeps
+    // the domain/pins on any uncertain sync/removal/invalidation error.
     drop(token);
     services.retired();
     // SAFETY: the token's value was moved out and dropped once; return only

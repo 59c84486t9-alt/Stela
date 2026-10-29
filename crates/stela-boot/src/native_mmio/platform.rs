@@ -33,7 +33,7 @@ struct Backing {
     owner: Arc<Resources>,
     span: PhysicalSpan,
 }
-// SAFETY: ScopedSource's concrete claim methods reserve only the retained actual
+// SAFETY: ScopedSource's concrete claim methods reserve only the
 // MADT/MCFG resources after the explicit native device handoff. The original
 // root assignment, final map exclusions and epoch remain pinned permanently.
 unsafe impl ResourceBacking for Backing {
@@ -59,7 +59,7 @@ struct Platform {
     ram_publisher: AtomicBool,
     mappings: UnsafeCell<Vec<Allocation>>,
 }
-// SAFETY: source/root metadata is immutable. Foreign CPUs fail the actual
+// SAFETY: source/root metadata is immutable. Foreign CPUs fail the
 // time-free RootContext check before touching the affine scope pointer. Mappings are accessed
 // under held on the sole admitted CPU; scope publication/removal masks IRQs.
 unsafe impl Send for Platform {}
@@ -67,7 +67,7 @@ unsafe impl Send for Platform {}
 unsafe impl Sync for Platform {}
 
 fn msr(index: u32) -> u64 {
-    // SAFETY: only qualified Intel architectural registers from observe's
+    // SAFETY: only checked Intel architectural registers from observe's
     // CPUID-checked memory image are read by this module.
     unsafe { crate::cpu::msr::rdmsr(index) }
 }
@@ -80,7 +80,7 @@ fn memory_register(index: u32) -> bool {
 impl Platform {
     fn controls(&self) -> Result<(), Error> {
         let (cr0, cr3, cr4): (u64, u64, u64);
-        // SAFETY: pure CPL0 observation after the actual CPU/root check.
+        // SAFETY: pure CPL0 observation after the CPU/root check.
         unsafe {
             asm!("mov {}, cr0",out(reg) cr0,options(nomem,nostack,preserves_flags));
             asm!("mov {}, cr3",out(reg) cr3,options(nomem,nostack,preserves_flags));
@@ -114,8 +114,8 @@ impl Platform {
     }
     fn flush(&self, first: usize, pages: usize) {
         // SAFETY: The admitted processor has PGE and PCIDE clear. INVLPG removes the
-        // current host translation; every other retained root reload flushes
-        // before use, and all share these same actual aperture leaves.
+        // current host translation; every other root reload flushes
+        // before use, and all share these same aperture leaves.
         unsafe {
             asm!("mfence", options(nostack, preserves_flags));
             for index in first..first + pages {
@@ -139,7 +139,7 @@ impl Platform {
         stela_drivers::platform::acpi::resources::reservation_parent(resource)
             .is_some_and(|parent| self.resource(parent))
     }
-    /// Bounded evidence from the original retained final map on claim refusal.
+    /// Bounded evidence from the original final map on claim refusal.
     /// This does not reinterpret a descriptor or change the exclusion predicate.
     fn report_memory_refusal(&self, name: &str, span: PhysicalSpan) {
         let memory = self.resources.wire.memory();
@@ -203,7 +203,7 @@ impl Drop for Guard<'_> {
 }
 
 // SAFETY: map publishes only owned preallocated leaves after concrete source,
-// root, aliases, PAT/MTRR and actual process-scope checks. The single-BSP
+// root, aliases, PAT/MTRR and process-scope checks. The single-BSP
 // profile and PCID/PGE refusal give a complete local TLB join; no SMP or WC
 // completion is guessed. Every uncertainty keeps the allocation reserved.
 unsafe impl MappingPlatform for Platform {
@@ -263,7 +263,7 @@ unsafe impl MappingPlatform for Platform {
             })
             .ok_or(unchanged(Error::Exhausted))?;
         for index in first..first + pages {
-            // SAFETY: concrete retained LOADER_DATA page, bounded PT slot.
+            // SAFETY: concrete kept LOADER_DATA page, bounded PT slot.
             if unsafe { self.leaf(index).map_err(unchanged)?.read_volatile() } != 0 {
                 return Err(unchanged(Error::MappingFailed));
             }
@@ -357,7 +357,7 @@ pub(crate) struct ScopedSource {
     platform: Arc<Platform>,
     authority: Authority,
 }
-/// Local process grant retained across every OriginalMapping/MappingView. A
+/// Local process grant kept across every OriginalMapping/MappingView. A
 /// failed retirement cannot let the dispatcher leave the root execution scope.
 pub(crate) struct Session {
     source: Arc<Platform>,
@@ -394,9 +394,9 @@ impl Drop for Session {
 }
 impl ScopedSource {
     /// # Safety
-    /// Actual post-EBS dispatcher on its single admitted processor. `wire` is
-    /// the sealed capture retained by this exact handoff; execution owns the
-    /// actual HostOwner canonical fixed root catalog. Firmware/SMM and native device ownership are
+    /// Post-EBS dispatcher on its single admitted processor. `wire` is
+    /// the sealed capture kept by this handoff; execution owns the
+    /// HostOwner canonical fixed root catalog. Firmware/SMM and native device ownership are
     /// transferred separately by the typed claim methods below. No guest or
     /// outside root/cache publisher runs concurrently with this scope.
     pub(crate) unsafe fn activate(
@@ -462,8 +462,8 @@ impl ScopedSource {
                 return Err(Error::Unavailable);
             }
         }
-        // SAFETY: complete actual root-set/UEFI RAM aliases were inventoried;
-        // the dedicated leaf table is owned and shared by each retained root.
+        // SAFETY: complete root-set/UEFI RAM aliases were inventoried;
+        // the dedicated leaf table is owned and shared by each root.
         let authority = unsafe { Authority::activate(platform.clone(), space, aliases) }?;
         let session = Session {
             source: platform.clone(),
@@ -481,7 +481,7 @@ impl ScopedSource {
     pub(crate) fn authority(&self) -> &Authority {
         &self.authority
     }
-    /// Re-enter the same retained root epoch after all earlier mappings retired.
+    /// Re-enter the same root epoch after all earlier mappings retired.
     /// Future guest shadow aliases remain confined to the imported real RAM.
     pub(crate) fn enter(&self, execution: &RootExecution) -> Result<Session, Error> {
         self.platform.context.check_current().map_err(failed)?;
@@ -507,7 +507,7 @@ impl ScopedSource {
             _local: PhantomData,
         })
     }
-    /// Inspect the actual retained aperture after complete consumer retirement.
+    /// Inspect the aperture after complete consumer retirement.
     pub(crate) fn verify_empty(&self) -> Result<(), Error> {
         self.platform.check_context(self.platform.space)?;
         let mut guard = self.platform.lock()?;
@@ -527,8 +527,8 @@ impl ScopedSource {
         self.platform.resources.wire.madt()
     }
     /// # Safety
-    /// Native dispatcher actually owns every MADT IOAPIC selector/window for
-    /// this retained epoch, excluding firmware/SMM/other drivers and CPUs.
+    /// Native dispatcher owns every MADT IOAPIC selector/window for
+    /// this epoch, excluding firmware/SMM/other drivers and CPUs.
     /// This is a controller handoff, independent from any IRQ pin/sharer grant.
     pub(crate) unsafe fn claim_ioapics(&self) -> Result<usize, Error> {
         self.platform.check_context(self.platform.space)?;
@@ -559,7 +559,7 @@ impl ScopedSource {
         Ok(count)
     }
     /// # Safety
-    /// Actual dispatcher exclusively owns this complete requested original
+    /// Dispatcher exclusively owns this complete requested original
     /// ECAM bus subset, including every function/config/reset access and native
     /// root epoch. This is distinct from the captured resource permission below.
     pub(crate) unsafe fn claim_ecam(
@@ -649,7 +649,7 @@ pub(super) fn owned_table(wire: &Wire, physical: u64) -> Result<*mut u64, Error>
     Ok(crate::layout::physical(physical) as *mut u64)
 }
 
-/// Every existing alias the retained roots and the guest's RAM hold, with
+/// Every existing alias the roots and the guest's RAM hold, with
 /// its cache policy where the roots fix one, after checking each root leads
 /// to the aperture's leaf table. `written` are the table pages the caller
 /// writes, whose aliases must be write-back.
@@ -751,7 +751,7 @@ pub(super) fn aliases(
         written,
     };
     // Every real root is scanned; shared table pages are visited once. Future
-    // guest aliases are restricted by HostOwner to its retained RAM inventory,
+    // guest aliases are restricted by HostOwner to its RAM inventory,
     // conservatively imported below with unknown policy (blocks device reuse).
     for root in roots {
         walk(&walker, *root, wire.levels - 1, &mut visited, &mut aliases)?;

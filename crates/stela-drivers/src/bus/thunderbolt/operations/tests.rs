@@ -15,8 +15,8 @@ struct Native {
     router: Option<Configured>,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: isolated actual configured router and serialized native model operation
-// engine; model control/DP association remains retained by original ownership.
+// SAFETY: isolated configured router and serialized native model operation
+// engine; model control/DP association remains held by original ownership.
 unsafe impl Owner for Native {
     fn inventory(&self) -> &Inventory {
         &self.inventory
@@ -32,8 +32,8 @@ impl Drop for Native {
     fn drop(&mut self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
         if let Some(router) = self.router.take() {
-            // SAFETY: isolated model final CM transfer keeps the original actual
-            // router/operation engine retained; uncertain Arc owners never drop.
+            // SAFETY: isolated model final CM transfer keeps the original
+            // router/operation engine kept; uncertain Arc owners never drop.
             unsafe { router.retire() };
         }
     }
@@ -66,7 +66,7 @@ fn fixture(operation: Operation) -> Fixture {
         router: Some(parent),
         dropped: Arc::new(AtomicUsize::new(0)),
     });
-    // SAFETY: actual isolated modeled child setup transferred to retained CM;
+    // SAFETY: isolated modeled child setup transferred to kept CM;
     // no command against that child or physical dependent tunnel is published.
     unsafe { child.retire() };
     Fixture {
@@ -257,7 +257,7 @@ fn actual_router_operations_query_allocate_deallocate_and_drom_retained_completi
             mut cursor,
             router_dropped,
         } = f;
-        // SAFETY: actual configured router, exact isolated operation/DP grant and idle model channel.
+        // SAFETY: configured router, exact isolated operation/DP grant and idle model channel.
         let mut control = unsafe { Control::new(channel, owner.clone(), cursor.now) }.unwrap();
         let completed = drive(&mut peer, &domain, &model, &mut cursor, &mut control).unwrap();
         let mut channel = control.into_channel();
@@ -279,16 +279,16 @@ fn actual_router_operations_query_allocate_deallocate_and_drom_retained_completi
             "original CM plus completed receipt"
         );
         assert_eq!(router_dropped.load(Ordering::Relaxed), 0);
-        // SAFETY: actual isolated model completion transferred with all original owners to final CM drain.
+        // SAFETY: isolated model completion transferred with all original owners to final CM drain.
         unsafe { completed.retire() };
         if matches!(operation, Operation::AllocateDp { .. }) {
             Arc::get_mut(&mut owner).unwrap().operation = Operation::DeallocateDp { port: 6 };
-            // SAFETY: same actual original CM retains the just-allocated resource.
+            // SAFETY: same original CM keeps the just-allocated resource.
             let mut cleanup = unsafe { Control::new(channel, owner.clone(), cursor.now) }.unwrap();
             let freed = drive(&mut peer, &domain, &model, &mut cursor, &mut cleanup).unwrap();
             channel = cleanup.into_channel();
             assert!(!peer.allocated);
-            // SAFETY: actual deallocation acknowledged and original CM retains all independent owners.
+            // SAFETY: deallocation acknowledged and original CM keeps all independent owners.
             unsafe { freed.retire() };
         }
         drop(owner);
@@ -373,13 +373,13 @@ fn actual_dp_resource_roundtrip_preserves_real_router_and_busy_query_state() {
         (Operation::QueryDp { port: 6 }, 0),
     ] {
         Arc::get_mut(&mut owner).unwrap().operation = operation;
-        // SAFETY: native model CM serializes operations on original actual owner.
+        // SAFETY: native model CM serializes operations on original owner.
         let mut control = unsafe { Control::new(channel, owner.clone(), cursor.now) }.unwrap();
         let completed = drive(&mut peer, &domain, &model, &mut cursor, &mut control).unwrap();
         assert_eq!(completed.status, status);
         channel = control.into_channel();
         assert_eq!(router_dropped.load(Ordering::Relaxed), 0);
-        // SAFETY: live original native model CM retains the exact resource and router between operations.
+        // SAFETY: live original native model CM keeps the exact resource and router between operations.
         unsafe { completed.retire() };
     }
     assert!(!peer.allocated);
@@ -408,7 +408,7 @@ fn each_actual_operation_write_uncertainty_readback_and_busy_timeout_poison_and_
                 mut cursor,
                 router_dropped,
             } = f;
-            // SAFETY: exact actual isolated configured router/native operation reservation.
+            // SAFETY: exact isolated configured router/native operation reservation.
             let mut control = unsafe { Control::new(channel, owner.clone(), cursor.now) }.unwrap();
             control.poll(cursor.now).unwrap();
             let mut failed = false;
@@ -471,7 +471,7 @@ fn actual_operation_preflight_idle_header_revocation_and_ranges_refuse_publicati
             mut cursor,
             ..
         } = f;
-        // SAFETY: deliberately changed actual model state is refused before mutation.
+        // SAFETY: changed model state is refused before mutation.
         let new = unsafe { Control::new(channel, owner.clone(), cursor.now) };
         if fault == 2 {
             assert!(matches!(new, Err(Error::Revoked)));
@@ -511,7 +511,7 @@ fn actual_operation_preflight_idle_header_revocation_and_ranges_refuse_publicati
             ..
         } = f;
         let writes = model.state.lock().unwrap().writes.len();
-        // SAFETY: invalid actual request metadata is rejected before publication.
+        // SAFETY: invalid request metadata is rejected before publication.
         assert!(unsafe { Control::new(channel, owner, 0) }.is_err());
         assert_eq!(writes, model.state.lock().unwrap().writes.len());
     }
@@ -544,9 +544,9 @@ fn unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_nativ
             _ => panic!("source operation"),
         };
         let linux_ret = fields[7].parse::<i32>().unwrap();
-        // Source wrappers intentionally treat ONS DP resource operations as a
+        // Source wrappers treat ONS DP resource operations as a
         // successful fallback. Native code keeps unsupported explicit and never
-        // fabricates a grant; verify that deliberate policy boundary separately.
+        // invents a grant; verify that deliberate policy boundary separately.
         assert_eq!(
             linux_ret,
             if unsupported {
@@ -583,7 +583,7 @@ fn unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_nativ
             mut cursor,
             router_dropped,
         } = f;
-        // SAFETY: actual configured native model router and protected source operation association.
+        // SAFETY: configured native model router and protected source operation association.
         let mut control = unsafe { Control::new(channel, owner.clone(), cursor.now) }.unwrap();
         let result = drive(&mut peer, &domain, &model, &mut cursor, &mut control);
         let count = n(8) as usize;
@@ -646,7 +646,7 @@ fn unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_nativ
         let mut channel = control.into_channel();
         if expect_error.is_none() && matches!(operation, Operation::AllocateDp { .. }) {
             Arc::get_mut(&mut owner).unwrap().operation = Operation::DeallocateDp { port: 6 };
-            // SAFETY: original actual CM still owns the successfully allocated model resource.
+            // SAFETY: original CM still owns the successfully allocated model resource.
             let mut cleanup = unsafe { Control::new(channel, owner.clone(), cursor.now) }.unwrap();
             let freed = drive(&mut peer, &domain, &model, &mut cursor, &mut cleanup).unwrap();
             channel = cleanup.into_channel();

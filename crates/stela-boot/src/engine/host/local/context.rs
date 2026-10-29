@@ -42,14 +42,14 @@ fn processor_id() -> u32 {
 }
 fn disable() -> u64 {
     let saved;
-    // SAFETY: actual native CPL0 dispatcher. Memory clobber encloses the save.
+    // SAFETY: native CPL0 dispatcher. Memory clobber encloses the save.
     unsafe {
         asm!("pushfq", "pop {}", "cli", out(reg) saved);
     }
     saved
 }
 unsafe fn restore(saved: u64) {
-    // SAFETY: caller retains the same actual CPU and exact enclosing IRQ save.
+    // SAFETY: caller keeps the same CPU and enclosing IRQ save.
     unsafe {
         asm!("push {}", "popfq", in(reg) saved);
     }
@@ -58,9 +58,9 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 
-/// Actual immutable CPU/descriptor/fixed-root identity, pinned by HostOwner.
+/// Immutable CPU/descriptor/fixed-root identity, pinned by HostOwner.
 /// This survives only checked RAM ownership joins. It grants no RAM-absence,
-/// mutable mapping-publication, task switching, or cross-CPU execution authority.
+/// mutable mapping-publication, task switching, or cross-CPU execution permission.
 /// Descriptor/local storage is static or permanently pinned through terminal IRQs.
 pub(crate) struct RootIdentity {
     roots: Arc<MmioRoots>,
@@ -82,7 +82,7 @@ pub(crate) struct ProcessRootScope<'a> {
     _local: PhantomData<*mut ()>,
 }
 impl ProcessRootScope<'_> {
-    /// Require the manager's actual entered original owner, not merely a Host
+    /// Require the manager's entered original owner, not a Host
     /// root with equivalent shared mappings. This remains no stack/service grant.
     pub(crate) fn entered_original(
         &self,
@@ -105,7 +105,7 @@ impl ProcessRootScope<'_> {
         if root() != self.root {
             return Err(WorkError::CorruptContext);
         }
-        // SAFETY: same actual HostOwner/original loader owner, retained shared
+        // SAFETY: same HostOwner/original loader owner, kept shared
         // aliases and IF0 scope were checked immediately above. No callbacks.
         let result =
             unsafe { self.identity.loader_tables.observe_shared(address) }.map_err(unavailable)?;
@@ -120,7 +120,7 @@ impl RootIdentity {
     fn validate_process_root(&self) -> Result<(), WorkError> {
         self.affinity()?;
         let (flags, cr4): (u64, u64);
-        // SAFETY: actual retained native CPU, after affinity before table access.
+        // SAFETY: native CPU, after affinity before table access.
         unsafe {
             asm!("pushfq", "pop {}", "mov {}, cr4", out(reg) flags, out(reg) cr4, options(nomem, preserves_flags));
         }
@@ -135,8 +135,8 @@ impl RootIdentity {
         {
             return Err(WorkError::CorruptContext);
         }
-        // SAFETY: actual fixed Host root is retained by roots._lease, and the
-        // entered original loader root is retained by loader_tables. Both shared
+        // SAFETY: fixed Host root is held by roots._lease, and the
+        // entered original loader root is held by loader_tables. Both shared
         // their window at the real Host installation; no copied root grants it.
         unsafe { self.loader_tables.check_shared_root(root() & ADDRESS) }.map_err(unavailable)
     }
@@ -148,15 +148,15 @@ impl RootIdentity {
             _local: PhantomData,
         })
     }
-    /// Read-only clock admission for ONLY the actual Host root or its manager's
+    /// Read-only clock admission for ONLY the Host root or its manager's
     /// entered original loader root. No arbitrary guest/root or task permission.
     pub(crate) fn check_clock_root(&self) -> Result<(), WorkError> {
         self.affinity()?;
         let saved = disable();
         let result = (|| {
             let scope = self.process_root()?;
-            // Revalidate the original catalog's actual shared-window metadata
-            // and page ownership; returned leaf data is not memory authority.
+            // Revalidate the original catalog's shared-window metadata
+            // and page ownership; returned leaf data is not memory permission.
             let address = crate::layout::physical(self.loader_tables.root());
             let observed = scope
                 .observe_original(address)?
@@ -183,7 +183,7 @@ impl RootIdentity {
         {
             return Err(WorkError::WrongCpu);
         }
-        // SAFETY: immutable architectural observation; original owner retained.
+        // SAFETY: immutable architectural observation; original owner kept.
         let observed = unsafe { interrupts::observe() };
         if observed.gs != self.gs
             || observed.gdt != self.gdt
@@ -206,7 +206,7 @@ impl RootIdentity {
         let current = root();
         if current & !ADDRESS != 0 || !self.roots.roots().contains(&current) {
             // Preserve the existing pinned guest IRQ roots above. The only
-            // additional tagged root is this manager's genuinely entered loader
+            // additional tagged root is this manager's entered loader
             // root, backed by its original allocation owner and same CPU guard.
             if !crate::engine::storage::entered_loader_root(self.loader_tables) {
                 return Err(WorkError::CorruptContext);
@@ -230,7 +230,7 @@ impl RootIdentity {
     pub(crate) fn check_dispatch(&self) -> Result<(), WorkError> {
         self.check_irq_cpu()?;
         let flags: u64;
-        // SAFETY: read the actual CPL0 caller's flags without changing IF.
+        // SAFETY: read the CPL0 caller's flags without changing IF.
         // Reject an interruptible boundary before reading affine frame slots.
         unsafe { asm!("pushfq", "pop {}", out(reg) flags) };
         if flags & IF != 0 || irq_active() || !native_frames_idle() {
@@ -244,12 +244,12 @@ impl RootIdentity {
         Ok(disable())
     }
     /// # Safety
-    /// Exact enclosing save from this same context; no switch or migration.
+    /// Enclosing save from this same context; no switch or migration.
     pub(crate) unsafe fn restore(&self, saved: u64) {
         if self.check_current().is_err() {
             self.fatal(WorkError::WrongCpu);
         }
-        // SAFETY: caller supplies this actual CPU's exact enclosing save.
+        // SAFETY: caller supplies this CPU's enclosing save.
         unsafe {
             restore(saved);
         }
@@ -261,8 +261,8 @@ impl RootIdentity {
     pub(crate) fn root_pages(&self) -> &[u64] {
         self.roots.roots()
     }
-    /// Immutable processor observations only, under the actual captured root
-    /// catalog. This does not qualify a fixed-root memory access or epoch.
+    /// Immutable processor observations only, under the captured root
+    /// catalog. This does not check a fixed-root memory access or epoch.
     pub(crate) fn processor_snapshot(&self) -> Result<Snapshot, WorkError> {
         self.check_dispatch()?;
         Ok(self.snapshot)
@@ -274,14 +274,14 @@ impl RootIdentity {
 }
 
 /// One generation's RAM-absence/publication view. Retaining this still prevents
-/// RAM adoption; keeping only immutable RootIdentity does not retain this grant.
+/// RAM adoption; keeping only immutable RootIdentity does not keep this grant.
 pub(crate) struct RootContext {
     identity: Arc<RootIdentity>,
     ram_generation: u64,
     executing: AtomicBool,
 }
 impl RootContext {
-    /// Immutable identity only; this reference carries no generation authority.
+    /// Immutable identity only; this reference carries no generation permission.
     pub(crate) fn identity(&self) -> &Arc<RootIdentity> {
         &self.identity
     }
@@ -307,12 +307,12 @@ impl RootContext {
         self.identity.save_disable()
     }
     /// # Safety
-    /// Exact enclosing same-CPU save; no switch/migration or active task-frame change.
+    /// Enclosing same-CPU save; no switch/migration or active task-frame change.
     pub(crate) unsafe fn restore(&self, saved: u64) {
         if self.check_current().is_err() {
             self.fatal(WorkError::Closed);
         }
-        // SAFETY: same retained identity and caller's exact enclosing save.
+        // SAFETY: same identity and caller's enclosing save.
         unsafe { self.identity.restore(saved) };
     }
     pub(crate) fn fatal(&self, error: WorkError) -> ! {
@@ -392,13 +392,13 @@ impl Drop for RootExecution {
         let context = self.context();
         let _saved = disable();
         // Fail BEFORE invalidating scope or restoring flags. An outstanding
-        // mapping/IRQ source must retain its exact epoch, including quarantine.
+        // mapping/IRQ source must keep its exact epoch, including quarantine.
         if Arc::strong_count(&self.epoch) != 1 {
             context.fatal(WorkError::Busy);
         }
         self.epoch.active.store(false, Ordering::Release);
         context.executing.store(false, Ordering::Release);
-        // SAFETY: actual same-CPU entry, no remaining epoch views or callbacks.
+        // SAFETY: same-CPU entry, no remaining epoch views or callbacks.
         unsafe {
             restore(self.saved);
         }
@@ -406,7 +406,7 @@ impl Drop for RootExecution {
 }
 
 impl Owner {
-    /// Retain actual CPU/root identity without extending a RAM-absence epoch.
+    /// Keep CPU/root identity without extending a RAM-absence epoch.
     /// Only pristine same-CPU process dispatch, IF0, may create/borrow it.
     pub(crate) fn root_identity(&mut self) -> Result<Arc<RootIdentity>, WorkError> {
         if gs_base() != self.local.as_ptr() as u64 {
@@ -428,7 +428,7 @@ impl Owner {
         // SAFETY: original physical Owner, IF0, no native frame or ISR.
         let snapshot = unsafe { firmware::observe() }.map_err(unavailable)?;
         let id = snapshot.apic_id().ok_or(WorkError::Unavailable)?;
-        // SAFETY: retained actual processor's installed descriptor set.
+        // SAFETY: processor's installed descriptor set.
         let observed = unsafe { interrupts::observe() };
         if observed.gs != self.local.as_ptr() as u64 || snapshot.cr3 & !ADDRESS != 0 {
             return Err(WorkError::CorruptContext);
@@ -538,7 +538,7 @@ impl Owner {
         Ok(())
     }
 
-    /// Admit this exact original Owner/context pair before Clock effects.
+    /// Admit this original Owner/context pair before Clock effects.
     /// The numbers inside an unrelated snapshot cannot satisfy this check.
     pub(crate) fn check_root(&self, execution: &RootExecution) -> Result<(), WorkError> {
         if gs_base() != self.local.as_ptr() as u64 {
@@ -552,9 +552,9 @@ impl Owner {
         Ok(())
     }
 
-    /// Called only by the actual post-EBS native dispatcher on its owner CPU.
+    /// Called only by the post-EBS native dispatcher on its owner CPU.
     /// The initial supported profile enters with IF0; timed Clock installation
-    /// later supplies its own independently qualified interrupt-delivery scope.
+    /// later supplies its own checked interrupt-delivery scope.
     pub(crate) fn enter_root(&mut self) -> Result<RootExecution, WorkError> {
         // Architectural preguard BEFORE current()/state()/local slot access.
         if gs_base() != self.local.as_ptr() as u64 {
@@ -599,7 +599,7 @@ impl Owner {
             })
         })();
         if result.is_err() {
-            // SAFETY: exact same-CPU save above, no scope was published.
+            // SAFETY: same-CPU save above, no scope was published.
             unsafe {
                 restore(saved);
             }

@@ -10,8 +10,8 @@ use alloc::rc::Rc;
 use core::cell::Cell;
 use stela_contracts::bus::Access;
 
-/// Opaque live callback receipt, minted only from the actual Signals context
-/// after the same source disable and actual registration retired. Event data
+/// Opaque live callback receipt, minted only from the Signals context
+/// after the same source disable and registration retired. Event data
 /// alone cannot construct one or mutate a control allocation.
 #[derive(Clone)]
 pub struct AuxiliaryReset {
@@ -65,7 +65,7 @@ impl AuxiliaryReset {
     }
 }
 
-/// Mandatory handle to the same actual platform/control software allocation.
+/// Mandatory handle to the same platform/control software allocation.
 /// Root must validate its instance and slot against the registration producer.
 /// It stores1 at P300+40*slot byte0 only after this real IRQ callback's disable
 /// has retired; it must not reset timers, synthesize a capture or acknowledge PMP.
@@ -82,7 +82,7 @@ pub struct AuxiliaryHandler<T> {
 }
 impl<T: AuxiliaryTarget> AuxiliaryHandler<T> {
     /// Factory only: this does not register a handler or manufacture the
-    /// nonzero member-flag condition that actually reaches101cfcc.
+    /// nonzero member-flag condition that reaches101cfcc.
     pub fn t8112(
         descriptor: &Descriptor,
         slot: usize,

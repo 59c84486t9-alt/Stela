@@ -1,4 +1,4 @@
-//! Actual RTS5229 HAIMR/PHY/card peer, including revision-C pull controls.
+//! RTS5229 HAIMR/PHY/card peer, including revision-C pull controls.
 use super::*;
 mod uhs;
 
@@ -153,7 +153,7 @@ fn unchanged_linux_rts5229_setup_drive_pull_and_power_effects_match_native() {
             assert_eq!(u32::from(c.regs[0x3d62]), n(12));
             assert_eq!(u32::from(c.regs[0x3d50] & 3), n(20));
             assert_eq!(u32::from(c.regs[0x3e75] & 6), n(21));
-            // The actual model's partial/full-power stores independently check
+            // The model's partial/full-power stores independently check
             // >=150us using the real Clock; this is the donor delay argument.
             assert_eq!(n(22), 150);
         }

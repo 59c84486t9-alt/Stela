@@ -6,7 +6,7 @@ const PROMISCUOUS: u32 = 0x100;
 
 impl<R: Registers, D: Delay> Hardware<R, D> {
     // A full multicast bitmap and a unicast address's low four bytes may be
-    // all ones. Keep removal detection on independent actual identity/MMIO
+    // all ones. Keep removal detection on independent identity/MMIO
     // observations instead of treating those legal data words as status.
     fn filter_data(&mut self, at: u32) -> Result<u32, Error> {
         let value = self.regs().read32(at)?;

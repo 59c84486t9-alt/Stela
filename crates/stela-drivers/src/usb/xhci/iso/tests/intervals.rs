@@ -29,7 +29,7 @@ fn ist_encoding_and_endpoint_intervals() {
             let first = c
                 .submit_iso_scheduled(1, 3, buffer.physical(), 32, IsoSchedule::AtMicroframe(4096))
                 .unwrap();
-            // Advance the actual peer clock, retaining the first TD, so
+            // Advance the peer clock, keeping the first TD, so
             // even the longest admitted interval fits the future window.
             model.borrow_mut().mfindex = 3840;
             let next = 4096 + (1 << exponent);
@@ -58,7 +58,7 @@ fn cfc_admission_and_asap_fallback() {
     let mut dma =
     // SAFETY: This CFC admission fixture owns the entire unresized RAM extent while
     // both accepted and fallback schedules run synchronously; all DMA addresses point
-    // into that retained backing.
+    // into that backing.
     unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, false);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)

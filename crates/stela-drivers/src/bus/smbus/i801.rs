@@ -17,15 +17,15 @@
 //! BYTE_DONE handshakes. All waits, including malformed block recovery, have a
 //! deadline. Failed KILL poisons the controller until a platform reset.
 //!
-//! There is deliberately no automatic PCI attachment: the platform must enable
+//! There is no automatic PCI attachment: the platform must enable
 //! the PCI I/O decode/host function in D0 and arbitrate ACPI AML and SMM access.
 //! A device ID or an idle status bit does not prove exclusive ownership. The
 //! unsafe [`PortIo::claim`] contract requires that ownership before any I/O.
 //! MMIO-only devices need a separate register accessor. [`i2c_block`] adds
-//! fixed-length I²C blocks with retained PCI configuration ownership and opt-in
+//! fixed-length I²C blocks with kept PCI configuration ownership and opt-in
 //! hardware PEC and E32B block process calls through that owner. Raw I801 handles
 //! still refuse PEC; SMBALERT and Host Notify remain unsupported.
-//! The retained owner also exposes payload-free SMBus Quick without PEC.
+//! The kept owner also exposes payload-free SMBus Quick without PEC.
 //!
 //! Read-to-acquire INUSE semantics are documented in Intel's Host Status
 //! Register Address (HSTS), offset 0, Core Ultra SoC I/O Registers, ID 795260.
@@ -79,7 +79,7 @@ pub trait Registers {
 }
 
 /// Exact Linux I801 PCI ID match and register capabilities, not a claim that
-/// firmware ownership has been acquired or that an OEM board was qualified.
+/// firmware ownership has been acquired or that an OEM board was checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControllerInfo {
     device: u16,
@@ -130,7 +130,7 @@ impl ControllerInfo {
     }
 
     /// Exact pinned FEATURE_SMBUS_PEC profiles: ICH4 and later. This reports
-    /// capability only; actual configuration ownership is separately required.
+    /// capability only; configuration ownership is separately required.
     pub fn has_hardware_pec(self) -> bool {
         self.block_buffer
     }
@@ -345,8 +345,8 @@ impl<R: Registers, T: Timer> I801<R, T> {
             if let Some(error) = Self::status_error(status) {
                 return Err(error);
             }
-            // An actually observed completion still cannot satisfy an expired
-            // transaction deadline. Retain its raw status for the caller.
+            // An observed completion still cannot satisfy an expired
+            // transaction deadline. Keep its raw status for the caller.
             if self.expired(start, self.config.timeout_us) {
                 return Err(Self::error(ErrorKind::Timeout(phase), status));
             }

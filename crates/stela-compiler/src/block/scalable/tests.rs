@@ -254,7 +254,7 @@ mod fp8_matrix_scope {
 mod numerical22_scope {
     use super::*;
 
-    // Canonical words retained from the exact June feature-facts ledger.
+    // Canonical words kept from the exact June feature-facts ledger.
     const CANONICAL: &[(&str, u32, bool)] = &[
         ("fabd_z_p_zz_", 0x65488040, true),
         ("fabs_z_p_z_m", 0x045ca020, false),

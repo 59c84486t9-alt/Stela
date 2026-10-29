@@ -72,7 +72,7 @@ pub(super) fn stream_base(index: u8) -> usize {
 /// Native access widths matter: SD_CTL occupies three bytes and the fourth
 /// byte is W1C status. Never implement byte writes through a dword RMW.
 pub trait Registers {
-    /// Bytes actually mapped by this register implementation. The conventional
+    /// Bytes mapped by this register implementation. The conventional
     /// contract already requires 0x440; extended capabilities need exact bounds.
     fn region_bytes(&self) -> usize {
         0x440
@@ -85,10 +85,10 @@ pub trait Registers {
         Ok(())
     }
     /// Authentic original PCI subsystem at configuration offset 0x2c, packed
-    /// vendor in low16/device in high16. Generic MMIO/codec graph authority does
+    /// vendor in low16/device in high16. Generic MMIO/codec graph permission does
     /// not establish this board identity. Native bound adapters must revalidate
-    /// their retained function and reject failed reads/power epochs; None is
-    /// actual absence of that service, never a positive OEM/default-board grant.
+    /// their function and reject failed reads/power epochs; None is
+    /// absence of that service, never a positive OEM/default-board grant.
     fn codec_pci_subsystem(&mut self) -> Result<Option<u32>, Error> {
         Ok(None)
     }

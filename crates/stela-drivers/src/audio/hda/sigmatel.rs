@@ -73,7 +73,7 @@ pub struct SigmatelReport {
     pub master_amplifier: Option<(u8, u8)>,
     /// Node/control after verified direct maximum-volume startup.
     pub volume_knob: Option<(u8, u8)>,
-    /// Source-qualified effective output amp range; observed graph stays intact.
+    /// Source-checked effective output amp range; observed graph stays intact.
     pub capture_output_amplifier: Option<(u8, u32)>,
     pub idt83: Option<Idt83PowerReport>,
     pub idt73: Option<Idt73PowerReport>,
@@ -226,7 +226,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let actual = owner.sigmatel_gpio_read(address, group, get, allowed)?;
             // GPIO inputs can change between the preserving snapshot and GET.
             // Verify the caller's owned bits, while rejecting failed/undeclared
-            // readback bits and reporting the actual observed complete value.
+            // readback bits and reporting the observed complete value.
             if (actual ^ value) & verify != 0 {
                 return Err(Error::RouteRejected);
             }
@@ -341,7 +341,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Cold/link-startup standard analog ownership. IDT73xx explicitly applies
     /// source-default GPIO0 EAPD; OEM pin/GPIO/LED masks, beep, SPDIF and PM
-    /// are separate. IDT73xx/83xxx retain source port maps and polled updates.
+    /// are separate. IDT73xx/83xxx keep source port maps and polled updates.
     pub fn initialize_sigmatel_codec(
         &mut self,
         graph: &CodecGraph,
@@ -577,7 +577,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    /// Program one explicit standard path after actual codec startup. Source
+    /// Program one explicit standard path after codec startup. Source
     /// own_eapd_ctl suppresses all per-pin EAPD edits, including generic calls.
     pub fn configure_sigmatel_route(
         &mut self,
@@ -610,7 +610,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.configure_analog_route_policy(graph, route, id, channel, options, policy)
     }
     /// STAC/IDT's no_trigger_sense applies through the canonical pin API too.
-    /// IDT83xxx detectable ports also retain source jack-driven power control.
+    /// IDT83xxx detectable ports also keep source jack-driven power control.
     pub fn poll_sigmatel_pin_sense(
         &mut self,
         graph: &CodecGraph,
@@ -699,7 +699,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .idt73 = state.idt73;
         Ok(report)
     }
-    /// Refresh the exact four IDT92HD95 ports through no-trigger actual jack
+    /// Refresh the exact four IDT92HD95 ports through no-trigger jack
     /// sensing. Unlike IDT83xxx this profile has no mode788 startup effect.
     pub fn refresh_idt95_power_map(
         &mut self,
@@ -752,7 +752,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Quiet the owned actual pin inventory after every stream stop has
+    /// Quiet the owned pin inventory after every stream stop has
     /// acknowledged. This is a native shutdown boundary, not S3/S4 support.
     pub(super) fn shutdown_sigmatel_codecs(&mut self) -> Result<(), Error> {
         for index in 0..self.sigmatel_codecs.len() {

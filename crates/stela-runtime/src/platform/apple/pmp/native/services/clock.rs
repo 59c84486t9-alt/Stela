@@ -1,4 +1,4 @@
-//! Source101fb00 reads actual counter plus signed offset;102a598 converts it.
+//! Source101fb00 reads counter plus signed offset;102a598 converts it.
 #[derive(Clone, Copy)]
 pub struct Clock {
     read: fn() -> u64,
@@ -6,7 +6,7 @@ pub struct Clock {
     signed_offset: i64,
 }
 impl Clock {
-    /// The configuration owner supplies an actual fresh native counter reader,
+    /// The configuration owner supplies a fresh native counter reader,
     /// e.g. its calibrated BSP physical counter. No Access.now or default clock.
     pub fn new(
         read: fn() -> u64,

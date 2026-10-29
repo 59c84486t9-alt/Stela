@@ -10,7 +10,7 @@ use super::{
     *,
 };
 
-/// Actual pre-reset observations, compared again after bootcode. These words
+/// Pre-reset observations, compared again after bootcode. These words
 /// identify a supported protocol/configuration; they are not authenticated data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::net::tg3) struct Profile {
@@ -31,7 +31,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         Ok(subsystem)
     }
     /// Full readback matters for the new alternate registers: a posted write
-    /// alone cannot qualify the hardware's required packet configuration.
+    /// alone cannot check the hardware's required packet configuration.
     pub(super) fn bcm5762_write(&mut self, at: u32, value: u32) -> Result<(), Error> {
         self.write(at, value)?;
         if self.read(at)? != value {
@@ -46,7 +46,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if config & NIC_SRAM_DATA_CFG_PHY_TYPE_MASK != NIC_SRAM_DATA_CFG_PHY_TYPE_COPPER {
             return Err(Error::UnsupportedMedia);
         }
-        // LOM GPIO state is bootcode-owned and needs a separate qualified
+        // LOM GPIO state is bootcode-owned and needs a separate checked
         // reconstruction. This cut supports the positively described NIC.
         if config & NIC_SRAM_DATA_CFG_EEPROM_WP != 0 {
             return Err(Error::UnsupportedBoard);
@@ -58,7 +58,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         let cfg2 = self.sram(NIC_SRAM_DATA_CFG_2, None)?;
         let led = super::board::decode_led(cfg2)?;
-        // tg3_get_invariants preserves 5762's actual UART selector. Unlike
+        // tg3_get_invariants preserves 5762's UART selector. Unlike
         // 5720, VMain selection does not acquire GPIO/modify CPMU_DRV_STATUS.
         let local = GRC_LCLCTRL_INT_ON_ATTN
             | GRC_LCLCTRL_AUTO_SEEPROM
@@ -104,7 +104,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             0
         };
         // EEPROM remapping only changes the donor's decoder; accesses remain
-        // actual NVRAM arbitration/read commands, without address translation.
+        // NVRAM arbitration/read commands, without address translation.
         // Requiring a recognized magic on Macronix too is conservative: the
         // donor's Macronix branch returns earlier without this extra check.
         let magic = self.nvram_word(0, false, if macronix { 4096 } else { 0 })?;

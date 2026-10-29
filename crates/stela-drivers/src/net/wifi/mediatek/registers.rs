@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Serialized chip-register mapping over the actual owned PCI BAR. Fixed
+//! Serialized chip-register mapping over the owned PCI BAR. Fixed
 //! windows and L1 remapping follow mt7921/mt7925 PCI bus operations. The
-//! unqualified Connac3 L2 path remains an explicit unsupported requirement.
+//! unchecked Connac3 L2 path remains an explicit unsupported requirement.
 use super::identity::Chip;
 use alloc::sync::Arc;
 use core::ptr::NonNull;
@@ -25,7 +25,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Actual exclusive BAR access, with completed volatile CPU MMIO operations.
+/// Exclusive BAR access, with completed volatile CPU MMIO operations.
 ///
 /// # Safety
 /// The implementation owns the real selected powered PCI function and its
@@ -39,7 +39,7 @@ pub unsafe trait BarIo: 'static {
     fn write32(&mut self, offset: u32, value: u32) -> Result<(), Error>;
 }
 
-/// Native volatile BAR operations retaining the actual PCI claim and mapping.
+/// Native volatile BAR operations keeping the PCI claim and mapping.
 /// This is a consumer of that claim, rather than a new PCI admission service.
 pub struct MmioBar {
     base: NonNull<u8>,
@@ -48,8 +48,8 @@ pub struct MmioBar {
 }
 impl MmioBar {
     /// # Safety
-    /// `base..base+bytes` is the actual exclusive uncached BAR of the observed
-    /// MT7921/22/25 requester. `owner` retains that real function reservation,
+    /// `base..base+bytes` is the exclusive uncached BAR of the observed
+    /// MT7921/22/25 requester. `owner` keeps that real function reservation,
     /// power and mapping through its final Drop. The mapping has no conflicting
     /// aliases or competing MMIO users; the PCIe ordering contract of `BarIo`
     /// holds. An unrelated token does not meet this ownership requirement.
@@ -83,7 +83,7 @@ impl MmioBar {
         Ok(unsafe { self.base.as_ptr().add(offset).cast() })
     }
 }
-// SAFETY: the constructor's actual mapping/PCI ownership contract is retained
+// SAFETY: the constructor's mapping/PCI ownership contract is held
 // by the Arc; each complete volatile access checks its aligned BAR bounds.
 unsafe impl BarIo for MmioBar {
     fn read32(&mut self, offset: u32) -> Result<u32, Error> {
@@ -107,7 +107,7 @@ pub struct Registers<I: BarIo> {
 }
 impl<I: BarIo> Registers<I> {
     /// # Safety
-    /// `chip` was obtained from the actual live PCI identity and hardware
+    /// `chip` was obtained from the live PCI identity and hardware
     /// revision of `io`'s exclusively owned requester. No other path may use
     /// its dynamic remap window or directly change the remap registers while
     /// this register file exists. This does not stop DMA or drain IRQ work.
@@ -138,7 +138,7 @@ impl<I: BarIo> Registers<I> {
     /// Restore a pending Connac3 L1 remap before another physical mapping or
     /// an explicit controller handoff. The saved value may legitimately be
     /// zero; unlike the donor's zero sentinel, Option preserves that state.
-    /// A failed restore retains its saved value and poisons further accesses.
+    /// A failed restore keeps its saved value and poisons further accesses.
     pub fn restore_remap(&mut self) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -240,7 +240,7 @@ impl<I: BarIo> Registers<I> {
         self.checked(result)
     }
     /// Donor read/modify/write semantics: `(old & !mask) | value`. `value`
-    /// may deliberately set bits outside `mask` (as mt76_set does).
+    /// may set bits outside `mask` (as mt76_set does).
     pub fn modify32(&mut self, address: u32, mask: u32, value: u32) -> Result<u32, Error> {
         let offset = self.resolve(address)?;
         let result = self.io.read32(offset);
@@ -265,8 +265,8 @@ mod tests {
         fail_at: Option<usize>,
         ignore_selector_store: bool,
     }
-    // SAFETY: this serialized register model owns its state and logs actual
-    // model operations; it makes no physical PCI or power qualification claim.
+    // SAFETY: this serialized register model owns its state and logs
+    // model operations; it makes no physical PCI or power validation claim.
     unsafe impl BarIo for Model {
         fn read32(&mut self, offset: u32) -> Result<u32, Error> {
             let value = self
@@ -438,7 +438,7 @@ mod tests {
             NonNull::from(&mut *bytes).cast::<u8>()
         };
         // SAFETY: this exclusively accessed RAM fixture models the owned UC
-        // BAR lifetime for volatile/bounds testing, not physical qualification.
+        // BAR lifetime for volatile/bounds testing, not physical validation.
         let mut bar = unsafe { MmioBar::from_owned_window(base, 16, owner) }.unwrap();
         bar.write32(12, 0x12345678).unwrap();
         assert_eq!(bar.read32(12), Ok(0x12345678));

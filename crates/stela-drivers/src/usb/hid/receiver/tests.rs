@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Authored pure protocol controls; these do not qualify a native receiver.
+//! Authored pure protocol controls; these do not check a native receiver.
 use super::*;
 use alloc::vec;
 

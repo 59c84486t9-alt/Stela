@@ -2,9 +2,9 @@
 // Linux HID reference: Copyright (c) 1999 Andreas Gal;
 // 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
 // 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
-// Retained source identities and adaptation scope: ../THIRD_PARTY.md.
-//! Descriptor-qualified HID reports, including consumer, gamepad and digitizer
-//! collections. Values retain their wire field and collection identity: contact
+// Source identities and adaptation scope: ../THIRD_PARTY.md.
+//! Descriptor-checked HID reports, including consumer, gamepad and digitizer
+//! collections. Values keep their wire field and collection identity: contact
 //! IDs, tip/in-range/confidence, scan time and contact count are never guessed.
 use super::{
     error::{ParseError, ParseErrorKind, Reader},
@@ -29,7 +29,7 @@ pub enum ReportType {
     Feature = 3,
 }
 
-/// One actual Collection main item, with its index in `Descriptor::collections`
+/// One Collection main item, with its index in `Descriptor::collections`
 /// providing a stable identity even for repeated Finger collections.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Collection {
@@ -464,7 +464,7 @@ impl Descriptor {
     }
 
     /// Decode one complete interrupt input. A short/overlong/unknown report is
-    /// diagnostic evidence, never a fabricated release or contact update.
+    /// diagnostic evidence, never an invented release or contact update.
     pub fn decode(&self, bytes: &[u8]) -> Result<Frame, DecodeError> {
         let (id, body) = if self.numbered {
             let (&id, body) = bytes.split_first().ok_or(DecodeError::MissingId)?;

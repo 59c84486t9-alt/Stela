@@ -6,7 +6,7 @@
 // cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See ../THIRD_PARTY.md.
 //! Intel LPSS SSP native polled full-duplex master and manual chip selects.
 //!
-//! All six LPSS register layouts use the actual SSP wire engine. Transfers
+//! All six LPSS register layouts use the SSP wire engine. Transfers
 //! support 4..=32-bit words, modes 0..3, active-low native CS, loopback, per-transfer
 //! speed/word size, delays and CS changes. Every receive word is consumed even
 //! for TX-only transfers. Read outputs are staged through final completion and
@@ -127,20 +127,20 @@ impl Profile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Description {
     pub profile: Profile,
-    /// Actual enabled SSP input clock observed from its retained clock owner.
+    /// Enabled SSP input clock observed from its clock owner.
     pub input_clock_hz: u32,
-    /// Actual board-owned native CS pins; controller capability further narrows.
+    /// Board-owned native CS pins; controller capability further narrows.
     pub chip_selects: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoError;
-/// Actual retained, stopped LPSS SSP controller and its ordered native DWORDs.
+/// Retained, stopped LPSS SSP controller and its ordered native DWORDs.
 /// # Safety
-/// Retain the original powered/reset/clock/pin/firmware device ownership and
-/// complete exclusive UC mapping. Description is immutable actual metadata;
+/// Keep the original powered/reset/clock/pin/firmware device ownership and
+/// complete exclusive UC mapping. Description is immutable metadata;
 /// prior DMA/IRQs/callbacks are stopped and drained. No other user can access,
-/// reset, relocate or revoke this epoch. Deliberately leaking the provider
-/// retains every original grant. Failed accesses may have taken effect.
+/// reset, relocate or revoke this epoch. Leaking the provider
+/// keeps every original grant. Failed accesses may have taken effect.
 pub unsafe trait Registers {
     fn description(&self) -> Description;
     fn bytes(&self) -> usize;
@@ -155,7 +155,7 @@ pub struct Device {
     pub loopback: bool,
 }
 /// Word storage matches the source: one LE byte for 4..8 bits, two for 9..16,
-/// four for 17..32. Absent TX sends zero; absent RX still drains actual words.
+/// four for 17..32. Absent TX sends zero; absent RX still drains words.
 pub struct Transfer<'a> {
     pub tx: Option<&'a [u8]>,
     pub rx: Option<&'a mut [u8]>,
@@ -357,8 +357,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.selected = asserted.then_some(device);
         Ok(())
     }
-    /// Source probe defaults, actual PIO service exclusion, private manual CS
-    /// and hardware CS capability admission. Failure retains the original owner.
+    /// Source probe defaults, PIO service exclusion, private manual CS
+    /// and hardware CS capability admission. Failure keeps the original owner.
     pub fn initialize(&mut self) -> Result<(), Error> {
         self.begin()?;
         if self.initialized {
@@ -481,7 +481,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         self.delay(transfer.delay_us)
     }
-    /// Full-duplex message, retaining CS across transfers unless requested.
+    /// Full-duplex message, keeping CS across transfers unless requested.
     /// All geometry/allocation checks precede hardware effects. Output commits
     /// only after the complete message, including delays and final CS state.
     pub fn message(&mut self, device: Device, transfers: &mut [Transfer<'_>]) -> Result<(), Error> {
@@ -571,7 +571,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     /// Acknowledge idle, deassert a held CS, disable SSP and return every
-    /// original owner. Faults retain the complete owner without guessed reset.
+    /// original owner. Faults keep the complete owner without guessed reset.
     pub fn release(mut self) -> Result<(R, T), Self> {
         if self.begin().is_err() {
             return Err(self);

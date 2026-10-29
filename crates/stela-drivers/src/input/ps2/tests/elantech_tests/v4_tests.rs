@@ -1,4 +1,4 @@
-//! Actual v4 configuration, five-contact I/O, retained failures and software MT.
+//! V4 configuration, five-contact I/O, kept failures and software MT.
 use super::*;
 
 fn target_v4(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
@@ -225,7 +225,7 @@ fn v4_rate_restore_late_ack_retains_both_real_mode_writes_without_claiming_curre
 #[test]
 fn v4_tracking_wrap_preserves_oldest_contact_and_exact_source_counter() {
     let (mut c, h) = configured(0x060001);
-    // Advance the genuine owner through actual framed heads/releases rather
+    // Advance the owner through framed heads/releases rather
     // than injecting a tracking counter into production state.
     for _ in 0..65534 {
         read_frame(&mut c, &h, packet(false, 1, 1));

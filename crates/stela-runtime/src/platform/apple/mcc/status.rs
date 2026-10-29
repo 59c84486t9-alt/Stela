@@ -1,7 +1,7 @@
 //! Source-required views of a declared Stela broadcast selector. Original
 //! iBoot's helper writes +0x10000c once per MCC around all-plane programs;
 //! SPTM's descriptor reader addresses +plane*0x40000. A newly created Stela
-//! resource exposes these read views of its one actual selector, rather than
+//! resource exposes these read views of its one selector, rather than
 //! storing independent cache-disabled values. This is a source-consumer-derived
 //! emulated protocol, not a physical Apple reset/alias observation. Retained
 //! physical observations do not acquire the relationship from this declaration.

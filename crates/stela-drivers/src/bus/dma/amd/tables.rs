@@ -1,4 +1,4 @@
-//! Retained AMDv1 host translations. Unit routing, IOVA allocation and the
+//! AMDv1 host translations. Unit routing, IOVA allocation and the
 //! device's submission/completion lifetime remain the live domain's owners.
 use super::{
     format::{FormatError, PageEntry, PhysicalAddress, TableLevel},
@@ -16,8 +16,8 @@ static QUARANTINED_TREES: AtomicU64 = AtomicU64::new(0);
 static QUARANTINED_TABLES: AtomicU64 = AtomicU64::new(0);
 static QUARANTINED_PAYLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// Cumulative resources retained by exposed-tree Drop, never proof of reset or
-/// reclamation. The retained hardware context is included in each tree owner.
+/// Cumulative resources kept by exposed-tree Drop, never proof of reset or
+/// reclamation. The kept hardware context is included in each tree owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QuarantineStatus {
     pub trees: u64,
@@ -44,17 +44,17 @@ fn count_quarantine(counter: &AtomicU64, amount: u64) {
 /// # Safety
 /// Every successful PageSource allocation must provide fresh, currently zeroed,
 /// CPU-exclusive table RAM for its entire returned pin lifetime. The inherited
-/// visibility service must qualify this actual remapper's table coherency.
+/// visibility service must check this remapper's table coherency.
 /// `invalidate` must invalidate all page and PDE caches covering the complete
-/// nonempty span in this exact domain and acknowledge actual hardware completion
+/// nonempty span in this exact domain and acknowledge hardware completion
 /// before success. A span whose exclusive end is unrepresentable requires a
 /// full-domain flush. A queue head, timeout or compiler fence is not completion.
 /// Faults, timeouts and unsupported operations must return failure. The context
-/// retains its real unit/domain, command/completion resources and IRQ ownership;
-/// it cannot tear them down underneath this tree or another retained owner.
+/// keeps its real unit/domain, command/completion resources and IRQ ownership;
+/// it cannot tear them down underneath this tree or another kept owner.
 /// Hardware table access/dirty updates must be disabled: the walker only reads
-/// these tables. `admit_payload` must validate the actual payload's cache and
-/// encryption policy and return the qualified FC selection before mutation.
+/// these tables. `admit_payload` must validate the payload's cache and
+/// encryption policy and return the checked FC selection before mutation.
 pub unsafe trait TableHardware: PageSource + TableVisibility {
     fn invalidate(&self, address: u64, bytes: usize) -> Result<(), DmaError>;
     fn admit_payload(&self, pages: &DmaPages, direction: Direction) -> Result<bool, DmaError>;
@@ -166,10 +166,10 @@ impl<H: TableHardware> PageTables<H> {
     /// `level`, `physical_bits` and `virtual_bits` are admitted for this exact
     /// hardware/domain, including HATS/IVINFO limits, encryption and host mode. No
     /// other software owner may mutate or publish these newly allocated tables.
-    /// `maximum_table_pages` is the real domain's retained-table budget, including
+    /// `maximum_table_pages` is the real domain's table budget, including
     /// the root and empty children. The live IOVA allocator must reuse/pack its
     /// aperture within this budget; unmap does not implicitly free child tables.
-    /// `maximum_backing_bytes` separately bounds full retained native pins,
+    /// `maximum_backing_bytes` separately bounds full native pins,
     /// including unused tails, rather than assuming 4 KiB per logical table.
     pub unsafe fn new(
         hardware: H,
@@ -235,7 +235,7 @@ impl<H: TableHardware> PageTables<H> {
     }
 
     /// # Safety
-    /// This root has been detached from every actual DTE/alias, every requester
+    /// This root has been detached from every DTE/alias, every requester
     /// and walker is stopped, and required invalidations/reset have completed.
     /// No hardware can access any of these tables or payloads again. A timeout
     /// or an empty mapping list cannot establish this retirement.
@@ -243,7 +243,7 @@ impl<H: TableHardware> PageTables<H> {
         self.exposed = false;
     }
 
-    /// Install the exact ordered native pages and retain them before any store.
+    /// Install the exact ordered native pages and keep them before any store.
     ///
     /// # Safety
     /// The live domain owns this IOVA span exclusively; no device/worker may
@@ -339,7 +339,7 @@ impl<H: TableHardware> Drop for PageTables<H> {
                 });
                 count_quarantine(&QUARANTINED_PAYLOAD_BYTES, bytes);
             }
-            // Retain the actual unit/IRQ/completion context as well as every
+            // Keep the unit/IRQ/completion context as well as every
             // table and payload. Dropping a context could otherwise disable or
             // reassign the domain while hardware still holds this root.
             core::mem::forget(self.state.take());
@@ -414,7 +414,7 @@ impl<H: TableHardware> State<H> {
                     .filter(|bytes| *bytes <= self.maximum_backing_bytes)
                     .ok_or(TranslationError::ResourceLimit)?;
                 // Cache visibility does not publish a parent or allow the
-                // callback to retain this span. The new page remains unreachable
+                // callback to keep this span. The new page remains unreachable
                 // by hardware and can be released on controlled staging failure.
                 new.table
                     .publish(&self.hardware)

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Intel Corporation
 //! Broadcom/Cypress USB PatchRAM initialization adapted from pinned Linux btbcm.
-//! Actual controller identification, exact Provider resources and acknowledged
+//! Controller identification, exact Provider resources and acknowledged
 //! HCD commands are required. Success is historical protocol evidence, not
-//! vendor authentication, Bluetooth service readiness or physical qualification.
+//! vendor authentication, Bluetooth service readiness or physical validation.
 //! USB media and the distinct BCM4377 PCIe transport remain separate backends.
 pub mod diagnostics;
 mod identity;
@@ -33,7 +33,7 @@ pub struct Attempt {
     pub patch_commands: usize,
     pub after: Option<LocalVersion>,
     pub address: Option<[u8; 6]>,
-    /// Unrelated asynchronous packets are retained in wire order, not discarded.
+    /// Unrelated asynchronous packets are held in wire order, not discarded.
     pub asynchronous: Vec<Packet>,
 }
 
@@ -106,7 +106,7 @@ pub(super) fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
 }
 
 /// Download the exact USB-controller PatchRAM image with no guessed address.
-/// Use the native initialization wrapper to retain a single attempt per actual
+/// Use the native initialization wrapper to keep a single attempt per
 /// attachment. Failure closes/quarantines that attachment; no firmware retry.
 pub fn initialize<B: Io>(
     hci: &mut Hci<B>,
@@ -115,9 +115,9 @@ pub fn initialize<B: Io>(
     initialize::run(hci, provider, None)
 }
 
-/// A genuine platform-supplied controller address can replace a source-listed
+/// A platform-supplied controller address can replace a source-listed
 /// default address. This is the host-order six-byte BD_ADDR as transmitted by
-/// HCI, not a generated/random identity. No platform value is fabricated.
+/// HCI, not a generated/random identity. No platform value is invented.
 pub fn initialize_with_address<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn crate::firmware::Provider,

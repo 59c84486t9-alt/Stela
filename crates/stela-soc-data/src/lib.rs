@@ -1,7 +1,7 @@
 //! Apple SoC topology, register geometry and initial image contracts.
 //!
 //! These data contracts carry no device execution, JIT, native mapping or
-//! controller-effect authority. Device models and bundle preparation consume
+//! controller-effect permission. Device models and bundle preparation consume
 //! the same validated descriptions.
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 extern crate alloc;

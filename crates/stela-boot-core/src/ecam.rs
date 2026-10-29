@@ -1,5 +1,5 @@
 //! Pure geometry for original captured ECAM/RootBridge descriptions.
-//! This module creates no Resource, mapping, device exclusion or root authority.
+//! This module creates no Resource, mapping, device exclusion or root permission.
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 use stela_drivers::bus::{
@@ -42,7 +42,7 @@ fn physical(window: EcamWindow, bits: u8) -> Result<PhysicalSpan, Error> {
 
 /// Borrowed immutable descriptions whose COMPLETE original MCFG windows were
 /// checked before any subset is selected. This remains descriptive metadata;
-/// only Source joins its actual captured bytes/owner and mints a reservation.
+/// only Source joins its captured bytes/owner and mints a reservation.
 pub struct EcamInventory<'a> {
     windows: &'a [EcamWindow],
     bits: u8,

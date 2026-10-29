@@ -115,7 +115,7 @@ impl SepOs {
     /// the xART pair over the anti-replay store `store`, the keystore and
     /// BootPolicy. With `observe`, their traffic is journaled and `scrd` is
     /// also advertised so its kernel client binds; its requests are
-    /// recorded and never answered (a diagnostic mode: it qualifies nothing
+    /// recorded and never answered (a diagnostic mode: it checks nothing
     /// beyond its log).
     pub fn with_services(
         mut self,

@@ -17,7 +17,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-/// An actual route chosen by the caller, including electrical options.
+/// A route chosen by the caller, including electrical options.
 #[derive(Clone, Copy, Debug)]
 pub struct RealtekHeadphoneRoute<'a> {
     pub route: &'a AnalogRoute,
@@ -27,11 +27,11 @@ pub struct RealtekHeadphoneRoute<'a> {
 }
 
 /// Startup observations only. Array order is selected primary pin, fixed pin16;
-/// those may be the same actual node. Only explicit supplied routes carry PCM.
+/// those may be the same node. Only explicit supplied routes carry PCM.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RealtekDualHeadphoneReport {
     pub common: RealtekCommonReport,
-    /// Actual coefficient0 used for ALC285 variant selection; absent for295.
+    /// Coefficient0 used for ALC285 variant selection; absent for295.
     pub coefficient_zero: Option<u16>,
     pub boot_depop_performed: bool,
     pub headphone_pins: [u8; 2],
@@ -39,7 +39,7 @@ pub struct RealtekDualHeadphoneReport {
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
-    // Node58 is fixed in the donor. Only its three actual sequencer indices
+    // Node58 is fixed in the donor. Only its three sequencer indices
     // enter this private helper; no public arbitrary vendor-NID API is added.
     fn sequencer_index(&mut self, codec: u8, index: u16) -> Result<(), Error> {
         if !matches!(index, 0 | 3 | 0x0f) {
@@ -110,7 +110,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::Timeout(Phase::CodecDepop));
         }
         self.sequencer_write(codec, 0, result)?;
-        // The donor ORs each full saved value after clearing its mask. Retain
+        // The donor ORs each full saved value after clearing its mask. Keep
         // that operation, rather than silently narrowing it to saved & mask.
         changes.push(self.update_coefficient(codec, 0x38, 1 << 4, saved38)?);
         changes.push(self.update_coefficient(codec, 0x0d, 0x110, saved0d)?);
@@ -161,9 +161,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok((power, pin_caps))
     }
 
-    /// Exact ALC285/295 held-D0 startup with one actual primary PCM route.
+    /// Exact ALC285/295 held-D0 startup with one primary PCM route.
     /// Fixed pin16 is always measured, including firmware NoConnection pins;
-    /// positive presence requires actual standard output/amp capabilities.
+    /// positive presence requires standard output/amp capabilities.
     /// Its pin/amp controls are reserved without inventing a second DAC/path.
     /// An optional real pin16 route may use a separate disjoint stream/path.
     /// Coefficient0 selects ALC285's donor boot-depop variant. ALC295 always

@@ -39,7 +39,7 @@ fn unchanged_linux_uas_reset_order_and_block_zero_cdb_match() {
             at += 21;
             if long_cdb {
                 // The ordinary Stela block-zero path selects READ(10).
-                // Retain the donor's alternative bytes without claiming a
+                // Keep the donor's alternative bytes without claiming a
                 // production use_16_for_rw quirk that is not selected.
                 assert_eq!(cdb[0], 0x88);
                 assert_eq!(&cdb[10..14], &1u32.to_be_bytes());

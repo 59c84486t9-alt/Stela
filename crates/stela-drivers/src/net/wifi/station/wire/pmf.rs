@@ -15,8 +15,8 @@ const SAE_EXT_KEY: u8 = 24;
 const OWE: u8 = 18;
 
 /// Original exact selected RSNE and bounded negotiated policy. Only parsing
-/// the explicit opt-in constructor creates it. Actual OS authentication and
-/// native hardware authority must be reacquired at every consuming effect.
+/// the explicit opt-in constructor creates it. OS authentication and
+/// native hardware permission must be reacquired at every consuming effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selection {
     rsn: Vec<u8>,
@@ -75,7 +75,7 @@ impl Selection {
             management: profile.management,
         })
     }
-    /// Bind to the actual retained BSS. A response may omit RSNE, as in Linux;
+    /// Bind to the BSS. A response may omit RSNE, as in Linux;
     /// any supplied RSNE must describe the same selected security profile.
     pub(in crate::net::wifi) fn validate_peer(
         &self,

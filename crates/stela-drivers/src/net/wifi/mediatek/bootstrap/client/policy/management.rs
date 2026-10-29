@@ -20,15 +20,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .map_err(PolicyError::Regulatory)
     }
 
-    /// Retain actual current peer/PTK/GTK/IGTK transport for the OS management
+    /// Keep current peer/PTK/GTK/IGTK transport for the OS management
     /// service. This supplies neither negotiated PMF nor an OS policy service.
     ///
     /// # Safety
-    /// The actual authenticated OS key exchange supplied this association's
+    /// The authenticated OS key exchange supplied this association's
     /// IGTK/IPN. Independently stop/drain all old GTK hardware RX/TX, DMA/IRQ/work
     /// and external deferred key users, including observations already returned
-    /// by poll. The native BA/queue checks are necessary, not that actual fence.
-    /// No live IGTK rekey is implemented; uncertain commands retain all owners.
+    /// by poll. The native BA/queue checks are necessary, not that fence.
+    /// No live IGTK rekey is implemented; uncertain commands keep all owners.
     pub unsafe fn install_management_key(
         &mut self,
         epoch: u64,
@@ -40,8 +40,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         C: Send + Sync,
     {
         let admission = self.management_admission()?;
-        // SAFETY: authority/controller are the same exclusive private attachment;
-        // inherited authentic input and actual independent old-user drain fence.
+        // SAFETY: permission/controller are the same exclusive private attachment;
+        // inherited authentic input and independent old-user drain fence.
         unsafe {
             self.client.install_management_key_modern(
                 &mut self.authority,
@@ -56,7 +56,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     }
 
     /// Consume the original authenticated observation under current native and
-    /// OS regulatory guards. The actual OS supplies all negotiated PMF/MLME and
+    /// OS regulatory guards. The OS supplies all negotiated PMF/MLME and
     /// SA Query policy; further deferred effects must revalidate independently.
     pub fn with_management<T>(
         &mut self,
@@ -64,7 +64,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         consume: impl FnOnce(&Mpdu, &[u8], PacketNumber) -> T,
     ) -> Result<T, PolicyError> {
         let admission = self.management_admission()?;
-        // SAFETY: the exclusive private attachment owns both actual authorities;
+        // SAFETY: the exclusive private attachment owns both permissions;
         // callback has no raw native escape and receives this original namespace.
         unsafe {
             self.client
@@ -82,7 +82,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         source: &dyn PageSource,
     ) -> Result<Receipt, PolicyError> {
         let admission = self.management_admission()?;
-        // SAFETY: actual hardware/OS guards belong to this sole retained native
+        // SAFETY: hardware/OS guards belong to this sole native
         // owner; revocation serializes through its real disconnect/drain path.
         unsafe {
             self.client.transmit_management_modern(
@@ -98,13 +98,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
 }
 
 impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
-    /// Update a current retained management session through this sole owning
-    /// hardware/OS attachment; retains the other MMIE receive key window.
+    /// Update a current management session through this sole owning
+    /// hardware/OS attachment; keeps the other MMIE receive key window.
     ///
     /// # Safety
     /// Inherit Client::rotate_management_key_modern's authenticated exchange,
-    /// peer same-index retirement and actual old hardware/RX/IRQ/deferred-user
-    /// drain contract. Physical firmware overlap remains unqualified.
+    /// peer same-index retirement and old hardware/RX/IRQ/deferred-user
+    /// drain contract. Physical firmware overlap remains unchecked.
     pub unsafe fn rotate_management_key(
         &mut self,
         session: &Session,
@@ -116,8 +116,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         C: Send + Sync,
     {
         let admission = self.management_admission()?;
-        // SAFETY: this private attachment retains the exact native requester and
-        // authorities; caller supplies authentic peer policy and actual drain.
+        // SAFETY: this private attachment keeps the native requester and
+        // permissions; caller supplies authentic peer policy and drain.
         unsafe {
             self.client.rotate_management_key_modern(
                 &mut self.authority,
@@ -137,7 +137,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     ///
     /// # Safety
     /// The real OS authorizes this original unicast action and deferred native
-    /// BA responses/timers/DELBA under its actual negotiated protection policy.
+    /// BA responses/timers/DELBA under its negotiated protection policy.
     /// Session/key transport and regulatory admission alone do not establish it.
     pub unsafe fn receive_management_block_ack(
         &mut self,
@@ -145,7 +145,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         now: u64,
     ) -> Result<(), PolicyError> {
         let admission = self.management_admission()?;
-        // SAFETY: private same-requester authority; caller supplies actual OS
+        // SAFETY: private same-requester permission; caller supplies OS
         // negotiated policy, while Client revalidates original RX/session/keys.
         unsafe {
             self.client
@@ -167,7 +167,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         now: u64,
     ) -> Result<(), PolicyError> {
         let admission = self.management_admission()?;
-        // SAFETY: sole private native authority plus inherited OS policy.
+        // SAFETY: sole private native permission plus inherited OS policy.
         unsafe {
             self.client.begin_management_block_ack(
                 &mut self.authority,
@@ -183,17 +183,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
 }
 
 impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
-    /// Publish one actual pending BA operation under freshly acquired guards.
-    /// The original OS-selected protected exchange retains its own Session.
+    /// Publish one pending BA operation under freshly acquired guards.
+    /// The original OS-selected protected exchange keeps its own Session.
     pub fn progress_block_ack(
         &mut self,
         source: &dyn PageSource,
         now: u64,
     ) -> Result<(), PolicyError> {
         let admission = self.management_admission()?;
-        // SAFETY: this sole private attachment retains both real authorities;
+        // SAFETY: this sole private attachment keeps both real permissions;
         // pending protected work was explicitly selected through the unsafe OS
-        // negotiated-policy boundaries and Client revalidates its exact owner.
+        // negotiated-policy boundaries and Client revalidates its owner.
         unsafe {
             self.client
                 .progress_block_ack(&mut self.authority, admission, source, now)
@@ -227,7 +227,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         self.client.next_transmit_deadline()
     }
 
-    /// Queue a restrictive timeout/stop. Actual disable and optional local
+    /// Queue a restrictive timeout/stop. Disable and optional local
     /// protected DELBA remain separate drain/ACK/guarded progress operations.
     pub fn poll_block_ack_timers(&mut self, now: u64) -> Result<(), PolicyError> {
         self.client

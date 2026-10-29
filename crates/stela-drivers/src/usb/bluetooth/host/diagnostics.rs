@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Actual xHCI owner for the separate Broadcom diagnostic bulk interface.
+//! XHCI owner for the separate Broadcom diagnostic bulk interface.
 use super::Host;
 use crate::{
     block::BlockError,
@@ -31,7 +31,7 @@ pub(super) struct Native {
     poisoned: bool,
 }
 impl Hci<Host> {
-    /// Separate diagnostic bulk endpoints of this actually initialized native
+    /// Separate diagnostic bulk endpoints of this initialized native
     /// PatchRAM function. This neither opens SCO nor changes controller firmware.
     pub fn into_broadcom_diagnostics(
         self,
@@ -63,7 +63,7 @@ impl Native {
             let mut device = controller.device(host.id)?;
             // Caller allocation may reenter after the first admission check.
             // Definitive ownership and publication share this same borrow; a
-            // busy refusal has no authority to retire another owner's DCIs.
+            // busy refusal has no permission to retire another owner's DCIs.
             device.preflight_endpoints(&self.pair.endpoints())?;
             self.configured = true;
             device.configure(&self.pair.endpoints(), None, dma)?;
@@ -148,7 +148,7 @@ impl Native {
                 .completed_ticket(self.output_ticket.as_ref().unwrap());
             if let Some(result) = done {
                 // completed_ticket consumes a successful TD, including a short
-                // completion. Retain that actual boundary before deadline or
+                // completion. Keep that boundary before deadline or
                 // protocol rejection; a stale ticket cannot cancel it again.
                 if let Ok(bytes) = &result {
                     self.retirement.output = Some(TransferCancellation::Completed(*bytes));

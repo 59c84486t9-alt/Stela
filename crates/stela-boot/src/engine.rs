@@ -664,19 +664,19 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         output::fatal("engine handoff has the wrong magic");
     }
     layout::set(handoff.placement);
-    // Use the retained physmap directly: its CPU and physical bases have the
+    // Use the physmap directly: its CPU and physical bases have the
     // same alignment phase. A separately placed heap alias cannot in general
     // satisfy higher-order CPU/physical page alignment simultaneously.
     let heap = layout::physical(handoff.heap.physical);
     // SAFETY: this reserved heap is unused and its RW+NX physmap is shared by
     // every native root for the complete engine lifetime.
     unsafe { crate::ALLOCATOR.initialize(heap as *mut u8, handoff.heap.bytes as usize) };
-    // SAFETY: this loader-owned private seed is retained in the shared physmap,
+    // SAFETY: this loader-owned private seed is held in the shared physmap,
     // exclusively consumed here before any native service is published.
     if let Err(error) = unsafe { crate::random::initialize(handoff.random_seed) } {
         output::arguments(format_args!("HOST entropy unavailable: {error:?}\n"));
     }
-    // SAFETY: this phase owns that exact reserved heap and retained WB mapping.
+    // SAFETY: this phase owns that reserved heap and kept WB mapping.
     unsafe {
         crate::native_memory::initialize(
             heap as usize,
@@ -685,7 +685,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             layout::physical(0),
         )
     };
-    // SAFETY: loader-reserved immutable pages, retained in every shared-window
+    // SAFETY: loader-reserved immutable pages, kept in every shared-window
     // physmap; metadata and Arc are created in this active engine allocator.
     let host_firmware = unsafe { crate::host_firmware::after_ebs(&handoff.host_firmware) }
         .unwrap_or_else(|error| output::fatal(error));
@@ -794,7 +794,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no host device handoff"));
         // SAFETY: --audio-check explicitly grants sole conventional HDA ownership;
-        // before host::install, the retained identity root and DMA pages are live.
+        // before host::install, the identity root and DMA pages are live.
         unsafe { crate::audio_check::run(&audio_handoff, mode) }.unwrap_or_else(|error| {
             output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
             output::fatal("the audio check failed")
@@ -979,7 +979,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     let worker_ram = ram;
     crate::status::begin("Starting the other host processors");
-    // SAFETY: the retained physical inventory and loader-owned reservations
+    // SAFETY: the physical inventory and loader-owned reservations
     // were validated before any SIPI; the BSP Host is installed, guest entry
     // is excluded, and APs remain parked until canonical worker publication.
     let executors = unsafe {
@@ -1043,7 +1043,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             ));
         }
         if options.native_shared_check {
-            // SAFETY: the bounded fixture owns all source RAM and actual frame
+            // SAFETY: the bounded fixture owns all source RAM and frame
             // loans; all AP returns are acquired before any borrowed release.
             unsafe {
                 crate::native_smp::kernel_check::check(
@@ -1200,7 +1200,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
-    // retained for every subsequent native CPU and synchronous device writer.
+    // for every subsequent native CPU and synchronous device writer.
     let canonical_ram = unsafe {
         crate::native_smp::canonical::reserve_for_workers(
             handoff,
@@ -1423,13 +1423,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 observation.edx,
             )
             .unwrap_or_else(|error| output::fatal(&error));
-            // This is the native Stela Host's actual configured counter source,
+            // This is the native Stela Host's configured counter source,
             // with an explicit software offset0, not an Apple frequency observation.
             let clock = NativePmpClock::new(host::fresh_counter, host::COUNTER_HZ as u32, 0)
                 .unwrap_or_else(|error| output::fatal(error));
             // SAFETY: cold before first guest/frame publication; same canonical
             // RAM, parked real APs and exclusive closed devices. Every later
-            // transfer runs under actual held/fenced canonical worker sessions.
+            // transfer runs under held/fenced canonical worker sessions.
             unsafe {
                 devices.bind_native_pmp_services(
                     board,
@@ -1500,7 +1500,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 },
             }
         });
-        // Development restores retain the original DEV-board FDR failure
+        // Development restores keep the original DEV-board FDR failure
         // policy without exposing Apple's FDR service. TSS, when selected,
         // uses the host signer directly; the image reader also owns its own
         // network access independently of this guest reverse proxy.
@@ -1550,7 +1550,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("restore preparation failed")
         })
     });
-    // All actual source/resource preparation precedes the first publication.
+    // All source/resource preparation precedes the first publication.
     // A reached write failure is terminal before any guest entry.
     let _published_tree = match &assigned {
         Some(assigned) => {
@@ -1591,7 +1591,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     // The loader handle's last RAM copy preceded canonical registration; its
     // borrow has ended. It never executes a guest instruction.
-    // SAFETY: actual started executors, retained source Plan/profile and exact
+    // SAFETY: started executors, kept source Plan/profile and exact
     // RAM/device owners remain live for the whole non-returning run below.
     let mut machine = unsafe {
         crate::native_smp::canonical::prepare_with_locks(
@@ -1636,7 +1636,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .unwrap_or_else(|error| output::fatal(error));
     }
     // The run's driver calls keep the engine's TLB entries; the serialized
-    // workers' qualifications require PCIDE clear.
+    // workers' validations require PCIDE clear.
     let _tagged = options
         .parallel
         .then(storage::TaggedRoots::enable)
@@ -1669,7 +1669,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         },
         |machine, limit| {
             // SAFETY: the same fixed workers and canonical producer set stay
-            // retained; an unsupported native service returns without fallback.
+            // kept; an unsupported native service returns without fallback.
             unsafe {
                 if options.native_rounds {
                     crate::native_smp::canonical::run_slice_for(
@@ -1731,7 +1731,7 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         bounce: Some((layout::bounce(), handoff.bounce)),
     };
     crate::status::begin("Installing the host processor state");
-    // SAFETY: once on the BSP, with interrupts off and owned native resources. Retain the
+    // SAFETY: once on the BSP, with interrupts off and owned native resources. Keep the
     // processor-local state through every native call and handler.
     let host_owner = unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     #[cfg(feature = "diagnostics")]
@@ -1746,7 +1746,7 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     #[cfg(feature = "diagnostics")]
     if options.native_clock_check {
         // SAFETY: explicit original UP/controller ownership; HPET uses the
-        // actual production Source, or absent HPET preserves the bounded PM
+        // production Source, or absent HPET preserves the bounded PM
         // fixture's complete <=1second gap contract. No driver is published.
         unsafe { crate::native_mmio::diagnostic::clock(handoff, &mut host_owner) }.unwrap_or_else(
             |error| {
@@ -1760,14 +1760,14 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     if options.native_mmio_check {
         // SAFETY: this explicit UP entry owns its separately reserved mixed32
         // diagnostic pool. It retires every view before the MMIO phases and
-        // never activates a second authority or publishes a service.
+        // never activates a second permission or publishes a service.
         unsafe { kernel_work::check_mixed(handoff, &mut host_owner) }.unwrap_or_else(|error| {
             output::arguments(format_args!("CHECK native-mixed32 FAIL {error}\n"));
             output::fatal("mixed32 native stack qualification failed")
         });
-        // SAFETY: explicit bounded native diagnostic on the original retained
+        // SAFETY: explicit bounded native diagnostic on the original kept
         // handoff/owner. Success stops before guest entry; permanent mapping
-        // and IRQ registries retain this exact physical root until VM shutdown.
+        // and IRQ registries keep this exact physical root until VM shutdown.
         unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
             |error| {
                 output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
@@ -1784,21 +1784,21 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     }
 }
 
-/// The firmware's ACPI namespace and the owned MMIO authority, each `None`
-/// when the host does not qualify, which is reported. The device interrupt
+/// The firmware's ACPI namespace and the owned MMIO permission, each `None`
+/// when the host does not check, which is reported. The device interrupt
 /// registry is attached here too, or its refusal reported.
 struct Platform {
     acpi: Option<&'static aml::HostAcpi>,
     mmio: Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
-    /// Affine runtime/source remain retained through paused/quarantined frames.
+    /// Affine runtime/source remain held through paused/quarantined frames.
     /// Its producer services require their own complete admission graph.
     _work: Option<&'static kernel_work::KernelWork>,
 }
 
 fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -> Platform {
-    // The owned MMIO authority the host devices' services map through. A
-    // host it cannot qualify is reported, and those services refuse.
+    // The owned MMIO permission the host devices' services map through. A
+    // host it cannot check is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
     // the other host processors start.
     let native_mmio = unsafe { crate::native_mmio::captured(handoff) }
@@ -1840,7 +1840,7 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         },
         _ => remapping::Remappers::none(),
     };
-    // SAFETY: actual validated BSP handoff, before AP/driver producers.
+    // SAFETY: validated BSP handoff, before AP/driver producers.
     let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner) } {
         Ok(work) => {
             #[cfg(feature = "diagnostics")]
@@ -2026,11 +2026,11 @@ fn start_devices(
                 host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
             #[cfg(feature = "diagnostics")]
             if options.audio_check.is_some() {
-                // The audio check retains the final slice even after shutdown.
+                // The audio check keeps the final slice even after shutdown.
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
             }
             crate::status::begin("Starting the PC's disks and USB devices");
-            // Every admitted input is owned or an actual retained boot owner.
+            // Every admitted input is owned or a boot owner.
             // No probe callback can borrow this dispatcher stack on timeout.
             let owned_targets: Vec<_> = targets.iter().map(|target| (**target).clone()).collect();
             let owned_preboot = options.preboot.clone();
@@ -2053,9 +2053,9 @@ fn start_devices(
                 let native = mmio
                     .map(|mmio| services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz));
                 let targets: Vec<_> = owned_targets.iter().collect();
-                // SAFETY: one actual admitted foreground task under the work
+                // SAFETY: one admitted foreground task under the work
                 // dispatcher's loader-root/driver guard. Owned handoff, inputs
-                // and retained services survive completion or quarantine.
+                // and kept services survive completion or quarantine.
                 unsafe {
                     storage::open(
                         &storage_handoff,
@@ -2174,7 +2174,7 @@ fn start_devices(
     }
 }
 
-/// Retained host interfaces used by both ordinary authored inputs and the
+/// Host interfaces used by both ordinary authored inputs and the
 /// canonical original-image execution path. Reporting cannot choose a fallback.
 struct RunIo {
     restore: Option<restore::Experiment>,
@@ -2576,7 +2576,7 @@ fn run<H: Host>(
         service_parts.lap(ServiceParts::SERVICE, host::rdtsc());
 
         // A wall-time service yield may precede even the final block limit.
-        // Only the actual executed count can establish budget completion.
+        // Only the executed count can establish budget completion.
         let budget_reached = budget != 0 && machine.statistics.blocks >= budget;
         let sliced = waiting || matches!(stop, Stop::Budget) && !budget_reached;
         let now = host::rdtsc();

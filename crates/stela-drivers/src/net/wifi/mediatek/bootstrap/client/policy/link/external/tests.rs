@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! The actual OS-facing owner, scan handles, native DMA and bounded notices.
+//! The OS-facing owner, scan handles, native DMA and bounded notices.
 use super::*;
 use crate::net::wifi::mediatek::{
     bootstrap::client::{
@@ -38,7 +38,7 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
     let handle = link.bss().next().unwrap().0;
     done(&model);
     link.service().unwrap();
-    // SAFETY: actual terminal source scan and all modeled old users drained.
+    // SAFETY: terminal source scan and all modeled old users drained.
     unsafe { link.retire_scan_after_drain() }.unwrap();
     while link.take_notice().is_some() {}
     let mut wrong = profile();
@@ -81,7 +81,7 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
         }
     }
     assert!(saw_release);
-    // Fill the real notice capacity using actual completed native RX frames.
+    // Fill the real notice capacity using completed native RX frames.
     for i in 0..64_u8 {
         incoming(
             &model,
@@ -103,7 +103,7 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
         let memory = model.memory.lock().unwrap();
         let offset = usize::from((queue.index + queue.count - 1) % queue.count) * 16;
         let pointer = (memory.mappings[&queue.base].1 + offset) as *const u8;
-        // SAFETY: actual completed model descriptor is still retained/mapped.
+        // SAFETY: completed model descriptor is still held/mapped.
         let descriptor = unsafe { core::slice::from_raw_parts(pointer, 16) }.to_vec();
         assert_ne!(
             u32::from_le_bytes(descriptor[4..8].try_into().unwrap()) & (1 << 31),
@@ -119,7 +119,7 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
         let offset = usize::from((queue.index + queue.count - 1) % queue.count) * 16;
         let pointer = (memory.mappings[&queue.base].1 + offset) as *const u8;
         assert_eq!(
-            // SAFETY: same retained actual model descriptor as the snapshot above.
+            // SAFETY: same model descriptor as the snapshot above.
             unsafe { core::slice::from_raw_parts(pointer, 16) },
             before.2
         );
@@ -150,7 +150,7 @@ fn owning_link_authentication_uses_actual_bss_and_backpressures_native_receive()
     link.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
     model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
-    // SAFETY: actual model stop/reset establishes whole-controller quiescence.
+    // SAFETY: model stop/reset establishes whole-controller quiescence.
     unsafe { link.stop_after_quiesce() }.unwrap();
     drop(link);
     assert_eq!(model.drops.load(Ordering::Relaxed), 1);

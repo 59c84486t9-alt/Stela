@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-//! Actual selected-object registration manifest. No source-body scan or linking.
-//! Requires the already retained object 0.37 and sha2 0.10 build dependencies.
+//! Selected-object registration manifest. No source-body scan or linking.
+//! Requires the already object 0.37 and sha2 0.10 build dependencies.
 use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSection, ObjectSymbol,
              RelocationKind, RelocationTarget, SectionKind, SymbolKind};
 use super::inputs::{self, Inputs, Key, Limits, Request, RootId};
@@ -370,7 +370,7 @@ fn validate_plan(plan: &Plan) -> Result<()> {
     if used_groups.len() != plan.groups.len() { return Err("orphan build group".into()); }
     Ok(())
 }
-/// Genuine compiler-produced object cases, explicitly supplied by the hosted
+/// Compiler-produced object cases, explicitly supplied by the hosted
 /// integration harness. Missing inputs fail; no environment-based silent skip.
 #[derive(Debug)]
 pub struct QualificationCase {
@@ -429,7 +429,7 @@ fn receipt_bindings(out: &mut String, bindings: &inputs::Bindings) -> Result<()>
 }
 /// Pure generation after bounded reads. Caller writes outputs only after all
 /// validation succeeds, then compiles C with the SAME target and reviewed ABI.
-/// Root reachability is NOT independent ALL-selected-object link qualification.
+/// Root reachability is NOT independent ALL-selected-object link validation.
 pub fn generate(plan: &Plan) -> Result<Manifest> {
     validate_plan(plan)?;
     let (mut inputs,roots,cohort_key,unit_keys) = prepare_inputs(plan)?;
@@ -450,7 +450,7 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
     }
     let mut observed = Vec::new(); let mut names = BTreeSet::new();
     for (unit,keys) in plan.units.iter().zip(&unit_keys) {
-        // Compiler and common headers retain hashes/identity only. Repeated
+        // Compiler and common headers keep hashes/identity only. Repeated
         // verify calls enforce each role without compiler-sized byte caches.
         inputs.verify(keys.source)?; inputs.verify(keys.compiler)?;
         receipt_input(&mut receipt,"source",&unit.source,keys.source,Some(&unit.token))?;
@@ -462,7 +462,7 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
             let bytes = inputs.read(keys.object)?;
             receipt_input(&mut receipt,"object",&unit.object,keys.object,Some(&unit.token))?;
             scan(plan,unit,&bytes)?
-        }; // The actual object buffer is released before the next TU.
+        }; // The object buffer is released before the next TU.
         let argv = unit.options.iter().map(|v| json_string(v)).collect::<Vec<_>>().join(",");
         writeln!(receipt,"{{\"unit\":{},\"ordinal\":{},\"group\":{},\"source_label\":{},\"provenance\":{},\"argv\":[{}],\"registrations\":{}}}",
             json_string(&unit.token),unit.ordinal,json_string(&unit.group_token),json_string(&unit.source_label),json_string(&unit.provenance),argv,records.len()).unwrap();
@@ -507,7 +507,7 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
     writeln!(c," groups, {}, units, {}\n}};",plan.groups.len(),plan.units.len()).unwrap();
     writeln!(receipt,"{{\"generated_c_sha256\":{},\"whole_selected_object_link\":\"UNRUN\",\"runtime\":\"UNRUN\"}}",json_string(&hex(&digest(c.as_bytes())))).unwrap();
     // Consuming final validation rehashes each UNIQUE consumed file once,
-    // checks roots/identities and closes all retained reader descriptors.
+    // checks roots/identities and closes all kept reader descriptors.
     // No output is returned or published if these final checks refuse.
     let bindings = inputs.finish()?;
     receipt_bindings(&mut receipt,&bindings)?;
@@ -519,7 +519,7 @@ mod tests {
     use super::*;
 
     // Authored empty COFF containers exercise the external object-reader
-    // contract. They deliberately lack the still-mandatory capture anchor.
+    // contract. They lack the still-mandatory capture anchor.
     fn coff_header(machine: u16) -> [u8; 20] {
         let mut bytes = [0; 20];
         bytes[..2].copy_from_slice(&machine.to_le_bytes());
@@ -569,7 +569,7 @@ mod tests {
             roots: vec![InputRoot { label: "reviewed".into(), selected: PathBuf::from("never-opened") }],
             input_limits: Limits { max_unique_files: 32, max_unique_bytes: 1024*1024*1024,
                 max_roots: 2, max_directory_entries: 32 },
-            // Explicit compiler cap admits the known ~290-MB retained tool;
+            // Explicit compiler cap admits the known ~290-MB kept tool;
             // small fixtures exercise accounting without allocating that size.
             role_limits: RoleLimits { cohort_bytes: 1024, source_bytes: 1024,
                 compiler_bytes: 512*1024*1024, dependency_bytes: 1024, object_bytes: 1024 },
@@ -611,7 +611,7 @@ mod tests {
                 QualificationCase { plan: policy_plan(), expected_records: Some(0), expected_error: None },
                 QualificationCase { plan: policy_plan(), expected_records: count, expected_error: error.map(str::to_owned) },
             ];
-            // The first deliberately incomplete plan would fail generation;
+            // The first incomplete plan would fail generation;
             // reaching that error would prove whole-list preflight was lost.
             assert_eq!(qualify(&cases).unwrap_err(),
                 "qualification requires exactly one count or nonempty error pattern");
@@ -678,7 +678,7 @@ mod tests {
     fn conflicting_role_pins_refuse_before_any_file_content_is_read() {
         let directory = FixtureDirectory::new();
         let mut plan = policy_plan(); plan.roots[0].selected = directory.0.clone();
-        // The shared file intentionally does not exist: conflict refusal must
+        // The shared file does not exist: conflict refusal must
         // precede reading it, not accidentally pass on an unrelated I/O error.
         let shared = Input { root: 0, relative: PathBuf::from("absent"), sha256: [1;32] };
         plan.cohort = shared.clone(); plan.units[0].compiler = Input { sha256: [2;32], ..shared };

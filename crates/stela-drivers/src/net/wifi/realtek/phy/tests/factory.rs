@@ -103,11 +103,11 @@ fn factory_calibration_preflight() {
             if change_rfe {
                 m.physical[6] = 5;
             } else {
-                // Append a genuine logical power-table word at offset10.
+                // Append a logical power-table word at offset10.
                 m.physical[16..21].copy_from_slice(&[0x2e, 1, 2, 0xff, 0xff]);
             }
         }
-        // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+        // SAFETY: Bus keeps the register buffer and 512-byte OTP array behind its mutex.
         // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
         let other = unsafe { crate::net::wifi::realtek::efuse::read(&mut bus) }.unwrap();
         bus.model.lock().unwrap().calls = 0;

@@ -9,11 +9,11 @@ fn actual_pte_capture_pcm_wraps_stop_restart_and_acknowledged_release() {
         let ring = period * 4;
         assert_eq!(controller.buffer_bytes(), Some(ring));
         let capture = controller.capture.as_ref().unwrap();
-        // SAFETY: prepared DMA has never started; take actual CPU cache
+        // SAFETY: prepared DMA has never started; take CPU cache
         // ownership before poisoning, then start must hand it back.
         unsafe { capture.dma.sync_for_cpu(0..capture.cpu.bytes()) }.unwrap();
         for offset in 0..capture.cpu.bytes() {
-            // SAFETY: DMA has not started; poison the actual CPU allocation.
+            // SAFETY: DMA has not started; poison the CPU allocation.
             unsafe {
                 capture
                     .cpu

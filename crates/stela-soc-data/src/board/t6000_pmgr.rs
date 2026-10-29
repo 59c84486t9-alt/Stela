@@ -21,7 +21,7 @@ pub struct Descriptor {
     pub optional_bridges: Vec<u8>,
     pub tuning: tunables::Profile,
     pub power: PowerStates,
-    /// Original graph qualification, independent of resource word ownership.
+    /// Original graph validation, independent of resource word ownership.
     pub coverage_requirement: Option<String>,
     pub source_sha256: String,
 }
@@ -162,7 +162,7 @@ mod original {
         }
         let mut bytes = original.clone();
         let reg = offset(&bytes, "reg");
-        // A required actual RegMap ordinal cannot become an empty slot.
+        // A required RegMap ordinal cannot become an empty slot.
         bytes[reg + 8..reg + 16].copy_from_slice(&0u64.to_le_bytes());
         assert!(Descriptor::parse(&bytes, 0x6000, 8, 0).is_err());
         let mut bytes = original.clone();

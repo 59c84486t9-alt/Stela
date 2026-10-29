@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Actual ordinary xHCI interrupt TDs, DMA payloads and command acknowledgements.
+//! Ordinary xHCI interrupt TDs, DMA payloads and command acknowledgements.
 use super::*;
 use crate::usb::audio::{Plan, UsbAudio};
 use crate::usb::xhci::{self, Device};
@@ -86,7 +86,7 @@ fn memory() -> Vec<u64> {
 }
 fn allocator(memory: &mut [u64]) -> RegionAllocator {
     let base = memory.as_mut_ptr() as u64;
-    // SAFETY: each caller retains exclusive backing for all controller/owner DMA.
+    // SAFETY: each caller keeps exclusive backing for all controller/owner DMA.
     unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) }
 }
 const FREQUENCY: [u8; 6] = [0, 1, 0, 1, 0, 10];
@@ -109,7 +109,7 @@ fn actual_descriptor_dma_completion_rearm_and_bounded_backpressure() {
     for epoch in 0..320 {
         let original = model.borrow().active[3].unwrap();
         for _ in 0..8 {
-            assert_eq!(owner.poll().unwrap(), 0); // genuine NAK: unchanged owner
+            assert_eq!(owner.poll().unwrap(), 0); // NAK: unchanged owner
             assert_eq!(model.borrow().active[3], Some(original));
         }
         model
@@ -142,9 +142,9 @@ fn actual_descriptor_dma_completion_rearm_and_bounded_backpressure() {
     owner.stop().unwrap();
     assert!(owner.ticket.is_none());
     assert!(!owner.configured);
-    assert!(model.borrow().seen.contains(&15)); // actual Stop Endpoint
-    assert!(model.borrow().seen.contains(&16)); // actual Set Dequeue
-    assert!(model.borrow().seen.contains(&12)); // actual Configure/Drop
+    assert!(model.borrow().seen.contains(&15)); // Stop Endpoint
+    assert!(model.borrow().seen.contains(&16)); // Set Dequeue
+    assert!(model.borrow().seen.contains(&12)); // Configure/Drop
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
     }
     hostile.push(vec![0, 2, 0, 2, 0, 10]); // validity has only CUR
     hostile.push(vec![0, 1, 3, 2, 0, 2]); // feature channel outside cluster
-    hostile.push(vec![0, 1, 0, 1, 0, 1]); // terminal controls not retained
+    hostile.push(vec![0, 1, 0, 1, 0, 1]); // terminal controls not kept
     hostile.push(vec![0, 2, 0, 1, 0, 2]); // mute RANGE unsupported
     hostile.push(vec![0, 1, 0, 16, 0, 2]); // unsupported feature selector
     for raw in hostile {
@@ -344,7 +344,7 @@ fn descriptor_selection_refuses_foreign_aliases_and_invalid_status_endpoint_prof
     assert!(StatusPlan::discover(&binding, &alias).is_err());
     let mut none = crate::usb::audio::test_configuration();
     assert!(StatusPlan::discover(&binding, &none).unwrap().is_none());
-    none[0] = 0; // not admitted by Binding::parse; no native authority minted
+    none[0] = 0; // not admitted by Binding::parse; no native permission minted
     let all = xhci::interfaces(&none);
     assert!(Binding::parse(&xhci::interfaces(&raw)[0], &all, &none, xhci::FULL_SPEED).is_err());
 }
@@ -473,7 +473,7 @@ fn dropping_pending_owner_retains_boot_dma_and_cannot_mint_replacement_authority
     model.borrow_mut().push_event(FREQUENCY.to_vec());
     model.borrow_mut().receive(3);
     assert!(model.borrow().active[3].is_none());
-    // SAFETY: original still-live DMA lies in this test's retained backing RAM.
+    // SAFETY: original still-live DMA lies in this test's backing RAM.
     let delivered = unsafe { core::slice::from_raw_parts(original.1 as *const u8, 6) };
     assert_eq!(delivered, FREQUENCY);
 }
@@ -499,7 +499,7 @@ fn actual_transfer_error_retains_ticket_until_reset_dequeue_and_drop_ack() {
     assert_eq!(owner.packet.bytes(), packet);
     assert!(owner.notices.is_empty());
     assert_eq!(owner.next_notice(), Err(Error::Poisoned));
-    // Recovery requires actual native Reset Endpoint, Set Dequeue and Drop;
+    // Recovery requires native Reset Endpoint, Set Dequeue and Drop;
     // no class-local clearing of the native halt/submission fence is allowed.
     owner.stop().unwrap();
     assert!(!owner.configured && !owner.poisoned && owner.ticket.is_none());
@@ -515,7 +515,7 @@ fn actual_transfer_error_retains_ticket_until_reset_dequeue_and_drop_ack() {
             .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
     );
     assert_eq!(model.borrow().halt_transfer, None);
-    // Replacement configuration must consume the actual retained dequeue
+    // Replacement configuration must consume the dequeue
     // pointer from the acknowledged native ring, without an allocator rewind.
     let producer = model.borrow().dequeues.last().copied().unwrap() & !0xf;
     owner.start().unwrap();
@@ -603,7 +603,7 @@ fn actual_usb_halt_clear_failure_retains_owner_and_never_acknowledges_drop() {
     let (_, _, foreign) = peer(&mut dma);
     foreign.borrow_mut().forbid_mmio();
     owner.shared = foreign;
-    assert!(owner.stop().is_err()); // cached cancellation ACK is not foreign authority
+    assert!(owner.stop().is_err()); // cached cancellation ACK is not foreign permission
     assert!(owner.cancelled && owner.poisoned && owner.configured && owner.ticket.is_some());
     assert_eq!(
         (
@@ -615,7 +615,7 @@ fn actual_usb_halt_clear_failure_retains_owner_and_never_acknowledges_drop() {
     );
     owner.shared = original_shared;
     model.borrow_mut().stall_control = None;
-    owner.stop().unwrap(); // retry requires genuine EP0 recovery and new clear ACK
+    owner.stop().unwrap(); // retry requires EP0 recovery and new clear ACK
     assert!(!owner.poisoned && !owner.configured);
     assert_eq!(model.borrow().halt_transfer, None);
     assert!(
@@ -639,8 +639,8 @@ fn actual_unpolled_stall_is_cleared_on_device_before_acknowledged_restart() {
     owner.start().unwrap();
     assert!(model.borrow().active[3].is_some());
     assert!(owner.ticket.is_some());
-    // The host deliberately has not consumed the actual STALL event. Device
-    // HALT must still clear through its actual EP0 request, not a cached flag.
+    // The host has not consumed the STALL event. Device
+    // HALT must still clear through its EP0 request, not a cached flag.
     owner.stop().unwrap();
     assert_eq!(model.borrow().halt_transfer, None);
     assert!(

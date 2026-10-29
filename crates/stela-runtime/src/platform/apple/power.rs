@@ -5,36 +5,36 @@
 //! clearing configuration, acknowledges channels at +0x24, enables the mask
 //! at +0x3f8, and finalizes at +0x3fc. `panicOnDvcDoneErr` 0x2fa3e18 tests
 //! low8 (optionally also bits23:16). Low8 writes acknowledge (W1C inference),
-//! never inject errors. Actual supplied error/status bits remain visible.
-//! A protected channel cannot be rewritten; other configuration words retain full writes.
+//! never inject errors. Supplied error/status bits remain visible.
+//! A protected channel cannot be rewritten; other configuration words keep full writes.
 //!
 //! The PS marker (reg[30]+0x17ffc, restoreHW 0x2fa3d88) is a firmware-owned
 //! read-only whole-word marker, distinct from the `ps-regs` device registers.
-//! GPCE (reg[34], `configCPUComplexPowerState` 0x2f9cab4) retains each complex's
+//! GPCE (reg[34], `configCPUComplexPowerState` 0x2f9cab4) keeps each complex's
 //! low4 request (0/f), preserving the other captured fields. The driver waits
 //! for bit4 clear; that expectation is not proof that a request completes.
-//! Request writes retain pending ownership and invalidate readiness observation
-//! until native controller progress is qualified. They never clear BUSY or
+//! Request writes keep pending ownership and invalidate readiness observation
+//! until native controller progress is checked. They never clear BUSY or
 //! claim a native sequence/CPU lifecycle completed.
 //!
 //! CIO (reg[41], `enableCioReconfig` 0x2fa5a44) reads offsets0x4000/0x8000,
-//! sets request bit0 and waits for actual mask2 clearance. The false path
+//! sets request bit0 and waits for mask2 clearance. The false path
 //! performs no access. Both port requests preserve unrelated captured fields,
 //! including a same-value request, without selecting an invented native PC.
 //! Captured GPCE/CIO unready observations remain explicit even before a new
 //! request; a snapshot must not turn prior native work into an empty idle queue.
 //!
-//! LLB `tunableh_pmgr_soc_gpce0_finalize` (file9c26c/9c2dc) has two actual
+//! LLB `tunableh_pmgr_soc_gpce0_finalize` (file9c26c/9c2dc) has two
 //! auxiliary RMWs at +2008/+200c, mask1/set0. Their configuration effects are
-//! retained without qualifying the distinct native rearm or engine progress.
+//! without checking the distinct native rearm or engine progress.
 //!
 //! Power-gate enables (reg[32], restoreHW 0x2f9cc3c and
-//! `_enableCPMPowerDomainGating` 0x2f9fd88) retain bit31 and other RMW fields.
+//! `_enableCPMPowerDomainGating` 0x2f9fd88) keep bit31 and other RMW fields.
 //! They permit automatic gating without inventing an electrical idle event.
 //! TVM (reg[35], `enableTVM` 0x2fa61f0) has four0x400-spaced controls/status
 //! pairs. Configuration does not establish zero pending voltage/thermal status.
 //!
-//! `new` has unknown handoff words. `from_snapshot` requires every actual bank
+//! `new` has unknown handoff words. `from_snapshot` requires every bank
 //! word; no zero marker, unlocked channel, disabled request or healthy status
 //! is inferred from firmware/DT absence. Supplied snapshots grant register
 //! observations only, not native execution, functional ownership or PS values.
@@ -410,7 +410,7 @@ impl MmioDevice for Power {
     }
 }
 
-/// Only installation configuration fields are qualified here. Source group2/3
+/// Only installation configuration fields are checked here. Source group2/3
 /// helpers OR slots; group0/1 replace one slot and set its independent enable.
 fn nub_fields(offset: u64) -> (u32, bool) {
     match offset {
@@ -611,7 +611,7 @@ mod tests {
         bus.write(0x23b782008, Width::Word, first & !1, &mut access)
             .unwrap();
         assert_eq!(bus.read(0x23b782008, Width::Word, &mut access), Ok(0x122));
-        // Later unqualified rearm refuses without erasing the first write.
+        // Later unchecked rearm refuses without erasing the first write.
         assert!(
             bus.write(0x23b78200c, Width::Word, 0x457, &mut access)
                 .is_err()

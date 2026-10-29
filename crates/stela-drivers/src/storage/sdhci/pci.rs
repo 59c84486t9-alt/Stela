@@ -80,7 +80,7 @@ impl Profile {
     }
     pub fn mmc_width(self) -> u8 {
         // mrst_hc_probe_slot declares this platform's eight physical pins.
-        // Controller CAP_8BIT alone is never wiring authority.
+        // Controller CAP_8BIT alone is never wiring permission.
         if matches!(self, Self::IntelMrst0 | Self::Gli9763e) {
             8
         } else {
@@ -112,8 +112,8 @@ impl Profile {
     }
 }
 
-/// The actual enumerated function remains owned here for every later clock and
-/// power operation. Slots share this authority; no second ECAM view is created.
+/// The enumerated function remains owned here for every later clock and
+/// power operation. Slots share this permission; no second ECAM view is created.
 pub(super) type Control = Rc<RefCell<Controller>>;
 pub(super) struct Controller {
     registers: Box<dyn Registers>,

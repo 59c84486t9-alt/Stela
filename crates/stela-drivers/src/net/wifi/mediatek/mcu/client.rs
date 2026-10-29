@@ -36,7 +36,7 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
-/// Exact source resource and observed legacy BSS inputs. No inferred EEPROM,
+/// Source resource and observed legacy BSS inputs. No inferred EEPROM,
 /// beacon/DTIM, antenna count, channel, rate bitmap, or policy default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Profile {
@@ -82,8 +82,8 @@ fn recount(bytes: &mut [u8], start: usize) {
     put16(bytes, 2, count);
 }
 impl Profile {
-    /// Source mt792x_rx_get_wcid lookup for this retained single-peer namespace.
-    /// This is only slot selection, never key/association or DMA authority.
+    /// Source mt792x_rx_get_wcid lookup for this single-peer namespace.
+    /// This is only slot selection, never key/association or DMA permission.
     pub(in crate::net::wifi::mediatek) fn receive_slot(
         self,
         raw: u16,
@@ -146,7 +146,7 @@ impl Profile {
         }
         Ok(())
     }
-    /// Full mt7925_mcu_sta_cmd. NONE=0 creates an unassociated actual peer;
+    /// Full mt7925_mcu_sta_cmd. NONE=0 creates an unassociated peer;
     /// ASSOC=2 includes the source single-link MLD record. PORT_SECURE is the
     /// source wire state only; the shared OS controlled port stays independent.
     pub fn peer_request(self, enable: bool, associated: bool) -> Result<Vec<u8>, Error> {
@@ -348,7 +348,7 @@ impl Profile {
     pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
         self.validate_inner(true)?;
         let mut b = vec![0; 72];
-        // Actual primary PHY band_idx is 0 for this single-PHY profile,
+        // Primary PHY band_idx is 0 for this single-PHY profile,
         // distinct from the non-MLO interface's band selector ff.
         put16(&mut b, 4, 12);
         put16(&mut b, 6, 68);
@@ -455,7 +455,7 @@ impl Profile {
         put16(b, 28, if two { 1 } else { 3 });
         b[31] = c.bss_index;
         let sec = tlv(&mut out, 16, 8);
-        // Exact source switch, including its default for CCMP256. These are
+        // Source switch, including its default for CCMP256. These are
         // firmware BSS fields, never evidence of an OS SAE/RSN authentication.
         let (mode, status) = match self.cipher {
             1 | 5 => (1, 0),
@@ -934,7 +934,7 @@ mod tests {
         assert_eq!(case, 49);
         // Full unchanged mt7925_mcu_hw_scan/build_scan_ie_tlv bodies, source
         // layouts and TLV appender under ASan/UBSan. Odd subsequent IE alignment
-        // is an explicit donor oracle limit; the independent test retains it.
+        // is an explicit donor oracle limit; the independent test keeps it.
         assert_eq!(
             <[u8; 32]>::from(hash.finalize()),
             [
@@ -1117,7 +1117,7 @@ mod tests {
     }
 }
 
-/// Actual UNI_ROC event observations. Unlike the source's global boolean, the
+/// UNI_ROC event observations. Unlike the source's global boolean, the
 /// native owner additionally matches exact token/BSS/channel/profile. The raw
 /// status remains visible; no copied grant may authorize a different owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

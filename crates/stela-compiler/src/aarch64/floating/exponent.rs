@@ -89,7 +89,7 @@ pub fn scale(
         Format::Double => widen(Double::from_bits(u128::from(operand.bits))),
     };
     // FPClampScale bounds every H/S/D result well inside Quad's exponent range;
-    // widening and exponent adjustment therefore retain the exact significand.
+    // widening and exponent adjustment therefore keep the exact significand.
     let scaled = value.scalbn(clamped_scale);
     debug_assert!(scaled.is_finite() && !scaled.is_zero());
     debug_assert!(scaled.scalbn(-clamped_scale).bitwise_eq(value));

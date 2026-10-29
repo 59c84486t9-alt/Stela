@@ -4,8 +4,8 @@
 use super::super::{Auxiliary, Descriptor, Error, Ordinal};
 use alloc::{vec, vec::Vec};
 
-/// Complete raw source rows. Pointer words are provenance only; the retained
-/// owned member arrays replace no actual provider, bank, or callback.
+/// Complete raw source rows. Pointer words are provenance only; the kept
+/// owned member arrays replace no provider, bank, or callback.
 #[derive(Clone, Debug)]
 pub struct Configuration {
     pub(super) ordinal: Ordinal,
@@ -18,7 +18,7 @@ impl Configuration {
         let config = super::super::Configuration::t8112(descriptor)?;
         Self::declared(descriptor, config.auxiliary_descriptors())
     }
-    /// Declared source software configuration. Overrides require their actual
+    /// Declared source software configuration. Overrides require their
     /// producer and provider bindings; this constructor grants none of them.
     pub fn declared(descriptor: &Descriptor, rows: &[Auxiliary]) -> Result<Self, Error> {
         if rows.len() != 4 {
@@ -58,9 +58,9 @@ impl Configuration {
     }
 }
 
-/// New software image or retained source observation, never hardware reset or
-/// controller readiness. Raw40-byte slots retain opaque/pointer provenance;
-/// member data lives in this sole actual allocation, not at those raw pointers.
+/// New software image or kept source observation, never hardware reset or
+/// controller readiness. Raw40-byte slots keep opaque/pointer provenance;
+/// member data lives in this sole allocation, not at those raw pointers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlotImage {
     pub raw: [u8; 40],
@@ -69,7 +69,7 @@ pub struct SlotImage {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoftwareImage {
-    /// Actual source P8 byte. Only bit2 gates101b464.
+    /// Source P8 byte. Only bit2 gates101b464.
     pub flags: u8,
     /// Declared opaque source sp+14 image. Its preserved bits are not a reset
     /// observation:101b64c reads them before the first local packed store.

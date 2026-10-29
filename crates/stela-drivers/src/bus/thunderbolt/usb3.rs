@@ -3,10 +3,10 @@
 // Copyright (C) 2019 Intel Corporation
 // Authors: Mika Westerberg <mika.westerberg@linux.intel.com>
 //          Rajmohan Mani <rajmohan.mani@intel.com>
-//! Actual root USB3 bandwidth and two-direction tunnel activation/stop from Linux
-//! usb4.c/path.c/tunnel.c/switch.c, with one genuine retained ownership chain.
+//! Root USB3 bandwidth and two-direction tunnel activation/stop from Linux
+//! usb4.c/path.c/tunnel.c/switch.c, with one ownership chain.
 //! Native accounting/permission/endpoint-control providers and host admission
-//! remain explicit external requirements; no OS service is fabricated.
+//! remain explicit external requirements; no OS service is invented.
 use super::{
     channel::{self, Channel},
     config::{self, Address, Reply, Route, Space},
@@ -45,31 +45,31 @@ pub struct Grant {
     pub permission: Decision,
     pub requested: Rates,
 }
-/// Actual exclusive native root bandwidth-accounting and permission reservation.
+/// Exclusive native root bandwidth-accounting and permission reservation.
 ///
 /// # Safety
-/// This retains the real shared-domain accounting right for the requested rates,
-/// existing consumed traffic and source quantization, with actual _OSC/security
+/// This keeps the real shared-domain accounting right for the requested rates,
+/// existing consumed traffic and source quantization, with _OSC/security
 /// permission and USB3↔primary-lane mapping for this exact Linked/requester/reset/
-/// topology/grant epoch. The object is the actual reservation, not supplied
+/// topology/grant epoch. The object is the reservation, not supplied
 /// numeric quotas. Existing consumed rights cannot be removed or double charged.
 /// It owns the root USB3 CMR/HCA transition, excludes firmware/other CM changes,
-/// retains endpoint/router/power lifetimes, and serializes dependent path work.
+/// keeps endpoint/router/power lifetimes, and serializes dependent path work.
 /// Real DMA/IMR/IOMMU/IRQ ownership remains independently held through final drain.
 /// Metadata stays protected until no mutation, real restore/reset or independent
-/// retained ownership transfer. No production allocator/policy implementation or
+/// ownership transfer. No production allocator/policy implementation or
 /// fallback admission is provided by this trait. An integer grant alone is never
-/// sufficient authority for implementing it.
-/// When supplied to ActivateTunnel it ALSO retains actual exclusive CS0 PE/V
-/// control authority for BOTH mapped USB3 endpoints through uncertain completion
+/// sufficient permission for implementing it.
+/// When supplied to ActivateTunnel it ALSO keeps exclusive CS0 PE/V
+/// control permission for BOTH mapped USB3 endpoints through uncertain completion
 /// and quarantine. That real platform grant is not implied by path IDs, matching
 /// numbers or a bandwidth request; an implementation lacking it cannot be used
 /// for endpoint activation.
 pub unsafe trait Reservation: Send + Sync {
     fn grant(&self) -> Grant;
-    /// Actual retained native reset/topology/permission guard, never numeric
+    /// Native reset/topology/permission guard, never numeric
     /// tuple equality or MMIO readiness. No permissive default is provided.
-    /// A true snapshot alone is insufficient: this object must also retain real
+    /// A true snapshot alone is insufficient: this object must also keep real
     /// exclusive admission and in-flight lifetime so reset/reassignment cannot
     /// reuse its physical resource until those operations independently quiesce.
     fn is_current(&self) -> bool;
@@ -146,8 +146,8 @@ pub enum Error {
     Link(link::Error),
     Channel(channel::Error),
 }
-/// Actual root bandwidth allocation; both HCA transitions completed. This owns
-/// its single original link and actual accounting reservation until real retire.
+/// Root bandwidth allocation; both HCA transitions completed. This owns
+/// its single original link and accounting reservation until real retire.
 pub struct Allocated {
     pub requested: Rates,
     pub consumed: Rates,
@@ -174,8 +174,8 @@ impl Allocated {
     }
     /// # Safety
     /// Real allocation/link restoration or reset and all independent endpoint/
-    /// DMA/IRQ/power lifetimes are satisfied, or the actual allocation, link and
-    /// both routers have independently retained native CM ownership. Clearing
+    /// DMA/IRQ/power lifetimes are satisfied, or the allocation, link and
+    /// both routers have independently kept native CM ownership. Clearing
     /// CMR/HCA never releases allocated bandwidth or proves endpoint quiescence.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::usb3::Allocated;
@@ -311,7 +311,7 @@ enum BandwidthMode {
     Allocate,
     ReleaseUnused,
 }
-/// Source consumed/max/scale/CS2 sequence with actual CMR/HCA hardware effects.
+/// Source consumed/max/scale/CS2 sequence with CMR/HCA hardware effects.
 pub struct Allocate<R: Registers> {
     channel: Option<Channel<R>>,
     retained: Option<Box<Allocated>>,
@@ -327,10 +327,10 @@ pub struct Allocate<R: Registers> {
 }
 impl<R: Registers> Allocate<R> {
     /// # Safety
-    /// All three objects identify the exact same live physical NHI/reset/topology/
+    /// All three objects identify the same live physical NHI/reset/topology/
     /// protected grant epoch. Link metadata is current, Channel exclusively idle,
-    /// and Reservation's actual native accounting/permission/mapping/lifetime
-    /// requirements hold; numbers alone cannot prove physical authority.
+    /// and Reservation's native accounting/permission/mapping/lifetime
+    /// requirements hold; numbers alone cannot prove physical permission.
     /// ```compile_fail
     /// use std::sync::Arc;
     /// use stela_drivers::bus::thunderbolt::{channel::Channel,link::Linked,usb3::{Allocate,Reservation},ring::Registers};
@@ -376,7 +376,7 @@ impl<R: Registers> Allocate<R> {
         let deadline = now.checked_add(REQUEST_MS).ok_or(Error::ClockOverflow)?;
         let job_deadline = now.checked_add(JOB_MS).ok_or(Error::ClockOverflow)?;
         // Reserve the final bundle before any request. Both the original link
-        // and actual accounting reservation stay in this same allocation on any
+        // and accounting reservation stay in this same allocation on any
         // uncertain write/ACK/readback, and when composed into path programming.
         // SAFETY: alloc, or test-only null allocator, gets the exact Box layout.
         let storage = unsafe { allocate(Layout::new::<Allocated>()) }.cast::<Allocated>();
@@ -803,7 +803,7 @@ impl<R: Registers> Allocate<R> {
 
 const ENDPOINT_ENABLE: u32 = (1 << 31) | (1 << 30);
 const TUNNEL_MS: u64 = 30_000;
-/// Both actual USB3 directions and enabled endpoints with one retained original
+/// Both USB3 directions and enabled endpoints with one original
 /// link/accounting chain. Native host admission/OS attachment remains external.
 pub struct ActiveTunnel {
     pub endpoints: [u32; 2],
@@ -853,7 +853,7 @@ impl ActiveTunnel {
     /// Real teardown/restoration/reset has satisfied BOTH directions, endpoint
     /// adapters, allocated bandwidth and all independent endpoint DMA/IRQ/power/
     /// native attachment lifetimes, or the entire live tunnel and every owner
-    /// already have independently retained native CM ownership. A PE readback,
+    /// already have independently kept native CM ownership. A PE readback,
     /// local pending drain or CMR clearance cannot establish this proof.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::usb3::ActiveTunnel;
@@ -908,7 +908,7 @@ enum TunnelStage {
     Fault,
 }
 /// Source USB3 Down path → Up path → Down endpoint → Up endpoint composition.
-/// Reuses the real Channel/path cores; no duplicate allocator or authority.
+/// Reuses the real Channel/path cores; no duplicate allocator or permission.
 pub struct ActivateTunnel<R: Registers> {
     channel: Option<Channel<R>>,
     path: Option<super::path::Activate<R>>,
@@ -924,14 +924,14 @@ pub struct ActivateTunnel<R: Registers> {
 }
 impl<R: Registers> ActivateTunnel<R> {
     /// # Safety
-    /// The actual bandwidth receipt, BOTH path allocations and idle Channel are
-    /// one exact live NHI/reset/topology/permission generation. Real native
+    /// The bandwidth receipt, BOTH path allocations and idle Channel are
+    /// one live NHI/reset/topology/permission generation. Real native
     /// accounting/_OSC/security/mapping/power/attachment lifetimes hold. In
-    /// addition, bandwidth's Reservation retains actual exclusive CS0 endpoint
+    /// addition, bandwidth's Reservation keeps exclusive CS0 endpoint
     /// control for BOTH adapters through final retirement or quarantine; neither
-    /// path IDs nor matching numeric grants imply that authority. No firmware or
+    /// path IDs nor matching numeric grants imply that permission. No firmware or
     /// other CM can enable/reuse the endpoints or paths. Pre-existing traffic is
-    /// independently serialized and every prior ID is genuinely owned.
+    /// independently serialized and every prior ID is owned.
     /// ```compile_fail
     /// use std::sync::Arc;
     /// use stela_drivers::bus::thunderbolt::{channel::Channel,path::Reservation,usb3::{Allocated,ActivateTunnel},ring::Registers};
@@ -1160,8 +1160,8 @@ impl<R: Registers> ActivateTunnel<R> {
                 .bandwidth
                 .take()
                 .expect("genuine bandwidth receipt");
-            // SAFETY: constructor checked both protected plans/epochs/authority;
-            // clocks were checked while all owners and Channel remained retained.
+            // SAFETY: constructor checked both protected plans/epochs/permission;
+            // clocks were checked while all owners and Channel remained kept.
             unsafe {
                 super::path::Activate::start_bandwidth(
                     channel,
@@ -1179,8 +1179,8 @@ impl<R: Registers> ActivateTunnel<R> {
                 .previous
                 .take()
                 .expect("actual first path receipt");
-            // SAFETY: actual first success remains in the preallocated wrapper;
-            // opposite protected plan shares exact native grant and endpoint lease.
+            // SAFETY: first success remains in the preallocated wrapper;
+            // opposite protected plan shares native grant and endpoint lease.
             unsafe {
                 super::path::Activate::start_previous(
                     channel,
@@ -1364,7 +1364,7 @@ impl<R: Registers> ActivateTunnel<R> {
                             .take()
                             .expect("preallocated first-path wrapper");
                         first.as_mut().write(active);
-                        // SAFETY: initialized exactly once with actual first success.
+                        // SAFETY: initialized exactly once with first success.
                         self.retained().previous = Some(unsafe { first.assume_init() });
                         if let Err(error) = self.start_path(1, now) {
                             return self.fail(error);
@@ -1419,7 +1419,7 @@ impl<R: Registers> ActivateTunnel<R> {
     }
 }
 
-/// Separate source release-unused operation on a genuinely active tunnel.
+/// Separate source release-unused operation on an active tunnel.
 /// Paths/endpoints stay active; max(consumed,900Mb/s) remains allocated.
 pub struct ReleaseUnused<R: Registers> {
     core: Option<Allocate<R>>,
@@ -1429,9 +1429,9 @@ pub struct ReleaseUnused<R: Registers> {
 }
 impl<R: Registers> ReleaseUnused<R> {
     /// # Safety
-    /// Same exact live physical Channel/tunnel and retained native guard. Real
-    /// global accounting serializes this adjustment and retains consumed rights,
-    /// the 900Mb/s floor, all path/endpoint authority and independent lifetimes.
+    /// Same live physical Channel/tunnel and kept native guard. Real
+    /// global accounting serializes this adjustment and keeps consumed rights,
+    /// the 900Mb/s floor, all path/endpoint permission and independent lifetimes.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::{channel::Channel,usb3::{ActiveTunnel,ReleaseUnused},ring::Registers};
     /// fn start<R:Registers>(c:Channel<R>,t:Box<ActiveTunnel>){let _=ReleaseUnused::new(c,t,0);}
@@ -1507,16 +1507,16 @@ impl<R: Registers> ReleaseUnused<R> {
     }
 }
 /// Explicitly returned LOCAL path rights, after matching-epoch hardware stop.
-/// Residual root bandwidth/accounting/permission and original link are retained.
+/// Residual root bandwidth/accounting/permission and original link are held.
 /// This does not release native endpoint posted DMA/IRQ/IOMMU or redistribute a
 /// branch's bandwidth. The real provider must independently retire those rights.
 pub struct Reusable {
     pub residual: Box<Allocated>,
-    /// Actual Down then Up allocations; these objects, not their numeric IDs,
+    /// Down then Up allocations; these objects, not their numeric IDs,
     /// are the native allocator/credit/permission lifetime being returned.
     pub paths: [Arc<dyn super::path::Reservation>; 2],
 }
-/// Genuine local stopped observations. Drop quarantines the complete chain;
+/// Local stopped observations. Drop quarantines the complete chain;
 /// reusable rights are returned only by explicitly consuming this receipt.
 pub struct Stopped {
     pub endpoints: [u32; 2],
@@ -1531,9 +1531,9 @@ impl Stopped {
             .expect("retained residual")
             .bandwidth_rates()
     }
-    /// Return actual local reservations only after the live native guard is
+    /// Return local reservations only after the live native guard is
     /// revalidated. Revocation keeps this exact receipt/owner chain recoverable.
-    /// A true snapshot is backed by Reservation's actual exclusive in-flight
+    /// A true snapshot is backed by Reservation's exclusive in-flight
     /// lifetime; it cannot substitute for reset serialization or endpoint drain.
     pub fn into_reusable(mut self: Box<Self>) -> Result<Reusable, (Error, Box<Self>)> {
         let bandwidth = self
@@ -1593,10 +1593,10 @@ pub struct StopTunnel<R: Registers> {
 }
 impl<R: Registers> StopTunnel<R> {
     /// # Safety
-    /// Actual Channel, complete tunnel and native reset/topology/permission guard
+    /// Channel, complete tunnel and native reset/topology/permission guard
     /// identify the same physical lifetime, exclusively idle and serialized.
     /// Native host submission admission is closed and all independent endpoint
-    /// posted-DMA/IRQ/IOMMU/power resources stay retained. The local path drain
+    /// posted-DMA/IRQ/IOMMU/power resources stay held. The local path drain
     /// cannot certify those independent lifetimes or authorize reset/reassignment.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::{channel::Channel,usb3::{ActiveTunnel,StopTunnel},ring::Registers};
@@ -2070,7 +2070,7 @@ mod tests {
         });
         let mut peer = BandwidthPeer::new(&linked, accounting.grant, 13);
         let mut path_peer = PathPeer::new(&linked, reservation.allocation, false, 3);
-        // SAFETY: exact actual synthetic accounting/permission/link/controller.
+        // SAFETY: synthetic accounting/permission/link/controller.
         let mut allocate =
             unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
         let allocated = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
@@ -2088,7 +2088,7 @@ mod tests {
         let mut channel = activate.into_channel();
         assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 0));
         assert_eq!(accounting_drop.load(Ordering::Relaxed), 0);
-        // SAFETY: complete actual synthetic path/bandwidth/link native lifetime transfer.
+        // SAFETY: complete synthetic path/bandwidth/link native lifetime transfer.
         unsafe { active.retire() };
         assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 1));
         assert_eq!(accounting_drop.load(Ordering::Relaxed), 1);
@@ -2330,7 +2330,7 @@ mod tests {
                 4 => {}
                 _ => unreachable!(),
             };
-            // SAFETY: exact retained synthetic physical controller/accounting grant.
+            // SAFETY: synthetic physical controller/accounting grant.
             let mut allocate =
                 unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
             if case == 4 {
@@ -2386,7 +2386,7 @@ mod tests {
             downstream: 2000,
         });
         let mut peer = BandwidthPeer::new(&linked, accounting.grant, 0);
-        // SAFETY: actual matching protected synthetic link and native grant.
+        // SAFETY: matching protected synthetic link and native grant.
         let mut allocate =
             unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
         let allocated = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
@@ -2400,7 +2400,7 @@ mod tests {
         drop(reservation);
         let writes = model.state.lock().unwrap().writes.len();
         assert!(
-            // SAFETY: metadata mismatch is a negative actual-model pairing; no request permitted.
+            // SAFETY: metadata mismatch is a negative model pairing; no request permitted.
             unsafe { Activate::with_bandwidth(channel, allocated, replacement, cursor.now) }
                 .is_err()
         );
@@ -2446,7 +2446,7 @@ mod tests {
             peer.consumed = v[3];
             peer.control = v[4];
             peer.scale = v[5];
-            // SAFETY: exact protected actual synthetic accounting/permission/link fixture.
+            // SAFETY: exact protected synthetic accounting/permission/link fixture.
             let mut allocate =
                 unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
             let allocated = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
@@ -2471,7 +2471,7 @@ mod tests {
                 "case={cases}"
             );
             let mut channel = allocate.into_channel();
-            // SAFETY: native allocation and all original owners transfer through actual synthetic final drain.
+            // SAFETY: native allocation and all original owners transfer through synthetic final drain.
             unsafe { allocated.retire() };
             assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 1));
             assert_eq!(accounting_drop.load(Ordering::Relaxed), 1);
@@ -2605,7 +2605,7 @@ mod tests {
                         dropped,
                         ..
                     } = fixture;
-                    // SAFETY: actual synthetic CM also retains real exclusive endpoint CS0 authority, both path grants and one bandwidth/link.
+                    // SAFETY: synthetic CM also keeps real exclusive endpoint CS0 permission, both path grants and one bandwidth/link.
                     let mut engine =
                         unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }
                             .unwrap();
@@ -2632,7 +2632,7 @@ mod tests {
                     assert_eq!(active.endpoints, peer.endpoints);
                     assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
                     let mut channel = engine.into_channel();
-                    // SAFETY: whole live native synthetic tunnel and all six owners transfer through actual final drain.
+                    // SAFETY: whole live native synthetic tunnel and all six owners transfer through final drain.
                     unsafe { active.retire() };
                     assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
                     channel_release(&mut channel);
@@ -2665,7 +2665,7 @@ mod tests {
                     dropped,
                     ..
                 } = fixture;
-                // SAFETY: exact protected actual synthetic endpoint authority and all owners.
+                // SAFETY: exact protected synthetic endpoint permission and all owners.
                 let mut engine =
                     unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }
                         .unwrap();
@@ -2766,7 +2766,7 @@ mod tests {
             });
             drop(up);
             let writes = model.state.lock().unwrap().writes.len();
-            // SAFETY: same negative actual synthetic native transaction. All protected wrappers must remain retained on failed construction.
+            // SAFETY: same negative synthetic native transaction. All protected wrappers must remain held on failed construction.
             let result = unsafe {
                 if case >= 8 {
                     ActivateTunnel::new_without_storage(
@@ -2822,7 +2822,7 @@ mod tests {
                 dropped,
                 ..
             } = fixture;
-            // SAFETY: actual same retained native controller and endpoint authority; negative wire states are explicit.
+            // SAFETY: same native controller and endpoint permission; negative wire states are explicit.
             let mut engine =
                 unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
             if case == 3 {
@@ -2897,7 +2897,7 @@ mod tests {
                     ));
                 }
             }
-            // SAFETY: exact endpoint/native accounting/path authority; case3 has physically unconsumed TX slots.
+            // SAFETY: exact endpoint/native accounting/path permission; case3 has physically unconsumed TX slots.
             let mut engine =
                 unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
             if case == 0 {
@@ -2995,7 +2995,7 @@ mod tests {
                     data: vec![value],
                 })
                 .collect();
-            // SAFETY: real protected synthetic accounting, BOTH path grants, exact native endpoint control and unchanged epochs.
+            // SAFETY: real protected synthetic accounting, BOTH path grants, native endpoint control and unchanged epochs.
             let mut engine =
                 unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
             let active = drive_tunnel(&mut peer, &domain, &model, &mut engine, &mut cursor);
@@ -3045,7 +3045,7 @@ mod tests {
                 ..
             } = stop_fixture(LaneCredits::LegacyBonded, 2);
             let residual = active.bandwidth_rates();
-            // SAFETY: real exact synthetic native epoch/authority, host admission closed and independent endpoint lifetimes retained.
+            // SAFETY: real synthetic native epoch/permission, host admission closed and independent endpoint lifetimes kept.
             let mut stop = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
             let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
             assert_eq!(peer.writes.len(), 6);
@@ -3076,7 +3076,7 @@ mod tests {
                 assert_eq!(dropped[4].load(Ordering::Relaxed), 1);
                 assert_eq!(dropped[5].load(Ordering::Relaxed), 1);
                 assert!(dropped[..4].iter().all(|v| v.load(Ordering::Relaxed) == 0));
-                // SAFETY: residual accounting/link have actual independent native provider retirement/transfer, beyond local path proof.
+                // SAFETY: residual accounting/link have independent native provider retirement/transfer, beyond local path proof.
                 unsafe { reusable.residual.retire() };
                 assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
             }
@@ -3101,7 +3101,7 @@ mod tests {
             mut bandwidth_peer,
             ..
         } = stop_fixture(LaneCredits::RouterAllocated(23), 0);
-        // SAFETY: actual protected native branch accounting explicitly reserves source consumed/900 floor; active paths stay retained.
+        // SAFETY: protected native branch accounting explicitly reserves source consumed/900 floor; active paths stay held.
         let mut release = unsafe { ReleaseUnused::new(channel, active, cursor.now) }.unwrap();
         let active = drive_release(
             &mut bandwidth_peer,
@@ -3115,7 +3115,7 @@ mod tests {
         assert_eq!(bandwidth_peer.writes.len(), 4);
         assert!(peer.endpoints.iter().all(|w| w & (1 << 31) != 0));
         let channel = release.into_channel();
-        // SAFETY: same actual native epoch and submission/endpoint lifetime proof.
+        // SAFETY: same native epoch and submission/endpoint lifetime proof.
         let mut stop = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
         let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
         let mut channel = stop.into_channel();
@@ -3126,7 +3126,7 @@ mod tests {
         assert!(reusable.residual.allocated.upstream >= 900);
         assert!(reusable.residual.allocated.downstream >= 900);
         drop(reusable.paths);
-        // SAFETY: actual residual provider lifetime transfers independently.
+        // SAFETY: residual provider lifetime transfers independently.
         unsafe { reusable.residual.retire() };
         assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
         channel_release(&mut channel);
@@ -3153,7 +3153,7 @@ mod tests {
                 if failure == 2 {
                     peer.reject = Some(target);
                 }
-                // SAFETY: matching physical epoch/authority and independently closed native admission.
+                // SAFETY: matching physical epoch/permission and independently closed native admission.
                 let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
                 engine.poll(cursor.now).unwrap();
                 let mut failed = false;
@@ -3220,7 +3220,7 @@ mod tests {
                 if failure == 2 {
                     bandwidth_peer.reject = Some(target);
                 }
-                // SAFETY: actual native accounting and active endpoint authority across this adjustment.
+                // SAFETY: native accounting and active endpoint permission across this adjustment.
                 let mut engine =
                     unsafe { ReleaseUnused::new(channel, active, cursor.now) }.unwrap();
                 engine.poll(cursor.now).unwrap();
@@ -3298,7 +3298,7 @@ mod tests {
                 let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
                 engine.poll(cursor.now).unwrap();
                 let prefix = if already_disabled { 2 + hop } else { 3 + hop };
-                // Stop immediately after the actual disable ACK (or first disabled-state read).
+                // Stop immediately after the disable ACK (or first disabled-state read).
                 for _ in 0..200 {
                     assert!(
                         stop_step(&mut peer, &domain, &model, &mut engine, &mut cursor)
@@ -3351,7 +3351,7 @@ mod tests {
                 dropped,
                 ..
             } = stop_fixture(LaneCredits::LegacyBonded, 2);
-            // SAFETY: exact admitted native epoch and closed host submissions, until deliberately revoked.
+            // SAFETY: exact admitted native epoch and closed host submissions, until revoked.
             let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
             if after_completion {
                 let stopped = drive_stop(&mut peer, &domain, &model, &mut engine, &mut cursor);
@@ -3364,7 +3364,7 @@ mod tests {
                 drop(same);
             } else {
                 engine.poll(cursor.now).unwrap();
-                // Actual request published while current; real DMA reply arrives only after native revocation.
+                // Request published while current; real DMA reply arrives only after native revocation.
                 let reply = peer.respond(&domain, &model, cursor.tx % 10);
                 current.store(false, Ordering::Release);
                 model.finish(Direction::Tx, cursor.tx % 10, &[], None);
@@ -3403,7 +3403,7 @@ mod tests {
             if case == 0 {
                 current.store(false, Ordering::Release);
             }
-            // SAFETY: actual paired native resources. Refusal cases must not publish or release anything.
+            // SAFETY: paired native resources. Refusal cases must not publish or release anything.
             let result = unsafe {
                 if case == 1 {
                     StopTunnel::new_without_storage(channel, active, cursor.now)
@@ -3559,7 +3559,7 @@ mod tests {
             if !late {
                 current.store(false, Ordering::Release);
             }
-            // SAFETY: actual active owner and exact native provider accounting authority.
+            // SAFETY: active owner and native provider accounting permission.
             let result = unsafe { ReleaseUnused::new(channel, active, cursor.now) };
             if late {
                 let mut engine = result.unwrap();
@@ -3618,7 +3618,7 @@ mod tests {
                 ..
             } = stop_fixture(credits, seed);
             if release != 0 {
-                // SAFETY: genuine model active receipt and retained native branch adjustment authority.
+                // SAFETY: model active receipt and kept native branch adjustment permission.
                 let mut engine =
                     unsafe { ReleaseUnused::new(channel, active, cursor.now) }.unwrap();
                 active = drive_release(
@@ -3640,7 +3640,7 @@ mod tests {
                 }));
             }
             let rates = active.bandwidth_rates();
-            // SAFETY: actual native guard, closed host admission and retained independent endpoint lifetimes.
+            // SAFETY: native guard, closed host admission and kept independent endpoint lifetimes.
             let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
             let stopped = drive_stop(&mut peer, &domain, &model, &mut engine, &mut cursor);
             activation.extend(peer.writes);
@@ -3705,7 +3705,7 @@ mod tests {
                 } else {
                     &mut peer.up
                 };
-                p.raw[case % 2][0] ^= 1; // actual next-HopID differs despite retained metadata.
+                p.raw[case % 2][0] ^= 1; // next-HopID differs despite kept metadata.
             } else {
                 for _ in 0..9 {
                     channel
@@ -3732,7 +3732,7 @@ mod tests {
                     ));
                 }
             }
-            // SAFETY: exact protected native owner pair; real wire state/progress is deliberately adverse.
+            // SAFETY: exact protected native owner pair; real wire state/progress is adverse.
             let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
             if case == 4 {
                 let writes = model.state.lock().unwrap().writes.len();

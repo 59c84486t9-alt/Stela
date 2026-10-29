@@ -60,7 +60,7 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
         let boot = start(&catalog, &source, &domain, &state, &drops);
         let boot = command_ready(boot, &empty, &source, &domain, &state);
         let mut init = boot.initialize_on_device_nvm();
-        // SAFETY: Source allocates exclusive RAM for this retained model initializer;
+        // SAFETY: Source allocates exclusive RAM for this model initializer;
         // its requester/domain have no asynchronous device or IRQ user.
         unsafe { init.advance(&source) }.unwrap();
         complete(
@@ -71,7 +71,7 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
             &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
         );
         // SAFETY: The extended-configuration ACK completed synchronously within that
-        // same retained domain; its original Source/mappings remain live.
+        // same domain; its original Source/mappings remain live.
         unsafe { init.advance(&source) }.unwrap();
         let mut packet = command_packet(Request::AccessComplete.id(), 1, &[]);
         let notification = command_packet(
@@ -87,9 +87,9 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
         packet[128..132].copy_from_slice(&0x55550000u32.to_le_bytes());
         complete(&init.boot, &domain, 2, 3, &packet);
         // SAFETY: The combined access ACK/notification is published in owned model RAM;
-        // the initializer retains its source/domain through reclaim and staging.
+        // the initializer keeps its source/domain through reclaim and staging.
         unsafe { init.advance(&source) }.unwrap();
-        // SAFETY: The same model owner retains the queued notification and pending DMA;
+        // SAFETY: The same model owner keeps the queued notification and pending DMA;
         // Source has no competing writer while initialization advances its phase.
         unsafe { init.advance(&source) }.unwrap();
         let strap = match case {
@@ -117,7 +117,7 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
                 s.all_ff = true;
             }
             // Three transport CSR operations precede the pre-read two
-            // identity observations and the two actual MAC words.
+            // identity observations and the two MAC words.
             if case == 4 {
                 s.sentinel = Some((s.ops.len() + 7, u32::MAX));
             }

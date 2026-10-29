@@ -1,4 +1,4 @@
-//! Board metadata exercised through actual stateful Runtime device models.
+//! Board metadata exercised through stateful Runtime device models.
 use super::{DcpextDma, DcpextNub};
 use crate::platform::apple::cluster::t6000::{Complex, T6000};
 use crate::platform::apple::power::t6000::native;
@@ -159,7 +159,7 @@ fn original_j314s_external_output_preserves_native_routes_and_identity() {
     devices
         .add_display_with_darts(&regions, dcp.role, &owners)
         .unwrap();
-    // Full original views and their actual nested owners mount together;
+    // Full original views and their nested owners mount together;
     // this is not evidence of original firmware execution or a frame.
 }
 
@@ -373,7 +373,7 @@ fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() 
     }
     // Both original RTC register banks mount while the single primary
     // service owns the global alarm output and the resolved SMC helper
-    // shares its actual oscillator. Epoch/fault history are explicitly
+    // shares its oscillator. Epoch/fault history are explicitly
     // created native inputs, not observed physical reset/persistent data.
     // Autonomous sleep/wake and whole-board admission remain separate.
 }

@@ -70,7 +70,7 @@ pub struct Ivrs<'a> {
 }
 
 impl<'a> Ivrs<'a> {
-    /// `maximum_hardware_blocks` is the caller's actual admission budget,
+    /// `maximum_hardware_blocks` is the caller's admission budget,
     /// including superseded versions. No implicit platform-sized limit applies.
     /// All framing/entry checks precede index allocation. A budget failure may
     /// reject an input before examining its remaining bytes, never admit it.
@@ -381,7 +381,7 @@ pub enum DeviceKind<'a> {
     },
 }
 
-/// Original bytes and data-setting flags are retained even for padding, range
+/// Original bytes and data-setting flags are held even for padding, range
 /// ends and special entries. HID UID formats are raw firmware metadata, not an
 /// assertion that an ACPI namespace or UID conversion service is implemented.
 #[derive(Clone, Copy, Debug)]
@@ -729,7 +729,7 @@ mod tests {
     fn large_interleaved_index_preserves_selected_table_order_and_original_bytes() {
         const UNITS: u16 = 2048;
         let mut blocks = Vec::new();
-        // Firmware order deliberately disagrees with both identity and version
+        // Firmware order disagrees with both identity and version
         // sort order; the final cache must follow the selected record's offset.
         for id in (0..UNITS).rev() {
             blocks.push(hardware(0x11, id % 7, id, &[]));

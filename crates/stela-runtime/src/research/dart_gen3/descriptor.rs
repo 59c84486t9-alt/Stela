@@ -3,7 +3,7 @@
 //! T8152 SPTM d3610/d18e0 constructs PA>>4 descriptors. J873g mBoot
 //! 20457.1.29 file1593ac..1593c0 and15a5f0..15a60c select PA>>8 above
 //! revision3.0. Its native TTBR write at158df8..158e00 still uses PA>>12.
-//! Choosing a software encoding does not qualify the native mode/revision,
+//! Choosing a software encoding does not check the native mode/revision,
 //! security, filter or context contracts needed for profile admission.
 use {crate::platform::apple::dart::descriptor::Format, stela_contracts::dma::DmaError};
 
@@ -19,7 +19,7 @@ pub enum Encoding {
 impl Encoding {
     /// The recovered SPTM handoff and native driver agree on revision3.0.
     /// Other firmware builder encodings remain explicit software forms until
-    /// their handoff mode is qualified; a compatible string cannot select it.
+    /// their handoff mode is checked; a compatible string cannot select it.
     pub fn handoff_revision(revision: u16) -> Result<Self, &'static str> {
         match revision {
             0x300 => Ok(Self::Shift4),

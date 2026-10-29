@@ -1,4 +1,4 @@
-//! Explicit original-card tuning with actual downgrade/CMD21/restore and faults.
+//! Explicit original-card tuning with downgrade/CMD21/restore and faults.
 use super::*;
 
 fn fast_card(
@@ -110,7 +110,7 @@ fn retune_refuses_other_timings_without_switches_and_lost_authority_without_mmio
     for (mode, revoked) in [(2, false), (4, false), (1, true)] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: strobe/refused original epochs retain all model DMA memory.
+        // SAFETY: strobe/refused original epochs keep all model DMA memory.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (_host, mut disk, card, state) = fast_card(&mut dma, mode);
         if revoked {

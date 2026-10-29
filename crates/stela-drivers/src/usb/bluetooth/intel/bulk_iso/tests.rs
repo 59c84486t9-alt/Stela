@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Independent command peer plus actual native xHCI bulk ownership controls.
+//! Independent command peer plus native xHCI bulk ownership controls.
 use super::*;
 use crate::{
     block::BlockError,
@@ -187,7 +187,7 @@ fn intel_bulk_iso_uses_actual_initialized_capabilities_and_retains_original_resp
 #[test]
 fn intel_bulk_iso_matches_source_capability_handle_flags_and_preserves_bulk_framing() {
     let mut owner = session(0x18);
-    // A complete timestamped packet retains its inner lost-SDU status. The
+    // A complete timestamped packet keeps its inner lost-SDU status. The
     // complete outer transport length remains8; no inner-status mask applies.
     let iso = vec![
         0x00, 0x49, 8, 0, 0x78, 0x56, 0x34, 0x12, 0x34, 0x12, 0, 0x80,

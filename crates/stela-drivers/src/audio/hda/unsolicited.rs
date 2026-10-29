@@ -2,7 +2,7 @@
 //! Standard analog jack unsolicited enable, RIRB delivery and teardown.
 //! Adapted from Linux sound/hda/{core/{bus,controller},common/jack}.c.
 //! Copyright (c) 2011-2012 Takashi Iwai <tiwai@suse.de>.
-//! Raw notifications invalidate measurements; use actual pin sense for state.
+//! Raw notifications invalidate measurements; use pin sense for state.
 use super::{CodecGraph, Controller, ControllerToken, Registers, Verb, WidgetKind};
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::{collections::VecDeque, vec::Vec};
@@ -12,7 +12,7 @@ const SET_UNSOL: u16 = 0x708;
 const GET_UNSOL: u16 = 0xf08;
 const ENABLE: u8 = 0x80;
 
-/// A tag reservation bound to one actual controller/reset epoch. Tags are never
+/// A tag reservation bound to one controller/reset epoch. Tags are never
 /// recycled in that epoch, even after disable; a late event cannot name a new pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JackNotificationId {
@@ -20,7 +20,7 @@ pub struct JackNotificationId {
     index: usize,
 }
 /// Original hardware response. An optional subscription is historical mapping,
-/// not a current pin state or authority to change a route/amp/codec power.
+/// not a current pin state or permission to change a route/amp/codec power.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnsolicitedResponse {
     pub codec: u8,
@@ -32,7 +32,7 @@ pub struct UnsolicitedResponse {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsolicitedEvent {
     Response(UnsolicitedResponse),
-    /// Software queue loss, after all earlier retained responses. While loss
+    /// Software queue loss, after all earlier kept responses. While loss
     /// is pending, later events join this count so no event overtakes the gap.
     Overflow {
         at_least: u64,
@@ -234,7 +234,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     /// Explicit polled delivery. Responses arriving between solicited verbs are
-    /// retained by that same real RIRB drain. Even cached events require a live
+    /// by that same real RIRB drain. Even cached events require a live
     /// command/ownership epoch. Raw event bits never replace fresh pin sense.
     pub fn next_unsolicited(&mut self) -> Result<Option<UnsolicitedEvent>, Error> {
         self.jack_ready()?;

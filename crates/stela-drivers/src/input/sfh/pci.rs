@@ -8,7 +8,7 @@ use crate::bus::{
         requester::StoppedRequester,
     },
 };
-/// Rejected attachment returns the exact original owners, without writes.
+/// Rejected attachment returns the original owners, without writes.
 pub struct AttachFailure {
     pub error: Error,
     pub function: Function<OwnedConfig>,
@@ -26,8 +26,8 @@ pub struct NativeRegisters {
 }
 impl NativeRegisters {
     /// # Safety
-    /// `bar` is this function's actually sized/reserved BAR2; `mapping` retains
-    /// this same actual exclusive resource/reset/assignment epoch. Numeric span
+    /// `bar` is this function's sized/reserved BAR2; `mapping` keeps
+    /// this same exclusive resource/reset/assignment epoch. Numeric span
     /// equality is insufficient. The stopped requester's firmware/IRQ/work and
     /// physical alias exclusion continues until successful explicit shutdown.
     /// No other raw access, cloned view or configuration writer may interfere.
@@ -215,7 +215,7 @@ mod tests {
     #[repr(align(4096))]
     struct Storage([u8; REGION_BYTES]);
     struct Reservation(Arc<AtomicUsize>);
-    // SAFETY: isolated symbolic BAR reservation paired with actual owned CPU RAM.
+    // SAFETY: isolated symbolic BAR reservation paired with owned CPU RAM.
     unsafe impl ResourceBacking for Reservation {
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, REGION_BYTES as u64).unwrap()
@@ -238,8 +238,8 @@ mod tests {
     unsafe impl Send for Platform {}
     // SAFETY: fixture serializes metadata and no safe payload alias escapes.
     unsafe impl Sync for Platform {}
-    // SAFETY: exact model resource is backed by owned stable CPU storage, with
-    // synchronous serialized install/retirement; no native mapping claim.
+    // SAFETY: model resource is backed by owned stable CPU storage, with
+    // synchronous serialized install/retirement.
     unsafe impl MappingPlatform for Platform {
         fn check_context(&self, _: AddressSpace) -> Result<(), MapError> {
             Ok(())
@@ -364,7 +364,7 @@ mod tests {
         for device in [0x15e6, 0x164a] {
             let (requester, _) = requester(device);
             let (mapping, unmaps, _) = mapping();
-            // SAFETY: identity refusal is deliberately exercised on the model.
+            // SAFETY: identity refusal is exercised on the model.
             let mut failure = match unsafe { NativeRegisters::attach(requester, mapping, bar()) } {
                 Err(value) => value,
                 Ok(_) => panic!("wrong SFH generation"),
@@ -375,7 +375,7 @@ mod tests {
             let mut config = failure.function.into_config().into_mapping();
             // SAFETY: attachment rejected without device accesses; model drained.
             unsafe { failure.mapping.retire() }.unwrap();
-            // SAFETY: same model exclusion and final actual config owner.
+            // SAFETY: same model exclusion and final config owner.
             unsafe { config.retire() }.unwrap();
             assert_eq!(unmaps.load(Ordering::Relaxed), 1);
         }

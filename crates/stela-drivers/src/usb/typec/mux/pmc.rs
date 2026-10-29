@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Stela contributors
 //! Intel PMC/IOM Type-C mux protocol from pinned intel_pmc_mux.c.
 //! Real IPC and IOM resource providers are required. Port associations and
-//! orientation overrides come from actual ACPI child properties, never guesses.
+//! orientation overrides come from ACPI child properties, never guesses.
 use super::{Mode, Orientation, Pin};
 use crate::usb::typec::ucsi::{DataRole, Timer};
 use alloc::vec::Vec;
@@ -65,8 +65,8 @@ pub enum Error {
     },
     NeedsInitialization,
 }
-/// One actual native IPC channel and the selected IOM resource. Implementations
-/// must retain hardware ownership/mappings and return genuine status/errors.
+/// One native IPC channel and the selected IOM resource. Implementations
+/// must keep hardware ownership/mappings and return status/errors.
 pub trait Backend {
     fn iom_kind(&self) -> IomKind;
     fn command(&mut self, message: &[u8]) -> Result<[u8; 4], scu::Error>;
@@ -120,7 +120,7 @@ impl<R: scu::Registers, I: scu::Registers, C: Timer> Backend for Native<R, I, C>
 pub struct Port {
     pub configuration: PortConfiguration,
     pub orientation: Orientation,
-    /// Last accepted role request; actual IOM role stays in `iom_status`.
+    /// Last accepted role request; IOM role stays in `iom_status`.
     pub role: Option<DataRole>,
     pub iom_status: u32,
 }
@@ -443,7 +443,7 @@ impl<B: Backend> Pmc<B> {
                 let cable = (enter_usb >> 19) & 3;
                 if cable != 0 {
                     // Pinned source sets RETIMER for optical/retimer on every
-                    // IOM generation; preserve its actual OR-condition result.
+                    // IOM generation; preserve its OR-condition result.
                     if cable == 3 {
                         word |= 1 << 18;
                     }

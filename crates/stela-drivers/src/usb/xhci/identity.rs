@@ -5,14 +5,14 @@
 //! the hardware slot. A slot number alone cannot express that lifetime: the
 //! next Enable Slot may return the same number. This boundary preserves old
 //! consumers' permanent refusal across that hardware reuse. Linux's pinned
-//! xhci_check_args also compares virt_dev->udev with the actual usb_device;
-//! a bare numerical slot is deliberately insufficient here after retirement.
+//! xhci_check_args also compares virt_dev->udev with the usb_device;
+//! a bare numerical slot is insufficient here after retirement.
 //!
 //! Public raw operations check one monotonic retirement fence. Exact access
-//! validates its genuine SlotId before entering private implementations; no
+//! validates its SlotId before entering private implementations; no
 //! public bypass flag or raw-to-current identity conversion is exposed.
 //! This identity boundary alone does not authorize recycling published slots.
-//! Exclusive root-leaf reset also requires retirement's actual physical-reset
+//! Exclusive root-leaf reset also requires retirement's physical-reset
 //! witness; a new generation never clears the permanent raw-slot fence.
 use super::*;
 use core::sync::atomic::AtomicU64;
@@ -145,7 +145,7 @@ impl Controller {
             .is_some_and(|state| state.generation == id.generation)
     }
 
-    /// Validate the identities stored at actual enumeration, including the
+    /// Validate the identities stored at enumeration, including the
     /// original parent objects. This pure check also works for a disabled child
     /// whose physical current grant must outlive Disable Slot. Suspension is
     /// allowed for private topology sequencing, never for class access.
@@ -210,7 +210,7 @@ impl Controller {
 
     /// Private owned command paths may act before descriptor inventory exists,
     /// e.g. failed EP0 enumeration retirement. Check their stored graph without
-    /// issuing a new credential to any retained raw-slot caller.
+    /// issuing a new credential to any raw-slot caller.
     pub(super) fn validate_owned_slot_ancestry(&self, slot: u8) -> Result<(), BlockError> {
         let state = self
             .slots
@@ -276,7 +276,7 @@ impl Controller {
         }
     }
 
-    /// The private hub recovery capability deliberately retains a quarantined
+    /// The private hub recovery capability keeps a quarantined
     /// generation. It never grants ordinary class access or matches a reuse.
     pub(super) fn validate_recovery_id(&self, id: SlotId) -> Result<(), BlockError> {
         self.validate_ancestry(id)?;
@@ -294,7 +294,7 @@ impl Controller {
         Ok(())
     }
 
-    /// Pure admission for a retained native consumer, including its original
+    /// Pure admission for a native consumer, including its original
     /// ancestor generations. No register, completion or DMA access occurs.
     pub(crate) fn validate_device_id(&self, id: SlotId) -> Result<(), BlockError> {
         self.validate_id(id).map(|_| ())
@@ -339,8 +339,8 @@ impl Controller {
     }
 }
 
-/// Device operations whose slot authority comes from physical enumeration.
-/// There is deliberately no Deref to the raw controller or slot setter.
+/// Device operations whose slot permission comes from physical enumeration.
+/// There is no Deref to the raw controller or slot setter.
 pub struct DeviceAccess<'a> {
     controller: &'a mut Controller,
     id: SlotId,
@@ -541,7 +541,7 @@ impl DeviceAccess<'_> {
     }
 
     /// Submit a scheduling request for this exact addressed generation. The
-    /// request carries no hardware authority; controller admission follows
+    /// request carries no hardware permission; controller admission follows
     /// identity validation and precedes DMA publication.
     pub fn submit_iso_scheduled(
         &mut self,
@@ -761,8 +761,8 @@ mod tests {
             if !vendor {
                 assert!(old_hardware.borrow().active[5].is_some());
             }
-            // Execute actual Stop/Set Dequeue and matching Disable Slot completion;
-            // no fabricated software retirement or new-generation ID is installed.
+            // Execute Stop/Set Dequeue and matching Disable Slot completion;
+            // no invented software retirement or new-generation ID is installed.
             previous
                 .borrow_mut()
                 .disable_slot(1, reset::Ownership::Retired)
@@ -842,9 +842,9 @@ mod tests {
             );
             assert_eq!(&data.bytes()[..64], &[0x6a; 64]);
             assert_eq!(&data.bytes()[64..], &[0xa5; 64]);
-            // This exercises retained consumer admission across real retirement
+            // This exercises kept consumer admission across real retirement
             // and distinct controller generations. Hardware-slot reuse stays
-            // disabled and is deliberately not established by this fixture.
+            // disabled and is not established by this fixture.
         }
     }
 
@@ -923,7 +923,7 @@ mod tests {
             assert_eq!(dma.remaining(), before_remaining);
             assert_eq!(backing, before);
 
-            // A second actual addressed controller independently mints the same
+            // A second addressed controller independently mints the same
             // hardware slot number; no old identity or publication fence is reset.
             let (current, current_hardware) = model::cancellation_controller(&mut dma);
             let current = Rc::new(RefCell::new(current));

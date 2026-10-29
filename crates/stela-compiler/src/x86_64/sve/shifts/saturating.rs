@@ -128,7 +128,7 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     packed(code, Host::AndNot, 2, 3);
     packed(code, Host::Or, 0, 2);
     stack_vector(code, 0, LEFT_SLOT, true);
-    // abs(INT_MIN) retains its unsigned-large magnitude; never narrow to low byte.
+    // abs(INT_MIN) keeps its unsigned-large magnitude; never narrow to low byte.
     sign_mask(code, 2, 1, element);
     packed(code, Host::Xor, 1, 2);
     packed(code, subtract(element), 1, 2);

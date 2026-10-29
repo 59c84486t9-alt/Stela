@@ -15,8 +15,8 @@ use alloc::{
 use core::cell::RefCell;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::TransferFault};
 
-/// Placement selected by the actual device dispatcher. Numeric topology does
-/// not authorize a substitute Port: Owners must name the same actual objects.
+/// Placement selected by the device dispatcher. Numeric topology does
+/// not authorize a substitute Port: Owners must name the same objects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Route {
     pub mapper: u32,
@@ -25,7 +25,7 @@ pub struct Route {
     pub context: u32,
     pub stream: usize,
 }
-/// Root retains these identities with the actual DART, canonical registered
+/// Root keeps these identities with the DART, canonical registered
 /// RAM generation and AP allocator/session. They are not host pointer exports.
 #[derive(Clone)]
 pub struct Owners {
@@ -40,7 +40,7 @@ impl Owners {
             && Rc::ptr_eq(&self.allocator, &other.allocator)
     }
 }
-/// Explicit qualified software/configuration inputs; no default or tag guess.
+/// Explicit checked software/configuration inputs; no default or tag guess.
 #[derive(Clone, Copy, Debug)]
 pub struct Configuration {
     pub mapper_index: u32,
@@ -161,7 +161,7 @@ pub(super) struct State {
 pub struct Broker {
     pub(super) state: Rc<RefCell<State>>,
 }
-/// Pairing is performed by the root's actual device/resource composition.
+/// Pairing is performed by the root's device/resource composition.
 /// Neither endpoint can be replaced by a successful absent dispatcher.
 pub fn pair(
     route: Route,

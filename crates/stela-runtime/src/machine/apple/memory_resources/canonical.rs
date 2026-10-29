@@ -28,7 +28,7 @@ impl super::super::AppleDevices {
 }
 
 impl Prepared {
-    /// Retain the actual canonical guest reservations before publishing this
+    /// Keep the canonical guest reservations before publishing this
     /// resource. Registration's all-writer contract excludes raw/unjoined DMA;
     /// the engine must still recover every native frame and finish synchronous
     /// device work before lending a live CanonicalRamService for a read.
@@ -46,22 +46,22 @@ impl Prepared {
         Ok(self)
     }
 
-    /// Effect-free classification only. Unknown widths/offsets retain the
-    /// ordinary explicit MMIO refusal; this creates no completion authority.
+    /// Effect-free classification only. Unknown widths/offsets keep the
+    /// ordinary explicit MMIO refusal; this creates no completion permission.
     pub fn requires_ram_read(&self, offset: u64, width: Width) -> bool {
         offset < self.ptd_offset() && mcc::is_drain_word(offset % mcc::APERTURE_BYTES, width)
     }
 
-    /// Observe an empty synchronous Stela RAM frontend while its exact native
+    /// Observe an empty synchronous Stela RAM frontend while its native
     /// owners, mapping generation and all physical writer gates remain held.
     /// No value is saved into the ordinary register bank: after this borrow
-    /// ends a fresh drain read needs another actual engine service.
+    /// ends a fresh drain read needs another engine service.
     ///
     /// # Safety
-    /// The complete producer set is the actual stopped native workers and
+    /// The complete producer set is the stopped native workers and
     /// exclusively borrowed synchronous Host/Devices whose transfer completed
-    /// before this borrow. Retained synchronous device requests may remain
-    /// queued only when the actual exclusive Devices borrow prevents their
+    /// before this borrow. Synchronous device requests may remain
+    /// queued only when the exclusive Devices borrow prevents their
     /// transfer from advancing or reentering throughout the service. No other
     /// independently advancing host job, firmware or asynchronous DMA producer
     /// may publish, even through registered gates. Free gates or transfer(Ok)
@@ -95,7 +95,7 @@ impl Prepared {
             return Err("DCS drain cannot settle an outstanding MCC/DRAM/power request");
         }
         // Every admitted frontend transfer is synchronous. The engine
-        // completed device copyout and fenced the actual CPU owners before
+        // completed device copyout and fenced the CPU owners before
         // obtaining this same mapping/native/all-writer exclusion. No frontend
         // transaction remains in flight, and none can enter while borrowed.
         self.router
@@ -104,15 +104,15 @@ impl Prepared {
             .map(u64::from)
     }
 
-    /// Consume the original low-byte clear under the exact same live owner as
+    /// Consume the original low-byte clear under the same live owner as
     /// the drain read. The high bits belong to the initialized control image;
     /// memory quiescence is never used to invent their value.
     ///
     /// # Safety
     /// The complete closed synchronous producer contract of read_ram_drain
-    /// holds for this entire operation. The caller retains all actual native
+    /// holds for this entire operation. The caller keeps all native
     /// workers and excludes every independently advancing publisher through
-    /// consumption; paused synchronous requests retain their actual owner.
+    /// consumption; paused synchronous requests keep their owner.
     pub unsafe fn write_ram_drain(
         &self,
         offset: u64,
@@ -121,7 +121,7 @@ impl Prepared {
         now: u64,
         memory: &CanonicalRamService<'_>,
     ) -> Result<(), &'static str> {
-        // SAFETY: caller retains exactly the same closed producer set/guard.
+        // SAFETY: caller keeps exactly the same closed producer set/guard.
         let expected = unsafe { self.read_ram_drain(offset, width, memory) }?;
         if u64::from(value as u32) != expected {
             return Err("DCS flush must preserve high16 and clear both low bytes");
@@ -144,7 +144,7 @@ mod tests {
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 128]>);
     // SAFETY: after registration these bytes have no Rust references and
-    // every reached access participates in the actual fixture memory system.
+    // every reached access participates in the fixture memory system.
     unsafe impl Sync for Storage {}
 
     fn ram() -> Arc<RegisteredSystemRam> {
@@ -155,7 +155,7 @@ mod tests {
             host_base: NonNull::new(storage.0.get().cast()).unwrap(),
             bytes: 128,
         };
-        // SAFETY: the fixture retains these stable disjoint bytes. This tests
+        // SAFETY: the fixture keeps these stable disjoint bytes. This tests
         // identity/exclusion, not production CPL0/native owner admission.
         Arc::new(unsafe { fixture(&[range], storage) })
     }
@@ -168,7 +168,7 @@ mod tests {
     ) -> Result<u64, &'static str> {
         // SAFETY: these single-thread fixtures have no native frames, jobs,
         // background publishers or DMA; the borrowed memory is their complete
-        // closed producer domain. This does not qualify a production host.
+        // closed producer domain. This does not check a production host.
         unsafe { owner.read_ram_drain(offset, width, memory) }
     }
 
@@ -222,7 +222,7 @@ mod tests {
         let other = foreign.try_service().unwrap().unwrap();
         let offset = mcc::DCS_BASE + mcc::DCS_DRAIN;
         // SAFETY: this fixture has no other producers, frames or DMA. Each
-        // call retains its exact actual all-writer borrow through completion.
+        // call keeps its exact all-writer borrow through completion.
         unsafe {
             assert!(
                 owner

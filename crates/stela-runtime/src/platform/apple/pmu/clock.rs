@@ -26,7 +26,7 @@ struct Clock {
     regression: Cell<Option<(u64, u64)>>,
 }
 
-/// Retained ownership of one PMIC oscillator/epoch. Clones refer to the same
+/// Ownership of one PMIC oscillator/epoch. Clones refer to the same
 /// publication; no interface owns another wall clock or a default sample.
 #[derive(Debug, Clone)]
 pub struct RtcClock(Rc<Clock>);
@@ -46,7 +46,7 @@ impl RtcClock {
         })))
     }
 
-    /// Check an actual Access.now without publishing or changing any owner.
+    /// Check an Access.now without publishing or changing any owner.
     pub fn check(&self, now: u64) -> Result<u64, &'static str> {
         if let Some(sample) = self.0.sample.get()
             && now < sample.counter
@@ -67,7 +67,7 @@ impl RtcClock {
 
     /// Board service boundary publication, before ASC receive/poll effects.
     /// Refusal preserves the previous sample. This is model time ownership,
-    /// never authority to execute on a host worker.
+    /// never permission to execute on a host worker.
     pub fn publish(&self, now: u64) -> Result<(), &'static str> {
         let ticks = self.check(now)?;
         self.0.sample.set(Some(Sample {

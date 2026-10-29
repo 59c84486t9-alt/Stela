@@ -1,4 +1,4 @@
-//! Control, bulk and interrupt transfers on retained rings, and the
+//! Control, bulk and interrupt transfers on kept rings, and the
 //! cancellation that must be acknowledged before a buffer is reused.
 use super::*;
 mod operation;
@@ -121,8 +121,8 @@ impl Controller {
     }
 
     /// Completion polling may inspect an errored TD while its buffer remains
-    /// fenced against resubmission. Cancellation deliberately bypasses this
-    /// submission fence and establishes retirement through actual commands.
+    /// fenced against resubmission. Cancellation bypasses this
+    /// submission fence and establishes retirement through commands.
     pub(super) fn completion_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.live_slot(slot)?;
         self.endpoint_ready_inner(slot, dci)
@@ -222,8 +222,8 @@ impl Controller {
     }
 
     /// Only the topology owner can mint this capability, after every old alias
-    /// is fenced and every descendant/status TD is actually retired. No public
-    /// slot API can obtain access merely by naming this still-enabled EP0.
+    /// is fenced and every descendant/status TD is retired. No public
+    /// slot API can obtain access by naming this still-enabled EP0.
     pub(super) fn recovery_control(
         &mut self,
         owner: &lifecycle::Recovery,
@@ -351,7 +351,7 @@ impl Controller {
     /// Set TR Dequeue moves past the abandoned TDs (xHCI 1.2 4.6.9/4.6.10).
     /// Success acknowledges that their buffers are no longer hardware-owned.
     /// Failure permanently poisons submission to this endpoint: callers must
-    /// retain the buffers and must not read, rewrite or recycle them. Device
+    /// keep the buffers and must not read, rewrite or recycle them. Device
     /// disconnect alone is not proof that controller DMA has stopped.
     pub fn cancel(&mut self, id: impl DeviceRef, dci: u8) -> Result<(), BlockError> {
         let slot = id.current_slot(self)?;
@@ -666,7 +666,7 @@ mod tests {
                 model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
             }
             // Keep a valid publication window in this shortened Clock1 model;
-            // the actual held TD then consumes the budget and must stop.
+            // the held TD then consumes the budget and must stop.
             let result = controller.transfer(1, 5, buffer.physical(), 512, 3_000_000);
             if fail_stop {
                 assert!(matches!(

@@ -108,12 +108,12 @@ struct Allocation {
     alias_tag: u8,
     inheritance: DataInheritance,
 }
-/// Private, non-shareable mappings with retained native storage lifetimes.
+/// Private, non-shareable mappings with kept native storage lifetimes.
 ///
 /// Safe operations copy bytes; they never lend Rust references into memory that
 /// native guest code may mutate. Callers executing native code remain responsible
 /// for its unsafe execution contract and must keep this owner alive throughout.
-/// Internal retained storage can outlive this logical owner; retention alone does
+/// Internal kept storage can outlive this logical owner; retention alone does
 /// not pin host rights or admit concurrent/shared execution.
 #[derive(Debug)]
 pub struct OwnedMemory {

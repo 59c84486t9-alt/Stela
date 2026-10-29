@@ -1,4 +1,4 @@
-//! GL9755 native retained-configuration and dual-rail regressions.
+//! GL9755 native kept-configuration and dual-rail regressions.
 use super::*;
 use crate::{bus::dma::RegionAllocator, storage::sdhci::model::*};
 use alloc::vec;
@@ -259,7 +259,7 @@ fn port() -> (Port55, Rc<RefCell<Hardware>>, Rc<RefCell<State>>) {
 }
 fn initialize_port(p: &mut Port55) -> Result<(), BlockError> {
     // Distinct MMIO peer shares only the original card register namespace;
-    // the actual original Function is passed to the production initialization.
+    // the original Function is passed to the production initialization.
     struct Mmio(Rc<RefCell<Hardware>>);
     impl Registers for Mmio {
         fn read8(&mut self, a: usize) -> u8 {
@@ -297,7 +297,7 @@ fn host(
         let mut c = card.borrow_mut();
         c.caps2 = CAP_SDR50 | CAP_SDR104;
         c.uhs_functions = 0x1f;
-        c.scr[2] = 0x80; // Actual card declares SD3 before requesting S18R/UHS.
+        c.scr[2] = 0x80; // Card declares SD3 before requesting S18R/UHS.
         c.max_current = 200;
     }
     if adma {
@@ -357,7 +357,7 @@ fn native_gl9755_original_pci_phy_power_cycle_and_two_rails_precede_real_pio() {
 fn native_gl9755_uhs_standard_tuning_pci_pll_and_v4_dma_transfer_payloads() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: retained backing is the actual model DMA address space throughout I/O.
+    // SAFETY: backing is the model DMA address space throughout I/O.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, state) = host(&mut dma, true, true);
     let mut disk = host.poll().unwrap().unwrap();
@@ -386,7 +386,7 @@ fn native_gl9755_overcurrent_removes_both_rails_preserves_cleanup_and_fences_ali
     for failed_cleanup in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: original allocations remain retained after permanent power quarantine.
+        // SAFETY: original allocations remain held after permanent power quarantine.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, card, state) = host(&mut dma, false, false);
         let mut disk = host.poll().unwrap().unwrap();
@@ -472,7 +472,7 @@ fn native_gl9755_single_ocp_latch_at_w1c_boundary_cannot_be_lost_before_command(
     for tuning in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: actual model DMA backing remains retained after electrical quarantine.
+        // SAFETY: model DMA backing remains held after electrical quarantine.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, card, state) = host(&mut dma, tuning, false);
         let mut disk = host.poll().unwrap().unwrap();
@@ -556,7 +556,7 @@ fn native_gl9755_engine_lost_pci_identity_power_decode_or_requester_authority_fe
     for mutation in 0..5 {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: a lost actual requester epoch permanently retains all boot DMA ranges.
+        // SAFETY: a lost requester epoch permanently keeps all boot DMA ranges.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, card, state) = host(&mut dma, false, false);
         let mut disk = host.poll().unwrap().unwrap();

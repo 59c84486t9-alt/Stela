@@ -63,13 +63,13 @@ impl<const BYTES: usize> Backing<BYTES> {
             .checked_sub(core::mem::size_of::<Frame>())
     }
     /// # Safety
-    /// The actual installed descriptor owns and maps this original backing.
+    /// The installed descriptor owns and maps this original backing.
     /// Its assembly has finished the complete frame/image/metadata save, with
     /// a stable image size and no Rust stack writes into the saved intervals.
     /// All image bytes remain initialized from this zeroed allocation or saved
     /// bytes. Nested same-slot entries must refuse before image reuse and may
     /// not return into this scope. Separate terminal stacks cannot resume it.
-    /// Retain the CPU, allocation and mappings for the complete lifetime of
+    /// Keep the CPU, allocation and mappings for the complete lifetime of
     /// EVERY returned image/metadata borrow, including references copied out of
     /// Captured. No hardware, assembly or Rust writer may change those saved
     /// intervals while any such borrow is live; consuming writeback does not
@@ -118,7 +118,7 @@ impl<const BYTES: usize> Backing<BYTES> {
     }
 }
 
-/// Assembly addresses for agreement with the actual retained Backing only.
+/// Assembly addresses for agreement with the Backing only.
 /// This record carries no ownership or permission on its own.
 #[derive(Debug, Clone, Copy)]
 pub struct Location {
@@ -140,7 +140,7 @@ pub struct Captured<'entry> {
 }
 impl Captured<'_> {
     pub fn writeback(self) {
-        // SAFETY: capture retains the actual backing through this borrow. Its
+        // SAFETY: capture keeps the backing through this borrow. Its
         // exclusive entry contract permits this one ordinary return write;
         // image and metadata intervals are disjoint from the original Frame.
         unsafe { self.pointer.as_ptr().write(self.frame) };

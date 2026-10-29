@@ -341,7 +341,7 @@ fn realtek_two_sense_model(id: u32, first: bool, second: bool) -> Rc<RefCell<Mod
         m.parameters.insert((0x16, 0x0e), 1);
         m.parameters.insert((8, 9), 5);
         m.connection_words.insert((0x16, 0), 8);
-        m.pin_defaults.insert(0x16, 0x4111_11f0); // Actual NoConnection.
+        m.pin_defaults.insert(0x16, 0x4111_11f0); // NoConnection.
         m.pin_senses
             .insert(0x16, if second { 0x8000_0123 } else { 0x123 });
         for (index, value) in [

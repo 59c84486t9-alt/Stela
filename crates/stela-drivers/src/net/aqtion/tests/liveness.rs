@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Original alive register distinguishes actual data from removal.
+//! Original alive register distinguishes data from removal.
 use super::*;
 #[test]
 fn actual_allones_programmed_mac_padding_initializes_and_transfers_on_both_generations() {

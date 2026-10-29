@@ -5,7 +5,7 @@
 // Copyright (C) 2011-2012 Mike Turquette, Linaro Ltd.
 // Intel LPSS PCI SPI resources adapted from intel-lpss.c/intel-lpss-pci.c;
 // same source pin and notices as the parent LPSS owner. See ../THIRD_PARTY.md.
-//! Actual retained PCI LPSS reset/remap/clock resources composed with SSP PIO.
+//! PCI LPSS reset/remap/clock resources composed with SSP PIO.
 //! Source root clocks are distinct from the observed fractional SSP input.
 use super::{Identity, NativeRegisters, NativeResources, Registers, Retired};
 use crate::bus::{mmio::owned::Mapping, pci::requester::StoppedRequester, spi::pxa2xx};
@@ -89,7 +89,7 @@ impl<R: Registers> Owner<R> {
             owner.phase = Phase::Touched;
             owner.verified(0x204, 0)?;
             owner.verified(0x204, 7)?;
-            // Linux lo_hi_writeq: actual physical BAR, never a CPU pointer.
+            // Linux lo_hi_writeq: physical BAR, never a CPU pointer.
             owner.write(0x240, base as u32)?;
             owner.write(0x244, (base >> 32) as u32)?;
             owner.verify(0x240, base as u32)?;
@@ -140,7 +140,7 @@ impl<R: Registers> Owner<R> {
         self.verify(offset, value)
     }
     fn retire(mut self) -> Result<Retired<R>, Error> {
-        // The actual SSP core has acknowledged idle, inactive CS and SSE=0.
+        // The SSP core has acknowledged idle, inactive CS and SSE=0.
         // Reverse the source clock gates before asserting the private reset.
         self.phase = Phase::Touched;
         let clock = self.read(0x200)?;
@@ -162,9 +162,9 @@ impl<R: Registers> Drop for Owner<R> {
         }
     }
 }
-// SAFETY: this same original LPSS provider retains the actual stopped canonical
+// SAFETY: this same original LPSS provider keeps the stopped canonical
 // Function/UC mapping/firmware epoch; prepare acknowledged private reset/remap
-// and actual clock gates. The PIO core alone can access these child/private CS
+// and clock gates. The PIO core alone can access these child/private CS
 // registers and it never enables a DMA/IRQ service. Quarantine leaks this Owner.
 unsafe impl<R: Registers> pxa2xx::Registers for Owner<R> {
     fn description(&self) -> pxa2xx::Description {
@@ -199,10 +199,10 @@ pub struct Spi<R: Registers, T: Timer> {
 }
 impl<R: Registers, T: Timer> Spi<R, T> {
     /// # Safety
-    /// The original retained provider grants this exact source-listed PCI
+    /// The original kept provider grants this source-listed PCI
     /// function's powered root clock, board native-CS pins and firmware/PUNIT
-    /// arbitration. Source root frequency is an actual established platform
-    /// clock, not authority inferred solely from its PCI ID. No IRQ/DMA child
+    /// arbitration. Source root frequency is an established platform
+    /// clock, not permission inferred solely from its PCI ID. No IRQ/DMA child
     /// exists, and all prior traffic/callbacks were drained by this same owner.
     pub unsafe fn attach(
         registers: R,
@@ -251,8 +251,8 @@ impl<R: Registers, T: Timer> Spi<R, T> {
 impl<T: Timer> Spi<NativeRegisters, T> {
     /// # Safety
     /// The parent's NativeRegisters claim and this adapter's root-clock/board/
-    /// arbitration contracts hold for the same actual original stopped function
-    /// and its complete exclusive UC BAR0 mapping, including retained Drop.
+    /// arbitration contracts hold for the same original stopped function
+    /// and its complete exclusive UC BAR0 mapping, including kept Drop.
     pub unsafe fn attach_native(
         requester: StoppedRequester,
         mapping: Mapping,
@@ -260,14 +260,14 @@ impl<T: Timer> Spi<NativeRegisters, T> {
         chip_selects: u8,
         timeout_us: u64,
     ) -> Result<Self, AttachFailure> {
-        // SAFETY: caller supplies the actual original stopped function/UC grant.
+        // SAFETY: caller supplies the original stopped function/UC grant.
         let registers = unsafe { NativeRegisters::claim(requester, mapping) }.map_err(
             |(error, resources)| AttachFailure {
                 error: Error::Platform(error),
                 unmodified: Some(resources),
             },
         )?;
-        // SAFETY: same genuine source clock/board/native firmware owner.
+        // SAFETY: same source clock/board/native firmware owner.
         unsafe { Self::attach(registers, timer, chip_selects, timeout_us) }.map_err(
             |(error, registers)| AttachFailure {
                 error,

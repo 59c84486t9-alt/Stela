@@ -50,7 +50,7 @@ pub fn tables() -> PathBuf {
     let host = env::var("HOST").expect("Cargo supplies HOST");
     let generator = staging.join(format!("gen_crc32table{}", env::consts::EXE_SUFFIX));
     // This is upstream host C, not a kernel translation unit. Its original
-    // main has unused argc/argv, so retain -Wall rather than add -Wextra.
+    // main has unused argc/argv, so keep -Wall rather than add -Wextra.
     let mut build = cc::Build::new();
     // Clang, as for the port itself, unless the caller chose a host compiler:
     // MSVC's cl takes none of these GCC-style options.

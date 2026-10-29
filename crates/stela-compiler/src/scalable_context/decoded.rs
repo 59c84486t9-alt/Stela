@@ -464,7 +464,7 @@ impl Decoded {
 }
 
 /// Existing register-only AdvSIMD recipes can share checked blocks without
-/// borrowing guest RAM. Memory variants must retain their typed adapters;
+/// borrowing guest RAM. Memory variants must keep their typed adapters;
 /// numerical FP remains on its separately recovered block/service path. Keep
 /// this exhaustive by variant so a future SIMD family needs explicit review.
 fn checked_register_asimd(operation: &Operation) -> bool {

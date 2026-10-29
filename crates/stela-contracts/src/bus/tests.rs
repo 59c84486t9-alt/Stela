@@ -189,7 +189,7 @@ fn whole_range_preflight_sees_interior_owners_and_publishes_nothing() {
     assert_eq!(bus.regions.len(), 1);
     assert_eq!(bus.devices.len(), 1);
     assert_eq!(bus.device::<Scratch>(bank).unwrap().0, [7; 16]);
-    // A successful preflight is not a reservation; actual map follows
+    // A successful preflight is not a reservation; map follows
     // the same checked overlap path under exclusive mutable Bus access.
     bus.map(bank, 0x1810, 16, 0).unwrap();
     assert_eq!(

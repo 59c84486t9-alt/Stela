@@ -73,7 +73,7 @@ pub(super) fn passive(
     {
         return Err(Ax200ScanError::UnsupportedRequest);
     }
-    // Even the unused passive template is bounded and retains every caller IE.
+    // Even the unused passive template is bounded and keeps every caller IE.
     // All SSID/short-SSID/BSSID arrays remain zero; no firmware probe selector
     // or implicit 6GHz/scheduled scan can enable transmission.
     let extra = request.extra_elements();
@@ -88,8 +88,8 @@ pub(super) fn passive(
         .try_reserve_exact(REQUEST_BYTES)
         .map_err(|_| Ax200ScanError::NoMemory)?;
     bytes.resize(REQUEST_BYTES, 0);
-    // One serialized UID0. Only the same retained owner can reuse it after
-    // actual completion, command reclaim and old-RB/deferred-user retirement.
+    // One serialized UID0. Only the same owner can reuse it after
+    // completion, command reclaim and old-RB/deferred-user retirement.
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_6.to_le_bytes());
     bytes[GENERAL..GENERAL + 2]
         .copy_from_slice(&(FORCE_PASSIVE | PASS_ALL | ADAPTIVE_DWELL).to_le_bytes());
@@ -98,8 +98,8 @@ pub(super) fn passive(
     bytes[GENERAL + 10..GENERAL + 12].copy_from_slice(&FULL_SCAN_BUDGET_TU.to_le_bytes());
     bytes[GENERAL + 28..GENERAL + 32].copy_from_slice(&PRIORITY_EXT_6.to_le_bytes());
     bytes[GENERAL + 32..GENERAL + 34].fill(PASSIVE_DWELL);
-    // Both LMAC timing arrays are zero for the genuine unassociated MAC.
-    // EBS is deliberately disabled: no previous successful EBS is fabricated.
+    // Both LMAC timing arrays are zero for the unassociated MAC.
+    // EBS is disabled: no previous successful EBS is invented.
     bytes[CHANNELS] = ENABLE_CHANNEL_ORDER;
     bytes[CHANNELS + 1] = request.channels().len() as u8;
     bytes[CHANNELS + 2..CHANNELS + 4].copy_from_slice(&[10, 2]);

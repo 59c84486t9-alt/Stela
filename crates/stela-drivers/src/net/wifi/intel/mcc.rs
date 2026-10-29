@@ -22,7 +22,7 @@ pub struct Request {
     pub source: u8,
 }
 impl Request {
-    /// Source get-current query; absence of multi-source support deliberately
+    /// Source get-current query; absence of multi-source support
     /// selects OLD_FW rather than falsely attributing a location source.
     pub fn current(firmware: &Firmware<'_>) -> Self {
         Self {
@@ -42,7 +42,7 @@ impl Request {
         }
     }
     /// Pure source provenance input, never a claim that caller-provided BIOS,
-    /// OS or cellular location data was actually observed/authenticated.
+    /// OS or cellular location data was observed/authenticated.
     pub fn bytes(self) -> Result<[u8; 28], Error> {
         if self.country != *b"00" && !self.country.iter().all(u8::is_ascii_uppercase) {
             return Err(Error::Country);
@@ -195,8 +195,8 @@ impl Response {
             raw: bytes.to_vec(),
         })
     }
-    /// Linux treats NEW_CHAN_PROFILE and ILLEGAL as changed; it still retains
-    /// the returned actual country/profile rather than echoing the request.
+    /// Linux treats NEW_CHAN_PROFILE and ILLEGAL as changed; it still keeps
+    /// the returned country/profile rather than echoing the request.
     pub fn profile_changed(&self) -> bool {
         matches!(self.status, 0 | 4)
     }

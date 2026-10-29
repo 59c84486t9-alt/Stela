@@ -1,6 +1,6 @@
 //! AMD APM 24593 rev3.44 §§3.2.1,7.9: routing controls beyond common MTRRs.
-//! Common AMD64 controls are selected by actual vendor/capability observations;
-//! family names do not grant additional model-specific or encryption authority.
+//! Common AMD64 controls are selected by vendor/capability observations;
+//! family names do not grant additional model-specific or encryption permission.
 use crate::topology::Snapshot;
 
 pub const SYSCFG: u32 = 0xc001_0010;
@@ -39,7 +39,7 @@ pub fn architectural(snapshot: &Snapshot) -> bool {
         return false;
     };
     // AMD APM common AMD64 system MSRs; model-specific fields remain opaque.
-    // Fixed registers are additionally enumerated through actual MTRRcap.FIX.
+    // Fixed registers are additionally enumerated through MTRRcap.FIX.
     const SYSTEM: u32 = (1 << 5) | (1 << 12) | (1 << 16); // MSR/MTRR/PAT
     leaf.edx & SYSTEM == SYSTEM
         && snapshot
@@ -111,8 +111,8 @@ impl State {
             || self.iorr.iter().any(|&(_, mask)| mask & (1 << 11) != 0)
     }
 
-    /// Per-processor opaque non-memory fields are retained, never interpreted
-    /// as feature authority or overwritten from a different processor.
+    /// Per-processor opaque non-memory fields are held, never interpreted
+    /// as feature permission or overwritten from a different processor.
     pub fn compatible(self, other: Self) -> Result<(), &'static str> {
         if (self.syscfg ^ other.syscfg) & !FIXED_MODIFY != 0
             || self.iorr != other.iorr
@@ -180,7 +180,7 @@ mod tests {
         assert!(State::from_snapshot(&source, 52).is_ok());
         let mut changed = source;
         // Other AMD families/models/steppings use these same documented
-        // architectural fields; marketing names cannot grant/deny authority.
+        // architectural fields; marketing names cannot grant/deny permission.
         for signature in [
             0x0010_0f20,
             0x0060_0f20,

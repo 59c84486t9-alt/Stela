@@ -669,7 +669,7 @@ fn resume_reinitializes_firmware_and_replaces_every_snapshot_generation() {
         .push_back(Reply::new(Command::global(NOTIFY), &[]));
     controller.suspend().unwrap();
     let fresh = initialized();
-    // Replay the genuine discovery requests against the stateful PPM;
+    // Replay the discovery requests against the stateful PPM;
     // firmware status and capability payloads remain supplied by replies.
     let mut cap = [0; 16];
     cap[4] = 1;

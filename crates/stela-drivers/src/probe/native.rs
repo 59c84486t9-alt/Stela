@@ -176,7 +176,7 @@ pub(super) unsafe fn tg3(
     // the calibrated handoff clock.
     let hardware = unsafe { tg3::Hardware::new(registers, clock) };
     // SAFETY: the mount's domain isolates this requester and its pages are
-    // retained; the function was stopped when claimed.
+    // kept; the function was stopped when claimed.
     match unsafe { tg3::Packet::attach(hardware, services.pages(), claimed.domain) } {
         Ok(link) => Ok(Located {
             location: alloc::format!("{address}"),
@@ -487,7 +487,7 @@ pub(super) unsafe fn vmd(
         child.address.function
     );
     // SAFETY: the mount's domain covers the host's requester and its aliases,
-    // its authority issued these mappings, and the hierarchy is stopped.
+    // its permission issued these mappings, and the hierarchy is stopped.
     match unsafe { vmd::nvme::attach(host, bar, domain, authority, services.pages(), clock, label) }
     {
         Ok((attached, hierarchy)) => Ok(Vmd {

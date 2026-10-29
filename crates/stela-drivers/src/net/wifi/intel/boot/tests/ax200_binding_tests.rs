@@ -84,13 +84,13 @@ fn powered<'a>(
     // requester domain.
     unsafe { power.advance(source) }.unwrap();
     // Publish real completed-buffer replenishment. The initial fixed pool's
-    // credits are nearly exhausted by the actual cold command prefix; never
+    // credits are nearly exhausted by the cold command prefix; never
     // invent credits or complete against an unposted descriptor.
     let credits = boot(&power.phy.scan).credits;
     let replenished = power.replenish_completed_receive().unwrap();
     // MLD's earlier real MAC replenishment can leave fewer than one complete
     // eight-entry producer batch here. Zero newly published entries is valid;
-    // actual existing credits must still cover the following command sequence.
+    // existing credits must still cover the following command sequence.
     assert!(replenished.published.is_multiple_of(8));
     assert_eq!(replenished.device_credits, credits + replenished.published);
     assert!(replenished.device_credits >= 5);
@@ -187,7 +187,7 @@ fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebi
     let (power, mut sequence, mut entry) =
         powered(&catalog, &empty, &source, &native, &policy, false);
     authorize(&policy);
-    // SAFETY: unchanged genuine authored service and exclusive owner; no
+    // SAFETY: unchanged authored service and exclusive owner; no
     // revocation/revision reuse occurs across these two cold bindings.
     let mut binding = unsafe { power.begin_binding() }.unwrap_or_else(|_| panic!("binding"));
     finish_add(&mut binding, &source, &native, &mut sequence, &mut entry);
@@ -249,8 +249,8 @@ fn quota_cache_requires_actual_ack_reclaim_and_survives_same_original_owner_rebi
             .collect::<Vec<_>>(),
         [BindingCommandKind::Remove, BindingCommandKind::Power]
     );
-    // Cache elision is qualified after actual first quota ACK and actual
-    // second ADD/power. Stop here without fabricating wrapped RX completions.
+    // Cache elision is checked after first quota ACK and
+    // second ADD/power. Stop here without inventing wrapped RX completions.
     rebound.stop().unwrap();
 }
 #[test]
@@ -444,7 +444,7 @@ fn exercise(bytes: &[u8], layout: bool) {
         sequence += 1;
     }
     assert_eq!(binding.phase(), Ax200BindingPhase::AuthenticationRequired);
-    // A genuine restriction cannot block control-plane teardown or invent a
+    // A restriction cannot block control-plane teardown or invent a
     // successful status. No permission is acquired for REMOVE or its power.
     let acquired = policy.acquired.load(Ordering::SeqCst);
     native.revoked.store(true, Ordering::SeqCst);

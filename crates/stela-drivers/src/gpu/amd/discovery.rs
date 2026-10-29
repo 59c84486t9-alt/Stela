@@ -246,7 +246,7 @@ pub struct Discovery<'owner> {
 /// indirect register or a binary in system memory, fails the discovery.
 ///
 /// # Safety
-/// The caller holds the actual device exclusively, in D0 and with reset,
+/// The caller holds the device exclusively, in D0 and with reset,
 /// removal and interrupts excluded, for the whole call; no other driver or
 /// firmware may change the discovery source meanwhile. `clock` is calibrated.
 /// The register and MM index accesses are not undone on failure.
@@ -259,7 +259,7 @@ pub unsafe fn discover<'owner>(
     // The pinned original IFWI wait issues msleep(1), up to 2000 times.
     // Check its complete individual interval before C can touch a register or
     // invoke the firmware provider. A zero or unrepresentable clock cannot
-    // grant timing authority just because a ready device would skip sleeping.
+    // grant timing permission just because a ready device would skip sleeping.
     clock.check_duration(1000).map_err(Error::Clock)?;
     let (subvendor, subdevice) = admission.subsystem_ids();
     let device = Device {

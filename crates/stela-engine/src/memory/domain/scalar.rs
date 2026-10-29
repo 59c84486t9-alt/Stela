@@ -206,7 +206,7 @@ mod tests {
         layout: Layout,
     }
 
-    // SAFETY: owner retains raw storage and lends no byte references.
+    // SAFETY: owner keeps raw storage and lends no byte references.
     unsafe impl Send for Storage {}
     // SAFETY: native memory accesses use one physical execution domain.
     unsafe impl Sync for Storage {}
@@ -235,7 +235,7 @@ mod tests {
 
     fn backing(system: &MemorySystem) -> Arc<MemoryBacking> {
         let layout = Layout::from_size_align(STORAGE_BYTES, SCA_BYTES).unwrap();
-        // SAFETY: valid nonempty layout retained by the raw lifetime owner.
+        // SAFETY: valid nonempty layout kept by the raw lifetime owner.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let owner = Arc::new(Storage { pointer, layout });
         // SAFETY: owner pins coherent readable/writable RAM, without byte references.

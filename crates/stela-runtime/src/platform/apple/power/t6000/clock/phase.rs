@@ -1,11 +1,11 @@
-//! Actual counter joins for one retained native controller clock.
+//! Counter joins for one native controller clock.
 use super::{Authority, Error, Image, Observation};
 use alloc::vec::Vec;
 
 const SYSTEM_HZ: u128 = 24_000_000;
 
-/// Complete native-cycle phase at an actual system counter instant. Captured
-/// and explicitly initialized Stela phase are different authorities. Unknown
+/// Complete native-cycle phase at a system counter instant. Captured
+/// and explicitly initialized Stela phase are different permissions. Unknown
 /// phase never acquires an implicit zero fractional cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -256,7 +256,7 @@ mod tests {
                 Error::UnqualifiedRate,
             ),
         ] {
-            assert!(input.frequency().is_ok()); // preserve the actual native query outcome
+            assert!(input.frequency().is_ok()); // preserve the native query outcome
             assert!(
                 matches!(Clock::new(input,Phase::DeclaredStela{at:0,cycles:0,fraction:0}),Err(actual) if actual==error)
             );

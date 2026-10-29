@@ -6,7 +6,7 @@ use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
 use stela_contracts::interrupt::AicInput;
 
-/// Retain one owner per physical input across every logical DART group on
+/// Keep one owner per physical input across every logical DART group on
 /// that input. Bind each translator before publishing its MMIO aperture.
 #[derive(Clone)]
 pub struct SharedIrq {

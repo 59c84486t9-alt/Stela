@@ -106,8 +106,8 @@ impl Queue {
     }
 }
 /// # Safety
-/// Exclusive actual selected RTL8822C register owner and retained UC BAR2.
-/// Fresh volatile indices and actual ordered register stores, no synthesized
+/// Exclusive selected RTL8822C register owner and kept UC BAR2.
+/// Fresh volatile indices and ordered register stores, no synthesized
 /// completion. Hardware remains awake; no competing reset/PS/submission worker.
 pub unsafe trait Registers {
     fn profile(&self) -> Profile;
@@ -182,7 +182,7 @@ pub struct Rings<R: Registers> {
 }
 impl<R: Registers> Rings<R> {
     /// # Safety
-    /// Actual exact RTL8822C requester independently stopped/drained, every
+    /// Exact RTL8822C requester independently stopped/drained, every
     /// indexed TX producer/consumer reset to 0, firmware H2C sequence reset 0.
     /// Real coherent WB RAM, NoSnoop/ATS disabled, exclusive UC BAR/requester
     /// and domain. Full RX/beacon rings and HCI reset/start remain separate.
@@ -260,7 +260,7 @@ impl<R: Registers> Rings<R> {
         distance(self.read, self.write)
     }
     /// Queue source general-info packet; success is publication only. Geometry
-    /// must belong to the actual exact profile. No firmware ACK is invented.
+    /// must belong to the exact profile. No firmware ACK is invented.
     pub fn general_info(
         &mut self,
         source: &dyn PageSource,
@@ -282,11 +282,11 @@ impl<R: Registers> Rings<R> {
     /// Success is publication only, not firmware application or calibration.
     ///
     /// # Safety
-    /// phy, report and these rings are the same actual retained native
+    /// phy, report and these rings are the same native
     /// requester/board/reset/firmware epoch, not matching Profile fingerprints
     /// alone. Source PHY/MAC/HCI start completed; all queues/pins remain live,
     /// native control is exclusive and operational TX stays gated pending
-    /// genuine channel/RFK/power/OS qualification. Real firmware command/data
+    /// channel/RFK/power/OS validation. Real firmware command/data
     /// retirement remains independent of descriptor consumer-index release.
     pub unsafe fn phydm_info(
         &mut self,
@@ -318,12 +318,12 @@ impl<R: Registers> Rings<R> {
         self.command(source, payload)
     }
     /// # Safety
-    /// Same actual retained native requester/reset/firmware epoch as the
+    /// Same kept native requester/reset/firmware epoch as the
     /// calibration control owner. Complete source GAPK/PHYDM and real native
-    /// HCI start, held native/OS/coexistence authority, required actual power
+    /// HCI start, held native/OS/coexistence permission, required power
     /// and emission gates, current channel and exclusive calibration work are
     /// caller-owned. IQK may emit calibration signals. This only publishes the
-    /// source clear=1/segment=0 command; an actual fresh IQK completion and
+    /// source clear=1/segment=0 command; a fresh IQK completion and
     /// independent DMA/firmware retirement are still required.
     pub(super) unsafe fn initial_iqk_command(
         &mut self,
@@ -432,8 +432,8 @@ impl<R: Registers> Rings<R> {
         for _ in 0..count {
             let index = usize::from(self.read);
             let offset = index * DESCRIPTOR;
-            // SAFETY: actual bounded hardware consumer advance consumed this
-            // exact live descriptor/payload; independent full stop not needed
+            // SAFETY: bounded hardware consumer advance consumed this
+            // live descriptor/payload; independent full stop not needed
             // for this completed ToDevice buffer, but no air/FW ACK follows.
             unsafe { self.rings[6].dma.sync_for_cpu(offset..offset + DESCRIPTOR) }
                 .map_err(beacon::Error::from)?;
@@ -450,7 +450,7 @@ impl<R: Registers> Rings<R> {
         Ok(count)
     }
     /// # Safety
-    /// Independently stopped/drained exact requester. Initial HCI only; any
+    /// Independently stopped/drained requester. Initial HCI only; any
     /// admitted command permanently refuses this path even after DMA reclaim,
     /// so command/key/station generations are never reset through it.
     pub(super) unsafe fn begin_hci_rebind(&mut self) -> Result<[u32; 7], Error> {
@@ -489,7 +489,7 @@ impl<R: Registers> Rings<R> {
         Ok(self.io.as_ref().ok_or(Error::Quarantined)?.profile())
     }
     /// # Safety
-    /// Independent actual acknowledged requester stop/drain and all workers
+    /// Independent acknowledged requester stop/drain and all workers
     /// stopped through unmap. Index equality/reset writes are insufficient.
     pub unsafe fn release_after_stop(&mut self) -> Result<(), Error> {
         self.poisoned = true;
@@ -594,8 +594,8 @@ mod tests {
     fn index(q: Queue) -> usize {
         QUEUES.into_iter().position(|v| v == q).unwrap()
     }
-    // SAFETY: serialized model's actual fresh indices and retained native
-    // allocation IOVAs; no actual hardware or privileged DMA proof claimed.
+    // SAFETY: serialized model's fresh indices and kept native
+    // allocation IOVAs; no hardware or privileged DMA proof claimed.
     unsafe impl Registers for Io {
         fn profile(&self) -> Profile {
             self.profile
@@ -734,7 +734,7 @@ mod tests {
             unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap_err(),
             super::super::firmware_control::Error::InvalidState
         );
-        // The actual DMA consumer may release these mappings, independently
+        // The DMA consumer may release these mappings, independently
         // of firmware execution or the observed IQK status.
         let producer = device.lock().unwrap().indices[6].0;
         device.lock().unwrap().indices[6].1 = producer;
@@ -802,8 +802,8 @@ mod tests {
     #[test]
     fn every_iqk_control_failure_late_reset_and_regressed_clock_retain_both_owners() {
         use super::super::firmware_control::{Control, tests::bus};
-        // One successful run determines the actual I/O/clock transaction count;
-        // each later case fails one actual operation, including post-publication
+        // One successful run determines the I/O/clock transaction count;
+        // each later case fails one operation, including post-publication
         // status/clear/identity checks, while keeping the real DMA model live.
         let mut total = 0;
         for fault in 0..64 {

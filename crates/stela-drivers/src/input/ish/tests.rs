@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Software qualification controls, never physical/native-platform evidence.
+//! Software validation controls, never physical/native-platform evidence.
 //! Original owned config + BAR Mapping + real IRQ Registry surround a separate
 //! firmware/register peer. Production MappedRegisters performs every BAR access.
 extern crate std;
@@ -423,7 +423,7 @@ struct ModelRegisters {
     native: MappedRegisters,
     peer: Arc<Peer>,
 }
-// SAFETY: explicit software register peer owns the actual isolated mapped CPU
+// SAFETY: explicit software register peer owns the isolated mapped CPU
 // storage; production native accesses use that same Mapping. Firmware effects
 // below are independent bounded device semantics, not native platform grants.
 unsafe impl Registers for ModelRegisters {
@@ -470,7 +470,7 @@ unsafe impl Registers for ModelRegisters {
                     s.outgoing.push_front(wire(3, 3, vec![0x34, 0x12, 0, 0]));
                 }
             }
-            // Model-only busy-clear status bit; no production PISRbit8 claim.
+            // Model-only busy-clear status bit.
             PISR => self.peer.raw_write(PISR, old & !(value & 0x100)),
             I2H if value == 0 => self.peer.raw_write(PISR, self.peer.raw_read(PISR) & !1),
             H2I => {
@@ -546,9 +546,9 @@ impl ConfigSpace for Config {
         }
     }
 }
-// SAFETY: forwards actual exact-width native stores through the owned fixture.
+// SAFETY: forwards exact-width native stores through the owned fixture.
 unsafe impl MsiConfigSpace for Config {}
-// SAFETY: same actual original fixture config owner, no duplicated access path.
+// SAFETY: same original fixture config owner, no duplicated access path.
 unsafe impl Configuration for Config {
     fn owned_address(&self) -> Address {
         self.native.address()
@@ -614,7 +614,7 @@ impl Drop for Domain {
     }
 }
 // SAFETY: explicit requester domain peer never advertises/makes any host DMA
-// mapping; it observes native stop ordering and actual retained fixture owners.
+// mapping; it observes native stop ordering and kept fixture owners.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,

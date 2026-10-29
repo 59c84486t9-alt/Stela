@@ -1,4 +1,4 @@
-//! Card/controller models exercise actual UHS initialization and block I/O.
+//! Card/controller models exercise UHS initialization and block I/O.
 use super::*;
 use crate::{bus::dma::RegionAllocator, storage::sdhci::model::*};
 use alloc::vec;
@@ -14,7 +14,7 @@ fn host(
         let mut c = chip.borrow_mut();
         c.caps = CAP_330 | CAP_HIGH_SPEED | 208 << 8 | if pio { 0 } else { CAP_ADMA2 | CAP_64 };
         c.caps2 = caps2;
-        c.max_current = 200; // Actual 3.3-V VCC supply supports 800 mA.
+        c.max_current = 200; // 3.3-V VCC supply supports 800 mA.
         c.uhs_functions = functions;
         c.scr[2] = 0x80;
     }
@@ -51,7 +51,7 @@ fn native_sdr12_25_50_104_switch_actual_voltage_and_complete_pio_adma_io() {
         for pio in [false, true] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: retained backing outlives the host, card and all DMA effects.
+            // SAFETY: backing outlives the host, card and all DMA effects.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut host, chip) = host(&mut dma, functions, caps, pio);
             let mut card = host.poll().unwrap().unwrap();
@@ -123,7 +123,7 @@ fn native_voltage_pin_clock_and_enable_failures_power_off_before_fresh_identify(
 fn native_uhs_failed_poweroff_retains_primary_and_cleanup_and_quarantines_owner() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: quarantined ownership retains backing through every refused operation.
+    // SAFETY: quarantined ownership keeps backing through every refused operation.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
     chip.borrow_mut().voltage_fault = Some(VoltageFault::Enable);
@@ -174,7 +174,7 @@ fn native_tuning_needs_real_ready_completion_and_hardware_selected_clock() {
 fn native_cmd11_lost_response_after_electrical_effect_still_removes_card_power() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the failed command retains its original allocations through cleanup.
+    // SAFETY: the failed command keeps its original allocations through cleanup.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
     chip.borrow_mut().silence_voltage_response = true;
@@ -190,7 +190,7 @@ fn native_cmd11_lost_response_after_electrical_effect_still_removes_card_power()
 fn native_retuning_precedes_live_io_and_failed_retuning_permanently_fences_aliases() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: retained model/allocations outlive both old card aliases.
+    // SAFETY: model/allocations outlive both old card aliases.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104 | 1 << 8, false);
     let mut card = host.poll().unwrap().unwrap();
@@ -232,7 +232,7 @@ fn native_retuning_precedes_live_io_and_failed_retuning_permanently_fences_alias
 fn native_unsupported_retune_modes_and_vendor_profiles_do_not_negotiate_unsupported_timing() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: one live model owns this retained region throughout negotiation.
+    // SAFETY: one live model owns this region throughout negotiation.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104 | CAP_SDR50_TUNING | 1 << 14, false);
     let card = host.poll().unwrap().unwrap();

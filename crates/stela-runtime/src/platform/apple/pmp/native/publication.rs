@@ -1,4 +1,4 @@
-//! A source update target retains actual bank identity and one startup lifetime.
+//! A source update target keeps bank identity and one startup lifetime.
 use super::{Error, transport};
 use alloc::rc::Rc;
 use core::cell::Cell;

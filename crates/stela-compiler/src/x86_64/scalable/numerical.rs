@@ -221,7 +221,7 @@ pub(crate) fn capture_status(code: &mut Code, frame: &Frame) {
     asm.alu_imm32(Alu::And, Size::Dword, Rcx, MXCSR_STATUS_MASK as i32);
 }
 
-/// Clear host stage status after installation, retaining approved pending FPSR.
+/// Clear host stage status after installation, keeping approved pending FPSR.
 pub(crate) fn clear_status(code: &mut Code, frame: &Frame) {
     private(frame);
     code.asm().ldmxcsr(stack(PRIVATE_MXCSR));

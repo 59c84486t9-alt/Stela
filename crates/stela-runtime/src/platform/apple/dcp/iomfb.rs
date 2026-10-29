@@ -183,7 +183,7 @@ impl Methods {
         self.planes = [None; swap::LAYERS];
         self.shut_down = false;
     }
-    /// Resume the retained link after the coprocessor's sleep-to-wake edge.
+    /// Resume the link after the coprocessor's sleep-to-wake edge.
     /// Firmware 0x187658 clears its quiescence byte and releases stopped
     /// streams; the shared region, mode and client state remain allocated.
     /// No callbacks or swaps discarded by A500 are recreated here.
@@ -625,7 +625,7 @@ impl Service for Methods {
             // DCPPowerManager::set_power_state (0x3d852c0) sends it for
             // power state 0 once the link is idle, then waits for its own
             // streams and cuts the DCP's power and DART. Methods resume
-            // only on the coprocessor's retained sleep-to-wake edge.
+            // only on the coprocessor's sleep-to-wake edge.
             // The firmware (restore 0x191390, normal 0x191594) reads only
             // the first byte. 1 also saves the pipe for hibernation
             // (0x191434, 0x1884a4). Otherwise it stops the pipe (0x27c99c),
@@ -1008,7 +1008,7 @@ mod tests {
         let reply = returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
         assert!(ap_success(&reply, 8));
         assert_eq!(&reply[8..12], &[0; 4]);
-        // setDisplayRefreshProperties is genuinely boolean: the AP at
+        // setDisplayRefreshProperties is boolean: the AP at
         // 0x3d7a4e4 reads its low bit instead of mapping a link status.
         assert_eq!(returned(methods.call(*b"A475", &[], 4)), [1, 0, 0, 0]);
     }
@@ -1441,7 +1441,7 @@ mod tests {
         let mut methods = methods();
         let id = start_swap(&mut methods);
         let input = submission(id, &[]);
-        // Public RPC validates ABI output size before dispatch. The actual
+        // Public RPC validates ABI output size before dispatch. The
         // submit method also prepares its fallible reply before committing.
         assert!(methods.submit(*b"A407", &input, 0).is_err());
         assert_eq!(methods.open_swap, Some(id));
@@ -1629,7 +1629,7 @@ mod tests {
                 .unwrap()
                 .contains("outside its surface")
         );
-        // The refused submission retains its accepted start until explicit abort.
+        // The refused submission keeps its accepted start until explicit abort.
         returned(methods.call(*b"A479", &[0; 8], 4));
         // A non-black background refuses.
         start_swap(&mut methods);

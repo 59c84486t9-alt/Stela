@@ -52,7 +52,7 @@ fn shared_terminal(
     }
     let analysis = block::analyze_with_profile(bytes, pc, BlockProfile::ORDINARY)
         .map_err(CompileError::from)?;
-    // The ordinary scalar numerical boundary is deliberately excluded until
+    // The ordinary scalar numerical boundary is excluded until
     // its low-V/upper-Z effects have been integrated in context mode.
     let permitted = analysis.trap.is_some()
         || analysis.dynamic_edge.is_some()

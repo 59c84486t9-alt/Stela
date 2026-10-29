@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual bounded, volatile access through retained native UC mappings.
+//! Bounded, volatile access through kept native UC mappings.
 use super::Error;
 use crate::bus::mmio::owned::Mapping;
 #[cfg(feature = "native-acpi")]
@@ -9,8 +9,8 @@ pub(super) mod sealed {
     pub trait Sealed {}
 }
 
-/// Sealed register transport: external callers cannot replace actual owned
-/// MMIO with numeric addresses or implement a fabricated native grant.
+/// Sealed register transport: external callers cannot replace owned
+/// MMIO with numeric addresses or implement an invented native grant.
 pub trait RegisterIo: sealed::Sealed {
     fn bytes(&self) -> usize;
     fn read32(&mut self, offset: usize) -> Result<u32, Error>;
@@ -21,9 +21,9 @@ pub trait RegisterIo: sealed::Sealed {
     fn finish(&mut self) -> Result<(), Error>;
 }
 
-/// Original mapping owners stay retained through failures/quarantine. There is
-/// deliberately no public raw constructor: the native adapter retains actual
-/// ACPI reservations and claims. A Mapping alone is not that authority.
+/// Original mapping owners stay held through failures/quarantine. There is
+/// no public raw constructor: the native adapter keeps
+/// ACPI reservations and claims. A Mapping alone is not that permission.
 pub struct NativeRegisters {
     gpio: Mapping,
     mux: Option<Mapping>,
@@ -94,8 +94,8 @@ impl RegisterIo for NativeRegisters {
     }
     fn finish(&mut self) -> Result<(), Error> {
         // This sealed transport is only retired by Controller after its final
-        // acknowledged control restoration. A failed/Busy unmap retains the
-        // actual reservation; progress is monotonic for retry after one window
+        // acknowledged control restoration. A failed/Busy unmap keeps the
+        // reservation; progress is monotonic for retry after one window
         // has already retired. No numeric address authorizes an unmap.
         if !self.gpio_retired {
             // SAFETY: serialized GPIO users stopped; UC writes read back; no

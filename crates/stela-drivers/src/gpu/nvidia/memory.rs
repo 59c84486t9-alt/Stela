@@ -8,7 +8,7 @@
 use alloc::alloc::{alloc, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr, ptr::NonNull};
 
-// The official API frees without a byte count. Retain the exact shared-heap
+// The official API frees without a byte count. Keep the exact shared-heap
 // layout immediately before the payload; no allocation registry or pool.
 // Sixteen bytes also covers the native C/C++ fundamental type alignment.
 #[repr(align(16))]
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn vendor_errors_clear_output_and_null_free_is_valid() {
         // Stable vendor ABI values from the pinned nvstatuscodes.h. These calls
-        // execute the C adapter compiled against those actual declarations.
+        // execute the C adapter compiled against those declarations.
         const NV_ERR_INVALID_ARGUMENT: u32 = 0x1f;
         for bytes in [u64::MAX, isize::MAX as u64] {
             let mut out = ptr::dangling_mut::<c_void>();

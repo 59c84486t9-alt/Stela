@@ -1568,7 +1568,7 @@ mod tests {
                 assert_eq!(absent & (1 << feature as u64), 0, "{chip:?} {feature:?}");
             }
             // Clearing a field must deny its feature with the adjacent
-            // fields retained. Full AMU SIZE above must read all six bits.
+            // fields kept. Full AMU SIZE above must read all six bits.
             for (register, shift, feature) in [
                 (ID_AA64SMFR0_EL1, 32, Feature::FEAT_SME),
                 (ID_AA64SMFR0_EL1, 33, Feature::FEAT_SME2),

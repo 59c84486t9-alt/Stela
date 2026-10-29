@@ -563,7 +563,7 @@ fn cpu_family_never_substitutes_for_explicit_source_variant_or_host_cardinality(
         Chip::AppleM6,
     ] {
         // All resources and semantics are synthetic explicit input, not
-        // claims that these fields qualify any unobserved silicon.
+        // claims that these fields check any unobserved silicon.
         let (host, mut r, a) = fixture(&contiguous(12));
         r.profile.chip = chip;
         let plan = Plan::build(&host, &r, &a).unwrap();

@@ -5,8 +5,8 @@
 // Yu Zhao <yu.zhao@intel.com>, Copyright (C) 2011 Advanced Micro Devices,
 // PRI and PASID additions by Joerg Roedel <joerg.roedel@amd.com>, at commit
 // cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
-//! Retained stopped PCI endpoints. A claim grants neither alias isolation nor
-//! a remapping-unit takeover. Actual engine/IRQ/work drainage and physical
+//! Stopped PCI endpoints. A claim grants neither alias isolation nor
+//! a remapping-unit takeover. Engine/IRQ/work drainage and physical
 //! function identity are unsafe producer obligations, not config-bit inferences.
 use super::{
     Address, CapabilityError, ConfigSpace, Function,
@@ -52,7 +52,7 @@ pub enum ClaimError {
 }
 
 /// The original configuration owner, with its immutable ECAM BDF and root/
-/// resource/reset epoch retained. No mutable config access escapes this claim.
+/// resource/reset epoch kept.
 pub struct StoppedRequester {
     function: Function<OwnedConfig>,
     address: Address,
@@ -60,7 +60,7 @@ pub struct StoppedRequester {
 }
 
 /// Non-cloneable binding derived from the original validated stopped function.
-/// It retains its exact native epoch but supplies no second config writer, new
+/// It keeps its native epoch but supplies no second config writer, new
 /// coherency/alias proof, or observation of current endpoint quiescence. The
 /// original unsafe stopped/attachment grant persists until explicit retirement.
 pub struct RequesterBinding {
@@ -86,14 +86,14 @@ impl RequesterBinding {
 
 impl StoppedRequester {
     /// # Safety
-    /// The actual endpoint's engines, DMA/posted requests, IRQs and workers are
+    /// The endpoint's engines, DMA/posted requests, IRQs and workers are
     /// stopped and drained. Payload WB DMA coherency has been independently
-    /// qualified for this device and platform. `Physical` must come from the
-    /// actual complete PF/VF inventory, never local capability absence. Firmware,
-    /// reset, removal and alias/config owners cannot change this retained epoch.
+    /// checked for this device and platform. `Physical` must come from the
+    /// complete PF/VF inventory, never local capability absence. Firmware,
+    /// reset, removal and alias/config owners cannot change this epoch.
     /// This grants no isolation from aliases and no control over other requesters.
     /// The caller and final release obey process/deferred-context requirements.
-    /// Rejection returns the exact original function and mapping owner.
+    /// Rejection returns the original function and mapping owner.
     pub unsafe fn from_stopped_pci(
         mut function: Function<OwnedConfig>,
         role: FunctionRole,
@@ -135,21 +135,21 @@ impl StoppedRequester {
         validate_stopped(&mut self.function)
     }
 
-    /// Transfer the exact retained owner. Consuming the claim does not end its
+    /// Transfer the owner. Consuming the claim does not end its
     /// mapping lifetime or authorize bus mastering; the recipient owns config.
     pub fn into_function(self) -> Function<OwnedConfig> {
         self.function
     }
 
-    /// Return this exact original stopped owner and retain its actual
+    /// Return this original stopped owner and keep its
     /// mapping/root epoch for one DMA domain. No new function or access path is
     /// manufactured. A private flag forbids a second safe split. Any failure
     /// returns the same original stopped owner.
     /// The sole original owner must not reset, remove or reassign in a way
-    /// invalidating the retained resource/routing/coherency/translation epoch.
-    /// Only a specifically qualified bounded reset preserving those owners and
+    /// invalidating the resource/routing/coherency/translation epoch.
+    /// Only a specifically checked bounded reset preserving those owners and
     /// ATS/NoSnoop policy is admissible. Reset supplies neither stopped/drained
-    /// proof nor remapper completion; retaining a mapping cannot enforce it.
+    /// proof nor remapper completion; keeping a mapping cannot enforce it.
     pub fn into_dma_binding(mut self) -> Result<(Self, RequesterBinding), (ClaimError, Self)> {
         if self.dma_bound {
             return Err((ClaimError::AlreadyBound, self));
@@ -333,7 +333,7 @@ fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<(), Cl
     standard(config, read16(config, STATUS)?)?;
     extended(config)?;
     // A second identity read catches observed removal/reset during traversal.
-    // The retained epoch grant, not this observation, excludes concurrent change.
+    // The kept epoch grant, not this observation, excludes concurrent change.
     if config.read32(0) != identity {
         return Err(ClaimError::IdentityChanged);
     }
@@ -399,7 +399,7 @@ mod tests {
         let mut mapping = function.into_config().into_mapping();
         assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
         // SAFETY: fixture has no device, IRQ or workers and no config access
-        // remains after consuming the exact original function owner.
+        // remains after consuming the original function owner.
         unsafe { mapping.retire() }.unwrap();
         assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
         assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
@@ -412,7 +412,7 @@ mod tests {
         configure(&mut config);
         let function = Function::new(ADDRESS, config).unwrap();
         // SAFETY: isolated RAM fixture has no active engine, alias, VF or IRQ;
-        // its real registry owners are retained, without native qualification.
+        // its real registry owners are held, without native validation.
         let mut claim =
             match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
                 Ok(claim) => claim,
@@ -430,7 +430,7 @@ mod tests {
         let (mut config, counters) = fixture(ADDRESS);
         configure(&mut config);
         let function = Function::new(ADDRESS, config).unwrap();
-        // SAFETY: actual isolated registry-owned RAM; no device/IRQ/worker.
+        // SAFETY: isolated registry-owned RAM; no device/IRQ/worker.
         let claim =
             match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
                 Ok(claim) => claim,
@@ -465,10 +465,10 @@ mod tests {
         let (other, other_counters) = fixture(ADDRESS);
         let mut other = other.into_mapping();
         // Same BDF and even the fixture's same numeric root identity do not
-        // reproduce the original retained Authority allocation.
+        // reproduce the original Permission allocation.
         assert_eq!(binding.matches_mapping(&other), Ok(false));
         drop(binding);
-        // SAFETY: explicit fixture release follows the final retained binding.
+        // SAFETY: explicit fixture release follows the final binding.
         unsafe { mapping.retire() }.unwrap();
         assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
         assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
@@ -500,7 +500,7 @@ mod tests {
                 Ok(claim) => claim,
                 Err((error, _)) => panic!("fixture claim: {error:?}"),
             };
-        // Private test access models an actual changed hardware observation.
+        // Private test access models a changed hardware observation.
         claim
             .function
             .config()
@@ -536,7 +536,7 @@ mod tests {
         configure(&mut config);
         let mut function = Function::new(ADDRESS, config).unwrap();
         function.address.bus ^= 1;
-        // SAFETY: drained fixture, deliberately mismatched metadata must fail.
+        // SAFETY: drained fixture, mismatched metadata must fail.
         let (error, function) =
             match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
                 Err(rejected) => rejected,

@@ -13,9 +13,9 @@
 //! else of its `MANP`; the file is a bare `IM4M` or an `IMG4` carrying one.
 //!
 //! Its signature is the SEP's, made with a key only the SEP holds. Stela
-//! never treats an unverified LocalPolicy as authority: without a
+//! never treats an unverified LocalPolicy as permission: without a
 //! [`PolicyAuthority`] its `nsih` only narrows which directory the
-//! evidence of `stela_loader::installed` must qualify.
+//! evidence of `stela_loader::installed` must check.
 use crate::im4m::{self, Property, Value};
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
@@ -31,7 +31,7 @@ const UUID_BYTES: usize = 16;
 /// The SEP owner (root, on the main thread) provides the real implementation
 /// against Stela's own SEP keys; `stela_loader::installed` and
 /// `stela_loader::upgrade` take `Option<&dyn PolicyAuthority>` and, with
-/// one, use the `nsih` and manifest signature as authority instead of
+/// one, use the `nsih` and manifest signature as permission instead of
 /// narrowing by evidence alone. [`Unverified`] is the placeholder until it
 /// is wired: it refuses by name so a verified boot never silently succeeds.
 pub trait PolicyAuthority {
@@ -43,7 +43,7 @@ pub trait PolicyAuthority {
 /// The SEP keys are not yet wired, so no LocalPolicy signature can be
 /// checked. Passing this where a [`PolicyAuthority`] is wanted refuses every
 /// policy by name rather than accepting an unverified one; a boot without an
-/// authority falls back to evidence (`stela_loader::installed`).
+/// permission falls back to evidence (`stela_loader::installed`).
 pub struct Unverified;
 
 impl PolicyAuthority for Unverified {

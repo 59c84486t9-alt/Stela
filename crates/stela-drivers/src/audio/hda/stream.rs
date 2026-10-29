@@ -46,7 +46,7 @@ pub enum StreamTagPolicy {
 
 const AMD_FIFO_FRAMES: usize = 32;
 
-/// Select from the actual controller's source-backed identity policy.
+/// Select from the controller's source-backed identity policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PositionPolicy {
     #[default]
@@ -71,10 +71,10 @@ impl PositionPolicy {
 pub struct PositionInfo {
     /// Exact LPIB value, including the permitted inclusive CBL endpoint.
     pub raw_link_bytes: u32,
-    /// Actual normalized LPIB: CBL maps to 0, with no FIFO arithmetic.
+    /// Normalized LPIB: CBL maps to 0, with no FIFO arithmetic.
     pub transport_bytes: u32,
     /// PCM consumer coordinate. AMD capture subtracts the effective FIFO delay
-    /// modulo CBL; playback and ordinary controllers retain transport_bytes.
+    /// modulo CBL; playback and ordinary controllers keep transport_bytes.
     pub pcm_bytes: u32,
     /// Effective delay in bytes, initially clamped to observed link progress.
     pub fifo_delay_bytes: u32,
@@ -88,13 +88,13 @@ pub struct StreamStatus {
     /// At least one descriptor with IOC completed since the last poll. This
     /// coalesced bit is not a period count or an underrun/overrun detector.
     pub period_completed: bool,
-    /// Actual normalized transport coordinate, retained for DMA diagnostics.
+    /// Normalized transport coordinate, kept for DMA diagnostics.
     pub position_bytes: u32,
     pub position: PositionInfo,
 }
 
-/// Actual converter effect reservation, including a failed/uncertain ACK.
-/// A full actual reset is the generic retirement boundary; vendor replay may
+/// Converter effect reservation, including a failed/uncertain ACK.
+/// A full reset is the generic retirement boundary; vendor replay may
 /// replace only its exact owned entries after real stopped/power proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ConverterBinding {
@@ -398,7 +398,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     /// Fill a stopped capture ring with a known byte before starting DMA.
-    /// This supports buffer sanitization and detecting actual device writes.
+    /// This supports buffer sanitization and detecting device writes.
     pub fn fill_capture(&mut self, id: StreamId, value: u8) -> Result<(), Error> {
         let stream = self.stream(id)?;
         if stream.running {
@@ -527,7 +527,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
 
-    /// Actual normalized link coordinate. CBL maps to zero, per HDA1.0a
+    /// Normalized link coordinate. CBL maps to zero, per HDA1.0a
     /// §3.3.37. No FIFO correction is credited as physical DMA progress.
     pub fn position(&mut self, id: StreamId) -> Result<u32, Error> {
         Ok(self.position_info(id)?.transport_bytes)
@@ -543,9 +543,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(position)
     }
 
-    /// Read actual transport position and apply only the identity-selected PCM
+    /// Read transport position and apply only the identity-selected PCM
     /// consumer policy. AMD capture subtracts 32 frames modulo CBL, initially
-    /// clamped to actual observed progress; playback reports its delay without
+    /// clamped to observed progress; playback reports its delay without
     /// changing position. A late first poll cannot infer missed complete wraps.
     pub fn position_info(&mut self, id: StreamId) -> Result<PositionInfo, Error> {
         let (bytes, frame_bytes, direction, insufficient) = {
@@ -589,7 +589,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
 
-    /// Bind one standard analog PCM converter. The caller supplies an actual
+    /// Bind one standard analog PCM converter. The caller supplies an
     /// enumerated graph and must separately power/unmute/route its widgets and
     /// pins. No speaker/OEM amplifier policy is guessed here. Binding requires
     /// a stopped controller stream and is verified through converter readback.

@@ -3,7 +3,7 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! Retained requester-domain rings; packet ownership follows actual completions.
+//! Requester-domain rings; packet ownership follows completions.
 use super::*;
 use crate::bus::dma::{
     mapping::{Direction, DmaMapping},
@@ -120,7 +120,7 @@ impl Memory {
         self.buffers[RX_RING].zero(self.geometry.rx * RX_DESCRIPTOR_BYTES)?;
         self.buffers[RETURNS].zero(self.geometry.returns * RX_DESCRIPTOR_BYTES)?;
         self.buffers[STATUS].zero(4096)?;
-        // Actual-domain coherent observation, before hardware publication.
+        // Domain coherent observation, before hardware publication.
         self.buffers[STATUS].mapping.read_coherent_u32(16)?;
         self.buffers[RETURNS].mapping.read_coherent_u32(28)?;
         for i in 0..self.geometry.rx - 1 {
@@ -130,10 +130,10 @@ impl Memory {
     }
     /// # Safety
     /// Every engine is stopped, BME clear and this original domain's posted
-    /// writes drained; no IRQ/workers can touch the retained queue RAM.
+    /// writes drained; no IRQ/workers can touch the queue RAM.
     pub(super) unsafe fn reset_after_drain(&mut self) -> Result<(), Error> {
         for buffer in &self.buffers {
-            // SAFETY: caller holds the actual stopped/drained queue epoch.
+            // SAFETY: caller holds the stopped/drained queue epoch.
             unsafe {
                 buffer.mapping.sync_for_cpu(0..buffer.mapping.bytes())?;
             }
@@ -177,7 +177,7 @@ impl Memory {
         Ok(())
     }
     pub(super) fn complete_tx(&self, index: usize) -> Result<(), Error> {
-        // SAFETY: actual status TX consumer has passed this submitted BD.
+        // SAFETY: status TX consumer has passed this submitted BD.
         unsafe {
             self.buffers[TX_DATA]
                 .mapping
@@ -222,7 +222,7 @@ impl Memory {
             .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
         let source = self.buffers[RX_DATA].cpu.address(slot * BUFFER, length)?;
         for i in 0..length {
-            // SAFETY: completed and bounds checked actual retained RX page.
+            // SAFETY: completed and bounds checked RX page.
             frame.push(unsafe { source.as_ptr().add(i).read_volatile() });
         }
         Ok((slot, Some(frame)))

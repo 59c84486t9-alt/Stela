@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! External, separately qualified whole-original-C trace. This test starts no
+//! External, separately checked whole-original-C trace. This test starts no
 //! child, compiles nothing and requires a complete exact sixty-case trace.
 use super::*;
 fn hex(s: &str) -> Vec<u8> {
@@ -148,7 +148,7 @@ fn original_linux_whole_helpers_match_sixty_wire_fragment_credit_and_refusal_cas
                 assert_eq!(f[2].parse::<usize>().unwrap(), frame.bytes.len());
                 assert_eq!(hex(f[3]), frame.bytes);
             }
-            // Exact original C free-list/sending/offset diagnostics above are checked
+            // Original C free-list/sending/offset diagnostics above are checked
             // independently. The production engine uses owned queued messages rather
             // than Linux list nodes; its observable publication/credit policy agrees.
             let (mut check, _, _) = connected(mode == 0);

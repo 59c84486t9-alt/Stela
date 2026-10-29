@@ -89,7 +89,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Self::join_deauthentication(s, reason, source, policy, None)
     }
 
-    /// `transmit_join_deauthentication` for a PMF join, qualified under the
+    /// `transmit_join_deauthentication` for a PMF join, checked under the
     /// exchange's held providers.
     ///
     /// # Safety
@@ -104,7 +104,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if !self.station().requires_protected_management() {
             return Err(Error::WrongProfile);
         }
-        // SAFETY: exclusive same native owner; guard borrows both actual leases.
+        // SAFETY: exclusive same native owner; guard borrows both leases.
         unsafe {
             authority.with_pmf_authentication(self, |client, guard| {
                 Self::join_deauthentication(client.state_mut(), reason, source, policy, Some(guard))

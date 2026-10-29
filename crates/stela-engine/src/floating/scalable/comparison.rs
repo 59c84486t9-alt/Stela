@@ -22,7 +22,7 @@ fn read_lane(source: &[u8], offset: usize, element_bytes: usize) -> u64 {
 
 /// No destination or FPSR effects commit until every active lane succeeds.
 /// The caller resolves enabled-feature access and the selected FA64 profile.
-/// Ordinary streaming masks numerical trap enables while retaining raw FPCR.
+/// Ordinary streaming masks numerical trap enables while keeping raw FPCR.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

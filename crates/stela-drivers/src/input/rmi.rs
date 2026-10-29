@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native RMI4 transport, function discovery and F01 device-control substrate.
-//! Based on Linux rmi4; retained notices are in input/THIRD_PARTY.md.
+//! Based on Linux rmi4; notices are in input/THIRD_PARTY.md.
 //!
-//! Control readiness is deliberately distinct from a usable touchpad. F11/F12
+//! Control readiness is distinct from a usable touchpad. F11/F12
 //! contacts, buttons, passthrough and other function engines must configure their
 //! own discovered registers before their interrupts/input can be published.
 use crate::bus::{i2c, smbus};
@@ -85,8 +85,8 @@ enum State {
     Faulted,
 }
 
-/// The actual exclusively owned attention source: a physical active GPIO level
-/// for I2C, or source/address-qualified SMBus Host Notify captured by the native
+/// The exclusively owned attention source: a physical active GPIO level
+/// for I2C, or source/address-checked SMBus Host Notify captured by the native
 /// controller. CPU route masking/draining must preserve hardware attention.
 /// `acknowledge` retires the captured source only after peripheral status read.
 pub trait Attention {
@@ -154,7 +154,7 @@ impl Properties {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Configuration {
-    /// Actual reset settling interval, in microseconds; Linux default is 100ms.
+    /// Reset settling interval, in microseconds; Linux default is 100ms.
     pub reset_delay_us: u64,
     pub no_sleep: Option<bool>,
     pub doze_interval: Option<u8>,
@@ -501,8 +501,8 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         self.awake_control = control;
         Ok(())
     }
-    /// Service actual peripheral attention. Unknown-function bits remain in the
-    /// returned exact status bytes; this substrate does not fabricate events.
+    /// Service peripheral attention. Unknown-function bits remain in the
+    /// returned exact status bytes; this substrate does not invent events.
     pub fn poll_control(&mut self) -> Result<Option<AttentionReport>, Error> {
         self.configured()?;
         if !self.f12.is_empty()

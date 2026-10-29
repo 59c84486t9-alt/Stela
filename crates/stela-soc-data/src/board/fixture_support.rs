@@ -1,5 +1,5 @@
 //! Shared pure ADT fixtures for Data parsing and Runtime model integration.
-//! These builders grant no mapping, executor or native effect authority.
+//! These builders grant no mapping, executor or native effect permission.
 use super::*;
 pub const PMGR: &str = "pmgr1,t8112";
 /// Existing unit fixtures explicitly declare an affine synthetic map.
@@ -266,7 +266,7 @@ pub fn parse_smc_fixture(
 }
 
 /// Explicit synthetic gate/resource metadata for Runtime model fixtures.
-/// The actual Runtime owner still validates every lifecycle/supply binding.
+/// The Runtime owner still validates every lifecycle/supply binding.
 pub fn power_states_fixture(
     blocks: Vec<(u64, u64)>,
     registers: Vec<u64>,

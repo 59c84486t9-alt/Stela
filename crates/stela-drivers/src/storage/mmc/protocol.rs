@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! SD and MMC initialization, actual card capabilities and durable block I/O.
+//! SD and MMC initialization, card capabilities and durable block I/O.
 use super::{wire::*, *};
 use crate::{
     Clock,
@@ -31,7 +31,7 @@ const EXT_CACHE_CONTROL: usize = 33;
 const EXT_CACHE_SIZE: usize = 249;
 // The complete immutable-byte set from pinned mmc_compare_ext_csds. Mutable
 // BUS_WIDTH, HS_TIMING, partition access and cache/notification controls stay
-// outside this comparison; their actual command acknowledgements own them.
+// outside this comparison; their command acknowledgements own them.
 const BUS_WIDTH_READ_ONLY: &[usize] = &[
     160, 181, 192, 194, 196, 217, 221, 223, 224, 229, 230, 231, 232, 212, 213, 214, 215, 200, 201,
     202, 203, 236, 237, 238, 239, 253,
@@ -85,9 +85,9 @@ pub(in crate::storage) trait Host {
     fn sd_uhs_modes(&self) -> SdUhsModes {
         SdUhsModes::default()
     }
-    /// CMD11 has completed. Verify DAT low, gate clock, switch actual PHY/pads,
-    /// retain the gated settling interval, restart clock and verify DAT high.
-    /// A failed transition requires actual power-off before another identify.
+    /// CMD11 has completed. Verify DAT low, gate clock, switch PHY/pads,
+    /// keep the gated settling interval, restart clock and verify DAT high.
+    /// A failed transition requires power-off before another identify.
     fn switch_sd_signal_voltage(&mut self) -> Result<(), BlockError> {
         Err(BlockError::Unsupported(
             "host SD1.8V switching is not implemented",
@@ -110,8 +110,8 @@ pub(in crate::storage) trait Host {
     fn set_high_speed(&mut self) -> Result<(), BlockError>;
     fn set_clock(&mut self, requested: u32) -> Result<u32, BlockError>;
     fn scratch(&self) -> &[u8];
-    /// Fence/retire the host, retain cleanup diagnostics and return the primary
-    /// failure unchanged, including when actual retirement also fails.
+    /// Fence/retire the host, keep cleanup diagnostics and return the primary
+    /// failure unchanged, including when retirement also fails.
     fn retire(&mut self, primary: BlockError) -> BlockError;
 }
 
@@ -371,7 +371,7 @@ impl<H: Host> Session<'_, H> {
                 self.begin_sdr_hs(&mut ext, &mut info)
                     .map_err(|error| self.host.mmc_mode_failure(error))?;
             }
-            // Only an exact source-declared board profile grants eight pins;
+            // Only a source-declared board profile grants eight pins;
             // generic controller CAP_8BIT never establishes board wiring.
             let width = self.host.mmc_width();
             let wire_width = if width == 8 { 2 } else { 1 };

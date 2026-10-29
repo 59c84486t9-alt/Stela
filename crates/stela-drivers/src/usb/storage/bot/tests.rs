@@ -496,7 +496,7 @@ fn native_fixture(
 fn native_root_bot_reuses_original_transport_buffers_across_96_resets_and_real_io() {
     use crate::block::BlockDevice;
     use crate::usb::xhci::{HIGH_SPEED, SUPER_SPEED};
-    // The unquirked profile intentionally has no flush command. The pinned
+    // The unquirked profile has no flush command. The pinned
     // WRITE_CACHE identity requires a real acknowledged 0x35 every epoch.
     for write_cache in [false, true] {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
@@ -733,7 +733,7 @@ fn all_sixteen_luns_have_independent_media_sense_and_shared_tags() {
     }
     let state = state.borrow();
     assert!(state.history.windows(2).all(|w| w[1].1 == w[0].1 + 1));
-    // Probe reads block zero before MODE SENSE. Check every actual CDB,
+    // Probe reads block zero before MODE SENSE. Check every CDB,
     // rather than only a total that could hide a missing read or a command
     // sent to the wrong LUN after the shared transport's tags advance.
     let expected: [&[u8]; 8] = [
@@ -1445,7 +1445,7 @@ fn recovery_waits_for_real_reset_settle_before_clears_and_next_lun() {
 }
 #[test]
 fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
-    // Two retained 64-KiB-aligned owners plus wrappers can require
+    // Two kept 64-KiB-aligned owners plus wrappers can require
     // 262207 bytes from an arbitrary base, exceeding a 256-KiB fixture.
     let mut memory = vec![0u64; 33 * 1024];
     let start = memory.as_mut_ptr() as u64;
@@ -1456,7 +1456,7 @@ fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
         vec![unit(3), unit(7)],
     );
     let state = io.0.clone();
-    // Kobian Mercury Binocam uses an actual 32-byte wrapper.
+    // Kobian Mercury Binocam uses a 32-byte wrapper.
     let flags = quirks::Flags::from_id(0x04fc, 0x80c2, 0x0100, true).unwrap();
     let mut bot = Bot::with_flags(io, 3, endpoints(), &mut dma, flags).unwrap();
     bot.command(0, &scsi::inquiry(), Data::In(36)).unwrap();

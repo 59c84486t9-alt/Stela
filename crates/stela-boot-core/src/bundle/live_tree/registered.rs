@@ -9,7 +9,7 @@ impl<'a> ColdRam<'a> {
     /// # Safety
     /// Registration's all-writer contract holds. All raw input copies are
     /// finished; guest execution, DMA, native frame loans and other publishers
-    /// are excluded for this borrow. The supplied RAM is the actual retained
+    /// are excluded for this borrow. The supplied RAM is the kept
     /// owner which will be installed in the Machine, not a shadow allocation.
     pub unsafe fn new(ram: &'a RegisteredSystemRam) -> Self {
         Self(ram)

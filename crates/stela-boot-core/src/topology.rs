@@ -26,7 +26,7 @@ pub const BSP: u32 = 1;
 pub const ENABLED: u32 = 1 << 1;
 pub const HEALTHY: u32 = 1 << 2;
 
-/// Number of guest PEs admitted by both the retained host roster and the
+/// Number of guest PEs admitted by both the host roster and the
 /// source profile. Extra default workers stay parked; an explicit request
 /// must fit both inventories.
 pub fn guest_assignment_count(
@@ -109,7 +109,7 @@ pub enum PlacementError {
 /// before an unmatched guest can consume another class's worker. Unknown
 /// workers, then other unused workers, fill any remaining slots in host order.
 /// Homogeneous host classes keep the original BSP-first assignment. When the
-/// guest has fewer slots, choose from the complete retained host roster; a
+/// guest has fewer slots, choose from the complete host roster; a
 /// matching class beyond the first guest-count workers remains eligible.
 pub fn placement(
     guest: &[CoreClass],
@@ -318,7 +318,7 @@ impl Snapshot {
     }
 }
 
-/// Conservative compiler policy from the assigned workers' actual installed
+/// Conservative compiler policy from the assigned workers' installed
 /// observations. This cannot grant execution: registration and each native
 /// entry must still validate the destination's current hardware and controls.
 pub fn common_native_target(
@@ -382,8 +382,8 @@ pub fn common_native_target(
     Ok(target)
 }
 
-/// The initial native executor deliberately uses legacy XMM state only. It
-/// derives this floor on each actual physical core rather than borrowing the
+/// The initial native executor uses legacy XMM state only. It
+/// derives this floor on each physical core rather than borrowing the
 /// BSP's CPUID or firmware OSXSAVE state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityRefusal {
@@ -432,7 +432,7 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Require the actual installed memory-type/routing image to equal the
+    /// Require the installed memory-type/routing image to equal the
     /// intended source image before sharing RAM or Stela metadata. Initial
     /// offline installation may establish this equality; TSC_ADJUST is separate.
     pub fn same_memory_types(&self, other: &Self) -> Result<(), CapabilityRefusal> {
@@ -546,7 +546,7 @@ pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
     Ok(selected)
 }
 
-/// Enabled logical processors outside the actual requested physical roster.
+/// Enabled logical processors outside the requested physical roster.
 /// Unlike admission, this includes enabled unhealthy APs: health does not prove
 /// that their firmware execution has stopped. Disabled processors stay disabled.
 /// No allocation or firmware access is needed at the post-EBS boundary.

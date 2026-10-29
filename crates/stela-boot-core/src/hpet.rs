@@ -1,6 +1,6 @@
 //! HPET table/geometry decoding and coherent counter sample validation.
 //! Results describe firmware bytes and observations; hardware ownership belongs
-//! to the actual native resource provider.
+//! to the native resource provider.
 use stela_crypto::{Sha256, digest::Digest};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,7 +83,7 @@ pub struct Geometry {
     pub timers: usize,
 }
 /// Outward elapsed-time bounds from an eligible continuously running HPET.
-/// This data carries no mapping, CPU or controller authority.
+/// This data carries no mapping, CPU or controller permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ElapsedBounds {
     pub lower_ns: u64,
@@ -105,7 +105,7 @@ impl Geometry {
         const ACCURACY_PPM: u128 = 500;
         const EDGE_NS: u128 = 1_000_000;
         // ticks*period is femtoseconds. Nanosecond conversion's 10^6 and
-        // rate error's 10^6 cancel, retaining a single outward division.
+        // rate error's 10^6 cancel, keeping a single outward division.
         let nominal_fs = u128::from(ticks) * u128::from(self.period_fs);
         let lower = (nominal_fs / (PPM + ACCURACY_PPM)).saturating_sub(EDGE_NS);
         let upper = nominal_fs
@@ -137,7 +137,7 @@ impl Geometry {
 }
 
 /// A coherent low word lies between two unchanged high observations.
-/// Used only after three ordered actual UC reads; no elapsed time inference.
+/// Used only after three ordered UC reads; no elapsed time inference.
 pub fn coherent_counter(first: u32, low: u32, last: u32) -> Option<u64> {
     (first == last).then_some(u64::from(last) << 32 | u64::from(low))
 }

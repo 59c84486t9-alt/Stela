@@ -32,9 +32,9 @@ pub struct Manifest {
     pub memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
 }
 
-/// Actual loaded artifact data. Host cache paths and cache-hit bookkeeping are
-/// preparation details, not retained native/source ownership or entry grants.
-/// Actual loaders bind native bytes before retaining this descriptive container.
+/// Loaded artifact data. Host cache paths and cache-hit bookkeeping are
+/// preparation details, not kept native/source ownership or entry grants.
+/// Loaders bind native bytes before keeping this descriptive container.
 /// This data is not a nonforgeable capability; source/PE owners remain mandatory.
 #[derive(Debug)]
 pub(crate) struct LoadedArtifact {
@@ -94,7 +94,7 @@ pub(crate) fn validate_source_map(
 }
 
 /// Shared geometry for absolute artifact PCs and page-relative stored PCs.
-/// Callers retain their own source-extent and identity checks.
+/// Callers keep their own source-extent and identity checks.
 pub(crate) fn validate_source_map_geometry(
     base: u64,
     source_bytes: usize,

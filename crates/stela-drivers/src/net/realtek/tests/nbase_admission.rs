@@ -5,8 +5,8 @@ use super::*;
 
 #[test]
 fn nbase_aperture_irq_width_and_doorbell_are_checked_before_extended_io() {
-    // The actual shared map_registers boundary checks both BAR size and
-    // retained mapping before returning MMIO. The constructor requests the
+    // The shared map_registers boundary checks both BAR size and
+    // mapping before returning MMIO. The constructor requests the
     // complete range through the 16-bit timer at 6048 before reading it.
     assert_eq!(register_aperture(revision(61)), 0x604a);
     assert_eq!(register_aperture(revision(70)), 0x604a);

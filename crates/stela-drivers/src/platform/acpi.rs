@@ -53,7 +53,7 @@ fn checked(status: Status) -> Result<(), Error> {
 
 /// Hardware capabilities attested by the native provider, required as a set.
 /// SCI includes correct FADT routing, shared level interrupts, mask/synchronize;
-/// work includes genuinely deferred IRQ-safe enqueue and draining; regions includes
+/// work includes deferred IRQ-safe enqueue and draining; regions includes
 /// owned EC/GPIO/serial-bus handlers installed before dependent firmware methods;
 /// allocation includes all OSL allocations from interrupt/deferred contexts.
 pub const CAP_SCI: u64 = 1;
@@ -72,7 +72,7 @@ pub struct PciId {
 }
 
 /// Version of the complete Rust/C OSL callback table. Format validation grants
-/// no hardware capability; each callback still requires its actual ownership.
+/// no hardware capability; each callback still requires its ownership.
 pub const SERVICES_ABI_VERSION: u32 = 2;
 pub const SERVICES_ABI_BYTES: u32 = core::mem::size_of::<Services>() as u32;
 
@@ -80,7 +80,7 @@ pub const SERVICES_ABI_BYTES: u32 = core::mem::size_of::<Services>() as u32;
 ///
 /// # Safety
 /// Transfer `context` ownership to [`Session::start`]. All callbacks and context
-/// must remain valid until `destroy`; failed quiescence intentionally retains them
+/// must remain valid until `destroy`; failed quiescence keeps them
 /// permanently. Each callback must implement the corresponding ACPICA OSL contract
 /// (including timeout units, IRQ flags, locking, memory attributes, map leases,
 /// unique nonzero thread IDs, 100 ns monotonic timer and callback draining).
@@ -90,7 +90,7 @@ pub const SERVICES_ABI_BYTES: u32 = core::mem::size_of::<Services>() as u32;
 /// cache attributes and lifetime after ExitBootServices. Lock acquisition disables
 /// local interrupts and restores their previous flags on release. Callbacks must
 /// not panic/unwind. Unsupported fallible operations return a real failure status;
-/// mandatory void operations must actually complete, never silently do nothing.
+/// mandatory void operations must complete, never silently do nothing.
 /// Semaphore timeout is milliseconds (`0` polls, `0xffff` waits forever), sleep
 /// is milliseconds and stall is microseconds; I/O widths are bits. `execute`
 /// queues work, including from SCI, without running it inline, preserving required
@@ -145,9 +145,9 @@ pub struct Services {
     pub quiesce: unsafe extern "C" fn(*mut c_void) -> Status,
     pub destroy: unsafe extern "C" fn(*mut c_void),
     /// Mandatory fail-closed kernel fatal path; called when pre-delete callback
-    /// quiescence fails. It must never return, unwind, or fabricate completion.
+    /// quiescence fails. It must never return, unwind, or invent completion.
     pub fatal: unsafe extern "C" fn(*mut c_void, Status) -> !,
-    /// Side-effect-free actual-context/role check before C removal starts.
+    /// Side-effect-free context/role check before C removal starts.
     /// Success is neither a durable permission nor completion of either flush.
     pub preflight_wait_events: unsafe extern "C" fn(*mut c_void) -> Status,
 }
@@ -348,7 +348,7 @@ impl Session {
             HardwareState::InterpreterOnly => {}
         }
         // C marks activation attempted before enabling hardware. That flag is
-        // deliberately not a success witness: even a partial attempt requires
+        // not a success witness: even a partial attempt requires
         // global shutdown before retry. Publish success only after both checks.
         self.hardware.set(HardwareState::ActivationFailed);
         // SAFETY: the live session owns ACPICA and the native provider.
@@ -357,13 +357,13 @@ impl Session {
         self.hardware.set(HardwareState::Enabled);
         Ok(())
     }
-    /// True only after this provider's actual C activation succeeded, while its
+    /// True only after this provider's C activation succeeded, while its
     /// original namespace remains valid. No caller can manufacture this witness.
     pub fn hardware_enabled(&self) -> bool {
         self.active && self.hardware.get() == HardwareState::Enabled && self.namespace_available()
     }
     /// Real ACPICA/FACS arbitration for an EC whose observed `_GLK` requires it.
-    /// The EC retains this owner and its namespace lease through byte access.
+    /// The EC keeps this owner and its namespace lease through byte access.
     pub fn ec_global_lock(&self) -> EcGlobalLock<'_> {
         EcGlobalLock {
             session: self,
@@ -564,7 +564,7 @@ impl Session {
     fn guard(&self) -> Result<NamespaceGuard<'_>, Error> {
         let mut raw = ptr::null_mut();
         let mut epoch = 0;
-        // SAFETY: borrowed session retains C/provider state through guard drop.
+        // SAFETY: borrowed session keeps C/provider state through guard drop.
         checked(unsafe { stela_acpi_guard_enter(&mut raw, &mut epoch) })?;
         Ok(NamespaceGuard {
             raw,
@@ -597,7 +597,7 @@ impl Session {
             || self.ec_resource_quarantine.load(Ordering::Acquire)
         {
             // An unreleased FACS mutex or an unregistered native resource with
-            // failed retirement still references this provider. Retain both.
+            // failed retirement still references this provider. Keep both.
             return Err(SUPPORT);
         }
         self.active = false;
@@ -605,7 +605,7 @@ impl Session {
         // SAFETY: this session owns the globally reserved instance.
         let result = checked(unsafe { stela_acpi_stop() });
         if result.is_ok() {
-            // The core/provider are stopped; includes callbacks retained after
+            // The core/provider are stopped; includes callbacks kept after
             // unload or failed Notify removal. Failed quiescence leaks them safely.
             for context in self.notifications.get_mut().drain(..) {
                 // SAFETY: the core is stopped, so no callback can still use the context.
@@ -639,7 +639,7 @@ impl NamespaceGuard<'_> {
     }
     fn bind(&self, candidate: *mut c_void) -> Result<(), Error> {
         self.check()?;
-        // SAFETY: actual namespace read lease protects the locked tree walk;
+        // SAFETY: namespace read lease protects the locked tree walk;
         // candidate itself is compared only and never dereferenced speculatively.
         checked(unsafe { stela_acpi_bind_node(candidate, self.epoch) })?;
         self.check()
@@ -654,8 +654,8 @@ impl Drop for NamespaceGuard<'_> {
     }
 }
 
-/// An EC firmware lock, backed by ACPICA's actual global-lock API.
-/// Failed release retains its token/namespace lease; it never retries implicitly.
+/// An EC firmware lock, backed by ACPICA's global-lock API.
+/// Failed release keeps its token/namespace lease; it never retries implicitly.
 pub struct EcGlobalLock<'a> {
     session: &'a Session,
     held: Option<(u32, NamespaceGuard<'a>)>,
@@ -673,7 +673,7 @@ impl super::ec::FirmwareLock for EcGlobalLock<'_> {
         }
         let guard = self.session.guard().map_err(|_| super::ec::LockError)?;
         let mut token = 0;
-        // SAFETY: the session and actual namespace read lease retain ACPICA;
+        // SAFETY: the session and namespace read lease keep ACPICA;
         // only the real API creates this FACS/global-mutex ownership token.
         checked(unsafe { acpi_acquire_global_lock(milliseconds as u16, &mut token) })
             .map_err(|_| super::ec::LockError)?;
@@ -688,7 +688,7 @@ impl super::ec::FirmwareLock for EcGlobalLock<'_> {
             .map_err(|_| super::ec::LockError)?;
         if self.held.as_ref().unwrap().1.check().is_err() {
             // A native callback may have invalidated namespace admission while
-            // acquisition waited. Release actual firmware ownership, never
+            // acquisition waited. Release firmware ownership, never
             // authorize EC I/O from the stale namespace observation.
             self.release()?;
             return Err(super::ec::LockError);
@@ -845,7 +845,7 @@ impl<'a> Handle<'a> {
     pub(crate) fn ec_resource_quarantine(self) -> Arc<AtomicBool> {
         self.session.ec_resource_quarantine.clone()
     }
-    /// Retain callback storage through actual core termination, including failed
+    /// Keep callback storage through core termination, including failed
     /// removal. The finalizer runs before the original OSL provider is destroyed.
     ///
     /// # Safety
@@ -854,10 +854,10 @@ impl<'a> Handle<'a> {
     /// admission and must refuse while ownership still requires the live core.
     /// The finalizer must not enter AML or unwind, and must retire provider
     /// resources before freeing its storage. Failed calls transfer no ownership.
-    /// An optional activation callback runs after actual FACS/SCI/GLK setup
+    /// An optional activation callback runs after FACS/SCI/GLK setup
     /// and before device _INI. It must be idempotent after explicit attachment,
-    /// retain its namespace identity and propagate any activation failure.
-    /// Activation must not register more retained contexts or borrow a movable
+    /// keep its namespace identity and propagate any activation failure.
+    /// Activation must not register more kept contexts or borrow a movable
     /// Rust Session address.
     pub(crate) unsafe fn retain_ec_context(
         self,
@@ -868,7 +868,7 @@ impl<'a> Handle<'a> {
     ) -> Result<(), Error> {
         let guard = self.session.guard()?;
         guard.bind(self.raw)?;
-        // SAFETY: caller transfers the retained context on actual C success.
+        // SAFETY: caller transfers the context on C success.
         checked(unsafe { stela_acpi_retain_context(before_termination, retire, activate, context) })
     }
     pub(crate) fn ec_activation_target(self) -> Result<*mut c_void, Error> {
@@ -877,7 +877,7 @@ impl<'a> Handle<'a> {
         Ok(self.raw)
     }
     /// Match Linux EC setup: root handler coverage must not connect unrelated
-    /// devices' _REG methods. The actual EC subtree is connected separately.
+    /// devices' _REG methods. The EC subtree is connected separately.
     pub(crate) unsafe fn install_ec_region(
         self,
         handler: Region,
@@ -886,8 +886,8 @@ impl<'a> Handle<'a> {
     ) -> Result<(), Error> {
         let guard = self.session.guard()?;
         guard.bind(self.raw)?;
-        // SAFETY: live namespace lease validates the exact scope; caller retains
-        // the callback/context until removal or actual core termination.
+        // SAFETY: live namespace lease validates the exact scope; caller keeps
+        // the callback/context until removal or core termination.
         checked(unsafe {
             acpi_install_address_space_handler_no_reg(self.raw, 3, handler, setup, context)
         })?;
@@ -897,7 +897,7 @@ impl<'a> Handle<'a> {
     pub fn hardware_active(self) -> bool {
         self.session.hardware_enabled()
     }
-    /// Resolve a retained namespace handle to its actual absolute ACPI path.
+    /// Resolve a namespace handle to its absolute ACPI path.
     pub fn path(self) -> Result<String, Error> {
         let guard = self.session.guard()?;
         // SAFETY: handle belongs to this live session, under its guard.
@@ -957,7 +957,7 @@ impl<'a> Handle<'a> {
     /// Execute AML while discarding its result in ACPICA itself. This preserves
     /// NULL-output evaluation semantics even when the returned object has no
     /// supported external representation. Errors and namespace invalidation
-    /// still propagate; the actual method and all side effects execute once.
+    /// still propagate; the method and all side effects execute once.
     pub fn invoke(self, path: Option<&str>, args: &[Argument<'_>]) -> Result<(), Error> {
         let guard = self.session.guard()?;
         guard.bind(self.raw)?;
@@ -968,7 +968,7 @@ impl<'a> Handle<'a> {
         let mut args = Arguments::new(args, self.session, 0)?;
         // SAFETY: the guard binds this live namespace target. Every argument
         // buffer remains owned/borrowed here for the call. A NULL result is the
-        // actual ACPICA API's discard request, not a fabricated return object.
+        // ACPICA API's discard request, not an invented return object.
         checked(unsafe {
             stela_acpi_evaluate(
                 self.raw,
@@ -995,7 +995,7 @@ impl<'a> Handle<'a> {
             length: u64::MAX,
             pointer: ptr::null_mut(),
         };
-        // SAFETY: arguments and all nested buffers are retained during evaluation.
+        // SAFETY: arguments and all nested buffers are held during evaluation.
         let status = unsafe {
             stela_acpi_evaluate(
                 self.raw,
@@ -1075,7 +1075,7 @@ impl<'a> Handle<'a> {
             callback,
         });
         let context = Box::into_raw(context);
-        // SAFETY: owned stable context is retained until removal and drain.
+        // SAFETY: owned stable context is held until removal and drain.
         let status = unsafe {
             acpi_install_notify_handler(self.raw, kind, notify_trampoline, context.cast())
         };
@@ -1101,7 +1101,7 @@ impl<'a> Handle<'a> {
     ///
     /// # Safety
     /// Context/callbacks must remain valid until removal and event drain; implement
-    /// ACPICA region setup/activation/deactivation, ownership and actual I/O. This
+    /// ACPICA region setup/activation/deactivation, ownership and I/O. This
     /// never silently substitutes zeros for an unsupported EC/GPIO/serial region.
     pub unsafe fn install_region(
         self,
@@ -1118,7 +1118,7 @@ impl<'a> Handle<'a> {
         guard.check()
     }
     /// # Safety
-    /// Must match an installed handler and retain its context through this call;
+    /// Must match an installed handler and keep its context through this call;
     /// provider must synchronize external region callbacks before freeing context.
     pub unsafe fn remove_region(self, space: u32, handler: Region) -> Result<(), Error> {
         let guard = self.session.guard()?;
@@ -1183,7 +1183,7 @@ unsafe extern "C" fn flag_event(context: *mut c_void) -> u32 {
     unsafe { &*context.cast::<AtomicBool>() }.store(true, Ordering::Release);
     INTERRUPT_HANDLED
 }
-/// A raw GPE handler retains a disabled device source until its owner drains
+/// A raw GPE handler keeps a disabled device source until its owner drains
 /// deferred transactions and explicitly resumes it. This permits the parent
 /// SCI to service FACS/global-lock events while a device worker waits.
 unsafe extern "C" fn flag_gpe(block: *mut c_void, number: u32, context: *mut c_void) -> u32 {
@@ -1221,8 +1221,8 @@ impl Notification<'_> {
     pub fn remove(mut self) -> Result<(), Error> {
         self.close()
     }
-    // Test an actual ACPICA removal error after another native actor removed
-    // the registration. The Rust owner deliberately remains outstanding.
+    // Test an ACPICA removal error after another native actor removed
+    // the registration. The Rust owner remains outstanding.
     #[cfg(test)]
     pub(crate) fn remove_from_core_without_retiring_for_test(&self) -> Result<(), Error> {
         let guard = self.handle.session.guard()?;
@@ -1232,7 +1232,7 @@ impl Notification<'_> {
             .map_or(DEVICE_NOTIFY, |context| unsafe { &*context }.kind);
         // SAFETY: immediate provider role check precedes the test's real C removal.
         checked(unsafe { stela_acpi_preflight_wait_events() })?;
-        // SAFETY: the actual live node and callback belong to this registration.
+        // SAFETY: the live node and callback belong to this registration.
         checked(unsafe { acpi_remove_notify_handler(self.handle.raw, kind, notify_trampoline) })?;
         // SAFETY: test process context; drain the real provider work queue.
         unsafe { acpi_os_wait_events_complete() };
@@ -1246,8 +1246,8 @@ impl Notification<'_> {
         let kind = unsafe { &*context }.kind;
         let result = (|| {
             let guard = self.handle.session.guard()?;
-            // SAFETY: actual role eligibility is checked before ACPICA removes
-            // this registration. Refusal retains its callback in Session.
+            // SAFETY: role eligibility is checked before ACPICA removes
+            // this registration. Refusal keeps its callback in Session.
             checked(unsafe { stela_acpi_preflight_wait_events() })?;
             // Only a live namespace lease may pass this node into ACPICA.
             // SAFETY: the namespace guard keeps this node live.
@@ -1657,7 +1657,7 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn drain_work(p: *mut c_void) -> Status {
-        // SAFETY: this fixture retains its TestPlatform until core shutdown.
+        // SAFETY: this fixture keeps its TestPlatform until core shutdown.
         let state = unsafe { platform(p) };
         state.counts.flush_calls.fetch_add(1, Ordering::SeqCst);
         let failure = state.counts.flush_status.load(Ordering::Acquire);
@@ -1888,8 +1888,8 @@ pub(crate) mod tests {
         )
     }
 
-    /// Reuse the actual ACPICA fixture with a reduced-hardware FADT. Hardware
-    /// mode then genuinely executes C activation and AML _INI without inventing
+    /// Reuse the ACPICA fixture with a reduced-hardware FADT. Hardware
+    /// mode then executes C activation and AML _INI without inventing
     /// legacy SCI/PM hardware. Extra AML methods are part of the real DSDT.
     pub(crate) fn reduced_hardware_fixture(extra_aml: &[u8]) -> Services {
         let mut dsdt = include_bytes!("acpi/fixtures/namespace.aml").to_vec();
@@ -1917,10 +1917,10 @@ pub(crate) mod tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (mut provider, counts) = fixture();
         // The real legacy-hardware C path is entered; the existing provider
-        // rejects actual legacy PM I/O. C has already marked its attempt, which
+        // rejects legacy PM I/O. C has already marked its attempt, which
         // must never be interpreted as successful activation by Rust clients.
         provider.capabilities = FULL_CAPABILITIES;
-        // SAFETY: actual test provider owns all services; singleton serialized.
+        // SAFETY: test provider owns all services; singleton serialized.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         assert!(session.enable_hardware().is_err());
         assert!(!session.hardware_enabled());
@@ -1949,7 +1949,7 @@ pub(crate) mod tests {
         dsdt[4..8].copy_from_slice(&length.to_le_bytes());
         checksum(&mut dsdt, 9);
         let (provider, counts) = fixture_dsdt(dsdt);
-        // SAFETY: actual test provider owns all services; singleton serialized.
+        // SAFETY: test provider owns all services; singleton serialized.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let prepared = || {
             session
@@ -1984,7 +1984,7 @@ pub(crate) mod tests {
         dsdt[4..8].copy_from_slice(&length.to_le_bytes());
         checksum(&mut dsdt, 9);
         let (provider, _) = fixture_dsdt(dsdt);
-        // SAFETY: actual test provider owns all services; singleton serialized.
+        // SAFETY: test provider owns all services; singleton serialized.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let wake = session.handle("\\_SB.WAK1").unwrap();
         assert!(session.all_devices().unwrap().contains(&wake));
@@ -2045,7 +2045,7 @@ pub(crate) mod tests {
             provider.abi_version = version;
             provider.abi_bytes = bytes;
             assert!(matches!(
-                // SAFETY: complete fixture allocation is valid even with deliberately mismatched
+                // SAFETY: complete fixture allocation is valid even with mismatched
                 // format metadata; Rust must retire it without entering C.
                 unsafe { Session::start(provider, Mode::InterpreterOnly) },
                 Err(BAD_PARAMETER)
@@ -2069,7 +2069,7 @@ pub(crate) mod tests {
     fn removal_preflight_retains_real_region_and_notification_on_refusal() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture();
-        // SAFETY: serialized fixture retains firmware and real ACPICA services.
+        // SAFETY: serialized fixture keeps firmware and real ACPICA services.
         let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         let handle = session.handle("\\_SB.UCSI").unwrap();
         unsafe extern "C" fn setup(
@@ -2079,7 +2079,7 @@ pub(crate) mod tests {
             output: *mut *mut c_void,
         ) -> Status {
             // SAFETY: ACPICA passes a writable context slot; this test keeps its
-            // exact u8 allocation live until actual handler removal succeeds.
+            // exact u8 allocation live until handler removal succeeds.
             unsafe {
                 output.write(if action == 0 {
                     context
@@ -2100,7 +2100,7 @@ pub(crate) mod tests {
             if function != 0 || address != 0 || width != 8 || context.is_null() {
                 return SUPPORT.0;
             }
-            // SAFETY: setup published the retained exact u8 allocation and C
+            // SAFETY: setup published the exact u8 allocation and C
             // provides the output slot for this screened 8-bit read.
             unsafe { value.write(u64::from(*context.cast::<u8>())) };
             0
@@ -2123,7 +2123,7 @@ pub(crate) mod tests {
         let flushes = counts.flush_calls.load(Ordering::Acquire);
         counts.preflight_status.store(SUPPORT.0, Ordering::Release);
         assert_eq!(
-            // SAFETY: exact retained registration; failed preflight must not remove it.
+            // SAFETY: registration; failed preflight must not remove it.
             unsafe { session.root().remove_region(3, read) },
             Err(SUPPORT)
         );
@@ -2139,7 +2139,7 @@ pub(crate) mod tests {
         counts.preflight_status.store(0, Ordering::Release);
         // SAFETY: same still-registered handler/context, now eligible for removal.
         unsafe { session.root().remove_region(3, read) }.unwrap();
-        // SAFETY: successful actual removal and completion exclude all borrowers.
+        // SAFETY: successful removal and completion exclude all borrowers.
         unsafe { drop(Box::from_raw(context)) };
         session.shutdown().unwrap();
         assert_eq!(Arc::strong_count(&observed), 1);
@@ -2231,7 +2231,7 @@ pub(crate) mod tests {
     #[test]
     fn activated_events_take_only_gpes_acpica_has() {
         let _serial = TEST_SERIAL.lock().unwrap();
-        // SAFETY: reduced-hardware provider enters actual C activation without
+        // SAFETY: reduced-hardware provider enters C activation without
         // inventing legacy hardware; singleton serialized for this whole test.
         let session =
             unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::Hardware) }.unwrap();
@@ -2246,7 +2246,7 @@ pub(crate) mod tests {
     #[test]
     fn successful_hardware_witness_is_revoked_by_actual_namespace_unload() {
         let _serial = TEST_SERIAL.lock().unwrap();
-        // SAFETY: reduced-hardware provider enters actual C activation without
+        // SAFETY: reduced-hardware provider enters C activation without
         // inventing legacy hardware; singleton serialized for this whole test.
         let session =
             unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::Hardware) }.unwrap();
@@ -2254,7 +2254,7 @@ pub(crate) mod tests {
         let root = session.root();
         assert!(root.hardware_active());
         // A minimal SSDT: Scope (\_SB) { Device (DYN1) { Name (TEST, 42) } }.
-        // Keep these actual table bytes alive until ACPICA terminates.
+        // Keep these table bytes alive until ACPICA terminates.
         let mut ssdt = table(b"SSDT", 36, 2);
         ssdt.extend_from_slice(&[0x10, 20, b'\\', b'_', b'S', b'B', b'_', 0x5b, 0x82, 12]);
         ssdt.extend_from_slice(b"DYN1");
@@ -2270,7 +2270,7 @@ pub(crate) mod tests {
         }
         let mut index = 0;
         assert_eq!(
-            // SAFETY: actual complete owned SSDT, retained through global teardown.
+            // SAFETY: complete owned SSDT, kept through global teardown.
             unsafe { acpi_load_table(ssdt.as_mut_ptr().cast(), &mut index) },
             0
         );
@@ -2326,7 +2326,7 @@ pub(crate) mod tests {
             handle
                 .evaluate(Some("FIRE"), &[Argument::Integer(0x80)])
                 .unwrap();
-            core::mem::forget(notification); // retained callback tests quarantine, not normal removal
+            core::mem::forget(notification); // callback tests quarantine, not normal removal
             assert_eq!(session.shutdown(), Err(SUPPORT));
             // SAFETY: the quarantined provider context stays alive, and its callbacks are still
             // valid.
@@ -2394,7 +2394,7 @@ pub(crate) mod tests {
                 "ABI field {field}"
             );
         }
-        // Actual partial initialization failures must reclaim the transferred provider.
+        // Partial initialization failures must reclaim the transferred provider.
         unsafe extern "C" fn reject_lock(_: *mut c_void, _: *mut *mut c_void) -> Status {
             4
         }
@@ -2682,7 +2682,7 @@ pub(crate) mod tests {
             .evaluate(Some("FIRE"), &[Argument::Integer(0x80)])
             .unwrap();
         if fatal_child {
-            // Swap only the actual provider callback used inside C's immutable
+            // Swap only the provider callback used inside C's immutable
             // transferred vtable through a fixture flag; no production bypass.
             // SAFETY: ACPICA passes back the provider context, a live `TestPlatform` until
             // `destroy`.
@@ -2693,13 +2693,13 @@ pub(crate) mod tests {
         unsafe extern "C" {
             fn acpi_unload_parent_table(handle: *mut c_void) -> Status;
         }
-        // SAFETY: actual loaded SSDT node, interpreter idle on this owner thread;
+        // SAFETY: loaded SSDT node, interpreter idle on this owner thread;
         // the provider drains all other callbacks before real namespace deletion.
-        // This uses ACPICA's supported native table API, not a fabricated AML DDB.
+        // This uses ACPICA's supported native table API, not an invented AML DDB.
         assert_eq!(unsafe { acpi_unload_parent_table(device.raw) }, 0);
         assert!(!session.namespace_available());
         // Force ACPICA's node caches back to the sanitizer allocator. Stale raw
-        // dereferences now read freed storage rather than merely recycled nodes.
+        // dereferences now read freed storage rather than recycled nodes.
         unsafe extern "C" {
             fn acpi_purge_cached_objects() -> Status;
         }
@@ -2723,7 +2723,7 @@ pub(crate) mod tests {
             2,
             "stale removal retains callback until termination"
         );
-        // Raw oracle calls are deliberately test-only: prove the real native
+        // Raw oracle calls are test-only: prove the real native
         // table API deleted the node. Unsupported AML did not execute its Store.
         let mut gone = ptr::null_mut();
         let name = CString::new("\\_SB.DYN0").unwrap();
@@ -2772,7 +2772,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Actual captured QEMU/firmware inputs remain ignored; this generic evaluator
+    /// Captured QEMU/firmware inputs remain ignored; this generic evaluator
     /// records their hash and real method results without production path exceptions.
     #[test]
     #[ignore = "oracle: STELA_ACPI_DSDT, STELA_ACPI_QUERIES"]

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2021-2026 Intel Corporation
-//! Raw UEFI power/coexistence observations, not selected BIOS authority,
+//! Raw UEFI power/coexistence observations, not selected BIOS permission,
 //! approved platform policy, submitted firmware tables or transmit permission.
 use super::{Error, bounded, prefix};
 use crate::bytes::le32;
@@ -67,9 +67,9 @@ impl<'a> Sar<'a> {
     pub fn raw_mode(self) -> u32 {
         le32(self.raw, 1)
     }
-    /// Exact source C call converts mode to the bool parameter of
+    /// Source C call converts mode to the bool parameter of
     /// iwl_uefi_set_sar_profile before applying its enable mask. Preserve mode
-    /// separately; this observation is not an actual SAR programming receipt.
+    /// separately; this observation is not a SAR programming receipt.
     pub fn source_enabled(self) -> bool {
         self.raw_mode() != 0
     }
@@ -145,7 +145,7 @@ pub struct Ppag<'a> {
 impl<'a> Ppag<'a> {
     pub fn parse(raw: &'a [u8]) -> Result<Self, Error> {
         bounded(raw, 27)?;
-        // The actual getter attempts the 29-byte shape first; a longer revision 1..4
+        // The getter attempts the 29-byte shape first; a longer revision 1..4
         // table is not reinterpreted through the shorter fallback branch.
         let subbands = if raw.len() >= 29 {
             if raw[0] != 5 {
@@ -176,8 +176,8 @@ impl<'a> Ppag<'a> {
             _ => self.raw_modes(),
         }
     }
-    /// Raw signed source gain. Validation for actual command version and
-    /// genuine approved platform identity belongs to the later consumer.
+    /// Raw signed source gain. Validation for command version and
+    /// approved platform identity belongs to the later consumer.
     pub fn gain(self, chain: usize, subband: usize) -> Option<i8> {
         if chain >= 2 || subband >= self.subbands {
             return None;
@@ -245,7 +245,7 @@ pub struct CountryMap<'a> {
     raw: &'a [u8],
 }
 impl<'a> CountryMap<'a> {
-    /// SGOM and UATS share this packed revision 1 prefix, while their actual
+    /// SGOM and UATS share this packed revision 1 prefix, while their
     /// consumers and prerequisites remain separate.
     pub fn parse(raw: &'a [u8]) -> Result<Self, Error> {
         prefix(raw, 339, 1)?;
@@ -257,8 +257,8 @@ impl<'a> CountryMap<'a> {
     pub fn raw_map(self) -> &'a [u8] {
         &self.raw[1..339]
     }
-    /// Exact source SGOM nibble clamp. The input count is pure data here;
-    /// actual geo-SAR initialization and enabled state must be separately held.
+    /// Source SGOM nibble clamp. The input count is pure data here;
+    /// geo-SAR initialization and enabled state must be separately held.
     pub fn sgom(self, geo_profiles: u8) -> Result<[u8; 338], Error> {
         if geo_profiles > 8 {
             return Err(Error::ProfileCount {

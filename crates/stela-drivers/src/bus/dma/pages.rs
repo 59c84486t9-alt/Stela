@@ -1,11 +1,11 @@
-//! Retained page sequences for device-domain mappings. Scatter metadata never
+//! Page sequences for device-domain mappings. Scatter metadata never
 //! manufactures a contiguous CPU view or a new physical reservation.
 use super::memory::{CacheAttribute, MemoryError, PinnedPages};
 use alloc::vec::Vec;
 use core::ops::Range;
 use triomphe::Arc;
 
-/// Whole-native-page subrange of an actual retained allocation. Padding within
+/// Whole-native-page subrange of an allocation. Padding within
 /// the reserved final page is mappable; this does not change logical byte size.
 #[derive(Clone)]
 pub struct PageRange {
@@ -33,7 +33,7 @@ impl PageRange {
 }
 
 struct Scatter {
-    // Retain every original owner until all mappings/quarantines release it.
+    // Keep every original owner until all mappings/quarantines release it.
     _ranges: Vec<PageRange>,
     physical: Vec<u64>,
     shift: u8,
@@ -46,7 +46,7 @@ enum Backing {
     Scatter(Arc<Scatter>),
 }
 
-/// An ordered native-page sequence with retained ownership. Cloning allocates
+/// An ordered native-page sequence with kept ownership. Cloning allocates
 /// nothing. Device addresses still require a real attached DmaDomain.
 #[derive(Clone)]
 pub struct DmaPages {
@@ -63,7 +63,7 @@ impl From<PinnedPages> for DmaPages {
 
 impl DmaPages {
     /// Preserve caller order, including repeated pages, without copying data or
-    /// creating a CPU mapping. Every range must share actual geometry/cache
+    /// creating a CPU mapping. Every range must share geometry/cache
     /// policy. An error releases all consumed ranges and metadata.
     pub fn from_ranges(ranges: Vec<PageRange>) -> Result<Self, MemoryError> {
         let first = ranges.first().ok_or(MemoryError::InvalidSize)?;
@@ -105,7 +105,7 @@ impl DmaPages {
     }
 
     /// Return the original single allocation when this sequence has one.
-    /// Scatter sequences never fabricate a contiguous CPU view.
+    /// Scatter sequences never invent a contiguous CPU view.
     pub fn as_single(&self) -> Option<&PinnedPages> {
         match &self.backing {
             Backing::Single(pages) => Some(pages),
@@ -120,7 +120,7 @@ impl DmaPages {
         }
     }
 
-    /// Granule of every retained page in this sequence, not a larger allocation
+    /// Granule of every page in this sequence, not a larger allocation
     /// or hardware-support claim inferred from total bytes or IOVA alignment.
     pub fn page_shift(&self) -> u8 {
         match &self.backing {
@@ -165,7 +165,7 @@ mod tests {
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
-    // SAFETY: actual aligned zeroed test CPU storage, with immutable symbolic
+    // SAFETY: aligned zeroed test CPU storage, with immutable symbolic
     // physical labels never dereferenced or submitted to hardware.
     unsafe impl PageBacking for Model {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -227,8 +227,8 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(cloned);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        // The original per-allocation CPU view still retains only its own pin.
-        // SAFETY: retained mapping owns this initialized byte; no DMA exists.
+        // The original per-allocation CPU view still keeps only its own pin.
+        // SAFETY: mapping owns this initialized byte; no DMA exists.
         assert_eq!(
             // SAFETY: the pointer addresses this test's own live pages, and the stopped model
             // writes nothing concurrently.

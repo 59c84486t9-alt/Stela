@@ -27,10 +27,10 @@ impl Prepared {
         self.0.delta(previous, current)
     }
     /// # Safety
-    /// The retained root owns this FADT's fixed SystemIO resource after EBS.
+    /// The kept root owns this FADT's fixed SystemIO resource after EBS.
     unsafe fn raw(self) -> u32 {
         let value: u32;
-        // SAFETY: source-qualified fixed timer port; a read has no clear effect.
+        // SAFETY: source-checked fixed timer port; a read has no clear effect.
         unsafe {
             asm!("in eax, dx", in("dx") self.port, out("eax") value, options(nomem, nostack, preserves_flags));
         }
@@ -41,7 +41,7 @@ impl Prepared {
     /// with bounded failure instead of an unbounded IRQ-context retry.
     pub(super) unsafe fn read(self) -> Result<u32, WorkError> {
         for _ in 0..8 {
-            // SAFETY: identical retained fixed resource for all three reads.
+            // SAFETY: identical kept fixed resource for all three reads.
             let (a, b, c) = unsafe { (self.raw(), self.raw(), self.raw()) };
             if !((a > b && a < c) || (b > c && b < a) || (c > a && c < b)) {
                 return Ok(b);

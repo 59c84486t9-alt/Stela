@@ -1,5 +1,5 @@
 //! DeviceTree namespace records, independent of a backing medium or driver.
-//! The execution model assigns and erases actual medium extents separately.
+//! The execution model assigns and erases medium extents separately.
 use alloc::vec::Vec;
 
 pub const BLOCK_BYTES: u32 = 4096;

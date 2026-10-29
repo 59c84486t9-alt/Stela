@@ -9,7 +9,7 @@ use crate::bus::dma::{
 use alloc::sync::Arc;
 use core::{ffi::c_void, marker::PhantomData};
 
-/// AMDGPU_GPU_PAGE_SIZE in the retained amdgpu headers, independently of the
+/// AMDGPU_GPU_PAGE_SIZE in the amdgpu headers, independently of the
 /// native CPU page size. These are ordinary system-memory leaf PTE updates.
 pub const GPU_PAGE_BYTES: usize = 4096;
 
@@ -22,8 +22,8 @@ pub enum StorageError {
 }
 
 /// An error after CPU stores may leave a modified, unpublished table. The real
-/// owner must retain both table and source leases, then retry visibility or
-/// tear down under actual GPU quiescence. No rollback or GPU flush is implied.
+/// owner must keep both table and source leases, then retry visibility or
+/// tear down under GPU quiescence. No rollback or GPU flush is implied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UpdateError {
     pub error: StorageError,
@@ -42,7 +42,7 @@ pub struct SystemPageUpdate {
 }
 
 /// Exact invalid-entry policy selected by the initialized GMC/VM owner.
-/// `flags` must encode an invalid entry for that actual table and generation;
+/// `flags` must encode an invalid entry for that table and generation;
 /// clearing address bits alone does not invalidate a GPU translation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemPageClear {
@@ -51,8 +51,8 @@ pub struct SystemPageClear {
     pub flags: u64,
 }
 
-/// Actual initialized GMC entry operations, borrowed for synchronous calls.
-/// These functions must not unwind or retain the table pointer.
+/// Initialized GMC entry operations, borrowed for synchronous calls.
+/// These functions must not unwind or keep the table pointer.
 pub struct GmcCpuCallbacks<'a> {
     context: *mut c_void,
     override_flags: unsafe extern "C" fn(*mut c_void, u64, *mut u64),
@@ -61,14 +61,14 @@ pub struct GmcCpuCallbacks<'a> {
 }
 
 impl<'a> GmcCpuCallbacks<'a> {
-    /// Borrow the actual device/VM owner's initialized generation callbacks.
+    /// Borrow the device/VM owner's initialized generation callbacks.
     ///
     /// # Safety
     /// `context` and both callbacks must remain valid and exclusively borrowed
     /// for `'a`. They must implement the real GMC override and entry-write
     /// algorithms, including architecture-correct stores and flags. Every call
     /// must be synchronous, infallible for its prevalidated range, non-reentrant
-    /// and non-unwinding. The override must resolve actual RAM/NUMA/coherency
+    /// and non-unwinding. The override must resolve RAM/NUMA/coherency
     /// facts without treating domain IOVAs as CPU physical addresses. Callers
     /// must not supply placeholders or infer device initialization from PCI ID.
     pub unsafe fn borrow_initialized(
@@ -86,7 +86,7 @@ impl<'a> GmcCpuCallbacks<'a> {
 }
 
 /// CPU and domain mappings from the same canonical reserved RAM allocation.
-/// Dropping an active DMA lease uses canonical quarantine, retaining the real
+/// Dropping an active DMA lease uses canonical quarantine, keeping the real
 /// pages and domain. Explicit release requires GPU quiescence and process or
 /// deferred context; this type cannot prove those hardware conditions.
 pub struct RamPageTable {
@@ -97,7 +97,7 @@ pub struct RamPageTable {
 impl RamPageTable {
     /// Allocate real table storage using the platform's existing page source
     /// and attached requester domain. `alignment`, cache policy and address
-    /// limit must satisfy the actual device's requirements. Failure propagates
+    /// limit must satisfy the device's requirements. Failure propagates
     /// the real service error; no identity-DMA or heap fallback exists.
     /// This does not publish or register the storage with a GPU.
     pub fn allocate(
@@ -139,30 +139,30 @@ impl RamPageTable {
         self.cpu.bytes()
     }
 
-    /// Actual requester-domain IOVA, not a GPU VA or CPU physical address.
+    /// Requester-domain IOVA, not a GPU VA or CPU physical address.
     /// Obtaining it does not establish GPU page-table binding or visibility.
     pub fn domain_address(&self) -> Result<u64, StorageError> {
         self.dma.address().map_err(StorageError::Dma)
     }
 
     /// Write bounded leaf PTEs with amdgpu's CPU loop, then perform the
-    /// canonical DMA domain's actual CPU-to-device visibility operation.
+    /// canonical DMA domain's CPU-to-device visibility operation.
     /// Success reports CPU entries written; it does not publish a GPU mapping.
-    /// A DMA visibility error reports the written count and retains ownership.
+    /// A DMA visibility error reports the written count and keeps ownership.
     ///
     /// # Safety
-    /// The actual initialized GPU owns this table and `source` in exactly the
+    /// The initialized GPU owns this table and `source` in exactly the
     /// same requester/domain. Its BO/VM reservations and reset/read exclusion
     /// must cover the entire update. All prior GPU/CPU users of this range must
     /// have finished; no concurrent writer or active Rust reference may alias
-    /// the destination. The owner must validate actual table level/index and
+    /// the destination. The owner must validate table level/index and
     /// generation PTE flags, address-mask/aperture compatibility, source access
-    /// rights and logical BO bounds. Actual source-data visibility and cache
+    /// rights and logical BO bounds. Source-data visibility and cache
     /// ownership transfers remain the source owner's responsibility. The
     /// callbacks must be that owner's initialized GMC operations. Domain IOVA,
     /// CPU physical pages and GPU VA must never be substituted for one another.
-    /// Both table and source leases must remain retained until PTE removal,
-    /// actual GPU HDP/TLB publication/invalidation and hardware fence completion
+    /// Both table and source leases must remain held until PTE removal,
+    /// GPU HDP/TLB publication/invalidation and hardware fence completion
     /// establish that no access remains. Required process/deferred context
     /// applies. This method supplies none of those VM, fence or TLB services.
     pub unsafe fn write_system_pages(
@@ -229,24 +229,24 @@ impl RamPageTable {
 
     /// Replace bounded system-memory leaf PTEs with the initialized owner's
     /// invalid encoding, then make those CPU stores visible through the real
-    /// DMA domain. Address bits are zero; `flags` supplies the actual GMC policy.
+    /// DMA domain. Address bits are zero; `flags` supplies the GMC policy.
     /// No source-address override is run for an invalid entry.
     ///
     /// Success reports CPU entries written. It does not remove an existing GPU
     /// translation or authorize releasing its backing: GPU HDP/TLB invalidation
     /// and completion remain mandatory, even after successful DMA visibility.
-    /// A visibility failure retains modified entries and reports their count.
+    /// A visibility failure keeps modified entries and reports their count.
     ///
     /// # Safety
-    /// The actual initialized VM owner must hold the same reservations, table
+    /// The initialized VM owner must hold the same reservations, table
     /// level/index, reset and CPU-write exclusion as `write_system_pages`.
     /// `flags` must be that generation's invalid system-memory leaf encoding,
     /// with no valid/access bits, PRT/sparse marker or physical address bits.
     /// Sparse/fault mappings require their original separate VM path. The
-    /// callbacks must belong to this initialized GMC and implement its actual
+    /// callbacks must belong to this initialized GMC and implement its
     /// entry stores.
-    /// All old source/table leases and VM references must remain retained until
-    /// actual GPU HDP/TLB invalidation and hardware completion establish that
+    /// All old source/table leases and VM references must remain held until
+    /// GPU HDP/TLB invalidation and hardware completion establish that
     /// stale translations and in-flight requests cannot access them. No new
     /// writer or submission may race the clear/publication/retirement sequence.
     /// Required process/deferred context applies. This operation itself proves
@@ -277,7 +277,7 @@ impl RamPageTable {
             .address(update.table_offset, table_bytes)
             .map_err(|_| fail(StorageError::MappingUnavailable))?;
         for index in 0..update.count {
-            // SAFETY: the owner supplies the actual invalid-entry encoding and
+            // SAFETY: the owner supplies the invalid-entry encoding and
             // initialized GMC store; preflight bounds every destination entry.
             unsafe {
                 (gmc.set_pte_pde)(gmc.context, table.as_ptr().cast(), index, 0, update.flags)
@@ -293,8 +293,8 @@ impl RamPageTable {
     }
 
     /// Release only after removal from all GPU page directories/VM roots,
-    /// actual GPU TLB invalidation, completion and drained users. A failed
-    /// domain unmap retains storage for retry; Drop quarantines it otherwise.
+    /// GPU TLB invalidation, completion and drained users. A failed
+    /// domain unmap keeps storage for retry; Drop quarantines it otherwise.
     ///
     /// # Safety
     /// All hardware accesses have finished and cannot restart; reservations,
@@ -336,7 +336,7 @@ mod tests {
     unsafe impl Send for ModelBacking {}
     // SAFETY: this synchronous model has no hardware or asynchronous writers.
     unsafe impl Sync for ModelBacking {}
-    // SAFETY: uniquely owned zeroed aligned RAM represents retained model pages.
+    // SAFETY: uniquely owned zeroed aligned RAM represents kept model pages.
     // Physical metadata is synthetic and is never supplied to a real device.
     unsafe impl PageBacking for ModelBacking {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -414,7 +414,7 @@ mod tests {
         end: AtomicUsize,
     }
     // SAFETY: synchronous ownership model, no hardware mappings or invalidation.
-    // Deliberately distinct IOVA and physical metadata exercise address separation.
+    // Distinct IOVA and physical metadata exercise address separation.
     unsafe impl DmaDomain for ModelDomain {
         unsafe fn map(
             &self,
@@ -487,7 +487,7 @@ mod tests {
         address: u64,
         flags: u64,
     ) {
-        // SAFETY: retained C preflight bounds the actual mapped model storage.
+        // SAFETY: C preflight bounds the mapped model storage.
         let gmc = unsafe { &mut *context.cast::<ModelGmc>() };
         gmc.writes += 1;
         // amdgpu_gmc_set_pte_pde's encoding.
@@ -696,7 +696,7 @@ mod tests {
         assert!(table.domain_address().is_ok());
         assert_eq!(pages.released.load(Ordering::Relaxed), 0);
         domain.fail_unmap.store(false, Ordering::Relaxed);
-        // SAFETY: retry remains quiescent and retains the exact original domain mapping.
+        // SAFETY: retry remains quiescent and keeps the original domain mapping.
         unsafe {
             table.unmap().unwrap();
         }

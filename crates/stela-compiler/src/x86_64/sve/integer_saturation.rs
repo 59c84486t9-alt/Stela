@@ -31,7 +31,7 @@ const QWORD_LOW_BITS: u64 = 1;
 const BITS_PER_BYTE: usize = 8;
 
 fn binary(code: &mut Code, opcode: Host, destination: u8, source: u8) {
-    // This family's packed recipes deliberately require only the SSE2 baseline.
+    // This family's packed recipes require only the SSE2 baseline.
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 fn copy(code: &mut Code, destination: u8, source: u8) {

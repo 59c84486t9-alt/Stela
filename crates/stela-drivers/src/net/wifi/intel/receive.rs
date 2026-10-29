@@ -217,9 +217,9 @@ pub struct Alive<'a> {
     raw: &'a [u8],
 }
 impl<'a> Alive<'a> {
-    /// Decode the actual image's negotiated layout, never a guessed default.
-    /// The result is plain metadata; only a retained transport receiving this
-    /// packet via its actual completed current-epoch RX may release ROM DMA.
+    /// Decode the image's negotiated layout, never a guessed default.
+    /// The result is plain metadata; only a transport receiving this
+    /// packet via its completed current-epoch RX may release ROM DMA.
     pub fn decode(packet: &Packet<'a>, firmware: &Firmware<'_>) -> Result<Self, Error> {
         if packet.command != 1 || packet.group != 0 {
             return Err(Error::NotAlive);

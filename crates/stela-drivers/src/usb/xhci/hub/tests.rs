@@ -53,7 +53,7 @@ fn superspeed_cold_hub_uses_actual_contexts_depth_power_routes_and_bulk_io() {
     for context in [32, 64] {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive live backing remains retained through all DMA.
+        // SAFETY: exclusive live backing remains held through all DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, context, nodes());
         let mut failures = Vec::new();
@@ -145,7 +145,7 @@ fn nested_superspeed_hubs_preserve_five_route_nibbles_and_no_usb2_tt() {
     }
     let mut backing = vec![0u64; 512 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive backing retains every ancestor/child context and TD.
+    // SAFETY: exclusive backing keeps every ancestor/child context and TD.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
@@ -215,7 +215,7 @@ fn asymmetric_or_unknown_actual_ssp_port_status_never_inherits_upstream_speed() 
         root.ports.as_mut().unwrap()[0].extended = extended;
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: rejected child links cannot release or reuse retained DMA.
+        // SAFETY: rejected child links cannot release or reuse kept DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -260,7 +260,7 @@ fn actual_hub_power_and_overcurrent_health_gate_all_downstream_admission() {
         root.after_power_status = after;
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed power admission retains every controller/hub allocation.
+        // SAFETY: failed power admission keeps every controller/hub allocation.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -292,7 +292,7 @@ fn historical_local_power_change_is_acknowledged_and_health_rechecked() {
     nodes.get_mut(&0).unwrap().hub_change = 1;
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all hub and child DMA is retained by the fixture's actual owners.
+    // SAFETY: all hub and child DMA is held by the fixture's owners.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
@@ -329,7 +329,7 @@ fn port_admission_refuses_power_lifecycle_reset_and_status_failures() {
         nodes.insert(0, fault_node(fault));
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: allocations remain retained even after uncertain operations.
+        // SAFETY: allocations remain held even after uncertain operations.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -365,7 +365,7 @@ fn inactive_and_failed_hot_reset_require_real_bounded_warm_reset() {
         nodes.insert(0, fault_node(fault));
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: fixture retains complete DMA ownership through every reset.
+        // SAFETY: fixture keeps complete DMA ownership through every reset.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -394,7 +394,7 @@ fn disconnect_during_reset_does_not_publish_a_child_or_recycle_hub_owners() {
     nodes.insert(0, fault_node(Fault::Disconnect));
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the disconnected hub's original DMA remains retained.
+    // SAFETY: the disconnected hub's original DMA remains held.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
@@ -423,7 +423,7 @@ fn failed_or_uncertain_hub_configuration_never_sends_depth_or_power() {
     for silent in [false, true] {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all rings/contexts remain retained after failed Configure.
+        // SAFETY: all rings/contexts remain held after failed Configure.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes());
         if silent {
@@ -539,7 +539,7 @@ fn malformed_hub_descriptors_and_bos_never_reach_configuration_or_child_allocati
         root.bos = bos;
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: even malformed wire inputs only access retained fixture DMA.
+        // SAFETY: even malformed wire inputs only access kept fixture DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -575,7 +575,7 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
     nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[1].fault = Fault::Reset;
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the already admitted child and failed port's hub retain owners.
+    // SAFETY: the already admitted child and failed port's hub keep owners.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
@@ -601,7 +601,7 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
     // A failed sibling port does not authorize resetting this already active
     // child with only part of its endpoint inventory. Downstream leaf reset
     // itself is supported, but requires exclusive ownership of every DCI.
-    // SAFETY: this test retains the full actual class endpoint set and DMA.
+    // SAFETY: this test keeps the full class endpoint set and DMA.
     let error =
         unsafe { controller.reset_and_identify(child, &endpoints[..1], &mut dma) }.unwrap_err();
     assert!(matches!(
@@ -616,8 +616,8 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
     );
     let old_output = controller.slot(child.slot).unwrap()._output.physical();
     // The complete inventory permits resetting the exclusive healthy leaf;
-    // the unrelated failed port neither grants nor prevents that authority.
-    // SAFETY: all configured DCIs belong exclusively to this retained test.
+    // the unrelated failed port neither grants nor prevents that permission.
+    // SAFETY: all configured DCIs belong exclusively to this test.
     let fresh = unsafe { controller.reset_and_identify(child, &endpoints, &mut dma) }.unwrap();
     assert_ne!(fresh.id, child.id);
     assert!(controller.device(child.id).is_err());
@@ -660,7 +660,7 @@ fn invalid_route_and_retired_or_foreign_hub_owner_refuse_before_transport_effect
     assert!(child(1, root, 1, HIGH_SPEED).is_err());
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all addressed but unconfigured state remains retained.
+    // SAFETY: all addressed but unconfigured state remains held.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes());
     let mut device = controller
@@ -852,7 +852,7 @@ fn superspeed_reset_waits_for_reconnection_and_ignores_reset_connection_change()
         nodes.insert(0, fault_node(fault));
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: fixture RAM and all contexts remain retained through completion.
+        // SAFETY: fixture RAM and all contexts remain held through completion.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 64, nodes);
         let mut failures = Vec::new();
@@ -879,7 +879,7 @@ fn observed_hub_power_loss_quarantines_all_previous_children_without_releasing_d
     ]);
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all fixture DMA owners remain retained until the controller drops.
+    // SAFETY: all fixture DMA owners remain held until the controller drops.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     model.borrow_mut().loss_after_child_route = Some(1);
@@ -902,7 +902,7 @@ fn observed_hub_power_loss_quarantines_all_previous_children_without_releasing_d
         model.borrow().mmio_writes,
     );
     let memory = backing.clone();
-    // Restoring observed power cannot revive either retained old handle.
+    // Restoring observed power cannot revive either kept old handle.
     model.borrow_mut().nodes.get_mut(&0).unwrap().hub_status = 0;
     for device in &devices {
         assert!(controller.endpoint_ready(device.slot, 3).is_err());
@@ -985,7 +985,7 @@ fn bus_powered_hub_charges_controller_and_ports_once_and_commits_actual_configur
     }
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: fixture backing is exclusively retained through every DMA access.
+    // SAFETY: fixture backing is exclusively kept through every DMA access.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
@@ -1024,7 +1024,7 @@ fn bus_powered_hub_never_powers_ports_without_a_current_reservation() {
     }
     let mut backing = vec![0u64; 512 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all hub and child contexts remain retained in exclusive fixture RAM.
+    // SAFETY: all hub and child contexts remain held in exclusive fixture RAM.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
@@ -1094,7 +1094,7 @@ fn bus_powered_child_configuration_cannot_bypass_the_one_unit_limit() {
     let nodes = BTreeMap::from([(0, bus_powered_hub(1)), (1, leaf)]);
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: controller and every retained TD reference this exclusive live RAM.
+    // SAFETY: controller and every TD reference this exclusive live RAM.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
@@ -1142,7 +1142,7 @@ fn consecutive_bus_hubs_refuse_but_self_powered_downstream_hubs_keep_local_capac
         let nodes = BTreeMap::from([(0, bus_powered_hub(1)), (1, middle), (0x11, leaf)]);
         let mut backing = vec![0u64; 512 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all nested parent and child DMA owners retain the backing.
+        // SAFETY: all nested parent and child DMA owners keep the backing.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 64, nodes);
         let mut failures = Vec::new();
@@ -1184,7 +1184,7 @@ fn failed_or_uncertain_raw_configuration_keeps_maximum_draw_until_actual_ack() {
         let nodes = BTreeMap::from([(0, leaf)]);
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: DMA remains retained across control cancellation and retries.
+        // SAFETY: DMA remains held across control cancellation and retries.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -1228,7 +1228,7 @@ fn usb2_bus_hub_uses_two_ma_configuration_units_and_hundred_ma_child_limits() {
     let nodes = BTreeMap::from([(0, hub), (1, first), (2, second)]);
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the USB2 TT tree retains the actual fixture contexts and payloads.
+    // SAFETY: the USB2 TT tree keeps the fixture contexts and payloads.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
@@ -1262,7 +1262,7 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
         PP | CCS | PED | u32::from(SUPER_SPEED) << 10 | (1 << 3),
         CCS | PED | u32::from(SUPER_SPEED) << 10,
         PP,                        // Physical disconnect also removes the speed observation.
-        PP | CCS | PED,            // Unknown protocol state cannot preserve authority.
+        PP | CCS | PED,            // Unknown protocol state cannot preserve permission.
         PP | CCS | PED | (1 << 3), // Over-current with unknown wire speed.
     ] {
         let nodes = BTreeMap::from([(0, Node::leaf(SUPER_SPEED))]);
@@ -1304,7 +1304,7 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
     let nodes = BTreeMap::from([(0, Node::leaf(SUPER_SPEED))]);
     let mut backing = vec![0u64; 256 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: no device is granted DMA until its root protocol qualifies.
+    // SAFETY: no device is granted DMA until its root protocol checks.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     controller.port_major[0] = 0;
@@ -1386,7 +1386,7 @@ fn hub_endpoint_teardown_does_not_authorize_reconfiguration_of_live_children() {
         let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(speed))]);
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all old hub/child DMA owners retain this exclusive RAM.
+        // SAFETY: all old hub/child DMA owners keep this exclusive RAM.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -1522,7 +1522,7 @@ fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
         let nodes = BTreeMap::from([(0, hub)]);
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the model consumes actual DMA from retained backing only.
+        // SAFETY: the model consumes DMA from kept backing only.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -1546,7 +1546,7 @@ fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
         hub.descriptor = Some(bytes);
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: malformed wire data cannot alter the retained fixture range.
+        // SAFETY: malformed wire data cannot alter the fixture range.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, 64, BTreeMap::from([(0, hub)]));
         let mut failures = Vec::new();
@@ -1562,7 +1562,7 @@ fn retained_hub_status_uses_same_reserved_field_contract_as_cold_enumeration() {
         let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: raw status replies target only the retained hub EP0 DMA.
+        // SAFETY: raw status replies target only the hub EP0 DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();

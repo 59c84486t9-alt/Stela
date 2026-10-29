@@ -867,7 +867,7 @@ fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_rec
         } else {
             assert!(link.firmware.is_none());
         }
-        drop(provider); // Actual native link must not borrow the image/catalog.
+        drop(provider); // Native link must not borrow the image/catalog.
         assert!(link.carrier());
         link.transmit(&[0x5a; 1514]).unwrap();
         assert_eq!(model.borrow().outgoing[0].len(), 1522);

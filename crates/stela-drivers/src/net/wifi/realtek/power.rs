@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
 //! RTL8822C source MAC power sequence, before firmware upload. This controls
-//! actual power/reset registers and never grants RF/channel/Link readiness.
+//! power/reset registers and never grants RF/channel/Link readiness.
 use super::{
     identity::Chip,
     io::{Error as HardwareError, Io},
@@ -74,15 +74,15 @@ impl<I: Io> Drop for Attempt<'_, I> {
 }
 
 /// Execute source pre-system configuration, on/off power tables and CPU/DDMA
-/// system configuration. Unknown cuts are refused before actual I/O: the
+/// system configuration. Unknown cuts are refused before I/O: the
 /// donor's eight-bit cut mask cannot represent cut >= 7 and would skip rows.
 ///
 /// # Safety
 /// The selected RTL8822C requester has exclusive ownership, isolated DMA and
 /// all previous DMA/IRQ/submission workers stopped and drained. No powered
-/// radio operation or other caller races this sequence; the retained beacon
+/// radio operation or other caller races this sequence; the beacon
 /// queue is fresh/idle. Power transitions do not prove IOMMU invalidation or
-/// authorize releasing any queue/domain/pin. On error the actual I/O owner is
+/// authorize releasing any queue/domain/pin. On error the I/O owner is
 /// quarantined, and no retry is allowed without independent reset/ownership.
 pub unsafe fn on<I: Io>(io: &mut I) -> Result<(), Error> {
     let profile = io.profile();
@@ -321,7 +321,7 @@ mod tests {
             Ok(())
         }
     }
-    // SAFETY: serial virtual power-state model, actual bytes/events recorded;
+    // SAFETY: serial virtual power-state model, bytes/events recorded;
     // no real requester/power/firmware/privileged DMA is claimed by this test.
     unsafe impl Io for Model {
         fn profile(&self) -> Profile {

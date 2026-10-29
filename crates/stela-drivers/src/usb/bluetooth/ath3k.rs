@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2008-2009 Atheros Communications Inc.
 //! AR3011/AR3012 raw USB firmware bootloader. This owner is never an HCI link:
-//! completed download requests still require genuine USB reenumeration before
+//! completed download requests still require USB reenumeration before
 //! another, freshly inventoried runtime device can attach.
 mod host;
 mod identity;
@@ -147,7 +147,7 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
-/// Retained exactly-once raw uploader, including terminal failures and uncertain
+/// Exactly-once raw uploader, including terminal failures and uncertain
 /// DMA ownership. No operation can reinterpret this attachment as a runtime HCI.
 pub struct Bootloader<B: Io> {
     binding: Binding,

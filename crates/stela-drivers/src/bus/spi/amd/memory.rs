@@ -28,7 +28,7 @@ pub enum Lanes {
     Quad = 4,
 }
 
-/// These describe the actual peripheral and board pins retained by Registers.
+/// These describe the peripheral and board pins kept by Registers.
 /// Values describe that ownership; constructing this value grants no pins.
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryDevice {
@@ -58,12 +58,12 @@ pub struct Operation<'a> {
     pub address: u64,
     pub address_bytes: u8,
     pub dummy_bytes: u8,
-    /// Zero uses the actual device limit; a nonzero value is capped to it.
+    /// Zero uses the device limit; a nonzero value is capped to it.
     pub max_hz: u32,
     pub data: Data<'a>,
 }
 impl Operation<'_> {
-    /// Safe index-mode payload capacity, including the actual FIFO header.
+    /// Safe index-mode payload capacity, including the FIFO header.
     /// Returns zero when the header itself does not fit. This does not change
     /// the supplied operation or infer permission to split a device command.
     pub fn maximum_data_len(&self) -> usize {
@@ -74,7 +74,7 @@ impl Operation<'_> {
 }
 
 // The named read command families in spi-amd.c define their hardware phases.
-// Unknown commands retain ordinary single-line behavior; writes are single-line.
+// Unknown commands keep ordinary single-line behavior; writes are single-line.
 fn protocol(opcode: u8) -> (Lanes, Lanes, bool) {
     match opcode {
         0x3b => (Lanes::Single, Lanes::Dual, false),

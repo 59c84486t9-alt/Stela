@@ -59,7 +59,7 @@ pub struct Tagger {
     inclusive: bool,
 }
 
-/// Actual register observations supplied by the owning register boundary.
+/// Register observations supplied by the owning register boundary.
 /// No default implementation substitutes zeros for unavailable observations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TagRegisters {
@@ -71,7 +71,7 @@ pub struct TagRegisters {
 }
 
 impl Tagger {
-    /// Parse the original complete handoff property, retaining its opaque
+    /// Parse the original complete handoff property, keeping its opaque
     /// word and dead-page value. There is no absent-property constructor:
     /// an original restore DT is not an observed post-mBoot register image.
     pub fn parse(property: &[u8], inclusive: bool) -> Result<Self, &'static str> {
@@ -181,7 +181,7 @@ impl Tagger {
 
     /// The original SPTM powerup predicate, including its explicit capability
     /// and lock-check exception. Success verifies these supplied observations;
-    /// it does not qualify active tagger DMA, retained power or reset effects.
+    /// it does not check active tagger DMA, kept power or reset effects.
     pub fn verify(
         self,
         parameters4: u32,
@@ -264,7 +264,7 @@ impl AddressRegion {
         if bytes > 1 << 32 {
             return Err("gen3 DART address-region size exceeds the recovered constructor width");
         }
-        // These explicit qualification bounds prevent unmodeled truncation;
+        // These explicit validation bounds prevent unmodeled truncation;
         // the original local constructor itself checks only alignment.
         for base in [input, output] {
             if base >= ADDRESS_LIMIT
@@ -294,7 +294,7 @@ impl AddressRegion {
 
     /// The control/start/final-page/offset payload fields. Publication first
     /// clears control/enable, stores bounds/offset, then control and enable.
-    /// The offset write retains its upper bits; original readback compares
+    /// The offset write keeps its upper bits; original readback compares
     /// the native 30-bit masked field, including a negative encoded difference.
     pub const fn words(self) -> [u32; 4] {
         [self.control, self.start, self.last, self.offset]
@@ -345,7 +345,7 @@ impl AddressRegion {
     }
 
     /// Verify fresh observations after programming and an optional lock.
-    /// Barriers, actual writes and observations belong to the owning boundary.
+    /// Barriers, writes and observations belong to the owning boundary.
     pub fn verify(
         self,
         actual: &AddressRegisters,
@@ -529,7 +529,7 @@ mod tests {
         actual.config = 7;
         assert!(tagger.verify(4, Some(&actual), false).is_err());
         // This is the source verifier's no-tagger branch, not permission
-        // to expose fabricated zero registers or perform active region DMA.
+        // to expose invented zero registers or perform active region DMA.
         Tagger::parse(&property(1, 3, regions, 0), false)
             .unwrap()
             .verify(0, None, true)

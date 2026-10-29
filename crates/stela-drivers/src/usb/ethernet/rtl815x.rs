@@ -510,8 +510,8 @@ impl<C: Control> Chip<C> {
         self.aldps(true)
     }
 
-    /// Actual PHY carrier drives MAC enabling. A disconnected link is never
-    /// assumed up merely because USB enumeration or initialization succeeded.
+    /// PHY carrier drives MAC enabling. A disconnected link is never
+    /// assumed up because USB enumeration or initialization succeeded.
     pub fn carrier(&mut self) -> Result<bool, BlockError> {
         if !self.initialized {
             return Err(BlockError::Unsupported("RTL815x chip is not initialized"));

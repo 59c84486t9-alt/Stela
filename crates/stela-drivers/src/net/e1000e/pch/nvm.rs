@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright(c) 1999 - 2018 Intel Corporation.
 // Copyright (c) 2026 Stela contributors
-//! Read-only PCH NVM banks and the actual hardware flash sequencing engine.
+//! Read-only PCH NVM banks and the hardware flash sequencing engine.
 //! No erase/program/checksum-repair command is issued. Missing valid banks and
 //! family-required checksums fail explicitly instead of falling back to bank
-//! zero. Actual-ID-selected TGP/ADP validation follows its source marker policy.
+//! zero. ID-selected TGP/ADP validation follows its source marker policy.
 use super::Delay;
 use alloc::{boxed::Box, vec::Vec};
 
@@ -33,7 +33,7 @@ pub enum Layout {
     Lpt,
     Spt,
 }
-/// Private actual-PCI-family policies selected by the cold I219 constructor.
+/// Private PCI-family policies selected by the cold I219 constructor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum I219Validation {
     Tgp,
@@ -73,16 +73,16 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Actual serialized access to this PCH MAC and its flash-register window.
+/// Serialized access to this PCH MAC and its flash-register window.
 ///
 /// # Safety
-/// The implementation retains the real exclusive powered PCI reservation and
+/// The implementation keeps the real exclusive powered PCI reservation and
 /// UC mappings, excluding firmware/SMM, other drivers, workers and resets from
 /// the complete hardware sequencer and NVM for its entire lifetime. MAC reads
 /// and flash width-specific accesses are real bounded/aligned little-endian
 /// volatile operations; reads flush this function's posted writes. Errors do
 /// not invent observations or acknowledged stores. Existing native DMA/IRQs
-/// are drained before granting access. The flash window is the actual separate
+/// are drained before granting access. The flash window is the separate
 /// flash BAR on PCH2/LPT or MAC BAR+0xe000 on SPT, not a guessed physical cast.
 pub unsafe trait Registers: 'static {
     fn read_mac32(&mut self, offset: u32) -> Result<u32, Error>;
@@ -130,8 +130,8 @@ pub struct Nvm<R: Registers, D: Delay> {
 }
 impl<R: Registers, D: Delay> Nvm<R, D> {
     /// # Safety
-    /// `layout` comes from the actual live PCH PCI generation, not a guessed
-    /// family match. `io` and `delay` satisfy the actual device/resource and
+    /// `layout` comes from the live PCH PCI generation, not a guessed
+    /// family match. `io` and `delay` satisfy the device/resource and
     /// minimum elapsed-time contracts; the caller has a fresh exclusive reset
     /// epoch. NVM is immutable except for this owner's read-only sequencing.
     /// No failed access epoch is reconstructed without real reset/recovery.
@@ -398,9 +398,9 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
         }
         result
     }
-    /// Source TGP/ADP checksum policy after actual PCI family selection. The
+    /// Source TGP/ADP checksum policy after PCI family selection. The
     /// selected bank is still observed by `read`; station validity is separate.
-    /// TGP alone skips the checksum when its actual NVM compatibility marker
+    /// TGP alone skips the checksum when its NVM compatibility marker
     /// is clear, or accepts its successfully read uninitialized checksum word.
     /// ADP always checks the checksum and does not demand repair.
     pub(super) fn validate_i219(&mut self, family: I219Validation) -> Result<(), Error> {
@@ -448,7 +448,7 @@ impl<R: Registers, D: Delay> Drop for Nvm<R, D> {
         if self.poisoned
             && let Some(owner) = self.io.take()
         {
-            // Retain the actual claim and mappings after uncertain flash state.
+            // Keep the claim and mappings after uncertain flash state.
             core::mem::forget(owner);
         }
     }
@@ -551,7 +551,7 @@ mod tests {
         }
     }
     // SAFETY: one serial deterministic register/flash model with no concurrent
-    // native producer; actual flash operations are not performed by this fixture.
+    // native producer; flash operations are not performed by this fixture.
     unsafe impl Registers for Io {
         fn read_mac32(&mut self, at: u32) -> Result<u32, Error> {
             let mut s = self.state.borrow_mut();
@@ -681,7 +681,7 @@ mod tests {
             state: state.clone(),
             released: released.clone(),
         };
-        // SAFETY: one controlled fresh model matches its actual selected layout.
+        // SAFETY: one controlled fresh model matches its selected layout.
         let nvm = unsafe { Nvm::new(layout, io, Timer(state.clone())) }.unwrap();
         (nvm, state, released)
     }
@@ -857,7 +857,7 @@ mod tests {
                 released: released.clone(),
             };
             assert!(matches!(
-                // SAFETY: sole actual model reservation, with the chosen layout.
+                // SAFETY: sole model reservation, with the chosen layout.
                 unsafe { Nvm::new(layout, io, Timer(state.clone())) },
                 Err(Error::FirmwareOwned)
             ));
@@ -874,7 +874,7 @@ mod tests {
         let mut flash = vec![0u32; 8];
         let flashp = NonNull::new(flash.as_mut_ptr().cast()).unwrap();
         let owner: Arc<dyn core::any::Any> = Arc::new(());
-        // SAFETY: exclusive stable allocations stand in for the two actual UC
+        // SAFETY: exclusive stable allocations stand in for the two UC
         // windows in this model only; no physical-hardware proof is inferred.
         let mut separate =
             unsafe { NvmMmio::from_separate_windows(macp, 0x10000, flashp, 32, owner.clone()) }
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(separate.read32(32), Err(Error::Bounds));
         assert_eq!(flash[2], 0);
         drop(separate);
-        // SAFETY: actual same-allocation +e000 subwindow and complete bounds.
+        // SAFETY: same-allocation +e000 subwindow and complete bounds.
         let mut integrated = unsafe { NvmMmio::from_mac_window(macp, 0x10000, owner) }.unwrap();
         integrated.write32(4, 0x5678_0000).unwrap();
         assert_eq!(integrated.read32(4).unwrap(), 0x5678_0000);

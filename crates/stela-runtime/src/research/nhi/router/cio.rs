@@ -1,9 +1,9 @@
 //! Original CIO router-header callbacks, not a router capability image.
 //!
 //! The 26A434 T8112 firmware's per-word callback at 0x1104d4 owns these
-//! masks, retained route fields and events. Its two event destinations are
-//! distinct original task queues. The actual CIO owner must supply all
-//! initial state and atomically retain generated events; no ready state,
+//! masks, kept route fields and events. Its two event destinations are
+//! distinct original task queues. The CIO owner must supply all
+//! initial state and atomically keep generated events; no ready state,
 //! register defaults, event completion or Configuration backend is implied.
 use alloc::vec::Vec;
 
@@ -17,8 +17,8 @@ const LIMIT_MASK: u32 = 0x3fff;
 const LIMIT_CONTROL: u32 = 0xc000_c000;
 
 /// Original 0x110458 read callback after the registered RAM word has been
-/// read. Limits are actual controller +0x274a/+0x274c values; `read_control`
-/// reads the actual mapped CIO control resource at the supplied byte offset.
+/// read. Limits are controller +0x274a/+0x274c values; `read_control`
+/// reads the mapped CIO control resource at the supplied byte offset.
 /// No register bank or live-device default is provided. TMU words have their
 /// own registered owner and must not fall through to this RAM callback.
 pub fn read_registered_word(
@@ -37,7 +37,7 @@ pub fn read_registered_word(
     }
 }
 
-/// Actual retained controller fields at +0x3a8/+0x3ac/+0x3b0.
+/// Controller fields at +0x3a8/+0x3ac/+0x3b0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingRoute {
     pub high: u32,
@@ -45,14 +45,14 @@ pub struct PendingRoute {
     pub state: u32,
 }
 
-/// Required actual state. There is deliberately no Default or capability
+/// Required state. There is no Default or capability
 /// constructor: a nine-word header is not the complete configuration bank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct State {
     pub header: [u32; 9],
     pub uuid_aliases: [u32; 2],
     pub pending_route: PendingRoute,
-    /// Retained controller +0x3b4, updated from word4's low byte.
+    /// Controller +0x3b4, updated from word4's low byte.
     pub adapter_count: u32,
 }
 
@@ -122,11 +122,11 @@ impl Header {
             .ok_or("CIO router span overflows its address")
     }
 
-    /// Execute a span in original per-word order. `enqueue` must retain the
+    /// Execute a span in original per-word order. `enqueue` must keep the
     /// whole event batch or refuse without effects. It must not execute the
     /// events inline: their owner observes the committed state afterwards.
     /// Missing callbacks, the original zero route-selector invariant
-    /// and queue refusals preserve every word and retained controller field.
+    /// and queue refusals preserve every word and kept controller field.
     pub fn write(
         &mut self,
         offset: u16,
@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    // Distinct test state exercises preserved bits and retained values. This
+    // Distinct test state exercises preserved bits and kept values. This
     // is not an original/default capability image or a production profile.
     fn state() -> State {
         State {

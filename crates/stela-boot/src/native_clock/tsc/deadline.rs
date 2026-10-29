@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual LAPIC idle/rate eligibility, including Linux init_amd family rules.
+//! LAPIC idle/rate eligibility, including Linux init_amd family rules.
 use super::super::WorkError;
 use core::arch::x86_64::__cpuid_count;
 use stela_boot_core::{

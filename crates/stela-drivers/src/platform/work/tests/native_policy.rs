@@ -17,7 +17,7 @@ impl Binding {
         );
     }
 }
-// SAFETY: real same-thread hosted frames are retained by the executor. Hooks
+// SAFETY: real same-thread hosted frames are held by the executor. Hooks
 // only inspect identity/stack and atomics; no allocation, owner drop or switch.
 unsafe impl SwitchBinding for Binding {
     unsafe fn attach(&self, view: &TaskContext) -> Result<(), WorkError> {
@@ -88,7 +88,7 @@ impl Scene {
         r.drain(r.queue.cpu.ticks() + 1_000_000_000).unwrap();
         for (_, _, wake) in core::mem::take(&mut *self.blocked.lock().unwrap()) {
             // SAFETY: every callback completed and no foreign producer/task exists.
-            // The exact retained binding is idle and this fixture still owns it.
+            // The exact binding is idle and this fixture still owns it.
             drop(unsafe { r.detach_binding(wake.context_id()) }.unwrap());
         }
         // SAFETY: all fixture sources are stopped, callbacks joined and bindings detached.
@@ -96,11 +96,11 @@ impl Scene {
     }
 }
 unsafe fn scene<'a>(p: *mut c_void) -> &'a Scene {
-    // SAFETY: every caller supplies this queue-retained Scene Arc allocation.
+    // SAFETY: every caller supplies this queue-kept Scene Arc allocation.
     unsafe { &*p.cast::<Scene>() }
 }
 unsafe fn block(p: *mut c_void, tag: u8, role: Option<FirmwareRole>) {
-    // SAFETY: callback forwards the matching queue-retained Scene pointer.
+    // SAFETY: callback forwards the matching queue-kept Scene pointer.
     let f = unsafe { scene(p) };
     let r = f.runtime();
     assert_eq!(r.firmware_role_current(), Ok(role));
@@ -144,7 +144,7 @@ unsafe extern "C" fn foreground(p: *mut c_void) {
     unsafe { block(p, 6, None) };
 }
 unsafe extern "C" fn marker(p: *mut c_void) {
-    // SAFETY: queue retains this exact Scene through callback completion.
+    // SAFETY: queue keeps this exact Scene through callback completion.
     let f = unsafe { scene(p) };
     assert_eq!(
         f.runtime().firmware_role_current(),
@@ -157,7 +157,7 @@ unsafe extern "C" fn rejected(p: *mut c_void) {
     unsafe { scene(p) }.event(99);
 }
 unsafe extern "C" fn signal_portal(p: *mut c_void) {
-    // SAFETY: callback receives this retained Scene on a distinct actual worker.
+    // SAFETY: callback receives this Scene on a distinct worker.
     let f = unsafe { scene(p) };
     assert_eq!(
         f.runtime().firmware_role_current(),
@@ -167,7 +167,7 @@ unsafe extern "C" fn signal_portal(p: *mut c_void) {
     f.release(Some(3));
 }
 unsafe extern "C" fn signal_notify(p: *mut c_void) {
-    // SAFETY: callback receives this retained Scene on a distinct actual worker.
+    // SAFETY: callback receives this Scene on a distinct worker.
     let f = unsafe { scene(p) };
     assert_eq!(
         f.runtime().firmware_role_current(),
@@ -195,7 +195,7 @@ fn all_roles_remain_distinct_when_general_workers_are_parked() {
     let (executor, f, cpu, dropped) = setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: static callbacks use the queue-retained Scene until actual join.
+    // SAFETY: static callbacks use the queue-kept Scene until join.
     unsafe { r.start_service(service, p) }.unwrap();
     // SAFETY: static short control fixture/context survives its parked frame.
     unsafe { r.start_firmware(control, p) }.unwrap();
@@ -204,12 +204,12 @@ fn all_roles_remain_distinct_when_general_workers_are_parked() {
         unsafe { r.queue.execute(Kind::General, general, p) }.unwrap();
     }
     for _ in 0..2 {
-        // SAFETY: each accepted portal callback is covered by Scene's retained lifetime.
+        // SAFETY: each accepted portal callback is covered by Scene's lifetime.
         unsafe { r.queue.execute_portal(portal, p) }.unwrap();
-        // SAFETY: each accepted Notify callback is covered by Scene's retained lifetime.
+        // SAFETY: each accepted Notify callback is covered by Scene's lifetime.
         unsafe { r.queue.execute(Kind::Notify, notify, p) }.unwrap();
     }
-    // SAFETY: GPE context remains retained independently from the other lanes.
+    // SAFETY: GPE context remains held independently from the other lanes.
     unsafe { r.queue.execute_gpe(gpe, p) }.unwrap();
     assert!(f.events.lock().unwrap().is_empty());
     assert_eq!(
@@ -219,22 +219,22 @@ fn all_roles_remain_distinct_when_general_workers_are_parked() {
     );
     assert_eq!(f.blocked.lock().unwrap().len(), 16);
     assert_eq!(
-        // SAFETY: Full must reject before retaining this valid static callback/context.
+        // SAFETY: Full must reject before keeping this valid static callback/context.
         unsafe { r.queue.execute_portal(rejected, p) },
         Err(WorkError::Full)
     );
     assert_eq!(
-        // SAFETY: both Notify workers are genuinely blocked; rejection transfers nothing.
+        // SAFETY: both Notify workers are blocked; rejection transfers nothing.
         unsafe { r.queue.execute(Kind::Notify, rejected, p) },
         Err(WorkError::Full)
     );
-    // SAFETY: pending GPE callback uses the same retained Scene until serial execution.
+    // SAFETY: pending GPE callback uses the same Scene until serial execution.
     let pending = unsafe { r.queue.execute_gpe(marker, p) }.unwrap();
     assert_eq!(r.step(), Ok(false));
     assert_eq!(r.queue.completed(pending), Ok(false));
     r.queue.close().unwrap();
     assert_eq!(
-        // SAFETY: closed admission must not retain this valid callback/context.
+        // SAFETY: closed admission must not keep this valid callback/context.
         unsafe { r.queue.execute_portal(rejected, p) },
         Err(WorkError::Closed)
     );
@@ -263,12 +263,12 @@ fn portal_and_notify_can_signal_a_blocked_peer_without_start_reordering() {
         let r = executor.runtime();
         let p = Arc::as_ptr(&f) as *mut c_void;
         if is_notify {
-            // SAFETY: both static callbacks share the retained fixture through join.
+            // SAFETY: both static callbacks share the fixture through join.
             unsafe { r.queue.execute(Kind::Notify, notify, p) }.unwrap();
             // SAFETY: a second distinct Notify continuation can signal the first.
             unsafe { r.queue.execute(Kind::Notify, signal_notify, p) }.unwrap();
         } else {
-            // SAFETY: both static callbacks share the retained fixture through join.
+            // SAFETY: both static callbacks share the fixture through join.
             unsafe { r.queue.execute_portal(portal, p) }.unwrap();
             // SAFETY: a second distinct portal continuation can signal the first.
             unsafe { r.queue.execute_portal(signal_portal, p) }.unwrap();
@@ -294,14 +294,14 @@ fn portal_and_notify_can_signal_a_blocked_peer_without_start_reordering() {
 }
 
 unsafe extern "C" fn count_queued(p: *mut c_void) {
-    // SAFETY: the queue retains this exact AtomicUsize allocation until join.
+    // SAFETY: the queue keeps this exact AtomicUsize allocation until join.
     unsafe { &*p.cast::<core::sync::atomic::AtomicUsize>() }.fetch_add(1, Ordering::Relaxed);
 }
 #[test]
 fn native_admission_rejects_legacy_jobs_without_claiming_or_reinterpreting_them() {
     let count = Arc::new(core::sync::atomic::AtomicUsize::new(0));
     let cpu = test_support::CpuModel::new();
-    // SAFETY: this same-thread modeled queue retains the actual callback context.
+    // SAFETY: this same-thread modeled queue keeps the callback context.
     let queue = unsafe { Queue::<32>::new(cpu.clone(), count.clone()) }.unwrap();
     // SAFETY: the queue owns count through the eventual legacy executor join.
     let ticket = unsafe {
@@ -363,7 +363,7 @@ fn native_admission_rejects_legacy_jobs_without_claiming_or_reinterpreting_them(
 }
 
 unsafe extern "C" fn firmware_turns(p: *mut c_void) {
-    // SAFETY: Scene is the queue-retained allocation, live through every yield.
+    // SAFETY: Scene is the queue-kept allocation, live through every yield.
     let f = unsafe { scene(p) };
     let r = f.runtime();
     let tag = match r.firmware_role_current().unwrap().unwrap() {
@@ -379,7 +379,7 @@ unsafe extern "C" fn firmware_turns(p: *mut c_void) {
     }
 }
 unsafe extern "C" fn service_turns(p: *mut c_void) {
-    // SAFETY: this retained Scene survives all Linux service continuation yields.
+    // SAFETY: this Scene survives all Linux service continuation yields.
     let f = unsafe { scene(p) };
     for _ in 0..20 {
         assert_eq!(f.runtime().service_current(), Ok(true));
@@ -389,7 +389,7 @@ unsafe extern "C" fn service_turns(p: *mut c_void) {
     }
 }
 unsafe extern "C" fn ordinary_turn(p: *mut c_void) {
-    // SAFETY: this queued callback borrows only the retained Scene allocation.
+    // SAFETY: this queued callback borrows only the Scene allocation.
     let f = unsafe { scene(p) };
     assert_eq!(f.runtime().service_current(), Ok(false));
     assert_eq!(f.runtime().firmware_role_current(), Ok(None));
@@ -400,19 +400,19 @@ fn continuously_ready_firmware_roles_share_bounded_turns_with_linux_work() {
     let (executor, f, cpu, dropped) = setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: each static callback's Scene remains retained through every yield/join.
+    // SAFETY: each static callback's Scene remains held through every yield/join.
     unsafe { r.start_service(service_turns, p) }.unwrap();
-    // SAFETY: this distinct retained control frame never borrows another role's stack.
+    // SAFETY: this distinct control frame never borrows another role's stack.
     unsafe { r.start_firmware(firmware_turns, p) }.unwrap();
     for _ in 0..2 {
-        // SAFETY: both actual portal worker frames retain the queue-owned Scene.
+        // SAFETY: both portal worker frames keep the queue-owned Scene.
         unsafe { r.queue.execute_portal(firmware_turns, p) }.unwrap();
-        // SAFETY: both actual Notify worker frames retain the queue-owned Scene.
+        // SAFETY: both Notify worker frames keep the queue-owned Scene.
         unsafe { r.queue.execute(Kind::Notify, firmware_turns, p) }.unwrap();
     }
-    // SAFETY: this serial GPE worker retains the same Scene through completion.
+    // SAFETY: this serial GPE worker keeps the same Scene through completion.
     unsafe { r.queue.execute_gpe(firmware_turns, p) }.unwrap();
-    // SAFETY: ordinary progress uses a separate actual General continuation.
+    // SAFETY: ordinary progress uses a separate General continuation.
     unsafe { r.queue.execute(Kind::General, ordinary_turn, p) }.unwrap();
     f.finish();
     let events = f.events.lock().unwrap();
@@ -447,14 +447,14 @@ fn continuously_ready_firmware_roles_share_bounded_turns_with_linux_work() {
 }
 
 unsafe extern "C" fn notify_tail(p: *mut c_void) {
-    // SAFETY: matching Scene is retained through this late callback's join.
+    // SAFETY: matching Scene is held through this late callback's join.
     unsafe { scene(p) }.event(34);
 }
 unsafe extern "C" fn notify_chain(p: *mut c_void) {
     // SAFETY: Scene is queue-owned through both accepted Notify callbacks.
     let f = unsafe { scene(p) };
     f.event(32);
-    // SAFETY: the later work borrows the same retained provider allocation.
+    // SAFETY: the later work borrows the same provider allocation.
     unsafe { f.runtime().queue.execute(Kind::Notify, notify_tail, p) }.unwrap();
     f.event(33);
 }
@@ -462,7 +462,7 @@ unsafe extern "C" fn gpe_chain(p: *mut c_void) {
     // SAFETY: Scene is queue-owned through GPE and the posted Notify work.
     let f = unsafe { scene(p) };
     f.event(30);
-    // SAFETY: the new queue's callback/context stay retained independently.
+    // SAFETY: the new queue's callback/context stay held independently.
     unsafe { f.runtime().queue.execute(Kind::Notify, notify_chain, p) }.unwrap();
     f.event(31);
 }
@@ -471,7 +471,7 @@ fn firmware_flush_captures_gpe_then_notify_and_excludes_later_same_queue_chains(
     let (executor, f, cpu, dropped) = setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: Scene retains all callback contexts through both flushes and close.
+    // SAFETY: Scene keeps all callback contexts through both flushes and close.
     unsafe { r.queue.execute_gpe(gpe_chain, p) }.unwrap();
     r.join_firmware(FirmwareQueue::Gpe, cpu.ticks() + 1_000_000_000)
         .unwrap();
@@ -514,7 +514,7 @@ fn firmware_flush_captures_gpe_then_notify_and_excludes_later_same_queue_chains(
     assert_eq!(cpu.flags(), 0x202);
 }
 unsafe extern "C" fn gpe_self_join(p: *mut c_void) {
-    // SAFETY: live queue-owned Scene, executing on the actual GPE frame.
+    // SAFETY: live queue-owned Scene, executing on the GPE frame.
     let f = unsafe { scene(p) };
     f.event(40);
     assert_eq!(
@@ -535,7 +535,7 @@ unsafe extern "C" fn gpe_self_join(p: *mut c_void) {
     f.event(41);
 }
 unsafe extern "C" fn notify_self_join(p: *mut c_void) {
-    // SAFETY: live queue-owned Scene, executing on an actual Notify frame.
+    // SAFETY: live queue-owned Scene, executing on a Notify frame.
     let f = unsafe { scene(p) };
     f.event(42);
     assert_eq!(
@@ -559,7 +559,7 @@ fn firmware_self_join_refuses_without_completing_or_discarding_the_active_job() 
     let p = Arc::as_ptr(&f) as *mut c_void;
     // SAFETY: both callbacks/context survive the refusal and eventual real completion.
     let gpe = unsafe { r.queue.execute_gpe(gpe_self_join, p) }.unwrap();
-    // SAFETY: Notify borrows the same retained provider until actual callback return.
+    // SAFETY: Notify borrows the same provider until callback return.
     let notify = unsafe { r.queue.execute(Kind::Notify, notify_self_join, p) }.unwrap();
     f.finish();
     assert_eq!(r.queue.completed(gpe), Ok(true));
@@ -586,7 +586,7 @@ fn firmware_self_join_refuses_without_completing_or_discarding_the_active_job() 
     assert_eq!(cpu.flags(), 0x202);
 }
 unsafe extern "C" fn portal_queue_join(p: *mut c_void) {
-    // SAFETY: this actual Portal frame borrows the queue-retained Scene.
+    // SAFETY: this Portal frame borrows the queue-kept Scene.
     let f = unsafe { scene(p) };
     f.event(50);
     assert_eq!(f.runtime().check_firmware_join(FirmwareQueue::Gpe), Ok(()));
@@ -614,19 +614,19 @@ fn portal_flush_excludes_parked_linux_service_and_general_callbacks() {
     let (executor, f, cpu, dropped) = setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: this blocked service retains Scene until explicit release/join.
+    // SAFETY: this blocked service keeps Scene until explicit release/join.
     unsafe { r.start_service(service, p) }.unwrap();
     for _ in 0..8 {
-        // SAFETY: all General contexts are retained by Scene through release.
+        // SAFETY: all General contexts are held by Scene through release.
         unsafe { r.queue.execute(Kind::General, general, p) }.unwrap();
     }
     for _ in 0..9 {
         assert_eq!(r.step(), Ok(true));
     }
     assert_eq!(f.blocked.lock().unwrap().len(), 9);
-    // SAFETY: GPE and its posted Notify callbacks share the retained Scene.
+    // SAFETY: GPE and its posted Notify callbacks share the Scene.
     unsafe { r.queue.execute_gpe(gpe_chain, p) }.unwrap();
-    // SAFETY: Portal stays retained while its finite queue-prefix joins suspend.
+    // SAFETY: Portal stays held while its finite queue-prefix joins suspend.
     let portal = unsafe { r.queue.execute_portal(portal_queue_join, p) }.unwrap();
     for _ in 0..24 {
         if r.queue.completed(portal).unwrap() {
@@ -660,7 +660,7 @@ fn minimum_sixteen_slot_queue_reserves_foreground_after_general_saturation() {
     let r = executor.runtime();
     let p = Arc::as_ptr(&count) as *mut c_void;
     for _ in 0..8 {
-        // SAFETY: queue retains this atomic allocation through every callback/join.
+        // SAFETY: queue keeps this atomic allocation through every callback/join.
         unsafe { r.queue.execute(Kind::General, count_queued, p) }.unwrap();
     }
     assert_eq!(
@@ -668,16 +668,16 @@ fn minimum_sixteen_slot_queue_reserves_foreground_after_general_saturation() {
         unsafe { r.queue.execute(Kind::General, count_queued, p) },
         Err(WorkError::Full)
     );
-    // SAFETY: Linux service callback's exact allocation stays retained through join.
+    // SAFETY: Linux service callback's exact allocation stays held through join.
     unsafe { r.start_service(count_queued, p) }.unwrap();
-    // SAFETY: independent control callback's exact allocation stays retained through join.
+    // SAFETY: independent control callback's exact allocation stays held through join.
     unsafe { r.start_firmware(count_queued, p) }.unwrap();
-    // SAFETY: independent serial GPE callback has the same retained atomic context.
+    // SAFETY: independent serial GPE callback has the same atomic context.
     unsafe { r.queue.execute_gpe(count_queued, p) }.unwrap();
     for _ in 0..2 {
-        // SAFETY: each actual portal worker borrows the retained atomic allocation.
+        // SAFETY: each portal worker borrows the atomic allocation.
         unsafe { r.queue.execute_portal(count_queued, p) }.unwrap();
-        // SAFETY: each actual Notify worker borrows the retained atomic allocation.
+        // SAFETY: each Notify worker borrows the atomic allocation.
         unsafe { r.queue.execute(Kind::Notify, count_queued, p) }.unwrap();
     }
     assert_eq!(count.load(Ordering::Relaxed), 0);
@@ -689,11 +689,11 @@ fn minimum_sixteen_slot_queue_reserves_foreground_after_general_saturation() {
     assert_eq!(count.load(Ordering::Relaxed), 0);
     assert_eq!(cpu.flags(), flags);
     assert_eq!(r.current_id(), Err(WorkError::Unavailable));
-    // SAFETY: Foreground retains the context across admission and every switched peer.
+    // SAFETY: Foreground keeps the context across admission and every switched peer.
     unsafe { r.call_foreground(count_queued, p, cpu.ticks() + 1_000_000_000) }.unwrap();
     r.drain(cpu.ticks() + 1_000_000_000).unwrap();
     assert_eq!(count.load(Ordering::Relaxed), 16);
-    // SAFETY: no producer remains and all16 admitted callbacks actually returned.
+    // SAFETY: no producer remains and all16 admitted callbacks returned.
     unsafe { r.retire() }.unwrap();
     assert_eq!(
         r.check_firmware_join(FirmwareQueue::Gpe),

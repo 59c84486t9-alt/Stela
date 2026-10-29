@@ -6,7 +6,7 @@
 //! supplied SRAM bytes. It does not admit a hardware trigger, interpret other
 //! instructions, acknowledge a controller or infer initial SRAM/PS contents.
 //!
-//! The owning controller must qualify its trigger before claiming effects,
+//! The owning controller must check its trigger before claiming effects,
 //! release its mutable borrow, route each claimed write through the existing
 //! checked RAM/MMIO boundary, then finish with its typed effect outcome. Only a
 //! positively proven no-effect refusal permits retry. Uncertain or partial
@@ -32,7 +32,7 @@ const HIGH_ADDRESS_SHIFT: u32 = 36;
 const WIDE_PADDING: u32 = 0xdead_beef;
 
 /// Original context+0x18: zero emits a separate six-bit high-address word;
-/// one omits it. No other address format is qualified by this component.
+/// one omits it. No other address format is checked by this component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressFormat {
     HighWord,
@@ -181,13 +181,13 @@ struct Packet {
     end: usize,
 }
 
-/// A retained packet-effect cursor, independent of hardware trigger/retirement
+/// A kept packet-effect cursor, independent of hardware trigger/retirement
 /// admission. `packet_pc` identifies the current packet, not a claimed physical
 /// engine's internal micro-PC. Only committed packet effects advance it.
 ///
 /// The image can be installed once, including after `unknown()`. Replacing an
-/// owned image or clearing a partial prefix requires separately qualified
-/// controller/reset semantics; this API deliberately provides neither.
+/// owned image or clearing a partial prefix requires separately checked
+/// controller/reset semantics; this API provides neither.
 #[derive(Default)]
 pub struct PacketCursor {
     owner: Rc<()>,
@@ -214,7 +214,7 @@ impl PacketCursor {
         Self::default()
     }
 
-    /// Own supplied bytes, never a fabricated reset/zero SRAM image. Geometry
+    /// Own supplied bytes, never an invented reset/zero SRAM image. Geometry
     /// checks grant no hardware trigger, target-bank or instruction admission.
     pub fn install_sram(
         &mut self,
@@ -329,8 +329,8 @@ impl PacketCursor {
             .map(|packet| (packet.committed, packet.writes.len()))
     }
 
-    /// Retained suspension blocks new claims and dispatch; an already routed
-    /// store must still finish exactly once, preserving its actual effect.
+    /// Suspension blocks new claims and dispatch; an already routed
+    /// store must still finish exactly once, preserving its effect.
     pub fn set_suspended(&mut self, suspended: bool) {
         self.suspended = suspended;
     }
@@ -439,13 +439,13 @@ impl PacketCursor {
         Ok(())
     }
 
-    /// The uncertain physical store is retained for diagnosis. There is no
+    /// The uncertain physical store is held for diagnosis. There is no
     /// retry, image replacement or reset API that can erase this uncertainty.
     pub fn uncertain_write(&self) -> Option<PhysicalWrite> {
         self.uncertain
     }
 
-    /// Preserve the actual routed error type and committed prefix. Only a
+    /// Preserve the routed error type and committed prefix. Only a
     /// positively proven no-effect outcome releases the current write for retry.
     /// An uncertain/partial result permanently quarantines further claims.
     /// Success retires this write, never the controller or the native program.
@@ -776,8 +776,8 @@ mod tests {
                 value: 0x0123456789abcdef
             }
         );
-        // Original emitter checks alignment4 even for wide. The actual target
-        // boundary decides whether this physical access is qualified.
+        // Original emitter checks alignment4 even for wide. The target
+        // boundary decides whether this physical access is checked.
         let mut short = Ram::new(0x2000001000, 8);
         short.bytes.fill(0xa5);
         let result = short.write(write.address, &write.value.to_le_bytes());

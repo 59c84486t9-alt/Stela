@@ -6,7 +6,7 @@
 //! Native ACPI control-method batteries (PNP0C0A).
 //!
 //! Values preserve firmware units and unknown sentinels. This transport does
-//! not choose charging policy, fabricate a percentage, or serve guest ACPI.
+//! not choose charging policy, invent a percentage, or serve guest ACPI.
 use super::acpi::{self, Argument, Handle, Value};
 use alloc::vec::Vec;
 
@@ -120,7 +120,7 @@ pub struct Battery<'a> {
     /// None after a failed/uncertain _BTP, removal or new information.
     alarm: Option<u32>,
     /// Actual `_BIX` execution error when Linux's `_BIF` fallback was attempted.
-    /// Retained even if the fallback itself fails; absence is not execution.
+    /// Even if the fallback itself fails; absence is not execution.
     information_fallback: Option<acpi::Error>,
     /// Most recent `_STA` error that Linux's defined status default consumed.
     status_fallback: Option<acpi::Error>,

@@ -21,9 +21,9 @@
 //! does not implement grouping, BA/reordering, fragmentation, deaggregation or
 //! PMF association negotiation. The unicast management boundary authenticates
 //! hardware-verified CCMP128 under the installed PTK and separate counter16;
-//! it grants no current-association or station-delivery authority. The separate
-//! management module authenticates group BIP-CMAC128 under an actually retained
-//! IGTK; this grants no current-association or controlled-port authority.
+//! it grants no current-association or station-delivery permission. The separate
+//! management module authenticates group BIP-CMAC128 under a kept
+//! IGTK; this grants no current-association or controlled-port permission.
 
 use super::{Aggregation, frame::Mpdu};
 use crate::net::Mac;
@@ -119,7 +119,7 @@ impl PacketNumber {
     }
 }
 
-/// Actual firmware key purpose and peer/BSS, independent of a reusable slot.
+/// Firmware key purpose and peer/BSS, independent of a reusable slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyScope {
     Pairwise(Mac),
@@ -134,7 +134,7 @@ impl KeyScope {
     }
 }
 
-/// Binding to one acknowledged installation, not merely a reusable HW slot.
+/// Binding to one acknowledged installation, not a reusable HW slot.
 /// Copy this identity from `KeySlot::installed()` into the vendor key table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyIdentity {
@@ -171,7 +171,7 @@ impl KeyIdentity {
     }
 }
 
-/// Actual hardware observation, distinct from stripped MIC bytes.
+/// Hardware observation, distinct from stripped MIC bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Integrity {
     #[default]
@@ -203,7 +203,7 @@ pub struct SecurityStatus {
     pub mic_stripped: bool,
     pub icv_error: bool,
     pub tkip_mic_error: bool,
-    /// Retained observation only; never substitutes for checking a PN.
+    /// Observation only; never substitutes for checking a PN.
     pub hardware_replay: HardwareReplay,
 }
 
@@ -233,7 +233,7 @@ pub enum Error {
     Unsupported(&'static str),
 }
 
-/// Authenticated initial receive counters from the actual key exchange or
+/// Authenticated initial receive counters from the key exchange or
 /// device handoff. Queues 0..15 correspond to TIDs; non-QoS data shares queue 0.
 /// Queue 16 is the separate unicast protected-management receive counter.
 /// Data authorization never reads or advances that counter.
@@ -258,7 +258,7 @@ impl ReplaySeed {
     }
 }
 
-/// A command ticket stays unusable until an actual successful acknowledgement.
+/// A command ticket stays unusable until a successful acknowledgement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InstallTicket {
     key: KeyIdentity,
@@ -317,7 +317,7 @@ pub struct KeySlot {
 }
 
 impl KeySlot {
-    /// Claim one actual hardware key slot, initially empty.
+    /// Claim one hardware key slot, initially empty.
     ///
     /// # Safety
     /// The caller must exclusively own this physical slot and its associated
@@ -454,7 +454,7 @@ impl KeySlot {
 
     /// # Safety
     /// Hardware key removal/reset must be acknowledged and all old RX,
-    /// completions and deferred key users drained. The caller retains this
+    /// completions and deferred key users drained. The caller keeps this
     /// slot's monotonically increasing generation across subsequent installs.
     pub unsafe fn retire_after_drain(&mut self) {
         self.state = State::Empty;
@@ -470,7 +470,7 @@ impl KeySlot {
     }
 
     // Only the complete-owned group gate may permit aggregate framing or
-    // supply an actual authenticated parent's PN for an absent member group1.
+    // supply an authenticated parent's PN for an absent member group1.
     fn checked_mpdu<'a>(
         &self,
         mpdu: &'a Mpdu,
@@ -693,7 +693,7 @@ mod tests {
         let values = [0, 1, 2, 17, 18, maximum - 1, maximum];
         let mut hash = Sha256::new();
         let mut count = 0;
-        // Actual complete mt76 helper trace: both arrival orders, all TIDs,
+        // Complete mt76 helper trace: both arrival orders, all TIDs,
         // non-QoS aliasing, authenticated floors, exhaustion and all 17 counters.
         // Pure canonical replay model; no physical integrity/ACK is inferred.
         for first in 0..17 {

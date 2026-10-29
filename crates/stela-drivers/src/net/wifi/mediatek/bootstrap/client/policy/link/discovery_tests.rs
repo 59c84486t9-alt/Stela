@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Owning frontend peers over actual modeled native commands and DMA queues.
+//! Owning frontend peers over modeled native commands and DMA queues.
 
 use super::*;
 use crate::net::wifi::mediatek::{
@@ -51,7 +51,7 @@ fn setup(six_capability: bool, six_programmed: bool, flags: u32) -> (TestLink, M
             },
         ],
     );
-    // SAFETY: actual model bootstrap and source policy programming completed.
+    // SAFETY: model bootstrap and source policy programming completed.
     unsafe { f.controller.initialize_mac() }.unwrap();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
@@ -259,7 +259,7 @@ fn no_ir_refuses_active_publication_but_passive_cancel_keeps_real_drain_owner() 
     assert_eq!(&tlv(&command, 12)[8..10], &[3, 1]);
     link.cancel_scan().unwrap();
     assert_eq!(link.phase(), Phase::Scanning);
-    // A genuine cancel ACK is not terminal scan completion or old-user drain.
+    // A cancel ACK is not terminal scan completion or old-user drain.
     assert!(link.begin_scan(passive_request(), SCAN_BUDGET_US).is_err());
     assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
@@ -285,7 +285,7 @@ fn six_ghz_notice_backpressure_preserves_next_native_rx_descriptor() {
         let memory = model.memory.lock().unwrap();
         let offset = usize::from((q.index + q.count - 1) % q.count) * 16;
         let pointer = (memory.mappings[&q.base].1 + offset) as *const u8;
-        // The actual mapped device descriptor retains DDONE and the buffer PA.
+        // The mapped device descriptor keeps DDONE and the buffer PA.
         // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
         // accesses it concurrently.
         let descriptor = unsafe { core::slice::from_raw_parts(pointer, 16) }.to_vec();

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual mapping-prefix retirement, never a caller-supplied stopped flag.
+//! Mapping-prefix retirement, never a caller-supplied stopped flag.
 use super::*;
 #[test]
 fn every_actual_unmap_failure_permanently_fences_rebuild_and_retries_original_retirement() {
@@ -21,7 +21,7 @@ fn every_actual_unmap_failure_permanently_fences_rebuild_and_retries_original_re
                 Some(1),
                 "real submitted TX remains unfetched"
             );
-            // Exercise a distinct actual posted DMA write as well as the
+            // Exercise a distinct posted DMA write as well as the
             // pending fetch. A held TX doorbell alone has not issued DMA.
             peer.receive(&[0x47; 60], 0, 3, 60);
             assert_ne!(domain.pending_dma.load(Ordering::Relaxed), 0);

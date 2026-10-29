@@ -86,17 +86,17 @@ pub struct Ax200Binding<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     first_error: Option<Ax200BindingError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q, B, O> {
-    /// Bind the actual cold MAC0 to its actual PHY0, with all enabled automatic
+    /// Bind the cold MAC0 to its PHY0, with all enabled automatic
     /// response rates independently authorized at native publication.
     /// # Safety
-    /// O's genuine same-device OsPolicy service must approve the entire cold
-    /// source response envelope and retain restrictive revocation through the
-    /// armed binding lifetime. It must coordinate actual unbind/stop/drain or
+    /// O's same-device OsPolicy service must approve the entire cold
+    /// source response envelope and keep restrictive revocation through the
+    /// armed binding lifetime. It must coordinate unbind/stop/drain or
     /// hardware enforcement before further responses after a restriction;
     /// polling or updating a revision alone is insufficient. The CountryIo and
-    /// OsPolicy interfaces remain the same genuine selected-country/database
-    /// service qualified by begin_scan. No other binding, station, data queue,
-    /// MAC/PHY or SF mutation may occur outside this retained original owner.
+    /// OsPolicy interfaces remain the same selected-country/database
+    /// service checked by begin_scan. No other binding, station, data queue,
+    /// MAC/PHY or SF mutation may occur outside this original owner.
     pub unsafe fn begin_binding(self) -> Result<Ax200Binding<'a, Q, B, O>, Box<Self>> {
         if self.phase != Ax200TransmitPowerPhase::BindingRequired
             || self.first_error.is_some()
@@ -120,15 +120,15 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q
             first_error: None,
         })
     }
-    /// Activate the actual MLD link0 on this retained PHY0 and applied power
+    /// Activate the MLD link0 on this PHY0 and applied power
     /// owner. Legacy BINDING is never substituted for LINK_CONFIG.
     /// # Safety
-    /// begin_binding's genuine same-device provider, complete finite response
+    /// begin_binding's same-device provider, complete finite response
     /// envelope and restrictive-revocation lifetime contracts apply unchanged.
     /// No external PHY/link/station/queue mutation may race this unique owner.
     pub unsafe fn begin_mld_link(self) -> Result<Ax200Binding<'a, Q, B, O>, Box<Self>> {
-        // SAFETY: the same original provider/publication contract is retained;
-        // the private protocol selector is qualified again before any command.
+        // SAFETY: the same original provider/publication contract is held;
+        // the private protocol selector is checked again before any command.
         unsafe { self.begin_binding() }.map(|mut binding| {
             binding.mld = true;
             binding
@@ -215,7 +215,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
         if firmware.supports_capability(110) {
             return Err(Ax200BindingError::MldLinkContinuationRequired);
         }
-        // Actual private cold prefix established SF_INIT_OFF, or selected
+        // Private cold prefix established SF_INIT_OFF, or selected
         // source API68 offload. A single unassociated BSS remains INIT_OFF;
         // Linux's sf_update/sf_config therefore issues no new SF command.
         if radio.phase() != ColdRadioPhase::PlatformConfigurationRequired
@@ -245,7 +245,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
         });
         // Single unchanged cold station: cfg.ps=false, no DTIM/peer, no BF,
         // no other interface can change device PS. Source's mandatory post-
-        // binding MAC power update has the same actual original cold payload.
+        // binding MAC power update has the same original cold payload.
         self.commands.push(BindingCommand {
             kind: BindingCommandKind::Power,
             id: power.id(),
@@ -253,7 +253,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
         });
         Ok(())
     }
-    /// Actual source unbind and mandatory MAC power update, without requiring
+    /// Source unbind and mandatory MAC power update, without requiring
     /// a new emission grant. RF-kill/failure can still require native stop.
     pub fn begin_remove(&mut self) -> Result<(), Ax200BindingError> {
         if self.phase != Ax200BindingPhase::AuthenticationRequired
@@ -307,7 +307,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
         self.removing = true;
         Ok(())
     }
-    /// Return the same unbound PHY/power owner only after both actual unbind
+    /// Return the same unbound PHY/power owner only after both unbind
     /// status and source MAC power command completed and reclaimed their DMA.
     pub fn into_transmit_power(self) -> Result<Ax200TransmitPower<'a, Q, B, O>, Box<Self>> {
         if self.phase != Ax200BindingPhase::Unbound
@@ -319,7 +319,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
         Ok(self.power)
     }
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the retained native
+    /// `source` supplies fresh exclusive coherent pages for the native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -445,7 +445,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O
                 .capture_idle_receive()
                 .map_err(Ax200BindingError::Phy)?;
             // SAFETY: complete original finite response envelope checked while
-            // both actual leases remain held through this same native HCMD.
+            // both leases remain held through this same native HCMD.
             unsafe { admission::publish(&mut self.power, &command, source) }?
         };
         self.ticket = Some(ticket);

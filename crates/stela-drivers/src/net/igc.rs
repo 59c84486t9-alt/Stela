@@ -118,7 +118,7 @@ pub fn matches(function: &Function) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR && DEVICES.contains(&function.device) && function.class == [2, 0, 0]
 }
@@ -127,7 +127,7 @@ fn prepare_link(
     device: u16,
     disable: impl FnOnce() -> Result<(), BlockError>,
 ) -> Result<(), BlockError> {
-    // Pinned igc_base.c::igc_is_device_id_i226. LMVP5503 is deliberately not
+    // Pinned igc_base.c::igc_is_device_id_i226. LMVP5503 is not
     // guessed into this exact donor erratum predicate.
     if matches!(device, 0x125b | 0x125c | 0x125d | 0x3102) {
         disable()?;
@@ -166,7 +166,7 @@ pub struct Igc {
     transmit: ManuallyDrop<Ring>,
     /// Since when the transmit ring has had no free descriptor.
     stalled: Option<u64>,
-    /// Discard the rest of a split/oversized frame through its actual EOP.
+    /// Discard the rest of a split/oversized frame through its EOP.
     discarding: bool,
     /// An absent/failed MMIO function requires a fresh attachment.
     faulted: bool,
@@ -176,7 +176,7 @@ pub struct Igc {
     mac: Mac,
     clock: Clock,
     pub location: String,
-    /// Actual internal PHY identifier, including its silicon revision.
+    /// Internal PHY identifier, including its silicon revision.
     pub phy_identity: u32,
     /// Whether MSI-X vector 0 sends the handoff's completion signal.
     signalled: bool,
@@ -187,7 +187,7 @@ impl Igc {
     ///
     /// # Safety
     /// The caller exclusively owns the controller, PCI segment configuration
-    /// and firmware/ACPI ASPM policy. The handoff describes actual mapped ECAM,
+    /// and firmware/ACPI ASPM policy. The handoff describes mapped ECAM,
     /// MMIO and boot-lifetime DMA ranges. No firmware or other driver may
     /// access these resources or restore disabled link states.
     pub unsafe fn new(
@@ -763,7 +763,7 @@ mod tests {
                 net.transmit.descriptors.read::<u32>(index * DESCRIPTOR + 8),
                 advanced::transmit_words(frame.len()).0
             );
-            // Actual modeled hardware writes completion into the same TD.
+            // Modeled hardware writes completion into the same TD.
             net.transmit
                 .descriptors
                 .write(index * DESCRIPTOR + 12, 1u32); // DD

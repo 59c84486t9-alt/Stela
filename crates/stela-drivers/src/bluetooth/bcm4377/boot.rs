@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) The Asahi Linux Contributors
-//! Actual source window/OTP, opaque boot image DMA and RTI state transitions.
+//! Source window/OTP, opaque boot image DMA and RTI state transitions.
 use super::*;
 use crate::firmware::{ErrorKind, Requirement};
 use identity::OTP_BYTES;

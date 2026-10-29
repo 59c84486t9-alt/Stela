@@ -27,7 +27,7 @@ fn reference_fixture() -> (Services, Arc<Counts>) {
 fn device_and_power_references_keep_actual_type_through_arguments() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let (services, counts) = reference_fixture();
-    // SAFETY: this serialized fixture transfers its complete retained provider
+    // SAFETY: this serialized fixture transfers its complete provider
     // to the one real ACPICA Session, which outlives all handles/results below.
     let session = unsafe { Session::start(services, Mode::InterpreterOnly) }.unwrap();
     let Some(Value::Package(dependencies)) = session
@@ -95,7 +95,7 @@ fn wire_reference_metadata_retains_unrecognized_codes() {
     let session = unsafe { Session::start(services, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\PR00").unwrap();
     let guard = session.guard().unwrap();
-    // A modeled external type code, around an actual validated namespace node.
+    // A modeled external type code, around a validated namespace node.
     // This proves lossless wire conversion, not that ACPICA emits unknown types.
     let raw = RawObject {
         kind: 0x14,
@@ -105,7 +105,7 @@ fn wire_reference_metadata_retains_unrecognized_codes() {
     };
     let start = core::ptr::addr_of!(raw) as usize;
     let mut budget = 1;
-    // SAFETY: the exact live RawObject is wholly inside the supplied byte range;
+    // SAFETY: the live RawObject is wholly inside the supplied byte range;
     // its handle belongs to this guarded Session and no deletion/evaluation runs.
     let value = unsafe {
         read_value(
@@ -133,7 +133,7 @@ fn wire_reference_metadata_retains_unrecognized_codes() {
 fn null_output_executes_side_effects_without_converting_returned_power_resource() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let (services, counts) = reference_fixture();
-    // SAFETY: this serialized provider retains the real tables, OSL callbacks
+    // SAFETY: this serialized provider keeps the real tables, OSL callbacks
     // and allocations through every guarded invocation and Session shutdown.
     let session = unsafe { Session::start(services, Mode::InterpreterOnly) }.unwrap();
     let root = session.root();

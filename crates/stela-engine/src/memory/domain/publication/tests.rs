@@ -41,7 +41,7 @@ impl Drop for Storage {
 
 fn backing(rights: AccessPermissions) -> Arc<MemoryBacking> {
     let layout = Layout::from_size_align(STORAGE_BYTES, HOST_QUANTITY_BYTES).unwrap();
-    // SAFETY: nonempty valid layout retained by Storage for deallocation.
+    // SAFETY: nonempty valid layout kept by Storage for deallocation.
     let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let storage = Arc::new(Storage { pointer, layout });
     // SAFETY: owner pins raw coherent RAM, with no aliasing Rust references.
@@ -356,7 +356,7 @@ fn publication_invalidates_cross_address_space_alias_reservations_including_aba(
             .reservations
             .load(&mut reservation, &first_access, || {
                 let pointer = backing.host_pointer(0, 1, AccessKind::Read).unwrap();
-                // SAFETY: reservation gate protects this exact live raw read.
+                // SAFETY: reservation gate protects this live raw read.
                 unsafe { access::read_part(pointer.as_ptr(), 1, TargetCpu::Baseline) }
             })
             .unwrap();
@@ -581,7 +581,7 @@ mod binding_reservation {
         let system = MemorySystem::new(16, 8).unwrap();
         let domain =
             // SAFETY: owned creates private anonymous RAM; this exclusive owner is its
-            // only writer and the resulting domain retains its allocation.
+            // only writer and the resulting domain keeps its allocation.
             unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 11), &mut []) }.unwrap();
         let mapping = &domain.registered_views()[0];
         let backing = Arc::clone(mapping.view.backing());
@@ -620,7 +620,7 @@ mod binding_reservation {
         let (mut owner, _) = owned();
         let mut publisher = published();
         let system = MemorySystem::new(16, 8).unwrap();
-        // SAFETY: owner and publisher retain disjoint live mappings with no running
+        // SAFETY: owner and publisher keep disjoint live mappings with no running
         // guest. This call binds their complete writer set to the same system.
         let domain = unsafe {
             owner.bind_shared_memory(config(Arc::clone(&system), 12), &mut [&mut publisher])
@@ -677,7 +677,7 @@ mod binding_reservation {
         let (mut owner, base) = owned();
         let (mut other_owner, other_base) = owned();
         let system = MemorySystem::new(16, 8).unwrap();
-        // SAFETY: Both owners exclusively retain separate anonymous mappings. There is
+        // SAFETY: Both owners exclusively keep separate anonymous mappings. There is
         // no running guest; the group binds every writer before any access.
         let domain = unsafe {
             owner.bind_shared_memory_group(

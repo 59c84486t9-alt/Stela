@@ -48,7 +48,7 @@ fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
     let drops = Arc::new(AtomicUsize::new(0));
     let boot = start(&catalog, &source, &domain, &state, &drops);
     let mut first = command_ready(boot, &empty, &source, &domain, &state);
-    // SAFETY: The first polling owner retains its own source/domain and fresh RAM;
+    // SAFETY: The first polling owner keeps its own source/domain and fresh RAM;
     // this fixture command has no external firmware objects or indirect allocations.
     let ticket = unsafe { first.submit_command(command_id(), &[], &source) }.unwrap();
     let other_source = Source::default();
@@ -108,7 +108,7 @@ fn hcmd_publication_faults_retain_real_owner_and_all_exposed_dma() {
             let mut s = state.lock().unwrap();
             s.fail = Some(s.ops.len() + 1);
         }
-        // SAFETY: The same model owner/source retain all mappings through injected failures;
+        // SAFETY: The same model owner/source keep all mappings through injected failures;
         // only serialized allocation/visibility/producer operations can fail here.
         assert!(unsafe { boot.submit_command(command_id(), &[0; 40], &source) }.is_err());
         assert_eq!(
@@ -155,7 +155,7 @@ fn hcmd_ring_and_sequence_wrap_match_each_family_without_reusing_live_slots() {
         let awake = awake_profile(state.clone(), drops.clone(), p);
         let boot = if ax210 {
             // SAFETY: The AX210 model has exclusive Source/domain RAM and synchronous register
-            // observations; NoIwlmei retains this sole reset owner with no SAP or IRQ user.
+            // observations; NoIwlmei keeps this sole reset owner with no SAP or IRQ user.
             unsafe {
                 RomBoot::start_ax210(
                     awake,
@@ -227,7 +227,7 @@ fn hcmd_exhausted_boot_rx_credit_refuses_publication() {
     let mut boot = command_ready(boot, &empty, &source, &domain, &state);
     // All posted credits are consumed by real completed RX notifications,
     // not by an invented successful repost in this boot-only receiver.
-    // SAFETY: The polling owner retains its original model source/domain and RAM;
+    // SAFETY: The polling owner keeps its original model source/domain and RAM;
     // this fixture command has no indirect resources, and completions are serialized.
     let ticket = unsafe { boot.submit_command(command_id(), &[], &source) }.unwrap();
     for index in 1..24 {

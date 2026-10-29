@@ -17,7 +17,7 @@
 //!
 //! The timing words, FORCE_GEN1 and the clock forcing only shape link
 //! training and clock gating, which no modeled bus observes; the model
-//! retains each traced field and refuses the rest. There is no PIPE PHY, so
+//! keeps each traced field and refuses the rest. There is no PIPE PHY, so
 //! its ready bit and lock state read clear, and the core's RAM is never
 //! busy. A D3 request completes at once, powering USB off and reporting
 //! SLEEP; D0 powers it on. The power block's interrupt (the controller's
@@ -54,7 +54,7 @@ const VDD_USB_OFF: u32 = 1 << 1;
 const INTERRUPTS: u32 = 0x1f;
 const LOCK: u32 = 1;
 
-/// The registers' retained fields, by offset.
+/// The registers' kept fields, by offset.
 const STORED: [(u64, u32); 8] = [
     (CIO_LFPS_OFFSET, u32::MAX),
     (CIO_BW_NEGOTIATION_OFFSET, u32::MAX),

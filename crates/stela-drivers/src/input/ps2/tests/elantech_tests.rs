@@ -1,4 +1,4 @@
-//! Actual Elantech sliced/custom commands, register effects and i8042 reports.
+//! Elantech sliced/custom commands, register effects and i8042 reports.
 use super::*;
 use alloc::collections::BTreeMap;
 #[path = "elantech_tests/controls_tests.rs"]
@@ -758,7 +758,7 @@ fn unchanged_linux_elantech_reports_match_actual_configured_i8042_device() {
                     }
                     // Original semi-MT software publishes zero for an unencoded
                     // secondary point in3/4-finger reports. Native keeps None;
-                    // this projection does not fabricate a hardware coordinate.
+                    // this projection does not invent a hardware coordinate.
                     if contact.fingers >= 2 {
                         slots[1] = contact.secondary.unwrap_or((0, 0));
                     }

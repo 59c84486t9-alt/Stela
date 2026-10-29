@@ -13,7 +13,7 @@
 //!
 //! Platform ACPI power resources, firmware/AML/SMM arbitration and coherent DMA
 //! mappings remain prerequisites. DSP/GPU controllers require additional owners
-//! and are deliberately absent from this attachment table.
+//! and are absent from this attachment table.
 use super::{
     Config, CorbReset, MmioRegisters, PositionPolicy, ProbePolicy, Registers, ResetPolicy,
     StreamTagPolicy,
@@ -201,7 +201,7 @@ impl Setup {
     }
 }
 
-/// Actual identity selected by the bounded table, never by a failed handshake.
+/// Identity selected by the bounded table, never by a failed handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub vendor: u16,
@@ -246,14 +246,14 @@ pub enum AttachError {
     ConfigurationRejected,
 }
 
-/// Match the enumerated identity only; `prepare` rechecks actual config space.
-/// This is a candidate match; actual subsystem/DMI exclusions are checked by
+/// Match the enumerated identity only; `prepare` rechecks config space.
+/// This is a candidate match; subsystem/DMI exclusions are checked by
 /// prepare before any write. Intel DSP and GPU HDA functions remain separate.
 pub fn identify<C: ConfigSpace>(function: &Function<C>) -> Result<Identity, AttachError> {
     identify_identity(&function.identity())
 }
 
-/// A copied candidate identity does not qualify BARs, clocks, DMA or resets.
+/// A copied candidate identity does not check BARs, clocks, DMA or resets.
 pub fn identify_identity(function: &crate::bus::pci::Identity) -> Result<Identity, AttachError> {
     identity(function.vendor, function.device, function.class)
 }
@@ -280,7 +280,7 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         }
         // Linux restricts ATI to 40 bits, and SB600 companion-SMBus revisions
         // before 0x30 additionally require 32 bits. Without companion evidence,
-        // retain the supported conservative 32-bit mode on every ATI stepping.
+        // keep the supported conservative 32-bit mode on every ATI stepping.
         (ATI, 0x437b | 0x4383) => (Setup::AtiAzalia, 32),
         // Exact AMD hosts use ATI snoop and 40-bit DMA. The later family
         // selects FIFO correction and mandatory bounded discovery below.
@@ -330,7 +330,7 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
     })
 }
 
-/// Target-machine SMBIOS board strings, when actually available. Missing data
+/// Target-machine SMBIOS board strings, when available. Missing data
 /// stays Unknown; a retail product name or development-host identity is no proof.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BoardIdentity<'a> {
@@ -359,7 +359,7 @@ fn check_subsystem<C: ConfigSpace>(
     if identity.device == 0x1487 && matches!(pair, (0x1043, 0x874f) | (0x1462, 0xcb59 | 0xcb60)) {
         return Err(AttachError::SubsystemExcluded);
     }
-    // The donor intentionally conditions this subsystem on two DMI strings:
+    // The donor conditions this subsystem on two DMI strings:
     // some laptops share the PCI IDs. Keep that condition, including unknowns.
     if identity.device == 0x15e3 && pair == (0x1462, 0xee59) {
         let BoardIdentity::Known { vendor, name } = board else {
@@ -422,7 +422,7 @@ impl Prepared {
 
     /// # Safety
     /// The prepared BAR range must be identity mapped uncached, exclusively
-    /// owned and remain mapped until controller shutdown succeeds. Retain PCI
+    /// owned and remain mapped until controller shutdown succeeds. Keep PCI
     /// ownership, power and decode established by `prepare` for that lifetime.
     pub unsafe fn claim_mmio(self) -> Result<MmioRegisters, super::super::Error> {
         if self.identity.requires_mapped_preflight() {
@@ -509,7 +509,7 @@ fn capabilities<C: ConfigSpace>(
             *slot = Some(offset16);
         }
     }
-    // PCH78 is Device Control, so require its actual known endpoint owner.
+    // PCH78 is Device Control, so require its known endpoint owner.
     // Missing/unknown capabilities do not authorize writing an ambiguous body.
     if controls.contains(&PCH_SNOOP) && found.pcie != Some(SCH_HDA_DEVC - 8) {
         return Err(AttachError::InvalidCapabilities);
@@ -567,12 +567,12 @@ fn validated_bar<C: ConfigSpace>(config: &C, bar0: Bar) -> Result<(u64, u64, boo
 /// Modern Intel identities require this path: read-only PCI/MMIO ownership
 /// preflight precedes every PCI mutation. No temporary power/decode operation
 /// is used to inspect an unknown DSP owner. Legacy `prepare` refuses these IDs.
-/// The returned adapter retains the exact PCI function and mandatory reset
+/// The returned adapter keeps the exact PCI function and mandatory reset
 /// policy; use its `config()` when constructing the controller.
 ///
 /// # Safety
 /// All `prepare` platform ownership, coherent DMA and mapping prerequisites
-/// apply. Additionally, the actual function must already be in D0 with memory
+/// apply. Additionally, the function must already be in D0 with memory
 /// decode enabled, and `registers` must map exactly its sized BAR0 uncached with
 /// native widths. Keep that mapping alive on failure as well as success. The
 /// platform must have quiesced all prior DMA and excluded firmware/AML/SMM/DSP
@@ -674,16 +674,16 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             true,
         )
     }?;
-    // SAFETY: preparation and the retained register implementation refer to
+    // SAFETY: preparation and the register implementation refer to
     // the same BAR/function checked above. Moving registers into the adapter
-    // retains that mapping while function remains exclusively borrowed.
+    // keeps that mapping while function remains exclusively borrowed.
     unsafe { prepared.bind_registers(function, registers) }
 }
 
 /// Enter PCI D0, select the identity's conventional coherent DMA behavior,
 /// enable memory/mastering, and disable all PCI interrupt delivery.
 ///
-/// `bar0` must be the actual BAR0 sized by the platform while the function is
+/// `bar0` must be the BAR0 sized by the platform while the function is
 /// exclusively owned. It must be nonprefetchable memory, at least 0x440 bytes.
 /// This function never sizes BARs or guesses addresses. Failure after a config
 /// write leaves ownership with the caller, with decoding/mastering disabled
@@ -696,7 +696,7 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
 /// certifies that decision; the enum cannot discover it. Configuration space
 /// must use native byte/word stores. No-PM-capability functions must already be
 /// configuration-ready in D0. The supplied allocator used subsequently
-/// must provide coherent, controller-reachable DMA through the actual IOMMU.
+/// must provide coherent, controller-reachable DMA through the IOMMU.
 /// No later agent may change power, decode, snoop or controller ownership.
 pub unsafe fn prepare<C: ConfigSpace>(
     function: &mut Function<C>,
@@ -710,12 +710,12 @@ pub unsafe fn prepare<C: ConfigSpace>(
     unsafe { prepare_with_board(function, bar0, timer, ownership, BoardIdentity::Unknown) }
 }
 
-/// Prepare with actual target SMBIOS board evidence for conditional exclusions.
+/// Prepare with target SMBIOS board evidence for conditional exclusions.
 /// `prepare` supplies Unknown and refuses ambiguous subsystem identities.
 ///
 /// # Safety
 /// All platform/power/ownership/coherent-DMA prerequisites of `prepare` apply.
-/// Known board strings must come from this target's actual firmware SMBIOS,
+/// Known board strings must come from this target's firmware SMBIOS,
 /// never a guessed machine name, the development host, or a PCI-ID inference.
 pub unsafe fn prepare_with_board<C: ConfigSpace>(
     function: &mut Function<C>,
@@ -724,7 +724,7 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     ownership: Ownership,
     board: BoardIdentity<'_>,
 ) -> Result<Prepared, AttachError> {
-    // SAFETY: the caller retains exclusive PCI/platform ownership, stable
+    // SAFETY: the caller keeps exclusive PCI/platform ownership, stable
     // power and coherent reachable DMA, and supplies firmware-derived board
     // identity. This path performs no mapped-register preflight.
     unsafe { prepare_inner(function, bar0, timer, ownership, board, false) }

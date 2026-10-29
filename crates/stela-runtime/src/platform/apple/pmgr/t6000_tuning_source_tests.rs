@@ -1,4 +1,4 @@
-//! Original-source bridge tuning/model oracle retained with the actual native model.
+//! Original-source bridge tuning/model oracle kept with the native model.
 
 use stela_soc_data::pmgr::t6000::tunables::{Profile, Tuning, check_optional_mask};
 const fn t(offset: u32, mask: u32, value: u32) -> Tuning {
@@ -28,7 +28,7 @@ fn original(variable: &str, digest: &str) -> Vec<u8> {
     bytes
 }
 // Exact metadata lists selected by all native first-die guard paths under
-// the qualified profile. Source guard/constructor hashes are checked below.
+// the checked profile. Source guard/constructor hashes are checked below.
 const LISTS: [&[usize]; 193] = [
     &[0x133bcb8],
     &[0x1316b90],
@@ -290,7 +290,7 @@ fn original_all_193_bridge_programs_keep_masks_order_and_actual_dt_bounds() {
         assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
     }
     assert_eq!(word(&bytes, 0x2b3a674), 0x39400389); // full u8 side, no boolean projection
-    assert_eq!(word(&bytes, 0x2b3a694), 0x52800c0c); // actual stride0x60
+    assert_eq!(word(&bytes, 0x2b3a694), 0x52800c0c); // stride0x60
     let profile = Profile::new(0x6000, 8, 0).unwrap();
     let mut count = 0;
     for (id, lists) in LISTS.iter().enumerate() {

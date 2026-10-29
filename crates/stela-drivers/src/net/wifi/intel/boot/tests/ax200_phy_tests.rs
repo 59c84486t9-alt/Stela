@@ -188,8 +188,8 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
                 .zip(copies.as_chunks::<4>().0.iter())
             {
                 // Remainder, TB0 and executable TFD are the exact additive
-                // command's guarded DMA publication. Actual ACK/reclaim then
-                // restores an inert invalid TFD without acquiring RF authority.
+                // command's guarded DMA publication. ACK/reclaim then
+                // restores an inert invalid TFD without acquiring RF permission.
                 assert_eq!(holds, &[1, 1, 1, 0]);
                 assert_eq!(copies[0].len(), 20);
                 assert_eq!(copies[1].len(), 20);
@@ -199,7 +199,7 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
                 assert_eq!(invalid.len(), 256);
                 assert_eq!(&invalid[..4], &[1, 0, 8, 0]);
                 let address = u64::from_le_bytes(invalid[4..12].try_into().unwrap());
-                // The retained source invalid target is immutable and still
+                // The kept source invalid target is immutable and still
                 // owned. No command payload can hide in an unguarded write.
                 assert_eq!(
                     device_read(&native.domain, address, 0, 8),

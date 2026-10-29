@@ -10,10 +10,10 @@
 //! count*4 allocation permits zero through IOMallocTypeVarImpl (VA c3e25dc)
 //! and the minimum allocator zone (bc21ae8..af4); its capture loop returns
 //! before selection when count0 (9ec1acc..ad0). Diagnostic register capture
-//! is a separate contract: unqualified auxiliary words still refuse.
+//! is a separate contract: unchecked auxiliary words still refuse.
 //!
 //! No UMMS-stage fault can occur while context selection refuses in TRAD.
-//! Its empty error slot and disabled counter status are actual native state,
+//! Its empty error slot and disabled counter status are native state,
 //! not mirrors of the paired TRAD fault. Nonzero counter control, hardware
 //! lock, metadata and capture payloads remain explicit requirements.
 
@@ -28,7 +28,7 @@ const PERF_STATUS: u64 = 0x1008;
 const PERF_OVERFLOW: u32 = 1 << 20;
 
 /// The only implemented performance state. Enabling events is refused until
-/// their actual counts, control, overflow and interrupt effects are known.
+/// their counts, control, overflow and interrupt effects are known.
 #[derive(Default)]
 pub(super) enum Performance {
     #[default]
@@ -86,7 +86,7 @@ impl Umms {
     pub(super) fn clear(&mut self) {
         // No original reset value for CONFIG20 is recovered. A destructive
         // reset/loss invalidates that observation until software writes it;
-        // retaining a power domain preserves the previous observation.
+        // keeping a power domain preserves the previous observation.
         self.automatic_clock_gating = None;
         self.performance = Performance::Disabled;
     }

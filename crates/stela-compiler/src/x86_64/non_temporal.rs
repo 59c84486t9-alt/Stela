@@ -55,5 +55,5 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
         }
     }
     // The shared pair recipes stage both loads before destination commits,
-    // retain completed store prefixes on faults, and never write back at Offset.
+    // keep completed store prefixes on faults, and never write back at Offset.
 }

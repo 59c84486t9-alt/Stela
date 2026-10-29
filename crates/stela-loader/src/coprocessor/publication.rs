@@ -1,4 +1,4 @@
-//! Exact original segment publication ABI, as an uninstalled parent proposal.
+//! Original segment publication ABI, as an uninstalled parent proposal.
 //!
 //! AppleA7IOP and RTBuddy consume PA/linked-VA/remap separately. An encoded
 //! proposal and ownership identifiers do not establish live allocation/mapping
@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_formats::sha256;
 
-/// Actual selected native policy inputs, before packing the wire flag word.
+/// Selected native policy inputs, before packing the wire flag word.
 /// These internal flags are not Mach-O protections. Their other allocation,
 /// isolation and lifecycle effects remain with the corresponding parent owners.
 pub struct NativeFlagsInput {
@@ -28,7 +28,7 @@ pub struct NativeFlagsInput {
     pub telemetry_provenance: Provenance,
 }
 
-/// A retained derivation, not certification of the caller's selected policy.
+/// A kept derivation, not certification of the caller's selected policy.
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeFlags {
     raw_flags: u32,
@@ -83,7 +83,7 @@ impl NativeFlags {
 
 #[derive(Clone)]
 pub enum Action {
-    /// Deliberate policy decision retained in the proposal, never an implicit
+    /// Deliberate policy decision kept in the proposal, never an implicit
     /// effect of a zero VM size or an unfamiliar segment name.
     Omit,
     Publish {
@@ -152,7 +152,7 @@ pub struct Proposal {
     pub records: Vec<SegmentRecord>,
     pub omitted: Vec<Omitted>,
     pub entry: MappedEntryPlan,
-    /// Actual OSData wire bytes, for both the ASC and nub provider views.
+    /// OSData wire bytes, for both the ASC and nub provider views.
     pub segment_ranges: Vec<u8>,
     /// RTBuddy's semicolon-delimited buffer. No unused trailing name remains.
     pub segment_names: Vec<u8>,

@@ -1,5 +1,5 @@
 //! Per-device RAM services for the original NVIDIA allocation hooks. Binding
-//! installs actual borrowed/retained platform resources, not a GPU initializer.
+//! installs borrowed/kept platform resources, not a GPU initializer.
 //! No global registry, fallback allocator, IRQ-context predicate or DMA identity
 //! conversion is introduced. RM activation still requires its remaining native
 //! services, including its original interrupt-allocation/context contract.
@@ -35,7 +35,7 @@ pub enum ServiceError {
     PageGeometry(page_geometry::Error),
 }
 
-/// Retained allocation provenance. DMA uses this actual attached domain and
+/// Allocation provenance. DMA uses this attached domain and
 /// compares opaque device keys BEFORE dereferencing any supplied dma_dev.
 pub(super) struct Origin {
     pub device_key: *mut c_void,
@@ -56,7 +56,7 @@ pub(super) struct Origin {
 /// until every allocation is freed, every DMA token is retired or quarantined,
 /// and every firmware token is returned. Therefore
 /// no map-capable old handle can legitimately survive a rebind/address reuse.
-/// CPU-only views and consumed quarantine independently retain actual pins/domain
+/// CPU-only views and consumed quarantine independently keep pins/domain
 /// and may survive. Final releases still obey backing/domain/heap context rules.
 pub struct MemoryServices<'a> {
     source: &'a dyn PageSource,
@@ -89,10 +89,10 @@ unsafe extern "C" {
 impl<'a> MemoryServices<'a> {
     /// # Safety
     /// `domain` must be the real isolated DMA domain attached to exactly
-    /// `requester`, with `address_limit` from that device's actual DMA policy.
+    /// `requester`, with `address_limit` from that device's DMA policy.
     /// `page_shift` is the real native granule, matching the backend's global
     /// os_page_shift facts before RM runs; it is never a guest granule. The
-    /// actual source must attest the exact installed PageGeometry; an unknown
+    /// source must attest the installed PageGeometry; an unknown
     /// source, conflicting maximum or non-base configured shift is refused. The
     /// provider must establish the requested CPU cache policy or refuse it,
     /// without introducing incompatible aliases.
@@ -129,7 +129,7 @@ impl<'a> MemoryServices<'a> {
         })
     }
 
-    /// Attach an immutable firmware provider before pinning/binding. Its actual
+    /// Attach an immutable firmware provider before pinning/binding. Its
     /// device-family attestation shares this service's requester/reset epoch.
     pub fn with_firmware(mut self, firmware: FirmwareBinding<'a>) -> Self {
         self.firmware = Some(firmware);
@@ -137,7 +137,7 @@ impl<'a> MemoryServices<'a> {
     }
 
     /// Bind an initialized native nv_state_t's empty OS/DMA slots. C checks
-    /// its actual PCI identity against the retained requester. This neither
+    /// its PCI identity against the requester. This neither
     /// enables hardware nor creates a channel, IRQ route or GPU VA mapping.
     ///
     /// # Safety
@@ -178,8 +178,8 @@ impl<'a> MemoryServices<'a> {
     /// call can start. Keep this pinned service/state live until this succeeds;
     /// dropping/reusing them while resources remain violates the bind contract.
     /// CPU-only views and consumed quarantine may remain. The real domain
-    /// must remain attached while any retained lease or quarantine needs it.
-    /// This method clears only the slots owned by this handle; it fabricates
+    /// must remain attached while any lease or quarantine needs it.
+    /// This method clears only the slots owned by this handle; it invents
     /// no device reset, retirement or completion proof.
     pub unsafe fn unbind(self: Pin<&mut Self>) -> Result<(), ServiceError> {
         // SAFETY: field access without moving the pinned handle.
@@ -193,7 +193,7 @@ impl<'a> MemoryServices<'a> {
         {
             return Err(ServiceError::Native(Status::InvalidState as u32));
         }
-        // SAFETY: the owner excludes callers; C compares exact installed slots.
+        // SAFETY: the owner excludes callers; C compares installed slots.
         let status = unsafe { stela_nvidia_unbind_memory(this.state, (this as *mut Self).cast()) };
         if status != 0 {
             return Err(ServiceError::Native(status));
@@ -398,7 +398,7 @@ unsafe extern "C" fn stela_nvidia_alloc_pages(
 
 /// # Safety
 /// Return one live producer-owned Allocation, once, after parent C users stop.
-/// Outstanding CPU views/DMA maps independently retain pins/domain. This cannot
+/// Outstanding CPU views/DMA maps independently keep pins/domain. This cannot
 /// be used for a manually supplied Allocation or another imported handle kind.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_nvidia_free_pages(
@@ -428,7 +428,7 @@ unsafe extern "C" fn stela_nvidia_free_pages(
     }
     services.allocations.set(services.allocations.get() - 1);
     // SAFETY: validated producer ownership; exactly one free, no live parent
-    // C reference. CpuMapping/DmaMapping retain any outstanding actual pins.
+    // C reference. CpuMapping/DmaMapping keep any outstanding pins.
     unsafe {
         private.cast::<Allocation>().drop_in_place();
         memory::free(private);
@@ -510,7 +510,7 @@ mod tests {
         );
     }
 
-    /// Exact original C type storage, with a zero PCI-identity fixture. This is
+    /// Original C type storage, with a zero PCI-identity fixture. This is
     /// test state, not device initialization. The production query returns only
     /// native layout facts and does not create a successful-looking GPU state.
     struct State {
@@ -551,7 +551,7 @@ mod tests {
     unsafe impl Send for Backing {}
     // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Backing {}
-    // SAFETY: same zeroed allocation/mapping/cache metadata is retained through
+    // SAFETY: same zeroed allocation/mapping/cache metadata is held through
     // the last real pin; physical labels are independent of CPU VA and IOVA.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -570,7 +570,7 @@ mod tests {
     impl Drop for Backing {
         fn drop(&mut self) {
             self.released.fetch_add(1, Ordering::SeqCst);
-            // SAFETY: the last pin owns this exact original model allocation.
+            // SAFETY: the last pin owns this original model allocation.
             unsafe { dealloc(self.cpu.as_ptr(), self.layout) };
         }
     }
@@ -740,7 +740,7 @@ mod tests {
         domain: &Arc<Domain>,
         state: &State,
     ) -> Pin<Box<MemoryServices<'a>>> {
-        // SAFETY: one isolated model requester/domain, actual model native page
+        // SAFETY: one isolated model requester/domain, model native page
         // granule and explicit limit. No hardware or guest is accessed.
         let mut services = Box::pin(
             unsafe {
@@ -759,7 +759,7 @@ mod tests {
             }
             .unwrap(),
         );
-        // SAFETY: exact original C type storage with the model's initialized PCI
+        // SAFETY: original C type storage with the model's initialized PCI
         // tuple, live/pinned service and serialized normal test context.
         unsafe { services.as_mut().bind(state.raw()).unwrap() };
         services
@@ -857,7 +857,7 @@ mod tests {
                 Err(ServiceError::Native(Status::InvalidState as u32))
             );
             assert_eq!(source.released.load(Ordering::SeqCst), 0);
-            // The model has no device execution; actual quiescence is established
+            // The model has no device execution; quiescence is established
             // here before calling the original unsafe retirement boundary.
             assert_eq!(
                 nv_dma_unmap_alloc(key(&services), 3, addresses.as_mut_ptr(), &mut dma_private),
@@ -1035,7 +1035,7 @@ mod tests {
             source.base.set(0x1_0000_0000);
             let mut ptes = [0xa5a5];
             let mut allocation = ptr::null_mut();
-            // Exercise the actual Rust callback's force32 policy without writing
+            // Exercise the Rust callback's force32 policy without writing
             // guessed offsets into the opaque original nv_state_t.
             assert_eq!(
                 stela_nvidia_alloc_pages(
@@ -1166,7 +1166,7 @@ mod tests {
             let state = State::new();
             let mut services = bind(&source, &domain, &state);
             // SAFETY: real model bindings and capacities. Any temporary mapping
-            // remains unpublished, and the model records its actual removal.
+            // remains unpublished, and the model records its removal.
             unsafe {
                 let mut addresses = [0; 2];
                 let mut allocation = ptr::null_mut();
@@ -1222,7 +1222,7 @@ mod tests {
             let state = State::new();
             let mut services = bind(&source, &domain, &state);
             let before = quarantine_status();
-            // SAFETY: model device has no running accesses; actual quiescence is
+            // SAFETY: model device has no running accesses; quiescence is
             // established before retirement. Inject a real visibility/removal error.
             unsafe {
                 let mut addresses = [0];
@@ -1281,7 +1281,7 @@ mod tests {
         let source = Source::new(12);
         let domain = Domain::new();
         let state = State::new();
-        // SAFETY: model policy only; the deliberately wrong requester must fail
+        // SAFETY: model policy only; the wrong requester must fail
         // original-C identity validation before any resource callback is possible.
         let mut wrong = Box::pin(
             unsafe {
@@ -1340,7 +1340,7 @@ mod tests {
             domain.base.store(base, Ordering::SeqCst);
             let state = State::new();
             let mut services = bind(&source, &domain, &state);
-            // SAFETY: exact original state and one native-page output. The model
+            // SAFETY: original state and one native-page output. The model
             // returns a real token with an unsuitable IOVA, never an identity PA.
             unsafe {
                 let mut addresses = [0];
@@ -1404,7 +1404,7 @@ mod tests {
         let mut services = bind(&source, &domain, &state);
         let before = quarantine_status();
         // SAFETY: the IOVA never escapes, so no model device could use it. Actual
-        // visibility and then actual rollback invalidation fail independently.
+        // visibility and then rollback invalidation fail independently.
         unsafe {
             let mut addresses = [0];
             let mut allocation = ptr::null_mut();

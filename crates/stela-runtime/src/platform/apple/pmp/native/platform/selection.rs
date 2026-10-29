@@ -4,7 +4,7 @@
 //! ANE1018da0..de0. These are facts about native software, not GPU execution.
 use alloc::vec::Vec;
 
-/// A semantic source24-byte counter reference; raw type/provider are retained.
+/// A semantic source24-byte counter reference; raw type/provider are held.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CounterReference {
     pub kind: u32,
@@ -27,7 +27,7 @@ impl CounterReference {
     }
 }
 /// Source-derived P20/P28 desired bits. This value contains no pending update,
-/// observation, counter generation, lifecycle or ACK authority.
+/// observation, counter generation, lifecycle or ACK permission.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CounterSelection {
     bits: u128,
@@ -64,7 +64,7 @@ impl CounterSelection {
     }
 }
 
-/// Actual MC source control transforms desired bits and expected counter masks.
+/// MC source control transforms desired bits and expected counter masks.
 /// Expected is policy data, independent of an arrived frame or copied receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct McSelection {

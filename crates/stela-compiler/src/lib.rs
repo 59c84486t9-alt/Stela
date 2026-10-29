@@ -322,7 +322,7 @@ mod tests {
             assert!(pclmul.x86_64_code.len() < baseline.x86_64_code.len());
             assert_eq!(pclmul.source_map.len(), baseline.source_map.len());
         }
-        // Byte polynomial forms retain the lane-isolated SSE2 recipe.
+        // Byte polynomial forms keep the lane-isolated SSE2 recipe.
         for word in [0x2e229c20u32, 0x0e22e020, 0x4e22e020] {
             let source: Vec<_> = [word, 0xd65f03c0]
                 .into_iter()

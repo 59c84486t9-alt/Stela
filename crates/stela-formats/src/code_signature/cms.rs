@@ -4,7 +4,7 @@
 //! attributes, the `messageDigest` attribute over the signed code
 //! directory, Apple's `CDHashes2` attribute (1.2.840.113635.100.9.2) over
 //! any other code directory the kernel chose, and each certificate's
-//! signature up a chain whose issuing authority and root are pinned by
+//! signature up a chain whose issuing permission and root are pinned by
 //! SHA-256 fingerprint. The certificates travel in the signature itself;
 //! validity periods are not checked, as code signing does not expire
 //! signed code.
@@ -100,8 +100,8 @@ const RSA_SHA1: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05];
 const RSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
 const RSA_SHA384: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c];
 
-/// The pinned SHA-256 fingerprints of the authority that issues the signing
-/// certificate and of the root that issues the authority.
+/// The pinned SHA-256 fingerprints of the permission that issues the signing
+/// certificate and of the root that issues the permission.
 pub(super) struct Anchors {
     pub(super) authority: [u8; 32],
     pub(super) root: [u8; 32],
@@ -381,7 +381,7 @@ mod tests {
     use super::*;
 
     // Generated solely for Stela with LibreSSL: a synthetic root, an
-    // authority it signed with SHA-1 and a leaf the authority signed with
+    // permission it signed with SHA-1 and a leaf the permission signed with
     // SHA-1, and a detached SHA-256 CMS signature over a synthetic code
     // directory. Public certificates and the signature only; no Apple data
     // and no private key.

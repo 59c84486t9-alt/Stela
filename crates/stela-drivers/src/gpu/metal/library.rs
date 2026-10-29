@@ -293,7 +293,7 @@ impl<'a> Library<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct Function<'a> {
     pub name: &'a str,
-    /// MTLB stage value, deliberately not the differently numbered MTLFunctionType.
+    /// MTLB stage value, not the differently numbered MTLFunctionType.
     pub kind: u8,
     pub air_version: Version,
     pub language_version: Version,

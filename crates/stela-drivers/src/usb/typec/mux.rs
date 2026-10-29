@@ -4,7 +4,7 @@
 // Copyright (C) 2024 Linaro Ltd.
 // Copyright (C) 2023 Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
 // Copyright (c) 2026 Stela contributors
-//! Physical Type-C switches/retimers. The platform binds actual board devices,
+//! Physical Type-C switches/retimers. The platform binds board devices,
 //! powered I²C targets, supplies, clocks, GPIOs and upstream route topology.
 //! An observation or mode request never invents those resources or a GPU link.
 
@@ -95,8 +95,8 @@ pub enum ResourceError {
     Status(u64),
     I2c(i2c::Error),
 }
-/// Actual board-selected resource operations. Absence/failure must be explicit;
-/// no dummy/no-op power provider is included. Providers retain resource leases.
+/// Board-selected resource operations. Absence/failure must be explicit;
+/// no dummy/no-op power provider is included. Providers keep resource leases.
 /// Operations establish this device's owned enable/reset vote, not an unchecked
 /// global rail refcount. Setting false is idempotent, including after a failed
 /// enable whose physical effects are uncertain.
@@ -104,7 +104,7 @@ pub trait Power {
     fn set(&mut self, operation: PowerOperation) -> Result<(), ResourceError>;
 }
 
-/// One actual route node. A platform-resolved chain may call orientation from
+/// One route node. A platform-resolved chain may call orientation from
 /// upstream to downstream, then mode from retimer to upstream mux, matching the
 /// Linux callbacks. There is no connector/topology inference in this trait.
 pub trait Route {

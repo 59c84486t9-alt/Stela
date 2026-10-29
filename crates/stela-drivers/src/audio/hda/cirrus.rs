@@ -157,9 +157,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if vendor.kind != WidgetKind::Vendor(15) {
             return Err(Error::UnsupportedTopology);
         }
-        // cs421x_init deliberately skips every vendor/processing operation for
+        // cs421x_init skips every vendor/processing operation for
         // CS4213. Its node9 identifies the variant; it does not authorize the
-        // CS4210 coefficient protocol or a fabricated processing capability.
+        // CS4210 coefficient protocol or an invented processing capability.
         let processing_caps = if selected == CirrusProfile::Cs4213 {
             None
         } else {
@@ -334,7 +334,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(state)
     }
-    /// Source-qualified cold startup, shared-pin mux and analog capabilities.
+    /// Source-checked cold startup, shared-pin mux and analog capabilities.
     /// No OEM GPIO, pin rewrite, automute or digital-stream policy is inferred.
     pub fn initialize_cirrus_codec(&mut self, graph: &CodecGraph) -> Result<CirrusReport, Error> {
         self.cirrus_guard(graph)?;
@@ -422,7 +422,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    /// Use the actual analog path with the retained source ADC/stereo/gain
+    /// Use the analog path with the source ADC/stereo/gain
     /// policy. Per-pin EAPD follows the caller's explicit electrical options.
     pub fn configure_cirrus_route(
         &mut self,

@@ -143,7 +143,7 @@ fn configuration_zero_missing_status_or_observed_value_never_reopens_old_endpoin
         assert!(c.submit_bulk_in(input(&pipes), 1, 1_000_000).is_err());
         assert!(c.bulk_pipes(&id).is_err());
         assert_eq!(m.lock().unwrap().io, before);
-        // Failed Drop cannot retire either actual-DMA or native resources.
+        // Failed Drop cannot retire either DMA or native resources.
         drop(c);
         let p = m.lock().unwrap();
         assert!(p.mapped && !p.retired);

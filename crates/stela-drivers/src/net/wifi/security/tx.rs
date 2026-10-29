@@ -20,11 +20,11 @@ pub enum NonceOwner {
     Host,
     /// Firmware/hardware inserts PN/IV and computes the cipher/MIC.
     Firmware,
-    /// Station GTK or a key deliberately not enabled for transmission.
+    /// Station GTK or a key not enabled for transmission.
     ReceiveOnly,
 }
 
-/// Initial counter programming for a genuinely new temporal-key epoch.
+/// Initial counter programming for a new temporal-key epoch.
 /// Does not authorize reinstalling a previous key or invent a recovery counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransmitSeed {
@@ -34,7 +34,7 @@ pub struct TransmitSeed {
 
 impl TransmitSeed {
     /// Hardware-managed PN is admitted only for a fresh key. Running firmware
-    /// PN recovery requires actual vendor proof and is not supplied here.
+    /// PN recovery requires vendor proof and is not supplied here.
     pub const FIRMWARE_FRESH: Self = Self {
         owner: NonceOwner::Firmware,
         counter: PacketNumber(0),
@@ -61,7 +61,7 @@ impl TransmitSeed {
     }
 }
 
-/// One reserved host PN. Intentionally not Clone/Copy: consume it once when
+/// One reserved host PN. Not Clone/Copy: consume it once when
 /// building this MPDU's crypto header. Failed TX consumes/skips the reservation;
 /// it must never be rolled back or reused for a different plaintext MPDU.
 #[derive(Debug)]
@@ -85,8 +85,8 @@ impl HostTxNonce {
 
 impl KeySlot {
     /// Reserve a monotonically increasing PN for one host-IV MPDU. The caller
-    /// serializes this with the physical key's actual TX queue publication.
-    /// Hardware retries of the same MPDU retain its PN and payload; a new MPDU
+    /// serializes this with the physical key's TX queue publication.
+    /// Hardware retries of the same MPDU keep its PN and payload; a new MPDU
     /// must obtain a new reservation. Hold the key/counter context through real
     /// hardware completion and deferred-work drain before slot retirement.
     pub fn reserve_host_tx_nonce(&mut self, expected: KeyIdentity) -> Result<HostTxNonce, Error> {

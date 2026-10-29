@@ -35,7 +35,7 @@ pub struct MsiMessage {
     pub data: u32,
 }
 
-/// Physical fixed-delivery target, qualified by the owning CPU adapter.
+/// Physical fixed-delivery target, checked by the owning CPU adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Target {
     pub destination: u8,
@@ -73,10 +73,10 @@ pub enum Disposition {
     Handled,
 }
 
-/// Immutable, pre-bound sharing group. Every member remains retained until
+/// Immutable, pre-bound sharing group. Every member remains held until
 /// the entire physical source group is masked, stopped and drained. Joining
 /// or removing a member requires complete group retirement and re-registration;
-/// dynamic sharing is deliberately unavailable. Dispatch invokes every member
+/// dynamic sharing is unavailable. Dispatch invokes every member
 /// without cloning, allocating or releasing references in interrupt context.
 pub struct SharedHandlers(Box<[Arc<dyn Handler>]>);
 impl SharedHandlers {
@@ -108,7 +108,7 @@ impl Handler for SharedHandlers {
 /// A request that did not register. Once the CPU check passes, a refusal
 /// before anything is published gives the source and handler back
 /// unchanged, so the driver can keep polling its device; after a wrong-CPU
-/// check or an uncertain arming failure they stay retained.
+/// check or an uncertain arming failure they stay held.
 pub struct RequestError {
     pub error: IrqError,
     pub returned: Option<(Box<dyn Source>, Arc<dyn Handler>)>,
@@ -134,7 +134,7 @@ impl<S: Source> UnregisteredSource<S> {
     /// Recover the exact untouched owners for device-specific fallback/retry.
     ///
     /// # Safety
-    /// Stay on the original qualified process CPU and retain handler until the
+    /// Stay on the original checked process CPU and keep handler until the
     /// source is consumed/released, including independent device/DMA-dependent
     /// lifetime obligations. No stop/drain or retired-route proof is supplied.
     pub unsafe fn into_parts(self) -> (Box<S>, Arc<dyn Handler>) {
@@ -169,7 +169,7 @@ impl From<IrqError> for RequestError {
 }
 
 /// Object-safe mount service for driver consumers, independent of CPU type.
-/// The actual platform initializes and permanently retains the controller.
+/// The platform initializes and permanently keeps the controller.
 pub trait IrqController: Sync {
     fn request(
         &'static self,
@@ -179,7 +179,7 @@ pub trait IrqController: Sync {
     fn quarantine_count(&self) -> u64;
 }
 
-/// Process/deferred, CPU-affine owner. This trait intentionally supplies no
+/// Process/deferred, CPU-affine owner. This trait supplies no
 /// Send/Sync promise; neither operations nor final Drop are hard-IRQ-safe.
 pub trait IrqRegistration {
     fn vector(&self) -> u8;
@@ -190,21 +190,21 @@ pub trait IrqRegistration {
     fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError>;
 }
 
-/// Genuine retained physical-parent mask capability for a hard-IRQ failure.
+/// Physical-parent mask capability for a hard-IRQ failure.
 /// This endpoint grants no route, callback, device or DMA ownership.
 ///
 /// # Safety
-/// Construct only from the actual owned pin and its nonwrapping claim epoch.
-/// `mask` checks the original CPU/epoch, performs actual IRQ-safe controller
+/// Construct only from the owned pin and its nonwrapping claim epoch.
+/// `mask` checks the original CPU/epoch, performs IRQ-safe controller
 /// mask and readback, and refuses stale endpoints after retirement/reuse. It
 /// allocates nothing, never waits for deferred work and never finally releases
-/// an owner in the ISR. Retain the endpoint through callback completion; final
+/// an owner in the ISR. Keep the endpoint through callback completion; final
 /// Drop remains process/deferred context. An error is not successful masking.
 pub unsafe trait ParentMask: Send + Sync {
     fn mask(&self) -> Result<(), IrqError>;
 }
 
-/// Acknowledged retirement of one actual registered route. Only the canonical
+/// Acknowledged retirement of one registered route. Only the canonical
 /// registry constructs this non-cloneable, CPU-affine receipt after hardware,
 /// callback and work drain. It proves no device DMA/domain/BM retirement.
 pub struct RetiredRoute {
@@ -219,7 +219,7 @@ impl RetiredRoute {
 
 /// The original source and callback owner after acknowledged route retirement.
 /// Source field order preserves final release while its callback context is
-/// still retained. This owner remains process/deferred and CPU-affine.
+/// still held. This owner remains process/deferred and CPU-affine.
 pub struct RetiredSource<S: Source + ?Sized> {
     source: Box<S>,
     handler: Arc<dyn Handler>,
@@ -230,14 +230,14 @@ impl<S: Source + ?Sized> RetiredSource<S> {
         &self.route
     }
 
-    /// Extract the exact original source, callback and route receipt.
+    /// Extract the original source, callback and route receipt.
     ///
     /// # Safety
-    /// Stay on the qualified process CPU. Retain `handler` until `source` has
+    /// Stay on the checked process CPU. Keep `handler` until `source` has
     /// been consumed/released, including any source-destructor dependency on
     /// callback-owned context, and until all independently required device/DMA
     /// completion for callback-owned resources is acknowledged. Config/root release still
-    /// requires its actual stop and completion proofs; route drain alone does
+    /// requires its stop and completion proofs; route drain alone does
     /// not grant them. A failed extraction must keep the original owners.
     pub unsafe fn into_parts(self) -> (Box<S>, Arc<dyn Handler>, RetiredRoute) {
         (self.source, self.handler, self.route)
@@ -245,48 +245,48 @@ impl<S: Source + ?Sized> RetiredSource<S> {
 }
 
 /// Fast hard-IRQ callback. Acknowledge owned real causes before returning, or
-/// actually mask a deferred source under its retained work owner. The platform
-/// emits EOI afterwards. A bounded diagnostic may deliberately leave a level
-/// asserted once to observe actual EOI/retrigger behavior. No blocking, allocation or final heap/Arc
-/// release is permitted. Defer work through the device's retained work owner.
+/// mask a deferred source under its work owner. The platform
+/// emits EOI afterwards. A bounded diagnostic may leave a level
+/// asserted once to observe EOI/retrigger behavior. No blocking, allocation or final heap/Arc
+/// release is permitted. Defer work through the device's work owner.
 pub trait Handler: Send + Sync {
     fn handle(&self) -> Disposition;
 }
 
-/// Exclusive real device/interrupt source retained by its registration.
+/// Exclusive real device/interrupt source kept by its registration.
 ///
 /// # Safety
 /// The source initially owns an inactive route, with no old firmware/driver
-/// callback or unresolved alias. `mask` actually disables interrupt generation
+/// callback or unresolved alias. `mask` disables interrupt generation
 /// and observes the device's acknowledgement. `quiesce` stops submissions and
 /// device DMA/posted interrupt writes, cancels/drains queued workers/timers
 /// and acknowledges pending causes. It excludes future device delivery/work
 /// until explicit `unmask`; the registry invokes it again after callback drain
-/// for work from a formerly in-flight callback. Both calls must retain every
+/// for work from a formerly in-flight callback. Both calls must keep every
 /// callback-reachable context, BO, reservation, pin and CPU/DMA lease until
 /// registration retirement finishes; quiescence alone never authorizes their
-/// release or skips an actual hardware fence/IOTLB acknowledgement.
+/// release or skips a hardware fence/IOTLB acknowledgement.
 /// `program` installs exactly the supplied typed route while masked;
 /// `unmask` enables only this route. Errors must never free hardware-reachable
 /// state. These process/deferred methods and final Drop are never ISR-safe.
-/// A source may be genuinely CPU-affine and !Send. Only its checked owning
+/// A source may be CPU-affine and !Send. Only its checked owning
 /// CPU's process registration accesses or finally releases it; IRQ dispatch
-/// sees the separately retained Send+Sync handler only.
+/// sees the separately Send+Sync handler only.
 pub unsafe trait Source {
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
     fn route(&self) -> RouteRequest;
     /// # Safety
-    /// The route is owned by the registry on its qualified CPU, matches this
-    /// source's request, and its retained callback is published before unmask.
+    /// The route is owned by the registry on its checked CPU, matches this
+    /// source's request, and its callback is published before unmask.
     unsafe fn program(&mut self, route: Route) -> Result<(), IrqError>;
     /// # Safety
-    /// A live registry retains the programmed route and every callback owner.
+    /// A live registry keeps the programmed route and every callback owner.
     unsafe fn unmask(&mut self) -> Result<(), IrqError>;
     /// Called after source quiescence, CPU IRR/ISR drain and callback EOI.
-    /// Check actual route-controller completion (including level Remote IRR)
+    /// Check route-controller completion (including level Remote IRR)
     /// and drain work queued by any formerly in-flight callback. An error
-    /// retains the complete registration; it never authorizes route reuse.
+    /// keeps the complete registration; it never authorizes route reuse.
     /// # Safety
     /// The owned source is stopped, CPU IRR/ISR and all in-flight callbacks
     /// have drained. No future callback can begin while synchronization runs.
@@ -298,7 +298,7 @@ pub unsafe trait Source {
 /// # Safety
 /// Save/disable and restore operate on this same CPU; their memory clobbers
 /// order the critical region. `check_cpu` refuses migration/unavailable state.
-/// Routing, pending IRR/ISR reads and EOI have their actual controller effects.
+/// Routing, pending IRR/ISR reads and EOI have their controller effects.
 /// `interrupt_window` admits queued IRQs and returns with local IRQs disabled;
 /// it is called outside registry locks only. The clock advances during drain.
 /// Vector ownership remains exclusive for the registry lifetime; another CPU
@@ -320,7 +320,7 @@ pub unsafe trait Platform: Send + Sync {
 }
 
 struct Slot {
-    // Release the stopped source while its callback context is still retained.
+    // Release the stopped source while its callback context is still held.
     source: core::cell::UnsafeCell<Box<dyn Source>>,
     handler: Arc<dyn Handler>,
     state: AtomicU8,
@@ -329,7 +329,7 @@ struct Slot {
 }
 
 /// Admission owns these bytes from its first instruction. Every early error
-/// retains them observably without allocating or releasing on an unknown CPU.
+/// keeps them observably without allocating or releasing on an unknown CPU.
 struct Pending<'a, P: Platform> {
     registry: &'a Registry<P>,
     source: ManuallyDrop<Box<dyn Source>>,
@@ -367,8 +367,8 @@ impl<P: Platform> Drop for Pending<'_, P> {
     fn drop(&mut self) {
         if !self.published {
             self.registry.count_quarantine();
-            // The real Box/Arc allocations remain retained. No source access
-            // or final Drop is qualified by a failed admission/CPU check.
+            // The real Box/Arc allocations remain held. No source access
+            // or final Drop is checked by a failed admission/CPU check.
         }
     }
 }
@@ -428,8 +428,8 @@ impl<P: Platform> Registry<P> {
         }
     }
 
-    /// Publish the retained handler before enabling the actual source. Any
-    /// uncertain arming failure retains source/handler and quarantines vector,
+    /// Publish the handler before enabling the source. Any
+    /// uncertain arming failure keeps source/handler and quarantines vector,
     /// as does a wrong-CPU check. Vector exhaustion and target or route
     /// refusals give both owners back.
     pub fn request(
@@ -437,7 +437,7 @@ impl<P: Platform> Registry<P> {
         source: Box<dyn Source>,
         handler: Arc<dyn Handler>,
     ) -> Result<Registration<'static, P>, RequestError> {
-        // Retain both actual owners if CPU qualification fails before
+        // Keep both owners if CPU validation fails before
         // publication: this consuming API cannot return a failed source to
         // its original CPU, and must never run a !Send source's Drop here.
         let pending = Pending {
@@ -487,14 +487,14 @@ impl<P: Platform> Registry<P> {
             .mask()
             .and_then(|()| source.quiesce())
             .and_then(|()| {
-                // SAFETY: qualified target, retained ARMING slot, actual mask and stop.
+                // SAFETY: checked target, kept ARMING slot, mask and stop.
                 unsafe { source.program(route) }
             });
         if let Err(error) = armed {
             self.quarantine(slot);
             return Err(error.into());
         }
-        // SAFETY: The slot is already fully retained; a delivery during unmask sees
+        // SAFETY: The slot is already fully kept; a delivery during unmask sees
         // the real handler. No new submission precedes source configuration.
         unsafe { slot.as_ref() }
             .state
@@ -515,7 +515,7 @@ impl<P: Platform> Registry<P> {
     }
 
     /// Preserve the concrete source type through canonical IRQ retirement.
-    /// This returns the actual original PCI/config/root owner, never a clone.
+    /// This returns the original PCI/config/root owner, never a clone.
     pub fn request_owned<S: Source + 'static>(
         &'static self,
         source: S,
@@ -561,7 +561,7 @@ impl<P: Platform> Registry<P> {
     }
 
     /// Called by the existing IDT dispatcher with local IRQs off. Returns
-    /// true for a retained route, including closing/quarantined tombstones.
+    /// true for a route, including closing/quarantined tombstones.
     pub fn dispatch(&self, vector: u8) -> bool {
         let Some(index) = vector
             .checked_sub(FIRST_VECTOR)
@@ -604,8 +604,8 @@ impl<P: Platform> Drop for Guard<'_, P> {
     }
 }
 
-/// Unique CPU-affine owner, deliberately neither Send nor Sync. Retains the
-/// source/handler until actual mask/quiescence, dispatch and IRR/ISR drain.
+/// Unique CPU-affine owner, neither Send nor Sync. Keeps the
+/// source/handler until mask/quiescence, dispatch and IRR/ISR drain.
 /// Drop and every method require process/deferred context; never an ISR.
 pub struct Registration<'a, P: Platform> {
     registry: &'a Registry<P>,
@@ -623,21 +623,21 @@ impl<P: Platform> Registration<'_, P> {
         if !self.active {
             return Err(IrqError::Unregistered);
         }
-        // SAFETY: this unique registration retains its slot until retirement.
+        // SAFETY: this unique registration keeps its slot until retirement.
         Ok(unsafe { self.slot.as_ref() }
             .handled
             .load(Ordering::Relaxed))
     }
 
-    /// A failed stop/drain retains the complete registration for retry; no
+    /// A failed stop/drain keeps the complete registration for retry; no
     /// vector/context or callback-owned pages can be reused by that failure.
     pub fn retire(&mut self) -> Result<(), IrqError> {
-        // Slot field order releases source while the callback is retained.
+        // Slot field order releases source while the callback is held.
         drop(self.detach()?);
         Ok(())
     }
 
-    /// Return the exact source only after final controller and callback drain.
+    /// Return the source only after final controller and callback drain.
     pub fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
         let retired = self.detach()?;
         let Slot {
@@ -660,7 +660,7 @@ impl<P: Platform> Registration<'_, P> {
         }
         self.registry.platform.check_cpu()?;
         let guard = self.registry.lock();
-        // SAFETY: unique retained process owner, protected against dispatch
+        // SAFETY: unique process owner, protected against dispatch
         // pointer acquisition; handler borrow remains guarded by inflight.
         let slot = unsafe { self.slot.as_ref() };
         slot.state.store(CLOSING, Ordering::Release);
@@ -685,7 +685,7 @@ impl<P: Platform> Registration<'_, P> {
                 break Err(IrqError::Drain);
             }
             // SAFETY: no registry/resource lock held; source stopped and
-            // tombstone retained, so pending delivery only drains/EOIs it.
+            // tombstone kept, so pending delivery only drains/EOIs it.
             unsafe { self.registry.platform.interrupt_window() };
         };
         // SAFETY: restore exactly the immediately enclosing same-CPU state.
@@ -694,7 +694,7 @@ impl<P: Platform> Registration<'_, P> {
         // A callback that was already in flight when closing began may have
         // queued work before its final EOI. Drain/cancel that work only after
         // the callback lifetime has ended as well as before hardware draining.
-        // SAFETY: actual source stop, CPU pending and in-flight callbacks have drained.
+        // SAFETY: source stop, CPU pending and in-flight callbacks have drained.
         unsafe { source.synchronize() }?;
         self.registry.platform.check_cpu()?;
         let guard = self.registry.lock();
@@ -714,7 +714,7 @@ impl<P: Platform> Registration<'_, P> {
 }
 
 /// Concrete-source registration with the same process/CPU affinity. Private
-/// construction proves the type of its erased, uniquely retained source.
+/// construction proves the type of its erased, uniquely kept source.
 pub struct OwnedRegistration<'a, P: Platform, S: Source + 'static> {
     registration: Registration<'a, P>,
     source: PhantomData<S>,
@@ -735,7 +735,7 @@ impl<P: Platform, S: Source + 'static> OwnedRegistration<'_, P, S> {
         Ok(RetiredSource {
             // SAFETY: request_owned alone constructs this wrapper from Box<S>;
             // Registry never replaces it. Retirement uniquely returns that
-            // allocation after actual controller/callback/work drain.
+            // allocation after controller/callback/work drain.
             source: unsafe { Box::from_raw(Box::into_raw(source) as *mut S) },
             handler,
             route,
@@ -863,7 +863,7 @@ mod tests {
         unsafe fn interrupt_window(&self) {
             if self.0.admit_irq.load(Ordering::Relaxed) && self.0.pending.load(Ordering::Relaxed) {
                 // SAFETY: the model registry is leaked/stable, and closing
-                // retains its source/context for this pending delivery.
+                // keeps its source/context for this pending delivery.
                 let registry = unsafe { &*self.0.registry.load(Ordering::Relaxed) };
                 assert!(registry.dispatch(self.0.vector.load(Ordering::Relaxed)));
             }
@@ -871,7 +871,7 @@ mod tests {
     }
     struct ModelSource(Arc<Model>);
     // SAFETY: explicit stopped-source model with injected mask failures and
-    // controller delivery. Quiesce represents actual device/work completion.
+    // controller delivery. Quiesce represents device/work completion.
     unsafe impl Source for ModelSource {
         fn mask(&mut self) -> Result<(), IrqError> {
             if self.0.fail_mask.load(Ordering::Relaxed) {
@@ -944,7 +944,7 @@ mod tests {
             .unwrap()
     }
 
-    // Rc/Cell plus a real creating thread identity make this owner genuinely
+    // Rc/Cell plus a real creating thread identity make this owner
     // !Send; no unsafe Send/Sync implementation or integer ownership erasure.
     struct LocalSource {
         inner: ModelSource,
@@ -952,7 +952,7 @@ mod tests {
         owner: std::thread::ThreadId,
     }
     // SAFETY: explicit same-CPU source model; the registry is the only owner
-    // and must retain it on every unqualified admission/retirement path.
+    // and must keep it on every unchecked admission/retirement path.
     unsafe impl Source for LocalSource {
         fn mask(&mut self) -> Result<(), IrqError> {
             self.inner.mask()
@@ -1240,7 +1240,7 @@ mod tests {
         let retired = registration.retire().unwrap();
         assert_eq!(retired.route().vector(), vector);
         // SAFETY: this concrete modeled source has no release dependency;
-        // retain its actual callback until after explicit source destruction.
+        // keep its callback until after explicit source destruction.
         let (source, handler, route) = unsafe { retired.into_parts() };
         assert!(Arc::ptr_eq(&source.0, &model));
         assert_eq!(route.vector(), vector);
@@ -1269,7 +1269,7 @@ mod tests {
             panic!("failed target registered")
         };
         assert_eq!(refusal.error, IrqError::Route);
-        // SAFETY: preserve the original CPU and callback through exact source
+        // SAFETY: preserve the original CPU and callback through source
         // retry below; the refused request has not changed either owner.
         let (source, handler) = unsafe { refusal.returned.unwrap().into_parts() };
         assert!(Arc::ptr_eq(&source.0, &model));
@@ -1360,7 +1360,7 @@ mod tests {
             .unwrap();
         let vector = registration.vector();
         // Concurrent model interleaving stresses the reader/remove lifetime;
-        // the actual native adapter remains confined to its one owning BSP.
+        // the native adapter remains confined to its one owning BSP.
         let irq = std::thread::spawn(move || assert!(registry.dispatch(vector)));
         handler.entered.wait();
         assert_eq!(registration.retire(), Err(IrqError::Drain));

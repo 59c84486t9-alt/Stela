@@ -10,8 +10,8 @@
 //!
 //! Observations are not display-link/sink-generation ownership. No stream,
 //! converter, DIP, pin-enable, protection or GPU power state is programmed.
-//! Per-entry selection is bounded and restored with actual codec readbacks;
-//! uncertain restoration poisons the retained controller. PCI admission
+//! Per-entry selection is bounded and restored with codec readbacks;
+//! uncertain restoration poisons the controller. PCI admission
 //! remains unchanged; this module cannot manufacture a powered GPU controller.
 use super::{Controller, ControllerToken, PcmCapabilities, Registers, Verb, WidgetKind};
 use crate::{
@@ -64,7 +64,7 @@ impl From<Error> for DigitalError {
     }
 }
 
-/// Converter capabilities read from the actual graph, not a caller-edited one.
+/// Converter capabilities read from the graph, not a caller-edited one.
 #[derive(Debug)]
 pub struct DigitalConverter {
     node: u8,
@@ -87,7 +87,7 @@ impl DigitalConverter {
     }
 }
 
-/// Non-cloneable session tied to the actual controller/reset generation.
+/// Non-cloneable session tied to the controller/reset generation.
 #[derive(Debug)]
 pub struct DigitalPin {
     token: ControllerToken,
@@ -185,7 +185,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         entry: u8,
         operation: impl FnOnce(&mut Self) -> Result<U, DigitalError>,
     ) -> Result<U, DigitalError> {
-        // An attached legacy port retains its pin even before playback starts
+        // An attached legacy port keeps its pin even before playback starts
         // or after a stream stops. Device selection and ELD belong to that
         // owner until an acknowledged detach, not to an observational session.
         if self.hdmi_owns_node(codec, node) {

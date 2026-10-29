@@ -36,7 +36,7 @@ fn ax210_every_launch_csr_fault_quarantines_actual_owner_after_publication() {
         let power = awake_profile(state.clone(), drops.clone(), ax210_profile());
         state.lock().unwrap().fail = Some(index);
         // SAFETY: This iteration owns fresh exclusive Source RAM in its AX210 model Domain;
-        // only serialized CSR failure is injected, and uncertain publication retains that owner.
+        // only serialized CSR failure is injected, and uncertain publication keeps that owner.
         let result = unsafe {
             RomBoot::start_ax210(
                 power,
@@ -73,7 +73,7 @@ fn ax210_every_launch_csr_fault_quarantines_actual_owner_after_publication() {
             let power = awake_profile(state.clone(), drops.clone(), ax210_profile());
             state.lock().unwrap().sentinel = Some((index, value));
             // SAFETY: Fresh Source/Domain belong to this sole AX210 model/reset owner;
-            // sentinel reads are serialized model data, with mappings retained after publication.
+            // sentinel reads are serialized model data, with mappings kept after publication.
             let result = unsafe {
                 RomBoot::start_ax210(
                     power,

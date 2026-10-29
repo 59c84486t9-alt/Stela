@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Native AMD SFH v2 (PCI 1022:15e4, actual ACS dialect 2). This is distinct
+//! Native AMD SFH v2 (PCI 1022:15e4, ACS dialect 2). This is distinct
 //! from AMD MP2 I²C 15e6, legacy SFH and SFH1.1 164a. Linux donor provenance,
-//! retained notices and report limitations are recorded in input/THIRD_PARTY.md.
+//! notices and report limitations are recorded in input/THIRD_PARTY.md.
 //! Copyright 2020-2021 Advanced Micro Devices, Inc.
 //! Authors: Shyam Sundar S K, Sandeep Singh, Basavaraj Natikar,
 //! Nehal Bakulchandra Shah.
 //!
-//! Sensors continuously DMA into retained coherent allocations. Reports read
-//! each aligned word through the actual domain's qualified coherence service;
+//! Sensors continuously DMA into kept coherent allocations. Reports read
+//! each aligned word through the domain's checked coherence service;
 //! no ownership-transfer invalidation, stop/read/restart, vector atomicity or
 //! new-sample counter is invented. The owner serializes this polling/control
 //! API and supplies scheduling (the donor polls every 200 ms).
@@ -117,9 +117,9 @@ pub enum Error {
     UnsupportedSetReport,
     InvalidPresence(u8),
 }
-/// Native adapters retain exact ECAM and UC BAR2 owners. Register operations
-/// must use actual aligned 32-bit MMIO and report failures without discarding
-/// writes. `check_authority` verifies the retained device/configuration epoch.
+/// Native adapters keep exact ECAM and UC BAR2 owners. Register operations
+/// must use aligned 32-bit MMIO and report failures without discarding
+/// writes. `check_authority` verifies the device/configuration epoch.
 pub trait Registers {
     fn check_authority(&mut self) -> Result<(), Error>;
     fn read32(&mut self, offset: usize) -> Result<u32, Error>;
@@ -145,7 +145,7 @@ impl Drop for Slot {
             // successful disable established its quiescence before clearing it.
             let _ = unsafe { self.dma.unmap() };
         }
-        // Published/uncertain mappings quarantine their actual domain and pins.
+        // Published/uncertain mappings quarantine their domain and pins.
     }
 }
 /// Complete reports containing only source-backed descriptor fields.
@@ -162,14 +162,14 @@ pub struct Controller<R, T> {
     slots: Vec<Slot>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// Claim without device writes. The native PCI adapter supplies actual
+    /// Claim without device writes. The native PCI adapter supplies
     /// stopped ownership; this grant binds the DMA provider to that requester.
     ///
     /// # Safety
-    /// `domain` is the retained function's DMA domain, isolated or the
+    /// `domain` is the function's DMA domain, isolated or the
     /// passthrough domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)),
     /// meeting the [`DmaDomain`] contract for its kind, with its WB payload
-    /// coherency independently qualified. Firmware/AML/SMM,
+    /// coherency checked. Firmware/AML/SMM,
     /// reset/removal and other workers cannot change this exclusive SFH epoch.
     /// Registers, domain and backing allocations remain valid in process/
     /// deferred context, including failures. No numeric identity-DMA fallback.
@@ -321,7 +321,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.authority()?;
         let sensor = self.slots[index].sensor;
         // A previous uncertain command must complete before any opposite one.
-        // A late response resolves the retained operation without replay.
+        // A late response resolves the operation without replay.
         if let Some(pending) = self.slots[index].pending {
             self.wait_response(sensor, pending, start)?;
             self.complete(index, pending);
@@ -540,7 +540,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.fault(result)?;
         Ok(count)
     }
-    /// Source suspend retains HPD operation and its DMA lease; no report worker
+    /// Source suspend keeps HPD operation and its DMA lease; no report worker
     /// runs while suspended. Full stop below acknowledges HPD disable too.
     pub fn suspend(&mut self) -> Result<(), Error> {
         self.running()?;
@@ -596,8 +596,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.clear_interrupt()?;
             self.registers.set_bus_master(false)?;
             // SAFETY: every published sensor acknowledged disable, submissions
-            // are serialized and stopped, and actual PCI mastering is off.
-            // This same retained requester domain performs the platform drain;
+            // are serialized and stopped, and PCI mastering is off.
+            // This same requester domain performs the platform drain;
             // neither sensor ACK nor PCI BM clear alone retires posted writes.
             if self
                 .slots
@@ -605,14 +605,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 .any(|slot| slot.ever_published && !slot.retire_ready)
             {
                 // SAFETY: per-sensor DMA sources and serialized submissions are
-                // stopped above; this retained domain drains their posted writes.
+                // stopped above; this domain drains their posted writes.
                 unsafe { self.domain.drain_posted_writes() }.map_err(Error::Dma)?;
             }
             for slot in &mut self.slots {
                 slot.retire_ready = true;
             }
             // SAFETY: every published sensor acknowledged disable above,
-            // actual PCI mastering is off and its domain's payload drain has
+            // PCI mastering is off and its domain's payload drain has
             // completed (or no IOVA was ever published).
             unsafe { self.registers.mark_quiescent() };
             self.state = State::Stopped;

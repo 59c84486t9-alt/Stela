@@ -100,7 +100,7 @@ pub enum Timestamp {
 pub enum Band {
     /// Unvalidated source two-bit code; reserved 3 is not changed to 5 GHz.
     Explicit(u8),
-    /// Exact source fallback when BAND_IN_RX_DATA API 59 is not present.
+    /// Source fallback when BAND_IN_RX_DATA API 59 is not present.
     ChannelInferred { five_ghz: bool },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,7 +187,7 @@ impl<'a> Observation<'a> {
             return Err(Error::PacketLength);
         }
         // Public Packet diagnostics are mutable; bind command identity to its
-        // actual immutable raw bytes, not a caller-retagged command/group.
+        // immutable raw bytes, not a caller-retagged command/group.
         if raw[4..6] != [0xc1, 0] {
             return Err(Error::NotMpdu);
         }
@@ -479,7 +479,7 @@ mod tests {
                     Band::ChannelInferred { five_ghz: false }
                 }
             );
-            assert!(o.raw_mpdu().is_empty()); // descriptor observations do not certify an actual MAC frame.
+            assert!(o.raw_mpdu().is_empty()); // descriptor observations do not certify a MAC frame.
         }
         for raw in [0, 1, 2, 3] {
             assert_eq!(

@@ -104,7 +104,7 @@ impl Mux {
             .expect("one version frame fits the empty queue");
         mux
     }
-    /// Invalidate every retained stream handle and discard all old wire work.
+    /// Invalidate every stream handle and discard all old wire work.
     pub fn reset(&mut self) -> Result<(), &'static str> {
         let generation = self
             .generation

@@ -1,4 +1,4 @@
-//! Actual retained MMC controller/card fast-mode transitions and containment.
+//! MMC controller/card fast-mode transitions and containment.
 use super::*;
 
 #[test]
@@ -8,7 +8,7 @@ fn native_hs200_hs400_and_enhanced_strobe_change_real_mmc_payloads() {
         let vcc180 = variant >= 3;
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the retained DMA backing outlives all controller/card aliases.
+        // SAFETY: the DMA backing outlives all controller/card aliases.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
@@ -138,7 +138,7 @@ fn native_fast_timing_tuning_or_strobe_refusal_fences_before_publication() {
     for fault in 0..5 {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed transitions retain all original resources and pages.
+        // SAFETY: failed transitions keep all original resources and pages.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();

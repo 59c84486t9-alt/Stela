@@ -203,7 +203,7 @@ pub enum Transport {
     Ram,
     /// A file in the firmware's file system, while boot services run.
     Firmware,
-    /// Native SD or MMC/eMMC user-area storage behind a qualified card host.
+    /// Native SD or MMC/eMMC user-area storage behind a checked card host.
     SdMmc,
 }
 
@@ -714,7 +714,7 @@ impl Submission {
     /// request once the running ones have completed.
     ///
     /// Admit at most 64 new commands per call, respecting a queued device's
-    /// depth and retaining at most 64 tags. Completion collection and an
+    /// depth and keeping at most 64 tags. Completion collection and an
     /// entered synchronous execution may take longer than the caller's slice.
     pub fn poll(&mut self, device: &mut (impl BlockDevice + ?Sized)) -> Option<Finished> {
         let mut index = 0;
@@ -1294,7 +1294,7 @@ impl Shared {
     /// Bounded observations without taking the disk's lock or touching a driver.
     /// Enabled samples bracket independent generation/start reads with counters;
     /// disabling adds no counter reads. None means profiling is disabled.
-    /// Activity never grants completion, DMA or quiescence authority.
+    /// Activity never grants completion, DMA or quiescence permission.
     pub fn callback_activity(&self) -> Option<CallbackActivity> {
         if !self.0.profile_callbacks.load(Ordering::Relaxed) {
             return None;
@@ -1311,9 +1311,9 @@ impl Shared {
         })
     }
 
-    /// Retained callback observations with one try-lock and no counter read.
+    /// Callback observations with one try-lock and no counter read.
     /// None means disabled, not yet observed, or currently held by an owner.
-    /// This snapshot grants no DMA, mapping or quiescence authority.
+    /// This snapshot grants no DMA, mapping or quiescence permission.
     pub fn callback_stats(&self) -> Option<CallbackStats> {
         if !self.0.profile_callbacks.load(Ordering::Relaxed)
             || self

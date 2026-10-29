@@ -113,7 +113,7 @@ impl Lockdown {
     /// the PE's RVBAR and CPU_STS contract. m1n1 7cde7d1a `src/smp.c`
     /// still accesses RVBAR at `cpu-impl-reg + 0` on those chips; XNU
     /// xnu-12377.121.6 `apple_arm64_regs.h` defines CPU_STS and throttle
-    /// offsets independently of HAS_CTRR. No lock registers are fabricated.
+    /// offsets independently of HAS_CTRR. No lock registers are invented.
     pub fn processor(entry: u64) -> Self {
         Self {
             name: "cpu-impl-reg",

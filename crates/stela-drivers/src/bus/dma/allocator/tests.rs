@@ -82,7 +82,7 @@ struct Model {
     passthrough: AtomicBool,
 }
 // SAFETY: serialized synchronous model tracks unique mappings and acknowledges
-// actual modeled removal. It neither grants native DMA nor performs hardware IO.
+// modeled removal. It neither grants native DMA nor performs hardware IO.
 unsafe impl DmaDomain for Model {
     fn kind(&self) -> DomainKind {
         if self.passthrough.load(Ordering::Relaxed) {
@@ -233,7 +233,7 @@ fn failed_visibility_retires_unpublished_translation() {
 #[test]
 fn failed_unmap_keeps_pin_until_acknowledged_retry() {
     let (source, domain) = fixture();
-    // SAFETY: exclusive synchronous model; actual CPU access uses its owned Box.
+    // SAFETY: exclusive synchronous model; CPU access uses its owned Box.
     let mut allocator = unsafe { DomainAllocator::new(&source, domain.clone(), u32::MAX.into()) };
     drop(allocator.allocate(4096, 4096).unwrap());
     domain.fail_unmap.store(true, Ordering::Relaxed);
@@ -246,7 +246,7 @@ fn failed_unmap_keeps_pin_until_acknowledged_retry() {
     );
     assert_eq!(source.0.load(Ordering::Relaxed), 0);
     assert_eq!(domain.live.lock().unwrap().len(), 1);
-    // SAFETY: same retained quiescent owner retries its unchanged mapping.
+    // SAFETY: same quiescent owner retries its unchanged mapping.
     unsafe { allocator.retire() }.unwrap();
     assert_eq!(source.0.load(Ordering::Relaxed), 1);
 }
@@ -318,7 +318,7 @@ fn passthrough_requires_constrained_provider_selection() {
 fn separate_domains_can_reuse_iovas() {
     let (source, first) = fixture();
     let second = Domain::new(Model::default());
-    // SAFETY: both synchronous model domains use independently retained,
+    // SAFETY: both synchronous model domains use independently kept,
     // coherent CPU allocations; no device receives either symbolic address.
     let mut a = unsafe { DomainAllocator::new(&source, first, u32::MAX.into()) };
     // SAFETY: same independent model ownership and execution context.

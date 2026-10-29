@@ -65,7 +65,7 @@ pub struct Packet<'a> {
     pub descriptor: &'a [u8; 24],
     pub shift: &'a [u8],
     pub driver_info: &'a [u8],
-    /// Source packet bytes, including any FCS actually selected by MAC/RCR.
+    /// Source packet bytes, including any FCS selected by MAC/RCR.
     /// This is not a validated/decrypted shared Wi-Fi MPDU.
     pub payload: &'a [u8],
     pub facts: Facts,
@@ -135,9 +135,9 @@ fn available(consumer: u16, producer: u16) -> usize {
 }
 
 /// # Safety
-/// Actual exclusive RTL8822C requester RX register block, retained claim/UC
+/// Exclusive RTL8822C requester RX register block, kept claim/UC
 /// BAR mapping for this object's full lifetime. Indices are fresh volatile
-/// reads, writes ordered actual MMIO; no cached/manufactured completion.
+/// reads, writes ordered MMIO; no cached/manufactured completion.
 /// Configuration requires acknowledged stopped/drained DMA and zero indices.
 pub unsafe trait Registers {
     fn configure(&mut self, iova: u32, count: u16) -> Result<(), Error>;
@@ -169,7 +169,7 @@ unsafe impl Registers for Bar {
     }
 }
 
-/// One source-sized native RX ring. Buffers/descriptor mappings and actual
+/// One source-sized native RX ring. Buffers/descriptor mappings and
 /// register owner survive uncertain Drop. Call poll only in deferred context,
 /// never from an IRQ handler or concurrently with reset/key/channel retirement.
 pub struct Ring<R: Registers> {
@@ -184,7 +184,7 @@ pub struct Ring<R: Registers> {
 }
 impl<R: Registers> Ring<R> {
     /// # Safety
-    /// Real selected RTL8822C is independently stopped/drained with actual
+    /// Real selected RTL8822C is independently stopped/drained with
     /// zero producer/consumer indices and RX tag reset to zero. `io` owns that
     /// requester/UC BAR and `domain` isolates it. All allocations are real
     /// coherent WB DMA RAM with NoSnoop/ATS disabled (WB alone is insufficient).
@@ -270,8 +270,8 @@ impl<R: Registers> Ring<R> {
         Ok(())
     }
     /// Deliver borrowed raw facts only while CPU owns the completed buffer.
-    /// Callback cannot retain its borrow through rearm. A producer-index DMA
-    /// event is not an actual radio integrity/key/replay/MLME acknowledgement.
+    /// Callback cannot keep its borrow through rearm. A producer-index DMA
+    /// event is not a radio integrity/key/replay/MLME acknowledgement.
     pub fn poll(
         &mut self,
         budget: usize,
@@ -305,7 +305,7 @@ impl<R: Registers> Ring<R> {
         for _ in 0..count {
             let index = usize::from(self.read);
             let offset = index * DESCRIPTOR;
-            // SAFETY: fresh actual producer advance transfers this descriptor
+            // SAFETY: fresh producer advance transfers this descriptor
             // and corresponding buffer to CPU; no reuse until publish below.
             unsafe {
                 self.descriptor
@@ -333,7 +333,7 @@ impl<R: Registers> Ring<R> {
                 .cpu
                 .address(0, BUFFER)
                 .map_err(beacon::Error::from)?;
-            // SAFETY: bounded retained actual native allocation, now CPU-owned
+            // SAFETY: bounded native allocation, now CPU-owned
             // after hardware completion/visibility; callback borrow ends before
             // descriptor/payload rearm or any new hardware ownership transfer.
             let bytes = unsafe { core::slice::from_raw_parts(pointer.as_ptr(), BUFFER) };
@@ -356,7 +356,7 @@ impl<R: Registers> Ring<R> {
         Ok(count)
     }
     /// # Safety
-    /// Independently stopped/drained exact requester, all workers serialized.
+    /// Independently stopped/drained requester, all workers serialized.
     /// Initial HCI only: any prior poll permanently refuses this path, so it
     /// cannot silently reset a live station's RX/tag/security generation.
     pub(super) unsafe fn begin_hci_rebind(&mut self) -> Result<u32, Error> {
@@ -388,9 +388,9 @@ impl<R: Registers> Ring<R> {
         Ok(())
     }
     /// # Safety
-    /// Independent actual requester stop/drain and stopped submission/IRQ
+    /// Independent requester stop/drain and stopped submission/IRQ
     /// workers through every unmap; read indices, RX tags or register reset
-    /// stores alone do not prove this. Failed invalidations retain ownership.
+    /// stores alone do not prove this. Failed invalidations keep ownership.
     pub unsafe fn release_after_stop(&mut self) -> Result<(), Error> {
         self.poisoned = true;
         // SAFETY: covered by this function's own safety contract.
@@ -510,7 +510,7 @@ mod tests {
                 .try_into()
                 .unwrap()
         }
-        /// Model writes only device-owned buffers addressed by actual native
+        /// Model writes only device-owned buffers addressed by native
         /// RXBDs; completing producer is the final device publication event.
         fn complete(&self, packets: usize, first_tag: u16, packet: &[u8]) {
             let mut d = self.device.lock().unwrap();

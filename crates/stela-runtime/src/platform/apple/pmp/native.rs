@@ -1,6 +1,6 @@
-//! Retained PMP startup/exit ownership on the actual local PTD object.
+//! PMP startup/exit ownership on the local PTD object.
 //! Original t6000pmp file91b4..9f04, c750..ce68 and9f04..a50c order the
-//! effects below. Device-specific effects require actual owned resources;
+//! effects below. Device-specific effects require owned resources;
 //! neither this coordinator nor the ping endpoint supplies their settlement.
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
@@ -25,15 +25,15 @@ pub mod trace;
 mod transport;
 pub use publication::Target as PublicationTarget;
 
-/// Actual resource inventory retained by the backend, not an Apple SKU count.
+/// Resource inventory kept by the backend, not an Apple SKU count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Inventory {
-    /// Native owner+5f8; bounds the exit writes to the actual ACK range.
+    /// Native owner+5f8; bounds the exit writes to the ACK range.
     pub power_groups: u32,
 }
 
 /// Original packet state at native owner+320..348. Refresh must obtain all six
-/// words from the actual device/callback owners, including their busy waits.
+/// words from the device/callback owners, including their busy waits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Packets(pub [u64; 6]);
 
@@ -46,57 +46,57 @@ pub enum Family {
 }
 
 /// Source-required backend effects. Each operation includes the complete loop
-/// over the backend's actual immutable inventory, source masks and optional
+/// over the backend's immutable inventory, source masks and optional
 /// resources. Returning retired requires its real effects, never FIFO enqueue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
-    /// c8e0..cafc: install actual shared-bank update targets on source devices.
+    /// c8e0..cafc: install shared-bank update targets on source devices.
     BindPacketSource(Family),
-    /// cb28..cb64: actual source register+200 RMW sets bit0.
+    /// cb28..cb64: source register+200 RMW sets bit0.
     EnableDirectPublishers,
-    /// cb68..cc48: pass the actual six-word packet state to each observer.
+    /// cb68..cc48: pass the six-word packet state to each observer.
     NotifyPacketObservers,
-    /// cc48..cc60: actual optional fast-die owner start (3d758).
+    /// cc48..cc60: optional fast-die owner start (3d758).
     StartFastDie,
-    /// cc60..cc6c: clear the actual native owner's four accounting masks.
+    /// cc60..cc6c: clear the native owner's four accounting masks.
     ClearAccountingMasks,
-    /// cc6c..cccc: actual control-loop start methods with source filter guards.
+    /// cc6c..cccc: control-loop start methods with source filter guards.
     StartControlLoops,
-    /// cccc..ccec: actual aggregate interrupt object's enable method.
+    /// cccc..ccec: aggregate interrupt object's enable method.
     EnableAggregateInterrupt,
-    /// ccec..cd68: actual unmasked per-device interrupt objects' enable methods.
+    /// ccec..cd68: unmasked per-device interrupt objects' enable methods.
     EnableDeviceInterrupts,
-    /// cd68..ce04: actual configured device register RMWs and power IRQ enables.
+    /// cd68..ce04: configured device register RMWs and power IRQ enables.
     EnablePowerActions,
-    /// ce04..ce54: actual unmasked event interrupt enable methods.
+    /// ce04..ce54: unmasked event interrupt enable methods.
     EnableEventInterrupts,
-    /// ce68..cf8c: actual monitor objects' stop methods in all four families.
+    /// ce68..cf8c: monitor objects' stop methods in all four families.
     StopPacketMonitors(Family),
-    /// 9f20..9f70: actual unmasked completion interrupt disable methods.
+    /// 9f20..9f70: unmasked completion interrupt disable methods.
     DisableCompletionInterrupts,
-    /// 9f70..9fb8: actual direct source+4/+c RMW or selected object's method60.
+    /// 9f70..9fb8: direct source+4/+c RMW or selected object's method60.
     DisableDirectDelivery,
-    /// 9fb8..9fd8: actual aggregate interrupt object's disable method.
+    /// 9fb8..9fd8: aggregate interrupt object's disable method.
     DisableAggregateInterrupt,
-    /// 9fd8..a054: actual unmasked per-device interrupt disable methods.
+    /// 9fd8..a054: unmasked per-device interrupt disable methods.
     DisableDeviceInterrupts,
     /// a054..a064,a300..a348: disable event IRQs from index1, preserving index0.
     DisableEventInterruptsExceptFirst,
-    /// a1cc..a218: actual source register+200 RMW clears bit0.
+    /// a1cc..a218: source register+200 RMW clears bit0.
     DisableDirectPublishers,
-    /// a218..a2bc: actual timed observer stop and callback retirement.
+    /// a218..a2bc: timed observer stop and callback retirement.
     StopPacketObservers,
-    /// a2bc..a2d0: actual optional fast-die owner stop (3d5b8).
+    /// a2bc..a2d0: optional fast-die owner stop (3d5b8).
     StopFastDie,
-    /// a3d0..a434: actual control-loop stop methods with source filter guards.
+    /// a3d0..a434: control-loop stop methods with source filter guards.
     StopControlLoops,
-    /// a454..a4d0: actual per-device stop method58 or register-bit0 clear RMW.
+    /// a454..a4d0: per-device stop method58 or register-bit0 clear RMW.
     DisablePowerActions,
-    /// a4d0..a4f8: release actual run state and retain actual counter sample.
+    /// a4d0..a4f8: release run state and keep counter sample.
     ReleaseRunStateAndSampleCounter,
 }
 
-/// A request belongs to this actual coordinator, transition and operation.
+/// A request belongs to this coordinator, transition and operation.
 /// Equal numeric serials on a different owner are not interchangeable tokens.
 #[derive(Clone)]
 pub struct Request {
@@ -138,22 +138,22 @@ pub enum Refresh {
     Refused(&'static str),
 }
 
-/// Actual native resource owner, moved into the coordinator and never replaced
-/// during a transition. Implementations must retain original masks, callback
+/// Native resource owner, moved into the coordinator and never replaced
+/// during a transition. Implementations must keep original masks, callback
 /// registrations, device/clock/memory owners and partial effects across busy or
 /// refusal. No default implementation or successful unavailable resource exists.
 pub trait Resources {
     fn inventory(&self) -> Inventory;
     /// Original2b514 plus the source timer accounting before packet publication:
-    /// invoke each actual device, wait its BUSY result, obtain actual state, and
-    /// refresh the complete retained packet state. No request-derived ACK.
+    /// invoke each device, wait its BUSY result, obtain state, and
+    /// refresh the complete packet state. No request-derived ACK.
     fn refresh_power_states(&mut self, request: &Request, access: &mut Access<'_>) -> Refresh;
-    /// cb68..cbd0 takes a fresh six-word snapshot through the actual native
-    /// callback or retained packet owner after publisher binding. It is not a
+    /// cb68..cbd0 takes a fresh six-word snapshot through the native
+    /// callback or kept packet owner after publisher binding. It is not a
     /// second device reprogramming pass or a copy of the earlier PTD payload.
     fn snapshot_observer_packets(&mut self, request: &Request, access: &mut Access<'_>) -> Refresh;
-    /// Bind operations receive a target retaining this exact PTD owner; observer
-    /// operations receive the frozen actual six-word refresh result. Backends
+    /// Bind operations receive a target keeping this exact PTD owner; observer
+    /// operations receive the frozen six-word refresh result. Backends
     /// must refuse missing native effects rather than report retirement.
     fn effect(
         &mut self,
@@ -207,7 +207,7 @@ struct Transition {
 
 /// Explicitly initialized Stela native service coordinator. Construction owns
 /// real transport/resources but does not assert firmware execution/readiness.
-/// `begin_startup`/`begin_exit` retain an ordered effect batch through completion;
+/// `begin_startup`/`begin_exit` keep an ordered effect batch through completion;
 /// no reset, cancellation, replacement backend or generic mark-ready API exists.
 #[must_use]
 pub struct Owner<B> {
@@ -232,7 +232,7 @@ pub struct Owner<B> {
 }
 impl<B: Resources> Owner<B> {
     /// `selected_ids` is the original pm-ptd-ranges array, not range ordinals or
-    /// AP AIC numbers. All nonzero IDs resolve on this actual local bank.
+    /// AP AIC numbers. All nonzero IDs resolve on this local bank.
     pub fn initialized(
         local: LocalNotifications,
         selected_ids: [u32; 15],
@@ -296,7 +296,7 @@ impl<B: Resources> Owner<B> {
             cache_claimed: false,
         })
     }
-    /// The original class1 callback/mutex slot belongs to this actual native
+    /// The original class1 callback/mutex slot belongs to this native
     /// owner for its whole lifetime, including ordinary startup/exit cycles.
     /// Dropping a claim never reopens it or releases remote allocations.
     pub fn claim_memory_services(&mut self) -> Result<memory::Claim, Error> {
@@ -309,7 +309,7 @@ impl<B: Resources> Owner<B> {
             self.service_alive.clone(),
         ))
     }
-    /// Native class3 waiter and class4 unsolicited callback share this retained
+    /// Native class3 waiter and class4 unsolicited callback share this kept
     /// registry owner, but are distinct original endpoint callback slots.
     pub fn claim_registry_services(&mut self) -> Result<registry::Claim, Error> {
         if self.registry_claimed {
@@ -326,7 +326,7 @@ impl<B: Resources> Owner<B> {
     pub fn notifications(&self) -> &LocalNotifications {
         &self.local
     }
-    /// One retained frame-buffer owner for this actual SOC-DEV-PKT range.
+    /// One kept frame-buffer owner for this SOC-DEV-PKT range.
     /// No startup, counter producer, event completion or ACK is supplied.
     pub fn claim_counter_frames(&mut self) -> Result<counters::Claim, Error> {
         if self.counter_frames_claimed {
@@ -348,7 +348,7 @@ impl<B: Resources> Owner<B> {
         ))
     }
     /// One shared101ba6c provider cache for source-selected slots4..7.
-    /// Counts/storage still require their actual source block-row product;
+    /// Counts/storage still require their source block-row product;
     /// this unique claim supplies only the same live native/PTD ownership.
     pub fn claim_provider_frames(&mut self) -> Result<platform::counter_cache::Claim, Error> {
         if self.provider_frames_claimed {
@@ -365,7 +365,7 @@ impl<B: Resources> Owner<B> {
             self.service_alive.clone(),
         ))
     }
-    /// One source manager G540 storage binding on this actual native recipient.
+    /// One source manager G540 storage binding on this native recipient.
     /// This supplies ownership only, never controller geometry or reset effects.
     pub fn claim_manager_read_masks(
         &mut self,
@@ -386,7 +386,7 @@ impl<B: Resources> Owner<B> {
         &self.resources
     }
     /// One MC service on this native recipient. The registry-resolved range
-    /// IDs must identify actual directional ranges on this same PTD object.
+    /// IDs must identify directional ranges on this same PTD object.
     /// Dropping the service cannot reopen the claim or authorize a reset.
     pub fn claim_cache_services(
         &mut self,
@@ -643,7 +643,7 @@ impl<B: Resources> Owner<B> {
 impl<B> Drop for Owner<B> {
     fn drop(&mut self) {
         // Poison escaped native API targets, never synthesize exit effects,
-        // reset the bank, clear STATUS or cancel actual hardware/DMA work.
+        // reset the bank, clear STATUS or cancel hardware/DMA work.
         self.service_alive.set(false);
         if let Some(epoch) = &self.publisher_epoch {
             epoch.set(false);
@@ -920,7 +920,7 @@ mod tests {
                 & 0xf0,
             0x30
         );
-        assert_eq!(local.asserted(), 1 << 3); // STATUS pending on the separately enabled actual route3.
+        assert_eq!(local.asserted(), 1 << 3); // STATUS pending on the separately enabled route3.
         let target = &owner.resources().targets[0];
         target
             .publish(15, 55, &mut Access::new(0, 10, &mut latch))

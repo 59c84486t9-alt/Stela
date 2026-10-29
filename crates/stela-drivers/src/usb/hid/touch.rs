@@ -272,7 +272,7 @@ impl Assembler {
 
 impl UsbInput {
     /// Enable only the descriptor's single-Finger scalar absolute profile.
-    /// Device capacity comes from its actual acknowledged Feature GET_REPORT.
+    /// Device capacity comes from its acknowledged Feature GET_REPORT.
     /// Other layouts remain available unchanged as raw HID reports/events.
     /// A rejected enable keeps the previous selection; stale identity clears it.
     pub fn enable_touch_frames(
@@ -424,7 +424,7 @@ mod tests {
         }
         let (d, mut decoder, mut a) = fixture();
         let mut invalid = raw(1, 1, 1, 7);
-        invalid[4] = 0x80; // X=32778, outside actual logical maximum.
+        invalid[4] = 0x80; // X=32778, outside logical maximum.
         assert_eq!(
             update(&d, &mut decoder, &mut a, &invalid).discarded,
             [TouchDiscard::InvalidValue]
@@ -458,7 +458,7 @@ mod tests {
             update(&d, &mut decoder, &mut a, &raw(1, 1, 1, 7)).discarded,
             [TouchDiscard::RepeatedScan]
         );
-        // No monotonic time requirement: actual 16-bit counter rollover works.
+        // No monotonic time requirement: 16-bit counter rollover works.
         assert_eq!(
             update(&d, &mut decoder, &mut a, &raw(1, 1, 1, 0))
                 .frames

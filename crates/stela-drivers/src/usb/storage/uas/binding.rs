@@ -39,7 +39,7 @@ impl Binding {
             return Err("source-listed enclosure requires BOT instead of UAS");
         }
         // The accepted nonzero-power ASM105x profile is the source's
-        // ASM1053 branch, which must retain its 240-sector transfer ceiling.
+        // ASM1053 branch, which must keep its 240-sector transfer ceiling.
         // Preserve the policy even while the current native TD limit is lower.
         if vendor == 0x174c && matches!(product, 0x5106 | 0x55aa) && device.configuration[8] != 0 {
             binding.flags = binding.flags.limit_to_240_sectors();
@@ -163,7 +163,7 @@ impl Binding {
             self.endpoints[3].address,
         ]
     }
-    /// Command OUT, status IN, data IN, data OUT, from actual pipe-usage IDs.
+    /// Command OUT, status IN, data IN, data OUT, from pipe-usage IDs.
     pub fn endpoints(&self) -> [Endpoint; 4] {
         self.endpoints
     }

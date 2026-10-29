@@ -186,7 +186,7 @@ impl Context {
     /// Derive one SID's shadow bounds from the original 64-bit per-SID
     /// vm-base/vm-size values. Dynamic SID assignment permits only the
     /// inherited bounds. A changed range must fit inside the global range,
-    /// then retain the original end-padding adjustment for vm-alignment.
+    /// then keep the original end-padding adjustment for vm-alignment.
     pub fn for_sid(
         self,
         base: Option<u64>,
@@ -311,7 +311,7 @@ impl Context {
         })
     }
 
-    /// Qualify a single DMA page before extracting any index. Absolute DVA
+    /// Check a single DMA page before extracting any index. Absolute DVA
     /// indices match the original walk: vm-base is never subtracted. Refuse
     /// two-level windows spanning different upper fill regions rather than
     /// silently folding their addresses. Native handling there is unresolved.

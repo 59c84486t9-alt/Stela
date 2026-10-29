@@ -1,4 +1,4 @@
-//! Independent HID-I2C peripheral model: addresses/registers, actual pin state,
+//! Independent HID-I2C peripheral model: addresses/registers, pin state,
 //! reset FIFO, power-dependent behavior, commands and wire reports.
 use super::*;
 use alloc::{collections::VecDeque, rc::Rc, vec};
@@ -681,7 +681,7 @@ fn source_qualified_no_irq_devices_expose_delay_instead_of_inventing_ack() {
         assert_eq!(d.poll().unwrap(), Some(InputReport::Data(vec![17, 1, 2])));
     }
     // Source identity is exact: a neighboring ordinary device still requires
-    // its new actual zero-length response regardless of elapsed time.
+    // its new zero-length response regardless of elapsed time.
     let (mut d, h) = device(0x2386, 0x3119);
     h.borrow_mut().no_reset_ack = true;
     assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::ResetTimeout);
@@ -717,7 +717,7 @@ fn no_irq_profile_keeps_actual_irq_and_mutable_command_failure_requirements() {
     assert!(d.needs_reset());
 
     // Even when a no-IRQ device does emit a real ACK, consume it without
-    // relabeling the qualified delay as IRQ evidence or leaking it to poll.
+    // relabeling the checked delay as IRQ evidence or leaking it to poll.
     let (mut d, h) = device(0x2386, 0x3118);
     d.initialize().unwrap();
     assert_eq!(

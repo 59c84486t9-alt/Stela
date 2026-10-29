@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual Gen3 register transactions, firmware launch and power settling.
+//! Gen3 register transactions, firmware launch and power settling.
 use super::*;
 const DATA: u8 = 0;
 const POWER: u8 = 0x29;
@@ -236,7 +236,7 @@ impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
     pub fn buttons_only(&mut self) -> Result<(), Error> {
         self.suspend(BUTTONS_ONLY, State::ButtonsOnly)
     }
-    /// Actual peripheral power register OFF, retaining I2C command access.
+    /// Peripheral power register OFF, keeping I2C command access.
     pub fn power_down(&mut self) -> Result<(), Error> {
         self.suspend(OFF, State::PoweredDown)
     }

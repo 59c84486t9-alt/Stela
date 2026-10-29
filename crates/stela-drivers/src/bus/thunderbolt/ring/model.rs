@@ -24,7 +24,7 @@ pub(crate) struct Backing {
     pub(crate) released: Arc<AtomicUsize>,
 }
 
-// SAFETY: immutable metadata points at retained exclusive model RAM; all
+// SAFETY: immutable metadata points at kept exclusive model RAM; all
 // modeled hardware operations and CPU operations are serialized by tests.
 unsafe impl Send for Backing {}
 
@@ -50,7 +50,7 @@ unsafe impl PageBacking for Backing {
 
 impl Drop for Backing {
     fn drop(&mut self) {
-        // SAFETY: this is the exact retained allocation and final pin.
+        // SAFETY: this is the exact allocation and final pin.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
         self.released.fetch_add(1, Ordering::Relaxed);
     }
@@ -144,7 +144,7 @@ impl Domain {
         live.cpu.address(offset, bytes).unwrap()
     }
     pub(crate) fn read32(&self, address: u64) -> u32 {
-        // SAFETY: retained model allocation, aligned bounded access.
+        // SAFETY: model allocation, aligned bounded access.
         unsafe {
             self.pointer(address, 4)
                 .cast::<u32>()
@@ -169,14 +169,14 @@ impl Domain {
     pub(crate) fn write_data(&self, address: u64, bytes: &[u8]) {
         let pointer = self.pointer(address, bytes.len());
         for (index, value) in bytes.iter().enumerate() {
-            // SAFETY: serialized modeled DMA within the retained frame.
+            // SAFETY: serialized modeled DMA within the frame.
             unsafe { pointer.as_ptr().add(index).write_volatile(*value) };
         }
     }
 }
 
 // SAFETY: this is a serialized synthetic domain with nonidentity IOVAs.
-// Every map retains real host RAM; failed unmap retains its reservation.
+// Every map keeps real host RAM; failed unmap keeps its reservation.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -485,7 +485,7 @@ pub(crate) fn finish_rx(model: &Model, index: usize, frame: &Encoded) {
 
 pub(crate) fn channel_release(channel: &mut super::super::channel::Channel<Model>) {
     channel.disable().unwrap();
-    // SAFETY: actual synthetic device/posted DMA/IRQ/work fully drained.
+    // SAFETY: synthetic device/posted DMA/IRQ/work fully drained.
     unsafe { channel.release() }.unwrap();
 }
 
@@ -500,7 +500,7 @@ impl Drop for HopOwner {
     }
 }
 
-// SAFETY: the model exclusively reserves this exact synthetic hop/router;
+// SAFETY: the model exclusively reserves this synthetic hop/router;
 // its Arc is the allocation lifetime, no other model actor reconfigures it.
 unsafe impl super::super::hop::Owner for HopOwner {
     fn target(&self) -> super::super::hop::Target {
@@ -560,7 +560,7 @@ pub(crate) fn icm(
     let model = Arc::new(Model::new(domain.clone()));
     model.state.lock().unwrap().values[0x39944 / 4] = 0x80000001;
     model.state.lock().unwrap().values[0x3990c / 4] = 3 << 8;
-    // SAFETY: exact synthetic requester/epoch owns stopped rings and coherent
+    // SAFETY: synthetic requester/epoch owns stopped rings and coherent
     // mappings; firmware is the modeled ICM peer, never a ring programmer.
     let host = unsafe {
         super::super::icm::Host::new(
@@ -593,7 +593,7 @@ impl Drop for AdapterOwner {
     }
 }
 
-// SAFETY: this fixture owns the actual synthetic adapter, unchanged capability
+// SAFETY: this fixture owns the synthetic adapter, unchanged capability
 // metadata and positive credit reservation, with no competing CM/link change.
 unsafe impl super::super::adapter::Owner for AdapterOwner {
     fn target(&self) -> super::super::adapter::Target {
@@ -664,7 +664,7 @@ impl Drop for RouterOwner {
     }
 }
 
-// SAFETY: fixtures reserve one exact synthetic NHI/domain/IMR epoch and
+// SAFETY: fixtures reserve one synthetic NHI/domain/IMR epoch and
 // unchanged real model inventories. Policy is an explicit model input,
 // not a production platform/_OSC/security provider or Type-C inference.
 unsafe impl super::super::router::Owner for RouterOwner {
@@ -1029,9 +1029,9 @@ impl Drop for LinkReservation {
     }
 }
 
-// SAFETY: fixture owns actual reciprocal model lanes and both routers in
+// SAFETY: fixture owns reciprocal model lanes and both routers in
 // this same synthetic NHI reset/topology epoch. No production topology,
-// policy, power or attachment provider is fabricated by the driver.
+// policy, power or attachment provider is invented by the driver.
 unsafe impl super::super::link::Reservation for LinkReservation {
     fn observed(&self) -> super::super::link::Partners {
         self.partners
@@ -1130,7 +1130,7 @@ pub(crate) fn link_fixture_with_protocol(map: u8, mode: bool, protocol: u32) -> 
     let parent_owner = Arc::new(parent_owner);
     let parent_drop = parent_owner.dropped.clone();
     let mut peer = RouterPeer::new(parent_owner.clone(), mask);
-    // SAFETY: exact same synthetic NHI/domain/IMR epoch and actual current
+    // SAFETY: same synthetic NHI/domain/IMR epoch and current
     // inventories with explicit model native policy; exclusive idle channel.
     let mut setup = unsafe { Setup::new(channel, parent_owner.clone(), cursor.now) }.unwrap();
     let parent = configured_router(&mut peer, &domain, &model, &mut setup, &mut cursor);
@@ -1148,8 +1148,8 @@ pub(crate) fn link_fixture_with_protocol(map: u8, mode: bool, protocol: u32) -> 
     let child_owner = Arc::new(child_owner);
     let child_drop = child_owner.dropped.clone();
     let mut peer = RouterPeer::new(child_owner.clone(), mask);
-    // SAFETY: same actual synthetic requester/epoch and already configured
-    // retained parent, exact current topology and native model policy.
+    // SAFETY: same synthetic requester/epoch and already configured
+    // parent, current topology and native model policy.
     let mut setup = unsafe { Setup::new(channel, child_owner.clone(), cursor.now) }.unwrap();
     let child = configured_router(&mut peer, &domain, &model, &mut setup, &mut cursor);
     channel = setup.into_channel();
@@ -1413,14 +1413,14 @@ impl Drop for PathReservation {
     }
 }
 
-// SAFETY: model retains actual protected IDs/credits/permission on the exact
+// SAFETY: model keeps protected IDs/credits/permission on the exact
 // configured synthetic link. This supplies no production allocator/provider.
 unsafe impl super::super::path::Reservation for PathReservation {
     fn allocation(&self) -> super::super::path::Allocation {
         self.allocation
     }
     fn is_current(&self) -> bool {
-        // This fixture's actual allocation remains held in its isolated epoch;
+        // This fixture's allocation remains held in its isolated epoch;
         // no independent reset or reassignment actor exists in the model.
         true
     }
@@ -1453,7 +1453,7 @@ pub(crate) fn path_fixture(
         ..
     } = link_fixture_with_usb3(1, false, true);
     let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 3);
-    // SAFETY: exact model NHI, both actual configured owners, observed lanes.
+    // SAFETY: model NHI, both configured owners, observed lanes.
     let mut activate =
         unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
     let linked = Box::new(drive_link(
@@ -1699,9 +1699,9 @@ impl Drop for BandwidthReservation {
     }
 }
 
-// SAFETY: actual synthetic domain accounting and permission protect this
+// SAFETY: synthetic domain accounting and permission protect this
 // exact root/peer link and source floor/quantization throughout the phase.
-// When used by tunnel fixtures it also retains actual exclusive synthetic
+// When used by tunnel fixtures it also keeps exclusive synthetic
 // CS0 endpoint control on both mapped adapters through final owner lifetime.
 // These fixtures implement no production accounting/policy/control service.
 unsafe impl super::super::usb3::Reservation for BandwidthReservation {
@@ -1943,7 +1943,7 @@ pub(crate) fn tunnel_fixture(credits: super::super::path::LaneCredits, seed: u32
     drop(reservation);
     let current = accounting.current.clone();
     let mut peer = BandwidthPeer::new(&linked, accounting.grant, seed);
-    // SAFETY: actual protected native synthetic link/accounting/permission.
+    // SAFETY: protected native synthetic link/accounting/permission.
     let mut allocate = unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
     let bandwidth = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
     let channel = allocate.into_channel();
@@ -2177,7 +2177,7 @@ pub(crate) fn stop_fixture(credits: super::super::path::LaneCredits, seed: u32) 
         dropped,
         band_writes,
     } = fixture;
-    // SAFETY: complete actual synthetic control/accounting/path authority.
+    // SAFETY: complete synthetic control/accounting/path permission.
     let mut engine =
         unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
     let active = drive_tunnel(&mut peer, &domain, &model, &mut engine, &mut cursor);

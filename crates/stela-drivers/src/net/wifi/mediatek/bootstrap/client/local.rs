@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
 // Copyright (C) 2020-2025 MediaTek Inc.
-//! Source-selected MT7925 station advertisements from this retained device's
-//! actual NIC, image/EEPROM/CLC and source-policy observations. Advertisement
+//! Source-selected MT7925 station advertisements from this device's
+//! NIC, image/EEPROM/CLC and source-policy observations. Advertisement
 //! bytes are capabilities, never an association or transmission permission.
 use super::*;
 use crate::net::wifi::{
@@ -29,7 +29,7 @@ pub enum LocalError {
     Selection(crate::net::wifi::mediatek::firmware::auxiliary::Error),
     Capabilities(phy::Error),
 }
-/// Preserve the actual optional NIC TLV facts. No MLD association or extra
+/// Preserve the optional NIC TLV facts. No MLD association or extra
 /// link/WCID/radio resource is manufactured from a reported support bit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MloObservations {
@@ -76,7 +76,7 @@ impl Advertisement {
     pub const fn he_source_maps(&self) -> &[McsMaps; 3] {
         &self.he_source_maps
     }
-    /// Check the actual outgoing station advertisement against this owner's
+    /// Check the outgoing station advertisement against this owner's
     /// source-selected capabilities. The frontend may omit an optional PHY
     /// family or supported rate; it cannot add hardware, streams, power-save
     /// behavior or capabilities. This grants no association/radio permission.
@@ -113,7 +113,7 @@ impl Advertisement {
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Native single-link, always-awake station capabilities. The OS adds its
-    /// actual SSID/security/operation observations. This does not enable MLO,
+    /// SSID/security/operation observations. This does not enable MLO,
     /// power-save, regulatory permissions or any modern native publication.
     pub fn local_advertisement(&self, band: Band) -> Result<Advertisement, LocalError> {
         current(self.state(), band)
@@ -143,7 +143,7 @@ pub(super) fn current<I: BarIo, Q: QueueIo, C: 'static>(
         return Err(LocalError::UnsupportedBand);
     }
     let antenna = phy.antenna_mask().map_err(|_| LocalError::UnsupportedNss)?;
-    // The pinned actual PHY callback sets chainmask=antenna_mask; it does
+    // The pinned PHY callback sets chainmask=antenna_mask; it does
     // not infer extra sounding chains from an unrelated EEPROM default.
     let selection = policy
         .auxiliary()
@@ -166,7 +166,7 @@ pub(super) fn current<I: BarIo, Q: QueueIo, C: 'static>(
 }
 /// Pure source BE-control selection. A missing list and MTCL invalid sentinel
 /// follow the source's EHT advertisement default; neither grants radio/policy
-/// authority. Malformed/no-terminator data is refused instead of overreading.
+/// permission. Malformed/no-terminator data is refused instead of overreading.
 fn source_eht_enabled(
     selection: &Selection<'_>,
     alpha2: [u8; 2],
@@ -260,7 +260,7 @@ fn make(
             vht[..4].copy_from_slice(&cap.to_le_bytes());
             vht[4..6].copy_from_slice(&mcs(nss).to_le_bytes());
             vht[8..10].copy_from_slice(&mcs(nss).to_le_bytes());
-            vht[10..12].copy_from_slice(&0x2000u16.to_le_bytes()); // actual ExtNSS-capable flag
+            vht[10..12].copy_from_slice(&0x2000u16.to_le_bytes()); // ExtNSS-capable flag
             ie(&mut elements, 191, &vht);
         }
     }
@@ -317,11 +317,11 @@ fn make(
         if band != Band::Ghz2 {
             cap.extend_from_slice(&[nss_map; 3]);
         }
-        // Actual MT7925 has no320 bit/map; source admits onlyMT7927 there.
+        // MT7925 has no320 bit/map; source admits onlyMT7927 there.
         extension(&mut elements, 108, &cap);
     }
     // Explicit native always-awake selection: no requested UAPSD service
-    // period or queue is advertised before an actual native PM executor exists.
+    // period or queue is advertised before a native PM executor exists.
     ie(&mut elements, 221, &[0, 0x50, 0xf2, 2, 0, 1, 0]);
     let he_source_maps = [
         McsMaps {
@@ -437,7 +437,7 @@ mod tests {
             }
             Capabilities::parse(Band::Ghz5, Role::Station, &bytes).unwrap()
         };
-        // Actual nss2 cannot become nss3 through an OS-copied HT or HE record.
+        // Nss2 cannot become nss3 through an OS-copied HT or HE record.
         let ht = edit(45, None, 5, 0xff);
         let he = edit(255, Some(35), 18, 0xea);
         // Source always-awake mode must not advertise a new UAPSD executor.

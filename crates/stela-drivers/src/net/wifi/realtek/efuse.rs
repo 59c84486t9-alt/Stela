@@ -46,7 +46,7 @@ impl<I: Io> Drop for Attempt<'_, I> {
 /// Immutable exact-requester OTP read. No public safe constructor admits
 /// supplied bytes as a physical board identity or calibrated profile. Profile
 /// is a hardware fingerprint, not a unique BDF/reset epoch; PHY admission must
-/// retain this result with the same actual control/claim owner.
+/// keep this result with the same control/claim owner.
 pub struct Physical {
     profile: Profile,
     bytes: [u8; PHYSICAL],
@@ -131,7 +131,7 @@ impl Board {
         &self.raw
     }
     /// Source's seven declared RFE tables, without inventing a fallback for
-    /// unknown/unprogrammed boards. Actual source PHY tables remain separate.
+    /// unknown/unprogrammed boards. Source PHY tables remain separate.
     pub fn source_rfe(&self) -> Result<u8, Error> {
         if self.raw.rfe_raw <= 6 {
             Ok(self.raw.rfe_raw)
@@ -148,14 +148,14 @@ impl Board {
     }
 }
 /// Read source RTL8822C physical OTP only; never program any efuse byte. The
-/// source chip has no efuse_grant hook. Bank/LDO accesses retain all unrelated
-/// bits, and each actual read trigger has the source bounded 1us polling loop.
+/// source chip has no efuse_grant hook. Bank/LDO accesses keep all unrelated
+/// bits, and each read trigger has the source bounded 1us polling loop.
 ///
 /// # Safety
-/// Actual selected/requester MAC power and actual source MCU-ready firmware;
+/// Selected/requester MAC power and source MCU-ready firmware;
 /// exclusive efuse/LDO/bank owner with no competing reset/OTP/calibration worker.
 /// Run only in initial process/deferred context, never a hard IRQ. All native
-/// HCI queues and claims remain retained. Delays are calibrated.
+/// HCI queues and claims remain held. Delays are calibrated.
 /// Unknown hardware, timeout/removal or uncertain I/O quarantines the real
 /// owner. This does not perform the separate firmware hardware-feature report,
 /// source PHY power-policy defaults, calibration, channel or station setup.
@@ -211,7 +211,7 @@ pub unsafe fn read<I: Io>(io: &mut I) -> Result<Physical, Error> {
                 observed,
             });
         }
-        // Raw EFUSE/LDO data may legitimately contain all ones. Actual fresh
+        // Raw EFUSE/LDO data may legitimately contain all ones. Fresh
         // immutable SYS_CFG identity, rather than a data byte, detects removal
         // before any physical observation can enter the immutable map.
         verify(a.io, profile)?;
@@ -231,7 +231,7 @@ fn verify<I: Io>(io: &mut I, profile: Profile) -> Result<(), Error> {
     Ok(())
 }
 /// Source one/two-byte efuse headers and last-write-wins words. The physical
-/// protected tail is retained by Physical, never consumed as logical content.
+/// protected tail is held by Physical, never consumed as logical content.
 /// Unlike the donor's permissive final-byte check, every header/word must fit
 /// completely before that protected tail. Malformed maps are explicit errors.
 pub fn logical_map(physical: &[u8; PHYSICAL]) -> Result<[u8; LOGICAL], Error> {
@@ -341,7 +341,7 @@ mod tests {
     }
     struct Registers(Arc<Mutex<Model>>);
     // SAFETY: serialized OTP/register/timer effects model, no physical OTP or
-    // calibrated timer claim. Actual source bytes and events stay independent.
+    // calibrated timer claim. Source bytes and events stay independent.
     unsafe impl Io for Registers {
         fn profile(&self) -> Profile {
             profile()

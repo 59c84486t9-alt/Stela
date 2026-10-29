@@ -1,4 +1,4 @@
-//! The actual board sampler selects and latches only its four-byte trigger.
+//! The board sampler selects and latches only its four-byte trigger.
 use super::AppleDevices;
 use crate::platform::apple::coresight::PC_SAMPLE;
 use stela_engine::machine::Devices;

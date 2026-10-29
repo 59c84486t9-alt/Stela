@@ -3,7 +3,7 @@
 // Copyright (C) Tom Long Nguyen (tom.l.nguyen@intel.com)
 // Copyright (C) 2016 Christoph Hellwig.
 // Copyright (c) 2026 Stela contributors
-//! Single-message PCI MSI configuration with retained real config ownership.
+//! Single-message PCI MSI configuration with kept real config ownership.
 //! Register layouts and narrow message programming follow Linux PCI MSI at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. Ownership, validation, readback and
 //! quarantine are Stela integration. This is not an IRQ controller or DMA stop.
@@ -34,13 +34,13 @@ const MASK_CAPABLE: u16 = 1 << 8;
 const MSIX_ENABLE: u16 = 1 << 15;
 static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 
-/// A transport whose `write16` has the actual native word-store effect.
+/// A transport whose `write16` has the native word-store effect.
 ///
 /// # Safety
 /// Configuration reads/writes have real serialized effects. In particular,
 /// `write16` never replays adjacent Status W1C bits through a dword RMW. It
 /// must override the generic model fallback. Access remains valid under the
-/// enclosing actual owner and occurs only in process/deferred context.
+/// enclosing owner and occurs only in process/deferred context.
 pub unsafe trait MsiConfigSpace: ConfigSpace {}
 // SAFETY: EcamConfig overrides write16 with Mmio::write16, a native volatile
 // word store; its real mapped/config lifetime is the constructor's grant.
@@ -189,7 +189,7 @@ fn discover<C: MsiConfigSpace>(f: &mut Function<C>) -> Result<(Layout, u16), Msi
     found.ok_or(MsiError::MissingCapability)
 }
 
-/// Owns the original Function and actual retained PCI/config/root/reset epoch.
+/// Owns the original Function and kept PCI/config/root/reset epoch.
 /// There is no normal config escape or second enumeration. Terminal retirement
 /// separately permits one unsafe scoped device-stop operation. No MSI method changes BM,
 /// acknowledges a device cause, drains callbacks, or infers DMA coherency.
@@ -202,15 +202,15 @@ pub struct MsiConfig<C: MsiConfigSpace = EcamConfig> {
 }
 impl<C: MsiConfigSpace> MsiConfig<C> {
     /// # Safety
-    /// `function` is the actual unique function (unmodified identity/address),
-    /// and `retained` is its genuine config/root/PCI/reset-epoch owner, not a
-    /// dummy token. This retains the real mapped configuration transport even
+    /// `function` is the unique function (unmodified identity/address),
+    /// and `retained` is its config/root/PCI/reset-epoch owner, not a
+    /// dummy token. This keeps the real mapped configuration transport even
     /// if abandoned. Native config accesses and every source/worker/reset are
     /// serialized; no firmware/alias/other CPU can reconfigure or revoke it.
-    /// Old MSI/INTx delivery, callbacks and device work have actually drained;
+    /// Old MSI/INTx delivery, callbacks and device work have drained;
     /// initially disabled MSI alone does not establish this. The platform has
-    /// qualified MSI routing. No vector or requester-coherency grant is created.
-    /// Errors return both actual owners without modifying configuration.
+    /// checked MSI routing. No vector or requester-coherency grant is created.
+    /// Errors return both owners without modifying configuration.
     pub unsafe fn new(
         mut function: Function<C>,
         retained: RetainedOwner,
@@ -240,11 +240,11 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     }
     /// Irreversibly disable MSI and fallback INTx before a device stop that
     /// needs the original configuration owner. This establishes no DMA, posted
-    /// write, IRQ or worker completion. The registry retains its route/callbacks
+    /// write, IRQ or worker completion. The registry keeps its route/callbacks
     /// while the terminal owner performs the real source stop.
     ///
     /// Authorization is revoked before even the first configuration access.
-    /// Failure retains the actual owner here with no program/unmask/retry path.
+    /// Failure keeps the owner here with no program/unmask/retry path.
     /// Ordinary admission-time mask remains reversible and does not use this.
     pub fn begin_device_retirement(&mut self) -> Result<DisabledMsiConfig<C>, MsiError> {
         self.normal()?;
@@ -276,7 +276,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
         write16(c, COMMAND, command | INTX_DISABLE)?;
         if let Some(offset) = layout.mask() {
             let mask = c.read32(offset);
-            // All-ones is a valid mask bitmap. Presence/control reads qualify
+            // All-ones is a valid mask bitmap. Presence/control reads check
             // this transport; never interpret valid all-masked as failed data.
             write32(c, offset, mask | 1)?;
         }
@@ -301,8 +301,8 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// Program exactly one supplied message, while MSI and INTx are disabled.
     ///
     /// # Safety
-    /// This typed message belongs to the actual registry's qualified route;
-    /// every callback/resource remains retained. Reprogramming requires real
+    /// This typed message belongs to the registry's checked route;
+    /// every callback/resource remains held. Reprogramming requires real
     /// source/callback/posted-write drain; masking alone is insufficient.
     pub unsafe fn program(&mut self, message: MsiMessage) -> Result<(), MsiError> {
         self.normal()?;
@@ -328,8 +328,8 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
         Ok(())
     }
     /// # Safety
-    /// The actual registry retains/publishes the callback and qualified route;
-    /// the requester and all IRQ/DMA/work/reset owners remain retained. BM and
+    /// The registry keeps/publishes the callback and checked route;
+    /// the requester and all IRQ/DMA/work/reset owners remain held. BM and
     /// vendor source enable are separately controlled by that owner.
     pub unsafe fn unmask(&mut self) -> Result<(), MsiError> {
         self.normal()?;
@@ -358,10 +358,10 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
         }
         result
     }
-    /// Return the exact owners only after independent source/IRQ/work drain.
+    /// Return the owners only after independent source/IRQ/work drain.
     ///
     /// # Safety
-    /// The actual device is stopped, posted MSI writes/CPU pending vectors,
+    /// The device is stopped, posted MSI writes/CPU pending vectors,
     /// callbacks and all deferred/timer/reset users have drained and cannot
     /// restart. Every DMA lease/fence/IOTLB obligation remains independently
     /// owned until completed; this helper does not prove any of them.
@@ -373,7 +373,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
 impl<C: MsiConfigSpace> Drop for MsiConfig<C> {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.take() {
-            // No hardware access or guessed completion in Drop. Retain the
+            // No hardware access or guessed completion in Drop. Keep the
             // real configuration and root owner on every uncertain path.
             core::mem::forget(owner);
             let _ = QUARANTINED.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
@@ -382,7 +382,7 @@ impl<C: MsiConfigSpace> Drop for MsiConfig<C> {
         }
     }
 }
-/// Cumulative abandoned config/root owners, deliberately retained for safety.
+/// Cumulative abandoned config/root owners, kept for safety.
 pub fn quarantined_configurations() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }

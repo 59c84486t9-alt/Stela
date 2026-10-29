@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
-//! Real cold AX200 board-power commands, retaining the original native owner.
+//! Real cold AX200 board-power commands, keeping the original native owner.
 //! Completion still requires explicit OS country/database admission and scan.
 use super::*;
 use crate::net::wifi::intel::{
@@ -160,9 +160,9 @@ impl<Q: BootIo, B: BiosIo> Ax200BoardPolicy<'_, Q, B> {
         self.commands = commands::prepare(fw, tables, identity.as_ref())?;
         Ok(())
     }
-    /// Apply cold source policy through actual ACK/reclaim in this exact epoch.
+    /// Apply cold source policy through ACK/reclaim in this exact epoch.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the retained native
+    /// `source` supplies fresh exclusive coherent pages for the native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -171,7 +171,7 @@ impl<Q: BootIo, B: BiosIo> Ax200BoardPolicy<'_, Q, B> {
         if let Some(error) = self.first_error.as_ref() {
             return Err(error.clone());
         }
-        // SAFETY: caller's exact page-source and retained native epoch contract.
+        // SAFETY: caller's exact page-source and kept native epoch contract.
         let result = unsafe { self.advance_inner(source) };
         if let Err(error) = &result
             && !matches!(error, Ax200BoardPolicyError::Boot(Error::CommandReclaim(_)))
@@ -251,8 +251,8 @@ impl<Q: BootIo, B: BiosIo> Ax200BoardPolicy<'_, Q, B> {
             self.phase = Ax200BoardPolicyPhase::CountryRequired;
             return Ok(self.phase);
         };
-        // SAFETY: prepared internally from this owner's actual BIOS session;
-        // no indirect resources, RF-kill enforced, original native epoch retained.
+        // SAFETY: prepared internally from this owner's BIOS session;
+        // no indirect resources, RF-kill enforced, original native epoch kept.
         self.ticket = Some(
             unsafe {
                 self.scan

@@ -10,7 +10,7 @@ use crate::net::wifi::{
 use zeroize::Zeroize;
 
 /// Sensitive source request. The native owning installer binds both material
-/// borrows to its actual retained GTK and new management-key operation.
+/// borrows to its GTK and new management-key operation.
 pub struct Request {
     data: DataRequest,
 }

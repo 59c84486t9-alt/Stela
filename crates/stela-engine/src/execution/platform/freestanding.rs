@@ -14,7 +14,7 @@ impl Mapping {
     // Freestanding entries are refused before the call.
     /// # Safety
     /// The bytes must implement the two-argument context-leaf ABI for the
-    /// actual admitted target. The caller retains exclusive state and a valid
+    /// admitted target. The caller keeps exclusive state and a valid
     /// context with all borrowed memory/service owners until call completion
     /// and architectural failure finalization. No callback may reenter them.
     pub unsafe fn call_context(
@@ -28,7 +28,7 @@ impl Mapping {
     ///
     /// # Safety
     /// The code, target, source map and context requirements must describe the
-    /// same checked compilation. The caller retains exclusive state, the live
+    /// same checked compilation. The caller keeps exclusive state, the live
     /// context and all reachable memory/service owners through return, context
     /// finalization and recovered source-PC settlement; entry cannot reenter.
     pub unsafe fn call_context_block(
@@ -55,9 +55,9 @@ impl Mapping {
     /// Invoke this owned mapping with the compiler's ordinary block ABI.
     ///
     /// # Safety
-    /// The bytes must implement the struct-return block ABI for the actual
+    /// The bytes must implement the struct-return block ABI for the
     /// admitted target. Every directly addressed guest range must remain
-    /// mapped with the compiled rights, and the caller retains exclusive
+    /// mapped with the compiled rights, and the caller keeps exclusive
     /// state, memory/fault owners and source identity through full settlement.
     pub unsafe fn call_block(&self, _state: &mut GuestState) -> Result<BlockExit> {
         anyhow::bail!("freestanding native entry is not implemented")

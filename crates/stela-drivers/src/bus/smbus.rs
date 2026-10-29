@@ -48,7 +48,7 @@ impl Default for Block {
 }
 
 impl Block {
-    /// Construct an actual completed block result in a bus provider. SMBus
+    /// Construct a completed block result in a bus provider. SMBus
     /// block counts are 1..=32; an empty default is not a completed transfer.
     pub fn from_slice(data: &[u8]) -> Result<Self, Error> {
         if !(1..=MAX_BLOCK).contains(&data.len()) {
@@ -143,7 +143,7 @@ pub enum ErrorKind {
     FirmwareSmi,
     WrongProtocolMode,
     UnsupportedPec,
-    /// Hardware reported packet CRC failure; retain its original AUXSTS byte.
+    /// Hardware reported packet CRC failure; keep its original AUXSTS byte.
     PecMismatch {
         auxiliary_status: u8,
     },
@@ -175,7 +175,7 @@ pub enum Recovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
-    /// Original host status, retained before W1C clears it.
+    /// Original host status, kept before W1C clears it.
     pub status: u8,
     pub recovery: Recovery,
 }

@@ -27,7 +27,7 @@ unsafe impl Sync for Backing {}
 // SAFETY: exact aligned owned CPU storage; physical labels are model only.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
-        // SAFETY: Box and UnsafeCell retain stable allocated storage.
+        // SAFETY: Box and UnsafeCell keep stable allocated storage.
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
     }
     fn physical_pages(&self) -> &[u64] {
@@ -86,7 +86,7 @@ struct DomainState {
     drains: usize,
 }
 struct Domain(Mutex<DomainState>);
-// SAFETY: isolated synchronous model retains exact pages/token; no actual IOMMU.
+// SAFETY: isolated synchronous model keeps exact pages/token; no IOMMU.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -167,7 +167,7 @@ unsafe impl DmaDomain for Domain {
             .cpu_mapping(CacheAttribute::WriteBack)
             .unwrap();
         let pointer = cpu.address(offset, 4).unwrap();
-        // SAFETY: exact retained model mapping, natural u32 alignment and bounds.
+        // SAFETY: model mapping, natural u32 alignment and bounds.
         let value = unsafe { pointer.as_ptr().cast::<u32>().read_volatile() };
         state.reads.push((token.id, offset));
         Ok(value)
@@ -183,7 +183,7 @@ impl Domain {
             .unwrap()
             .cpu_mapping(CacheAttribute::WriteBack)
             .unwrap();
-        // SAFETY: serialized device model writing its actual retained allocation.
+        // SAFETY: serialized device model writing its allocation.
         unsafe {
             cpu.address(word * 4, 4)
                 .unwrap()
@@ -249,7 +249,7 @@ fn native_clock_refusal_precedes_sfh_authority_registers_and_dma() {
         (u64::MAX, crate::ClockError::DurationOverflow),
     ] {
         let domain = Arc::new(Domain(Mutex::new(DomainState::default())));
-        // SAFETY: no live device; deliberately inaccessible register fixture.
+        // SAFETY: no live device; inaccessible register fixture.
         let result = unsafe {
             Controller::claim(
                 Untouched,
@@ -341,7 +341,7 @@ fn fixture(sensors: &[Sensor]) -> Fixture {
         response_delay: 0,
     }));
     let domain = Arc::new(Domain(Mutex::new(DomainState::default())));
-    // SAFETY: isolated register+domain/page model, no native device authority.
+    // SAFETY: isolated register+domain/page model, no native device permission.
     let controller =
         unsafe { Controller::claim(Model(registers.clone()), time, domain.clone()) }.unwrap();
     (

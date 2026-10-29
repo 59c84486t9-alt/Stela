@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT AND ISC
-//! Genuine addressed MT7925 HCI/media owners, never fabricated ready evidence.
+//! Addressed MT7925 HCI/media owners, never invented ready evidence.
 use super::*;
 use crate::usb::xhci::{self, Found};
 
@@ -19,7 +19,7 @@ pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> Hci<Host> 
     assert!(found.failures.is_empty(), "{:?}", found.failures);
     assert_eq!(found.bluetooth.len(), 1);
     let mut peer = found.bluetooth.pop().unwrap();
-    // Actual class request/ordinary receives and interface/profile commands.
+    // Class request/ordinary receives and interface/profile commands.
     // No firmware initialization, command-credit or radio success is invented.
     peer.io
         .control(xhci::setup(0x20, 0, 0, 0, 3), &[3, 0x0c, 0])
@@ -128,7 +128,7 @@ pub(crate) fn cached_refuse(hci: &mut Hci<Host>, target: &Shared) {
     assert_eq!(hci.state(), super::super::State::Open);
     assert_eq!(snapshot(hci), before);
     hci.state = super::super::State::Closed;
-    assert!(hci.close().is_err()); // No cached successful-close authority.
+    assert!(hci.close().is_err()); // No cached successful-close permission.
     assert_eq!(hci.state(), super::super::State::Closed);
     assert_eq!(snapshot(hci), before);
     hci.state = super::super::State::Open;

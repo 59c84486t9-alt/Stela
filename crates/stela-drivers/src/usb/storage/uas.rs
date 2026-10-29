@@ -1,8 +1,8 @@
 //! Native USB Attached SCSI command/data/status transport.
 //!
-//! USB2 uses actual READ/WRITE_READY handshakes; SuperSpeed uses the canonical
+//! USB2 uses READ/WRITE_READY handshakes; SuperSpeed uses the canonical
 //! xHCI primary stream service and opaque transfer tickets. The same serialized
-//! CDB owner retains every contributor until completion or acknowledged drain.
+//! CDB owner keeps every contributor until completion or acknowledged drain.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux uas.c reference: Hans de Goede/Red Hat 2013-2016;
 // Matthew Wilcox/Intel Corp 2010; Sarah Sharp/Intel Corp 2010.
@@ -19,7 +19,7 @@ mod quirks;
 pub use abort::{AbortCommandResult, AbortTaskOutcome};
 pub use binding::Binding;
 
-/// Shared with alternate selection; readiness still requires actual allocation.
+/// Shared with alternate selection; readiness still requires allocation.
 pub const REQUESTED_STREAMS: u16 = 2;
 
 const COMMAND_IU: u8 = 1;
@@ -45,7 +45,7 @@ impl Pipe {
     }
 }
 
-/// Opaque eight-byte SCSI logical-unit address, retained exactly as reported.
+/// Opaque eight-byte SCSI logical-unit address, kept exactly as reported.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Lun([u8; 8]);
 impl Lun {
@@ -94,7 +94,7 @@ impl Host {
     /// `device`, binding and controller must name the same physical attachment
     /// and configuration/reset epoch. The caller owns the interface exclusively
     /// and has not configured or submitted to any of these endpoint contexts.
-    /// This constructor owns SET_INTERFACE and actual endpoint/stream setup.
+    /// This constructor owns SET_INTERFACE and endpoint/stream setup.
     /// No firmware/other class owner may drive the interface.
     pub unsafe fn new(
         controller: Shared,
@@ -111,7 +111,7 @@ impl Host {
             binding,
         })
     }
-    /// Establish the actual alternate and endpoint/stream contexts before
+    /// Establish the alternate and endpoint/stream contexts before
     /// acquiring or transferring any transport DMA owner.
     fn configure_native(
         controller: Shared,
@@ -177,9 +177,9 @@ impl Host {
             streams,
         })
     }
-    /// Permanently retire this owner and construct a new owner after an actual
+    /// Permanently retire this owner and construct a new owner after a
     /// whole-device USB reset. Existing Rc disk aliases never become usable.
-    /// Retain the three transport allocations; root-leaf reset also reuses
+    /// Keep the three transport allocations; root-leaf reset also reuses
     /// retired controller resources. Downstream reset keeps its existing
     /// controller-allocation behavior until subtree reuse is supported.
     pub(super) fn reset_and_rebind(
@@ -266,9 +266,9 @@ impl Host {
                     error,
                 )
             })?;
-            // Actual whole-device retirement and every fallible reconstruction
+            // Whole-device retirement and every fallible reconstruction
             // step precede transferring any of the three unique allocations.
-            // Old aliases retain their permanently poisoned, empty engine.
+            // Old aliases keep their permanently poisoned, empty engine.
             let mut command = self.engine.command.transfer();
             let mut status = self.engine.status.transfer();
             let mut data = self.engine.data.transfer();
@@ -314,7 +314,7 @@ impl Host {
         }
     }
 
-    /// Execute a CDB against an actual eight-byte SCSI LUN address. A check
+    /// Execute a CDB against an eight-byte SCSI LUN address. A check
     /// condition uses the returned Sense IU, not an invented REQUEST SENSE.
     pub fn command(
         &mut self,
@@ -633,7 +633,7 @@ impl<I: Io> Engine<I> {
         self.poisoned = true;
         for pipe in [Pipe::Command, Pipe::Status, Pipe::Input, Pipe::Output] {
             if self.touched[pipe.index()] {
-                // Retain the owner and all allocations even on cancellation
+                // Keep the owner and all allocations even on cancellation
                 // failure. There is no successful-looking tag reuse afterward.
                 let _ = self.io.cancel(pipe);
             }
@@ -697,7 +697,7 @@ impl<I: Io> Engine<I> {
         if let Err(error) = self.post(Pipe::Status, self.status.physical(), IU_BUFFER_BYTES) {
             return self.failure(error);
         }
-        // USB3 has no READY handshake. Queue the actual stream-owned status
+        // USB3 has no READY handshake. Queue the stream-owned status
         // and data requests before publishing the ordinary command IU.
         if streams.is_some()
             && length != 0
@@ -820,7 +820,7 @@ impl<I: Io> Engine<I> {
                         .map(|moved| self.data.bytes()[..moved].to_vec());
                 }
                 // Device-terminal error may precede host data completion.
-                // Drain each actual outstanding contributor before any CPU
+                // Drain each outstanding contributor before any CPU
                 // buffer access or later command is permitted.
                 for pipe in [Pipe::Command, Pipe::Input, Pipe::Output] {
                     if self.pending[pipe.index()].is_some() {
@@ -913,7 +913,7 @@ fn status_iu(bytes: &[u8], tag: u16) -> Option<Frame> {
         WRITE_READY_IU if bytes.len() == 4 => Some(Frame::Ready(false)),
         STATUS_IU if bytes.len() >= 16 => {
             // Like Linux uas_sense, a sense length that disagrees with the
-            // transfer is clamped to the bytes that actually arrived.
+            // transfer is clamped to the bytes that arrived.
             let length = usize::from(u16::from_be_bytes(bytes[14..16].try_into().ok()?));
             let end = bytes.len().min(16 + length);
             Some(Frame::Done(Status {

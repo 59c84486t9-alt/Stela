@@ -52,7 +52,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.clkreq_bug.get_or_insert(control & 0x100 != 0);
         let led = super::board::decode_led(cfg2)?;
         let local = GRC_LCLCTRL_INT_ON_ATTN | GRC_LCLCTRL_AUTO_SEEPROM;
-        // 5761 is not 5717_PLUS. Source VMain setup writes the actual local
+        // 5761 is not 5717_PLUS. Source VMain setup writes the local
         // control directly, without the 5720 APE GPIO/CPMU-status handshake.
         self.flush(GRC_LOCAL_CTRL, local)?;
         self.wait(100)?;

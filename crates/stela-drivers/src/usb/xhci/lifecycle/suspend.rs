@@ -24,7 +24,7 @@ pub(super) enum Sleep {
     #[default]
     Awake,
     Suspended(Snapshot),
-    /// Any uncertain transition keeps every consumer fenced and DMA retained.
+    /// Any uncertain transition keeps every consumer fenced and DMA kept.
     Failed,
 }
 impl Sleep {
@@ -157,9 +157,9 @@ impl Host {
         Ok(Snapshot { topology, roots })
     }
 
-    /// Restore actual controller/link state, retire the canceled old generations,
+    /// Restore controller/link state, retire the canceled old generations,
     /// then reset and enumerate complete fresh devices/class owners. Consumers
-    /// must apply the returned additions; a failed restoration retains every
+    /// must apply the returned additions; a failed restoration keeps every
     /// old allocation and leaves all old handles fenced.
     pub fn resume(
         &mut self,
@@ -196,7 +196,7 @@ impl Host {
             return changes;
         }
         // All physical ancestors are awake. Private descendant cancellation
-        // can now clear actual TT buffers, then Disable Slot retires old DMA.
+        // can now clear TT buffers, then Disable Slot retires old DMA.
         let roots: Vec<_> = snapshot
             .topology
             .iter()
@@ -496,7 +496,7 @@ impl Controller {
                     "reserved USB3 suspend device status",
                 ));
             }
-            // Disable every actual interface's function remote-wakeup/LP flags,
+            // Disable every interface's function remote-wakeup/LP flags,
             // including composite devices, rather than assuming interface zero.
             for interface in active {
                 self.control_owned(slot, setup(1, SET_FEATURE, 0, u16::from(interface), 0), &[])?;

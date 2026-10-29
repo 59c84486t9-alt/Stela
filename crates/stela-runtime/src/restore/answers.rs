@@ -1,6 +1,6 @@
 //! Manifest-driven offline answers. Firmware updater support is keyed to its
 //! protocol arguments, never an application/build identity. Unknown updater
-//! formats and nonce-bound ticket requests retain their full refusal context.
+//! formats and nonce-bound ticket requests keep their full refusal context.
 use super::{
     Error, Result,
     asr::Sender,
@@ -872,7 +872,7 @@ impl<R: ReadAt> Answers<R> {
         }
         let request = args.required("DeviceGeneratedRequest")?;
         // Explicit nonce or ECID requests cannot be answered with a non-nonce
-        // global. Retain all device-generated context in the caller's refusal.
+        // global. Keep all device-generated context in the caller's refusal.
         if let Value::Dict(d) = request
             && d.keys().any(|k| k.contains("Nonce") || k.contains("ECID"))
         {

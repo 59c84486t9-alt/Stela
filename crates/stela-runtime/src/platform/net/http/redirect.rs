@@ -61,7 +61,7 @@ impl Redirects {
     }
     /// Authorization/Cookie/Proxy-Authorization must stay removed after the
     /// first unrelated origin change, including a later redirect back. A
-    /// same-host default-port HTTPS upgrade retains its original credentials.
+    /// same-host default-port HTTPS upgrade keeps its original credentials.
     pub fn forwards_credentials(&self) -> bool {
         self.credentials
     }

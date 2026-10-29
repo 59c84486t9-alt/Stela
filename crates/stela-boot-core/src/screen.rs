@@ -13,7 +13,7 @@ pub fn window(selected: usize, count: usize, fits: usize) -> usize {
         .min(count.saturating_sub(fits))
 }
 
-/// `completed` of `total` as a percentage rounded down, so 100 needs actual
+/// `completed` of `total` as a percentage rounded down, so 100 needs
 /// completion; `None` for an unknown or inconsistent total. Wide
 /// intermediates keep full-width byte counts exact.
 pub fn percentage(completed: u64, total: u64) -> Option<u8> {

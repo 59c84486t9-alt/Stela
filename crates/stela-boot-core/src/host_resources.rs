@@ -304,7 +304,7 @@ impl Resources {
 }
 
 /// JSON escaping makes literal quotes/backslashes in bounded identity labels
-/// unambiguous. Records come from the actual validated catalog in this phase,
+/// unambiguous. Records come from the validated catalog in this phase,
 /// including an exact provider lookup for each manifest-selected requirement.
 fn record(
     phase: &str,
@@ -475,7 +475,7 @@ mod tests {
         resources = copied;
         resources.smbios.sha256[0] ^= 1;
         assert_eq!(
-            // SAFETY: same complete static fixture with intentionally wrong digest.
+            // SAFETY: same complete static fixture with wrong digest.
             unsafe {
                 resources.catalog(
                     |address| address - 0x1000 + raw.as_ptr() as u64,

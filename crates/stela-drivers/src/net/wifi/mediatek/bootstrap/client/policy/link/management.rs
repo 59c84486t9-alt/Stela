@@ -8,8 +8,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     ///
     /// # Safety
     /// Inherit ManagedClient::install_management_key's authenticated-input and
-    /// actual old hardware/RX/IRQ/work/deferred-key-user drain contract, including
-    /// notices already taken by the OS. Empty retained frontend/native queues
+    /// old hardware/RX/IRQ/work/deferred-key-user drain contract, including
+    /// notices already taken by the OS. Empty kept frontend/native queues
     /// are checked but do not establish that independent physical fence.
     pub unsafe fn install_management_key(
         &mut self,
@@ -22,7 +22,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         C: Send + Sync,
     {
         let s = self.state_mut();
-        // Retained frontend batches must be consumed/drained as well as native
+        // Frontend batches must be consumed/drained as well as native
         // queues; never drop observations or silently retag old key users.
         if !s.data.is_empty()
             || !s.notices.is_empty()
@@ -31,7 +31,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         {
             return Err(LinkControlError::Backpressure);
         }
-        // SAFETY: inherited authentic OS input and independent actual drain.
+        // SAFETY: inherited authentic OS input and independent drain.
         let result = unsafe {
             s.client
                 .install_management_key(epoch, index, material, receive)
@@ -41,7 +41,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     }
 
     /// Consume a taken ProtectedManagement notice with its original session,
-    /// rechecking the actual current association, keys and policy at the callback.
+    /// rechecking the current association, keys and policy at the callback.
     pub fn with_management<T>(
         &mut self,
         received: Received,
@@ -68,12 +68,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
 }
 
 impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
-    /// Rotate one current IGTK slot after consuming all retained frontend users.
+    /// Rotate one current IGTK slot after consuming all kept frontend users.
     /// Historical taken envelopes are revoked by the new exact Session.
     ///
     /// # Safety
     /// Inherit ManagedClient::rotate_management_key's authentic OS exchange,
-    /// peer same-index retirement and actual old hardware/RX/IRQ/work/external
+    /// peer same-index retirement and old hardware/RX/IRQ/work/external
     /// deferred-user drain contract, including notices already taken by the OS.
     /// This CPU backpressure check does not prove that independent fence.
     pub unsafe fn rotate_management_key(
@@ -94,7 +94,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         {
             return Err(LinkControlError::Backpressure);
         }
-        // SAFETY: inherited genuine key exchange, peer policy and actual drain.
+        // SAFETY: inherited key exchange, peer policy and drain.
         let result = unsafe {
             s.client
                 .rotate_management_key(session, index, material, receive)
@@ -108,7 +108,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     /// Consume the original OS-selected protected BA notice.
     ///
     /// # Safety
-    /// Inherit ManagedClient::receive_management_block_ack's actual negotiated
+    /// Inherit ManagedClient::receive_management_block_ack's negotiated
     /// OS policy contract through all deferred responses, timers and teardown.
     pub unsafe fn receive_management_block_ack(
         &mut self,
@@ -116,7 +116,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         now: u64,
     ) -> Result<(), LinkControlError> {
         let s = self.state_mut();
-        // SAFETY: inherited OS policy; private attachment retains authority.
+        // SAFETY: inherited OS policy; private attachment keeps permission.
         let result = unsafe { s.client.receive_management_block_ack(received, now) };
         Self::reconcile(s);
         Ok(result?)
@@ -149,7 +149,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
 }
 
 impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
-    /// Progress one separately admitted native BA operation, retaining notices
+    /// Progress one separately admitted native BA operation, keeping notices
     /// and packet retirement backpressure before allocating or publishing DMA.
     pub fn progress_block_ack(&mut self, now: u64) -> Result<(), LinkControlError> {
         let s = self.state_mut();
@@ -161,7 +161,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Ok(result?)
     }
 
-    /// Stop actual BA users while restrictions deny new transmissions.
+    /// Stop BA users while restrictions deny new transmissions.
     pub fn progress_block_ack_stop(&mut self) -> Result<(), LinkControlError> {
         let s = self.state_mut();
         let result = s.client.progress_block_ack_stop();

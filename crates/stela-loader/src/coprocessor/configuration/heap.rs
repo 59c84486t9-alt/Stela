@@ -2,7 +2,7 @@
 //!
 //! Allocation and mapping remain with the boot resource owner. These operations
 //! check source policy and geometry; coordinates/provenance are not ownership
-//! or execution authority. The actual owners must survive firmware heap use.
+//! or execution permission. The owners must survive firmware heap use.
 use super::{Action, Field, Provenance, source_record};
 use crate::coprocessor::Staged;
 use anyhow::{Result, ensure};
@@ -11,7 +11,7 @@ const BASE: u32 = u32::from_be_bytes(*b"RHB1");
 const SIZE: u32 = u32::from_be_bytes(*b"RHS1");
 const MINIMUM: u64 = 0x400;
 
-/// Actual selected native bank state, independent of the image allocation.
+/// Selected native bank state, independent of the image allocation.
 #[derive(Debug, Clone, Copy)]
 pub enum BankState {
     Allocate,
@@ -26,12 +26,12 @@ pub struct Policy {
     pub bank: u16,
     pub alignment: u64,
     pub state: BankState,
-    /// Covers selected bank identity/state and actual allocator alignment.
+    /// Covers selected bank identity/state and allocator alignment.
     pub provenance: Provenance,
 }
 
-/// Resource demand for the caller's actual allocator and selected mapper.
-/// This value carries no allocation, mapping or backend authority.
+/// Resource demand for the caller's allocator and selected mapper.
+/// This value carries no allocation, mapping or backend permission.
 #[derive(Debug, Clone, Copy)]
 pub struct Request {
     pub bank: u16,
@@ -39,14 +39,14 @@ pub struct Request {
     pub bytes: u64,
 }
 
-/// Coordinates returned by the actual allocation and selected mapping owners.
+/// Coordinates returned by the allocation and selected mapping owners.
 /// The PA interval must be independent of the staged image. IOP is separate.
 pub struct Mapping {
     pub bank: u16,
     pub physical: u64,
     pub iop: u64,
     pub bytes: u64,
-    /// Covers both actual allocation and complete readable/writable IOP mapping.
+    /// Covers both allocation and complete readable/writable IOP mapping.
     pub provenance: Provenance,
 }
 
@@ -59,7 +59,7 @@ impl Staged {
     /// iBoot ceb34 reads the original RHS1 request; only an absent tag takes
     /// its 64MiB fallback. This operation requires the present original family.
     /// ceb98 clamps a reserved bank to the request; eebd0 rounds an allocation
-    /// to the actual allocator granule, obtained by the same native lookup as
+    /// to the allocator granule, obtained by the same native lookup as
     /// alignment (ee5e0, d020c). Real allocator bounds/security remain required.
     pub fn heap_request(&self, policy: &Policy) -> Result<Request> {
         policy.provenance.validate()?;
@@ -101,7 +101,7 @@ impl Staged {
     }
 
     /// cec28 takes mapping result+0x28, not its physical+0x20. cec94/cecb0
-    /// install that IOP base and actual length. FW12470 refuses zero base/size
+    /// install that IOP base and length. FW12470 refuses zero base/size
     /// and maps the range before initializing the heap. Produce both fields
     /// together for the still-required complete configuration transaction.
     pub fn heap_fields(&self, policy: &Policy, mapping: Mapping) -> Result<Fields> {

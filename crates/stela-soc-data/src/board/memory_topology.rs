@@ -18,11 +18,11 @@ pub struct MemoryCache {
     pub channels: (u64, u64, usize),
     /// The PMP's PTD bank, `reg[pmp_ptd_reg_idx]`.
     pub ptd: PtdBank,
-    /// The PMP's actual 8-byte update alias, not the whole half-bank.
+    /// The PMP's 8-byte update alias, not the whole half-bank.
     pub ptd_updates: (u64, u64),
     /// Addressable capacity shared by publication, updates and interrupt routing.
-    /// This is not the native firmware's implemented entry count. An actual
-    /// native constructor must also validate its source-qualified profile.
+    /// This is not the native firmware's implemented entry count. A
+    /// native constructor must also validate its source-checked profile.
     pub ptd_entries: usize,
 }
 

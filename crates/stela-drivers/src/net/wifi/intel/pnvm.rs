@@ -28,7 +28,7 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChunkKind {
     SectionMarker(u32),
-    /// Retained source metadata, never a host physical/DMA address.
+    /// Source metadata, never a host physical/DMA address.
     MemoryDescriptor {
         address: u32,
     },
@@ -57,7 +57,7 @@ pub struct Selection<'a> {
     chunks: Vec<Chunk<'a>>,
 }
 /// Reduced-power packages have SKU-scoped MEM_DESC payloads, with no PNVM
-/// hardware/version requirement. Actual ALIVE selection remains mandatory.
+/// hardware/version requirement. ALIVE selection remains mandatory.
 #[derive(Debug)]
 pub struct ReducedPower<'a> {
     pub sku: [u32; 3],
@@ -183,7 +183,7 @@ impl<'a> Pnvm<'a> {
             Error::UnknownSku
         })
     }
-    /// `observed_sku` must be the actual ALIVE notification's three SKU words;
+    /// `observed_sku` must be the ALIVE notification's three SKU words;
     /// there is no first-board/default/zero-SKU fallback. The eventual transport
     /// must also bind that notification to its current reset/firmware epoch.
     pub fn select(

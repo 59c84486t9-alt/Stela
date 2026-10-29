@@ -329,8 +329,8 @@ pub enum FaultCause {
     TagChecked,
 }
 
-/// Distinguish an actual exception image from a deliberate translation-helper
-/// return. The helper token cannot fabricate hardware vector authority.
+/// Distinguish an exception image from a deliberate translation-helper
+/// return. The helper token cannot invent hardware vector permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeFaultOrigin {
     Exception,
@@ -344,22 +344,22 @@ pub struct NativeFault {
     pub address: u64,
     pub write: bool,
     pub cause: FaultCause,
-    /// Actual x86 exception vector, or zero for a deliberate helper return.
+    /// X86 exception vector, or zero for a deliberate helper return.
     pub trap: u16,
-    /// Actual x86 exception error code; instruction-fetch or host page-table/
+    /// X86 exception error code; instruction-fetch or host page-table/
     /// protection/stack failures cannot authorize a guest data-abort projection.
     pub error_code: u64,
-    /// Initialized words captured from a qualified invocation stack, unavailable
-    /// until the platform actually supplies that owned lease and exact plan.
+    /// Initialized words captured from a checked invocation stack, unavailable
+    /// until the platform supplies that owned lease and exact plan.
     pub spills: stela_compiler::block::HostSpillSnapshot,
     /// Host GPRs in architectural encoding order at the faulting instruction.
-    /// A platform supplies the extended bank only after actually capturing it
-    /// or qualifying its architectural initialization state. Recovery refuses
+    /// A platform supplies the extended bank only after capturing it
+    /// or checking its architectural initialization state. Recovery refuses
     /// a missing bank before publishing any recovered guest register.
     pub registers: stela_compiler::block::HostGprSnapshot,
 }
 
-// Retain the complete interrupt capture inline: native fault return must not
+// Keep the complete interrupt capture inline: native fault return must not
 // allocate or borrow storage that the next entry can overwrite.
 #[allow(
     clippy::large_enum_variant,
@@ -394,19 +394,19 @@ pub trait Host {
     fn native_timing_work_end(&mut self, _work: NativeTimingWork, _started: u64) {}
 
     /// Select the source PE whose stopped services this Host can settle through
-    /// its actual physical owner. Ordinary serial Hosts do not admit this path.
+    /// its physical owner. Ordinary serial Hosts do not admit this path.
     fn select_native_service(&mut self, _worker: publication::WorkerId) -> bool {
         false
     }
 
-    /// Complete this actual host worker's coherent CPU-memory accesses. This
-    /// is not a device/DMA/controller drain or MCC completion authority.
+    /// Complete this host worker's coherent CPU-memory accesses. This
+    /// is not a device/DMA/controller drain or MCC completion permission.
     fn memory_barrier(&mut self) {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Source-qualified identity retained by this physical worker's local
-    /// Host/GS owner. Serial hosts have no native-worker authority.
+    /// Source-checked identity kept by this physical worker's local
+    /// Host/GS owner. Serial hosts have no native-worker permission.
     fn native_worker(&self) -> Option<publication::WorkerId> {
         None
     }
@@ -425,7 +425,7 @@ pub trait Host {
     /// Store `new` at `physical` if guest RAM there holds `expected`, in one
     /// single-copy atomic step against every other core; whether it stored.
     /// When not, `expected` receives what RAM held. Accesses of up to 16
-    /// bytes within one aligned 16-byte block qualify; `None` when the host
+    /// bytes within one aligned 16-byte block check; `None` when the host
     /// cannot perform this one.
     fn compare_exchange_ram(
         &mut self,
@@ -436,7 +436,7 @@ pub trait Host {
         None
     }
     /// Descriptor admission needs a real RAM/permission owner. A legacy host
-    /// without that service cannot qualify a native coprocessor mapping.
+    /// without that service cannot check a native coprocessor mapping.
     fn check_ram_range(
         &mut self,
         _physical: u64,
@@ -447,7 +447,7 @@ pub trait Host {
             "host DMA range validation is unavailable",
         ))
     }
-    /// Stateful DMA must retain partial effects across later owner failures.
+    /// Stateful DMA must keep partial effects across later owner failures.
     /// The default is for hosts whose boolean failure commits no bytes.
     fn read_ram_progress(
         &mut self,
@@ -476,7 +476,7 @@ pub trait Host {
 
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError>;
     /// Install immutable context code, optionally reusing this same live Arc's
-    /// installation on this actual Host. Ordinary patchable installs stay
+    /// installation on this Host. Ordinary patchable installs stay
     /// independent. Implementations must invalidate reuse before every arena
     /// patch, discard or reclaim; replacement Hosts start with no entries.
     /// The default preserves the existing one-install-per-call behavior.
@@ -486,10 +486,10 @@ pub trait Host {
     /// Overwrite installed code at `code` with `bytes`, which the next
     /// native run executes.
     fn patch(&mut self, code: NativeCode, bytes: &[u8]);
-    /// Copy an idle installed native extent from this actual Host's retained
+    /// Copy an idle installed native extent from this Host's kept
     /// executable owner. Refuse unknown/reclaimed ranges; numeric addresses
     /// alone never authorize reading native memory. Used in dispatcher fault
-    /// qualification, never in an interrupt handler.
+    /// validation, never in an interrupt handler.
     fn read_native(&mut self, _code: NativeCode, _bytes: &mut [u8]) -> bool {
         false
     }
@@ -521,10 +521,10 @@ pub trait Host {
     ///
     /// # Safety
     /// `code` was installed by this same Host since its last discard, uses the
-    /// compiler's context-block ABI and matches the actual source-qualified
-    /// target/profile. The caller exclusively retains the real guest frame,
+    /// compiler's context-block ABI and matches the source-checked
+    /// target/profile. The caller exclusively keeps the real guest frame,
     /// valid context and every reachable service/mapping/code owner through
-    /// actual return or fault, complete recovery and source-PC settlement.
+    /// return or fault, complete recovery and source-PC settlement.
     /// The Host stays pinned to its physical owner; callbacks cannot reenter it.
     unsafe fn execute_context(
         &mut self,
@@ -639,7 +639,7 @@ pub enum DeviceError {
 
 /// A complete device pair read has consumed its input. A subsequent board
 /// service failure cannot turn it into a replayable register refusal: the
-/// engine retires the returned data and then stops at the retained failure.
+/// engine retires the returned data and then stops at the failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumedPair {
     pub values: [u64; 2],
@@ -657,7 +657,7 @@ pub trait Devices {
     /// Supply that PE's execution PC immediately before its sample trigger.
     fn observe_pc_sample(&mut self, _physical: u64, _pc: u64) {}
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
-    /// Effect-free classification only; this grants no memory authority. A
+    /// Effect-free classification only; this grants no memory permission. A
     /// canonical-required read must never execute through the raw/serial hook.
     fn requires_canonical_read(
         &self,
@@ -673,7 +673,7 @@ pub trait Devices {
     fn requires_canonical_write(&self, _cpu: usize, _physical: u64, _bytes: u8) -> bool {
         false
     }
-    /// Refuse before consumption, or return the actual consumed scalar and any
+    /// Refuse before consumption, or return the consumed scalar and any
     /// later settlement failure while the same live canonical guard is held.
     fn read_canonical(
         &mut self,
@@ -701,7 +701,7 @@ pub trait Devices {
         ))
     }
     /// Outer Err is proved effect-free. Partial or unknown effects must be
-    /// returned explicitly; no raw write fallback or fabricated ACK is allowed.
+    /// returned explicitly; no raw write fallback or invented ACK is allowed.
     fn write_canonical(
         &mut self,
         _cpu: usize,
@@ -715,7 +715,7 @@ pub trait Devices {
             "canonical device write has no live backend".into(),
         ))
     }
-    /// One qualified whole-pair owner; adjacent scalar registers are never
+    /// One checked whole-pair owner; adjacent scalar registers are never
     /// combined by this default boundary.
     fn write_pair_canonical(
         &mut self,
@@ -730,9 +730,9 @@ pub trait Devices {
             "canonical device pair write has no live backend".into(),
         ))
     }
-    /// Optional whole-pair boundary for a device with a qualified consuming
+    /// Optional whole-pair boundary for a device with a checked consuming
     /// read protocol. `Ok(None)` has no effects and requests ordinary scalar
-    /// reads. `Err` refuses before consumption; `Ok(Some(..))` must retain the
+    /// reads. `Err` refuses before consumption; `Ok(Some(..))` must keep the
     /// data even if forwarding its resulting board effects later fails.
     fn read_pair(
         &mut self,
@@ -751,7 +751,7 @@ pub trait Devices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError>;
-    /// Complete a device write with exclusive access to the actual CPU and
+    /// Complete a device write with exclusive access to the CPU and
     /// native owners. CPU-affecting controllers must preflight every owner,
     /// consume one whole processor batch, then commit infallibly before ACK.
     /// A CPU/lifecycle refusal is a non-substitutable native service failure.
@@ -1015,9 +1015,9 @@ pub enum RequirementKind {
     VmState(&'static str),
     Native(&'static str),
     ParallelAdmission(ParallelAdmissionError),
-    /// Register residency cannot be recovered from the retained host capture.
+    /// Register residency cannot be recovered from the host capture.
     FaultRecovery(stela_compiler::block::FaultRecoveryError),
-    /// Detailed refusal before an actual checked native frame was executed.
+    /// Detailed refusal before a checked native frame was executed.
     NativePreparation(String),
 }
 
@@ -1150,12 +1150,12 @@ pub enum Stop {
     /// A device carried out the guest's reset or power-off request.
     Reset(Reset),
     Unsupported(Requirement),
-    /// The native implementation failed. Its owned code/capture remain retained;
+    /// The native implementation failed. Its owned code/capture remain held;
     /// the current frame is not a resumable architectural guest state.
     NativeFailure(Arc<NativeFailure>),
-    /// An unexecuted device read retained by the actual canonical scheduler.
+    /// An unexecuted device read kept by the canonical scheduler.
     DeviceRead(DeviceReadRequest),
-    /// An unexecuted write, retained by the same canonical cohort owner.
+    /// An unexecuted write, kept by the same canonical cohort owner.
     DeviceWrite(DeviceWriteRequest),
     /// The running PE reached a host breakpoint (`Machine::set_breakpoints`)
     /// at this PC, before executing its instruction.
@@ -1903,9 +1903,9 @@ pub struct Machine<H: Host, D: Devices> {
     waiting: Option<Wait>,
     /// Every PE by number; the running one's state is `cpu`.
     peers: Vec<processors::Peer>,
-    /// Explicitly qualified retained core/cluster clock and quiesce inputs.
+    /// Explicitly checked kept core/cluster clock and quiesce inputs.
     processor_power: Processors,
-    /// Actual native-worker publication inventory; absent in the serial lane.
+    /// Native-worker publication inventory; absent in the serial lane.
     native_publication: Option<processors::publication::WorkerPublications>,
     /// Identity of this Machine's persistent checked PE memory/event owners.
     native_memory_identity: Arc<shared_memory::ExecutionDomain>,
@@ -1915,7 +1915,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// The other PEs' machines, when each PE runs on its own host core
     /// (`parallel`), and the count of device line changes last seen.
     parallel: Option<Arc<parallel::Hub>>,
-    /// The unique admitted hub/PE epoch. The chain owner also retains this
+    /// The unique admitted hub/PE epoch. The chain owner also keeps this
     /// claim, so field drop order cannot release it before control use ends.
     attached: Option<Arc<parallel::Attached>>,
     /// CPU power changes for the other PEs' machines, not yet sent.
@@ -2026,7 +2026,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Start the supplied architectural state on one existing profile PE.
     /// All other PEs remain held in reset; identities and board resource
-    /// indices retain their original order. This selects no native executor.
+    /// indices keep their original order. This selects no native executor.
     pub fn new_at(
         cpu: Cpu,
         host: H,
@@ -2469,7 +2469,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Resume a stopped architectural exception after a validation fixture has
-    /// repaired its backing. Apply the retained ELR/SPSR and synchronize all
+    /// repaired its backing. Apply the ELR/SPSR and synchronize all
     /// native controls, without retiring a guest instruction or supplying OS
     /// services. Production guest kernels return through their own ERET.
     #[cfg(feature = "test-support")]
@@ -2600,7 +2600,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// at the run loop: the UNDEFINED exception at its PC, which an Apple CPU
     /// takes for an encoding it does not implement. Only a stop raised
     /// before the instruction's effects (the PE still at its PC and EL) on a
-    /// serially executing PE qualifies; every other stop stands.
+    /// serially executing PE checks; every other stop stands.
     fn undefined_instead(&mut self, stop: Stop) -> Step {
         let Stop::Unsupported(requirement) = stop else {
             return Err(stop);
@@ -2711,7 +2711,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn device_transfer(&mut self, now: u64) -> Result<(), DeviceError> {
         self.observe_parallel_source(SourcePhase::DeviceAdvanceEnter);
         // A just-accepted lock write precedes follow_memory_lock(), so query
-        // its actual device owner rather than the CPU's previous snapshot.
+        // its device owner rather than the CPU's previous snapshot.
         let mut memory = HostMemory {
             host: &mut self.host,
             lock: self.devices.memory_lock(),
@@ -2762,7 +2762,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         report
     }
 
-    /// An architectural cache epoch must never wrap back to an old authority.
+    /// An architectural cache epoch must never wrap back to an old permission.
     fn advance_translation_generation(&mut self) {
         self.translation_generation = self
             .translation_generation
@@ -2922,7 +2922,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Release local code owners under pressure before allocating compilation
     /// input and recovery metadata. A ring may return an unused part: advancing
-    /// it alone does not release any retained template or source witness.
+    /// it alone does not release any template or source witness.
     fn reclaim_for_memory(&mut self) {
         while !self.blocks.is_empty() && self.host.memory_low() {
             let retained = self.fault_recovery.len();
@@ -5739,7 +5739,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// The original fixed capture retained after a terminal native failure.
+    /// The original fixed capture kept after a terminal native failure.
     /// Its frame is diagnostic only; subsequent run calls refuse execution.
     pub fn native_failure_capture(&self) -> Option<&NativeFault> {
         self.native_failure.as_ref().map(|failure| &failure.capture)
@@ -5790,7 +5790,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         use stela_compiler::block::{
             FaultRecovery, HostFaultSnapshot, RecoverySiteKind, RetirementPhase,
         };
-        // Source maps locate diagnostics; only an independently qualified exact
+        // Source maps locate diagnostics; only a checked exact
         // operand/check site can authorize architectural fault projection.
         let Some(block) = (index < self.blocks.len()).then(|| &self.blocks[index]) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
@@ -7584,7 +7584,7 @@ mod tests {
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
             assert!(!self.exits.is_empty(), "unit tests do not run native code");
             if let Some((control, chained)) = self.chained.take() {
-                // SAFETY: this fixture names the retained owner's live control
+                // SAFETY: this fixture names the owner's live control
                 // outside native execution. Match native disjoint field writes;
                 // the budget is always accessed atomically, even in fixtures.
                 unsafe {
@@ -8123,7 +8123,7 @@ mod tests {
             let (_, value) = self.stores[index];
             assert!(memory.write(BASE + 0x800 + index as u64 * 8, &value.to_le_bytes()));
             if self.failed_transfer == Some(index) {
-                // Deliberately use an ordinary register error: the engine
+                // Use an ordinary register error: the engine
                 // knows this came from service and must never survey it.
                 return Err(DeviceError::Refused("injected later DMA failure".into()));
             }
@@ -8465,7 +8465,7 @@ mod tests {
         let pc = machine.cpu.pc;
         let retired = machine.cpu.retired;
         // Corrupt a real, minted operand row to exercise atomic capture refusal;
-        // no test-only constructor fabricates a guest site at internal code.
+        // no test-only constructor invents a guest site at internal code.
         let row = machine
             .fault_recovery
             .get_mut(&index)
@@ -8791,7 +8791,7 @@ mod tests {
             machine.step()
         };
         // LA57 has no intentional range-check UD2 here. An illegal Host
-        // opcode at the actual operand is terminal, not a graceful guest check.
+        // opcode at the operand is terminal, not a graceful guest check.
         let stop = run(
             &mut machine,
             FaultCause::InvalidOpcode,
@@ -8857,7 +8857,7 @@ mod tests {
         }
         assert_eq!(machine.statistics.translated_pages, 2);
         // The translated body replaces failed range checks with helper calls;
-        // no intentional UD2 exists. An actual Host #UD remains terminal.
+        // no intentional UD2 exists. A Host #UD remains terminal.
         let stop = run(
             &mut machine,
             FaultCause::InvalidOpcode,
@@ -9194,7 +9194,7 @@ mod tests {
                 // Configuration precedes this scripted retirement trace.
                 machine.cpu.pc = BASE;
             }
-            // Fixed counters on all chips; the source-qualified M1/M2
+            // Fixed counters on all chips; the source-checked M1/M2
             // programmable instruction event counts the same retirements.
             machine.cpu.state.x[1] = 0x30300 | if programmable { 1 << 15 | 1 << 23 } else { 0 };
             let controls = 0x3 | 0x3000 | 0x400 | if programmable { 1 << 7 | 1 << 19 } else { 0 };
@@ -9324,7 +9324,7 @@ mod tests {
         assert_eq!(machine.fault_recovery.len(), 1);
         assert!(!machine.index.keys().any(|&(pc, ..)| pc == base));
         assert_ne!(machine.code_generation, old_generation);
-        // A cached hit adds no compilation scratch and retains its owner.
+        // A cached hit adds no compilation scratch and keeps its owner.
         let discarded = machine.statistics.code_discards;
         assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
         assert_eq!(machine.statistics.code_discards, discarded);
@@ -9847,7 +9847,7 @@ mod tests {
         machine.remember_target(far, target);
         assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b0111);
         // BTI C itself performs no guest memory access. Preserve this
-        // original landing-pad program, but a fabricated Host fault at its
+        // original landing-pad program, but an invented Host fault at its
         // first instruction cannot be projected as an ARM data abort.
         let current = machine.chain.snapshot();
         machine.host.chained = Some((
@@ -11128,7 +11128,7 @@ mod tests {
         let ib = usize::from(x86_64_pointer::key_index(PointerAuthenticationKey::Ib));
         assert_eq!(machine.pointer.tags[ia], 0);
         assert_eq!(machine.pointer.tags[ib], x86_64_pointer::DISABLED);
-        // Actual first LLB MSR encoding; the other half must stay unknown.
+        // First LLB MSR encoding; the other half must stay unknown.
         machine.cpu.state.x[1] = 11;
         machine.system_instruction(0xd51e_fd01).unwrap();
         assert_eq!(machine.pointer_keys(), [None; 5]);
@@ -11208,7 +11208,7 @@ mod tests {
                 .unwrap(),
             expected
         );
-        // A read or a lower-EL access has no source-qualified permissions:
+        // A read or a lower-EL access has no source-checked permissions:
         // each is reported once.
         machine.system_instruction(0xd51e_fd01).unwrap();
         machine.cpu.pstate = Pstate::reset(2);
@@ -11221,7 +11221,7 @@ mod tests {
         use crate::machine::system::key;
         use stela_compiler::aarch64::system::registers::Encoding;
         // Original SPTM's early canary instruction, used here with authored
-        // operands. Its preceding standard-name MSRs must feed actual EL2 PAC.
+        // operands. Its preceding standard-name MSRs must feed EL2 PAC.
         const PACGA: u32 = 0x9ac0_33e1;
         let mut machine = pac_machine_for(stela_contracts::Chip::AppleM2, &[PACGA]);
         machine
@@ -11501,7 +11501,7 @@ mod tests {
             .cpu
             .registers
             .set(SystemRegister::TCR_EL2, 0, 25 << 16 | 25);
-        // The source-qualified Apple host keys have an independent owner.
+        // The source-checked Apple host keys have an independent owner.
         // Give this enable/layout fixture explicit inputs through real MSRs,
         // rather than borrowing the lower bank or assuming reset zeroes.
         machine.cpu.set_pstate(Pstate::reset(2));
@@ -11767,7 +11767,7 @@ mod tests {
                         let saved = machine.cpu.pstate.to_spsr(machine.cpu.state.nzcv);
                         let pc = machine.cpu.pc;
                         let retired = machine.cpu.retired;
-                        // Invoke the actual implicit path after its source-entry
+                        // Invoke the implicit path after its source-entry
                         // boundary; this fixture does not model a guarded leaf.
                         machine.system_instruction_for_test(word);
                         let faults = !combined || chip == stela_contracts::Chip::AppleM6;

@@ -14,18 +14,18 @@ impl core::fmt::Display for StackPinError {
 }
 impl core::error::Error for StackPinError {}
 
-/// Owns the original excluded cold preparation and actual mapping/allocation
+/// Owns the original excluded cold preparation and mapping/allocation
 /// pin. It offers no page/address/C descriptor getter and grants no current,
-/// task or stack loan. No borrowed entered authority survives the operation.
-/// Drop/forget retains the pin and original runtime ownership; cancellation
-/// releases only after fresh matching authority restores the real frame.
+/// task or stack loan. No borrowed entered permission survives the operation.
+/// Drop/forget keeps the pin and original runtime ownership; cancellation
+/// releases only after fresh matching permission restores the real frame.
 #[must_use = "cancel under fresh matching authority; Drop retains and closes the owner"]
 pub struct PinnedColdStackPreparation<'runtime, const N: usize> {
     cold: ColdStackPreparation<'runtime, N>,
 }
 impl<const N: usize> PinnedColdStackPreparation<'_, N> {
     // Catalog transport stays crate-private: borrowed metadata is consumed
-    // immediately while this owning value retains the pin and excluded frame.
+    // immediately while this owning value keeps the pin and excluded frame.
     #[cfg(feature = "linux-kernel")]
     pub(crate) fn inspect_pin<T>(
         &self,
@@ -62,7 +62,7 @@ impl<'runtime, const N: usize> ColdStackPreparation<'runtime, N> {
             }
             owner.validate_state(state, TaskState::Preparing)?;
             // SAFETY: exact creator/nonce/state checked at IF0. This immutable
-            // boxed backing stays retained by the owned Runtime lifetime;
+            // boxed backing stays held by the owned Runtime lifetime;
             // Preparing excludes entry/reuse and retirement is count-blocked.
             let task = unsafe { &*owner.runtime.task(owner.worker) };
             if task.ever_entered {
@@ -70,13 +70,13 @@ impl<'runtime, const N: usize> ColdStackPreparation<'runtime, N> {
             }
             Ok((&*task.stack.backing, task.stack.bounds.clone()))
         })();
-        // SAFETY: exact enclosing flags; no queue/task borrow or lock survives.
+        // SAFETY: enclosing flags; no queue/task borrow or lock survives.
         // Exporter metadata work happens only after this restoration.
         unsafe { owner.queue.cpu.restore(flags) };
         result
     }
 
-    /// Retain actual usable-page ownership without exposing bytes or a C stack.
+    /// Keep usable-page ownership without exposing bytes or a C stack.
     /// Every refusal returns this same original cold owner. A successful but
     /// refused exported pin remains held for fresh cancellation; retry cannot
     /// accumulate another pin. Stale/drop/forget never releases it implicitly.
@@ -95,9 +95,9 @@ impl<'runtime, const N: usize> ColdStackPreparation<'runtime, N> {
         if self.pin.is_some() {
             return Err((self, StackPinError::Work(WorkError::Busy)));
         }
-        // SAFETY: actual never-entered Preparing ownership and zeroing were
+        // SAFETY: never-entered Preparing ownership and zeroing were
         // established by the original cold frame owner. The boxed source is
-        // retained, and the exporter cannot park/reenter/change this context.
+        // kept, and the exporter cannot park/reenter/change this context.
         let exported = unsafe { (&*source).pin_cold_pages() };
         let validation = match exported {
             Ok(pin) => {
@@ -106,7 +106,7 @@ impl<'runtime, const N: usize> ColdStackPreparation<'runtime, N> {
             }
             Err(error) => Err(error),
         };
-        // Always recheck actual scope/creator/nonce after exporter and all pin
+        // Always recheck scope/creator/nonce after exporter and all pin
         // metadata queries, even on failure. No label or caller epoch suffices.
         let post = self.pin_source(entered).and_then(|(after, bounds)| {
             if !core::ptr::eq(source, after as *const dyn StackBacking) || bounds != range {

@@ -71,7 +71,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         let product_id = u16::from_be_bytes([product.as_slice()[0], product.as_slice()[1]]);
         let ic_type = sample.as_slice()[1];
         let sample_version = sample.as_slice()[0];
-        // Source sleep_control(false) is a no-op. Actual wake here is the
+        // Source sleep_control(false) is a no-op. Wake here is the
         // acknowledged ENABLE above; we do not claim power or reset effects.
         if (ic_type == 0x0e && matches!(product_id, 5..=7 | 9 | 0x13))
             || (ic_type == 8 && product_id == 0x26)
@@ -133,7 +133,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         })
     }
     /// Perform the source hello/enable/mode handshake. It is not a peripheral
-    /// reset: pending reports retain their actual hardware queue semantics.
+    /// reset: pending reports keep their hardware queue semantics.
     /// Uncertain ownership requires a platform reset and a new owner.
     pub fn initialize(&mut self) -> Result<(), Error> {
         self.timer

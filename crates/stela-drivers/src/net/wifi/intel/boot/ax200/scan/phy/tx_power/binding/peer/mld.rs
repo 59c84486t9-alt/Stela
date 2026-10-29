@@ -32,7 +32,7 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
         return Err(Ax200LegacyPeerError::MissingApi);
     }
     // Original MLD send_sta_cmd explicitly defaults an unlisted STA_CONFIG to
-    // version 0 and then uses v1 for <=1. Only the retained v1/v2 bodies are
+    // version 0 and then uses v1 for <=1. Only the v1/v2 bodies are
     // implemented; a future advertised body cannot silently use this prefix.
     let version = firmware
         .command_version(3, 0x0a)
@@ -162,7 +162,7 @@ pub(super) fn removal() -> [PeerCommand; 2] {
 
 fn station(address: Mac, version: u8, mfp: bool) -> Vec<u8> {
     let mut bytes = alloc::vec![0; if version <= 1 { 96 } else { 104 }];
-    // Source station0 on actual link0, STATION_TYPE_PEER=0, unassociated AID0.
+    // Source station0 on link0, STATION_TYPE_PEER=0, unassociated AID0.
     bytes[8..14].copy_from_slice(&address.0);
     bytes[16..22].copy_from_slice(&address.0);
     bytes[36..40].copy_from_slice(&u32::from(mfp).to_le_bytes());

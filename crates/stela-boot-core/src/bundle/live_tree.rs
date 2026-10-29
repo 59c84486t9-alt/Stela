@@ -1,4 +1,4 @@
-//! The actual post-patch ADT in guest RAM, before any guest entry.
+//! The post-patch ADT in guest RAM, before any guest entry.
 //!
 //! Region byte offsets remain valid until Verified::load finishes. Projection
 //! happens afterwards. Its shorter encoding changes boot_args' data length,
@@ -131,9 +131,9 @@ impl LiveTree {
         &self.bytes
     }
 
-    /// Check the actual post-patch boot_args snapshot, not the manifest's
+    /// Check the post-patch boot_args snapshot, not the manifest's
     /// command line. The source factory separately checks all DT providers.
-    /// Even an explicit zero requires a separately qualified override path.
+    /// Even an explicit zero requires a separately checked override path.
     pub fn require_no_harvesting_override(&self) -> Result<(), String> {
         let args = boot_args::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
         if args.command_line.split_ascii_whitespace().any(|word| {
@@ -146,16 +146,16 @@ impl LiveTree {
 
     /// Consumes the old snapshot. Any reached write failure is terminal before
     /// guest entry: a later boot_args failure does not undo an earlier ADT write.
-    /// This supplies no new RAM reservation, physical resource or CPU authority.
+    /// This supplies no new RAM reservation, physical resource or CPU permission.
     #[allow(
         dead_code,
         reason = "retained live-tree operations serve later source-qualified topology publication"
-    )] // Adoption also needs the actual Plan/RAM/device owners.
+    )] // Adoption also needs the Plan/RAM/device owners.
     pub fn publish(self, ram: &mut impl Ram, projected: &DeviceTree) -> Result<Self, String> {
         self.publish_inner(ram, projected, false)
     }
 
-    /// Publish the actual original driver's cacheless argument together with
+    /// Publish the original driver's cacheless argument together with
     /// the assigned topology, only after the parent constructed its matching
     /// empty cache and canonical RAM owners. This changes no bundle schema.
     pub fn publish_cacheless(

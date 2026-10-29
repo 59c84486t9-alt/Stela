@@ -1,4 +1,4 @@
-//! Actual native-clock admission must precede all controller/provider accesses.
+//! Native-clock admission must precede all controller/provider accesses.
 use super::*;
 use crate::bus::{
     dma::{DmaAllocator, RegionAllocator},
@@ -71,7 +71,7 @@ unsafe impl spi::pxa2xx::Registers for NoIo {
         panic!("SSP write before admission")
     }
 }
-// SAFETY: trapped retained LPSS resource model, never a hardware mapping.
+// SAFETY: trapped kept LPSS resource model, never a hardware mapping.
 unsafe impl lpss::Registers for NoIo {
     fn identity(&mut self) -> Result<lpss::Identity, lpss::Error> {
         panic!("identity before admission")
@@ -185,7 +185,7 @@ fn invalid_native_spi_and_mp2_clocks_return_exact_original_unmodified_owners() {
         drop(error);
         assert_eq!(d.get(), 1);
         let (r, d) = no_io();
-        // SAFETY: trapped explicit retained model, no device or pending child.
+        // SAFETY: trapped explicit kept model, no device or pending child.
         let error = unsafe { lpss::spi::Spi::attach(r, clock(rate), 1, BUDGET) }
             .err()
             .unwrap();
@@ -196,13 +196,13 @@ fn invalid_native_spi_and_mp2_clocks_return_exact_original_unmodified_owners() {
         assert_eq!(d.get(), 1);
         let backing = Box::leak(vec![0u64; 1024].into_boxed_slice());
         let address = backing.as_mut_ptr() as u64;
-        // SAFETY: actual zeroed private model RAM remains pinned for this process.
+        // SAFETY: zeroed private model RAM remains pinned for this process.
         let mut allocator =
             unsafe { RegionAllocator::new(address..address + backing.len() as u64 * 8) };
         let buffer = allocator.allocate(amd_mp2::MAX_LENGTH, 8).unwrap();
         let physical = buffer.physical();
         let (r, d) = no_io();
-        // SAFETY: isolated stopped mailbox model, retained private coherent RAM;
+        // SAFETY: isolated stopped mailbox model, kept private coherent RAM;
         // invalid time must return every owner before publishing anything.
         let error = unsafe {
             amd_mp2::Controller::claim(

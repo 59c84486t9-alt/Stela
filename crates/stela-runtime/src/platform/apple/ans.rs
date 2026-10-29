@@ -200,7 +200,7 @@ impl Queue {
     }
 }
 
-/// Last DMA submission, retained for an explicit refusal diagnostic. This
+/// Last DMA submission, kept for an explicit refusal diagnostic. This
 /// never grants keys or substitutes a successful completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {

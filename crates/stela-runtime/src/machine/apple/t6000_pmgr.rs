@@ -22,7 +22,7 @@ pub enum Authority {
 pub enum RevisionAuthority {
     /// Explicit resource construction before the firmware RAM cache exists.
     DeclaredBeforeCache,
-    /// The root owns this actual firmware-RAM observation, independently of
+    /// The root owns this firmware-RAM observation, independently of
     /// immutable physical inputs. MAX follows the source's uncached branch.
     ObservedCache { value: u32, known: u32 },
 }

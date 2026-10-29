@@ -3,7 +3,7 @@
 // intel-lpss-pci.c at a804c5742bff224d4cb4d25dd383554d598be32b.
 // Copyright (C) 2015 Intel Corporation.
 // Authors: Andy Shevchenko, Mika Westerberg, Heikki Krogerus, Jarkko Nikula.
-//! Owned PCI LPSS I²C platform resources. [`spi`] supplies the separate retained
+//! Owned PCI LPSS I²C platform resources. [`spi`] supplies the separate kept
 //! SPI reset/remap/clock and SSP PIO composition. UART/iDMA and platform PM
 //! remain separate. The explicit I²C owner composes private resource
 //! initialization with the shared DesignWare PIO engine and held-D0 lifetime.
@@ -49,8 +49,8 @@ pub struct Identity {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
 }
-/// Exact source clock/property group. Names follow the donor's info
-/// structures; later chips can select an earlier group's actual properties.
+/// Source clock/property group. Names follow the donor's info
+/// structures; later chips can select an earlier group's properties.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProfileKind {
     Sunrisepoint,
@@ -60,8 +60,8 @@ enum ProfileKind {
     GeminiLake,
     ElkhartLake,
 }
-/// One exact source-selected I²C profile. These properties are not board SCL
-/// counts or authority to ignore an overlapping firmware resource reservation.
+/// One source-selected I²C profile. These properties are not board SCL
+/// counts or permission to ignore an overlapping firmware resource reservation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Profile {
     device: u16,
@@ -144,15 +144,15 @@ impl Profile {
         }
     }
 }
-/// Actual retained function/root/reset and UC register authority.
+/// Function/root/reset and UC register permission.
 ///
 /// # Safety
-/// The provider owns the same actual powered D0 physical function, complete
+/// The provider owns the same powered D0 physical function, complete
 /// BAR and configuration/reset epoch. Firmware, AML/SMM, shared PUNIT/semaphore users, IRQs and other CPUs
 /// cannot access/revoke it. Prior engines, posted DMA, callbacks and work are
 /// stopped/drained; bus mastering and interrupts remain disabled. All addresses
-/// and identity are observations from those retained resources. Leaking this
-/// provider retains its actual grants; no borrowed temporary owner is allowed.
+/// and identity are observations from those resources. Leaking this
+/// provider keeps its grants; no borrowed temporary owner is allowed.
 pub unsafe trait Registers: 'static {
     fn identity(&mut self) -> Result<Identity, Error>;
     fn physical_base(&self) -> u64;
@@ -160,12 +160,12 @@ pub unsafe trait Registers: 'static {
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error>;
 }
 
-/// Conventional, infallible child MMIO under the retained actual mapping.
+/// Conventional, infallible child MMIO under the mapping.
 /// # Safety
 /// The full 0x200-byte child aperture has stable ordered native DWORD access.
-/// Offsets are the actual DesignWare register definitions. Hardware fault values
-/// remain observable; no fabricated success or temporary pointer is permitted.
-/// The same provider retains actual power/clock/root grants if quarantined.
+/// Offsets are the DesignWare register definitions. Hardware fault values
+/// remain observable; no invented success or temporary pointer is permitted.
+/// The same provider keeps power/clock/root grants if quarantined.
 pub unsafe trait ChildAccess: Registers {
     fn child_read32(&mut self, offset: usize) -> u32;
     fn child_write32(&mut self, offset: usize, value: u32);
@@ -181,11 +181,11 @@ pub struct NativeRegisters {
 }
 impl NativeRegisters {
     /// # Safety
-    /// Mapping is this stopped function's actual exclusive BAR0 reservation at
-    /// the same retained root/firmware epoch, powered D0. It cannot be revoked
+    /// Mapping is this stopped function's exclusive BAR0 reservation at
+    /// the same root/firmware epoch, powered D0. It cannot be revoked
     /// through aliases. The original stopped producer's drainage contract holds.
-    /// Power/clock and firmware/PUNIT exclusions are boot-lifetime or retained
-    /// in the consumed resources' actual backings, including quarantine. A
+    /// Power/clock and firmware/PUNIT exclusions are boot-lifetime or kept
+    /// in the consumed resources' backings, including quarantine. A
     /// borrowed external guard that can end first is insufficient. No implicit
     /// identity mapping or firmware-conflict override is permitted.
     pub unsafe fn claim(
@@ -253,7 +253,7 @@ impl NativeRegisters {
         (self.function, self.mapping)
     }
 }
-// SAFETY: unsafe claim consumes canonical actual stopped ownership and UC
+// SAFETY: unsafe claim consumes canonical stopped ownership and UC
 // mapping, validates real BAR/configuration and keeps both for every access.
 unsafe impl Registers for NativeRegisters {
     fn identity(&mut self) -> Result<Identity, Error> {
@@ -301,8 +301,8 @@ pub struct Controller<R: Registers> {
     phase: Phase,
 }
 impl<R: Registers> Controller<R> {
-    /// Consume actual authority. Rejected metadata returns an unmodified owner;
-    /// errors after the first reset write retain all resources on Drop.
+    /// Consume permission. Rejected metadata returns an unmodified owner;
+    /// errors after the first reset write keep all resources on Drop.
     pub fn initialize(mut registers: R) -> Result<Self, (Error, Option<R>)> {
         let profile = match registers.identity().and_then(Profile::select) {
             Ok(profile) => profile,
@@ -367,7 +367,7 @@ impl<R: Registers> Controller<R> {
         self.verify(offset, value)
     }
     /// # Safety
-    /// The actual child has acknowledged disable, or no child has ever been
+    /// The child has acknowledged disable, or no child has ever been
     /// published. No child register/IRQ/work users remain. This is not a DMA or
     /// external SDA/SCL recovery primitive; this PIO owner never enabled DMA.
     unsafe fn retire(mut self) -> Result<Retired<R>, Error> {
@@ -392,7 +392,7 @@ impl<R: Registers> Drop for Controller<R> {
     }
 }
 
-// SAFETY: NativeRegisters retains the complete actual UC aperture and original
+// SAFETY: NativeRegisters keeps the complete UC aperture and original
 // function/root epoch. DesignWare offsets are bounded below private registers.
 unsafe impl ChildAccess for NativeRegisters {
     fn child_read32(&mut self, offset: usize) -> u32 {
@@ -455,7 +455,7 @@ mod tests {
             Ok(self.fail == Some((self.calls, true)))
         }
     }
-    // SAFETY: actual isolated owned register model and a distinct drop-counted
+    // SAFETY: isolated owned register model and a distinct drop-counted
     // resource guard. No hardware, other process or asynchronous borrower exists.
     unsafe impl Registers for Model {
         fn identity(&mut self) -> Result<Identity, Error> {
@@ -486,7 +486,7 @@ mod tests {
             if late { Err(Error::Io) } else { Ok(()) }
         }
     }
-    // SAFETY: actual isolated model aperture; command/FIFO/status effects are
+    // SAFETY: isolated model aperture; command/FIFO/status effects are
     // independent of the production engine. There is no real DMA or IRQ.
     unsafe impl ChildAccess for Model {
         fn child_read32(&mut self, offset: usize) -> u32 {
@@ -618,8 +618,8 @@ mod tests {
         config.write32(0, u32::from(device) << 16 | 0x8086);
         config.write32(8, 0x1180_0000);
         config.write16(PCI_COMMAND, PCI_MEMORY | PCI_INTX_DISABLE);
-        // A real owned RAM mapping stands in for the exclusive actual BAR.
-        // Its CPU pointer and symbolic physical address are deliberately distinct.
+        // A real owned RAM mapping stands in for the exclusive BAR.
+        // Its CPU pointer and symbolic physical address are distinct.
         config.write32(0x10, physical as u32 | 4);
         config.write32(0x14, 0);
         config.write32(0x2c, 0x1237_152d);
@@ -636,8 +636,8 @@ mod tests {
         )
     }
     pub(super) fn stop_fixture(function: Function<OwnedConfig>) -> StoppedRequester {
-        // SAFETY: actual owned fixture storage is drained, exclusively retained
-        // and not exposed as any production device/coherency qualification.
+        // SAFETY: owned fixture storage is drained, exclusively kept
+        // and not exposed as any production device/coherency validation.
         match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
             Ok(stopped) => stopped,
             Err((error, _)) => panic!("valid stopped fixture: {error:?}"),
@@ -672,7 +672,7 @@ mod tests {
                 unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) }.to_vec()
             };
             let requester = stop_fixture(function);
-            // SAFETY: same actual stopped owner/mapping; failed time admission
+            // SAFETY: same stopped owner/mapping; failed time admission
             // must return them before private reset/remap or child accesses.
             let failure = unsafe {
                 I2c::attach_native(
@@ -693,7 +693,7 @@ mod tests {
             let resources = failure.unmodified.expect("original unchanged owners");
             let pointer = resources.1.address(0, WINDOW_BYTES).unwrap();
             assert_eq!(
-                // SAFETY: these exact original owners still retain the aperture.
+                // SAFETY: these original owners still keep the aperture.
                 unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) },
                 before
             );
@@ -705,7 +705,7 @@ mod tests {
     fn concrete_native_registers_use_actual_owned_mapping_and_acknowledged_reset_release() {
         let (function, mapping, config_counts, bar_counts) = native_fixture();
         let physical = mapping.physical_span().unwrap().start();
-        // SAFETY: stopped exclusively owned RAM fixture and its actual mapping.
+        // SAFETY: stopped exclusively owned RAM fixture and its mapping.
         let registers = match unsafe { NativeRegisters::claim(stop_fixture(function), mapping) } {
             Ok(registers) => registers,
             Err((error, _)) => panic!("valid mapped owner: {error:?}"),
@@ -735,7 +735,7 @@ mod tests {
             let (function, mapping, config_counts, bar_counts) = native_fixture();
             if stage >= 2 {
                 let pointer = mapping.address(0, PRIVATE).unwrap().cast::<u32>();
-                // SAFETY: no user has claimed these actual isolated registers;
+                // SAFETY: no user has claimed these isolated registers;
                 // source component words and frozen enable status are hardware
                 // observations, independent of the production engine.
                 unsafe {
@@ -751,7 +751,7 @@ mod tests {
                         .write_volatile(u32::from(stage == 2));
                 }
             }
-            // SAFETY: same retained actual stopped owner and isolated BAR fixture.
+            // SAFETY: same stopped owner and isolated BAR fixture.
             let registers = match unsafe { NativeRegisters::claim(stop_fixture(function), mapping) }
             {
                 Ok(registers) => registers,
@@ -765,7 +765,7 @@ mod tests {
                 drop(owner);
             } else {
                 // SAFETY: exact isolated source clock/timing fixture. This
-                // exercises real volatile NativeRegisters and the actual DW
+                // exercises real volatile NativeRegisters and the DW
                 // constructor, not the generic protocol Register model.
                 let child = unsafe { owner.into_i2c(Time(Rc::new(Cell::new(0))), timing()) };
                 match stage {
@@ -799,13 +799,13 @@ mod tests {
                 2 => function.config().write16(PCI_COMMAND, PCI_INTX_DISABLE),
                 3 => function.config().write32(0x14, u32::MAX),
                 4 => {
-                    // SAFETY: no actual register user/engine exists; the retired
+                    // SAFETY: no register user/engine exists; the retired
                     // mapping must not be silently resurrected by the adapter.
                     unsafe { mapping.retire() }.unwrap();
                 }
                 _ => unreachable!(),
             }
-            // SAFETY: same isolated stopped fixture, deliberately invalid BAR
+            // SAFETY: same isolated stopped fixture, invalid BAR
             // metadata or decode. Rejection must not produce any MMIO effect.
             let (error, resources) =
                 match unsafe { NativeRegisters::claim(stop_fixture(function), mapping) } {
@@ -928,7 +928,7 @@ mod tests {
         let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
         let owner = Controller::initialize(registers).unwrap();
         h.borrow_mut().reject = Some(RESET);
-        // SAFETY: no child was published; actual reset failure must quarantine.
+        // SAFETY: no child was published; reset failure must quarantine.
         assert!(unsafe { owner.retire() }.is_err());
         assert_eq!(drops.get(), 0);
         let (registers, _, drops) = model(0x9d60, 0x1_2345_0000, 0);
@@ -940,8 +940,8 @@ mod tests {
         use crate::bus::i2c::{Address, Bus, Operation};
         let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
         let owner = Controller::initialize(registers).unwrap();
-        // SAFETY: literal timing belongs to this exact modeled source clock and
-        // finite peer; no guessed production board authority is supplied.
+        // SAFETY: literal timing belongs to this modeled source clock and
+        // finite peer; no guessed production board permission is supplied.
         let mut bus =
             unsafe { owner.into_i2c(Time(Rc::new(Cell::new(u64::MAX - 10))), timing()) }.unwrap();
         let mut bytes = [0; 2];
@@ -972,7 +972,7 @@ mod tests {
             if stage == 0 {
                 h.borrow_mut().stuck_disable = true;
             }
-            // SAFETY: same isolated literal timing and actual model owner.
+            // SAFETY: same isolated literal timing and model owner.
             let result = unsafe { owner.into_i2c(Time(Rc::new(Cell::new(0))), timing()) };
             if stage == 0 {
                 assert!(result.is_err());
@@ -1024,8 +1024,8 @@ mod tests {
             assert_eq!(profile.source_sda_hold_ns(), values[2]);
             assert_eq!(profile.source_sda_fall_ns().unwrap_or(u32::MAX), values[3]);
             assert_eq!(profile.source_scl_fall_ns().unwrap_or(u32::MAX), values[4]);
-            // Execute private native reset/remap for every actual source profile,
-            // with an actual high remap address independent of CPU storage.
+            // Execute private native reset/remap for every source profile,
+            // with a high remap address independent of CPU storage.
             let (registers, _, _) = model(device, 0x1_2345_0000, 0);
             let owner = Controller::initialize(registers).unwrap();
             assert_eq!(owner.profile(), profile);

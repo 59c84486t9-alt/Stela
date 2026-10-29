@@ -36,14 +36,14 @@ impl RecoveryBinding {
 }
 
 /// Capture data from one pinned invocation and its matching code/plan epoch.
-/// Native-stack authority remains with the platform capture owner.
+/// Native-stack permission remains with the platform capture owner.
 #[derive(Debug, Clone, Copy)]
 pub struct HostFaultSnapshot<'a> {
     pub gprs: &'a HostGprSnapshot,
     pub spills: &'a HostSpillSnapshot,
 }
 
-/// Exact native interval with a single complete guest retirement boundary.
+/// Native interval with a single complete guest retirement boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultRecovery {
     pub start: usize,
@@ -55,7 +55,7 @@ pub struct FaultRecovery {
 impl FaultRecovery {
     /// Classify before attempting architectural settlement. An absent row is a
     /// host-internal fault. Ordinary frame/commit intervals do not authorize
-    /// guest projection merely because their location metadata says Before.
+    /// guest projection because their location metadata says Before.
     pub fn site_at(table: &[Self], offset: usize) -> Result<RecoverySite, FaultRecoveryError> {
         let mut site = None;
         for entry in table {
@@ -83,8 +83,8 @@ impl FaultRecovery {
         }
         Ok(site.unwrap_or(RecoverySite::native_internal()))
     }
-    /// Required initialized spill words at this exact native offset. The capture
-    /// owner validates each address against its retained mapped invocation lease.
+    /// Required initialized spill words at this native offset. The capture
+    /// owner validates each address against its mapped invocation lease.
     pub fn required_spills(
         table: &[Self],
         offset: usize,

@@ -22,7 +22,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.stopped = false;
         self.initialize_phy(board)?;
         self.reset_unmanaged_core()?;
-        // Re-observe actual post-bootcode signed board identity; never retain a
+        // Re-observe post-bootcode signed board identity; never keep a
         // guessed MAC/management setting across reset.
         let observed = self.board()?;
         if observed.mac != board.mac
@@ -231,7 +231,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             SNDDATAI_SCTRL_ENABLE | SNDDATAI_SCTRL_FASTUPD,
         )?;
         self.stop_block(HOSTCC_MODE)?;
-        // Interrupts stay masked. Time and max-frame coalescing cause genuine
+        // Interrupts stay masked. Time and max-frame coalescing cause
         // status DMA even when the caller hasn't requested a NOW update yet.
         for (at, value) in [
             (HOSTCC_RXCOL_TICKS, 1),
@@ -327,7 +327,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | if legacy { 0 } else { RDMAC_MODE_IPV6_LSO_EN },
         )?;
         self.wait(40)?;
-        // Observe the actual residual channel lengths before applying 5720's
+        // Observe the residual channel lengths before applying 5720's
         // documented workaround; no synthetic normal-channel assumption.
         for index in 0..if bcm5762 || legacy {
             0
@@ -424,7 +424,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | HOSTCC_MODE_NOINT_ON_NOW,
         )
     }
-    /// Classify the actual causes behind SD_STATUS_ERROR, following
+    /// Classify the causes behind SD_STATUS_ERROR, following
     /// tg3_process_error. BCM5720_A0's MBUF low-water event is a discard
     /// indication, not a fatal DMA failure. tg3_periodic_fetch_stats clears
     /// that one W1C bit and counts one observation, not an exact packet total.
@@ -479,7 +479,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.flush(MAILBOX_RCVRET_CON_IDX_0 + 4, index as u32)
     }
     pub(in crate::net::tg3) fn packet_stop(&mut self) -> Result<(), Error> {
-        // A poisoned submission epoch cannot use normal helpers, but genuine
+        // A poisoned submission epoch cannot use normal helpers, but
         // stop accesses remain legal for containment. Failure never retires.
         // Re-observe every engine even after a partially failed core reset;
         // an old stopped bit cannot certify bootcode's subsequent effects.

@@ -83,8 +83,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         nodes: &[u8],
     ) -> Result<State, Error> {
-        // These retained native profiles require an actual AFG1 and the
-        // exact source node list; do not redirect vendor authority by inference.
+        // These kept native profiles require an AFG1 and the
+        // source node list; do not redirect vendor permission by inference.
         if group != 1 || nodes.is_empty() || nodes.len() > 8 {
             return Err(Error::UnsupportedTopology);
         }
@@ -155,7 +155,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         state: &mut State,
     ) -> Result<(), Error> {
         // Vendor registers may be inaccessible in D3. The caller owns the
-        // codec and acknowledges D0 before this first actual map observation.
+        // codec and acknowledges D0 before this first map observation.
         state.power_map = Some(self.read_idt_port_map(graph.address, group, state.mask)?);
         Ok(())
     }

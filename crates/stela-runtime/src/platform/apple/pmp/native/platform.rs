@@ -5,14 +5,14 @@
 //! 1011160..1011674, cycle 100f820..100fb28 and activation 101c504..101cb58.
 //! The immutable ignored evidence is pmgr/platform-lifecycle-producer-r1
 //! (75 windows, seal99e6589ab2ac169545825660da5918c8b5b9575a9455983f5f985a94fdf2ba80).
-//! Additional packet/interpolation and counter selection operands are retained
+//! Additional packet/interpolation and counter selection operands are held
 //! in pmgr/platform-implementation-r1. No Apple code or firmware executes here.
 //!
 //! Software eligibility is a source policy result. It is neither PMGR ACTIVE,
-//! a hardware observation nor an ACK. Backend operations retain actual effects,
+//! a hardware observation nor an ACK. Backend operations keep effects,
 //! busy waits and refusals under a stable request; there is no default backend.
 //! The cycle API owns evaluation and hook dispatch through100fb50, including
-//! retained manager controller save/restore, G540 clear and accumulator effects.
+//! manager controller save/restore, G540 clear and accumulator effects.
 //! It is not the entire manager100e798..100fd70: the parent still owns request
 //! queue draining before evaluation and the post-dispatch100fb50..100fd30 vote,
 //! pending-work, trace-publication, scheduling and timing-accounting stages.

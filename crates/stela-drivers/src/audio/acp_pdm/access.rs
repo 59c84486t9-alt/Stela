@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Shared ACP lifecycle admission, register sentinel and deadline polling.
-//! I2S/PDM retain their hardware profiles, registers and ownership epochs.
+//! I2S/PDM keep their hardware profiles, registers and ownership epochs.
 use super::{Error, Phase, Registers, State};
 use crate::bus::i2c::Timer;
 
@@ -50,7 +50,7 @@ pub(in crate::audio) fn phase_read(
     deadline: Deadline,
 ) -> Result<u32, Error> {
     deadline.check(timer)?;
-    // An actual access failure wins over the clock after that access. A late
+    // An access failure wins over the clock after that access. A late
     // successful ready observation never grants phase completion.
     let value = read(registers, offset)?;
     deadline.check(timer)?;

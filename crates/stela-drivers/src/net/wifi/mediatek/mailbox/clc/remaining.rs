@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Domain/SAR-rate-power continuation of the same genuine retained CLC owner.
+//! Domain/SAR-rate-power continuation of the same CLC owner.
 //! Completion observations never implement a trusted HardwarePolicy provider.
 use super::{Execution, Mailbox, PCI_TIMEOUT_US, Packet, Phase, QueueIo, Reply};
 use crate::net::wifi::mediatek::{
@@ -71,16 +71,16 @@ pub(super) struct Chain {
 
 impl<C: 'static> Execution<C> {
     /// # Safety
-    /// Extend the existing genuine retained `resource` authority/ownership to
+    /// Extend the existing kept `resource` permission/ownership to
     /// these exact channel and resolved per-channel/per-rate half-dBm inputs,
-    /// resolved after consuming this owner's actual completed CLC facts.
-    /// They must derive from actual chip/board/chain, completed CLC restrictions
+    /// resolved after consuming this owner's completed CLC facts.
+    /// They must derive from chip/board/chain, completed CLC restrictions
     /// (including MT7925 BE_CTRL), requested power, trusted current OS/location
-    /// domain, actual SAR and ACPI/DTS limits. Actual absence must be proven;
+    /// domain, SAR and ACPI/DTS limits. Absence must be proven;
     /// missing values cannot use zero/127/unlimited defaults. For every source
     /// fixed power-list channel, limits faithfully represent all applicable
     /// constraints; disabled channels remain disabled in the domain. The real
-    /// guards and board/chain/source-policy resources must remain retained by C
+    /// guards and board/chain/source-policy resources must remain held by C
     /// through all uncertain/completed firmware/radio users, with raw changes
     /// and revocation serialized as in `prepare`. Copied raw flags or arrays
     /// alone cannot satisfy this. This method creates no applied-policy receipt.
@@ -117,7 +117,7 @@ impl<C: 'static> Execution<C> {
             .phy()
             .ok_or(Error::CapabilitiesIncomplete)?;
         // Optional absent6GHz observation selects no6GHz source protocol; the
-        // original None remains in the owned actual report and grants no band.
+        // original None remains in the owned report and grants no band.
         let mut expected = [
             phy.has_2ghz(),
             phy.has_5ghz(),
@@ -126,7 +126,7 @@ impl<C: 'static> Execution<C> {
         if mailbox.identity.chip == Chip::Mt7925 {
             // Source rate-power skips6GHz when the last now-completed CLC
             // rule's flags are zero. This only selects the bounded source plan;
-            // the actual CLC completion and its retained source context precede
+            // the CLC completion and its source context precede
             // this planning operation, with no predicted response permission.
             expected[2] &= state
                 .plan
@@ -177,8 +177,8 @@ impl<C: 'static> Execution<C> {
     pub fn remaining_completed(&self) -> bool {
         self.owned().phase == Phase::RemainingFacts
     }
-    /// Continue the actual completed CLC with domain and complete source rate-
-    /// power/PSE exactly once under the same retained authority. CLC is never
+    /// Continue the completed CLC with domain and complete source rate-
+    /// power/PSE exactly once under the same permission. CLC is never
     /// restarted/replayed. Return means raw protocol facts, including source
     /// one-way boundaries, never an admitted radio or policy.
     pub fn execute_all<W: QueueIo, F: QueueIo, R: QueueIo>(
@@ -283,7 +283,7 @@ impl<C: 'static> Execution<C> {
             .map_or(&[], |c| c.start_facts.as_slice())
     }
     /// Vendor initial lifecycle only: source repeats the same resolved domain
-    /// at first start. This does not replay CLC or manufacture new authority.
+    /// at first start. This does not replay CLC or manufacture new permission.
     pub(in crate::net::wifi::mediatek) fn start_domain<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
         mailbox: &mut Mailbox<W, F, R>,
@@ -387,7 +387,7 @@ impl<C: 'static> Execution<C> {
 }
 
 impl<C: 'static> Execution<C> {
-    /// Private view of this retained owner's actual completed MT7925 chain.
+    /// Private view of this owner's completed MT7925 chain.
     /// No public copied receipt can manufacture a programmed policy.
     pub(in crate::net::wifi::mediatek) fn programmed_mt7925(
         &self,
@@ -519,9 +519,9 @@ pub(crate) mod tests {
         bands: &[Vec<power::Channel>; 3],
         chan: &[Vec<domain::Channel>; 3],
     ) -> Result<(), RemainingError> {
-        // Install the actual source-policy fixture behind the same retained Guard,
+        // Install the source-policy fixture behind the same Guard,
         // not an unrelated drop counter. Every device DMA consumer checks these
-        // exact retained restrictions/rate inputs before mutating modeled hardware.
+        // exact restrictions/rate inputs before mutating modeled hardware.
         {
             let mut model = fixture.model.lock().unwrap();
             if model.regulatory_expected_domain.is_none() {
@@ -549,10 +549,10 @@ pub(crate) mod tests {
                 }
             }
         }
-        // SAFETY: the actual retained model guard owns stopped radio and the
+        // SAFETY: the model guard owns stopped radio and the
         // fixture source-policy state for these explicit restricted channels and
         // resolved rate arrays. The same guard is checked by each real DMA read;
-        // no native HardwarePolicy/OS authority is manufactured by this test.
+        // no native HardwarePolicy/OS permission is manufactured by this test.
         unsafe {
             owner.prepare_remaining(
                 &fixture.mailbox,
@@ -894,7 +894,7 @@ pub(crate) mod tests {
                         .unwrap();
                     assert_eq!(flags, returned_flags);
                     assert_eq!(owner.facts().len(), 2);
-                    // The same actual source-policy guard now resolves source UNII4
+                    // The same source-policy guard now resolves source UNII4
                     // restrictions from the completed reply. Source get_ch_power applies
                     // the channel regulatory cap only while enabled; the disabled channel
                     // remains excluded from the domain even if its raw rate limit differs.

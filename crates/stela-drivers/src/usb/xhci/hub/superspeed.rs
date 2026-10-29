@@ -186,7 +186,7 @@ impl Controller {
             let reset = |controller: &mut Self| {
                 controller.observe_hub_power(slot, attachment)?;
                 let speed = controller.superspeed_port_for(device.id, port, ssp.as_ref());
-                // Recheck global authority even when this individual port
+                // Recheck global permission even when this individual port
                 // failed. A local reset error must not hide parent power loss.
                 controller.observe_hub_power(slot, attachment)?;
                 speed?
@@ -195,7 +195,7 @@ impl Controller {
             };
             self.connect(location, Some(device.id), reset, dma, devices, failures);
             if self.live_slot(slot).is_err() {
-                // connect already records the actual power observation failure.
+                // connect already records the power observation failure.
                 // Keep the inventory as historical identity, never as a live handle.
                 break;
             }
@@ -281,7 +281,7 @@ impl Controller {
         ssp: Option<&Ssp>,
     ) -> Result<Option<u8>, BlockError> {
         let slot = self.validate_topology_id(id)?;
-        // Qualify the same stable connection interval as USB2/root ports.
+        // Check the same stable connection interval as USB2/root ports.
         // Clearing CSC once is not evidence that the downstream plug settled.
         let clock = self.clock;
         let mut stable_state = None;

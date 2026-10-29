@@ -40,9 +40,9 @@ fn host_modes_and_top_level_slots() {
                 .find(|item| item.physical == root)
                 .unwrap();
             for slot in 128..512 {
-                // SAFETY: the exact retained root allocation, read-only model.
+                // SAFETY: the exact root allocation, read-only model.
                 assert_eq!(
-                    // SAFETY: The monitor guard retains this exact 512-word aligned
+                    // SAFETY: The monitor guard keeps this exact 512-word aligned
                     // root allocation and excludes retirement; slots 128..512 are in
                     // bounds and no model writer runs during this read.
                     unsafe { (root.cpu as *const u64).add(slot).read_volatile() },
@@ -143,12 +143,12 @@ fn virtual_aperture_and_host_capacity() {
     for address in [1u64 << 32, (1u64 << 32) + 0xffff_f000] {
         let rejected = Arc::new(AtomicUsize::new(0));
         let before = monitor.state.lock().unwrap().events.len();
-        // SAFETY: an address representable by mode3 but outside the actual
-        // admitted aperture must not alias or mutate any retained mapping.
+        // SAFETY: an address representable by mode3 but outside the
+        // admitted aperture must not alias or mutate any mapping.
         assert_eq!(
             // SAFETY: The candidate payload has live backing with symbolic addresses.
             // No hardware or worker is present; the out-of-aperture IOVA must fail
-            // before any retained table changes.
+            // before any table changes.
             unsafe { tree.map(address, payload(0x500000, &rejected), Direction::FromDevice) },
             Err(TranslationError::AddressLimit)
         );
@@ -160,7 +160,7 @@ fn virtual_aperture_and_host_capacity() {
         monitor.walk(root, 3, 0xffff_ffff).unwrap().physical,
         0x300fff
     );
-    // SAFETY: no asynchronous requester exists; exact model mapping is idle.
+    // SAFETY: no asynchronous requester exists; model mapping is idle.
     unsafe { tree.unmap(0xffff_f000) }.unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     retired(tree, &monitor);

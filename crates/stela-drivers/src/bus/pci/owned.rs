@@ -1,5 +1,5 @@
-//! One exclusively owned ECAM function, retained through the native mapping
-//! registry. Numeric MCFG geometry is checked here; actual device/resource and
+//! One exclusively owned ECAM function, kept through the native mapping
+//! registry. Numeric MCFG geometry is checked here; device/resource and
 //! configuration-writer exclusion come from the producer's attachment grant.
 use super::{Address, ConfigSpace, EcamWindow, msi::MsiConfigSpace};
 use crate::bus::mmio::owned::{
@@ -24,7 +24,7 @@ pub enum ConfigError {
     Mapping(MappingError),
 }
 
-/// Retains the real resource, installed native mapping and address-space owner.
+/// Keeps the real resource, installed native mapping and address-space owner.
 /// No clone or raw configuration view is exposed. Final mapping retirement is
 /// explicit, after consuming this owner and draining all configuration access.
 pub struct OwnedConfig {
@@ -37,7 +37,7 @@ pub struct OwnedConfig {
 /// epoch. It exposes no pointer or second configuration access path. Holding
 /// it prevents mapping retirement; dropping it establishes no DMA completion.
 /// The original driver's sole config owner must still honor the attachment's
-/// reset/removal/assignment exclusion for every retained DMA binding lifetime.
+/// reset/removal/assignment exclusion for every DMA binding lifetime.
 pub struct ConfigRetention {
     view: MappingView,
 }
@@ -47,7 +47,7 @@ impl ConfigRetention {
         self.view.check_current()
     }
 
-    /// Compare actual retained authorities, never caller-supplied numeric IDs.
+    /// Compare kept permissions, never caller-supplied numeric IDs.
     pub fn matches_mapping(&self, mapping: &Mapping) -> Result<bool, MappingError> {
         mapping.shares_mapping(&self.view)
     }
@@ -58,8 +58,8 @@ impl OwnedConfig {
     /// same mapping, including its retirement obligations, without device access.
     ///
     /// # Safety
-    /// `window` is the actual immutable MCFG window for this function and epoch;
-    /// the retained mapping's resource is this actual ECAM configuration space.
+    /// `window` is the immutable MCFG window for this function and epoch;
+    /// the mapping's resource is this ECAM configuration space.
     /// Its native platform owner keeps the mapping valid in every access context.
     /// The producer holds exclusive configuration, reset/removal, root/bridge
     /// routing and assignment ownership until the mapping is retired. No other
@@ -149,9 +149,9 @@ impl OwnedConfig {
         self.window
     }
 
-    /// Compare an actual consumed requester binding with this exact retained
+    /// Compare a consumed requester binding with this kept
     /// configuration mapping. Matching numeric BDF/physical addresses do not
-    /// qualify. This establishes no current device quiescence.
+    /// check. This establishes no current device quiescence.
     pub fn matches_binding(
         &self,
         binding: &super::requester::RequesterBinding,
@@ -184,7 +184,7 @@ impl OwnedConfig {
         {
             return Err(ConfigError::Access { offset, width });
         }
-        // Recheck live registry state for each operation instead of retaining
+        // Recheck live registry state for each operation instead of keeping
         // a raw pointer across a possible later mapping quarantine.
         self.mapping
             .address(start, width)
@@ -330,8 +330,8 @@ pub(crate) mod tests {
         kind: ResourceKind,
         counters: Arc<Counters>,
     }
-    // SAFETY: isolated symbolic physical inventory, retained alongside actual
-    // owned CPU fixture storage; no hardware or production authority is used.
+    // SAFETY: isolated symbolic physical inventory, kept alongside
+    // owned CPU fixture storage; no hardware or production permission is used.
     unsafe impl ResourceBacking for Backing {
         fn physical_span(&self) -> PhysicalSpan {
             self.span
@@ -373,7 +373,7 @@ pub(crate) mod tests {
             self.counters.platform_drops.fetch_add(1, Ordering::Relaxed);
         }
     }
-    // SAFETY: actual retained aligned CPU RAM models exactly the requested
+    // SAFETY: aligned CPU RAM models exactly the requested
     // symbolic device pages. This proves registry/transport lifetimes only,
     // not physical ECAM, effective cache attributes or native page tables.
     unsafe impl MappingPlatform for Model {
@@ -387,7 +387,7 @@ pub(crate) mod tests {
             if watched != 0 {
                 let offset = watched - 1;
                 assert!(offset <= 8188 && offset.is_multiple_of(4));
-                // SAFETY: isolated fixture owns this actual aligned RAM and
+                // SAFETY: isolated fixture owns this aligned RAM and
                 // all operations are sequential; observe the real store.
                 let value = unsafe {
                     self.pointer()
@@ -470,7 +470,7 @@ pub(crate) mod tests {
         let authority = unsafe { Authority::isolated_model(platform, SPACE, Vec::new()) }.unwrap();
         let resource = Resource::new(Box::new(Backing {
             span,
-            // WC exists only for the intentionally unsuitable-resource case;
+            // WC exists only for the unsuitable-resource case;
             // ordinary ECAM fixtures model conservative register resources.
             kind: if attribute == CacheAttribute::WriteCombining {
                 ResourceKind::PrefetchableMemory
@@ -486,7 +486,7 @@ pub(crate) mod tests {
         (mapping, counters)
     }
 
-    /// Actual registry-owned transport fixture for sibling requester tests.
+    /// Registry-owned transport fixture for sibling requester tests.
     /// Program it through ConfigSpace and explicitly retire its returned mapping.
     pub(crate) fn fixture(address: Address) -> (OwnedConfig, Arc<Counters>) {
         let span = PhysicalSpan::new(physical(address), FUNCTION_BYTES as u64).unwrap();
@@ -497,8 +497,8 @@ pub(crate) mod tests {
             CacheAttribute::Uncached,
             Protection::ReadWrite,
         );
-        // SAFETY: this fixture owns its actual storage, exclusive config access
-        // and symbolic resource epoch. It grants no production device authority.
+        // SAFETY: this fixture owns its storage, exclusive config access
+        // and symbolic resource epoch. It grants no production device permission.
         let config = match unsafe { OwnedConfig::attach(address, window(address), mapping) } {
             Ok(config) => config,
             Err((error, _)) => panic!("valid owned fixture: {error:?}"),
@@ -538,7 +538,7 @@ pub(crate) mod tests {
 
     #[test]
     fn native_narrow_accesses_preserve_neighboring_status_and_tail_bytes() {
-        // Actual volatile CPU RAM effects, not an emulation of PCI W1C status.
+        // Volatile CPU RAM effects, not an emulation of PCI W1C status.
         // Hardware width is prescribed by each production write_volatile call.
         let (mut config, counters) = fixture(ADDRESS);
         config.write32(4, 0xa5c3_0102);
@@ -664,7 +664,7 @@ pub(crate) mod tests {
             let mapping = config.into_mapping();
             let original = mapping.address(0, FUNCTION_BYTES).unwrap();
             // SAFETY: fixture grants the ownership; malformed numeric metadata
-            // is deliberately passed for rejection before any register access.
+            // is passed for rejection before any register access.
             let (error, mapping) = match unsafe { OwnedConfig::attach(address, ecam, mapping) } {
                 Err(failure) => failure,
                 Ok(_) => panic!("invalid config metadata accepted"),

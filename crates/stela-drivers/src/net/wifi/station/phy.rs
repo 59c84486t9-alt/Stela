@@ -4,7 +4,7 @@
 //! Validated single-link PHY negotiation inputs and directional rate bounds.
 //!
 //! These are observations/negotiation results, never radio, key or association
-//! authority. The vendor must encode every negotiated effect and obtain actual
+//! permission. The vendor must encode every negotiated effect and obtain
 //! firmware completion before station attachment. Existing legacy constructors
 //! remain restricted until their modern configuration/data paths consume this.
 
@@ -59,7 +59,7 @@ pub enum Width {
 pub struct LegacyRates {
     pub supported: u16,
     pub basic: u16,
-    /// Bits0..3: HT(127), VHT(126), HE(122), EHT(121). Bit4 retains
+    /// Bits0..3: HT(127), VHT(126), HE(122), EHT(121). Bit4 keeps
     /// SAE H2E(123) for the real authentication owner; it is not a PHY rate.
     pub selectors: u8,
 }
@@ -160,7 +160,7 @@ impl Wmm {
     }
 }
 
-/// Actual complete management-IE observations, parsed in two passes so EHT
+/// Complete management-IE observations, parsed in two passes so EHT
 /// sizing uses HE regardless of IE order. Duplicates and partial fields refuse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
@@ -175,7 +175,7 @@ pub struct Capabilities {
     wmm: Option<Wmm>,
     // Complete outer ML TLVs and contiguous fragments; unparsed AP facts only.
     unselected_multi_link: Vec<u8>,
-    // Actual local source object words, including untransmitted width slots.
+    // Local source object words, including untransmitted width slots.
     // Observations only; the native owner must bind them to its real issuer.
     local_he_source_maps: Option<[McsMaps; 3]>,
 }
@@ -298,9 +298,9 @@ impl Capabilities {
     pub fn unselected_multi_link_elements(&self) -> &[u8] {
         &self.unselected_multi_link
     }
-    /// Retain actual local source struct slots without inferring hidden words
-    /// from absent wire maps. These are observations, never hardware authority.
-    /// The physical owner must compare them to its genuine source-cap issuer.
+    /// Keep local source struct slots without inferring hidden words
+    /// from absent wire maps. These are observations, never hardware permission.
+    /// The physical owner must compare them to its source-cap issuer.
     pub fn with_local_he_source_maps(mut self, maps: [McsMaps; 3]) -> Result<Self, Error> {
         if self.role != Role::Station {
             return Err(Error::Invalid("local source maps on AP observation"));
@@ -342,9 +342,9 @@ impl Capabilities {
             .ok_or(Error::Missing("local HE capability"))?
             .local_meets_basic(required, self.local_he_source_maps)
     }
-    /// Check the AP basic EHT MCS/NSS requirement against every actual local
+    /// Check the AP basic EHT MCS/NSS requirement against every local
     /// supported width, including20-only STA mapping. This is metadata
-    /// validation only, not regulatory, association or publication authority.
+    /// validation only, not regulatory, association or publication permission.
     pub fn meets_eht_basic(&self, required: [u8; 4]) -> bool {
         self.he
             .as_ref()
@@ -420,7 +420,7 @@ mod tests {
     }
     fn eht(width_bits: u8, role: Role, width320: bool) -> Vec<u8> {
         let mut data = vec![0; 11];
-        data[0] = 1 << 6; // Actual 2.4GHz max-MPDU selection; ignored elsewhere.
+        data[0] = 1 << 6; // 2.4GHz max-MPDU selection; ignored elsewhere.
         data[2] = if width320 { 2 } else { 0 };
         if width_bits & 2 != 0 {
             data.extend_from_slice(&[0x22, 0x22, 0x11]);
@@ -505,7 +505,7 @@ mod tests {
         assert!(Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).is_ok());
         let mut rates = LegacyRates::default();
         assert!(rates.add(Band::Ghz5, &[0x82]).is_err()); // CCK cannot become an OFDM bit.
-        rates.add(Band::Ghz5, &[0xfb]).unwrap(); // SAE H2E is retained separately.
+        rates.add(Band::Ghz5, &[0xfb]).unwrap(); // SAE H2E is held separately.
         assert_eq!((rates.supported, rates.selectors), (0, 16));
         assert!(Negotiated::between(&local, &peer, Mode::Ht, Width::Mhz40).is_err());
         assert!(rates.add(Band::Ghz5, &[0xf8]).is_err()); // UHR remains unsupported.
@@ -674,7 +674,7 @@ mod tests {
                 own_width == 8 && peer_width == 8
             );
             assert!(Negotiated::between(&local, &peer, Mode::Vht, Width::Mhz80).is_ok());
-            // A lower-family VHT restriction cannot disable actual HE/EHT160.
+            // A lower-family VHT restriction cannot disable HE/EHT160.
             assert!(Negotiated::between(&local, &peer, Mode::He, Width::Mhz160).is_ok());
             assert!(Negotiated::between(&local, &peer, Mode::Eht, Width::Mhz160).is_ok());
         }

@@ -77,7 +77,7 @@ pub(super) fn initialize<C: ConfigSpace>(
     }
     update(f.config(), 0x800, 1, 1)?;
     let result = (|| {
-        // Preserve actual firmware CD/WP polarity; no invented board properties.
+        // Preserve firmware CD/WP polarity; no invented board properties.
         update(f.config(), 0x44, 7 << 12 | 1 << 29, 0)?;
         update(f.config(), 0x70, 1 << 19, 0)?;
         update(f.config(), 0x48, 31 << 24, 31 << 24)?;
@@ -219,7 +219,7 @@ pub(in crate::storage::sdhci) fn set_power(
     vdd1: u8,
 ) -> Result<(), BlockError> {
     let events = r.read32(INTERRUPT_ENABLE) & !BUS_POWER;
-    r.write32(SIGNAL_ENABLE, 0); // Actual polling owner has no CPU interrupt route.
+    r.write32(SIGNAL_ENABLE, 0); // Polling owner has no CPU interrupt route.
     r.write32(INTERRUPT_ENABLE, events);
     r.write8(POWER, 0);
     if r.read8(POWER) != 0 {
@@ -268,7 +268,7 @@ impl Engine {
             restoration,
             quarantined: true,
         });
-        // Shared protocol unwinding must preserve the actual power-off outcome.
+        // Shared protocol unwinding must preserve the power-off outcome.
         self.uhs_failed = true;
         Err(primary)
     }

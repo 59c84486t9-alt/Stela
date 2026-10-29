@@ -1,5 +1,5 @@
-//! Rejection-only quarantine of one actual canonical Machine execution domain.
-//! The first raw failure is retained before low-level recovery releases a frame.
+//! Rejection-only quarantine of one canonical Machine execution domain.
+//! The first raw failure is held before low-level recovery releases a frame.
 use crate::{
     machine::{NativeCode, NativeFault},
     platform::sync::Mutex,
@@ -15,7 +15,7 @@ pub(in crate::machine::engine) struct FailureCapture {
     pub fault: NativeFault,
 }
 /// Created only with Machine's real canonical-memory identity. No public
-/// constructor, capture setter or replacement token grants execution authority.
+/// constructor, capture setter or replacement token grants execution permission.
 pub(in crate::machine::engine) struct ExecutionDomain {
     rejected: AtomicBool,
     first: Mutex<Option<FailureCapture>>,

@@ -8,7 +8,7 @@
 //! selection2e48d74..2e48f28 restores them or writes the first alternate word.
 //! Zero initial controls/explicit weights are Stela software policy, not Apple
 //! reset, capacity, timing or completed DRAM programming. Source cacheless
-//! disable_mcc command/waiter evidence is retained in t6000-mcc-backend-20261021-1.
+//! disable_mcc command/waiter evidence is held in t6000-mcc-backend-20261021-1.
 use super::Prepared;
 use super::mcc;
 use crate::machine::apple::AppleDevices;
@@ -130,7 +130,7 @@ impl Plan {
             configuration: configuration.clone(),
         })
     }
-    /// Before consuming mount inputs, require the actual complete live source
+    /// Before consuming mount inputs, require the complete live source
     /// descriptors. Parsing alone never admits canonical memory execution.
     pub fn validate(
         &self,
@@ -241,7 +241,7 @@ impl Plan {
             lifecycle,
         )
         .map_err(String::from)?;
-        // new_local retains the SAME actual notification receiver in owner;
+        // new_local keeps the SAME notification receiver in owner;
         // no callback/service/IRQ binding is manufactured or discarded here.
         let owner = owner.with_registered_ram(self.ram).map_err(String::from)?;
         devices.add_memory_resources(owner)?;
@@ -304,9 +304,9 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
             }
         }
     }
-    // Only one registered lifecycle identity may own this actual device. An
-    // independently gated alias in the same full aperture needs a qualified
-    // additional join, not silent omission or a fabricated aggregate ACK.
+    // Only one registered lifecycle identity may own this device. An
+    // independently gated alias in the same full aperture needs a checked
+    // additional join, not silent omission or an invented aggregate ACK.
     for (id, resource) in power.resources.iter().enumerate() {
         if let Some(PowerOwner::Mmio(address)) = resource.owner
             && address != physical
@@ -332,7 +332,7 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
     }
     Ok(domains)
 }
-// Match coverage::analyze's actual normalized graph: all records sharing a
+// Match coverage::analyze's normalized graph: all records sharing a
 // physical address are ONE key with the union of their parents. Raw virtual
 // IDs remain distinct. Missing IDs/raw cycles/alias cycles were checked above.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -495,7 +495,7 @@ mod tests {
         // Its declared ACTIVE/control image is not consumed by this factory.
         let original = super::super::tests::prepared();
         // Router::new removes this SOURCE descriptor field from its private
-        // AMCC layout: actual shared status is served by the MCC, never an
+        // AMCC layout: shared status is served by the MCC, never an
         // independent AMCC ready/disabled bit. Reconstruct the original input
         // descriptor here; the transformed inner layout is not that input.
         let mut layout = original.router.lock_layout;
@@ -783,7 +783,7 @@ mod tests {
                 [None; 4], &configuration()),
                 Err(reason) if reason == "cold T6000 requested input has an unresolved virtual ancestor")
             );
-            // The same alias ancestry is supported when V actually resolves
+            // The same alias ancestry is supported when V resolves
             // to a physical ancestor. No arbitrary virtual-input veto.
             let backed_id = virtual_id + 1;
             power

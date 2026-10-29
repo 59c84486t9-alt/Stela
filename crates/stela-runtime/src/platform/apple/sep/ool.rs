@@ -71,7 +71,7 @@ impl Buffers {
     /// Record only; returning Ok does not authorize sending an AP reply.
     /// The caller must separately implement the control transaction contract.
     /// No registration probes memory by overwriting guest bytes. Translation
-    /// permissions and faults are checked on every actual DMA operation.
+    /// permissions and faults are checked on every DMA operation.
     pub fn record(&mut self, frame: Frame) -> Result<(), &'static str> {
         if frame.service != message::CONTROL || frame.tag == 0 || frame.parameter != self.service {
             return Err("SEP OOL setup service, tag or owner is invalid");

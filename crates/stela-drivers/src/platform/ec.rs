@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! ACPI embedded-controller byte transactions and operation-region access.
 //!
-//! The platform must supply the actual PNP0C09/ECDT resources, firmware lock
+//! The platform must supply the PNP0C09/ECDT resources, firmware lock
 //! policy and exclusive native ownership. This is a polled engine, not GPE
 //! installation or vendor-specific EC RAM interpretation. Query receipts can
 //! evaluate native AML after releasing transaction/firmware locks.
@@ -125,7 +125,7 @@ pub struct Error {
     pub published: bool,
     pub lock_release_failed: bool,
     pub burst_cleanup_failed: bool,
-    /// Last actually acknowledged data byte. Retained even when its access or
+    /// Last acknowledged data byte. Even when its access or
     /// final lock release crossed a deadline; never published as successful IO.
     pub last_data: Option<ObservedData>,
 }
@@ -139,7 +139,7 @@ pub struct ObservedData {
 
 /// One consumed nonzero QR_EC reply. Move it out of the EC owner lock before
 /// evaluating AML, whose operation regions can issue fresh EC transactions.
-/// A receipt is deliberately not Clone or Copy: evaluation consumes it once.
+/// A receipt is not Clone or Copy: evaluation consumes it once.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a consumed EC event must be dispatched or explicitly recorded as unhandled"]
 pub struct Query(u8);
@@ -190,7 +190,7 @@ pub struct PortIo {
 
 impl PortIo {
     /// # Safety
-    /// Ports are the actual EC resources, decoded/powered after ExitBootServices,
+    /// Ports are the EC resources, decoded/powered after ExitBootServices,
     /// caller has native I/O privilege, and this object exclusively owns them.
     /// The matching firmware arbitration must remain valid until EC retirement.
     pub unsafe fn claim(data: u16, command: u16) -> Result<Self, Error> {
@@ -333,7 +333,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             let status = self.registers.status();
             self.status = self.io(status)?;
             // A status provider may take time, including a successful read.
-            // Record the actual byte before refusing a late acknowledgement.
+            // Record the byte before refusing a late acknowledgement.
             self.deadline(start, phase)?;
             if self.status & mask == expected {
                 return Ok(self.status);
@@ -443,7 +443,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
         self.owned(|ec, start| ec.transfer(start, WRITE, &[address, value], &mut []))
     }
 
-    /// Consume one actual QR_EC response; zero means no pending query method.
+    /// Consume one QR_EC response; zero means no pending query method.
     /// The returned nonzero value names `_Qxx`; dispatch belongs to deferred AML
     /// work after this call releases the firmware lock, never inside this call.
     pub fn query(&mut self) -> Result<Option<u8>, Error> {
@@ -459,9 +459,9 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
     }
 
     /// Poll one native event without consuming QR_EC when SCI_EVT is clear.
-    /// The status test and actual QUERY share one firmware arbitration lease;
+    /// The status test and QUERY share one firmware arbitration lease;
     /// successful return releases it before the receipt can evaluate AML.
-    /// Zero is the actual no-event reply, not `_Q00`. Process/deferred context.
+    /// Zero is the no-event reply, not `_Q00`. Process/deferred context.
     /// Repeated calls must have a caller's finite work budget; a stuck SCI must
     /// never turn an IRQ callback into an unbounded polling loop.
     pub fn poll_query(&mut self) -> Result<Option<Query>, Error> {

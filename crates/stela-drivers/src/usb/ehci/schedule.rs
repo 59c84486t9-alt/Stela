@@ -1,5 +1,5 @@
 //! EHCI 1.0 sections3.5/3.6/4.8/4.10 and AppendixB descriptor machinery.
-//! All CPU reads/writes below require actual schedule-stop + DMA-write drain.
+//! All CPU reads/writes below require schedule-stop + DMA-write drain.
 use super::*;
 
 pub(super) const FRAME_LIST: usize = 4096 + MAX_TRANSFER;
@@ -25,7 +25,7 @@ const QH_ALT: usize = 20;
 const QH_TOKEN: usize = 24;
 const QTD_TOKEN: usize = 8;
 
-/// Encodes one actual qTD; memory publication remains the Arena owner's job.
+/// Encodes one qTD; memory publication remains the Arena owner's job.
 /// Kept separate so the ignored unchanged Linux oracle compares precisely the
 /// production arithmetic, without manufacturing a DMA mapping/attachment.
 #[derive(Clone, Copy)]
@@ -86,7 +86,7 @@ impl Arena {
                 .checked_add(ARENA_BYTES as u64 - 1)
                 .is_none_or(|last| last >> 32 != address >> 32)
         {
-            // Not published; this exact fresh mapping can be removed safely.
+            // Not published; this fresh mapping can be removed safely.
             // SAFETY: no EHCI register or descriptor has received this IOVA.
             unsafe {
                 dma.unmap()?;
@@ -109,7 +109,7 @@ impl Arena {
         Ok(pointer.as_ptr().cast())
     }
     pub(super) fn read(&self, offset: usize) -> Result<u32, Error> {
-        // SAFETY: caller stopped/drained DMA, retained CPU mapping bounds.
+        // SAFETY: caller stopped/drained DMA, kept CPU mapping bounds.
         Ok(u32::from_le(unsafe { self.word(offset)?.read_volatile() }))
     }
     pub(super) fn write(&mut self, offset: usize, value: u32) -> Result<(), Error> {
@@ -435,7 +435,7 @@ impl Controller {
         })();
         self.guard(build)?;
         self.next_transfer = serial;
-        self.pending = Some(pending); // Retain exact owners before publication.
+        self.pending = Some(pending); // Keep owners before publication.
         let result = self.schedule_on();
         self.guard(result)?;
         Ok(TransferId {
@@ -468,7 +468,7 @@ impl Controller {
         }
         Ok(())
     }
-    /// Poll the exact retained transfer. Each poll returns DMA ownership only
+    /// Poll the exact transfer. Each poll returns DMA ownership only
     /// after ASS0/PSS0 and requester drain, and resumes unchanged partial overlays.
     pub fn poll(&mut self, ticket: &TransferId) -> Result<Option<Completion>, Error> {
         self.ticket(ticket)?;
@@ -512,7 +512,7 @@ impl Controller {
                     && self.pending.as_ref().expect("retained").endpoint.is_some() =>
             {
                 // Pure bulk STALL: schedule proved stopped. Preserve exact
-                // endpoint halt; only successful actual clear_halt reopens it.
+                // endpoint halt; only successful clear_halt reopens it.
                 let result = self.save_toggle();
                 self.guard(result)?;
                 self.pending = None;
@@ -521,7 +521,7 @@ impl Controller {
             Err(error) => self.fail(error),
         }
     }
-    /// Cancel only this actual TD. No payload is copied from an incomplete TD.
+    /// Cancel only this TD. No payload is copied from an incomplete TD.
     pub fn cancel(&mut self, ticket: &TransferId) -> Result<(), Error> {
         self.ticket(ticket)?;
         self.live(&ticket.device)?;

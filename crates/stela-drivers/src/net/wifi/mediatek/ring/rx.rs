@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Raw non-WED/non-RRO WFDMA receive buffers. Actual DDONE transfers ownership;
+//! Raw non-WED/non-RRO WFDMA receive buffers. DDONE transfers ownership;
 //! fragments preserve hardware length/drop/checksum observations for the MCU
 //! or 802.11 decoder, and never claim an associated or authenticated packet.
 use super::{Allocation, DESC_BYTES, DONE, Error, LAST, QueueIo};
@@ -38,7 +38,7 @@ pub struct RxRing<Q: QueueIo> {
 }
 impl<Q: QueueIo> RxRing<Q> {
     /// # Safety
-    /// Same actual coherent-WB requester/BAR/domain and stopped-engine requirements as
+    /// Same coherent-WB requester/BAR/domain and stopped-engine requirements as
     /// `TxRing::install`. WED/RRO and hardware header translation are disabled;
     /// the queue uses ordinary 16-byte descriptors and 2048-byte native buffers.
     /// Count need not be a power of two: the donor's data queues use 1536 entries.
@@ -133,7 +133,7 @@ impl<Q: QueueIo> RxRing<Q> {
             return Err(Error::OwnershipMismatch);
         }
         let at = self.tail * DESC_BYTES;
-        // Qualified-coherent WB volatile completion load: no Rust slice aliases device-written bytes.
+        // Checked-coherent WB volatile completion load: no Rust slice aliases device-written bytes.
         let control = self.descriptors.read32(at + 4)?;
         if control & DONE == 0 {
             return Ok(None);
@@ -152,7 +152,7 @@ impl<Q: QueueIo> RxRing<Q> {
         let buffer1 = self.descriptors.read32(at + 8)?;
         let info = self.descriptors.read32(at + 12)?;
         let slot = &mut self.slots[self.tail];
-        // SAFETY: observed real DDONE on the qualified-coherent descriptor transfers this payload
+        // SAFETY: observed real DDONE on the checked-coherent descriptor transfers this payload
         // to the CPU. Reposting happens only after all bytes have been copied.
         unsafe { slot.data.dma.sync_for_cpu(0..BUFFER_BYTES)? };
         let mut bytes = vec![0u8; length];
@@ -226,7 +226,7 @@ pub struct Frame {
     pub drop: bool,
     pub fragments: usize,
 }
-/// All actual DMA descriptor observations and their byte boundaries remain
+/// All DMA descriptor observations and their byte boundaries remain
 /// attached to assembled RX bytes for checksum/drop/protocol consumers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Descriptor {
@@ -304,7 +304,7 @@ pub(crate) mod tests {
         let payload = s.memory.lock().unwrap().mappings[&address].1 as *mut u8;
         assert_ne!(payload as u64, address);
         assert!(bytes.len() <= BUFFER_BYTES);
-        // Device writes the actual IOVA-backed payload before publishing DDONE.
+        // Device writes the IOVA-backed payload before publishing DDONE.
         // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
         // accesses it concurrently.
         unsafe {
@@ -318,7 +318,7 @@ pub(crate) mod tests {
         s.index = (s.index + 1) % s.count;
     }
 
-    /// Publish a complete packet through actual buffer-sized DDONE fragments.
+    /// Publish a complete packet through buffer-sized DDONE fragments.
     /// The final descriptor alone terminates the native receive chain.
     pub(crate) fn device_receive_frame(
         state: &Arc<Mutex<State>>,
@@ -414,7 +414,7 @@ pub(crate) mod tests {
             5
         );
         assert_eq!(state.lock().unwrap().queue_drops, 0);
-        // SAFETY: actual modeled device stopped before all mappings are removed.
+        // SAFETY: modeled device stopped before all mappings are removed.
         unsafe { ring.release_after_quiesce() }.unwrap();
         drop(ring);
         assert!(

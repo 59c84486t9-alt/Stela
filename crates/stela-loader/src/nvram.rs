@@ -25,7 +25,7 @@ const PROXY: &str = "nvram-proxy-data";
 const SPINOR: &str = "/arm-io/spi1/spinor";
 // The J473 26A434 DeviceTree still carries the earlier one-MiB placeholder
 // geometry even though mBoot's table describes the physical eight-MiB
-// layout. Accept only that exact source template (or an already normalized
+// layout. Accept only that source template (or an already normalized
 // tree), then publish the mBoot-derived regions from `nor`.
 const TEMPLATE_CAPACITY: u32 = 0x100000;
 const TEMPLATE_FIRMWARE: &[(u32, u32)] = &[(0, 0xc0000)];

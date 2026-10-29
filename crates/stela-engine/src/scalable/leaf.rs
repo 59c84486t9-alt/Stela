@@ -28,7 +28,7 @@ use crate::{
     memory::domain::{DataPolicy, MemoryThread},
 };
 
-/// Complete identity of the exact source and generated context leaf.
+/// Complete identity of the source and generated context leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScalableLeafIdentity {
     pub source_sha256: String,
@@ -314,7 +314,7 @@ mod tests {
     // SAFETY: bytes have no Rust references; tests access them only outside each
     // serialized domain invocation, and the Arc owns their complete live extent.
     unsafe impl Send for Storage {}
-    // SAFETY: sharing retains only raw storage metadata; no method accesses bytes
+    // SAFETY: sharing keeps only raw storage metadata; no method accesses bytes
     // concurrently with native execution or another domain writer.
     unsafe impl Sync for Storage {}
     impl Storage {

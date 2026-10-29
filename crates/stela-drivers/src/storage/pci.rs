@@ -63,7 +63,7 @@ pub(super) fn quiesce_pio<C: ConfigSpace>(function: &mut Function<C>) -> Result<
     Ok(())
 }
 
-// The shared inventory is deliberately tolerant for discovery. Hardware ownership
+// The shared inventory is tolerant for discovery. Hardware ownership
 // instead requires a complete, unambiguous chain before any power/BAR/MMIO work.
 fn checked_capabilities<C: ConfigSpace>(
     config: &C,
@@ -457,7 +457,7 @@ mod tests {
             &*writes.borrow(),
             &[(4, 2, 0x401), (0x52, 2, 0x80), (0x62, 2, 1)]
         );
-        // Exact source endpoint lengths differ by version and link presence.
+        // Source endpoint lengths differ by version and link presence.
         // All headers following these real bodies remain separate from PMCSR
         // and interrupt controls, even when body bytes resemble header IDs.
         for flags in [0x01u16, 0x02, 0x11, 0x12, 0x91, 0x92] {
@@ -503,7 +503,7 @@ mod tests {
             );
         }
         // Exact endpoint bodies and vendor lengths may end at byte255. These
-        // are genuine boundary profiles, not headers admitted by truncation.
+        // are boundary profiles, not headers admitted by truncation.
         for (start, id, extra) in [
             (0xec, 0x10, 0x01u8),
             (0xcc, 0x10, 0x02),

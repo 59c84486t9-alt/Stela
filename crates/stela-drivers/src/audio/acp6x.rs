@@ -6,9 +6,9 @@
 //!
 //! This is the held-D0 direct path, not SOF firmware/IPC, ACP3x/5x, I2S or an
 //! Apple audio frontend. Only 48kHz stereo signed 32-bit little-endian capture
-//! is admitted. The caller supplies actual evaluated ACPI presence evidence;
+//! is admitted. The caller supplies evaluated ACPI presence evidence;
 //! DMI-only machine selection and system/runtime suspend remain separate.
-//! DMA uses actual retained native RAM and an attached device domain. After an error or drop, mappings,
+//! DMA uses kept native RAM and an attached device domain. After an error or drop, mappings,
 //! power and exclusive ownership must remain pinned until acknowledged reset
 //! or shutdown. No destructor attempts device access or frees active DMA.
 use super::acp_pdm::{self, DmaConfig, Profile};
@@ -66,10 +66,10 @@ impl Identity {
     }
 }
 
-/// Actual firmware observations for this function, not an ID-derived guess.
+/// Firmware observations for this function, not an ID-derived guess.
 /// Pinned machine policy refuses `_WOV=0` even for its DMI overrides. This
 /// bounded path requires successful nonzero `_WOV` and `AcpDmicConnected=1`;
-/// the upstream positive DMI fallback is intentionally not implemented here.
+/// the upstream positive DMI fallback is not implemented here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DmicPresence {
     pub wov: Option<u64>,
@@ -85,7 +85,7 @@ pub enum Ownership {
 pub struct Config {
     pub ownership: Ownership,
     pub presence: DmicPresence,
-    /// Actual platform/IOMMU reachability ceiling. Bit63 is PTE validity, so
+    /// Platform/IOMMU reachability ceiling. Bit63 is PTE validity, so
     /// the hardware encoding can represent at most 63 address bits.
     pub dma_address_bits: u8,
     /// Source WOV gain encoding 0..=3, applied preserving other MISC bits.
@@ -93,16 +93,16 @@ pub struct Config {
 }
 
 impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, YellowCarp> {
-    /// Claim without writing hardware. Initialization errors retain this owner.
+    /// Claim without writing hardware. Initialization errors keep this owner.
     ///
     /// # Safety
     /// The platform must arbitrate the whole function away from firmware, SOF,
     /// AML/SMM and other CPUs and hold it in PCI D0 with coherent DMA/IOMMU
     /// reachability. Presence must come from this function's evaluated ACPI.
-    /// `domain` is the actual isolated domain attached to this PCI requester.
-    /// Registers and DMA RAM stay mapped while retained, including after errors
+    /// `domain` is the isolated domain attached to this PCI requester.
+    /// Registers and DMA RAM stay mapped while kept, including after errors
     /// or drop; release ownership only after acknowledged shutdown/reset.
-    /// `domain` must provide actual posted-payload completion after engine stop;
+    /// `domain` must provide posted-payload completion after engine stop;
     /// missing completion refuses before any capture mapping is published.
     /// Native PCI interrupt delivery must be contained (the supplied adapter
     /// requires INTx disabled and MSI/MSI-X disabled). This backend polls W1C

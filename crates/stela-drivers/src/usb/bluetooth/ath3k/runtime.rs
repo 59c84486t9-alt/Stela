@@ -27,7 +27,7 @@ pub struct Attempt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FirmwareEvidence {
     /// Donor treats unknown ROMs with nonzero upper bits as not requiring DFU.
-    /// Actual vendor version and later HCI responses are retained, but the
+    /// Vendor version and later HCI responses are held, but the
     /// running image/provenance/authentication are unknown.
     RunningUnknown,
     Dfu(Box<qca::OwnedReport>),
@@ -93,7 +93,7 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
-/// Initialize only an actual source-listed bcdDevice>1 standard HCI attachment.
+/// Initialize only a source-listed bcdDevice>1 standard HCI attachment.
 /// Raw upload evidence does not authorize this entry point or infer readiness.
 pub fn initialize<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     if !super::is_runtime_candidate(hci.binding.device()) {

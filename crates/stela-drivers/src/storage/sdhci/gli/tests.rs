@@ -248,7 +248,7 @@ fn host(dma: &mut dyn DmaAllocator) -> (Host, Rc<RefCell<Hardware>>, Rc<RefCell<
 fn native_gl9750_phy_pll_real_voltage_tuning_and_pio_block_io() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: retained payload and controller allocations outlive every card alias.
+    // SAFETY: payload and controller allocations outlive every card alias.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
@@ -281,7 +281,7 @@ fn native_gl9750_second_rx_polarity_requires_real_first_phase_retirement() {
     for timeout in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed first-phase effects retain actual DMA/controller ownership.
+        // SAFETY: failed first-phase effects keep DMA/controller ownership.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, card, bank) = host(&mut dma);
         bank.borrow_mut().first_polarity_bad = !timeout;
@@ -307,7 +307,7 @@ fn native_gl9750_second_rx_polarity_requires_real_first_phase_retirement() {
 fn native_gl9750_protected_register_failure_closes_window_and_fences_aliases() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: every old card and failed register epoch retains original backing.
+    // SAFETY: every old card and failed register epoch keeps original backing.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, _, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
@@ -338,7 +338,7 @@ fn native_gl9750_protected_register_failure_closes_window_and_fences_aliases() {
 fn native_gl9750_phase_timeout_preserves_primary_and_failed_reset_without_reusing_aliases() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: quarantined controller and both stale aliases retain all backing.
+    // SAFETY: quarantined controller and both stale aliases keep all backing.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, _, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
@@ -366,7 +366,7 @@ fn native_gl9750_phase_timeout_preserves_primary_and_failed_reset_without_reusin
 fn native_gl9750_both_polarity_timeouts_keep_timeout_and_each_card_stop_ack() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both timed-out native/card tasks retain their original allocations.
+    // SAFETY: both timed-out native/card tasks keep their original allocations.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, bank) = host(&mut dma);
     bank.borrow_mut().both_polarities_timeout = true;
@@ -421,7 +421,7 @@ fn dma_host(
 fn native_gl9750_normal_shutdown_stops_actual_vendor_pll_before_card_rail_off() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the original card and all aliases retain their actual model DMA RAM.
+    // SAFETY: the original card and all aliases keep their model DMA RAM.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
@@ -441,8 +441,8 @@ fn native_gl9750_v4_adma_64bit_legacy_and_modern_capabilities_transfer_real_payl
     for (version, capability, wide) in [(2, CAP_64, true), (4, 1 << 27, true), (4, CAP_64, false)] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: retained descriptor/payload pages remain live through every
-        // actual modeled DMA effect and the card's completed flush.
+        // SAFETY: descriptor/payload pages remain live through every
+        // modeled DMA effect and the card's completed flush.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, card, bank) = dma_host(&mut dma, version, capability);
         let mut disk = host.poll().unwrap().unwrap();
@@ -508,7 +508,7 @@ fn native_gl9750_ignored_dma_selection_cannot_publish_a_dma_command_or_output() 
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: ignored controller configuration keeps original descriptor and
-    // payload allocations retained, and publishes no data command.
+    // payload allocations kept, and publishes no data command.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, bank) = dma_host(&mut dma, 4, 1 << 27);
     let mut disk = host.poll().unwrap().unwrap();
@@ -604,7 +604,7 @@ fn native_gl9750_v4_adma32_uses_real_low_address_descriptor_and_payload_pages() 
     let pages = LowPages(address, 1024 * 1024);
     let start = pages.0 as u64;
     assert!(start + pages.1 as u64 <= 1u64 << 32);
-    // SAFETY: the actual mapped low-address RAM remains live through all
+    // SAFETY: the mapped low-address RAM remains live through all
     // modeled command/data DMA, errors, aliases and final controller retirement.
     let mut dma = unsafe { RegionAllocator::new(start..start + pages.1 as u64) };
     let (mut host, card, bank) = dma_host(&mut dma, 4, 0);
@@ -627,7 +627,7 @@ fn native_gl9750_v4_adma32_uses_real_low_address_descriptor_and_payload_pages() 
 fn native_gl9750_mmc_adma_cache_flush_and_poweroff_preserve_the_real_card_lifecycle() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the MMC card and all aliases retain the actual modeled DMA RAM
+    // SAFETY: the MMC card and all aliases keep the modeled DMA RAM
     // until acknowledged power-off and controller retirement have completed.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, bank) = host(&mut dma);
@@ -712,7 +712,7 @@ impl ConfigSpace for Config {
                 return;
             }
             if value & 3 == 0 && config.bytes[0x54] & 3 == 3 {
-                config.bytes[0x10..0x28].fill(0); // Actual D3hot-to-D0 soft reset.
+                config.bytes[0x10..0x28].fill(0); // D3hot-to-D0 soft reset.
                 if config.fail == Some(3) {
                     config.bytes[0] ^= 1;
                 }
@@ -803,7 +803,7 @@ fn native_gl9750_pci_dma_grant_uses_acknowledged_word_stores_and_never_regrants_
     state.borrow_mut().allow_dma = true;
     state.borrow_mut().bytes[0x61] = 0xa0;
     state.borrow_mut().bytes[0xa0] = 5;
-    state.borrow_mut().bytes[0xa2] = 1; // Actual MSI is unexpectedly enabled.
+    state.borrow_mut().bytes[0xa2] = 1; // MSI is unexpectedly enabled.
     let mut enabled = false;
     assert!(pci::dma_grant(&mut function, &mut enabled).is_err());
     assert!(
@@ -816,7 +816,7 @@ fn native_gl9750_pci_dma_grant_uses_acknowledged_word_stores_and_never_regrants_
 fn native_gl9750_actual_pci_power_cycle_restores_bars_and_masks_source_aer_event() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: PCI source model and native controller retain all allocation epochs.
+    // SAFETY: PCI source model and native controller keep all allocation epochs.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (host, card, bank) = host(&mut dma);
     drop(host);
@@ -905,7 +905,7 @@ fn native_gl9750_embedded_aer_capability_cannot_authorize_configuration_writes()
         bank: bank.clone(),
     };
     let (mut function, config) = configuration();
-    // Vendor body includes a forged AER header at0x108; actual length0x40
+    // Vendor body includes a forged AER header at0x108; length0x40
     // protects the entire body against becoming another capability header.
     config.borrow_mut().bytes[0x100..0x104].copy_from_slice(&0x1081_000bu32.to_le_bytes());
     config.borrow_mut().bytes[0x104..0x108].copy_from_slice(&0x0400_0000u32.to_le_bytes());
@@ -1020,8 +1020,8 @@ fn unchanged_linux_gl9750_phy_clocks_and_two_polarity_tuning_match_native() {
             "T" => {
                 let mut backing = vec![0u64; 128 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: each complete native card initialization retains its
-                // actual command/payload allocations through final retirement.
+                // SAFETY: each complete native card initialization keeps its
+                // command/payload allocations through final retirement.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut host, card, bank) = host(&mut dma);

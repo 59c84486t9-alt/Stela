@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of Linux sdhci.c and sdhci-pci-gli.c.
-//! Qualified embedded MMC signaling and sampling through the retained engine.
+//! Checked embedded MMC signaling and sampling through the engine.
 use super::*;
 
 impl Engine {

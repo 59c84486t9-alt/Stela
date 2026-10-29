@@ -3,7 +3,7 @@
 // Copyright (C) 2018 Intel Corporation
 //! Native NHI controller preparation from Linux pci.c/nhi.c.
 //!
-//! Actual Intel force-power/FW_READY/LTR, USB4v2 host reset and interrupt
+//! Intel force-power/FW_READY/LTR, USB4v2 host reset and interrupt
 //! masking. This never claims CM ownership, enables PCI bus mastering, supplies
 //! an identity DMA domain or starts rings/tunnels. Platform grants precede it.
 use super::ring::{CAPABILITIES, Registers};
@@ -173,7 +173,7 @@ enum Phase {
     Prepared,
     Fault,
 }
-/// Caller-serialized controller preparation. Clock observations use one actual
+/// Caller-serialized controller preparation. Clock observations use one
 /// monotonic millisecond source; polls never sleep or invent timer progress.
 pub struct Controller<'a, C: ConfigSpace, R: Registers> {
     configuration: &'a mut C,
@@ -186,17 +186,17 @@ pub struct Controller<'a, C: ConfigSpace, R: Registers> {
 }
 impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     /// # Safety
-    /// ConfigSpace and Registers identify the exact same live physical NHI
-    /// requester, ownership/reset epoch and BAR0. The retained Registers owns
-    /// its actual PCI function/MMIO/power reservation, including quarantine.
+    /// ConfigSpace and Registers identify the same live physical NHI
+    /// requester, ownership/reset epoch and BAR0. The kept Registers owns
+    /// its PCI function/MMIO/power reservation, including quarantine.
     /// Native ACPI/platform services positively granted software CM ownership;
-    /// no firmware ICM or other owner controls this NHI. Actual shared power
-    /// resources and PCI D0/memory decode are established and retained. The
+    /// no firmware ICM or other owner controls this NHI. Shared power
+    /// resources and PCI D0/memory decode are established and kept. The
     /// platform resolves the firmware IMR_VALID property and rejects invalid
     /// firmware instead of substituting an unknown/default-success result. All
     /// prior NHI DMA/posted writes and IRQ/deferred work are stopped/drained;
     /// no active ring or tunneled path may be reset. PCI bus mastering stays
-    /// disabled until its actual requester-isolating domain has been attached.
+    /// disabled until its requester-isolating domain has been attached.
     ///
     /// Safe code cannot pair independent physical PCI and MMIO capabilities:
     /// ```compile_fail
@@ -754,7 +754,7 @@ mod tests {
                     model.state.lock().unwrap().values.insert(0x19800, 1 << 31);
                 }
             }
-            // SAFETY: synthetic identity/register faults intentionally test
+            // SAFETY: synthetic identity/register faults test
             // validation; no other physical owner or DMA can exist.
             match unsafe { Controller::new(&mut pci, model.clone()) } {
                 Ok(mut controller) => assert_eq!(poll(&mut controller, 0), Err(Error::Busy)),
@@ -828,14 +828,14 @@ mod tests {
     fn clock_regression_and_overflow_never_claim_prepared_or_publish_new_work() {
         let (mut pci, model) = fixture(0x8086, 0x9a1b, 0x0c0340, 0x40, 8);
         let state = pci.state.clone();
-        // SAFETY: same exact synthetic requester and epoch contract.
+        // SAFETY: same synthetic requester and epoch contract.
         let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
         assert_eq!(poll(&mut controller, u64::MAX), Err(Error::ClockOverflow));
         assert!(state.lock().unwrap().writes.is_empty());
         drop(controller);
         let (mut pci, model) = fixture(0x8086, 0x9a1b, 0x0c0340, 0x40, 8);
         let state = pci.state.clone();
-        // SAFETY: independent exact synthetic requester/epoch, no prior work.
+        // SAFETY: independent synthetic requester/epoch, no prior work.
         let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
         poll(&mut controller, 10).unwrap();
         let writes = state.lock().unwrap().writes.len();
@@ -867,7 +867,7 @@ mod tests {
                 data[4] as u16,
             );
             let state = pci.state.clone();
-            // SAFETY: this exact same stopped synthetic requester/epoch is
+            // SAFETY: this same stopped synthetic requester/epoch is
             // represented by both PCI and MMIO; no independent owner is paired.
             let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
             let mut prepared = None;

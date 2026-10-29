@@ -74,7 +74,7 @@ fn raw_reached_part_translation_precedes_permissions_and_retains_prefix() {
             pc: TEST_PC,
         };
         // SAFETY: staging is a live, disjoint two-byte array for the callback. The fixture
-        // retains the domain; no view or staging pointer escapes this closure.
+        // keeps the domain; no view or staging pointer escapes this closure.
         unsafe {
             thread.with_view(|context| {
                 assert_eq!(
@@ -235,7 +235,7 @@ fn each_wrapping_raw_part_is_translated_in_its_own_regime() {
         pc: TEST_PC,
     };
     // SAFETY: The two-byte staging array is live and disjoint from backing RAM.
-    // The retained domain checks the guest address; pointers do not escape.
+    // The kept domain checks the guest address; pointers do not escape.
     unsafe {
         thread.with_view(|context| {
             assert_eq!(
@@ -261,8 +261,8 @@ fn local_stack_fault_keeps_named_provenance_and_clears_selected_reservation() {
             Ok::<_, MemoryStatus>(())
         })
         .unwrap();
-    // SAFETY: The retained fixture owns this thread and its callback. The closure
-    // updates only fault metadata and retains no pointer to the view.
+    // SAFETY: The kept fixture owns this thread and its callback. The closure
+    // updates only fault metadata and keeps no pointer to the view.
     unsafe {
         thread.with_view(|context| {
             context.record(MemoryStatus::StackAlignment, GUEST_BASE + 1, TEST_PC, 0);

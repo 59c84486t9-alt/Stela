@@ -1,5 +1,5 @@
-//! Actual cooperative x86-64 SysV call continuations. The UEFI caller may use
-//! Win64: the switch explicitly retains XMM6..15 because the UEFI soft-float
+//! Cooperative x86-64 SysV call continuations. The UEFI caller may use
+//! Win64: the switch explicitly keeps XMM6..15 because the UEFI soft-float
 //! target does not emit their cross-ABI spills. Callbacks keep their declared
 //! extern C ABI, never a transmuted one.
 use super::WorkError;
@@ -30,7 +30,7 @@ pub(super) struct Controls {
     pub(super) mxcsr: u32,
     pub(super) fcw: u16,
 }
-/// Read-only capability/control qualification on the actual native CPL0 CPU.
+/// Read-only capability/control validation on the native CPL0 CPU.
 pub(super) unsafe fn controls() -> Result<Controls, WorkError> {
     let cpuid = core::arch::x86_64::__cpuid(1);
     if cpuid.edx & (7 << 24) != 7 << 24 {
@@ -43,7 +43,7 @@ pub(super) unsafe fn controls() -> Result<Controls, WorkError> {
         asm!("mov {}, cr0",out(reg) cr0,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr4",out(reg) cr4,options(nomem,nostack,preserves_flags));
     }
-    // Kernel shadow stacks require a genuine paired shadow-stack switch;
+    // Kernel shadow stacks require a paired shadow-stack switch;
     // this bounded continuation backend does not supply one.
     if cr0 & 12 != 0 || cr4 & (1 << 9) == 0 || cr4 & (1 << 23) != 0 {
         return Err(WorkError::Unavailable);
@@ -51,7 +51,7 @@ pub(super) unsafe fn controls() -> Result<Controls, WorkError> {
     // SAFETY: covered by this function's own safety contract.
     Ok(unsafe { read_controls() })
 }
-/// Save the actual ABI control state; privileged qualification happens before
+/// Save the ABI control state; privileged validation happens before
 /// production construction. Hosted context tests call only this unprivileged
 /// component and never attest a native CPU/IRQ provider.
 pub(super) unsafe fn read_controls() -> Controls {
@@ -91,8 +91,8 @@ impl Frame {
         }
     }
     /// # Safety
-    /// Exclusive actual retained stack. Top is 16-byte aligned; no live frame
-    /// exists in it. The actual executor/function pointers stay pinned forever
+    /// Exclusive kept stack. Top is 16-byte aligned; no live frame
+    /// exists in it. The executor/function pointers stay pinned forever
     /// if teardown cannot prove every continuation has stopped.
     pub(super) unsafe fn start(
         &mut self,
@@ -118,11 +118,11 @@ impl Frame {
 unsafe extern "sysv64" fn trampoline() -> ! {
     naked_asm!("mov rdi, r12", "mov rsi, r13", "jmp r14");
 }
-/// Save/restore one actual call continuation. IF remains disabled throughout;
+/// Save/restore one call continuation. IF remains disabled throughout;
 /// caller restores flags only after target RSP/metadata is consistent. This
 /// explicit SysV boundary permits caller-saved clobbers. UEFI soft-float does
-/// not emit Win64 XMM spills at this boundary, so the actual frame explicitly
-/// retains every XMM6..15 lane (SSE2 baseline), including dispatcher state.
+/// not emit Win64 XMM spills at this boundary, so the frame explicitly
+/// keeps every XMM6..15 lane (SSE2 baseline), including dispatcher state.
 /// MXCSR and x87 control are callee-saved and belong to each real task.
 #[unsafe(naked)]
 pub(super) unsafe extern "sysv64" fn switch(from: *mut Frame, to: *const Frame) {

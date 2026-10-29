@@ -9,7 +9,7 @@ use crate::bus::{
 };
 mod device;
 
-/// Actual SMBus query responses. There are no I2C descriptors on this transport.
+/// SMBus query responses. There are no I2C descriptors on this transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Queries {
     pub hello: Block,
@@ -47,8 +47,8 @@ impl Capabilities {
         }
     }
     fn same_identity(&self, other: &Self) -> bool {
-        // Unknown trailing query bytes are retained but are not an invented
-        // identity contract. Compare the actual source-declared fields.
+        // Unknown trailing query bytes are held but are not an invented
+        // identity contract. Compare the source-declared fields.
         self.product_id == other.product_id
             && self.ic_type == other.ic_type
             && self.sample_version == other.sample_version

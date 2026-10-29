@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Original completed native RX, actual firmware commands and packet retirement.
-//! These modeled OS permissions never qualify a physical or production OS peer.
+//! Original completed native RX, firmware commands and packet retirement.
+//! These modeled OS permissions never check a physical or production OS peer.
 use super::*;
 
 const TID: u8 = 6;
@@ -35,14 +35,14 @@ fn consume(driver: &mut Native, owner: &mut Owner, received: Received, now: u64)
     // original authenticated envelope and subsequent guarded response/teardown.
     let mut retained = Some(received);
     // SAFETY: The envelope owns this current session and requester. Fresh hardware/OS
-    // guards serialize protected BA consumption, and retained state owns any deferred
+    // guards serialize protected BA consumption, and kept state owns any deferred
     // response or teardown after the call.
     unsafe { driver.receive_management_block_ack(owner, permit, &mut retained, now) }.unwrap();
     assert!(retained.is_none());
 }
 fn progress(driver: &mut Native, owner: &mut Owner, state: &Rc<AuthorityState>, now: u64) {
     let permit = admit(owner, driver, AssociationUse::Management);
-    // SAFETY: actual modeled requester and original OS policy cover all deferred effects.
+    // SAFETY: modeled requester and original OS policy cover all deferred effects.
     unsafe { driver.progress_block_ack(owner, permit, &GuardedSource(state.clone()), now) }
         .unwrap();
 }
@@ -58,7 +58,7 @@ fn assert_cipher_descriptor(model: &Model, session: &Session, request: bool) {
     let pointer = crate::net::wifi::mediatek::bootstrap::client::tests::pointer;
     let descriptor =
     // SAFETY: The queue guard fixes this live descriptor index and the memory guard
-    // retains its mapping. pointer validates the complete 16-byte readable range; no
+    // keeps its mapping. pointer validates the complete 16-byte readable range; no
     // model peer writes it concurrently.
     unsafe {
         core::slice::from_raw_parts(
@@ -68,22 +68,22 @@ fn assert_cipher_descriptor(model: &Model, session: &Session, request: bool) {
     };
     let address = u32::from_le_bytes(descriptor[..4].try_into().unwrap()) as u64;
     let actual =
-    // SAFETY: The memory guard retains the mapped TXWI/payload backing, and pointer
+    // SAFETY: The memory guard keeps the mapped TXWI/payload backing, and pointer
     // checks the entire 64-byte readable range. All bytes were initialized before
     // queueing; no physical DMA or concurrent writer exists.
     unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) };
     let word1 = u32::from_le_bytes(actual[4..8].try_into().unwrap());
     let word3 = u32::from_le_bytes(actual[12..16].try_into().unwrap());
-    assert_eq!(word3 & 2, 2); // actual MT_TXD3_PROTECT_FRAME
+    assert_eq!(word3 & 2, 2); // MT_TXD3_PROTECT_FRAME
     assert_eq!(word1 & 0xfff, u32::from(session.pairwise_key().slot()));
     assert_eq!((word1 >> 21) & 15, if request { 2 } else { 0 });
 }
 
 fn rotate_refused(driver: &mut Native, owner: &mut Owner, session: &Session) {
     let permit = admit(owner, driver, AssociationUse::Management);
-    // SAFETY: negative actual drain control; no old user may be released here.
+    // SAFETY: negative drain control; no old user may be released here.
     assert!(matches!(
-        // SAFETY: The current session and pending BA/packet owners remain retained in
+        // SAFETY: The current session and pending BA/packet owners remain held in
         // this software model. Rotation must refuse the undrained user before
         // changing or releasing its key namespace.
         unsafe {

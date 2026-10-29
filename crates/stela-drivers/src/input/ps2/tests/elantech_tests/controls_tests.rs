@@ -107,9 +107,9 @@ fn pending_bad_packet_before_live_control_retains_fragment_without_stale_respons
     for write in [false, true] {
         let (mut c, h) = configured(4);
         let raw = [8, 0x21, 0x43, 0x11, 0x65, 0x87];
-        // Route actual mouse bytes into the owner side queue while the sibling
+        // Route mouse bytes into the owner side queue while the sibling
         // keyboard command receives its own real ACK. No internal queue/state
-        // injection bypasses the actual controller read/routing path.
+        // injection bypasses the controller read/routing path.
         h.borrow_mut().inject_led = raw.iter().map(|data| (Port::Mouse, *data)).collect();
         c.set_leds(1).unwrap();
         assert_eq!(c.observed_response.unwrap().data, ACK);
@@ -125,7 +125,7 @@ fn pending_bad_packet_before_live_control_retains_fragment_without_stale_respons
         assert_eq!(error.response, None);
         assert_eq!(c.elantech_fragment(), Some(raw.as_slice()));
         // Containment uses controller port-disable commands, never a new
-        // mouse register/device command after the actual packet failure.
+        // mouse register/device command after the packet failure.
         assert!(mouse_wire(&h.borrow(), writes).is_empty());
         if write {
             let control = c.elantech_register_controls().unwrap()[0];

@@ -39,8 +39,8 @@ pub enum Hook {
     Trace,
 }
 /// Software configuration cells read by the original evaluator. A caller
-/// applies the actual native registry write; these carry no hardware state.
-/// The unqualified P18 freshness-arm producer is deliberately absent.
+/// applies the native registry write; these carry no hardware state.
+/// The unchecked P18 freshness-arm producer is absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Configuration {
     Hysteresis(u32),
@@ -143,7 +143,7 @@ impl Descriptor {
     }
 }
 
-/// Actual joined source records plus a source-qualified native layout profile.
+/// Joined source records plus a source-checked native layout profile.
 /// Labels and image hashes are evidence, never runtime dispatch keys.
 #[derive(Clone, Debug)]
 pub struct Profile {
@@ -357,7 +357,7 @@ fn hooks(i: usize) -> [u64; 6] {
 }
 
 // Semantic24-byte counter reference facts, not binary configuration blobs.
-// The profile retains nonlocal/provider references too; only kind2/provider0
+// The profile keeps nonlocal/provider references too; only kind2/provider0
 // contributes local desired bits. Source locations are in the pinned ledger.
 fn source_references(ordinal: usize) -> Vec<CounterReference> {
     source_rows(ordinal)

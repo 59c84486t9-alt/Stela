@@ -27,7 +27,7 @@ impl Controller {
     }
 
     /// Records a completed synchronous flush only after Prepared checks the
-    /// same RAM owner and actual producer exclusion. This does not settle a
+    /// same RAM owner and producer exclusion. This does not settle a
     /// channel-configuration, clock, power or external DMA request.
     pub(crate) fn record_ram_drain(
         &self,

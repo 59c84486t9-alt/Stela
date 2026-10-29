@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Ordinary raw-802.11 PCIe TXD construction, adapted from Connac2/MT7925.
-//! Input metadata must come from the shared validated MPDU and actual installed
+//! Input metadata must come from the shared validated MPDU and installed
 //! firmware station/rate context. Encoding does not install keys, allocate a
 //! token, publish DMA or claim the hardware transmitted an indicated sequence.
 use super::identity::Chip;
@@ -35,7 +35,7 @@ pub enum Kind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Sequence {
     /// Source ordinary path: hardware assigns the air sequence. Host MPDU
-    /// bytes alone must not be reported as the actual transmitted sequence.
+    /// bytes alone must not be reported as the transmitted sequence.
     Hardware,
     /// Source injected path: SN_VALID and the explicit 12-bit sequence are set.
     Explicit(u16),
@@ -58,16 +58,16 @@ pub enum Queue {
 pub struct Vif {
     pub omac: u8,
     pub wmm: u8,
-    /// Actual firmware hardware-band index, not the radio frequency band.
+    /// Firmware hardware-band index, not the radio frequency band.
     pub band: u8,
     pub mld: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixedRate {
-    /// Actual source PHY-encoded legacy rate word, selected from negotiated
+    /// Source PHY-encoded legacy rate word, selected from negotiated
     /// basic rates. This helper never guesses a channel/rate or substitutes zero.
     Connac2(u16),
-    /// Actual configured firmware basic/multicast/beacon rate table index.
+    /// Configured firmware basic/multicast/beacon rate table index.
     Connac3(u8),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,8 +80,8 @@ pub struct Frame {
     pub multicast: bool,
     pub fragment: Fragment,
     pub sequence: Sequence,
-    /// Ordinary management or data only. Action frames require actual body
-    /// qualification below; BIP/MMIE/translated 802.3 and monitor radiotap
+    /// Ordinary management or data only. Action frames require body
+    /// validation below; BIP/MMIE/translated 802.3 and monitor radiotap
     /// policy remain outside this explicitly bounded profile.
     pub minimum_rate: bool,
 }
@@ -94,7 +94,7 @@ pub struct Config {
     pub queue: Queue,
     pub pid: u8,
     pub frame: Frame,
-    /// A current acknowledged actual hardware-key context must exist at
+    /// A current acknowledged hardware-key context must exist at
     /// publication. This wire flag neither proves encryption nor owns a PN.
     pub protect: bool,
     pub no_ack: bool,
@@ -117,7 +117,7 @@ pub fn encode(c: Config) -> Result<[u8; 32], Error> {
     encode_inner(c, None)
 }
 
-/// Body-qualified MT7925 Block Ack, protected unicast SA Query and other
+/// Body-checked MT7925 Block Ack, protected unicast SA Query and other
 /// action path; only a robust category may be protected.
 /// Metadata-only Action encoding remains refused: the real category/action bytes select the donor
 /// ADDBA-request TID independently of ordinary response/DELBA management.
@@ -388,7 +388,7 @@ mod tests {
             let w = words(encode(c).unwrap());
             assert_eq!(w[0], 160 | (7 << 25));
             assert_eq!(w[3] & ((1 << 31) | (1 << 30) | (0xfff << 16)), 0);
-            assert_eq!(w[4], 0); // no fabricated host PN
+            assert_eq!(w[4], 0); // no invented host PN
             assert_eq!(w[5], 3 | (1 << 10));
             assert_eq!(w[3] & 2, 2);
             if chip == Chip::Mt7925 {

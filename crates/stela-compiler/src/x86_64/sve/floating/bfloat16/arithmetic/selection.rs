@@ -223,7 +223,7 @@ pub(in crate::x86_64) fn emit(
     pc: GuestAddress,
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
-    // Paired measurements qualify these lengths; all others keep the baseline.
+    // Paired measurements check these lengths; all others keep the baseline.
     const QUALIFIED_MAPPING_LENGTHS: [usize; 2] = [16, 64];
     let recipe = if QUALIFIED_MAPPING_LENGTHS.contains(&length.bytes())
         && target.supports(TargetCpu::Sse41)

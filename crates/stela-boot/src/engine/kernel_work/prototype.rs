@@ -1,5 +1,5 @@
 //! Bounded optional mixed32 owner proof. Small callbacks only record their
-//! actual context/RSP; they do not enter Linux, AML, Clock or a driver service.
+//! context/RSP; they do not enter Linux, AML, Clock or a driver service.
 use super::*;
 use core::{
     mem::{ManuallyDrop, MaybeUninit},
@@ -14,11 +14,11 @@ struct Case {
     observed: UnsafeCell<MaybeUninit<work::TaskContext>>,
 }
 unsafe extern "C" fn record(context: *mut c_void) {
-    // SAFETY: the diagnostic retains its stable preallocated Case vector and
-    // actual Runtime through every accepted ticket or permanent quarantine.
+    // SAFETY: the diagnostic keeps its stable preallocated Case vector and
+    // Runtime through every accepted ticket or permanent quarantine.
     let case = unsafe { &*context.cast::<Case>() };
-    // SAFETY: pointer is the same retained pinned Runtime, on its qualified
-    // actual callback stack. It is never used as a cross-CPU execution grant.
+    // SAFETY: pointer is the same pinned Runtime, on its checked
+    // callback stack. It is never used as a cross-CPU execution grant.
     let runtime = unsafe { Pin::new_unchecked(&*(case.runtime as *const work::Runtime<SLOTS>)) };
     let result = (|| {
         let view = runtime.current_context()?;
@@ -54,7 +54,7 @@ unsafe extern "C" fn record(context: *mut c_void) {
 }
 /// # Safety
 /// Explicit original UP native-MMIO diagnostic, before any driver/IRQ/guest
-/// producer. Actual sealed loader raw allocation and all-root/cache owners
+/// producer. Sealed loader raw allocation and all-root/cache owners
 /// stay pinned. No C entry, KernelTask, hardware Clock or service is published.
 pub(in crate::engine) unsafe fn check(
     handoff: &'static Handoff,
@@ -63,7 +63,7 @@ pub(in crate::engine) unsafe fn check(
     if handoff.native_resources.cores != 1 {
         return Err(Error::WrongCpu);
     }
-    // Deliberately corrupt layout DATA while retaining the genuine original
+    // Corrupt layout DATA while keeping the original
     // handoff. Validation must reject before a root/stack publication or claim.
     let mut wrong = Plan::prototype(handoff)?;
     if let Plan::Mixed { raw, .. } = &mut wrong {
@@ -72,7 +72,7 @@ pub(in crate::engine) unsafe fn check(
         return Err(Error::Geometry);
     }
     if !matches!(
-        // SAFETY: actual handoff/owner remain genuine; the bad Plan supplies no authority and must
+        // SAFETY: handoff/owner remain genuine; the bad Plan supplies no permission and must
         // fail their pre-effect exact-inventory comparison.
         unsafe { KernelWork::prepare_plan(handoff, owner, wrong) },
         Err(Error::Inventory)
@@ -105,7 +105,7 @@ pub(in crate::engine) unsafe fn check(
             observed: UnsafeCell::new(MaybeUninit::uninit()),
         });
     }
-    // SAFETY: this is the separately selected genuine raw reservation, never
+    // SAFETY: this is the separately selected raw reservation, never
     // a reinterpretation of production's16-stack pool or unowned metadata.
     let work = unsafe { KernelWork::prepare_plan(handoff, owner, Plan::prototype(handoff)?) }?;
     let stack_pages = work.task_pages()?;
@@ -114,7 +114,7 @@ pub(in crate::engine) unsafe fn check(
         return Err(Error::Qualification);
     }
     // SAFETY: original UP process-only diagnostic, before producers, with
-    // immutable actual heap/slot allocations and all-root WB mappings retained.
+    // immutable heap/slot allocations and all-root WB mappings kept.
     let mut catalog = unsafe { stack_pages.register() }?;
     catalog.verify().map_err(Error::Pages)?;
     catalog.try_retire().map_err(Error::Pages)?;
@@ -126,7 +126,7 @@ pub(in crate::engine) unsafe fn check(
     for case in &mut cases {
         case.runtime = pointer;
     }
-    // If a callback/ticket becomes uncertain, retaining the complete vector is
+    // If a callback/ticket becomes uncertain, keeping the complete vector is
     // mandatory. Runtime Drop likewise quarantines every paused stack owner.
     let cases = ManuallyDrop::new(cases);
     work._cpu
@@ -134,8 +134,8 @@ pub(in crate::engine) unsafe fn check(
         .identity
         .check_dispatch()
         .map_err(Error::Work)?;
-    // SAFETY: the same actual root/CPU owns all32 validated mappings and frames;
-    // acquire the non-reentrant host/root guard once around actual switching.
+    // SAFETY: the same root/CPU owns all32 validated mappings and frames;
+    // acquire the non-reentrant host/root guard once around switching.
     let root = unsafe { RestoreRoot::enter(handoff.root) };
     let runtime = work.executor.runtime();
     let context = |index: usize| {
@@ -145,7 +145,7 @@ pub(in crate::engine) unsafe fn check(
     };
     let kernel = stela_drivers::gpu::linux::task::stack_requirement().map_err(Error::Work)?;
     // SAFETY: fixed finite callbacks fit their real stack class and every Case,
-    // Runtime/code/root remains retained until complete retirement/quarantine.
+    // Runtime/code/root remains held until complete retirement/quarantine.
     unsafe {
         runtime
             .start_service(record, context(2))
@@ -202,7 +202,7 @@ pub(in crate::engine) unsafe fn check(
         if !case.completed.load(Ordering::Acquire) || case.error.load(Ordering::Relaxed) != 0 {
             return Err(Error::Qualification);
         }
-        // SAFETY: actual callback finished and release-published its full view.
+        // SAFETY: callback finished and release-published its full view.
         ids[index] = unsafe { (*case.observed.get()).assume_init_ref() }.context_id;
     }
     ids.sort_unstable();

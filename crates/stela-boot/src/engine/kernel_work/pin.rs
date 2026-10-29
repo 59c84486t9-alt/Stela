@@ -10,12 +10,12 @@ struct View {
     physical: Vec<u64>,
 }
 // SAFETY: construction accepts only one zeroed, never-entered usable slot in
-// Preparing. The shared Reservation retains the firmware-created allocation
-// claim and all qualified root mappings. Its immutable page list excludes raw
+// Preparing. The shared Reservation keeps the firmware-created allocation
+// claim and all checked root mappings. Its immutable page list excludes raw
 // padding and guard holes. Pages remain Stela-owned for the whole boot.
 unsafe impl PageBacking for View {
     fn cpu_base(&self) -> NonNull<u8> {
-        // SAFETY: export checked the nonzero usable mapping; it is retained
+        // SAFETY: export checked the nonzero usable mapping; it is held
         // with this view and its page list is immutable.
         unsafe { NonNull::new_unchecked(self.cpu as *mut u8) }
     }
@@ -32,7 +32,7 @@ unsafe impl PageBacking for View {
 
 fn boxed(view: View) -> Result<Box<View>, MemoryError> {
     // SAFETY: nonzero View layout; allocation occurs outside IRQ-save/queue
-    // locks and NULL is reported without relinquishing its retained inputs.
+    // locks and NULL is reported without relinquishing its inputs.
     let raw = unsafe { alloc(Layout::new::<View>()) }.cast::<View>();
     let Some(raw) = NonNull::new(raw) else {
         return Err(MemoryError::OutOfMemory);

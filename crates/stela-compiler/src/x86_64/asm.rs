@@ -43,7 +43,7 @@ impl<'a> Asm<'a> {
             sites: None,
         }
     }
-    /// Mark exactly one actual guest memory operand, including its prefixes and
+    /// Mark exactly one guest memory operand, including its prefixes and
     /// immediate bytes. Frame/staging/address instructions must remain outside.
     pub(crate) fn guest_access(&mut self, emit: impl FnOnce(&mut Self)) {
         self.fault_site(crate::block::RecoverySite::guest_access(), emit);

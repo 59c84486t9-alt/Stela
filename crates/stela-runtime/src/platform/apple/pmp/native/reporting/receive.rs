@@ -20,7 +20,7 @@ pub(super) struct Inbox {
 #[derive(Clone)]
 pub struct Receiver(pub(super) Rc<RefCell<Inbox>>);
 impl Receiver {
-    /// Transport must preserve this actual endpoint session. The source wire
+    /// Transport must preserve this endpoint session. The source wire
     /// has no nonce: a stale same-kind ACK cannot be authenticated by geometry.
     pub fn receive(
         &self,

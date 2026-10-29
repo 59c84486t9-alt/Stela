@@ -203,7 +203,7 @@ fn f12_sleep_reinitialization_and_irq_enable_effect_errors_preserve_readiness_bo
     assert_eq!(h.borrow().memory[0x41], 1);
     h.borrow_mut().fail_after_write = true;
     assert!(matches!(d.initialize_f12(None), Err(Error::I2c(_))));
-    assert_eq!(h.borrow().memory[0x41], 5); // actual effect preceded error
+    assert_eq!(h.borrow().memory[0x41], 5); // effect preceded error
     assert_eq!(d.f12_capabilities().count(), 0);
     assert_eq!(d.control_state(), ControlState::Uncertain);
     assert_eq!(d.poll_f12().error, Some(Error::NeedsReset));

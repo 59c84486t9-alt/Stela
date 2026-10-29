@@ -7,7 +7,7 @@ use core::cell::{Cell, RefCell};
 unsafe fn bytes(address: u64, n: usize) -> Vec<u8> {
     (0..n)
         .map(|i| {
-            // SAFETY: each caller uses an address read from live retained test DMA.
+            // SAFETY: each caller uses an address read from live test DMA.
             unsafe { (address as *const u8).add(i).read_volatile() }
         })
         .collect()
@@ -147,7 +147,7 @@ impl Model {
     fn context(&mut self) {
         self.context = u64::from(self.reg(CI_LOW)) | u64::from(self.reg(CI_HIGH)) << 32;
         assert_ne!(self.context, 0);
-        // SAFETY: source context is published from the retained test allocation.
+        // SAFETY: source context is published from the test allocation.
         let c = unsafe { bytes(self.context, 152) };
         assert_eq!(
             &c[..16],
@@ -165,7 +165,7 @@ impl Model {
             // SAFETY: these are live source context address members.
             assert_eq!(unsafe { read64(self.context + o) } % 128, 0);
         }
-        // SAFETY: DBGC fragment's address is read from the actual live context.
+        // SAFETY: DBGC fragment's address is read from the live context.
         let fragment = unsafe { read64(self.context + 112) };
         // SAFETY: live208-byte model fragment.
         let b = unsafe { bytes(fragment, 208) };
@@ -273,7 +273,7 @@ impl Model {
                 if v >> 16 == 513 {
                     assert_eq!(self.index(16, 1), next);
                     let index = (next + 63) % 64;
-                    // SAFETY: model fetches the actual published FRBD.
+                    // SAFETY: model fetches the published FRBD.
                     let d = unsafe { bytes(self.dma_pointer(80) + u64::from(index) * 16, 16) };
                     let tag = u16::from_le_bytes([d[0], d[1]]);
                     assert_eq!(tag, index);
@@ -305,7 +305,7 @@ impl Model {
                     assert_eq!(&d[12..], &[0; 4]);
                     let size = usize::from(u16::from_le_bytes([d[1], d[2]]));
                     let address = u64::from_le_bytes(d[4..12].try_into().unwrap());
-                    // SAFETY: source descriptor gives a retained DMA packet buffer.
+                    // SAFETY: source descriptor gives a DMA packet buffer.
                     let packet = unsafe { bytes(address, size) };
                     self.transmitted.push(packet.clone());
                     self.time.set(self.time.get() + self.tx_delay);
@@ -314,7 +314,7 @@ impl Model {
                         let completion = self
                             .completion_override
                             .unwrap_or(u32::from(next) | (1 << 24) | (1 << 31));
-                        // SAFETY: actual device-owned live URBD0 and head index.
+                        // SAFETY: device-owned live URBD0 and head index.
                         unsafe {
                             write(
                                 self.dma_pointer(64) + u64::from(tail) * 4,
@@ -322,7 +322,7 @@ impl Model {
                             );
                         }
                         if self.duplicate_completion {
-                            // SAFETY: second actual source completion entry in live DMA.
+                            // SAFETY: second source completion entry in live DMA.
                             unsafe {
                                 write(
                                     self.dma_pointer(64) + u64::from((tail + 1) % 32) * 4,
@@ -395,7 +395,7 @@ impl Model {
     }
 }
 pub(super) struct ModelPlatform(Rc<RefCell<Model>>);
-// SAFETY: explicit independent hardware model. All pointers name retained test
+// SAFETY: explicit independent hardware model. All pointers name kept test
 // DMA, operations are serialized, and the enclosing test backing outlives it.
 unsafe impl Platform for ModelPlatform {
     fn identity(&self) -> Identity {
@@ -475,7 +475,7 @@ impl Drop for ModelPlatform {
 }
 pub(super) fn allocator(backing: &mut [u64]) -> RegionAllocator {
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: test retains backing, with exclusive physical/DMA use until drop.
+    // SAFETY: test keeps backing, with exclusive physical/DMA use until drop.
     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) }
 }
 pub(super) fn transport(
@@ -636,7 +636,7 @@ fn old_gp0_cannot_acknowledge_a_silent_d0_request() {
         t.send(Kind::Command, &[1, 0xfc, 0]).unwrap();
         t.poll().unwrap();
         m.borrow_mut().silence_d0 = silent;
-        // A genuine older OP GP0 is already pending before the new SLEEP write.
+        // An older OP GP0 is already pending before the new SLEEP write.
         m.borrow_mut().cause(0, 1);
         if silent {
             assert!(matches!(t.enter_d0(), Err(Error::Timeout(_))));
@@ -1009,7 +1009,7 @@ fn malformed_rfh_hci_type_payload_and_unposted_rx_tags_never_reuse_owned_storage
         ));
         assert_eq!(t.state(), State::Failed);
         if let Some(address) = raw {
-            // SAFETY: physically retired test backing still retains this buffer.
+            // SAFETY: physically retired test backing still keeps this buffer.
             let bytes = unsafe { bytes(address, 8) };
             assert_eq!(bytes[2], 1);
         }
@@ -1034,7 +1034,7 @@ fn out_of_order_rx_cannot_overwrite_a_still_posted_buffer_during_rearm() {
             ..
         })
     ));
-    // SAFETY: real modeled reset retired storage, which remains retained.
+    // SAFETY: real modeled reset retired storage, which remains held.
     assert_eq!(unsafe { bytes(address, 4096) }, before);
     assert_eq!(t.state(), State::Failed);
 }
@@ -1576,7 +1576,7 @@ mod native_models {
         }
     }
     struct Bar(Arc<Mutex<Hardware>>);
-    // SAFETY: independent actual-resource model, same function/epoch and span.
+    // SAFETY: independent resource model, same function/epoch and span.
     unsafe impl msix::BarAccess for Bar {
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BAR_BYTES).unwrap()
@@ -1613,7 +1613,7 @@ mod native_models {
     }
     struct Registers(Arc<Mutex<Hardware>>);
     // SAFETY: explicit independent physical register model, serialized by Mutex;
-    // actual MMIO effects precede injected late errors. No production emulation.
+    // MMIO effects precede injected late errors. No production emulation.
     unsafe impl native::Registers for Registers {
         fn full_bar(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BAR_BYTES).unwrap()
@@ -1669,7 +1669,7 @@ mod native_models {
             drop(h);
             if let Some(registry) = callback {
                 // An already-posted message can reach the CPU after source
-                // masking. Deliver through the actual registered IDT route.
+                // masking. Deliver through the registered IDT route.
                 assert!(registry.dispatch(irq::FIRST_VECTOR));
             }
             Ok(())
@@ -1689,7 +1689,7 @@ mod native_models {
         fail_pending: Arc<AtomicBool>,
         eoi: Arc<AtomicU64>,
     }
-    // SAFETY: independent existing-controller model; its actual source uses
+    // SAFETY: independent existing-controller model; its source uses
     // the real Registry implementation and this owned vector/CPU inventory.
     unsafe impl irq::Platform for Cpu {
         fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
@@ -1743,8 +1743,8 @@ mod native_models {
         h.lock().unwrap().route = Some(registry);
         let address = h.lock().unwrap().bt.identity.address;
         let function = Function::new(address, Config(h.clone())).unwrap();
-        // The retained root is the actual independent Function hardware model,
-        // not a numeric token. All BAR/register/config views retain that epoch.
+        // The kept root is the independent Function hardware model,
+        // not a numeric token. All BAR/register/config views keep that epoch.
         let inputs = native::Inputs {
             function,
             retained: h.clone(),
@@ -1824,8 +1824,8 @@ mod native_models {
                 !h.lock().unwrap().bt.armed,
                 "failed stop omitted actual route mask"
             );
-            // Failed explicit retirement retains a closing tombstone for its
-            // actual vector, rather than releasing it or running the callback.
+            // Failed explicit retirement keeps a closing tombstone for its
+            // vector, rather than releasing it or running the callback.
             let eoi = h.lock().unwrap().callback_eoi.load(Ordering::Relaxed);
             assert!(registry.dispatch(irq::FIRST_VECTOR));
             assert_eq!(
@@ -1971,7 +1971,7 @@ mod native_models {
             }
             let before = h.lock().unwrap().config;
             // SAFETY: negative independent model inputs; constructor must refuse
-            // their unqualified metadata without changing any physical state.
+            // their unchecked metadata without changing any physical state.
             let (error, returned) = match unsafe { native::NativePlatform::new(inputs) } {
                 Ok(_) => panic!("unqualified native inputs admitted"),
                 Err(refusal) => refusal,

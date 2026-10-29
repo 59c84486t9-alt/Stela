@@ -1,4 +1,4 @@
-//! Opt-in real paused QEMU SDHCI PIO qualification. Uses an authored sparse
+//! Opt-in real paused QEMU SDHCI PIO validation. Uses an authored sparse
 //! card image; no guest CPU or operating system is executed by this fixture.
 extern crate std;
 use super::*;
@@ -97,7 +97,7 @@ fn real_paused_qemu_sd_card_runs_native_initialization_pio_and_durable_io() {
     drop(image_file);
     let socket = output.join("qtest.sock");
     // Authored standard capabilities: v3,3.3V,100MHz,high-speed,PIO. The
-    // emulator's actual register advertises this profile; no driver read is
+    // emulator's register advertises this profile; no driver read is
     // rewritten. ADMA remains independently modeled, outside this PIO receipt.
     let arguments = vec![
         String::from("-machine"),

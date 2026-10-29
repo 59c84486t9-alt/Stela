@@ -11,7 +11,7 @@ fn revoked_initial_key_admission() {
     let log = model.bar.0.lock().unwrap().log.len();
     state.allowed.set(false);
     assert!(
-        // SAFETY: The original context and native backing remain retained, but OS
+        // SAFETY: The original context and native backing remain held, but OS
         // permission was revoked after preflight. Fresh leases must deny the initial
         // key batch before any firmware publication.
         unsafe {
@@ -85,13 +85,13 @@ fn pending_block_ack_prevents_initial_igtk() {
             assert!(driver.state().transmit_ba[6].is_some());
         }
         if mode == 2 {
-            // Complete actual RX BA firmware install, publish its ADDBA response,
+            // Complete RX BA firmware install, publish its ADDBA response,
             // and retire both source TX receipts before buffering real QoS RX.
             for now in [NOW + 1, NOW + 2] {
                 let permit = admit(&mut owner, &driver, AssociationUse::Management);
-                // SAFETY: The canonical BA state belongs to this retained model peer.
+                // SAFETY: The canonical BA state belongs to this model peer.
                 // Both current guards serialize synchronous firmware progress and
-                // retain its response packet/DMA until actual modeled completion.
+                // keep its response packet/DMA until modeled completion.
                 unsafe {
                     driver.progress_block_ack(
                         &mut owner,
@@ -149,7 +149,7 @@ fn pending_block_ack_prevents_initial_igtk() {
         ));
         assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
         assert!(driver.state().management.is_none());
-        // Whole association removal is the actual completion/drain boundary;
+        // Whole association removal is the completion/drain boundary;
         // no test silently clears pending records to make the batch succeed.
         stop(&mut driver, &model);
         drop(driver);

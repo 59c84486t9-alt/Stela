@@ -57,8 +57,8 @@ pub(super) fn exercise_mpdu_observations(
         let mut payload = vec![0; size + 45];
         payload[..2].copy_from_slice(&45u16.to_le_bytes());
         payload[2] = 4 << 4; // 8 source-reported MIC/CRC bytes
-        payload[3] = 0x20; // 2-byte pad after MAC + retained IV
-        payload[7] = 1 << 6; // actual explicit band code 1 = 2.4 GHz
+        payload[3] = 0x20; // 2-byte pad after MAC + kept IV
+        payload[7] = 1 << 6; // explicit band code 1 = 2.4 GHz
         payload[12..16].copy_from_slice(&0x0500026fu32.to_le_bytes());
         payload[16..20].copy_from_slice(&(127u32 << 24).to_le_bytes());
         let (rate, energy) = if ax210 { (36, 40) } else { (28, 32) };
@@ -111,7 +111,7 @@ pub(super) fn exercise_mpdu_observations(
     expected.extend(&wire_frame(0)[34..37]);
     assert_eq!(normalized.frame().bytes(), expected);
     assert_eq!(normalized.frame().security.pn.unwrap().value(), 1);
-    // A malformed actual descriptor is retained as a rejection, never
+    // A malformed descriptor is held as a rejection, never
     // retagged as a frame or allowed to poison the control/RX owner.
     let size = if ax210 { 64 } else { 48 };
     let mut bad = vec![0; size];
@@ -195,8 +195,8 @@ pub(super) fn exercise_mpdu_observations(
     ));
     assert_eq!(source.calls.load(Ordering::Relaxed), allocations);
     assert_eq!(domain.records.lock().unwrap().maps, maps);
-    // Actual failed CPU handoff cannot issue an MPDU receipt or release
-    // mappings. Actual bus-master/reset stop below still owns teardown.
+    // Failed CPU handoff cannot issue an MPDU receipt or release
+    // mappings. Bus-master/reset stop below still owns teardown.
     complete_payload(radio, &vec![0; size]);
     let live = domain.records.lock().unwrap().live.len();
     {

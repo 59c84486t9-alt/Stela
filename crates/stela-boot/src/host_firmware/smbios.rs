@@ -28,7 +28,7 @@ fn read(address: u64, output: &mut [u8], stage: Stage) -> Result<(), Failure> {
         ));
     }
     let cr4: u64;
-    // SAFETY: read-only actual x64 control-register observation during UEFI.
+    // SAFETY: read-only x64 control-register observation during UEFI.
     unsafe {
         core::arch::asm!("mov {}, cr4",out(reg)cr4,options(nomem,nostack,preserves_flags));
     }
@@ -44,7 +44,7 @@ fn read(address: u64, output: &mut [u8], stage: Stage) -> Result<(), Failure> {
         if cr4 & (1 << 12) != 0 { 56 } else { 47 },
     )
     .map_err(|error| failure(stage, error, address, output.len()))?;
-    // SAFETY: actual published configuration table, boot services still live,
+    // SAFETY: published configuration table, boot services still live,
     // checked complete readable data-RAM extent and canonical pointer under the
     // UEFI x64 identity-map contract above. No Stela root has been installed.
     unsafe {

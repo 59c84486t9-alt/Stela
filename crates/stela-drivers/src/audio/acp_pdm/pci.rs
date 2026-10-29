@@ -20,7 +20,7 @@ pub struct AttachFailure {
     pub mapping: Mapping,
 }
 
-/// Owns actual ECAM/configuration and UC/RW BAR0 resource leases. No raw PA or
+/// Owns ECAM/configuration and UC/RW BAR0 resource leases. No raw PA or
 /// generic physical map is accepted, and no mutable function accessor escapes.
 pub struct NativeRegisters<P: Profile> {
     _profile: core::marker::PhantomData<P>,
@@ -36,14 +36,14 @@ impl<P: Profile> NativeRegisters<P> {
     /// Associate the original stopped owner and a real native BAR0 mapping.
     ///
     /// # Safety
-    /// `bar` is this exact function's fully sized/reserved BAR0 in the retained
+    /// `bar` is this exact function's fully sized/reserved BAR0 in the kept
     /// assignment epoch. The mapping's real ResourceBacking reserves that BAR
     /// for this function (numeric equality alone is insufficient). The original
     /// stopped producer's engine/IRQ/work/firmware exclusion remains in force.
-    /// The platform has selected direct ACP ownership and qualified WB capture
+    /// The platform has selected direct ACP ownership and checked WB capture
     /// DMA coherency; attachment does not infer either from PCI or pin mode.
     /// No cloned view/raw pointer or other owner accesses these mappings.
-    /// Keep the native owners retained until controller shutdown succeeds.
+    /// Keep the native owners kept until controller shutdown succeeds.
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         mapping: Mapping,
@@ -130,8 +130,8 @@ impl<P: Profile> NativeRegisters<P> {
         }
         Ok(identity)
     }
-    /// Return exact native owners only after the controller acknowledged its
-    /// shutdown and removed DMA. Failure retains this register provider intact.
+    /// Return native owners only after the controller acknowledged its
+    /// shutdown and removed DMA. Failure keeps this register provider intact.
     pub fn into_stopped_resources(mut self) -> Result<(Function<OwnedConfig>, Mapping), Self> {
         if self.associated().is_err()
             || P::exclusive(&mut self).is_err()

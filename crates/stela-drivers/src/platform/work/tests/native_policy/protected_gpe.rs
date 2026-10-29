@@ -6,7 +6,7 @@ fn policy(budget: GpeQueueBudget) -> ReservationPolicy {
 fn failed_construction<const N: usize>(queued: bool, expected: WorkError) {
     let count = Arc::new(core::sync::atomic::AtomicUsize::new(0));
     let cpu = test_support::CpuModel::new();
-    // SAFETY: this same-thread modeled queue retains the actual atomic context.
+    // SAFETY: this same-thread modeled queue keeps the atomic context.
     let queue = unsafe { Queue::<N>::new(cpu.clone(), count.clone()) }.unwrap();
     let p = Arc::as_ptr(&count) as *mut c_void;
     let ticket = if queued {
@@ -79,7 +79,7 @@ fn full_admission_policy<const N: usize>(
     assert_eq!(r.protected_gpe_budget(), Ok(Some(budget)));
     let p = Arc::as_ptr(&count) as *mut c_void;
     for _ in 0..budget.total_jobs() {
-        // SAFETY: all accepted callbacks borrow the queue-retained atomic allocation.
+        // SAFETY: all accepted callbacks borrow the queue-kept atomic allocation.
         unsafe { r.queue.execute_gpe(count_queued, p) }.unwrap();
     }
     assert_eq!(
@@ -88,7 +88,7 @@ fn full_admission_policy<const N: usize>(
         Err(WorkError::Full)
     );
     for _ in 0..general_capacity {
-        // SAFETY: every General callback retains this exact atomic context through join.
+        // SAFETY: every General callback keeps this exact atomic context through join.
         unsafe { r.queue.execute(Kind::General, count_queued, p) }.unwrap();
     }
     assert_eq!(
@@ -98,12 +98,12 @@ fn full_admission_policy<const N: usize>(
     );
     // SAFETY: queue-owned counter remains valid through each role's real completion.
     unsafe { r.start_service(count_queued, p) }.unwrap();
-    // SAFETY: the independent control frame borrows the same retained counter.
+    // SAFETY: the independent control frame borrows the same counter.
     unsafe { r.start_firmware(count_queued, p) }.unwrap();
     for _ in 0..2 {
-        // SAFETY: each accepted Portal owns a distinct actual continuation permit.
+        // SAFETY: each accepted Portal owns a distinct continuation permit.
         unsafe { r.queue.execute_portal(count_queued, p) }.unwrap();
-        // SAFETY: each accepted Notify owns a distinct actual continuation permit.
+        // SAFETY: each accepted Notify owns a distinct continuation permit.
         unsafe { r.queue.execute(Kind::Notify, count_queued, p) }.unwrap();
     }
     assert_eq!(count.load(Ordering::Relaxed), 0);
@@ -111,7 +111,7 @@ fn full_admission_policy<const N: usize>(
     unsafe { r.call_foreground(count_queued, p, cpu.ticks() + 1_000_000_000) }.unwrap();
     r.drain(cpu.ticks() + 1_000_000_000).unwrap();
     assert_eq!(count.load(Ordering::Relaxed), N);
-    // SAFETY: no producer remains and every admitted job actually returned.
+    // SAFETY: no producer remains and every admitted job returned.
     unsafe { r.retire() }.unwrap();
     assert_eq!(r.protected_gpe_budget(), Err(WorkError::Closed));
     assert_eq!(
@@ -146,11 +146,11 @@ fn a_pending_gpe_keeps_its_own_slot_under_full_general_admission_and_stack_satur
         .store(r.get_ref() as *const Runtime<32> as u64, Ordering::Release);
     let p = Arc::as_ptr(&f) as *mut c_void;
     for _ in 0..8 {
-        // SAFETY: all blocking General frames retain Scene until explicit release.
+        // SAFETY: all blocking General frames keep Scene until explicit release.
         unsafe { r.queue.execute(Kind::General, general, p) }.unwrap();
     }
     for _ in 0..15 {
-        // SAFETY: queued General markers borrow the same retained Scene and do not rebind.
+        // SAFETY: queued General markers borrow the same Scene and do not rebind.
         unsafe { r.queue.execute(Kind::General, ordinary_turn, p) }.unwrap();
     }
     assert_eq!(
@@ -158,20 +158,20 @@ fn a_pending_gpe_keeps_its_own_slot_under_full_general_admission_and_stack_satur
         unsafe { r.queue.execute(Kind::General, rejected, p) },
         Err(WorkError::Full)
     );
-    // SAFETY: all role callbacks are covered by Scene's retained allocation.
+    // SAFETY: all role callbacks are covered by Scene's allocation.
     unsafe { r.start_service(service, p) }.unwrap();
     // SAFETY: the dedicated control context remains live while parked.
     unsafe { r.start_firmware(control, p) }.unwrap();
     for _ in 0..2 {
-        // SAFETY: each portal context survives its actual parked frame.
+        // SAFETY: each portal context survives its parked frame.
         unsafe { r.queue.execute_portal(portal, p) }.unwrap();
-        // SAFETY: each Notify context survives its actual parked frame.
+        // SAFETY: each Notify context survives its parked frame.
         unsafe { r.queue.execute(Kind::Notify, notify, p) }.unwrap();
     }
-    // SAFETY: active serial GPE frame retains the same Scene until release.
+    // SAFETY: active serial GPE frame keeps the same Scene until release.
     unsafe { r.queue.execute_gpe(gpe, p) }.unwrap();
     assert_eq!(
-        // SAFETY: Foreground's reserved context remains retained through its pending result.
+        // SAFETY: Foreground's reserved context remains held through its pending result.
         unsafe { r.call_foreground(foreground, p, cpu.ticks() + 1_000_000_000) },
         Err(WorkError::Pending)
     );

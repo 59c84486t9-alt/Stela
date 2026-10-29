@@ -96,7 +96,7 @@ fn native_empty_owner_rescans_change_and_reset_without_retargeting_old_disks() {
         assert_eq!(hardware.borrow().accesses, before);
         hardware.borrow_mut().empty_media = false;
         let mut inserted = storage.rescan(&mut failures).unwrap();
-        // The retained reset variant must return a usable owner even when
+        // The kept reset variant must return a usable owner even when
         // physical reset succeeds with no media. Old owners stay poisoned.
         hardware.borrow_mut().empty_media = true;
         let (mut rebound, empty) = inserted[0]

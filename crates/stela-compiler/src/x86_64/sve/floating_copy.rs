@@ -20,7 +20,7 @@ const OLD_DESTINATION: u8 = 3;
 const SELECTED: u8 = 4;
 const REPEAT_LOW_DWORD: u8 = 0;
 // Only this H/S vector shape has a measured ComplementXor win. Other lengths
-// and Double retain AndSelect; this is an empirical shape, not a threshold.
+// and Double keep AndSelect; this is an empirical shape, not a threshold.
 const COMPLEMENT_XOR_MEASURED_VECTOR_BYTES: usize = 64;
 
 /// Fill active SVE lanes with the already expanded VFP immediate. All inactive

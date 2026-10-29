@@ -19,7 +19,7 @@ fn failure(stage: &'static str, error: impl core::fmt::Display) -> &'static str 
 }
 
 /// # Safety
-/// Actual mapped ECAM, BARs, reserved DMA and exclusive post-EBS controller
+/// Mapped ECAM, BARs, reserved DMA and exclusive post-EBS controller
 /// ownership must satisfy the ordinary native driver probe contract.
 pub(super) unsafe fn probe_and_reset(
     handoff: &Handoff,
@@ -35,7 +35,7 @@ pub(super) unsafe fn probe_and_reset(
             if !handoff.is_mapped(&window.range()) {
                 return Err("USB reset check requires mapped ECAM");
             }
-            // SAFETY: caller owns the actual mapped ECAM and native devices.
+            // SAFETY: caller owns the mapped ECAM and native devices.
             for mut function in unsafe { Function::enumerate(window) } {
                 if function.class == xhci::CLASS {
                     owners.push(

@@ -97,7 +97,7 @@ impl BlockBackend for Backend<'_> {
 impl Backend<'_> {
     unsafe fn run(&self, input: *const u8, output: *mut u8, count: usize) {
         if self.encrypt {
-            // SAFETY: the caller provides the extents and qualified AES backend.
+            // SAFETY: the caller provides the extents and checked AES backend.
             unsafe {
                 super::x86_64::aes_encrypt(
                     self.schedule.enc.as_ptr(),

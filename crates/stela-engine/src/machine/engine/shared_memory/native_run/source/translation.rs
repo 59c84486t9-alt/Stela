@@ -1,10 +1,10 @@
-//! One lexical executable mapping, never retained across a guest body.
+//! One lexical executable mapping, never kept across a guest body.
 #[cfg(feature = "native-profile")]
 use super::super::super::source_profile::{Fetch, Profile};
 use super::*;
 use crate::memory::{RegisteredSystemRam, domain::MemoryExecutionLoan};
 
-/// Non-Copy same-PC source witness. The borrowed controls, RAM and actual pin
+/// Non-Copy same-PC source witness. The borrowed controls, RAM and pin
 /// cannot be substituted by a later read. Full source bytes are always reread.
 pub(in crate::machine::engine::shared_memory::native_run) struct ExecuteTranslation<'a> {
     ram: &'a RegisteredSystemRam,
@@ -22,7 +22,7 @@ impl<'a> ExecuteTranslation<'a> {
     /// # Safety
     /// Until this witness is dropped, the caller must exclude guest execution,
     /// code/MMU/control publication and unjoined DMA/host writers using the
-    /// actual held-cohort or single-online-PE native-round producer contract.
+    /// held-cohort or single-online-PE native-round producer contract.
     /// The execution loan alone does not exclude descriptor or ordinary writes.
     /// No Host/device service may intervene before a read through this witness.
     pub(in crate::machine::engine::shared_memory::native_run) unsafe fn first(
@@ -52,7 +52,7 @@ impl<'a> ExecuteTranslation<'a> {
                 &mut resolutions,
             )?;
             let mut bytes = [0; 4];
-            // SAFETY: private staging under the caller's actual no-writer scope.
+            // SAFETY: private staging under the caller's no-writer scope.
             unsafe { ram.read_physical(mapped.physical, &mut bytes) }
                 .map_err(FetchFailure::Refused)?;
             Self::check_owner(ram, execution).map_err(FetchFailure::Refused)?;
@@ -149,7 +149,7 @@ mod tests {
         loan: &'a MemoryExecutionLoan,
         pc: u64,
     ) -> Result<ExecuteTranslation<'a>, FetchFailure> {
-        // SAFETY: each test retains a lexical no-writer scope until drop.
+        // SAFETY: each test keeps a lexical no-writer scope until drop.
         unsafe {
             ExecuteTranslation::first(
                 &memory.ram,

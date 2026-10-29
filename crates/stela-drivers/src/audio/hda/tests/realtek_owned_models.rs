@@ -171,7 +171,7 @@ fn default_amp_model(id: u32, zero: u16) -> Rc<RefCell<Model>> {
     let model = family_model(id);
     {
         let mut m = model.borrow_mut();
-        // An actual source-listed EAPD endpoint, independent of the
+        // A source-listed EAPD endpoint, independent of the
         // ordinary PCM path at pin4. Start coefficient7 with bit controls
         // clear so every positive default-amplifier case performs a write.
         m.parameters.insert((0x14, 9), (4 << 20) | 1);
@@ -457,7 +457,7 @@ fn pci_oem_fixups_and_retirement() {
             .unwrap();
         assert_eq!(route.nodes(), &[0x14, 0x0c, 2]);
         // The donor's sole observed connection needs no selector write.
-        // Read the actual peer through CORB/RIRB rather than assuming a
+        // Read the peer through CORB/RIRB rather than assuming a
         // successful GET inserted an entry in its sparse write map.
         assert_eq!(
             controller
@@ -499,7 +499,7 @@ fn missing_pci_identity_blocks_fixups() {
     let pci = Rc::new(Cell::new(Some(0xa0cd1458)));
     let timer = model.borrow().clock.clone();
     controller.shutdown().unwrap();
-    // SAFETY: prior owner is stopped; the retained model has exclusive DMA.
+    // SAFETY: prior owner is stopped; the model has exclusive DMA.
     let mut controller = unsafe {
         Controller::new(
             OemRegisters {

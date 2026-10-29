@@ -19,7 +19,7 @@ pub enum Environment {
     Outdoor = 2,
 }
 /// Explicit observations consumed by the Connac2 helper. Connac3's helper
-/// leaves its ACPI byte zero; these fields do not invent ACPI/SAR authority.
+/// leaves its ACPI byte zero; these fields do not invent ACPI/SAR permission.
 #[derive(Clone, Copy, Debug)]
 pub struct Inputs {
     pub alpha2: [u8; 2],
@@ -29,7 +29,7 @@ pub struct Inputs {
     pub power_type: u8,
     pub acpi_flags: u8,
     pub mtcl_configuration: u32,
-    /// Actual MTCL lookup for the source fallback country00, separately from
+    /// MTCL lookup for the source fallback country00, separately from
     /// the requested country lookup. They may select different ACPI entries.
     pub world_mtcl_configuration: u32,
 }
@@ -51,7 +51,7 @@ pub struct Request {
     fallback: bool,
     body: Vec<u8>,
     completion: Completion,
-    /// Source's pending per-rule flags, not an actual applied-policy receipt.
+    /// Source's pending per-rule flags, not an applied-policy receipt.
     pending_channel_flags: Option<u8>,
 }
 impl Request {
@@ -105,8 +105,8 @@ impl core::fmt::Display for Error {
 impl core::error::Error for Error {}
 impl Plan {
     /// Match source slot order and its explicit "00"/Indoor retry when the
-    /// requested country is absent. Fallback is retained as a visible fact;
-    /// it never broadens actual hardware/OS/location permissions. No requests
+    /// requested country is absent. Fallback is held as a visible fact;
+    /// it never broadens hardware/OS/location permissions. No requests
     /// are published until the complete bounded plan validates atomically.
     pub fn build(selection: &Selection<'_>, inputs: Inputs) -> Result<Self, Error> {
         let mut plan = Self {
@@ -201,7 +201,7 @@ impl Plan {
                 | u8::from(inputs.power_limits_node) << 1;
             body[8..12].copy_from_slice(&rule[..4]);
             body[12] = inputs.power_type;
-            body[13] = inputs.mtcl_configuration as u8; // actual source u32→u8 field assignment
+            body[13] = inputs.mtcl_configuration as u8; // source u32→u8 field assignment
             body[76..].copy_from_slice(&rule[6..]);
             self.push(Request {
                 chip: self.chip,
@@ -371,7 +371,7 @@ mod tests {
     }
     #[test]
     fn source_c2_short_tail_is_not_a_rule_and_later_malformed_rule_is_atomic() {
-        // The donor's >16-byte loop intentionally never consumes this valid
+        // The donor's >16-byte loop never consumes this valid
         // six-byte rule header with ten bytes of data.
         let owner = auxiliary_owner(Chip::Mt7922, &c2(0, b"US", 10));
         let selection = owner.select_clc(0).unwrap();

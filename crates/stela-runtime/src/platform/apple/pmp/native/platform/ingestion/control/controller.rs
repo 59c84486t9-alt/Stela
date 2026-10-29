@@ -1,4 +1,4 @@
-//! Actual source-selected controller views; no replacement register images.
+//! Source-selected controller views; no replacement register images.
 //!
 //! Original T8112 constructor1033000..10330e4 supplies four x2 tuples. Base
 //!1005e94..1005eb4 copies their+38..+50 pointers into P1c8. Direct vtable
@@ -65,8 +65,8 @@ struct Completed {
     operation: Operation,
     value: ResourceValue,
 }
-/// Own the actual device or an identity-preserving alias of the AP bus owner.
-/// The caller must qualify those mapped views against the supplied placements;
+/// Own the device or an identity-preserving alias of the AP bus owner.
+/// The caller must check those mapped views against the supplied placements;
 /// numeric geometry by itself cannot turn a copied word bank into that owner.
 /// This does not construct the hardware event producer or assume any reset word.
 pub struct Controller {

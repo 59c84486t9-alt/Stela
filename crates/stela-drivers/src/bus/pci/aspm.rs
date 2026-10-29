@@ -26,7 +26,7 @@ const EXT_CAPABILITY_L1SS: u16 = 0x1e;
 const L1SS_CONTROL1: u16 = 8;
 const ASPM_L1_2: u32 = 1 << 2;
 
-/// Disable only ASPM L1.2 at the actual downstream/upstream link components.
+/// Disable only ASPM L1.2 at the downstream/upstream link components.
 /// PCI-PM L1.2, L1.1, timing parameters and conventional Link Control remain
 /// unchanged. Both capability chains and control snapshots are validated before
 /// the downstream-first writes. An error may leave the downstream disabled;
@@ -43,7 +43,7 @@ pub unsafe fn disable_aspm_l1_2_link(
     let windows = segment_windows(function, handoff)?;
     let mut functions = Vec::new();
     for window in windows {
-        // SAFETY: qualified exclusive segment ownership and complete ECAM
+        // SAFETY: checked exclusive segment ownership and complete ECAM
         // mappings; no second PCI or firmware owner may race this operation.
         functions.extend(unsafe { Function::enumerate(&window) });
     }
@@ -176,7 +176,7 @@ fn segment_windows<C: ConfigSpace>(
         .iter()
         .any(|window| (window.start_bus..=window.end_bus).contains(&function.address.bus));
     if !mapped || !contains {
-        // Skipping an unmapped range could hide the actual upstream bridge.
+        // Skipping an unmapped range could hide the upstream bridge.
         return Err(BlockError::Unsupported(
             "unmapped PCI configuration for ASPM",
         ));

@@ -1,6 +1,6 @@
 //! Permanent nonblocking access to the same canonical global heap.
 //!
-//! Registration retains a function, never a per-enter borrowed context. Its
+//! Registration keeps a function, never a per-enter borrowed context. Its
 //! result must use the existing exact-layout global free path; no unrelated
 //! allocator, page catalog, physical mapping or GPU readiness is installed.
 use core::{
@@ -61,7 +61,7 @@ impl Registry {
 
     /// # Safety
     /// The caller meets the registered canonical heap's context contract and
-    /// supplies a nonzero layout. The returned pointer retains exact-layout
+    /// supplies a nonzero layout. The returned pointer keeps exact-layout
     /// ownership until its one matching canonical global deallocation.
     unsafe fn allocate(&self, layout: Layout) -> *mut u8 {
         assert!(
@@ -71,7 +71,7 @@ impl Registry {
         // SAFETY: acquired permanent publication; this function is never
         // replaced, dropped or retargeted after a capability query.
         let callback = unsafe { *(*self.callback.get()).assume_init_ref() };
-        // SAFETY: registration attests the actual canonical owner and callback;
+        // SAFETY: registration attests the canonical owner and callback;
         // this caller preserves that same nonzero layout and context contract.
         unsafe { callback(layout) }
     }
@@ -79,19 +79,19 @@ impl Registry {
 
 static HEAP: Registry = Registry::new();
 
-/// Evidence of permanent callback publication, not native/GPU qualification.
+/// Evidence of permanent callback publication, not native/GPU validation.
 /// Dropping it does not unregister, replace or release the canonical heap.
 #[derive(Debug)]
 pub struct LinuxHeapRegistration {
     _private: (),
 }
 
-/// Publish the actual canonical global heap's nonblocking allocation operation.
+/// Publish the canonical global heap's nonblocking allocation operation.
 /// A second or concurrent installation returns its callback unchanged. There
 /// is no replacement or unregister operation and no allocation during install.
 ///
 /// # Safety
-/// The callback's code and actual initialized heap/backing/mapping stay valid
+/// The callback's code and initialized heap/backing/mapping stay valid
 /// through every allocation and its matching global deallocation. Success is
 /// aligned, zeroed, exclusive storage from the EXACT allocator instance used by
 /// `alloc::alloc::dealloc`, with the exact supplied layout. Failure transfers
@@ -117,7 +117,7 @@ extern "C" fn stela_linux_heap_try_available() -> bool {
 
 /// # Safety
 /// For a nonzero valid layout the C caller first verifies the permanent heap
-/// capability and preserves its actual owner/context/one-free contract. Missing
+/// capability and preserves its owner/context/one-free contract. Missing
 /// registration is a contract trap, not an ordinary exhausted-heap NULL.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_linux_heap_try_alloc(size: usize, align: usize) -> *mut c_void {
@@ -136,7 +136,7 @@ mod tests {
     use core::sync::atomic::AtomicUsize;
 
     // Negative allocation models test publication/dispatch only. They transfer
-    // no storage and do not qualify a positive/nonblocking native allocator.
+    // no storage and do not check a positive/nonblocking native allocator.
     static SIZE: AtomicUsize = AtomicUsize::new(0);
     static ALIGN: AtomicUsize = AtomicUsize::new(0);
     unsafe fn exhausted(layout: Layout) -> *mut u8 {

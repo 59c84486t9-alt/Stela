@@ -71,7 +71,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if matches!(id, 0x10ec_0255..=0x10ec_0257) {
                 self.depop_control(address, DepopControl::HeadphonePower, 1)?;
                 // Source en_3kpull_low defaults true; ALC257 explicitly clears
-                // it to retain cold-boot headset microphone detection.
+                // it to keep cold-boot headset microphone detection.
                 if id != 0x10ec_0257 {
                     self.update_coefficient(address, 0x46, 0, 3 << 12)?;
                 }
@@ -90,7 +90,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
         }
         // alc_headset_mic_no_shutup returns early when bus.shutdown is true.
-        // Retain microphone/jack defaults on these codecs during permanent
+        // Keep microphone/jack defaults on these codecs during permanent
         // shutdown. Primary headphone mute/clear above remains mandatory.
         if matches!(id, 0x10ec_0269 | 0x10ec_0255) {
             for widget in graph.groups.iter().flat_map(|group| &group.widgets) {

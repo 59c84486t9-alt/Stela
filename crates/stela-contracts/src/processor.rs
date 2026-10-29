@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 
 /// Supplied participant membership. A physical cluster can mix core types.
 /// These indices describe a plan; they grant no executor, lifecycle, reset,
-/// memory-retention or hardware-root authority. Engine owners validate them
-/// against their actual participant inventory before settlement.
+/// memory-retention or hardware-root permission. Engine owners validate them
+/// against their participant inventory before settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessorTarget {
     Core { pe: usize },

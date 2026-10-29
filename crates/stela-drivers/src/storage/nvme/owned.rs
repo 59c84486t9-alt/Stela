@@ -1,4 +1,4 @@
-//! Retained native NVMe transport and requester-domain memory. No physical
+//! Native NVMe transport and requester-domain memory. No physical
 //! address is interpreted as a CPU pointer or a device IOVA.
 use super::*;
 use crate::bus::{
@@ -15,13 +15,13 @@ use crate::bus::{
 use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{mem, ptr};
 
-/// Exclusive, fallible controller registers, retained through final retirement.
+/// Exclusive, fallible controller registers, kept through final retirement.
 ///
 /// # Safety
-/// Implementors retain the actual controller BAR mapping, CPU-root/resource
-/// reservation and its mapping epoch. The paired Lifecycle retains PCI/reset
+/// Implementors keep the controller BAR mapping, CPU-root/resource
+/// reservation and its mapping epoch. The paired Lifecycle keeps PCI/reset
 /// hierarchy ownership through register retirement. Every access checks its
-/// complete range and alignment, uses the actual device's UC mapping and
+/// complete range and alignment, uses the device's UC mapping and
 /// preserves device ordering. Failures
 /// must remain errors, never synthetic all-ones reads or acknowledged writes.
 /// No other controller or register accessor may drive this controller.
@@ -42,24 +42,24 @@ pub unsafe trait Registers {
     /// # Safety
     /// Controller/submission paths are stopped, requester BME is contained,
     /// domain payload writes drained, and all RAM mappings unmapped. No access
-    /// to these registers may follow success. Failure retains the exact owner.
+    /// to these registers may follow success. Failure keeps the owner.
     unsafe fn retire(&mut self) -> Result<(), BlockError>;
 }
 
-/// The actual retained PCI/child hierarchy; a BDF is not this authority.
+/// The kept PCI/child hierarchy; a BDF is not this permission.
 ///
 /// # Safety
-/// Implementors retain exclusive controller/configuration/reset/resource and
-/// parent root owners until release. On entry, the entire retained hierarchy
+/// Implementors keep exclusive controller/configuration/reset/resource and
+/// parent root owners until release. On entry, the entire hierarchy
 /// must have acknowledged BME-clear, with no uncontrolled DMA engine. `prepare`
-/// establishes actual D0 and memory decode while preserving containment.
-/// `enable_dma` establishes actual memory decode/BME for this exact domain-bound requester; errors after any
-/// possible effect retain that authority. `disable_dma` acknowledges actual
+/// establishes D0 and memory decode while preserving containment.
+/// `enable_dma` establishes memory decode/BME for this exact domain-bound requester; errors after any
+/// possible effect keep that permission. `disable_dma` acknowledges
 /// BME-clear and excludes new requester DMA. It is not a payload-write drain.
 /// Failed `prepare` does not authorize any NVMe MMIO: the caller quarantines
 /// the complete owner because no generic recovery can establish D0.
 /// `release` returns owners only after its caller's completed teardown; failed
-/// operations retain the same hardware epoch and are retryable or quarantined.
+/// operations keep the same hardware epoch and are retryable or quarantined.
 pub unsafe trait Lifecycle {
     fn prepare(&mut self) -> Result<(), BlockError>;
     fn enable_dma(&mut self) -> Result<(), BlockError>;
@@ -67,7 +67,7 @@ pub unsafe trait Lifecycle {
     fn release(&mut self) -> Result<(), BlockError>;
 }
 
-/// An actual exclusively reserved, owned UC BAR mapping.
+/// An exclusively reserved, owned UC BAR mapping.
 pub struct MappingRegisters {
     mapping: Mapping,
 }
@@ -97,7 +97,7 @@ impl MappingRegisters {
         Ok(pointer.as_ptr().cast())
     }
 }
-// SAFETY: the owned Mapping retains the actual exclusive resource, UC policy,
+// SAFETY: the owned Mapping keeps the exclusive resource, UC policy,
 // CPU root and span; checked volatile accesses preserve their exact effects.
 unsafe impl Registers for MappingRegisters {
     fn read32(&self, offset: usize) -> Result<u32, BlockError> {
@@ -233,7 +233,7 @@ impl Buffer {
             Self::Legacy(b) => b.bytes(),
             Self::Owned(b) => {
                 assert!(b.cpu_owned, "CPU view while NVMe owns DMA");
-                // SAFETY: allocation is retained and CPU ownership established
+                // SAFETY: allocation is held and CPU ownership established
                 // by completion or before any publication; no device writer.
                 unsafe {
                     core::slice::from_raw_parts(
@@ -253,7 +253,7 @@ impl Buffer {
             Self::Legacy(b) => b.bytes_mut(),
             Self::Owned(b) => {
                 assert!(b.cpu_owned, "CPU write while NVMe owns DMA");
-                // SAFETY: exclusive CPU ownership and retained mapped span.
+                // SAFETY: exclusive CPU ownership and kept mapped span.
                 unsafe {
                     core::slice::from_raw_parts_mut(
                         b.cpu
@@ -317,12 +317,12 @@ impl Buffer {
         }
         Ok(())
     }
-    /// Only after actual command completion or acknowledged stopped/drained DMA.
+    /// Only after command completion or acknowledged stopped/drained DMA.
     pub(super) unsafe fn take(&mut self) -> Result<(), BlockError> {
         if let Self::Owned(b) = self
             && !b.cpu_owned
         {
-            // SAFETY: caller establishes actual hardware completion.
+            // SAFETY: caller establishes hardware completion.
             unsafe { b.dma.sync_for_cpu(0..b.dma.bytes()) }.map_err(map_dma_error)?;
             b.cpu_owned = true;
         }
@@ -348,8 +348,8 @@ impl Drop for Memory {
             // SAFETY: IOVA was never exposed, or unmap already succeeded.
             let _ = unsafe { self.dma.unmap() };
         }
-        // A published lease automatically retains pins/domain on Drop. The
-        // controller additionally retains the CPU/config/root owners on failure.
+        // A published lease automatically keeps pins/domain on Drop. The
+        // controller additionally keeps the CPU/config/root owners on failure.
     }
 }
 /// Monotonic observations, not inferred hardware state. A failed step leaves
@@ -379,7 +379,7 @@ pub(super) struct Owner {
 /// timeout clears BME and drains the domain before the CPU reuses any buffer.
 /// # Safety
 /// The supplied register/lifecycle owners and domain must denote the same
-/// actual exclusive controller, its requester and every DMA alias/root/reset
+/// exclusive controller, its requester and every DMA alias/root/reset
 /// epoch. Bind that real domain before entry, and keep the complete hierarchy
 /// BME-contained. This identity cannot be established from numeric BDFs or by
 /// combining independently obtained type-erased owners.
@@ -491,7 +491,7 @@ unsafe fn attach_with_timeout(
         Direction::Bidirectional,
     )?;
     controller.prp_list = Buffer::allocate(source, domain.clone(), PAGE, Direction::ToDevice)?;
-    // Polling live CQ memory requires the domain's independently qualified
+    // Polling live CQ memory requires the domain's checked
     // coherent observation; refuse absent support before enabling the engine.
     controller.admin.completions.coherent(12)?;
     controller.io.completions.coherent(12)?;
@@ -518,7 +518,7 @@ impl super::HostMemorySource for Pages<'_> {
 }
 
 impl Controller {
-    /// Stop once for all sibling namespaces. A failed step retains every
+    /// Stop once for all sibling namespaces. A failed step keeps every
     /// remaining owner, and a retry continues against the same exact epoch.
     fn retire_owned(&mut self) -> Result<(), BlockError> {
         if self.teardown == Teardown::Released || self.owned.is_none() {
@@ -529,12 +529,12 @@ impl Controller {
             Teardown::Unadmitted => {
                 // Clock refusal authorizes neither configuration nor MMIO.
                 // Keep every original owner while the old error-only API
-                // cannot return this complete still-contained authority.
+                // cannot return this complete still-contained permission.
                 return Err(BlockError::Unsupported("NVMe clock admission quarantined"));
             }
             Teardown::Preparing => {
                 // The hierarchy may still be in D3. Neither reset nor any
-                // register read is authorized. Drop retains the complete epoch.
+                // register read is authorized. Drop keeps the complete epoch.
                 return Err(BlockError::Unsupported(
                     "NVMe uncertain preparation quarantined",
                 ));
@@ -557,7 +557,7 @@ impl Controller {
             self.teardown = Teardown::Contained;
         }
         if self.teardown == Teardown::Contained {
-            // SAFETY: acknowledged stopped engine and actual BME containment.
+            // SAFETY: acknowledged stopped engine and BME containment.
             unsafe { owner.domain.drain_posted_writes() }.map_err(map_dma_error)?;
             self.teardown = Teardown::Drained;
         }
@@ -576,9 +576,9 @@ impl Controller {
             .into_iter()
             .chain(host_memory)
             {
-                // SAFETY: actual stop/containment/drain remain acknowledged;
+                // SAFETY: stop/containment/drain remain acknowledged;
                 // each successful unmap becomes Empty before the next step.
-                // Retry therefore only visits still-retained RAM mappings.
+                // Retry therefore only visits still RAM mappings.
                 unsafe { buffer.unmap()? };
             }
             self.teardown = Teardown::RamUnmapped;
@@ -666,13 +666,13 @@ mod tests {
         bytes: usize,
         released: Arc<AtomicUsize>,
     }
-    // SAFETY: exclusive aligned model allocation, retained by actual pins; raw
+    // SAFETY: exclusive aligned model allocation, kept by pins; raw
     // device/CPU effects are serialized by the model and ownership protocol.
     unsafe impl Send for Backing {}
     // SAFETY: same serialized model accesses, no safe overlapping slices.
     unsafe impl Sync for Backing {}
     // SAFETY: these physical numbers are explicitly model metadata; cpu_base
-    // names independently allocated, aligned, retained zeroed model RAM.
+    // names independently allocated, aligned, kept zeroed model RAM.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
             self.pointer
@@ -690,7 +690,7 @@ mod tests {
     impl Drop for Backing {
         fn drop(&mut self) {
             self.released.fetch_add(1, Ordering::SeqCst);
-            // SAFETY: exact unique allocation retained until its final pin.
+            // SAFETY: exact unique allocation kept until its final pin.
             unsafe {
                 dealloc(
                     self.pointer.as_ptr(),
@@ -1208,7 +1208,7 @@ mod tests {
         }
     }
     struct Domain(Arc<Mutex<Model>>);
-    // SAFETY: independent device/CPU visibility model retains exact page pins
+    // SAFETY: independent device/CPU visibility model keeps exact page pins
     // via CpuMapping and isolated IOVAs. It models no real hardware capability.
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
@@ -1297,7 +1297,7 @@ mod tests {
             assert_eq!(direction, b.direction);
             let p = b.cpu.address(range.start, range.len()).unwrap();
             for (i, at) in range.enumerate() {
-                // SAFETY: actual model command completion established CPU ownership.
+                // SAFETY: model command completion established CPU ownership.
                 unsafe { p.as_ptr().add(i).write_volatile(b.device[at]) };
             }
             m.sync_cpu += 1;
@@ -1334,7 +1334,7 @@ mod tests {
     }
     struct Regs(Arc<Mutex<Model>>);
     // SAFETY: this independent controller model serializes exact bounded
-    // register effects and retains model RAM/configuration until retirement.
+    // register effects and keeps model RAM/configuration until retirement.
     unsafe impl Registers for Regs {
         fn read32(&self, offset: usize) -> Result<u32, BlockError> {
             assert!(offset < 0x2000 && offset.is_multiple_of(4));
@@ -1429,7 +1429,7 @@ mod tests {
             self.0.lock().unwrap().lifecycle_owner_drops += 1;
         }
     }
-    // SAFETY: models exclusive hierarchy ownership, actual separate preparation
+    // SAFETY: models exclusive hierarchy ownership, separate preparation
     // and BME effects, and refuses release before full native-owner teardown.
     unsafe impl Lifecycle for Life {
         fn prepare(&mut self) -> Result<(), BlockError> {
@@ -1437,7 +1437,7 @@ mod tests {
             assert!(!m.bme);
             m.record("prepare_attempt");
             if m.fail_prepare {
-                // Actual power remains D3; no BAR access is possible.
+                // Power remains D3; no BAR access is possible.
                 return Err(register_error());
             }
             m.prepared = true;
@@ -1490,7 +1490,7 @@ mod tests {
             }
         }
         fn attach(&self) -> Result<Attached, BlockError> {
-            // SAFETY: every owner retains the same exclusive independent
+            // SAFETY: every owner keeps the same exclusive independent
             // model controller/root and domain, initially BME-contained.
             unsafe {
                 attach_with_timeout(
@@ -1550,8 +1550,8 @@ mod tests {
     fn invalid_clock_retains_unadmitted_original_owners_without_any_effect() {
         for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * 255 * 500_000) + 1] {
             let f = Fixture::new();
-            // SAFETY: the complete same-controller authority is transferred;
-            // clock refusal must retain it before PCI/MMIO or DMA allocation.
+            // SAFETY: the complete same-controller permission is transferred;
+            // clock refusal must keep it before PCI/MMIO or DMA allocation.
             let result = unsafe {
                 attach(
                     Box::new(Regs(f.model.clone())),
@@ -2146,7 +2146,7 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
-    // SAFETY: isolated model reservation, retained through the real Authority;
+    // SAFETY: isolated model reservation, kept through the real Permission;
     // this physical interval is metadata, not a CPU or DMA pointer.
     unsafe impl crate::bus::mmio::owned::ResourceBacking for RegisterResource {
         fn physical_span(&self) -> crate::bus::mmio::owned::PhysicalSpan {
@@ -2156,8 +2156,8 @@ mod tests {
             crate::bus::mmio::owned::ResourceKind::Registers
         }
     }
-    // SAFETY: isolated aligned RAM models UC register storage, retained by this
-    // actual platform owner. Real registry reservations/retirement are used;
+    // SAFETY: isolated aligned RAM models UC register storage, kept by this
+    // platform owner. Real registry reservations/retirement are used;
     // only a legitimate sub-page Mapping offset creates an unaligned accessor.
     unsafe impl crate::bus::mmio::owned::MappingPlatform for RegisterPlatform {
         fn check_context(

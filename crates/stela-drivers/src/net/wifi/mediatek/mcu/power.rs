@@ -2,14 +2,14 @@
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Source SAR arithmetic, rate-SKU placement and complete per-band wire batches.
-//! Explicit resolved inputs are data, not trusted platform/OS power authority.
+//! Explicit resolved inputs are data, not trusted platform/OS power permission.
 use super::{Encoder, Event};
 use crate::net::wifi::{Band, mediatek::identity::Chip};
 use alloc::vec::Vec;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Limits {
-    /// Half-dBm values already resolved against actual per-rate board, SAR,
+    /// Half-dBm values already resolved against per-rate board, SAR,
     /// regulatory, chain and requested-power constraints. No absent-data default.
     pub cck: [i8; 4],
     pub ofdm: [i8; 8],
@@ -19,7 +19,7 @@ pub struct Limits {
 }
 impl Limits {
     /// Explicit uniform data, matching the source no-DTS resolution only when
-    /// its real input authority actually proves that condition. No authority
+    /// its real input permission proves that condition. No permission
     /// or missing-power fallback is created by this pure constructor.
     pub fn uniform(half_dbm: i8) -> Self {
         Self {
@@ -112,8 +112,8 @@ pub struct Channel {
 }
 pub struct Inputs<'a> {
     pub alpha2: [u8; 2],
-    /// None means this band is deliberately excluded from the source plan;
-    /// actual capability/CLC/trusted policy must prove that choice separately.
+    /// None means this band is excluded from the source plan;
+    /// capability/CLC/trusted policy must prove that choice separately.
     pub ghz2: Option<&'a [Channel]>,
     pub ghz5: Option<&'a [Channel]>,
     pub ghz6: Option<&'a [Channel]>,
@@ -485,8 +485,8 @@ pub(crate) mod tests {
                 let mut packet = wire[wt..wt + n].to_vec();
                 wt += n;
                 if chip == Chip::Mt7925 {
-                    // These source heap-header fields are genuinely unwritten;
-                    // canary allocation exposes them. Native deliberately zeroes
+                    // These source heap-header fields are unwritten;
+                    // canary allocation exposes them. Native zeroes
                     // them, preserving all source-defined bytes exactly.
                     for range in [0..4, 8..12, 15..16, 18..52] {
                         assert!(body[range.clone()].iter().all(|&b| b == 0x5a));

@@ -50,12 +50,12 @@ pub struct IoError;
 /// Original serialized Cadence link register and platform owner.
 ///
 /// # Safety
-/// The provider retains this actual controller/link's mappings, power, reset,
+/// The provider keeps this controller/link's mappings, power, reset,
 /// frame clock, pins, firmware exclusion and parent resource lifetime. The link
 /// is already initialized in normal command mode. No other command, IRQ,
 /// deferred task, wake or firmware user may access/reset this epoch. Every
 /// access is ordered; errors may follow effects. Retaining/leaking the provider
-/// must retain those actual grants. A copied ID or temporary lock is inadequate.
+/// must keep those grants. A copied ID or temporary lock is inadequate.
 pub unsafe trait Registers: 'static {
     fn layout(&self) -> Layout;
     fn bytes(&self) -> usize;
@@ -142,7 +142,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let ip = self.layout.offset();
         // Observe source normal mode, accepted commands, running frame clock,
         // stopped reset and disabled physical interrupt delivery. These checks
-        // supplement, but cannot establish, the provider's retained authority.
+        // supplement, but cannot establish, the provider's permission.
         if self.read(CONFIG)? & (1 << 6) != 0
             || self.read(ip + CONFIG)? & (7 | (1 << 3) | (1 << 5) | (15 << 24)) != 0
             || self.read(CONTROL)? & ((1 << 7) | (1 << 6) | (1 << 4)) != 0

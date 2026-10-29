@@ -73,7 +73,7 @@ pub(super) fn admit(
     }
     let (features, _) = profile.hardware_extended_features.ok_or(Error::Profile)?;
     let (firmware_features, _) = unit.extended_features().ok_or(Error::Profile)?;
-    // IA is needed for actual initial/final complete cache invalidation. HATS3
+    // IA is needed for initial/final complete cache invalidation. HATS3
     // is reserved. SNP changes completion/exclusion ownership and is refused.
     if features & firmware_features & (1 << 6) == 0
         || (features >> 10) & 3 == 3

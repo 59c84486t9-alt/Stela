@@ -54,7 +54,7 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
         if case < 2 {
             assert!(matches!(
                 // SAFETY: the unchanged same-epoch model source/domain remain
-                // retained while an unqualified command version is refused.
+                // while an unchecked command version is refused.
                 unsafe { mac.advance(&source) },
                 Err(Ax200MacError::Version { .. })
             ));
@@ -64,7 +64,7 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
         } else {
             mac.replenish_completed_receive().unwrap();
             // SAFETY: the fixture Source supplies exclusive RAM and Native
-            // retains the matching domain; no device or worker runs in parallel.
+            // keeps the matching domain; no device or worker runs in parallel.
             unsafe { mac.advance(&source) }.unwrap();
             for index in 0..2 {
                 let command = mac.commands()[index].clone();
@@ -88,7 +88,7 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
         let error = mac.first_error().unwrap().clone();
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
-        // SAFETY: the latched failure still retains its original source/domain
+        // SAFETY: the latched failure still keeps its original source/domain
         // and pending DMA; this repeated entry has no concurrent model user.
         assert_eq!(unsafe { mac.advance(&source) }, Err(error.clone()));
         assert_eq!(
@@ -142,7 +142,7 @@ fn receive_rearm_failure_latches_error_and_quarantines_uncertain_dma() {
     let syncs = native.domain.records.lock().unwrap().syncs;
     assert_eq!(
         // SAFETY: failed receive rearm kept the original model allocations and
-        // same source/domain retained; the failure adds no hardware access.
+        // same source/domain kept; the failure adds no hardware access.
         unsafe { mac.advance(&source) },
         Err(Ax200MacError::Boot(error.clone()))
     );

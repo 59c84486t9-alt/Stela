@@ -154,11 +154,11 @@ pub struct Run {
     #[arg(long)]
     cpu: Option<String>,
     /// Firmware-visible x86 cores, one thread each. This supplies the host
-    /// inventory; the mount independently selects/qualifies native workers.
+    /// inventory; the mount independently selects/checks native workers.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=64))]
     host_cores: u16,
     /// Firmware-visible SMT threads per core. Native execution independently
-    /// selects one qualified thread per physical core.
+    /// selects one checked thread per physical core.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
     host_threads: u16,
     /// Guest machine memory for QEMU; defaults to 1G, 8G for system mode
@@ -241,8 +241,8 @@ pub struct Run {
     /// mount's hashes and every byte of the images.
     #[arg(long)]
     storage_check: bool,
-    /// Qualify native conventional HDA after ExitBootServices. Playback compares
-    /// actual WAV PCM; duplex checks both DMA engines with a silent null source.
+    /// Check native conventional HDA after ExitBootServices. Playback compares
+    /// WAV PCM; duplex checks both DMA engines with a silent null source.
     #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "duplex",
         conflicts_with_all = ["module", "usb_image", "payload", "storage_check"])]
     audio_check: Option<audio_check::Mode>,
@@ -1330,7 +1330,7 @@ fn native_mmio_observation(serial: &str) -> Option<&str> {
         .then_some(line)
 }
 
-/// Old single-requester output never qualifies the two-context fixture.
+/// Old single-requester output never checks the two-context fixture.
 fn native_isolation_verified(serial: &str) -> bool {
     serial.lines().any(|line| {
         let reason = line

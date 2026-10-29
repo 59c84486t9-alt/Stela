@@ -1,4 +1,4 @@
-//! Borrowed dispatch to the actual placed memory resource, never copied state.
+//! Borrowed dispatch to the placed memory resource, never copied state.
 use super::Prepared;
 use super::t6020;
 use super::t8112;
@@ -99,7 +99,7 @@ impl Resource<'_> {
             Self::T6020(owner) => owner.publication_footprint(),
         }
     }
-    /// A shared publication view requires the actual implemented protocol,
+    /// A shared publication view requires the implemented protocol,
     /// independently of the physically owned bank's extent.
     pub(in crate::machine::apple) fn publication_binding(
         &self,

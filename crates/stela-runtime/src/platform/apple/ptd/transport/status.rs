@@ -1,9 +1,9 @@
 //! Nondestructive IRQ-status snapshots. Original AP `_irqStatus` reads32/64;
 //! original PMP reader file0x28044..0x28204 also uses aligned LDP128. All words
-//! belong to the actual pending bank and are read under one immutable borrow.
+//! belong to the pending bank and are read under one immutable borrow.
 use super::{IRQ_STATUS, Ptd, State};
 
-/// Qualified complete status-register transaction widths in bytes.
+/// Checked complete status-register transaction widths in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
     Word,
@@ -31,7 +31,7 @@ impl Width {
 
 /// Raw little-endian register words from one stable borrow. Narrow widths
 /// zero-extend within this numeric container; no absent register is read or
-/// supplied. This is data, never consumption or execution-retirement authority.
+/// supplied. This is data, never consumption or execution-retirement permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Snapshot {
     pub low: u64,
@@ -41,12 +41,12 @@ pub struct Snapshot {
 impl Ptd {
     /// Original T8112 PMP VA1012e40..1012fa8 reads naturally aligned status
     /// words/doubles/quads covering a range, then shifts and masks its bits.
-    /// This is a nondestructive observation of at most128 actual entries.
+    /// This is a nondestructive observation of at most128 entries.
     pub fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot, &'static str> {
         self.0.borrow().pending_range(start, count)
     }
     /// Snapshot one naturally aligned, complete status span. `offset` is relative
-    /// to the whole PTD device and must select actual status words, never entries,
+    /// to the whole PTD device and must select status words, never entries,
     /// holes, routes or write aliases. Nothing is consumed or acknowledged.
     pub fn interrupt_snapshot(&self, offset: u64, width: Width) -> Result<Snapshot, &'static str> {
         self.0.borrow().interrupt_snapshot(offset, width)

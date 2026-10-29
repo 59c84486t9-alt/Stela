@@ -49,7 +49,7 @@ impl Drop for Model {
     }
 }
 // SAFETY: isolated uniquely owned source-register and peripheral peer, with
-// actual retained backing and independent before/after effect failures.
+// backing and independent before/after effect failures.
 unsafe impl Registers for Model {
     fn identity(&mut self) -> Result<Identity, super::super::Error> {
         let mut h = self.0.borrow_mut();
@@ -162,7 +162,7 @@ fn retained_private_reset_remap_fractional_clock_and_real_pio_compose_before_ret
     ] {
         for clock in [0, 1 << 1 | 2 << 16, 1 << 1 | 3 << 16] {
             let (registers, time, h) = model(device, clock);
-            // SAFETY: same isolated actual source-register owner, stopped before attach.
+            // SAFETY: same isolated source-register owner, stopped before attach.
             let mut spi = match unsafe { Spi::attach(registers, time, 1, 10_000) } {
                 Ok(s) => s,
                 Err((e, _)) => panic!("attach: {e:?}"),
@@ -254,7 +254,7 @@ fn each_preparation_effect_failure_preserves_original_owner_and_unmodified_bound
         for after in [false, true] {
             let (r, t, h) = model(0xa0aa, 0);
             h.borrow_mut().fail = Some((ordinal, after));
-            // SAFETY: same isolated model, injecting uncertain actual register effects.
+            // SAFETY: same isolated model, injecting uncertain register effects.
             let (error, returned) = unsafe { Spi::attach(r, t, 1, 10_000) }.err().unwrap();
             assert!(matches!(error, Error::Platform(_) | Error::Spi(_)));
             assert_eq!(h.borrow().log.len(), ordinal);
@@ -285,7 +285,7 @@ fn unknown_identity_caps_clock_and_bad_native_time_never_program_hardware() {
             h.borrow_mut().regs[0x2fc / 4] = 0;
         }
         let result = if fault == 3 {
-            // SAFETY: same retained peer, unusable actual native timer must be refused.
+            // SAFETY: same peer, unusable native timer must be refused.
             unsafe {
                 Spi::attach(
                     r,
@@ -317,7 +317,7 @@ fn unknown_identity_caps_clock_and_bad_native_time_never_program_hardware() {
 #[test]
 fn every_shutdown_access_failure_and_refused_gate_reset_retains_original_owners() {
     let (r, t, h) = model(0xa0aa, 1 << 1 | 2 << 16);
-    // SAFETY: original isolated retained controller, no prior user.
+    // SAFETY: original isolated kept controller, no prior user.
     let spi = unsafe { Spi::attach(r, t, 1, 10_000) }.ok().unwrap();
     h.borrow_mut().log.clear();
     drop(spi.shutdown().unwrap());
@@ -336,7 +336,7 @@ fn every_shutdown_access_failure_and_refused_gate_reset_retains_original_owners(
     }
     for offset in [0x200, 0x204] {
         let (r, t, h) = model(0xa0aa, 1 << 1 | 2 << 16);
-        // SAFETY: same exact retained source peer and successful preparation.
+        // SAFETY: same source peer and successful preparation.
         let spi = unsafe { Spi::attach(r, t, 1, 10_000) }.ok().unwrap();
         h.borrow_mut().reject = Some(offset);
         assert!(
@@ -361,7 +361,7 @@ fn native_original_function_mapping_prepare_and_acknowledged_retirement() {
             .add(0x200 / 4)
             .write_volatile(1 << 1 | 2 << 16);
     }
-    // SAFETY: exact same original stopped fixture/resource and source clock epoch.
+    // SAFETY: same original stopped fixture/resource and source clock epoch.
     let registers = match unsafe { NativeRegisters::claim(stop_fixture(function), mapping) } {
         Ok(registers) => registers,
         Err((error, _)) => panic!("native claim: {error:?}"),
@@ -373,7 +373,7 @@ fn native_original_function_mapping_prepare_and_acknowledged_retirement() {
     assert_eq!(owner.description.input_clock_hz, 60_000_000);
     assert_eq!(owner.read(0x204), Ok(7));
     assert_eq!(owner.read(0x200), Ok(1 << 31 | 1 << 1 | 2 << 16 | 1));
-    // This concrete RAM mapping qualifies the actual native resource and
+    // This concrete RAM mapping checks the native resource and
     // private reset/remap/clock accesses. RAM has no SSP FIFO/W1C semantics,
     // so no child is published here. Separate independent serial peers execute
     // the full same composed PIO engine instead of inventing RAM-side ACKs.
@@ -415,7 +415,7 @@ fn unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_nativ
                     }
                 );
                 let (r, t, h) = model(device, 0);
-                // SAFETY: every actual source profile drives the same retained
+                // SAFETY: every source profile drives the same kept
                 // private/PXA/card peer rather than gaining credit from its ID.
                 let mut spi = unsafe { Spi::attach(r, t, 1, 10_000) }.ok().unwrap();
                 let mut output = [0xe7];

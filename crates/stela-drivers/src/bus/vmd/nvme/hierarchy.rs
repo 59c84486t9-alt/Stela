@@ -330,7 +330,7 @@ impl Hierarchy {
                 return Err(Error::InvalidResource);
             }
         }
-        // Re-read actual shadow/config bus restrictions, rather than comparing
+        // Re-read shadow/config bus restrictions, rather than comparing
         // two cached copies while hardware routing has changed underneath.
         host.first_bus = 0;
         host.discover()?;
@@ -398,9 +398,9 @@ impl Hierarchy {
         crate::bus::pci::power::Timer::check(&clock).map_err(|_| Error::Clock)?;
         self.recheck(host, false)?;
         // This initial attachment profile checked parent D0 before child
-        // discovery; the retained grant excludes outside PM changes.
+        // discovery; the grant excludes outside PM changes.
         // Power/decode bridge ancestors before touching downstream memory, with
-        // every BM bit still clear. Child config is always actual CFGBAR I/O.
+        // every BM bit still clear. Child config is always CFGBAR I/O.
         let mut order = self.path.clone();
         order.push(self.selected);
         for &index in &order {
@@ -447,7 +447,7 @@ impl Hierarchy {
     }
     pub(super) fn disable<R: Registers>(&mut self, host: &mut Host<R>) -> Result<(), Error> {
         // Do not require an enabled shape: attach can fail before first enable.
-        // Identity/assignment checks still precede every actual containment.
+        // Identity/assignment checks still precede every containment.
         let enabled = parent_command(host)? & BUS_MASTER != 0;
         self.recheck(host, enabled)?;
         let mut order = self.path.clone();

@@ -3,7 +3,7 @@
 // Copyright 1997 -- 2000 Martin Mares <mj@ucw.cz>
 // PCI register/reset sequence adapted from pinned Linux drivers/pci/pci.c and
 // include/uapi/linux/pci_regs.h. See ../../THIRD_PARTY.md.
-//! Supported endpoint FLR, D0 and exact native command/control writes.
+//! Supported endpoint FLR, D0 and native command/control writes.
 use super::{Configuration, Error, Time};
 use crate::bus::pci::{CapabilityError, ConfigSpace, Function, Layout as Extent, msi::MsiError};
 
@@ -265,7 +265,7 @@ impl Layout {
             }
             core::hint::spin_loop();
         }
-        // Revalidate support in this actual epoch immediately before reset.
+        // Revalidate support in this epoch immediately before reset.
         if read32(c, 0)? != self.id || read32(c, self.express + 4)? & FLR_SUPPORTED == 0 {
             return Err(Error::Requirement("same supported actual FLR endpoint"));
         }

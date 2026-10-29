@@ -2,7 +2,7 @@
 //!
 //! Publication, completion and uncertain retirement stay with the vendor
 //! queue. A WB mapping alone does not establish hardware coherence: each
-//! installer must qualify the actual requester and its NoSnoop/ATS policy.
+//! installer must check the requester and its NoSnoop/ATS policy.
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DmaMapping},
     memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},

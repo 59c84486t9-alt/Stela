@@ -2,7 +2,7 @@
 // Copyright(c) 2018-2019 Realtek Corporation
 //! Same-board factory power references, by-rate deltas and all factory sheets.
 //! No source sheet, fallback/default lookup seed or raw OTP selects OS country,
-//! actual radio channel or regulatory/EIRP/TX authority.
+//! radio channel or regulatory/EIRP/TX permission.
 mod data;
 use super::{Board, Profile};
 use alloc::vec::Vec;
@@ -119,9 +119,9 @@ impl GainDelta {
         self.0
     }
 }
-/// Privately prepared source board setup, carried through the genuine initial
+/// Privately prepared source board setup, carried through the initial
 /// PHY states. Tables have all source factory sheets, not a chosen country.
-/// No hardware programming or current per-channel TX qualification occurs here.
+/// No hardware programming or current per-channel TX validation occurs here.
 pub struct FactoryPower {
     profile: Profile,
     rfe: u8,
@@ -150,7 +150,7 @@ impl FactoryPower {
     pub fn limit_sheet_type(&self) -> u8 {
         if self.rfe == 5 { 5 } else { 0 }
     }
-    /// Actual immutable logical board bytes, four 42-byte path records.
+    /// Immutable logical board bytes, four 42-byte path records.
     pub fn raw_gain_calibration(&self) -> &[u8; 168] {
         &self.nvm
     }
@@ -183,7 +183,7 @@ impl FactoryPower {
     }
     /// Factory-sheet delta relative to the source path-A section reference,
     /// as the source board setup normalizes it. This does not select a sheet
-    /// for actual operation or enforce genuine OS/location EIRP constraints.
+    /// for operation or enforce OS/location EIRP constraints.
     pub fn sheet_delta(
         &self,
         sheet: FactorySheet,
@@ -203,7 +203,7 @@ impl FactoryPower {
     }
     // Recover the original signed source datum before its byte-width
     // normalization. This is bijective over the original i8 domain. Live
-    // qualification then subtracts in wide arithmetic, never using a wrapped
+    // validation then subtracts in wide arithmetic, never using a wrapped
     // positive delta as a low absolute ceiling.
     pub(super) fn wide_rate_delta(
         &self,

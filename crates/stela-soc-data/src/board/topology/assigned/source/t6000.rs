@@ -1,6 +1,6 @@
 //! Original T6000 normal-mode membership. Kernel discovery, PMGR constructor
 //! order and native worker order are separate coordinates. This adapter keeps
-//! the first two in original source order; the caller binds the actual BSP to
+//! the first two in original source order; the caller binds the BSP to
 //! its real worker independently. No PS state or interrupt delivery is granted.
 use super::*;
 use stela_contracts::processor::ProcessorTarget;
@@ -8,10 +8,10 @@ use stela_contracts::processor::ProcessorTarget;
 const EVIDENCE: &str = "26A434 mac13j mode1 source-prefix membership; complex file2b16e08/core2b190e4/skip2b19918; no lifecycle, AIC delivery or native execution admission";
 
 impl<'a> BspSource<'a> {
-    /// Selects an original-order prefix of actual source PEs. Every original
+    /// Selects an original-order prefix of source PEs. Every original
     /// complex must remain represented and the selected boot PE must be the
     /// sole prepared running CPU. Later records in the last complex are
-    /// retained in the full graph, but acquire no assigned owner here.
+    /// in the full graph, but acquire no assigned owner here.
     pub fn t6000_assigned(
         original: &'a [u8],
         prepared: &[u8],
@@ -23,7 +23,7 @@ impl<'a> BspSource<'a> {
         if effective_acc_harvesting != 1 {
             return Err("assigned T6000 requires effective normal harvesting1".into());
         }
-        // Reuse only the established identity, retained-schema and complete
+        // Reuse only the established identity, kept-schema and complete
         // original graph checks. That constructor examines original E0 and
         // does not require prepared E0 to be running. Its single-PE metadata
         // is replaced below; no input bytes are changed to pass preflight.
@@ -238,7 +238,7 @@ impl<'a> BspSource<'a> {
                 result.core_address = owner.address;
             }
         }
-        // Capacities bound the retained inventory, not a larger fabricated SKU.
+        // Capacities bound the inventory, not a larger invented SKU.
         // board::cpus has also checked the reviewed kernel20PE/6complex/physical10
         // envelope; the shared resolver checked source-order contiguous Aff0.
         let physical_span = full_clusters

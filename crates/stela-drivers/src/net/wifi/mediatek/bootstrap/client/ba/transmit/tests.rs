@@ -172,7 +172,7 @@ fn canceled_prepare_retains_previous_qos_until_descriptor_txfree_and_unmap() {
         Err(Error::NeedsDrain)
     ));
     f.driver.poll(NOW + 2, &Source, &mut Policy(true)).unwrap();
-    // Actual firmware TX-free without successful unmap still retains context.
+    // Firmware TX-free without successful unmap still keeps context.
     assert!(matches!(
         f.driver.progress_block_ack_stop(),
         Err(Error::NeedsDrain)
@@ -236,7 +236,7 @@ fn queued_operational_cancel_also_drains_original_session_management_packet() {
     body.extend_from_slice(&0u16.to_le_bytes());
     incoming(&f.model, &response(0xd0, &body), None, false);
     f.driver.poll(NOW + 3, &Source, &mut Policy(true)).unwrap();
-    // The management context has no data TID, but it retains this exact BA
+    // The management context has no data TID, but it keeps this exact BA
     // session until successful unmap. It cannot disappear under a disable.
     assert!(
         f.driver

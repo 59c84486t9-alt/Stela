@@ -253,7 +253,7 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
         };
         let mask = 1 << (18 + if self.chip.modern() { 0 } else { self.port });
         // Linux treats missing CFG_DONE as a diagnostic. It is not a
-        // substitute for checking actual NVM contents and PHY transactions.
+        // substitute for checking NVM contents and PHY transactions.
         self.warnings.phy_configuration_timeout |= !self
             .clock
             .wait(100_000, || self.io.read(register) & mask != 0);

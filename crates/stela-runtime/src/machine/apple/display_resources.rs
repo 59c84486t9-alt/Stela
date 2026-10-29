@@ -1,12 +1,12 @@
-//! A display's broad physical windows retain their actual nested devices.
+//! A display's broad physical windows keep their nested devices.
 use super::*;
 
 impl AppleDevices {
     /// Mount all original physical display views in one transaction, leaving
     /// the selected coprocessor and explicitly supplied complete DART groups
-    /// at their existing routes. A declared update subview also retains the
+    /// at their existing routes. A declared update subview also keeps the
     /// canonical Prepared PTD owner, offsets, lifecycle and unknown tail.
-    /// No display register gains fabricated meaning.
+    /// No display register gains invented meaning.
     pub fn add_display_with_darts(
         &mut self,
         regions: &[(&'static str, Range)],
@@ -51,8 +51,8 @@ impl AppleDevices {
             .map(|(_, range)| (range.physical, range.bytes))
             .collect::<Vec<_>>();
         // The PMGR/AP full PTD bank and display's update view name the same
-        // physical resource. Only the actual prepared owner can supply this
-        // subview; a bare overlap or matching name never qualifies it.
+        // physical resource. Only the prepared owner can supply this
+        // subview; a bare overlap or matching name never checks it.
         let mut shared: Vec<stela_contracts::bus::SharedView> = Vec::new();
         if let Some(device) = self.memory_publication.or(self.memory_controller)
             && let Some(owner) = memory_resources::resource_for(&self.bus, device)
@@ -85,7 +85,7 @@ impl AppleDevices {
         // A view strictly inside one larger placed window is a sub-block of
         // that window's owner, which keeps it: J473AP `dispext0` reaches into
         // the PMP's ASC wrapper at +0x3c000 and into the PMGR. The prepared
-        // memory owner's PTD views qualify only above; an equal window is a
+        // memory owner's PTD views check only above; an equal window is a
         // conflicting owner.
         for &(physical, bytes) in &spans {
             let Some((start, end, owner, offset)) = self.bus.window_at(physical) else {

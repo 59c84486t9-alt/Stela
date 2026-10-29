@@ -13,7 +13,7 @@ pub(super) struct Flags {
 
 pub(super) fn flags(clang: &Path, source: &Sources, output: &Path) -> Result<Flags> {
     let makefile = output.join("flags.mk");
-    // Let the retained Makefile and its ordinary shell expand each argument.
+    // Let the Makefile and its ordinary shell expand each argument.
     // No second flag parser or copied vendor build configuration is needed.
     fs::write(
         &makefile,
@@ -49,7 +49,7 @@ pub(super) fn flags(clang: &Path, source: &Sources, output: &Path) -> Result<Fla
         section == Some(2) && !common.is_empty() && !c.is_empty() && !cxx.is_empty(),
         "incomplete NVKMS flags"
     );
-    // Only the probe's object format changes. Full production builds retain
+    // Only the probe's object format changes. Full production builds keep
     // their original machine-model and external return-thunk options.
     common.retain(|flag| !flag.starts_with("--target="));
     Ok(Flags { common, c, cxx })

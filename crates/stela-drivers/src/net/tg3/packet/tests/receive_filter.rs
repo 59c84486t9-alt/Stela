@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual MAC/hash lookup, mapped frames and retained filter lifetimes.
+//! MAC/hash lookup, mapped frames and kept filter lifetimes.
 use super::*;
 use crate::net::tg3::ReceiveFilter;
 
@@ -53,7 +53,7 @@ struct FilterTime {
     waits: Arc<Mutex<Vec<u64>>>,
     fail: Arc<AtomicBool>,
 }
-// SAFETY: explicit isolated timer only, never native calibration authority.
+// SAFETY: explicit isolated timer only, never native calibration permission.
 unsafe impl Delay for FilterTime {
     fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
         Ok(())
@@ -182,7 +182,7 @@ fn real_station_multicast_hash_aliases_and_promiscuous_modes_control_dma_accepta
             .map(|n| Mac([1, 0, 0x5e, 0, 2, n]))
             .find(|mac| physical_hash(&mac.0) == physical_hash(&group.0))
             .unwrap();
-        delivered(&mut f, collision, true); // source hardware hashing is intentionally approximate.
+        delivered(&mut f, collision, true); // source hardware hashing is approximate.
         f.packet
             .set_receive_filter(ReceiveFilter::default())
             .unwrap();

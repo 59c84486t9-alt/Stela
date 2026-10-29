@@ -3,8 +3,8 @@
 use super::*;
 use crate::bus::pci::{Address, Bar, ConfigSpace, Function};
 
-// A separate numeric PCI model wraps the existing actual CORB/RIRB/BDL
-// device, so vendor verbs cannot be replaced by fabricated private State.
+// A separate numeric PCI model wraps the existing CORB/RIRB/BDL
+// device, so vendor verbs cannot be replaced by invented private State.
 struct PciState {
     words: [u32; 64],
     model: Rc<RefCell<Model>>,
@@ -30,7 +30,7 @@ impl PciModel {
                 assert_eq!(model.get(0x80 + index * 0x20, 1) & 2, 0);
             }
             if value & 3 == 3 {
-                // This fixture's actual ALC662-family EAPD pin and PCM pin
+                // This fixture's ALC662-family EAPD pin and PCM pin
                 // must both be quiet before PCI power can change.
                 assert_eq!(model.route_controls[&(0x14, 0xf0c)], 0);
                 assert_eq!(model.route_controls[&(4, 0xf07)], 0);
@@ -51,8 +51,8 @@ impl PciModel {
                 return;
             }
             let old = state.words[0x54 / 4];
-            // PME status is W1C. D3hot->D0 has an actual 10ms readiness
-            // boundary even though this model retains BAR contents.
+            // PME status is W1C. D3hot->D0 has a 10ms readiness
+            // boundary even though this model keeps BAR contents.
             if old & 3 == 3 && value & 3 == 0 {
                 state.d0_ready = now + 10_000;
             }
@@ -177,7 +177,7 @@ fn claim<'a>(
 ) -> NativeController<'a> {
     let model = state.borrow().model.clone();
     let clock = model.borrow().clock.clone();
-    // SAFETY: isolated exclusive symbolic PCI/BAR owner, actual retained
+    // SAFETY: isolated exclusive symbolic PCI/BAR owner, kept
     // model RAM, no firmware/DSP and one matching conventional function.
     let registers = unsafe {
         pci::prepare_with_registers(
@@ -198,7 +198,7 @@ fn claim<'a>(
     }
     .unwrap();
     let config = registers.config();
-    // SAFETY: same retained symbolic function, BAR and unique DMA RAM.
+    // SAFETY: same symbolic function, BAR and unique DMA RAM.
     unsafe { Controller::new(registers, clock, &mut fixture.allocator, config) }.unwrap()
 }
 fn routes<R: Registers, T: Timer>(
@@ -321,7 +321,7 @@ fn failed_quiescence_blocks_pci_power() {
         if failed_stop {
             model.borrow_mut().stream_stop_stuck = true;
         } else {
-            // Lose the actual EAPD-off ACK after the hardware effect.
+            // Lose the EAPD-off ACK after the hardware effect.
             model.borrow_mut().drop_reply_command = Some(0x0147_0c00);
         }
         assert!(c.suspend_pci_d3hot().is_err());

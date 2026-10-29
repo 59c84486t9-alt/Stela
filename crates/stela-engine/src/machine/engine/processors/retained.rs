@@ -1,5 +1,5 @@
-//! Retained CPU participants, independent of a board's PMGR record resolver.
-//! A caller must supply the positively qualified physical domain and exact PE
+//! CPU participants, independent of a board's PMGR record resolver.
+//! A caller must supply the positively checked physical domain and exact PE
 //! membership. Neither record names, byte 2 nor MPIDR core-type bits select it.
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use stela_contracts::{bus::LifecycleState, processor::ProcessorTarget};
@@ -84,7 +84,7 @@ impl PreparedProcessorPower {
     }
 }
 
-/// A checked exclusive lease over the actual participant inventory. While
+/// A checked exclusive lease over the participant inventory. While
 /// native-dispatch preflight runs, no caller can replace its revision or
 /// membership. Dropping it without commit has no effect.
 pub(super) struct Settlement<'a> {
@@ -112,7 +112,7 @@ impl Settlement<'_> {
 }
 
 /// Scheduler-owned participant inventory. No binding means no lifecycle
-/// qualification; existing PEs keep their original execution behavior.
+/// validation; existing PEs keep their original execution behavior.
 #[derive(Debug)]
 pub struct Processors {
     count: usize,
@@ -148,7 +148,7 @@ impl Processors {
         self.count
     }
 
-    /// Whether at least one qualified core/cluster clock or quiesce input
+    /// Whether at least one checked core/cluster clock or quiesce input
     /// inhibits this PE. An IRQ/event cannot bypass that input.
     pub fn paused(&self, pe: usize) -> Option<bool> {
         self.paused.get(pe).copied()
@@ -159,7 +159,7 @@ impl Processors {
     }
 
     /// Validate every binding before changing any domain or PE. The starting
-    /// state is explicit; clock/quiesce retains state even when supply-off
+    /// state is explicit; clock/quiesce keeps state even when supply-off
     /// retention capability is false. Supply loss/reset always refuse here.
     pub fn prepare_bindings(
         &self,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Fresh held board and OS authority for finite6GHz SAE transport only.
+//! Fresh held board and OS permission for finite6GHz SAE transport only.
 //! None of these observations authenticate SAE or permit an association.
 use super::{
     AssociationOwner, Error, HardwareLease, HardwarePolicy, NativeContext, OsLease, OsPolicy, Owner,
@@ -7,8 +7,8 @@ use super::{
 use crate::net::wifi::{frame::Mpdu, station::external::Session};
 use alloc::sync::Arc;
 
-/// Exact source-enabled native initial peer envelope. Public fields are
-/// inspection facts, never a constructor for held authority or native state.
+/// Source-enabled native initial peer envelope. Public fields are
+/// inspection facts, never a constructor for held permission or native state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SixGhzTransportProfile {
     pub interface: [u8; 5],
@@ -31,7 +31,7 @@ pub enum SixGhzAuthenticationUse<'a> {
     Receive(&'a Mpdu),
     Service,
 }
-/// Providers must inspect real retained board CLC/domain/SKU/calibration,
+/// Providers must inspect real kept board CLC/domain/SKU/calibration,
 /// antenna/power/SAR/indoor policy, HE20/OFDM retry/ACK footprint and exact OS
 /// selected BSS/session/security. The OS selects transport, never SAE success.
 #[derive(Debug)]
@@ -51,7 +51,7 @@ impl SixGhzAuthenticationOperation<'_> {
         self.purpose
     }
 }
-/// Equality fences retain original identity, never prior permission.
+/// Equality fences keep original identity, never prior permission.
 #[derive(Clone)]
 pub(crate) struct SixGhzAuthenticationBinding {
     owner: u64,
@@ -115,7 +115,7 @@ impl SixGhzAuthenticationGuard<'_> {
 }
 impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     /// # Safety
-    /// Same genuine requester/policy/board retention and actual revocation,
+    /// Same requester/policy/board retention and revocation,
     /// enforcement, cancellation and independent drain contract as
     /// publish_association. Transport selection is not supplicant completion.
     /// Cleanup of original armed work remains possible without new permission.

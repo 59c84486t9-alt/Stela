@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Actual canonical profile, CI command DMA/ACK/reclaim and owner retention.
+//! Canonical profile, CI command DMA/ACK/reclaim and owner retention.
 use super::*;
 use crate::net::wifi::intel::boot::coexistence::CoexistenceError;
 #[path = "ax200_link_tests.rs"]

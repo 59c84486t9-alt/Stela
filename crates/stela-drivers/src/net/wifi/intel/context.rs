@@ -5,9 +5,9 @@
 //! pcie/iwl-context-info.h. AX210 uses a distinct gen3 context/IML protocol.
 //!
 //! This encoder neither allocates nor publishes DMA. All addresses must come
-//! from retained device-domain mappings, payload copies and RX descriptors must
+//! from kept device-domain mappings, payload copies and RX descriptors must
 //! be visible before the context doorbell, and rings/paging must remain pinned
-//! until their actual hardware completion. A valid layout is not radio readiness.
+//! until their hardware completion. A valid layout is not radio readiness.
 use super::{
     firmware::{Family, SelfLoadPlan},
     identity::Profile,
@@ -58,7 +58,7 @@ pub enum Error {
     AliasedRegion,
 }
 
-/// Retains the donor's *end-exclusive* check: a transfer ending exactly on a
+/// Keeps the donor's *end-exclusive* check: a transfer ending exactly on a
 /// 4GiB boundary is hazardous too. Addition overflow is always refused.
 pub fn crosses_4g_boundary(address: u64, bytes: u16) -> bool {
     address

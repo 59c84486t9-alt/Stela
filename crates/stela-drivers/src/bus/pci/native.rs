@@ -1,7 +1,7 @@
 //! Original owned PCI configuration for a process-local native service.
 //!
 //! This is an access/lifetime boundary, not a host bridge, driver registry or
-//! DMA attachment. Its unsafe producer must retain the real exclusion owner.
+//! DMA attachment. Its unsafe producer must keep the real exclusion owner.
 use super::{
     Address, EcamWindow, Function,
     owned::{ConfigError, ConfigRetention, OwnedConfig},
@@ -25,7 +25,7 @@ pub enum Error {
     AlreadyClaimed,
 }
 
-/// First unsupported configuration transition observed by this actual owner.
+/// First unsupported configuration transition observed by this owner.
 /// A denied write has no config effect but prevents claiming device readiness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeniedWrite {
@@ -34,7 +34,7 @@ pub struct DeniedWrite {
     pub value: u32,
 }
 
-/// Immutable observed identity and actual ECAM routing. This describes one
+/// Immutable observed identity and ECAM routing. This describes one
 /// function; an MCFG window does not identify a Linux host/root bus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Description {
@@ -44,16 +44,16 @@ pub struct Description {
     pub device: u16,
     pub class_revision: u32,
     pub header_type: u8,
-    /// Extent of the actual ECAM mapping, not observed device cfg_size. A
+    /// Extent of the ECAM mapping, not observed device cfg_size. A
     /// conventional function can expose only 256 bytes inside this 4 KiB window;
-    /// the actual PCI setup/capability path must determine device support.
+    /// the PCI setup/capability path must determine device support.
     pub mapped_config_bytes: u16,
 }
 
 pub type Parts = (Function<OwnedConfig>, Box<dyn Any>);
 
 /// Sole original config writer. No config pointer, mutable Function or cloned
-/// mapping escapes. The originating exclusion owner is retained with it.
+/// mapping escapes. The originating exclusion owner is held with it.
 /// Uncertain/drop paths keep both owners permanently; refcount release alone
 /// cannot establish DMA, IRQ, config-worker or C-callback retirement.
 pub struct NativeFunction {
@@ -100,12 +100,12 @@ fn observe(config: &OwnedConfig) -> Result<Description, Error> {
 
 impl NativeFunction {
     /// Preserve the original canonical stopped-requester split. The returned
-    /// binding must be consumed by its actual remapper attachment; it grants
+    /// binding must be consumed by its remapper attachment; it grants
     /// no translation/root takeover or isolation by itself.
     ///
     /// # Safety
     /// As for `attach`; the stopped requester's original engine/IRQ/coherency
-    /// grant remains current until the actual remapper consumes the binding.
+    /// grant remains current until the remapper consumes the binding.
     pub unsafe fn attach_stopped(
         requester: super::requester::StoppedRequester,
         exclusion: Box<dyn Any>,
@@ -124,16 +124,16 @@ impl NativeFunction {
             (function, binding)
         })
     }
-    /// Consume actual owned configuration and its originating exclusion owner.
+    /// Consume owned configuration and its originating exclusion owner.
     /// Rejection returns both original owners, including retirement obligations.
     ///
     /// # Safety
-    /// `exclusion` is the actual retained platform/device owner, keeping this
+    /// `exclusion` is the platform/device owner, keeping this
     /// function's D0/config availability, firmware/config writer exclusion,
     /// root routing, reset, removal and assignment epoch stable. Its lifetime
     /// covers all C callbacks and child resources. No raw/foreign config alias
     /// or reset worker may coexist. All methods and final retirement obey the
-    /// actual mapping's process/CPU context. Observed IDs grant none of this.
+    /// mapping's process/CPU context. Observed IDs grant none of this.
     /// No DMA domain, coherency, engine stop or topology is inferred here.
     pub unsafe fn attach(
         mut function: Function<OwnedConfig>,
@@ -176,9 +176,9 @@ impl NativeFunction {
         result
     }
 
-    /// Pure retained mapping/execution/epoch and latched-failure observation.
+    /// Pure kept mapping/execution/epoch and latched-failure observation.
     /// No config register is read. A stopped device remains current while its
-    /// real mapping and remapper context are retained. Detach is not a stop.
+    /// real mapping and remapper context are held. Detach is not a stop.
     pub fn check_current(&self) -> Result<(), Error> {
         if let Some(error) = self.failure {
             return Err(error);
@@ -225,7 +225,7 @@ impl NativeFunction {
         Error::UnsupportedPolicy
     }
 
-    /// Issue one non-Clone native registration claim from this exact owner.
+    /// Issue one non-Clone native registration claim from this owner.
     /// Dropping the claim cannot prove unregister/child/IRQ/DMA retirement and
     /// does not make another registration available.
     pub fn claim_registration(
@@ -246,7 +246,7 @@ impl NativeFunction {
         }
     }
 
-    /// Revalidate the retained mapping/context and immutable observed identity.
+    /// Revalidate the mapping/context and immutable observed identity.
     /// The first uncertainty is terminal; subsequent calls perform no config IO.
     pub fn check_live(&mut self) -> Result<(), Error> {
         if let Some(error) = self.failure {
@@ -297,7 +297,7 @@ impl NativeFunction {
         Ok(value)
     }
 
-    /// Exact native-width write. An error may follow a real effect; never infer
+    /// Native-width write. An error may follow a real effect; never infer
     /// rollback or retry safety from this result. First uncertainty is latched.
     pub fn write(&mut self, offset: u16, width: u8, value: u32) -> Result<(), Error> {
         Self::validate(offset, width)?;
@@ -305,8 +305,8 @@ impl NativeFunction {
         if self.binding_issued || self.registration_issued {
             // An affirmative finite transition set, rather than an incomplete
             // blacklist of known reset/PM/translation/vendor register offsets.
-            // Unknown writes require actual stop/lease/IRQ/root requalification
-            // authority, which this initial producer deliberately cannot issue.
+            // Unknown writes require stop/lease/IRQ/root requalification
+            // permission, which this initial producer cannot issue.
             if self.bound.is_none() || !matches!((offset, width), (4, 1 | 2) | (5, 1)) {
                 return Err(self.deny(offset, width, value));
             }
@@ -320,7 +320,7 @@ impl NativeFunction {
             };
             // IO/MEM/BME gate changes preserve the same programmed BAR/root
             // and translated coherency policy. INTx stays disabled until the
-            // actual original interrupt owner supplies a supported transition.
+            // original interrupt owner supplies a supported transition.
             if old == u16::MAX {
                 return self.latch(Err(Error::Unavailable));
             }
@@ -347,13 +347,13 @@ impl NativeFunction {
         self.check_live()
     }
 
-    /// Return the exact original owners only after actual complete retirement.
+    /// Return the original owners only after complete retirement.
     /// Failed/uncertain owners cannot be extracted by this boundary.
     ///
     /// # Safety
     /// All C references, config callbacks, device engines, DMA/posted accesses,
     /// IRQ/work and child owners are stopped/drained using their original
-    /// authorities. No callback can reenter or retain this service. The caller
+    /// permissions. No callback can reenter or keep this service. The caller
     /// continues the original epoch/context and mapping retirement obligations.
     #[expect(
         clippy::result_large_err,
@@ -376,18 +376,18 @@ impl NativeFunction {
     }
 }
 
-/// Remapper-backed canonical PCI pairing. This is implemented by the actual
+/// Remapper-backed canonical PCI pairing. This is implemented by the
 /// hardware context owner, never by a caller-selected numeric RID or callback.
 ///
 /// # Safety
-/// `check_configuration` must check a live, unpoisoned actual hardware context
+/// `check_configuration` must check a live, unpoisoned hardware context
 /// and its consumed canonical RequesterBinding against the SAME OwnedConfig
 /// mapping/root epoch. `generation` is the real non-reused context generation.
 /// It must refuse legacy/raw-config claims and uncertain/detached contexts.
 pub unsafe trait PciDmaDomain: DmaDomain {
     fn check_configuration(&self, config: &OwnedConfig) -> Result<u64, DmaError>;
 
-    /// Pure actual retained context/epoch observation for generic native-root
+    /// Pure kept context/epoch observation for generic native-root
     /// guards. No config/MMIO/PIO/DMA access, allocation, waiting, unwinding or
     /// Linux reentry. Refuse unavailable execution/lock/context immediately.
     /// Legacy implementations cannot advertise this stronger contract.
@@ -396,7 +396,7 @@ pub unsafe trait PciDmaDomain: DmaDomain {
     }
 }
 
-/// Unique actual-function registration ownership. Shared config views cannot
+/// Unique function registration ownership. Shared config views cannot
 /// manufacture a second claim. This is neither a Linux root bus/topology nor
 /// a stop/drain/IRQ handoff receipt.
 pub struct RegistrationClaim {
@@ -415,12 +415,12 @@ impl RegistrationClaim {
 }
 
 /// A verified canonical requester/configuration/remapper/source chain. Public
-/// construction checks the actual consumed binding, not just Arc/BDF equality.
-/// The process-local config/exclusion owner is retained through every clone of
-/// this root's function handle; mapping leases retain the real hardware domain.
+/// construction checks the consumed binding, not just Arc/BDF equality.
+/// The process-local config/exclusion owner is held through every clone of
+/// this root's function handle; mapping leases keep the real hardware domain.
 /// Retaining a PageSource grants no coherence, physical placement or cache
-/// policy: its actual returned pins and the domain's mapping/coherence contract
-/// must independently qualify every allocation.
+/// policy: its returned pins and the domain's mapping/coherence contract
+/// must independently check every allocation.
 pub struct NativeDmaRoot {
     function: Rc<RefCell<NativeFunction>>,
     domain: Arc<dyn PciDmaDomain>,

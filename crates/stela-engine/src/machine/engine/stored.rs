@@ -171,7 +171,7 @@ impl Offer {
         &self.block
     }
 
-    /// Retain this genuine same-process emission and its complete private
+    /// Keep this same-process emission and its complete private
     /// source/profile/template binding. No factory accepts portable site tags.
     ///
     /// ```compile_fail

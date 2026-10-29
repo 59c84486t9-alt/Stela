@@ -1,4 +1,4 @@
-//! Control-channel dispatch to an actual router configuration owner.
+//! Control-channel dispatch to a router configuration owner.
 //!
 //! This is the raw control transport, not a capability/register template.
 //! Every configuration access, error, timestamp, notification and reset comes
@@ -15,7 +15,7 @@ pub struct Failure {
     pub port: u8,
     pub code: u8,
 }
-/// Native completion time and the actual outcome of a configuration access.
+/// Native completion time and the outcome of a configuration access.
 /// The backend owns timestamp encoding; it must not substitute scheduled time.
 /// `Ok(None)` means accepted without a reply (for example a router reset that
 /// destroys its return route). It never means successful configuration data.
@@ -35,7 +35,7 @@ pub struct Notification {
 /// Required hardware configuration/reset owner. Outer errors mean an explicit
 /// model requirement, with no committed effects. Inner failures are real wire
 /// errors returned by the router. A successful read must return exactly the
-/// requested word count and an actual upstream adapter. No sparse-zero bank,
+/// requested word count and an upstream adapter. No sparse-zero bank,
 /// always-success writes or implied reset completion is supplied here.
 pub trait Configuration {
     fn read(
@@ -52,10 +52,10 @@ pub trait Configuration {
         now: u64,
     ) -> Result<Completion<u8>, &'static str>;
     fn reset_router(&mut self, route: u64, now: u64) -> Result<Completion<()>, &'static str>;
-    /// PDF3/4 acknowledgments have no automatic response. Validate the actual
+    /// PDF3/4 acknowledgments have no automatic response. Validate the
     /// event/ack lifecycle before applying it or returning a completion time.
     fn acknowledge(&mut self, route: u64, body: &Body, now: u64) -> Result<u32, &'static str>;
-    /// Return only real events, at most `credits` packets. Retain events while
+    /// Return only real events, at most `credits` packets. Keep events while
     /// the AP has no receive descriptors, without acknowledging them early.
     fn notifications(
         &mut self,
@@ -191,7 +191,7 @@ impl Consumer for Router {
             return Err("AP control packet requires an additional router protocol");
         }
         if self.response.is_some() {
-            // One retained control response is the explicit native queue
+            // One kept control response is the explicit native queue
             // budget. Full means no backend effects and no TX completion.
             // Acknowledgments above remain possible to avoid event deadlock.
             return Ok(None);

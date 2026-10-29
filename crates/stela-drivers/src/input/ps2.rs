@@ -3,7 +3,7 @@
 //!
 //! Linux `i8042.c`, `libps2.c`, `atkbd.c` and `psmouse-base.c` are the protocol
 //! references; see [`../THIRD_PARTY.md`](../THIRD_PARTY.md). Vojtech Pavlik
-//! (1999–2002) and Dmitry Torokhov (2003–2004) retain their upstream copyrights.
+//! (1999–2002) and Dmitry Torokhov (2003–2004) keep their upstream copyrights.
 //!
 //! The platform must establish ACPI/PnP presence, remove USB legacy emulation,
 //! mask both IRQ routes and provide exclusive controller ownership. This engine
@@ -121,13 +121,13 @@ pub struct Config {
     pub keyboard: bool,
     pub mouse: bool,
     /// Probe IntelliMouse (200/100/80) then Explorer (200/200/80), each
-    /// followed by an actual GETID. An ordinary ID0 mouse stays three-byte.
+    /// followed by a GETID. An ordinary ID0 mouse stays three-byte.
     /// The separate Explorer4.0 horizontal-mode sequence is not enabled.
     pub wheel: bool,
     pub io_timeout_us: u64,
     pub command_timeout_us: u64,
     pub reset_timeout_us: u64,
-    /// An incomplete keyboard prefix or mouse packet cannot retain framing
+    /// An incomplete keyboard prefix or mouse packet cannot keep framing
     /// indefinitely. Expiration is reported; no invented input is emitted.
     pub packet_timeout_us: u64,
 }
@@ -204,12 +204,12 @@ pub enum Recovery {
 pub struct Error {
     pub kind: ErrorKind,
     pub recovery: Recovery,
-    /// Actual reply or framed-error byte consumed before failure, including a
+    /// Reply or framed-error byte consumed before failure, including a
     /// late ACK. This is an observation, not proof of accepted acknowledgement.
     /// Recovery register accesses cannot replace this original observation.
     pub response: Option<ObservedResponse>,
     pub recovery_error: Option<ErrorKind>,
-    /// Separate actual containment observation, never relabeled as the primary
+    /// Separate containment observation, never relabeled as the primary
     /// reply or copied from it when containment performed no read.
     pub recovery_response: Option<ObservedResponse>,
 }
@@ -270,7 +270,7 @@ pub struct Controller<R = PortIo, T = Clock> {
     observed_response: Option<ObservedResponse>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// Validates configuration and retains the timer origin; call `initialize`
+    /// Validates configuration and keeps the timer origin; call `initialize`
     /// to touch device hardware. The same stable clock/context must survive the
     /// owner, with its origin observed within the timer's full counter period.
     pub fn new(registers: R, timer: T, config: Config) -> Result<Self, Error> {
@@ -321,10 +321,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn discarded_before_start(&self) -> u64 {
         self.discarded_before_start
     }
-    /// Actual queued port/data/receipt-time observations, including bytes kept
+    /// Queued port/data/receipt-time observations, including bytes kept
     /// during failed commands and containment. Reading this does not consume
-    /// input or grant authority to resume a faulted controller. Receipt times
-    /// are microseconds from this owner's retained clock origin.
+    /// input or grant permission to resume a faulted controller. Receipt times
+    /// are microseconds from this owner's clock origin.
     pub fn retained_bytes(&self) -> impl Iterator<Item = (Port, u8, u64)> + '_ {
         self.pending
             .iter()
@@ -397,10 +397,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         } else {
             Port::Mouse
         };
-        // A sibling byte needs queue space. Do not consume it merely to learn
+        // A sibling byte needs queue space. Do not consume it to learn
         // the queue is full, including during subsequent fault containment.
         // Expected replies have their own observation slot; framed errors also
-        // retain their consumed byte with the first failure below.
+        // keep their consumed byte with the first failure below.
         if self.pending.len() >= QUEUE_LIMIT && expected != Some(port) && status & FRAME_ERRORS == 0
         {
             return Err(ErrorKind::QueueFull);
@@ -553,7 +553,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             && self.input_known
             && (self.synaptics.is_some() || self.elantech.is_some())
         {
-            // Sibling commands can retain a mouse prefix. Establish its actual
+            // Sibling commands can keep a mouse prefix. Establish its
             // position before distinguishing reply FA from coordinate data FA.
             while let Some(byte) = self.pending.pop_front() {
                 self.decode(byte)?;
@@ -726,7 +726,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     fn collect_output(&mut self) -> Result<(), ErrorKind> {
-        // Controller replies share the keyboard data lane. Retain all older
+        // Controller replies share the keyboard data lane. Keep all older
         // input before asking for CTR; otherwise a key byte could be mistaken
         // for a successful controller acknowledgement.
         for _ in 0..QUEUE_LIMIT {
@@ -780,7 +780,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             _ => Err(ErrorKind::NotInitialized.into()),
         }
     }
-    /// Set Scroll/Num/Caps LEDs (bits 0/1/2). Interleaved input is retained.
+    /// Set Scroll/Num/Caps LEDs (bits 0/1/2). Interleaved input is held.
     pub fn set_leds(&mut self, leds: u8) -> Result<(), Error> {
         self.ready()?;
         if leds & !7 != 0 {
@@ -829,7 +829,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     /// Decode at most 64 hardware bytes per poll. Prefixes/partial packets stay
-    /// with their actual port. On error, already decoded input remains available
+    /// with their port. On error, already decoded input remains available
     /// through `drain_events`; it is never silently discarded with the error.
     pub fn poll(&mut self) -> Result<Vec<Input>, Error> {
         self.ready()?;
@@ -862,7 +862,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 return Err(self.fail(kind));
             }
         }
-        // A silent device must not retain an incomplete prefix indefinitely.
+        // A silent device must not keep an incomplete prefix indefinitely.
         // Do not expire a frame while complete bytes remain queued to decode.
         if self.pending.is_empty()
             && self.status().map_err(|kind| self.fail(kind))? & OUTPUT_FULL == 0

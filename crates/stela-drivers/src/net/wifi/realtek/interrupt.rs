@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
-//! Source RTL8822C interrupt masks and actual W1C cause observations.
+//! Source RTL8822C interrupt masks and W1C cause observations.
 //! This device block does not allocate vectors or manufacture an MSI route,
 //! deferred work, packet completion, firmware ACK or DMA-stop acknowledgement.
 use super::{
@@ -33,7 +33,7 @@ pub enum State {
     RxMasked,
     Quarantined,
 }
-/// Actual raw HISR values and only this source's masked W1C causes. Unowned
+/// Raw HISR values and only this source's masked W1C causes. Unowned
 /// latched bits remain untouched. None of these flags proves a DMA/radio/FW ACK.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Causes {
@@ -50,8 +50,8 @@ impl Causes {
     pub fn h2c_dma(self) -> bool {
         self.owned[2] & (1 << 16) != 0
     }
-    /// Actual queue interrupt cause only; inspect that queue's live hardware
-    /// consumer before releasing DMA and its actual report before air status.
+    /// Queue interrupt cause only; inspect that queue's live hardware
+    /// consumer before releasing DMA and its report before air status.
     pub fn tx(self, queue: super::transmit::Queue) -> bool {
         use super::transmit::Queue;
         let bit = match queue {
@@ -72,7 +72,7 @@ impl Causes {
 /// CPU-affine exclusive control I/O; canonical native IRQ routing and worker
 /// ownership remain outside this device register block. No concurrent calls,
 /// reset or direct HIMR/HISR access may bypass this owner. Uncertain Drop keeps
-/// the actual control/queue/BAR owner through Io::quarantine.
+/// the control/queue/BAR owner through Io::quarantine.
 pub struct Controller<I: Io> {
     io: Option<I>,
     state: State,
@@ -127,10 +127,10 @@ impl<I: Io> Controller<I> {
         }
         self.mask()
     }
-    /// Mask the actual device before W1C, as required by the source MSI edge
-    /// sequence. The actual platform EOI follows the device handler; this
+    /// Mask the device before W1C, as required by the source MSI edge
+    /// sequence. The platform EOI follows the device handler; this
     /// bounded register phase allocates no work or memory. Deferred work must
-    /// remain retained by the canonical caller before it enables the route.
+    /// remain held by the canonical caller before it enables the route.
     pub fn capture(&mut self) -> Result<Causes, Error> {
         if self.state == State::Quarantined {
             return Err(Error::Quarantined);
@@ -149,14 +149,14 @@ impl<I: Io> Controller<I> {
         self.state = State::Disabled;
         Ok(Causes { raw, owned })
     }
-    /// Enable the actual source masks, optionally leaving RX masked while the
-    /// actual retained RX worker drains its ring. No cached IRQ/packet count
+    /// Enable the source masks, optionally leaving RX masked while the
+    /// RX worker drains its ring. No cached IRQ/packet count
     /// is used to decide whether receive work has finished.
     /// # Safety
-    /// Exact requester has a live canonical native IRQ registration and an
-    /// actually retained handler/deferred worker. Full source HCI/MAC/PHY/start
+    /// Requester has a live canonical native IRQ registration and a
+    /// handler/deferred worker. Full source HCI/MAC/PHY/start
     /// prerequisites are satisfied. Caller serializes this transition with
-    /// actual IRQ/callback/deferred/RX/reset retirement, including local IRQ
+    /// IRQ/callback/deferred/RX/reset retirement, including local IRQ
     /// exclusion where required; `rx_pending` describes the real RX worker.
     pub unsafe fn enable(&mut self, rx_pending: bool) -> Result<(), Error> {
         if self.state != State::Disabled {
@@ -181,9 +181,9 @@ impl<I: Io> Controller<I> {
         };
         Ok(())
     }
-    /// Recover the retained raw control owner for actual stopped teardown.
+    /// Recover the raw control owner for stopped teardown.
     /// # Safety
-    /// Actual independently acknowledged requester DMA/MSI stop and drained
+    /// Independently acknowledged requester DMA/MSI stop and drained
     /// canonical registration/callback/deferred workers; HIMR disable, W1C,
     /// equal indices or this method do not establish any of those guarantees.
     pub unsafe fn into_stopped(mut self) -> Result<I, Error> {
@@ -276,7 +276,7 @@ mod tests {
         }
     }
     struct Registers(Arc<Mutex<Model>>);
-    // SAFETY: serialized W1C/mask register model with explicit retained-owner
+    // SAFETY: serialized W1C/mask register model with explicit kept-owner
     // quarantine; no physical IRQ route, DMA stop or deferred work is claimed.
     unsafe impl Io for Registers {
         fn profile(&self) -> Profile {

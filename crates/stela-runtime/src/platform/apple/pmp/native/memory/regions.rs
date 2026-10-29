@@ -1,4 +1,4 @@
-//! Source-native copy of the actual AP table, not authority to map its rows.
+//! Source-native copy of the AP table, not permission to map its rows.
 use super::wire::TABLE_BYTES;
 use alloc::vec::Vec;
 

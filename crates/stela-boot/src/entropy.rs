@@ -1,14 +1,14 @@
 //! UEFI RNG discovery and capture into the shared finite entropy pool.
 pub use stela_boot_core::entropy::{Algorithm, Pool};
 
-/// Read actual advertised UEFI RNG output while boot services are active.
+/// Read advertised UEFI RNG output while boot services are active.
 /// The parent owns protocol discovery/selection and its source provenance;
 /// the borrowed protocol must be closed before ExitBootServices. There are
 /// no post-EBS protocol calls, implicit algorithm default or CPU fallback.
 ///
 /// UEFI2.11 37.5 requires exact output length and forbids reuse across calls.
 /// Recognized SP800-90 256-bit DRBGs or the explicit raw source are accepted.
-/// Other advertised algorithms require separate qualification. Protocol
+/// Other advertised algorithms require separate validation. Protocol
 /// failure, including NOT_READY, aborts/clears the entire finite capture.
 pub fn prepare<const BYTES: usize, const REQUESTS: usize>(
     rng: &mut uefi::proto::rng::Rng,
@@ -47,8 +47,8 @@ pub fn prepare<const BYTES: usize, const REQUESTS: usize>(
     })
 }
 
-/// Retain one private ChaCha20 seed before firmware services end. Firmware
-/// RNG is preferred; qualified architectural hardware randomness is the
+/// Keep one private ChaCha20 seed before firmware services end. Firmware
+/// RNG is preferred; checked architectural hardware randomness is the
 /// fallback. Failed sources never publish partial seed material.
 pub fn retain_seed() -> Result<(crate::handoff::Region, &'static str), &'static str> {
     let mut seed = [0; 32];
@@ -125,7 +125,7 @@ fn hardware_seed(seed: &mut [u8; 32]) -> Result<&'static str, &'static str> {
 fn hardware_word(seed: bool) -> Option<u64> {
     for _ in 0..128 {
         let (value, ready): (u64, u8);
-        // SAFETY: CPUID qualified this instruction before entry. It changes
+        // SAFETY: CPUID checked this instruction before entry. It changes
         // only its destination and flags, and executes before native takeover.
         unsafe {
             if seed {

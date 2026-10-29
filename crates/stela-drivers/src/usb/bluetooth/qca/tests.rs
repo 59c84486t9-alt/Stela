@@ -374,7 +374,7 @@ fn exact_source_board_gf_and_custom_directory_rules_are_preserved() {
         assert_eq!(v.rampatch_name(), patch);
         assert_eq!(v.nvm_name(), nvm);
     }
-    // NVM selection must use the actual post-patch OTP/RAM/board response.
+    // NVM selection must use the post-patch OTP/RAM/board response.
     let before = version(0x00130201, 1, 0, 0, 0, 0);
     let after = version(0x00130201, 2, 0x400c1211, 3, 10, 0x8000);
     let (mut hci, catalog, _) = model(before, after, 0, 1, 1);

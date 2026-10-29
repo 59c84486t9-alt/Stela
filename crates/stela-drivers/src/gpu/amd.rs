@@ -1,4 +1,4 @@
-//! Native AMD storage and command interfaces. Actual initialized-device,
+//! Native AMD storage and command interfaces. Initialized-device,
 //! reservation, mapping and completion services remain the caller's owners.
 #[cfg(feature = "amd-commands")]
 mod commands;

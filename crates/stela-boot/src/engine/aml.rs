@@ -3,8 +3,8 @@
 //! through the engine's own OSL services: its heap, the TSC, port I/O, PCI
 //! configuration space and the loader root's mappings.
 //!
-//! The boot retains its EC binding before namespace initialization. When the
-//! captured SCI resources qualify, a native interrupt masks the owned line
+//! The boot keeps its EC binding before namespace initialization. When the
+//! captured SCI resources check, a native interrupt masks the owned line
 //! and the BSP later dispatches ACPICA and its FIFO work under RestoreRoot.
 //! Power-device notifications coalesce into refresh work on that same BSP.
 //!
@@ -74,7 +74,7 @@ enum Gap {
 }
 
 struct Provider {
-    /// The one actual BSP executor; Session callbacks never infer a task from IF.
+    /// The one BSP executor; Session callbacks never infer a task from IF.
     executor: &'static KernelWork,
     /// The loader root, which takes the identity mappings of device pages.
     root: u64,
@@ -376,7 +376,7 @@ unsafe extern "C" fn wait_semaphore(
             break;
         }
         if let Ok(platform) = crate::native_irq::NativePlatform::current() {
-            // SAFETY: current BSP and provider root are retained through this
+            // SAFETY: current BSP and provider root are held through this
             // wait; only the small native IRQ handlers run in this window.
             unsafe { stela_drivers::bus::irq::Platform::interrupt_window(&platform) };
             provider.dispatch_sci(false);
@@ -410,7 +410,7 @@ unsafe extern "C" fn install_interrupt(
     handler: Interrupt,
     argument: *mut c_void,
 ) -> Status {
-    // SAFETY: this live provider is retained by the active ACPICA session.
+    // SAFETY: this live provider is held by the active ACPICA session.
     let provider = unsafe { provider(context) };
     let Some(prepared) = provider.prepared_sci.borrow_mut().take() else {
         return AE_SUPPORT;
@@ -431,7 +431,7 @@ unsafe extern "C" fn install_interrupt(
     }
 }
 unsafe extern "C" fn remove_interrupt(context: *mut c_void, _: u32, _: Interrupt) -> Status {
-    // SAFETY: the session's retained provider; process context at termination.
+    // SAFETY: the session's provider; process context at termination.
     let provider = unsafe { provider(context) };
     let mut slot = provider.sci.borrow_mut();
     match slot.as_mut() {
@@ -446,9 +446,9 @@ unsafe extern "C" fn remove_interrupt(context: *mut c_void, _: u32, _: Interrupt
     }
 }
 
-/// ACPICA mutex ownership uses the actual retained continuation identity.
+/// ACPICA mutex ownership uses the continuation identity.
 unsafe extern "C" fn thread_id(context: *mut c_void) -> u64 {
-    // SAFETY: this Session retains its provider and real affine work owner.
+    // SAFETY: this Session keeps its provider and real affine work owner.
     let provider = unsafe { provider(context) };
     provider
         .executor
@@ -754,7 +754,7 @@ unsafe extern "C" fn quiesce(context: *mut c_void) -> Status {
 /// reserved firmware-role contract before C removes any callback. The current
 /// legacy constructor refuses; it does not acquire permission from an empty FIFO.
 unsafe extern "C" fn preflight_wait_events(context: *mut c_void) -> Status {
-    // SAFETY: Session retains this provider and its actual affine executor.
+    // SAFETY: Session keeps this provider and its affine executor.
     match unsafe { provider(context) }.executor.check_firmware_wait() {
         Ok(()) => AE_OK,
         Err(_) => AE_SUPPORT,
@@ -821,7 +821,7 @@ impl HostAcpi {
             }
         }
     }
-    /// Called only by the actual owned foreground callback under its retained
+    /// Called only by the owned foreground callback under its kept
     /// loader-root/host-driver guard. It must never acquire that guard again.
     fn start_entered(
         rsdp: u64,
@@ -835,10 +835,10 @@ impl HostAcpi {
             output::arguments(format_args!("ACPI firmware AML unavailable: no RSDP\n"));
             return None;
         }
-        // An SCI route alone does not qualify ACPICA hardware mode. The draft
+        // An SCI route alone does not check ACPICA hardware mode. The draft
         // provider still lacks real role-specific continuations/thread IDs and
         // exact resource-owned map/unmap leases. Keep namespace-only operation
-        // until that complete provider is admitted by the actual work owner.
+        // until that complete provider is admitted by the work owner.
         let capabilities = 0;
         let provider = Box::new(Provider {
             executor,
@@ -945,7 +945,7 @@ impl HostAcpi {
             deferred_failed: AtomicBool::new(false),
         }));
         if capabilities != 0 {
-            // SAFETY: the boot retains the provider's exclusive EC resources
+            // SAFETY: the boot keeps the provider's exclusive EC resources
             // before namespace initialization and through this permanent owner.
             let installation =
                 unsafe { stela_drivers::probe::install_embedded_controller(&host.session) };
@@ -1041,10 +1041,10 @@ impl HostAcpi {
     }
 
     pub(super) fn poll(&'static self) {
-        // SAFETY: this permanent provider is retained by the leaked Session.
+        // SAFETY: this permanent provider is held by the leaked Session.
         let provider = unsafe { &*self.provider };
         // These atomic observations do not borrow AML/provider mutable state
-        // while an uncertain continuation might remain retained in quarantine.
+        // while an uncertain continuation might remain held in quarantine.
         if self.deferred_failed.load(Ordering::Acquire)
             || (!self.hardware_active()
                 && !provider.queued.load(Ordering::Acquire)
@@ -1064,8 +1064,8 @@ impl HostAcpi {
         }
     }
     fn poll_entered(&self) {
-        // SAFETY: the actual work dispatcher owns the loader root and driver
-        // exclusion across this continuation; the Session retains the provider.
+        // SAFETY: the work dispatcher owns the loader root and driver
+        // exclusion across this continuation; the Session keeps the provider.
         let provider = unsafe { &*self.provider };
         provider.dispatch_sci(true);
         if EC_EVENT.swap(false, Ordering::AcqRel) || self.ec_pending.get() {
@@ -1145,7 +1145,7 @@ impl HostAcpi {
     /// firmware's `\_S5` evaluates, after `\_PTS(5)` and `\_SST`; `None`
     /// without S5. A failed `\_PTS` is reported, and S5 follows all the same.
     pub fn prepare_soft_off(&'static self) -> Option<(u8, u8)> {
-        // SAFETY: this permanent provider is retained by the leaked Session.
+        // SAFETY: this permanent provider is held by the leaked Session.
         let provider = unsafe { &*self.provider };
         match provider
             .executor

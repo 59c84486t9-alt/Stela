@@ -112,7 +112,7 @@ fn xts<C: BlockEncrypt<BlockSize = aes::cipher::consts::U16> + BlockDecrypt + Ke
             }
         }
     }
-    // Decryption batches can retain plaintext and key-derived tweak masks.
+    // Decryption batches can keep plaintext and key-derived tweak masks.
     // Erase them before releasing this invocation's stack frame.
     for block in &mut blocks {
         block.as_mut_slice().zeroize();

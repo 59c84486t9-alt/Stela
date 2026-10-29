@@ -14,7 +14,7 @@ impl Drop for Os {
         self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: this test-only provider belongs to one retained model epoch. Its
+// SAFETY: this test-only provider belongs to one model epoch. Its
 // pinned country and shared revocation flag are the explicit selection in that
 // model; the provider never escapes into a physical-device or OS service.
 unsafe impl CountryIo for Os {
@@ -61,7 +61,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
         let mut scan = mcc
             .begin_scan_configuration()
             .unwrap_or_else(|_| panic!("scan"));
-        // SAFETY: Source supplies exclusive aligned model RAM for the retained
+        // SAFETY: Source supplies exclusive aligned model RAM for the kept
         // requester/domain; the fixture has no asynchronous device or IRQ user.
         unsafe { scan.advance(&source) }.unwrap();
         complete(
@@ -79,19 +79,19 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
                 &[],
             ),
         );
-        // SAFETY: the same owners retain the initialized model mappings; the
+        // SAFETY: the same owners keep the initialized model mappings; the
         // synchronous completion above finished before this continuation.
         unsafe { scan.advance(&source) }.unwrap();
         sequence += 1;
         entry += 1;
-        // Genuine modeled absence of all optional board tables: no source
+        // Modeled absence of all optional board tables: no source
         // programming is required, and no copied board-policy receipt is used.
         scan.mcc.setup.lari.bios.io.board_case = Some(1);
         let mut board = scan
             .begin_board_policy()
             .unwrap_or_else(|_| panic!("board"));
         assert_eq!(
-            // SAFETY: the board owner retains the same exclusive fixture RAM
+            // SAFETY: the board owner keeps the same exclusive fixture RAM
             // and domain; optional-policy absence creates no competing user.
             unsafe { board.advance(&source) }.unwrap(),
             Ax200BoardPolicyPhase::CountryRequired
@@ -102,7 +102,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
             unavailable: case == 1,
         };
         // SAFETY: this Os was created for this model epoch and its pinned test
-        // country; it is retained by the same board owner, never a real device.
+        // country; it is held by the same board owner, never a real device.
         let mut country = unsafe { board.begin_country(os) }.unwrap_or_else(|_| panic!("country"));
         let bell = state.lock().unwrap().registers[&0x460];
         if case == 0 {
@@ -115,7 +115,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
             let mut r = domain.records.lock().unwrap();
             r.sync_fail = Some(r.syncs + 2);
         }
-        // SAFETY: the retained country/board domain owns all model mappings;
+        // SAFETY: the country/board domain owns all model mappings;
         // Source remains exclusive and no asynchronous device can access them.
         let result = unsafe { country.advance(&source) };
         if case == 1 || case == 2 {
@@ -186,7 +186,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
                 options.clock.delay(20);
                 assert_eq!(
                     // SAFETY: only the model clock changed; requester, source
-                    // and live DMA ownership remain retained by country.
+                    // and live DMA ownership remain held by country.
                     unsafe { country.advance(&source) },
                     Err(Ax200CountryError::Deadline)
                 );
@@ -218,7 +218,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
                     options.clock.delay(20);
                     assert_eq!(
                         // SAFETY: the synchronous reply is published and the
-                        // same model source/domain retain all pending DMA.
+                        // same model source/domain keep all pending DMA.
                         unsafe { country.advance(&source) },
                         Err(Ax200CountryError::Deadline)
                     );
@@ -226,7 +226,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
                 } else {
                     assert!(matches!(
                         // SAFETY: the injected CPU-sync refusal leaves model
-                        // mappings retained; no device or worker runs in parallel.
+                        // mappings kept; no device or worker runs in parallel.
                         unsafe { country.advance(&source) },
                         Err(Ax200CountryError::Boot(Error::CommandReclaim(_)))
                     ));
@@ -242,7 +242,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
                             assert_eq!(country.channels().len(), 51);
                             revoked.store(true, Ordering::Relaxed);
                             assert_eq!(
-                                // SAFETY: only the retained model Os was revoked;
+                                // SAFETY: only the model Os was revoked;
                                 // Source and DMA ownership are unchanged.
                                 unsafe { country.advance(&source) },
                                 Err(Ax200CountryError::Revoked)
@@ -266,7 +266,7 @@ fn country_application_preserves_dma_lifetimes_and_refusals() {
         }
         let first = country.first_error().unwrap().clone();
         let operations = state.lock().unwrap().ops.len();
-        // SAFETY: the same retained no-device model owners remain live while
+        // SAFETY: the same no-device model owners remain live while
         // reentering the latched failure; Source still supplies exclusive RAM.
         assert_eq!(unsafe { country.advance(&source) }, Err(first));
         assert_eq!(state.lock().unwrap().ops.len(), operations);

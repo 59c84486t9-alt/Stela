@@ -1,4 +1,4 @@
-//! Whole-operation deadlines and opaque timer markers around the actual host.
+//! Whole-operation deadlines and opaque timer markers around the host.
 use super::*;
 
 struct OpaqueTime(Rc<Cell<u64>>);

@@ -1,4 +1,4 @@
-//! Owned copies of the actual UEFI resource settings and final memory map.
+//! Owned copies of the UEFI resource settings and final memory map.
 //! No firmware protocol, borrowed descriptor buffer or allocator crosses EBS.
 use super::*;
 use crate::{handoff::Region, tables::Frames};
@@ -24,7 +24,7 @@ pub(super) struct Memory {
     pub kind: u32,
     pub attributes: u64,
 }
-/// All fields are initialized by the actual loader. Kept in reserved
+/// All fields are initialized by the loader. Kept in reserved
 /// LOADER_DATA pages, mapped by the native physmap and never offered to guests.
 #[repr(C)]
 pub(crate) struct Wire {
@@ -92,7 +92,7 @@ impl Wire {
                     .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)
             })
     }
-    /// Classification of this actual sealed final map; not an allocation grant.
+    /// Classification of this sealed final map; not an allocation grant.
     pub(crate) fn loader_ram(&self, physical: u64, bytes: u64) -> bool {
         physical.is_multiple_of(PAGE)
             && bytes != 0
@@ -116,7 +116,7 @@ pub(crate) struct Prepared {
     region: Region,
 }
 impl Prepared {
-    /// Copy genuine root settings without disconnecting the firmware's bus
+    /// Copy root settings without disconnecting the firmware's bus
     /// driver. A missing/unsupported descriptor set leaves MMIO unavailable.
     pub(crate) fn capture() -> Result<Self, &'static str> {
         let bytes = size_of::<Wire>().next_multiple_of(PAGE as usize);
@@ -136,7 +136,7 @@ impl Prepared {
         // protocol installation while borrowed; MP capture already joined.
         // Exclusive opening would stop the firmware PCI bus driver and can
         // destroy its children/assignments, so it is not an inventory read.
-        // SAFETY: actual application-level BSP entry, before EBS, with joined
+        // SAFETY: application-level BSP entry, before EBS, with joined
         // MP callbacks; the matching guard restores TPL on every exit path.
         let tpl = unsafe { boot::raise_tpl(boot::Tpl::NOTIFY) };
         for (bridge, handle) in handles.into_iter().enumerate() {
@@ -185,7 +185,7 @@ impl Prepared {
         }
         drop(tpl);
         let rsdp = crate::storage::rsdp().ok_or("MMIO ACPI root unavailable")?;
-        // SAFETY: the actual UEFI configuration table points to retained readable
+        // SAFETY: the UEFI configuration table points to kept readable
         // firmware tables before EBS. find validates RSDP/root/SDT checksums.
         for (signature, destination, length) in [
             (b"APIC", &mut wire.madt[..], &mut wire.madt_bytes),
@@ -204,7 +204,7 @@ impl Prepared {
         // HPET is optional for other clocks. Absence, invalid checksum or
         // unsupported original length leaves the typed HPET factory unavailable;
         // no default address/capability is reconstructed.
-        // SAFETY: same actual pre-EBS readable firmware ACPI root as above.
+        // SAFETY: same pre-EBS readable firmware ACPI root as above.
         if let Ok(source) = unsafe { acpi::find(rsdp, b"HPET") }
             && source.len() == wire.hpet.len()
         {
@@ -261,7 +261,7 @@ impl Prepared {
         wire.levels = crate::layout::top_level() + 1;
         Ok(())
     }
-    /// Seal from the actual successful ExitBootServices map, after every owned
+    /// Seal from the successful ExitBootServices map, after every owned
     /// allocation. On overflow magic stays absent and post-EBS admission refuses.
     pub(crate) fn finish(&self, map: &impl MemoryMap) -> Result<(), &'static str> {
         // SAFETY: sole loader writer, not published to the engine until sealed.

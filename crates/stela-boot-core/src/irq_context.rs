@@ -30,7 +30,7 @@ impl Context {
         }
     }
     /// # Safety
-    /// `cpu` is the actual owning BSP check for this real device ISR, with
+    /// `cpu` is the owning BSP check for this real device ISR, with
     /// local IRQs disabled. `interrupted` is copied from the unchanged CPU
     /// entry frame, never inferred from the ISR's own IST stack or caller data.
     pub unsafe fn enter(
@@ -67,7 +67,7 @@ impl Context {
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
         // Same checked BSP/disabled-IRQ call chain; nested entries must have
-        // completed before this actual dispatch continuation resumes.
+        // completed before this dispatch continuation resumes.
         self.owner
             .interrupted
             .store(self.interrupted, Ordering::Relaxed);

@@ -11,7 +11,7 @@ pub struct SepDevice {
     pub iommu: usize,
     /// Explicit selection of the sole original TRAD, independent of SID count.
     pub instance: usize,
-    /// Actual iommu-parent owner and OS context, before native incoming remap.
+    /// Iommu-parent owner and OS context, before native incoming remap.
     pub mapper: u32,
     pub mapper_context: u32,
     pub stream: u32,

@@ -3,7 +3,7 @@
 use super::{Address, Error, ErrorKind, Interrupt, RegisterAccess, State, Timer};
 use crate::bus::smbus::{self, Block, I2cBlockBus, Transaction};
 
-/// The complete Gen3 lifecycle and physical reports, backed by actual SMBus
+/// The complete Gen3 lifecycle and physical reports, backed by SMBus
 /// transactions. Boot status/security operations require real fixed I2C blocks.
 pub type Device<B, I, T> = super::Device<Registers<B>, I, T>;
 
@@ -77,7 +77,7 @@ impl<B: I2cBlockBus> RegisterAccess for Registers<B> {
                 Ok(()) => Ok(()),
                 Err(error) if Self::recovered_probe(error) => {
                     // Pinned cyapa_get_state's odd-address ENXIO/ETIMEDOUT path.
-                    // With PEC off, I801 DEV_ERR maps to ENXIO; retain the original
+                    // With PEC off, I801 DEV_ERR maps to ENXIO; keep the original
                     // probe outcome before requiring a real exact-count reply.
                     self.probe_notice = Some(error);
                     if !allow_fallback() {
@@ -170,8 +170,8 @@ impl<B: I2cBlockBus, I: Interrupt, T: Timer> super::Device<Registers<B>, I, T> {
     pub fn take_probe_notice(&mut self) -> Option<smbus::Error> {
         self.bus.probe_notice.take()
     }
-    /// Most recent complete actual count-bearing response, including malformed
-    /// counts/bodies. A failed transfer does not fabricate a replacement block.
+    /// Most recent complete count-bearing response, including malformed
+    /// counts/bodies. A failed transfer does not invent a replacement block.
     pub fn take_last_block(&mut self) -> Option<Block> {
         self.bus.last_block.take()
     }

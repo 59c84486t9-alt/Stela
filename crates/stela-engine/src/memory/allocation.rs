@@ -56,7 +56,7 @@ pub struct AllocateDataRequest {
     pub inheritance: DataInheritance,
 }
 
-/// Immutable allocation metadata; `OwnedMemory` retains the mapping lifetime.
+/// Immutable allocation metadata; `OwnedMemory` keeps the mapping lifetime.
 /// Current permissions are represented by its possibly split `MemoryRegion`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DataAllocation {
@@ -208,7 +208,7 @@ impl OwnedMemory {
             .try_reserve(1)
             .map_err(|_| E::MetadataAllocation)?;
         let mapping = map_anonymous(request.placement, mapped_bytes, alignment, self.page_bytes)?;
-        // Create the retained owner before final protection/publication. Failure
+        // Create the owner before final protection/publication. Failure
         // or rejection drops only this unpublished native allocation.
         let storage = mapping.into_storage();
         let allocation = DataAllocation {

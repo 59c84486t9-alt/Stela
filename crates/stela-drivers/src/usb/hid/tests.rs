@@ -236,7 +236,7 @@ fn real_descriptor_fetch_initialization_input_control_and_restart() {
             .iter()
             .any(|(request, _)| request[1] == SET_PROTOCOL)
     );
-    assert!(input.poll_hid().reports.is_empty()); // Actual queued TD remains NAKed.
+    assert!(input.poll_hid().reports.is_empty()); // Queued TD remains NAKed.
     let ticket = input.queued;
     assert!(ticket.is_some());
     assert!(input.poll_hid().reports.is_empty());

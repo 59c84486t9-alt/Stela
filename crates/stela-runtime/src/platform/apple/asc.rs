@@ -40,9 +40,9 @@
 //! - a load of an empty outbox is refused (the hardware underflows, which
 //!   `AppleA7IOP::_outboxUnderflowCheck` treats as an error);
 //! - clearing RUN halts native firmware rather than resetting it. A firmware
-//!   must admit retained stop/resume explicitly; unsupported reset and
+//!   must admit kept stop/resume explicitly; unsupported reset and
 //!   power-loss flows still refuse. Mailbox controls, staged payload and
-//!   queued responses survive a retained halt.
+//!   queued responses survive a halt.
 use alloc::boxed::Box;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::string::String;
@@ -106,11 +106,11 @@ pub struct TransitionRequest {
 /// The coprocessor's software, emulated natively.
 pub trait Firmware: Any {
     /// Fetch through this backend's live allocation and selected IOP mapping
-    /// owners. Success requires known instruction bytes, actual resolved PA,
+    /// owners. Success requires known instruction bytes, resolved PA,
     /// current mapping/ownership and applicable fetch access. A source hash,
     /// numerical address relation or native protocol peer is not that proof.
     /// ASC checks the result at handoff and before every start/resume; the
-    /// same backend must retain the owners through its execution/use boundary.
+    /// same backend must keep the owners through its execution/use boundary.
     fn fetch_entry(&mut self, _iop: u64) -> Result<EntryFetch, &'static str> {
         Err("original coprocessor instruction fetch ownership is not modeled")
     }
@@ -126,15 +126,15 @@ pub trait Firmware: Any {
     }
     /// The coprocessor starts running; messages it sends go to `outbox`.
     /// Start/resume/receive output is provisional until Ok; a refusal must
-    /// retain retryable native state and must not commit its success ACK.
+    /// keep retryable native state and must not commit its success ACK.
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
-    /// Halt CPU execution while retaining firmware state. Validate before
+    /// Halt CPU execution while keeping firmware state. Validate before
     /// changing state: a refusal leaves RUN and the mailbox untouched.
-    /// Autonomous hardware work must be settled or retained by its owner.
+    /// Autonomous hardware work must be settled or kept by its owner.
     fn stop(&mut self) -> Result<(), &'static str> {
         Err("firmware retained CPU stop is not modeled")
     }
-    /// Resume after an accepted retained halt, preserving protocol state.
+    /// Resume after an accepted halt, preserving protocol state.
     /// This is distinct from cold `start`; refusal leaves the CPU halted.
     fn resume(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         Err("firmware retained CPU resume is not modeled")
@@ -149,7 +149,7 @@ pub trait Firmware: Any {
     }
     /// Perform that queued DMA through `port`, pushing committed mailbox
     /// messages to `outbox`. Earlier output remains committed if a later
-    /// transfer fails; retain unfinished native work for retry.
+    /// transfer fails; keep unfinished native work for retry.
     fn dma(
         &mut self,
         _port: &mut Port<'_, '_>,
@@ -158,7 +158,7 @@ pub trait Firmware: Any {
         Ok(())
     }
     /// Committed asynchronous messages, collected at each device advance.
-    /// Output appended before a later error remains visible; retain only
+    /// Output appended before a later error remains visible; keep only
     /// unfinished native work so retry never duplicates an earlier event.
     fn poll(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         Ok(())
@@ -202,7 +202,7 @@ pub struct Asc {
     firmware: Box<dyn Firmware>,
     lifecycle: LifecycleState,
     running: bool,
-    /// RUN was cleared after firmware admitted a retained CPU halt.
+    /// RUN was cleared after firmware admitted a CPU halt.
     halted: bool,
     cpu_control: u64,
     a2i_control: u64,
@@ -280,7 +280,7 @@ impl Asc {
         self.auxiliary.clone()
     }
 
-    /// Check the actual backend's current owned entry fetch, then establish
+    /// Check the backend's current owned entry fetch, then establish
     /// the independent register handoff. The supplied mapping describes all
     /// three address domains and the expected original instruction.
     /// This never loads or executes ARM firmware, or derives an entry from a
@@ -504,7 +504,7 @@ impl Lifecycle for Asc {
         }
         self.lifecycle = proposed;
         self.auxiliary.set_lifecycle(proposed);
-        // Retained gates freeze execution; neither they nor gate release
+        // Gates freeze execution; neither they nor gate release
         // synthesize a firmware sleep/wake message or alter FIFO ownership.
         self.update_lines(access);
     }
@@ -1252,7 +1252,7 @@ mod tests {
         asc.write(I2A_CONTROL, Width::Word, 0, &mut access).unwrap();
         assert!(asc.advance(&mut access).is_err());
         assert_eq!(asc.outbox.len(), 2);
-        assert_eq!(asc.levels[2], Some(false)); // Delivery gated, events retained.
+        assert_eq!(asc.levels[2], Some(false)); // Delivery gated, events kept.
         assert!(asc.read(I2A_RECV0, Width::Double, &mut access).is_err());
         asc.write(I2A_CONTROL, Width::Word, 1, &mut access).unwrap();
         assert_eq!(asc.levels[2], Some(true));

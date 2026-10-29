@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
 //! Cold unbound UMAC retirement. Linux mvm/scan.c's UMAC completion handler
-//! releases its UID at actual completion. This owner additionally captures old
+//! releases its UID at completion. This owner additionally captures old
 //! completed RBs and waits for deferred users before reusing that UID. No PHY,
 //! associated channel, station, TCM worker or data queue exists in this owner;
 //! there is no operating-channel command to invent as a restoration witness.
 use super::*;
 
-/// An immutable post-completion packet, deliberately never a BSS for either
+/// An immutable post-completion packet, never a BSS for either
 /// the completed request or a later request. Keep it until its raw consumer is
 /// finished; dropping this receipt releases only that deferred-user reference.
 pub struct ScanRawReceive {
@@ -19,8 +19,8 @@ impl ScanRawReceive {
         &self.progress
     }
 }
-/// Historical terminal evidence moved out only after actual retirement. It
-/// owns copied bytes and command receipts, with no native/DMA/scan authority.
+/// Historical terminal evidence moved out only after retirement. It
+/// owns copied bytes and command receipts, with no native/DMA/scan permission.
 pub struct ScanRetirement {
     outcome: protocol::Outcome,
     completion: ScanCompletion,
@@ -46,7 +46,7 @@ impl ScanRetirement {
     }
 }
 impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
-    /// Drain genuine MPDUs captured after completion without attributing them
+    /// Drain MPDUs captured after completion without attributing them
     /// to either request. No rearm, current-ticket lookup or public raw-packet
     /// restoration is performed. None means no captured MPDU this poll; only
     /// retire performs the complete bounded old-RB quiet check.
@@ -116,7 +116,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
     }
     /// Retire this exact completed passive scan in the unchanged cold/unbound
     /// MAC. Successful command polling already reclaimed the original command
-    /// DMA; actual UMAC completion ends its radio lifetime. The live shared RX
+    /// DMA; UMAC completion ends its radio lifetime. The live shared RX
     /// pool stays owned by RomBoot: this does not claim its DMA engine stopped.
     ///
     /// Capture every completed RB without rearming, refuse undrained canonical

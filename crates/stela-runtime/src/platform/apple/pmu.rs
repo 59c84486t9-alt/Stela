@@ -46,7 +46,7 @@
 //! settings begin with declared zero storage; these are not observed Apple
 //! reset values. Outside-scratch fault logs require `with_fault_history` and
 //! every initial byte explicitly supplied. Only the source's complete captured
-//! snapshot acknowledgement is qualified; arbitrary W1C, unqualified partial
+//! snapshot acknowledgement is checked; arbitrary W1C, unchecked partial
 //! writes,
 //! physical fault production and reset semantics remain unsupported. A log
 //! inside scratch shares its canonical bytes and source zero-clear behavior.
@@ -79,7 +79,7 @@
 //! byte that write-back keeps the control bits it read and clears the event
 //! bits it carries, so the byte reads as control | event, its event-mask bits
 //! are write-one-to-clear and its other bits are the control. The event and
-//! control fields must be disjoint; the control field keeps the qualified
+//! control fields must be disjoint; the control field keeps the checked
 //! monitor / monitor+enable encodings of a separate control register.
 //!
 //! Chapel and later PMICs declare a firmware mailbox: `fw-mcom-address`,
@@ -102,7 +102,7 @@
 //! no RTC child it does nothing beyond a debug log. The RTC alarm is the only
 //! output source this model has; firmware, fault and rail events have no
 //! modeled producer (as for the fault log), so such a PMU's output is an
-//! actual, permanently deasserted wire rather than an unqualified one.
+//! actual, permanently deasserted wire rather than an unchecked one.
 use stela_soc_data::pmu::ALARM_BYTES;
 #[cfg(test)]
 use stela_soc_data::pmu::DEFAULT_EVENT_MASK;
@@ -145,7 +145,7 @@ impl Interrupt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Byte {
     Storage,
-    /// A byte of the retained-history owner at this index.
+    /// A byte of the history owner at this index.
     History(usize, u16),
     Upcount(u16),
     AlarmControl,
@@ -204,7 +204,7 @@ impl Pmu {
         )
     }
 
-    /// Bind a declared oscillator owner; the primary's SMC helper must retain
+    /// Bind a declared oscillator owner; the primary's SMC helper must keep
     /// this same handle, never derive a second epoch from its own uptime.
     pub fn with_clock(
         config: Configuration,
@@ -302,7 +302,7 @@ impl Pmu {
         Ok(pmu)
     }
 
-    /// The actual retained oscillator owner, when this PMU has RTC resources.
+    /// The kept oscillator owner, when this PMU has RTC resources.
     pub fn rtc_clock(&self) -> Option<RtcClock> {
         self.rtc.map(|_| self.clock.clone())
     }
@@ -571,7 +571,7 @@ impl SpmiSlave for Pmu {
                 .check_address(address, data)
                 .map_err(SlaveError::Unsupported)?;
             if let Some(loader) = &self.loader {
-                // The address pair only positions the retained port. Permit
+                // The address pair only positions the port. Permit
                 // a new readback cursor after sealing while rejecting every
                 // data mutation of the protected image.
                 loader
@@ -1524,7 +1524,7 @@ mod tests {
                 0x2d51864usize,
                 80usize,
                 "77649b1296a66d2725fe2bc3c1b607b70fa6f9d2c6da9f0dcf661cdeacdd014b",
-            ), // identity-descriptor-retain
+            ), // identity-descriptor-keep
         ] {
             assert_eq!(
                 stela_formats::sha256(&data[offset..offset + bytes]),
@@ -1583,7 +1583,7 @@ mod tests {
                 }
                 pmus += 1;
                 assert_eq!(node.cells32("info-id").unwrap(), [0, 10]); // address/length, not ID bytes
-                // The original AP driver requires legacy scratch before retaining
+                // The original AP driver requires legacy scratch before keeping
                 // this descriptor. Monaco remains a provider without that service;
                 // neither property grants identity-byte readback semantics.
                 if node.compatible("pmu,maverick") {

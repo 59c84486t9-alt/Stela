@@ -40,7 +40,7 @@ pub struct ScalableBlockIdentity {
 }
 
 /// Owns the exact consumed source and its immutable RX translation. The caller
-/// retains application image/build identity and any source-registration lease.
+/// keeps application image/build identity and any source-registration lease.
 #[derive(Debug)]
 pub struct PreparedScalableBlock {
     identity: ScalableBlockIdentity,
@@ -1242,7 +1242,7 @@ mod tests {
             let declared = new19_features();
             let mode = ScalableMode::new(true, true);
             let numerical = NumericalFeatures::default();
-            // Missing EnFPM permission is refused after exact source re-decoding.
+            // Missing EnFPM permission is refused after source re-decoding.
             let denied = new19_profile(32, declared, false, mode, numerical)?;
             assert!(PreparedScalableBlock::prepare(&source(FP8), BASE, &denied).is_err());
             let instruction = decode_scalable_numerical_instruction(NUMERICAL_PC, FP8)?.unwrap();
@@ -1404,7 +1404,7 @@ mod tests {
                     );
                 }
             }
-            // Retained enables under effective FullA64 must refuse without partial commit.
+            // Enables under effective FullA64 must refuse without partial commit.
             let entry = PreparedScalableBlock::prepare(&source(FP8), BASE, &fa64)?;
             fixture.thread.pc = BASE;
             fixture.thread.registers.fpcr = FPCR_EXCEPTION_ENABLE_MASK;

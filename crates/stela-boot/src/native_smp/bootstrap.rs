@@ -42,7 +42,7 @@ global_asm!(
     "lea {page}(%ebp), %esp",
     "lidtl (stela_ap_idtr32 - stela_ap_start)(%ebp)",
     // No shared high memory is reached before the cache/MTRR image. INIT
-    // retains cache contents, so flush under the now-installed early32 IDT.
+    // keeps cache contents, so flush under the now-installed early32 IDT.
     "mov %cr0, %eax",
     "andl $0xdfffffff, %eax", // NW=0
     "orl $0x40000000, %eax", // CD=1
@@ -52,8 +52,8 @@ global_asm!(
     "mov %eax, %cr4",
     "mov (stela_ap_root - stela_ap_start)(%ebp), %eax",
     "mov %eax, %cr3",
-    // The AP has qualified long mode/NX/PAT/FXSR/SSE before INIT. It never
-    // inherits firmware PCID, CET or unqualified OS XSTATE controls.
+    // The AP has checked long mode/NX/PAT/FXSR/SSE before INIT. It never
+    // inherits firmware PCID, CET or unchecked OS XSTATE controls.
     "mov $0xc0000080, %ecx",
     "mov $0x900, %eax", // LME | NXE; LMA is hardware-owned.
     "xor %edx, %edx",
@@ -314,7 +314,7 @@ pub(crate) struct Entry<'a> {
     /// This selected physical AP's own immutable firmware CPUID1 EAX, not
     /// the BSP's signature or a model name selected by the ARM guest profile.
     pub processor_signature: u32,
-    /// The BSP's installed PAT, qualified against each AP's memory-type state.
+    /// The BSP's installed PAT, checked against each AP's memory-type state.
     pub pat: u64,
     pub memory_types: &'a Image,
     pub stack_top: u64,
@@ -328,7 +328,7 @@ pub(crate) struct Entry<'a> {
 /// `mapped` is the exclusive writable alias of one owned page at `physical`.
 /// No AP is reading that page, including a timed-out prior startup. The page,
 /// root, entry, stack and argument mappings remain live through AP entry and
-/// recovery; the caller has qualified this AP's features and memory types.
+/// recovery; the caller has checked this AP's features and memory types.
 /// The low identity alias is executable and the high stack is writable/NX.
 pub(crate) unsafe fn prepare(
     mapped: *mut u8,
@@ -463,13 +463,13 @@ pub(crate) unsafe fn prepare(
     Ok((physical / PAGE) as u8)
 }
 
-/// Observe only an actual sealed early AP failure; an empty/unfinished record
+/// Observe only a sealed early AP failure; an empty/unfinished record
 /// never supplies READY or permission to reuse the low page.
 ///
 /// # Safety
-/// `mapped` is the retained actual owned SIPI page, prepared for this one AP.
+/// `mapped` is the owned SIPI page, prepared for this one AP.
 pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, early::RecordError> {
-    // SAFETY: the caller retains this AP's owned SIPI page, whose assembly
+    // SAFETY: the caller keeps this AP's owned SIPI page, whose assembly
     // publishes the aligned record once and leaves its sealed payload immutable.
     unsafe { early::read(mapped.add(offset(&raw const stela_ap_fault_record)).cast()) }
 }

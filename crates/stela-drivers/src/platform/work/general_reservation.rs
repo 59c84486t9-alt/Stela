@@ -1,18 +1,18 @@
-//! Affine actual-worker/job reservation under a borrowed entered process guard.
+//! Affine worker/job reservation under a borrowed entered process guard.
 use super::*;
 mod owned;
 pub use owned::{
     ColdStackPreparation, OwnedGeneralEscrow, PinnedColdStackPreparation, StackPinError,
 };
-/// Actual borrowed platform process-entry authority, independent of task IDs.
+/// Borrowed platform process-entry permission, independent of task IDs.
 ///
 /// # Safety
-/// The view borrows a genuine entered process guard for its entire lifetime.
-/// check validates actual CPU/root/process generation before mutable service
+/// The view borrows an entered process guard for its entire lifetime.
+/// check validates CPU/root/process generation before mutable service
 /// access; neither RootIdentity nor a caller integer substitutes for that guard.
 /// It is nonblocking/nonallocating and valid with local IRQs saved/disabled:
 /// no AML, queue callback, allocator, RestoreRoot reacquisition or wait. There
-/// is no permissive default. A borrowed authority must not escape across Guest.
+/// is no permissive default. A borrowed permission must not escape across Guest.
 pub unsafe trait EnteredProcess {
     fn check(&self) -> Result<(), WorkError>;
 }
@@ -36,7 +36,7 @@ impl Creator {
             && self.sequence == view.sequence
     }
 }
-/// Receipt for actual assigned deferred work, not child startup or C current.
+/// Receipt for assigned deferred work, not child startup or C current.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AssignedGeneral {
     ticket: Ticket,
@@ -51,7 +51,7 @@ impl AssignedGeneral {
     }
 }
 /// Non-Send, non-Clone short-lived reservation. Drop rolls back only under its
-/// matching actual entered scope; uncertain ownership retains the whole owner.
+/// matching entered scope; uncertain ownership keeps the whole owner.
 #[must_use = "drop/cancel rolls back; commit publishes only actual owned deferred work"]
 pub struct GeneralReservation<'runtime, 'entered, const N: usize> {
     runtime: Pin<&'runtime Runtime<N>>,
@@ -80,7 +80,7 @@ impl Eligibility {
     }
 }
 impl<const N: usize> Runtime<N> {
-    /// Reserve one actually idle, unbound compatible General worker and one
+    /// Reserve one idle, unbound compatible General worker and one
     /// ordinary job slot. This publishes no callback, ticket, C task or current.
     /// All mutations follow real scope/current checks. Incoming IF is restored
     /// before returning for bounded nonblocking metadata setup; no permit parks.
@@ -91,7 +91,7 @@ impl<const N: usize> Runtime<N> {
     ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
         self.reserve_eligible(entered, requirement, Eligibility::AnyIdle)
     }
-    /// Reserve only an actual never-entered compatible worker. This is a short
+    /// Reserve only a never-entered compatible worker. This is a short
     /// reservation, not stack byte access or C task publication. Eligibility is
     /// constructor/entry-owned history, never a caller-provided cold flag.
     pub fn reserve_unstarted_general<'runtime, 'entered>(
@@ -130,12 +130,12 @@ impl<const N: usize> Runtime<N> {
                 .flatten()
                 .find(|slot| state.jobs[*slot].is_none() && state.reservations[*slot] == 0)
                 .ok_or(WorkError::Full)?;
-            // SAFETY: actual current CPU and IF0 own this immutable retained Vec;
+            // SAFETY: current CPU and IF0 own this immutable Vec;
             // no foreign hook/callback, allocation or switch spans these reads.
             let count = unsafe { (*self.tasks.get()).len() };
             let worker = (0..count)
                 .find(|index| {
-                    // SAFETY: bounded actual task entry, stopped while creator runs at IF0.
+                    // SAFETY: bounded task entry, stopped while creator runs at IF0.
                     let task = unsafe { &*self.task(*index) };
                     task.lane == Lane::General
                         && task.state == TaskState::Idle
@@ -180,7 +180,7 @@ impl<const N: usize> Runtime<N> {
                 _local: PhantomData,
             })
         })();
-        // SAFETY: exact enclosing save_disable flags; all queue/task borrows ended.
+        // SAFETY: enclosing save_disable flags; all queue/task borrows ended.
         unsafe { self.queue.cpu.restore(flags) };
         result
     }
@@ -194,11 +194,11 @@ impl<const N: usize> GeneralReservation<'_, '_, N> {
         Ok(())
     }
     /// # Safety
-    /// The provider already retains callback/code/context and every reachable
+    /// The provider already keeps callback/code/context and every reachable
     /// resource through completion or quarantine, as for Queue::execute. The
-    /// body fits the requested actual extent and must not unwind. Metadata
-    /// setup was nonblocking; no borrowed process authority enters the job.
-    /// Error admits no callback and grants no wrong-scope cleanup authority.
+    /// body fits the requested extent and must not unwind. Metadata
+    /// setup was nonblocking; no borrowed process permission enters the job.
+    /// Error admits no callback and grants no wrong-scope cleanup permission.
     pub unsafe fn commit(
         mut self,
         callback: Callback,
@@ -228,7 +228,7 @@ impl<const N: usize> GeneralReservation<'_, '_, N> {
                 running: true,
                 requirement: Some(self.requirement),
             };
-            // No fallible operation follows this actual ownership publication.
+            // No fallible operation follows this ownership publication.
             state.next = next;
             state.jobs[self.slot] = Some(job);
             state.reservations[self.slot] = 0;
@@ -264,8 +264,8 @@ impl<const N: usize> GeneralReservation<'_, '_, N> {
         {
             return Err(WorkError::CorruptContext);
         }
-        // SAFETY: caller checked real current authority at IF0 and retained the
-        // unchanged actual task vector; worker is private constructor-captured.
+        // SAFETY: caller checked real current permission at IF0 and kept the
+        // unchanged task vector; worker is private constructor-captured.
         let task = unsafe { &*self.runtime.task(self.worker) };
         if task.id != self.context
             || task.lane != Lane::General
@@ -292,7 +292,7 @@ impl<const N: usize> GeneralReservation<'_, '_, N> {
             let state = guard.state();
             self.validate(state)?;
             state.reservations[self.slot] = 0;
-            // SAFETY: exact reserved worker ownership validated above. No callback
+            // SAFETY: reserved worker ownership validated above. No callback
             // or task metadata was published, and no binding/producer owns it.
             unsafe { (*self.runtime.task(self.worker)).state = TaskState::Idle };
             self.runtime
@@ -307,8 +307,8 @@ impl<const N: usize> GeneralReservation<'_, '_, N> {
     }
     fn abandon(&mut self) {
         // No affine Runtime/Task/queue state is read or freed under a stale
-        // authority. The atomic view closes admission; reserved state and every
-        // real owner remain retained, including this whole pinned executor.
+        // permission. The atomic view closes admission; reserved state and every
+        // real owner remain held, including this whole pinned executor.
         self.queue.abandoned.store(true, Ordering::Release);
         quarantine();
         self.live = false;

@@ -116,7 +116,7 @@ impl Address {
     }
 }
 
-/// An encoded raw-control frame, including its actual four-byte CRC.
+/// An encoded raw-control frame, including its four-byte CRC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Encoded {
     pub kind: PacketType,
@@ -360,7 +360,7 @@ impl Received<'_> {
     }
 }
 
-/// An actual asynchronous router notification, separate from request replies.
+/// An asynchronous router notification, separate from request replies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotificationError {
     pub route: Route,
@@ -388,7 +388,7 @@ pub struct PlugEvent {
     pub route: Route,
     pub port: u8,
     pub unplug: bool,
-    /// Actual high header bits, preserved without inventing reply-marker
+    /// High header bits, preserved without inventing reply-marker
     /// requirements for asynchronous hotplug events.
     pub header_flags: u16,
 }

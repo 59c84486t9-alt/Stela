@@ -58,7 +58,7 @@ pub(super) fn exercise_cold_radio(actual: bool) {
         assert_eq!(radio.initialized_nvm().information.tx_chains, 3);
         assert_ne!(radio.initialized_nvm().address.bytes, copied.address.bytes);
         assert_eq!(
-            // SAFETY: begin_radio moved the actual initialized model owner and its mappings;
+            // SAFETY: begin_radio moved the initialized model owner and its mappings;
             // the same exclusive Source/Domain publish the NVM-selected cold prefix.
             unsafe { radio.advance(&source) }.unwrap(),
             ColdRadioPhase::Waiting(expected.commands()[0].stage())
@@ -88,7 +88,7 @@ pub(super) fn exercise_cold_radio(actual: bool) {
             assert_eq!(emitted, encoded.bytes());
             let doorbell = state.lock().unwrap().registers[&0x460];
             assert_eq!(
-                // SAFETY: No completion has occurred since publication; radio retains that same
+                // SAFETY: No completion has occurred since publication; radio keeps that same
                 // pending mapping and exclusive Source while polling the serialized model.
                 unsafe { radio.advance(&source) }.unwrap(),
                 ColdRadioPhase::Waiting(command.stage())
@@ -110,7 +110,7 @@ pub(super) fn exercise_cold_radio(actual: bool) {
                 r.cpu_sync_fail = Some(r.cpu_syncs + 1);
                 drop(r);
                 assert!(matches!(
-                    // SAFETY: The response completed synchronously in retained model RAM; injected
+                    // SAFETY: The response completed synchronously in kept model RAM; injected
                     // CPU-sync failure leaves ownership with radio for a retry using this Source.
                     unsafe { radio.advance(&source) },
                     Err(Error::CommandReclaim(_))
@@ -119,7 +119,7 @@ pub(super) fn exercise_cold_radio(actual: bool) {
                 assert_eq!(state.lock().unwrap().registers[&0x460], doorbell);
                 domain.records.lock().unwrap().cpu_sync_fail = None;
             }
-            // SAFETY: The failed reclaim retained the original Domain and all pending buffers;
+            // SAFETY: The failed reclaim kept the original Domain and all pending buffers;
             // clearing its serialized injection retries with the same exclusive Source.
             let phase = unsafe { radio.advance(&source) }.unwrap();
             assert_eq!(
@@ -137,7 +137,7 @@ pub(super) fn exercise_cold_radio(actual: bool) {
         let ops = state.lock().unwrap().ops.len();
         let allocations = source.calls.load(Ordering::Relaxed);
         assert_eq!(
-            // SAFETY: The completed prefix still retains the original model owner/domain;
+            // SAFETY: The completed prefix still keeps the original model owner/domain;
             // the final observation uses the same Source without publishing another command.
             unsafe { radio.advance(&source) }.unwrap(),
             ColdRadioPhase::PlatformConfigurationRequired

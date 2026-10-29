@@ -71,7 +71,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             .unwrap_or(Err(Error::UnsupportedPcie))
     }
     pub(super) fn unmanaged(&mut self) -> Result<(), Error> {
-        // The managed APE/ASF handshake is deliberately not inferred from an
+        // The managed APE/ASF handshake is not inferred from an
         // absent NCSI feature bit or from firmware which has not finished boot.
         if self.ape_read(APE_SIGNATURE)? == APE_SIGNATURE_MAGIC
             || self.ape_read(APE_FIRMWARE_STATUS)? & APE_READY != 0
@@ -115,11 +115,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         Err(Error::FirmwareTimeout)
     }
-    /// Execute the actual Linux tg3_chip_reset ordinary PCIe/CPMU sequence for
+    /// Execute the Linux tg3_chip_reset ordinary PCIe/CPMU sequence for
     /// an unmanaged named ASIC. Bus mastering stays disabled: no rings exist.
     /// The firmware inversion, config restoration and APE release must all be
     /// observed before `core_reset_completed` is true. Any failure is terminal
-    /// and retains the actual config/BAR owner, including uncertain held locks.
+    /// and keeps the config/BAR owner, including uncertain held locks.
     pub fn reset_unmanaged_core(&mut self) -> Result<(), Error> {
         if self.failure.is_some() {
             return Err(Error::Poisoned);

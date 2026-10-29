@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-// Actual completed RX and native EDCA command peers; no physical-radio grant.
+// Completed RX and native EDCA command peers; no physical-radio grant.
 use super::*;
 use crate::net::wifi::regulatory::database::{Wmm, WmmAc};
 
@@ -33,7 +33,7 @@ fn observe(driver: &mut Native, model: &Model, frame: &[u8]) -> Result<Vec<Event
 }
 fn update(driver: &mut Native, owner: &mut Owner, limit: Option<&Wmm>) -> Result<(), ClientError> {
     let permit = admit(owner, driver, AssociationUse::Management);
-    // SAFETY: actual same modeled requester; held guards serialize publication,
+    // SAFETY: same modeled requester; held guards serialize publication,
     // native queue drain and fixed model OS country/queue rule are explicit.
     unsafe { driver.update_edca_modern(owner, permit, limit) }
 }

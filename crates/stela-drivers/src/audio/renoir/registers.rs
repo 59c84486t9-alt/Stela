@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual Renoir BAR offsets from rn_chip_offset_byte.h/rn_acp3x.h at the pin.
+//! Renoir BAR offsets from rn_chip_offset_byte.h/rn_acp3x.h at the pin.
 //! Copyright (C) 2020 Advanced Micro Devices, Inc.
 #[cfg(test)]
 pub(super) use super::super::acp_pdm::registers::DMA_ENABLE;

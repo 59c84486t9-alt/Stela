@@ -21,8 +21,8 @@
 //!   and CPU initialization branches on the result. The declared emulated
 //!   capability is generation 1–4 on M1–M4, matching the selected reference
 //!   model. These IDR answers are not observed hardware register values.
-//!   M3/M4 accept only the source-qualified CTL bit 8 and enable bit 63;
-//!   M5/M6 controls and instructions refuse pending qualification.
+//!   M3/M4 accept only the source-checked CTL bit 8 and enable bit 63;
+//!   M5/M6 controls and instructions refuse pending validation.
 //! - Every context-switch use sets or clears only bit 63 with
 //!   read-modify-write, and reads `AMX_STATE_T` after `dsb ish` testing only
 //!   for nonzero (`0xfffffe000bd83694`). Live state reads as 1 here
@@ -44,7 +44,7 @@ pub const AMX_CTL_EL2: Encoding = Encoding::new(3, 4, 15, 4, 7);
 pub const AMX_STATE_T: Encoding = Encoding::new(3, 4, 15, 1, 3);
 /// `S3_6_C15_C2_7`: the AMX generation, one bit per generation.
 pub const AMXIDR_EL1: Encoding = Encoding::new(3, 6, 15, 2, 7);
-/// No M5/M6 behavior is inferred from the qualified M1–M4 reference semantics.
+/// No M5/M6 behavior is inferred from the checked M1–M4 reference semantics.
 pub(super) const UNQUALIFIED_GENERATION: &str =
     "AMX controls and instruction generation are not source-qualified for this chip";
 pub const AMX_CTL_ENABLE: u64 = 1 << 63;
@@ -114,7 +114,7 @@ impl Default for Unit {
 }
 
 impl Unit {
-    /// The emulated generation qualified by the reference semantics and original
+    /// The emulated generation checked by the reference semantics and original
     /// kernel control flow. This is not an observation of silicon IDR bits.
     pub fn on(chip: super::Chip) -> Self {
         let generation = match chip {
@@ -191,7 +191,7 @@ impl Unit {
         }
         // M3/M4's selected version-3/4 initialization writes only bit 8;
         // PE identity is written separately to CTX. Other low fields remain
-        // unqualified, not silently inherited from the legacy M2 API domain.
+        // unchecked, not silently inherited from the legacy M2 API domain.
         let init_fields = match self.generation {
             Some(Generation::M3 | Generation::M4) => AMX_CTL_VERSION_3_4_INIT_FIELDS,
             _ => AMX_CTL_INIT_FIELDS,

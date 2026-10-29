@@ -146,7 +146,7 @@
 //! (SMC key census).
 //!
 //! A source-declared primary RTC helper can additionally bind CLKM to the
-//! actual PMU oscillator. Its recovered six-byte hex_ / attributes0x94 key
+//! PMU oscillator. Its recovered six-byte hex_ / attributes0x94 key
 //! profile and original/native evidence are in docs/research/smc-rtc-t6000.md.
 //! Missing counter publication refuses before SRAM/reply effects; this path
 //! owns no second calendar offset and makes no Apple reset-epoch assumption.
@@ -234,7 +234,7 @@ const MAX_VALUE: usize = 120;
 const WRITE_LOG_LIMIT: usize = 64;
 
 /// A diagnostic observation of a write at the key endpoint. The raw reply
-/// is retained even when it is zero; an error means no reply was emitted.
+/// is held even when it is zero; an error means no reply was emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteLog {
     pub request: u64,
@@ -438,7 +438,7 @@ impl Smc {
         self.sleep == Sleep::Asleep
     }
 
-    /// Bind the actual primary PMU oscillator. No key/value exists before this
+    /// Bind the primary PMU oscillator. No key/value exists before this
     /// join, and a missing counter publication cannot return an initial zero.
     pub fn bind_rtc(
         &mut self,
@@ -1029,7 +1029,7 @@ mod tests {
         smc.bind_rtc(pmu.rtc_clock().unwrap(), RtcKeyProfile::Hex48Little)
             .unwrap();
         let now = 100 + 3 * FREQUENCY_HZ;
-        clock.publish(now).unwrap(); // same actual service boundary as the root adapter
+        clock.publish(now).unwrap(); // same service boundary as the root adapter
         send(&mut smc, request(READ, 0, 6, 0, rtc::KEY));
         let mut raw = [0; 8];
         raw[..6].copy_from_slice(&sram.get(6));

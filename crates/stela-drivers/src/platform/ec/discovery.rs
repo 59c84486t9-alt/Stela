@@ -63,7 +63,7 @@ impl<'a> Ecdt<'a> {
         }
         let path = &table[65..];
         let end = path.iter().position(|byte| *byte == 0).ok_or(Error::Path)?;
-        // Keep the actual firmware path, including Linux's accepted relative
+        // Keep the firmware path, including Linux's accepted relative
         // path variant. Do not repair a guessed leading backslash or EC name.
         let path = core::str::from_utf8(&path[..end]).map_err(|_| Error::Path)?;
         if path.is_empty() || !path.is_ascii() || path.bytes().any(|b| b.is_ascii_control()) {
@@ -106,7 +106,7 @@ fn register(bytes: &[u8]) -> Result<Register, Error> {
 }
 
 impl Ports {
-    /// Decode the exact native `_CRS` resource-template buffer. As in Linux,
+    /// Decode the native `_CRS` resource-template buffer. As in Linux,
     /// the first IO descriptor is data, the second command/status. This subset
     /// requires two fixed one-byte IO descriptors and refuses unsupported
     /// address/IRQ resources rather than silently skipping their requirements.
@@ -157,7 +157,7 @@ impl Ports {
                     count += 1;
                 }
                 // Vendor-defined information does not reserve additional
-                // hardware; retain no interpretation or inferred capability.
+                // hardware; keep no interpretation or inferred capability.
                 0x0e | 0x84 => {}
                 _ => return Err(Error::UnsupportedResource(tag)),
             }
@@ -204,7 +204,7 @@ pub mod native {
             })
         }
 
-        /// Use an actual PNP0C09 handle from Session::devices. Evaluate only
+        /// Use a PNP0C09 handle from Session::devices. Evaluate only
         /// after required native operation regions and firmware services exist.
         /// `_GPE` package/GPIO routing is explicitly outside this IO subset.
         pub fn discover(handle: Handle<'a>) -> Result<Self, DiscoveryError> {

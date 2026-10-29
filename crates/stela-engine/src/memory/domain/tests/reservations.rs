@@ -307,7 +307,7 @@ fn local_native_fault_record_clears_reservation_at_invocation_return() {
             Ok::<_, MemoryStatus>(())
         })
         .unwrap();
-    // SAFETY: the callback only records a local fault, retaining no pointers.
+    // SAFETY: the callback only records a local fault, keeping no pointers.
     unsafe {
         thread.with_view(|context| {
             context.record(MemoryStatus::Alignment, GUEST_BASE + 1, TEST_PC, 0)

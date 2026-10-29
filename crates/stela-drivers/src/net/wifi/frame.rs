@@ -156,7 +156,7 @@ impl Header {
     }
 }
 
-/// Whole MPDU without FCS or transport padding. Metadata retains vendor facts;
+/// Whole MPDU without FCS or transport padding. Metadata keeps vendor facts;
 /// construction validates framing, not security or station membership.
 #[derive(Clone, Debug)]
 pub struct Mpdu {

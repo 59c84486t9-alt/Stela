@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // SAE authentication transport follows Linux net/mac80211/{mlme,util}.c;
-// source notices and pin are retained in wifi/THIRD_PARTY.md.
+// source notices and pin are held in wifi/THIRD_PARTY.md.
 //! Bounded OS-supplicant SAE transport. Commit/confirm/token/group/H2E bytes
 //! remain opaque to this layer; as `ieee80211_rx_mgmt_auth` does, it follows
 //! only the exchange's order and status codes, so the AP's successful confirm
@@ -11,7 +11,7 @@
 use super::*;
 
 /// One OS-produced SAE transmit frame. Consumers validate their session and
-/// authority before serializing these named fields and opaque payload.
+/// permission before serializing these named fields and opaque payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame<'a> {
     pub transaction: u16,
@@ -101,8 +101,8 @@ const FIXED_BYTES: usize = 30;
 // IEEE80211_MAX_DATA_LEN (2304), less the six fixed authentication bytes.
 const MAX_AUTHENTICATION_DATA: usize = 2304 - 6;
 
-/// Retained identity of one selected single-link authentication attempt.
-/// No public constructor, mutation or conversion into association authority.
+/// Identity of one selected single-link authentication attempt.
+/// No public constructor, mutation or conversion into association permission.
 #[derive(Debug)]
 pub struct Session {
     epoch: u64,
@@ -113,7 +113,7 @@ pub struct Session {
     deadline: u64,
     six_ghz: Option<SixGhzBinding>,
 }
-/// Original native inputs retained transitively by every actual packet Session.
+/// Original native inputs kept transitively by every packet Session.
 #[derive(Debug)]
 struct SixGhzBinding {
     observation: Arc<NativeBssObservation>,
@@ -153,7 +153,7 @@ impl Session {
 
 /// Original RX bytes for the real OS supplicant. The native implementation
 /// creates these only from its completed owned RX queue. This observation is
-/// deliberately not a successful SAE result or a credential/key capability.
+/// not a successful SAE result or a credential/key capability.
 pub struct Received {
     session: Arc<Session>,
     frame: Mpdu,
@@ -177,8 +177,8 @@ impl Received {
 }
 
 impl Station {
-    /// Reserve an exchange for an actual OS-selected BSS. Native publication
-    /// must additionally bind this to actual hardware/source/regulatory owners.
+    /// Reserve an exchange for an OS-selected BSS. Native publication
+    /// must additionally bind this to hardware/source/regulatory owners.
     /// The deadline covers OS computation as well as transport; repeated commits
     /// do not extend it. Only the OS's last frame is sent again, as
     /// `ieee80211_auth` retries it.
@@ -282,8 +282,8 @@ impl Station {
             }),
         }))
     }
-    /// Only a native callback holding both actual transport providers calls
-    /// this after qualifying the original prepared Session and both clocks.
+    /// Only a native callback holding both transport providers calls
+    /// this after checking the original prepared Session and both clocks.
     pub(crate) fn commit_six_ghz_authentication(
         &mut self,
         session: Arc<Session>,
@@ -304,7 +304,7 @@ impl Station {
         Ok(())
     }
 
-    /// Identity observation only; a retained old handle stays inspectable but
+    /// Identity observation only; an old handle stays inspectable but
     /// every operation must pass validate_external_authentication again.
     pub fn external_authentication(&self) -> Option<&Arc<Session>> {
         self.external.as_ref()
@@ -349,7 +349,7 @@ impl Station {
 
     /// Build only the ordinary authentication header and fixed SAE fields.
     /// The OS supplies complete transaction/status/data, including anti-clogging
-    /// retries. This does not parse or fabricate secret SAE arithmetic.
+    /// retries. This does not parse or invent secret SAE arithmetic.
     pub fn external_authentication_transmit(
         &mut self,
         session: &Session,
@@ -442,8 +442,8 @@ impl Station {
 
     /// `ieee80211_rx_mgmt_auth` for the OS's exchange: `None` for a frame
     /// mac80211 ignores, after authentication or out of the exchange's order.
-    /// The caller must retain the actual RX/peer owner; copied security bits
-    /// supply no authority.
+    /// The caller must keep the RX/peer owner; copied security bits
+    /// supply no permission.
     pub fn receive_external_authentication(
         &mut self,
         session: &Arc<Session>,

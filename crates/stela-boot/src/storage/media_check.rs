@@ -1,4 +1,4 @@
-//! Explicit removable-media fixture diagnostic through retained native USB.
+//! Explicit removable-media fixture diagnostic through kept native USB.
 use super::CHECK_BYTES;
 use crate::output;
 use alloc::{boxed::Box, vec, vec::Vec};
@@ -116,7 +116,7 @@ pub(super) unsafe fn probe_and_rescan(
             if !handoff.is_mapped(&window.range()) {
                 return Err("USB media check requires mapped ECAM");
             }
-            // SAFETY: caller owns the actual mapped ECAM and native devices.
+            // SAFETY: caller owns the mapped ECAM and native devices.
             for mut function in unsafe { Function::enumerate(window) } {
                 if function.class == xhci::CLASS {
                     owners.push(
@@ -182,7 +182,7 @@ pub(super) unsafe fn probe_and_rescan(
             storage::open(&mut aliases, target)
                 .map_err(|error| failure("open medium A first handle", error))?,
         );
-        // A second actual rescan supplies another publication of the same A.
+        // A second rescan supplies another publication of the same A.
         // open/check alone confine every diagnostic write to the named partition.
         aliases.extend(
             wait_media(owner, handoff.clock, true, &mut observed)?

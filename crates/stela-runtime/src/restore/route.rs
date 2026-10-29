@@ -1,6 +1,6 @@
 //! Host option sets: Apple's stock restore, the recovery-only erase restore
 //! of the stick SSD, and the study for firmware owned by Stela. The study is
-//! an explicitly unqualified experiment, not an attestation that every
+//! an explicitly unchecked experiment, not an attestation that every
 //! requested object can be supplied. Evidence: restored classic arm64e file offsets in
 //! `docs/research/stela-firmware-route.md`. No application/build keys.
 use super::{Error, Result, plist::Value};
@@ -13,7 +13,7 @@ pub enum Route {
     /// policy. The caller must separately present a board whose
     /// `HWModelStr` ends in `DEV`; restored checks both that predicate and
     /// this option (26A434 R 0x10014fc84). Its FDR create/recover wrappers
-    /// retain and log the original error before continuing. This is an
+    /// keep and log the original error before continuing. This is an
     /// explicit degraded compatibility profile, not factory provisioning.
     Development,
     /// Apple's erase restore without the macOS system image: the stick SSD

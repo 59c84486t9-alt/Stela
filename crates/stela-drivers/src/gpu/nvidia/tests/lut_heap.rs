@@ -1,4 +1,4 @@
-//! CPU fixture only: the actual common heap and metadata adapter, with a
+//! CPU fixture only: the common heap and metadata adapter, with a
 //! process-owned host buffer. This is never linked into the production driver.
 #![no_std]
 #![allow(dead_code)]
@@ -35,7 +35,7 @@ fn fixture_panic(_: &core::panic::PanicInfo) -> ! {
     unsafe extern "C" {
         fn abort() -> !;
     }
-    // SAFETY: actual host C runtime termination for this separate CPU fixture.
+    // SAFETY: host C runtime termination for this separate CPU fixture.
     // No NVIDIA fatal, purecall, thunk or production runtime hook is supplied.
     unsafe { abort() }
 }

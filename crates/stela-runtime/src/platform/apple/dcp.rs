@@ -415,7 +415,7 @@ impl Firmware for Coprocessor {
         self.rtkit.resume(outbox)?;
         // Firmware 0x232fc restores the saved running state after its
         // hardware sleep primitive returns, invoking the same 8 -> 0x21
-        // retained-link callback as an explicit IOP wake request.
+        // kept-link callback as an explicit IOP wake request.
         if matches!(previous, 0x201 | 0x202) {
             self.link.borrow_mut().service_mut().resume();
         }
@@ -434,7 +434,7 @@ impl Firmware for Coprocessor {
         let previous = self.rtkit.iop_power();
         self.rtkit.receive(message, outbox)?;
         // Firmware 0x257f8 decodes wire 0x201/0x202 to internal state 8
-        // and 0x220 to 0x21. Its retained-link power callback 0x187524
+        // and 0x220 to 0x21. Its kept-link power callback 0x187524
         // resumes only the 8 -> 0x21 edge, without a new endpoint Hello.
         if matches!(previous, 0x201 | 0x202) && self.rtkit.iop_power() == 0x220 {
             self.link.borrow_mut().service_mut().resume();
@@ -664,7 +664,7 @@ mod tests {
             let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
             let mut endpoint = up(&mut coprocessor, &mut ram);
             // Bring a separate AFK transport up before the display sleeps.
-            // Retained power must not restart it or clear its registered rings.
+            // Power must not restart it or clear its registered rings.
             let afk = coprocessor.afk[0].clone();
             afk.borrow_mut()
                 .receive(afk::INIT << 48 | 0x100, &mut Vec::new())
@@ -721,7 +721,7 @@ mod tests {
             assert_eq!(&ram.bytes[0xc00c..0xc010], &1920u32.to_le_bytes());
             assert_eq!(coprocessor.link.borrow().heap(), heap);
             // Repeated wake and a rail-off-to-wake request are distinct from
-            // the retained sleep edge and leave a new shutdown quiesced.
+            // the sleep edge and leave a new shutdown quiesced.
             call(
                 &mut endpoint,
                 &mut ram,
@@ -1067,7 +1067,7 @@ mod tests {
             7 << 52 | 0x220
         );
         let reply = controller_call(&mut coprocessor, &mut ram, 7, Some(0));
-        assert_eq!(&reply[0x50..0x58], &[0; 8]); // Retained IOP wake preserves the monitor.
+        assert_eq!(&reply[0x50..0x58], &[0; 8]); // IOP wake preserves the monitor.
         controller_call(&mut coprocessor, &mut ram, 5, None);
         open[8] = 0x13;
         assert!(controller_exchange(&mut coprocessor, &mut ram, &open).is_none());
@@ -1154,8 +1154,8 @@ mod tests {
         assert_eq!((&header.tag, header.input), (b"D594", 0x730));
         let complete = &ram.bytes[header_at + 12..header_at + 12 + 0x730];
         assert_eq!(&complete[..4], &1u32.to_le_bytes());
-        // Decode the actual AP callback fields: zero blobs and absent
-        // SwapCompleteData, so no fabricated timestamp reaches the AP.
+        // Decode the AP callback fields: zero blobs and absent
+        // SwapCompleteData, so no invented timestamp reaches the AP.
         assert_eq!(&complete[0x727..0x72b], &[0; 4]);
         assert_eq!(complete[0x72c] & 1, 1);
         // Waiting for the AP is not runnable DMA, but still owns the stream

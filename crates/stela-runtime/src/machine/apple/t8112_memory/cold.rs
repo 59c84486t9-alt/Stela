@@ -1,5 +1,5 @@
 //! Cold native T8112 memory placement over the loader's registered RAM.
-//! Software backing is declared here. Switched inputs come from the actual
+//! Software backing is declared here. Switched inputs come from the
 //! PMGR; an explicitly certified input-free AP frontend owns its software state.
 //! Neither case nor clear words certify Apple hardware/private PMP readiness.
 use super::super::AppleDevices;
@@ -47,7 +47,7 @@ impl Configuration {
     }
 }
 
-/// Retains the same RAM and live source descriptors before any input is moved
+/// Keeps the same RAM and live source descriptors before any input is moved
 /// into a bus owner. The whole source graph remains independently accounted.
 pub struct Plan {
     controller: MemoryController,
@@ -59,7 +59,7 @@ pub struct Plan {
     configuration: Configuration,
 }
 // Private constructors prevent a missing/failed dependency lookup from granting
-// an unswitched lifecycle. The certificate retains the actual backing identity.
+// an unswitched lifecycle. The certificate keeps the backing identity.
 enum LifecycleInput {
     Switched(Vec<u64>),
     UnswitchedApFrontend(UnswitchedApFrontend),
@@ -92,7 +92,7 @@ impl Plan {
 
     /// Selects a switched lifecycle or an explicitly input-free Stela AP
     /// frontend from the complete source graph, never from a failed lookup.
-    /// This does not qualify private Apple MCC/PMP power transitions.
+    /// This does not check private Apple MCC/PMP power transitions.
     pub fn prepare_ap_frontend(
         board: &Board,
         ram: &Arc<RegisteredSystemRam>,
@@ -196,7 +196,7 @@ impl Plan {
         })
     }
 
-    /// Mount preflight against its actual live board, before consuming inputs.
+    /// Mount preflight against its live board, before consuming inputs.
     pub fn validate(
         &self,
         controller: Option<&MemoryController>,
@@ -260,7 +260,7 @@ impl Plan {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 // Retention declares that this software backing keeps data on gating.
-                // Every other input is the actual current controller word, never ACTIVE
+                // Every other input is the current controller word, never ACTIVE
                 // substituted for an absent domain or an asserted reset.
                 LifecycleState {
                     powered: states.iter().all(|state| state.power != pmgr::POWER_GATED),
@@ -302,7 +302,7 @@ impl Plan {
     }
 }
 
-/// Reuse the same ancestor/alias/implicit-power closure as actual powerconnect.
+/// Reuse the same ancestor/alias/implicit-power closure as powerconnect.
 /// No sinks are claimed complete while deriving these metadata dependencies.
 fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>, String> {
     let resources = states
@@ -539,7 +539,7 @@ mod tests {
         Arc<RegisteredSystemRam>,
         PowerStates,
     ) {
-        // Reuse actual component fixtures for source geometry/RAM only. Their
+        // Reuse component fixtures for source geometry/RAM only. Their
         // ClampZero/ACTIVE initialization is NOT consumed by this cold plan.
         let (memory, cache) = EmptyResource::service_test_components();
         let controller = cache.source().clone();

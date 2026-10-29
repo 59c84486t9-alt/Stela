@@ -1,4 +1,4 @@
-//! Bounded broadcast observations. No observation grants quiescence authority.
+//! Bounded broadcast observations. No observation grants quiescence permission.
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +15,7 @@ impl BroadcastKind {
 }
 
 /// Whole broadcast duration includes posting and processing incoming mail.
-/// Counts saturate; they are retained observations, never completion receipts.
+/// Counts saturate; they are held observations, never completion receipts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BroadcastCounts {
     pub started: u64,

@@ -60,7 +60,7 @@ pub fn matches(function: &Function) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR && function.device == MODERN_INPUT
 }

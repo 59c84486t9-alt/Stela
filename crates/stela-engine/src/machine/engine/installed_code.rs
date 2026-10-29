@@ -1,7 +1,7 @@
-//! Bounded metadata owned by one actual Host's executable arena. A live Arc's
+//! Bounded metadata owned by one Host's executable arena. A live Arc's
 //! allocation identity permits reuse of immutable code; equal bytes, a hash,
 //! a source PC or a recycled payload pointer do not. This stores no guest state,
-//! frame, worker authority or permission grant. Callers revalidate those anew.
+//! frame, worker permission or permission grant. Callers revalidate those anew.
 use super::NativeCode;
 use alloc::{
     sync::{Arc, Weak},
@@ -13,7 +13,7 @@ pub const MAX_ENTRIES: usize = 64;
 const NO_HINT: u8 = u8::MAX;
 const _: () = assert!(MAX_ENTRIES < NO_HINT as usize);
 /// Separate Arc<Vec> allocation: the Vec value plus strong/weak counters.
-/// Payload capacity is separately charged to the retained compiler artifact.
+/// Payload capacity is separately charged to the compiler artifact.
 /// Allocator headers are excluded, as in that existing accounting policy.
 pub const ARC_VEC_METADATA_BYTES: usize =
     core::mem::size_of::<Vec<u8>>() + 2 * core::mem::size_of::<usize>();
@@ -53,7 +53,7 @@ impl InstalledCodeCache {
         if let Some(Some(entry)) = self.entries.get(usize::from(self.hints[hint]))
             && entry.owner.as_ptr() == identity
         {
-            // The same retained Weak and borrowed strong Arc prove identity
+            // The same Weak and borrowed strong Arc prove identity
             // and lifetime as in the scan below. A hint alone proves neither.
             return Some(entry.code);
         }
@@ -71,10 +71,10 @@ impl InstalledCodeCache {
                 }
                 continue;
             }
-            // The retained Weak pins this exact allocation against ABA and
+            // The kept Weak pins this exact allocation against ABA and
             // the caller's borrowed strong Arc keeps it alive for the whole
             // lookup. Equality above names the Arc-allocated Vec, not its
-            // replaceable payload buffer. An upgrade/drop adds no authority
+            // replaceable payload buffer. An upgrade/drop adds no permission
             // and would perform two needless strong-count atomic RMWs.
             self.hints[hint] = index as u8;
             return Some(entry.code);
@@ -87,7 +87,7 @@ impl InstalledCodeCache {
         // treating an address/hash as artifact identity. Collisions just scan.
         ((address >> 3) ^ (address >> 12)) % MAX_ENTRIES
     }
-    /// Record only after the actual Host successfully installed all bytes.
+    /// Record only after the Host successfully installed all bytes.
     /// Failed/partial installation must never create an entry. Weak<Vec> keeps
     /// only the small Arc/Vec metadata after artifact eviction, not its payload.
     pub fn record(&mut self, owner: &Arc<Vec<u8>>, code: NativeCode) {
@@ -123,7 +123,7 @@ mod tests {
     use crate::machine::InstallError;
     use alloc::vec;
 
-    // An actual isolated byte arena. No native execution/privilege is claimed.
+    // An isolated byte arena. No native execution/privilege is claimed.
     struct Arena {
         bytes: Vec<u8>,
         cache: InstalledCodeCache,
@@ -333,7 +333,7 @@ mod tests {
                     .unwrap();
                 let mut state = GuestState::default();
                 // SAFETY: only compiler-produced baseline leaf code is
-                // recorded; this exact RX mapping retains it through return.
+                // recorded; this exact RX mapping keeps it through return.
                 unsafe { mapping.call(&mut state) }.unwrap();
                 state.x[0]
             }
@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(arena.run(&equal), 7);
         assert_eq!(arena.installs, 4);
         // Stale hint metadata names the different, still-live seven body.
-        // The actual translated execution must still return eleven.
+        // The translated execution must still return eleven.
         arena.cache.hints[InstalledCodeCache::hint_slot(&replacement)] = 1;
         assert_eq!(arena.run(&replacement), 11);
         assert_eq!(arena.installs, 4);

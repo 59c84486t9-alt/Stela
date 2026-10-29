@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Exact PCI candidates and retained actual chip observations. This is not
+//! Exact PCI candidates and kept chip observations. This is not
 //! controller admission; callers still need mapped/owned PCI and WFDMA setup.
 use alloc::{format, string::String};
 
@@ -66,9 +66,9 @@ pub enum IdentityError {
 }
 
 impl Identity {
-    /// Classify actual observations without substituting a chip identity from
+    /// Classify observations without substituting a chip identity from
     /// PCI marketing names. MT7961's bound bit 7 selects the distinct MT7920
-    /// firmware family, which this initial slice deliberately does not admit.
+    /// firmware family, which this initial slice does not admit.
     pub fn observed(
         pci: PciIdentity,
         raw_chip: u32,

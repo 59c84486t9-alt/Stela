@@ -1,4 +1,4 @@
-//! Actual captured-HPET reservation and typed owner. Intended child of platform.
+//! Captured-HPET reservation and typed owner. Intended child of platform.
 use super::*;
 use crate::{
     engine::host::{RootContext, RootProcessScope},
@@ -34,7 +34,7 @@ impl HpetMapping {
         self.scope.context()
     }
     /// Pure exact process-epoch observation, including after unmap uncertainty.
-    /// Do not call Mapping::check_current here: LIVE is not a retry authority.
+    /// Do not call Mapping::check_current here: LIVE is not a retry permission.
     pub(crate) fn check_process(&self) -> Result<(), WorkError> {
         self.scope.check()
     }
@@ -46,9 +46,9 @@ impl HpetMapping {
     }
     /// # Safety
     /// Clock/entry hooks and every raw counter/config reader/writer have stopped
-    /// and drained, including failure paths. Caller has settled actual HPET
+    /// and drained, including failure paths. Caller has settled HPET
     /// ownership (stopping only a counter it was authorized to start). No new
-    /// access may begin. Failure retains the exact owner and epoch for retry.
+    /// access may begin. Failure keeps the owner and epoch for retry.
     pub(crate) unsafe fn retire_mapping(&mut self) -> Result<(), WorkError> {
         self.check_process()?;
         if self.retired {
@@ -56,7 +56,7 @@ impl HpetMapping {
         }
         self.closing = true;
         if !self.mapping_retired {
-            // SAFETY: caller supplies actual complete hardware/callback drain.
+            // SAFETY: caller supplies complete hardware/callback drain.
             unsafe { self.mapping.retire() }.map_err(unavailable)?;
             self.mapping_retired = true;
         }
@@ -72,7 +72,7 @@ impl HpetMapping {
 }
 impl Drop for HpetMapping {
     fn drop(&mut self) {
-        // Any live/uncertain token permanently retains the original root epoch
+        // Any live/uncertain token permanently keeps the original root epoch
         // as well as Mapping; generic Mapping quarantine alone is insufficient.
         if !self.retired || self.check_process().is_err() {
             return;
@@ -88,8 +88,8 @@ impl Drop for HpetMapping {
     }
 }
 
-/// A genuine whole-controller handoff distinct from a read-only running view.
-/// Non-Clone; only the actual Source can mint this exact original owner.
+/// A whole-controller handoff distinct from a read-only running view.
+/// Non-Clone; only the Source can mint this original owner.
 pub(crate) struct ExclusiveHpet {
     mapping: HpetMapping,
 }
@@ -103,8 +103,8 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 impl ScopedSource {
-    /// Inspect actual complete PTE/journal retirement while the permanent
-    /// adopted Clock still retains its one original typed HPET mapping.
+    /// Inspect complete PTE/journal retirement while the permanent
+    /// adopted Clock still keeps its one original typed HPET mapping.
     pub(crate) fn verify_only_hpet(&self, owner: &HpetMapping) -> Result<(), Error> {
         self.platform.check_context(self.platform.space)?;
         owner.check_process().map_err(failed)?;
@@ -141,8 +141,8 @@ impl ScopedSource {
                 0
             };
         for index in 0..ENTRIES {
-            // SAFETY: same current actual source/root/held ownership and
-            // bounded retained original LOADER_DATA aperture PT.
+            // SAFETY: same current source/root/held ownership and
+            // bounded original LOADER_DATA aperture PT.
             let entry = unsafe { self.platform.leaf(index)?.read_volatile() };
             if index == allocation.first {
                 if entry & !((1 << 5) | (1 << 6)) != (expected.start() | rights) {
@@ -156,17 +156,17 @@ impl ScopedSource {
     }
 
     /// # Safety
-    /// Actual native dispatcher has retained the original running HPET owner
+    /// Native dispatcher has kept the original running HPET owner
     /// and the WHOLE rounded page/control-block exclusion from firmware, SMM,
     /// other drivers/CPUs, comparator/legacy/FSB/route users and independent raw
     /// aliases. No decode/reset/stop/counter-write/rate/suspend discontinuity may
-    /// occur through final Clock/source drain and unmap. The retained SDT and
+    /// occur through final Clock/source drain and unmap. The kept SDT and
     /// quiet register contents alone never establish this ownership contract.
     pub(crate) unsafe fn map_running_hpet(&self) -> Result<HpetMapping, Error> {
         self.map_original_hpet(Protection::ReadOnly)
     }
     /// # Safety
-    /// Actual post-EBS main has transferred exclusive ownership of the original
+    /// Post-EBS main has transferred exclusive ownership of the original
     /// complete HPET block AND rounded page, including every firmware/SMM/native
     /// timer/route/counter/config/decode writer and in-flight access. No outside
     /// owner may resume until drained retirement. This authorizes the consumer
@@ -180,7 +180,7 @@ impl ScopedSource {
     }
     fn map_original_hpet(&self, protection: Protection) -> Result<HpetMapping, Error> {
         self.platform.check_context(self.platform.space)?;
-        // Parse only the exact source-retained original SDT, never caller bytes.
+        // Parse only the source-kept original SDT, never caller bytes.
         let descriptor =
             Descriptor::from_sdt(self.platform.resources.wire.hpet()).map_err(failed)?;
         let span = descriptor.registers();
@@ -201,7 +201,7 @@ impl ScopedSource {
         if pointer.is_null() {
             return Err(Error::Unavailable);
         }
-        // SAFETY: actual same CPU/process was checked BEFORE pointer load. The
+        // SAFETY: same CPU/process was checked BEFORE pointer load. The
         // one !Send Session owns this Arc until same-CPU IRQ-disabled removal.
         let scope = unsafe {
             Arc::increment_strong_count(pointer);
@@ -220,7 +220,7 @@ impl ScopedSource {
             {
                 Ok(mapping) => mapping,
                 Err(error) => {
-                    // An uncertain native map retains its registry reservation.
+                    // An uncertain native map keeps its registry reservation.
                     // Keep the exact scope as well: no rollback success is inferred.
                     if self.authority.unregister_resource(registration).is_err() {
                         core::mem::forget(scope);

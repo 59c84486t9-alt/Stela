@@ -204,7 +204,7 @@ mod tests {
     fn register_offsets_outside_the_bar_refuse_the_controller() {
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: this test retains exclusive live identity-mapped RAM.
+        // SAFETY: this test keeps exclusive live identity-mapped RAM.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         // Doorbells for eight slots end at 0x1024; xECP 0x800 is at 0x2000.
         for (size, extended, fits) in [
@@ -233,7 +233,7 @@ mod tests {
         for overfetch in [false, true] {
             let mut backing = vec![0u64; 64 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: this test retains exclusive live identity-mapped RAM.
+            // SAFETY: this test keeps exclusive live identity-mapped RAM.
             let mut region =
                 unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let mut dma = Allocator {
@@ -356,8 +356,8 @@ mod tests {
         ] {
             let mut backing = vec![0u64; 64 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // A hosted identity pointer lies beyond these actual apertures;
-            // retain this conditional for unusual low-address test processes.
+            // A hosted identity pointer lies beyond these apertures;
+            // keep this conditional for unusual low-address test processes.
             if start < 1 << 36 {
                 continue;
             }

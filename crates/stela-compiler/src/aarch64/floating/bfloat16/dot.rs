@@ -87,7 +87,7 @@ fn round_odd(result: StatusAnd<Double>) -> u32 {
     let magnitude = result.value.abs().to_bits();
     // BFRound classifies the exact exponent before rounding. In particular,
     // neither tiny sticky values nor finite values above max-Single jam to
-    // a subnormal or infinity merely because APFloat reports target overflow.
+    // a subnormal or infinity because APFloat reports target overflow.
     if magnitude < SINGLE_MINIMUM_AS_DOUBLE {
         return sign;
     }
@@ -362,7 +362,7 @@ mod tests {
     fn dot_retains_separately_flushed_and_overflowed_stages() {
         assert_eq!(dot_add(0, 0, [BFLOAT16_MINIMUM; 2], [BFLOAT16_HALF; 2]), 0);
         // Opposite overflowing products become opposite infinities before their
-        // pair addition; cancellation of exact real products is not fused.
+        // pair addition; cancellation of real products is not fused.
         assert_eq!(
             dot_add(
                 0,

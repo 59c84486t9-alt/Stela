@@ -390,7 +390,7 @@ mod tests {
                     .is_err()
             );
             assert!(hci.io.control_pending);
-            // The actual outstanding control buffer, transfer/command/event
+            // The outstanding control buffer, transfer/command/event
             // rings and all other DMA bytes remain untouched by this retry.
             assert_eq!(backing, before);
             assert!(hci.close().is_err());
@@ -405,7 +405,7 @@ mod tests {
         use core::cell::RefCell;
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: retained backing exclusively owns these actual modeled DMA pages.
+        // SAFETY: backing exclusively owns these modeled DMA pages.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, _) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
@@ -458,7 +458,7 @@ mod tests {
         for rate in [0, u64::MAX, u64::MAX / 2 / MAX_NATIVE_BUDGET_US + 1] {
             let mut backing = vec![0u64; 64 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: retained fixture exclusively owns backing until teardown.
+            // SAFETY: fixture exclusively owns backing until teardown.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = xhci::model::cancellation_controller(&mut dma);
             let device = firmware_device(controller.test_device_id(1).unwrap());
@@ -487,7 +487,7 @@ mod tests {
         use core::cell::RefCell;
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: retained backing exclusively owns these actual modeled DMA pages.
+        // SAFETY: backing exclusively owns these modeled DMA pages.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, model) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));

@@ -4,7 +4,7 @@ use super::*;
 
 fn stop(link: &mut TestLink, model: &Model) {
     depart(link, model);
-    // SAFETY: exact model removal ACK and independent RX/IRQ/work drain.
+    // SAFETY: model removal ACK and independent RX/IRQ/work drain.
     unsafe { link.retire_peer_after_drain() }.unwrap();
     link.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
@@ -21,7 +21,7 @@ fn owning_live_igtk_rotation_preserves_buffered_notice_then_revokes_taken_envelo
     assert_eq!(link.queues().notices, 1);
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(matches!(
-        // SAFETY: deliberate pending frontend user must refuse before actual publication.
+        // SAFETY: deliberate pending frontend user must refuse before publication.
         unsafe {
             link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },
@@ -30,8 +30,8 @@ fn owning_live_igtk_rotation_preserves_buffered_notice_then_revokes_taken_envelo
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
     assert_eq!(link.queues().notices, 1);
     let delayed = take_management(&mut link);
-    // SAFETY: actual model users/queues and independent RX/IRQ fence drained;
-    // taken observation is historical and consuming authority will be revoked.
+    // SAFETY: model users/queues and independent RX/IRQ fence drained;
+    // taken observation is historical and consuming permission will be revoked.
     let second = unsafe {
         link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
     }
@@ -83,20 +83,20 @@ fn owning_live_igtk_rotation_waits_for_released_tx_notice_and_exact_retry_is_eff
     link.service().unwrap();
     assert_ne!(link.queues().notices, 0);
     assert!(matches!(
-        // SAFETY: completed but retained frontend TX notice is still an old-key user.
+        // SAFETY: completed but kept frontend TX notice is still an old-key user.
         unsafe {
             link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },
         Err(LinkControlError::Backpressure)
     ));
     drop(drain_notices(&mut link));
-    // SAFETY: actual model TX-free/unmap and all native/frontend/external users drained.
+    // SAFETY: model TX-free/unmap and all native/frontend/external users drained.
     let second = unsafe {
         link.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
     }
     .unwrap();
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: exact retry in same actual independently drained model namespace.
+    // SAFETY: exact retry in same independently drained model namespace.
     let retry = unsafe {
         link.rotate_management_key(&second, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
     }

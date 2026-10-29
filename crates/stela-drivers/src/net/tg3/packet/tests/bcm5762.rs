@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Authored UNRUN BCM5762 device effects. Profile evidence comes from actual
+//! Authored UNRUN BCM5762 device effects. Profile evidence comes from
 //! config/PHY/NVM/register bytes, never a caller-supplied native capability.
 use super::*;
 
@@ -15,9 +15,9 @@ impl Device {
         p.phy
             .insert(3, (((id >> 16) & 0xfc00) | (id & 0x3ff)) as u16);
         p.mac.insert(0x7014, 0x0080_0000); // 5762 MX25L100.
-        p.mac.insert(0x7038, 0); // actual autosense density code0.
+        p.mac.insert(0x7038, 0); // autosense density code0.
         p.nvram.insert(0, 0x6699_55aa);
-        p.mac.insert(0x6808, 0x10); // actual UART selector retained.
+        p.mac.insert(0x6808, 0x10); // UART selector kept.
         p.mac.insert(0x4890, 0x93db_a951);
         p.mac.insert(0x48a0, 0x0010_0080);
         p.mac.insert(0x4910, 0x0110_0080);
@@ -285,7 +285,7 @@ fn actual_5762_ignored_required_register_writes_cannot_advertise_attachment() {
         assert_eq!(peer.lock().unwrap().dma_effects, 0);
         assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
         peer.lock().unwrap().ignore_write = None;
-        // Some faults happen after BME. Only actual stop+domain drain retires.
+        // Some faults happen after BME. Only stop+domain drain retires.
         if packet.identified {
             assert!(packet.retire().is_ok());
         } else {
@@ -500,7 +500,7 @@ fn actual_5762_register_access_removal_and_nvm_read_failures_retain_owners() {
                     _ => p.removed_read = Some(at),
                 }
                 // The NVM write target is exercised by the EEPROM compat
-                // transition, not a fabricated flash programming command.
+                // transition, not an invented flash programming command.
                 if at == 0x7014 {
                     p.mac.insert(at, 0x8200_0001);
                 }

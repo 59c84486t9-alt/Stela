@@ -196,7 +196,7 @@ pub struct System {
     pub boot_volume: Option<BootVolume>,
     /// NVRAM asked for a safe-mode boot (`--safe-boot`).
     pub safe_boot: bool,
-    /// The entry origin retained after NVRAM's one-shot command is consumed.
+    /// The entry origin kept after NVRAM's one-shot command is consumed.
     pub boot_command: Option<BootCommand>,
     /// NVRAM chose a staged macOS update (`--upgrade`): build from the
     /// Preboot disk's Update volume.
@@ -230,7 +230,7 @@ pub struct System {
     pub verify_on_read: bool,
     /// Restore with the inventory's Update identity (`--update-restore`).
     pub update_restore: bool,
-    /// Use restored's development-board policy to retain and report FDR
+    /// Use restored's development-board policy to keep and report FDR
     /// failures while allowing the erase restore to continue
     /// (`--development-restore`), a degraded mode.
     pub development_restore: bool,
@@ -253,7 +253,7 @@ pub struct System {
     /// siblings. Without it every physical core up to the executor's
     /// capacity is assigned.
     pub native_cores: Option<usize>,
-    /// Qualify owned AP startup/host resources, then stop before guest entry.
+    /// Check owned AP startup/host resources, then stop before guest entry.
     pub native_bootstrap_check: bool,
     /// Bounded checked-memory kernel execution on the selected cores.
     pub native_shared_check: bool,
@@ -276,7 +276,7 @@ pub struct System {
     /// POST once to this `http://` URL at start and report the reply
     /// (`--network-check URL`).
     pub network_check: Option<String>,
-    /// Qualify exclusively owned conventional HDA after ExitBootServices.
+    /// Check exclusively owned conventional HDA after ExitBootServices.
     pub audio_check: Option<AudioCheck>,
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).

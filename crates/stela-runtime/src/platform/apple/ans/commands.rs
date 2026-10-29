@@ -910,7 +910,7 @@ impl Ans {
             return Err("ANS namespace request extension fields are not modeled");
         }
         // Same-layout formatting drops the growable data extent's mappings.
-        // Fixed auxiliary namespaces retain their contents: their services
+        // Fixed auxiliary namespaces keep their contents: their services
         // stay attached across doFormatMedia, and eanFormat reuses a valid
         // header instead of formatting it again. Erasing that header here
         // leaves the service's cached formatted state pointing at zero data.
@@ -996,7 +996,7 @@ impl Ans {
             // (0x3df69c4..0x3df6a20), CopyNANDIDData (0x3dc0088) as
             // eight opaque manufacturer-ID bytes. The chosen ID starts 9b
             // and agrees with the descriptor's YMTC personality. Only the
-            // consumed eight bytes have a modeled meaning; no fabricated
+            // consumed eight bytes have a modeled meaning; no invented
             // geometry is placed in the rest of the 4 KiB output buffer.
             if cmd.long(52) == 0
                 || cmd.word(60) != tunnel_buffer(4096)

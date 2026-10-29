@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native F1A one-byte active-high button records.
-//! Pinned source and retained copyright are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyright are in input/THIRD_PARTY.md.
 use super::{Error, Function, transport::Transport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub struct Capabilities {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub capabilities: Capabilities,
-    /// Complete actual data byte, including bits outside the declared buttons.
+    /// Complete data byte, including bits outside the declared buttons.
     pub raw: u8,
 }
 impl Frame {

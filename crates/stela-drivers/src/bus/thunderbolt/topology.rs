@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2018 Intel Corporation
-//! Read-only router/adapter inventory over the actual native control channel.
+//! Read-only router/adapter inventory over the native control channel.
 //!
 //! Layout and capability traversal follow Linux tb_regs.h/cap.c/switch.c.
 //! Observation does not configure a router, grant authorization or create a
-//! tunnel. Raw headers/capabilities are retained, including unknown adapters.
+//! tunnel. Raw headers/capabilities are held, including unknown adapters.
 use super::{
     channel::{self, Channel},
     config::{self, Address, Reply, Route, Space},
@@ -273,7 +273,7 @@ pub enum AdapterObservation {
         capabilities: Vec<Capability>,
     },
     /// Linux treats INVALID_CONFIG_SPACE for a port-header read as an absent
-    /// adapter. The actual error and sending router/port remain attached.
+    /// adapter. The error and sending router/port remain attached.
     Unimplemented {
         port: u8,
         response_route: Route,
@@ -316,7 +316,7 @@ struct Job {
 /// Bounded read-only enumeration; all reads execute through Channel/Ring DMA.
 /// Router/adapter capabilities are traversed once, with cycle/bounds checks.
 /// Control adapter0 has no port config and is never read. Caller supplies an
-/// actual reachable route; probing does not unlock or configure downstream
+/// reachable route; probing does not unlock or configure downstream
 /// links. Legacy Light/Eagle Ridge TMU access side effects are not implemented.
 pub struct Inspector<R: Registers> {
     channel: Channel<R>,
@@ -859,7 +859,7 @@ mod tests {
         adapter3[2] = 0xabcdef;
         adapter3[3] = 3 << 20;
         // (space,port,offset,words,reply-data/error). Every expected request is
-        // decoded from the driver's actual mapped TX frame, not a mock RPC.
+        // decoded from the driver's mapped TX frame, not a mock RPC.
         type InspectStep = (u32, u32, u32, u32, Result<Vec<u32>, u32>);
         let steps: Vec<InspectStep> = vec![
             (

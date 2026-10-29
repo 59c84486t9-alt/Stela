@@ -55,18 +55,18 @@
 //! faults. The model executes a command when its last payload word arrives.
 //! It has no faults to latch or count, so those registers read zero.
 //!
-//! Retained lifecycle pauses require no partial request and every vector
+//! Lifecycle pauses require no partial request and every vector
 //! masked. Masked responses/pending latches and attached PMIC state remain
 //! owned; physical reset/rail loss and armed-source wake behavior refuse.
 //! Quiesce permits nonmutating reads, while a clock-stop MMIO access remains
-//! unqualified. Slave autonomous time is independent of controller gating.
+//! unchecked. Slave autonomous time is independent of controller gating.
 //! Armed autonomous capture through clock/power loss remains an explicit board
 //! requirement; attaching a slave does not claim that wire. The debug queue
 //! windows (A+0xb0..0xb8; Gen3 A+0xbc; Gen4 A+0x800..0x810), the Gen3 and
 //! Gen4 arbiter reset (`reg[2]` + 0x20, which the driver pulses only when a
 //! queue reset leaves the FIFOs non-empty, never here), nonzero control on
 //! every generation but Gen2, command types outside the extended/scalar register
-//! and four payloadless forms, unqualified slave command effects, and request
+//! and four payloadless forms, unchecked slave command effects, and request
 //! or response overflow refuse.
 
 #[cfg(test)]
@@ -122,7 +122,7 @@ pub enum Command {
 pub trait SpmiSlave {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError>;
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError>;
-    /// Execute an actual slave-owned command. Unqualified effects must not ACK.
+    /// Execute a slave-owned command. Unqualified effects must not ACK.
     fn command(&mut self, _command: Command, _now: u64) -> Result<(), SlaveError> {
         Err(SlaveError::Unsupported(
             "SPMI slave payloadless command is unqualified",
@@ -135,7 +135,7 @@ pub trait SpmiSlave {
     fn check_time(&self, _now: u64) -> Result<(), SlaveError> {
         Ok(())
     }
-    /// Actual slave output. None means this slave has no qualified output contract.
+    /// Slave output. None means this slave has no checked output contract.
     fn interrupt_level(&self) -> Option<bool> {
         None
     }
@@ -149,7 +149,7 @@ pub trait SpmiSlave {
         }
     }
     /// Could an autonomous output change while the master is paused? Unknown
-    /// slaves conservatively retain ownership; a masked local vector is irrelevant.
+    /// slaves conservatively keep ownership; a masked local vector is irrelevant.
     fn interrupt_armed(&self) -> bool {
         true
     }
@@ -313,7 +313,7 @@ impl Spmi {
         self.slaves.push((sid, slave));
         Ok(())
     }
-    /// Attach an actual deasserted slave output to a source-declared edge vector.
+    /// Attach a deasserted slave output to a source-declared edge vector.
     /// This samples the initial level; attaching cannot manufacture an edge.
     pub fn attach_with_interrupt(
         &mut self,
@@ -324,7 +324,7 @@ impl Spmi {
         self.attach_with_interrupts(sid, &[(0, vector)], slave)
     }
     /// Attach every source-declared output atomically. Output indices select
-    /// actual independent slave levels; vector order never invents semantics.
+    /// independent slave levels; vector order never invents semantics.
     pub fn attach_with_interrupts(
         &mut self,
         sid: u8,
@@ -882,7 +882,7 @@ mod tests {
             wr(&mut c, &mut access, layout.request, request(3) | 0xb0 << 16);
             assert!(c.partial.is_some());
             wr(&mut c, &mut access, layout.queue_reset, 1);
-            wr(&mut c, &mut access, layout.request, select); // actual body commit
+            wr(&mut c, &mut access, layout.request, select); // body commit
             assert_eq!(c.pending[0], 1 << 11);
             assert_eq!(rd(&mut c, &mut access, layout.response), ACK | 0xc89);
             assert_eq!(c.pending[0], 1 << 11); // FIFO pop does not ACK an output
@@ -1134,7 +1134,7 @@ mod tests {
             assert!(c.pending.iter().all(|&bits| bits == 0));
         }
         // Four accepted writes occupy four of five response words.
-        // A read needs two; its rejected header retains the entire prefix.
+        // A read needs two; its rejected header keeps the entire prefix.
         for byte in 1..=4 {
             wr(
                 &mut c,
@@ -1182,7 +1182,7 @@ mod tests {
         wr(&mut c, &mut a, QUEUE_RESET, 1);
         assert_eq!(rd(&mut c, &mut a, QUEUE_RESET), 0);
         assert_eq!(rd(&mut c, &mut a, STATUS), 0x0100_0100);
-        // Payloadless reset/sleep commands have no qualified slave lifecycle.
+        // Payloadless reset/sleep commands have no checked slave lifecycle.
         for opcode in [0x10, 0x11] {
             assert!(
                 c.write(
@@ -1369,7 +1369,7 @@ mod tests {
         write(&mut c, &mut a, rtc.irq_mask, 0x30, 1);
         assert!(!output.asserted());
         write(&mut c, &mut a, rtc.irq_mask, 0x30, 0);
-        assert_eq!(c.pending[0], 4); // actual wire fell and rose
+        assert_eq!(c.pending[0], 4); // wire fell and rose
         assert!(output.asserted());
         write(&mut c, &mut a, rtc.alarm_event, 0x30, 1);
         assert!(!output.asserted());

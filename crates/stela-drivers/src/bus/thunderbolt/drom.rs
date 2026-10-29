@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! Actual USB4 DROM acquisition and bounded source CRC/entry observations.
+//! USB4 DROM acquisition and bounded source CRC/entry observations.
 //! Parsed identifiers and lane hints never grant board, power or tunnel rights.
 use super::{
     channel::{self, Channel},
@@ -22,18 +22,18 @@ const JOB_MS: u64 = 1_440_000;
 pub const MAX_DURATION_US: u64 = (JOB_MS + 5000) * 1000;
 static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 
-/// Actual configured router/CM lifetime, exclusively retained across every read.
+/// Configured router/CM lifetime, exclusively kept across every read.
 /// # Safety
-/// Inventory is the actual configured router in the same physical NHI requester,
+/// Inventory is the configured router in the same physical NHI requester,
 /// reset/topology lifetime as Channel. Original router, D0/link, exclusive native
 /// operation-engine/CM admission and independent DMA/IRQ/IOMMU owners remain held
 /// through completion, failure and quarantine. Firmware/proxy or competing CM
-/// cannot mutate the engine or inventory. is_current checks actual admission and
+/// cannot mutate the engine or inventory. is_current checks admission and
 /// pins this in-flight physical lifetime against reuse. supports_duration checks
 /// the real calibrated scheduler clock for the full requested microsecond budget;
 /// no permissive production provider or default is supplied. Clock observations
 /// passed to poll come from that same stable monotonic source, in milliseconds.
-/// DROM bytes/identifiers/CRC and parsed ports provide no authority by themselves.
+/// DROM bytes/identifiers/CRC and parsed ports provide no permission by themselves.
 pub unsafe trait Owner: Send + Sync {
     fn inventory(&self) -> &Inventory;
     fn is_current(&self) -> bool;
@@ -112,9 +112,9 @@ pub struct Entry {
     pub index: u8,
     pub kind: Kind,
 }
-/// Actual acquired bytes and source interpretations, not a native resource grant.
+/// Acquired bytes and source interpretations, not a native resource grant.
 /// CRC32 mismatch is explicit while entries remain observable, as Linux warns
-/// and continues. Version1 UID CRC failure is fatal; version3 uses actual CS7 UID.
+/// and continues. Version1 UID CRC failure is fatal; version3 uses CS7 UID.
 pub struct Image {
     pub uid: u64,
     pub uid_source: UidSource,
@@ -301,8 +301,8 @@ impl Acquired {
         self.owner.as_ref().is_some_and(|o| o.is_current())
     }
     /// # Safety
-    /// Actual configured-router/native CM owner and all independent platform,
-    /// DMA/IRQ/IOMMU lifetimes are restored or independently retained. DROM
+    /// Configured-router/native CM owner and all independent platform,
+    /// DMA/IRQ/IOMMU lifetimes are restored or independently kept. DROM
     /// observations alone cannot retire those owners or grant a tunnel.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::drom::Acquired;
@@ -329,8 +329,8 @@ struct ReadOwner {
     route: Route,
     operation: AtomicU32,
 }
-// SAFETY: private adapter retains the exact original actual CM owner. Only the
-// source-derived bounded DROM span changes; metadata supplies no new authority.
+// SAFETY: private adapter keeps the original CM owner. Only the
+// source-derived bounded DROM span changes; metadata supplies no new permission.
 unsafe impl operations::Owner for ReadOwner {
     fn inventory(&self) -> &Inventory {
         self.source.inventory()
@@ -398,7 +398,7 @@ pub struct Read<R: Registers> {
 }
 impl<R: Registers> Read<R> {
     /// # Safety
-    /// Idle Channel and actual Owner are this exact physical configured router,
+    /// Idle Channel and Owner are this exact physical configured router,
     /// original native CM/reset/topology lifetime. All Owner requirements hold.
     /// ```compile_fail
     /// use std::sync::Arc;
@@ -517,7 +517,7 @@ impl<R: Registers> Read<R> {
             Ordering::Release,
         );
         let data = self.block_data.take().ok_or(Error::UnexpectedReceipt)?;
-        // SAFETY: original actual native CM owner remains in self.owner and the
+        // SAFETY: original native CM owner remains in self.owner and the
         // preallocated private adapter across blocks. Prior block ownership is
         // closed before its immutable captured operation metadata can change.
         self.control = Some(
@@ -697,7 +697,7 @@ impl<R: Registers> Read<R> {
                 Ok(Some(operations::Event::Discarded(e))) => return Ok(Some(Event::Discarded(e))),
                 Ok(Some(operations::Event::Completed(done))) => {
                     self.channel = Some(self.control.take().unwrap().into_channel());
-                    // SAFETY: exact original actual CM owner remains in self.owner;
+                    // SAFETY: original CM owner remains in self.owner;
                     // private completed DROM read has all final ACK/OV0 receipts.
                     let Some(data) = (unsafe { done.take_read_data() }) else {
                         return self.fail(Error::Revoked);
@@ -720,8 +720,8 @@ impl<R: Registers> Read<R> {
                     }
                 }
                 Err(e) => {
-                    // SAFETY: original actual CM and adapter stay retained;
-                    // only final acknowledged read-only status errors qualify.
+                    // SAFETY: original CM and adapter stay held;
+                    // only final acknowledged read-only status errors check.
                     let channel = unsafe { self.control.as_mut().unwrap().retry_read() };
                     if let Some((channel, mut data)) = channel {
                         self.control.take();

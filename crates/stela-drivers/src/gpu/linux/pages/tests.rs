@@ -1,11 +1,11 @@
-//! CPU-owned page catalog and actual C ABI lifetime fixtures.
+//! CPU-owned page catalog and C ABI lifetime fixtures.
 extern crate std;
 use super::*;
 use crate::bus::dma::memory::PageBacking;
 use core::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
-// CPU-only ownership model. Physical labels deliberately differ from CPU
+// CPU-only ownership model. Physical labels differ from CPU
 // addresses and are never passed to hardware or treated as native evidence.
 const PHYSICAL: u64 = 0x1_0000_0000;
 #[repr(align(4096))]
@@ -21,7 +21,7 @@ impl Drop for Backing {
     }
 }
 // SAFETY: aligned zeroed owned model memory, immutable symbolic page list,
-// and no DMA or shared data references. Drop ends the actual CPU storage.
+// and no DMA or shared data references. Drop ends the CPU storage.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
         NonNull::from(&self.buffer.0[0])
@@ -80,7 +80,7 @@ fn model_at(
     });
     let cpu = backing.cpu_base();
     let pin = PinnedPages::new(backing, PAGE_BYTES, PAGE_BYTES).unwrap();
-    // SAFETY: explicit CPU-only model with the exact retained CPU extent;
+    // SAFETY: explicit CPU-only model with the exact CPU extent;
     // no conversion or callback grants hardware access to its PA labels.
     let reservation = unsafe { Reservation::new(physical, cpu, 1) }.unwrap();
     (
@@ -96,7 +96,7 @@ fn model_at(
 }
 
 struct PairModel([Model; 2]);
-// SAFETY: each component retains its actual separate model CPU pin; the
+// SAFETY: each component keeps its separate model CPU pin; the
 // symbolic physical inventories do not grant any native hardware access.
 // Validation and transfer obey the same serialized nonreentrant contract
 // as Model; only ordinary exhaustion falls through to the second owner.
@@ -145,9 +145,9 @@ fn multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations()
     let (right, right_extent, right_drops, _) = model_at(false, right_physical);
     let expected_cpu = [left_extent.cpu_base, right_extent.cpu_base];
     assert_ne!(expected_cpu[0], expected_cpu[1]);
-    // SAFETY: both actual separate CPU grants are retained by PairModel;
+    // SAFETY: both separate CPU grants are held by PairModel;
     // only isolated symbolic physical labels are used and IRQ/root writers
-    // are absent. Reversed input proves ordering is not caller authority.
+    // are absent. Reversed input proves ordering is not caller permission.
     let mut catalog = unsafe {
         Catalog::register_extents(
             PairModel([left, right]),
@@ -156,7 +156,7 @@ fn multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations()
     }
     .unwrap();
     let entered = Entered::try_new().unwrap();
-    // SAFETY: the actual isolated C owner is entered at quiescence; the
+    // SAFETY: the isolated C owner is entered at quiescence; the
     // registered provider transfers its two real CPU pins through the
     // normal Linux page API. Null nodemask and node -1 permit node0.
     let pages = unsafe {
@@ -168,7 +168,7 @@ fn multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations()
     assert!(!pages[0].is_null() && !pages[1].is_null());
     for (index, physical) in [PHYSICAL, right_physical].into_iter().enumerate() {
         // SAFETY: each page is live in this exact generation, and these
-        // queries operate on its retained metadata and actual CPU mapping.
+        // queries operate on its metadata and CPU mapping.
         unsafe {
             assert_eq!(page_to_pfn(pages[index]) as u64, physical >> PAGE_SHIFT);
             assert_eq!(
@@ -182,7 +182,7 @@ fn multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations()
     assert_eq!(left_drops.load(Ordering::Relaxed), 0);
     assert_eq!(right_drops.load(Ordering::Relaxed), 0);
     let entered = Entered::try_new().unwrap();
-    // SAFETY: both exact original order0 live references are uniquely held
+    // SAFETY: both original order0 live references are uniquely held
     // by this test; no device, IRQ, RCU or concurrent consumer exists.
     unsafe {
         __free_pages(pages[0], 0);
@@ -198,9 +198,9 @@ struct DeferredModel {
     ordinary: Model,
     ready: Arc<AtomicBool>,
 }
-// SAFETY: this retains the exact ordinary model pin. The test-only flag
-// models an extra owner acknowledgment; it qualifies no native stack,
-// terminal, RCU or platform authority. Until set, no pin may be dropped.
+// SAFETY: this keeps the exact ordinary model pin. The test-only flag
+// models an extra owner acknowledgment; it checks no native stack,
+// terminal, RCU or platform permission. Until set, no pin may be dropped.
 unsafe impl Provider for DeferredModel {
     fn validate(&self, request: Request) -> Result<(), MemoryError> {
         self.ordinary.validate(request)
@@ -249,13 +249,13 @@ fn logical_c_free_and_busy_drop_retain_the_pin_until_its_owner_acknowledges() {
             ordinary,
             ready: ready.clone(),
         };
-        // SAFETY: isolated actual CPU backing/mapping model with retained
+        // SAFETY: isolated CPU backing/mapping model with kept
         // provider ownership and no native IRQ, root or resource producers.
         let mut catalog = unsafe { Catalog::register(provider, extent) }.unwrap();
         let entered = Entered::try_new().unwrap();
-        // SAFETY: actual C owner at quiescence; the unique live order0
+        // SAFETY: C owner at quiescence; the unique live order0
         // reference is allocated/freed through its original ordinary API.
-        // Its backing remains retained by the provider's extra fence.
+        // Its backing remains held by the provider's extra fence.
         unsafe {
             let page = __alloc_pages_noprof(0, 0, -1, ptr::null_mut());
             assert!(!page.is_null());
@@ -276,14 +276,14 @@ fn logical_c_free_and_busy_drop_retain_the_pin_until_its_owner_acknowledges() {
             let entered = Entered::try_new().unwrap();
             assert_eq!(
                 // SAFETY: fixture-only recovery of this exact isolated known
-                // catalog after its actual modeled fence; no caller, callback
+                // catalog after its modeled fence; no caller, callback
                 // or page reference survives. Production Drop never does this.
                 unsafe { stela_linux_page_catalog_unregister(generation) },
                 0
             );
             drop(entered);
             // SAFETY: successful exact unregister ended all C borrows of
-            // the unique Context retained by the production busy Drop.
+            // the unique Context kept by the production busy Drop.
             drop(unsafe { Box::from_raw(context.cast_mut()) });
         } else {
             ready.store(true, Ordering::Release);
@@ -343,7 +343,7 @@ fn callback_transfers_only_valid_pins_and_refuses_before_provider_allocation() {
             physical_pages: ptr::null(),
             page_count: 0,
         };
-        // SAFETY: actual typed stable context and native writable output;
+        // SAFETY: typed stable context and native writable output;
         // this directly tests the production ownership callback.
         let result = unsafe {
             allocate::<Model>(
@@ -367,7 +367,7 @@ fn callback_transfers_only_valid_pins_and_refuses_before_provider_allocation() {
             assert!(!output.pin.is_null());
             assert_eq!(output.page_count, 1);
             assert_eq!(drops.load(Ordering::Relaxed), 0);
-            // SAFETY: successful callback retains its actual CPU mapping
+            // SAFETY: successful callback keeps its CPU mapping
             // and physical-list storage until the unique release below.
             unsafe {
                 assert_eq!(output.physical_pages.read(), PHYSICAL);
@@ -412,7 +412,7 @@ fn catalog_retirement_and_nested_drop_preserve_provider_lifetime() {
     }
     let (provider, reservation, drops, _) = model(false);
     // SAFETY: isolated CPU model in the ordinary test thread, with a
-    // retained reservation/provider and no native IRQ or root writers.
+    // reservation/provider and no native IRQ or root writers.
     let mut catalog = unsafe { Catalog::register(provider, reservation) }.unwrap();
     catalog.try_retire().unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -427,13 +427,13 @@ fn catalog_retirement_and_nested_drop_preserve_provider_lifetime() {
     let context = &**catalog.context.as_ref().unwrap() as *const Context<Model>;
     let before = quarantined_catalogs();
     let entered = Entered::try_new().unwrap();
-    // A nested final Drop must return immediately and retain the C callback
+    // A nested final Drop must return immediately and keep the C callback
     // context. It cannot wait for its own borrowed Linux execution owner.
     drop(catalog);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     assert_eq!(quarantined_catalogs(), before + 1);
     // Test-only cleanup of this known quiescent catalog. Production Drop
-    // supplies no fabricated drain/reset witness or automatic reclamation.
+    // supplies no invented drain/reset witness or automatic reclamation.
     assert_eq!(
         // SAFETY: no page was allocated through this catalog; the current
         // entered owner is quiescent and supplies the exact generation.
@@ -442,7 +442,7 @@ fn catalog_retirement_and_nested_drop_preserve_provider_lifetime() {
     );
     drop(entered);
     // SAFETY: successful unregister ended all C borrows of the unique
-    // Context retained by the production busy-drop path above.
+    // Context kept by the production busy-drop path above.
     drop(unsafe { Box::from_raw(context.cast_mut()) });
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }

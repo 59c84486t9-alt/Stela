@@ -385,7 +385,7 @@ fn plan(
         };
         if input && let Some(mut caps) = current.input_amplifier {
             if policy == RoutePolicy::CirrusCs4208 && matches!(*node, 0x18 | 0x1b | 0x1c) {
-                // cs4208_fix_amp_caps corrects only the 0dB offset; retain
+                // cs4208_fix_amp_caps corrects only the 0dB offset; keep
                 // every observed step-size/range/mute bit in this policy.
                 caps = (caps & !0x7f) | 2;
             }
@@ -431,12 +431,12 @@ fn plan(
             }
             if policy == RoutePolicy::CirrusCs4210 && *node == 2 {
                 // fix_volume_caps limits the DAC to its observed 0dB offset,
-                // retaining all other raw amplifier capability bits.
+                // keeping all other raw amplifier capability bits.
                 caps = (caps & !0x7f00) | ((caps & 0x7f) << 8);
             }
             let mut amp = amplifier(*node, true, 0, current_channels, caps, false)?;
             // add_cx5051_fake_mutes authorizes minimum volume as mute only
-            // for these two DAC outputs; physical mute bits retain precedence.
+            // for these two DAC outputs; physical mute bits keep precedence.
             amp.minimum_mute = policy == RoutePolicy::ConexantCx20561
                 && matches!(*node, 0x10 | 0x11)
                 && caps & AMP_MUTE_SUPPORTED == 0;
@@ -487,7 +487,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn route_amplifier(&mut self, codec: u8, amp: Amplifier) -> Result<(), Error> {
-        // Fake mute is a real minimum-gain write, never a fabricated bit7
+        // Fake mute is a real minimum-gain write, never an invented bit7
         // capability. Enabling restores the route's advertised 0dB value.
         let value = if amp.minimum_mute && amp.mute {
             0
@@ -610,7 +610,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// sharing/reconfiguration needs full controller reinitialization. Any
     /// hardware failure after programming begins blocks future route/stream
     /// starts until reinitialization; partial codec effects are not rolled back.
-    /// Initialized Conexant codecs retain their ADC/EAPD policy through this
+    /// Initialized Conexant codecs keep their ADC/EAPD policy through this
     /// entry point too. OEM GPIO/amp sequencing, jack detection and digital
     /// audio remain separate.
     pub fn configure_analog_route(

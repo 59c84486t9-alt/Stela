@@ -1,4 +1,4 @@
-//! Observed original GuC-only hardware reset, retaining the actual Device epoch.
+//! Observed original GuC-only hardware reset, keeping the Device epoch.
 use super::activation::Device;
 
 #[repr(C)]
@@ -15,7 +15,7 @@ const _: () = assert!(core::mem::size_of::<NativeResult>() == 24);
 const _: () = assert!(core::mem::offset_of!(NativeResult, guc_status) == 12);
 
 /// The original GDRST clear and MIA-in-reset observations from this explicit
-/// operation. The exclusive borrow retains the same canonical owner and wake.
+/// operation. The exclusive borrow keeps the same canonical owner and wake.
 /// This does not implement `xe_uc_sanitize_reset` or establish whole-device DMA
 /// quiescence, CT/job drain, firmware authentication or GGTT readiness. Drop
 /// performs no reset, rollback, sleep or implicit cleanup.

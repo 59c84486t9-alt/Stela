@@ -316,7 +316,7 @@ fn exclusive_service_shared_same_value_aba_publication_invalidates_without_extra
             exclusive_invoke(&mut thread, GUEST_BASE, 4, &mut load, 0).0,
             MemoryStatus::Success
         );
-        // SAFETY: source is disjoint private bytes and the shared system owns the retained raw backing.
+        // SAFETY: source is disjoint private bytes and the shared system owns the raw backing.
         unsafe { system.publish(&backing, 0, values) }.unwrap();
         assert!(exclusive_wait(&mut endpoint, &events));
         let mut store = exclusive_data(ExclusiveOperation::Store, ExclusiveShape::Scalar, 9);

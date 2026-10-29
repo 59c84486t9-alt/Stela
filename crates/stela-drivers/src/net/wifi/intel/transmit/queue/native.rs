@@ -47,7 +47,7 @@ impl NativeMemory {
         self.memory.slots()
     }
     /// # Safety
-    /// The actual requester/coherent domain is the retained native epoch's.
+    /// The requester/coherent domain is the native epoch's.
     /// All required real policy leases are held through this handoff and its
     /// following HCMD. The CPU has exclusive ownership of this fresh memory;
     /// no queue/frame or address has previously been submitted from it.
@@ -81,10 +81,10 @@ impl NativeMemory {
         self.exposed && !self.released
     }
     /// # Safety
-    /// Actual scheduler REMOVE ACK/reclaim or independent native stop has
+    /// Scheduler REMOVE ACK/reclaim or independent native stop has
     /// ended all device access; no frame or queue worker can reference these
     /// mappings. Every pending descriptor has completed and reclaimed. A failed
-    /// invalidation must retain the same native/policy owner with this memory.
+    /// invalidation must keep the same native/policy owner with this memory.
     pub(in crate::net::wifi::intel) unsafe fn release(&mut self) -> Result<(), Error> {
         for chunk in [
             &mut self.memory.byte_counts,
@@ -92,7 +92,7 @@ impl NativeMemory {
             &mut self.memory.first,
             &mut self.memory.invalid,
         ] {
-            // SAFETY: actual source quiescence supplied by this method's owner.
+            // SAFETY: source quiescence supplied by this method's owner.
             unsafe { chunk.release() }.map_err(|error| Error::Dma(dma::Error::Dma(error)))?;
         }
         self.released = true;

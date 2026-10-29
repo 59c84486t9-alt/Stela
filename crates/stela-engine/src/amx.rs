@@ -29,7 +29,7 @@ pub enum Failure {
     Unsupported { detail: &'static str },
     /// The transfer touches memory outside the direct-RAM user range.
     Memory { address: u64, write: bool },
-    /// A qualified transfer alignment fault. The M2 model
+    /// A checked transfer alignment fault. The M2 model
     /// does not produce this M1-specific diagnostic.
     Alignment {
         address: u64,

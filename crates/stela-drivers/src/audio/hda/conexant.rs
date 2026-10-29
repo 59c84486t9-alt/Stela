@@ -36,7 +36,7 @@ pub struct ConexantReport {
     pub function_group: u8,
     /// Inferred from the donor's count heuristic, not a silicon capability bit.
     pub eapd_mode: ConexantEapdMode,
-    /// Actual pin IDs and observed EAPD controls after initialization.
+    /// Pin IDs and observed EAPD controls after initialization.
     pub eapd: Vec<(u8, u8)>,
     pub single_adc_amplifier: bool,
 }
@@ -106,7 +106,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(value)
     }
     /// Initialize held-D0 standard analog control ownership. The graph must
-    /// describe the actual codec. Dynamic EAPD retains its observed value until
+    /// describe the codec. Dynamic EAPD keeps its observed value until
     /// the caller explicitly applies the master output switch. OEM pin/GPIO,
     /// ACPI, headset protocols, unsolicited events and suspend are separate.
     pub fn initialize_conexant_codec(
@@ -155,7 +155,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             ConexantEapdMode::Global
         };
         let index = self.conexant_codecs.len();
-        // Retain the exact verified pin set before any power/EAPD effects.
+        // Keep the exact verified pin set before any power/EAPD effects.
         self.conexant_codecs.push(State {
             address: graph.address,
             codec_id: graph.vendor_id,
@@ -218,9 +218,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Ok(())
         });
         if let Err(error) = identity {
-            // Once this codec is owned, a lost live authority check makes its
-            // already configured routes uncertain too. Retain their resources
-            // and prevent any later start until actual reset.
+            // Once this codec is owned, a lost live permission check makes its
+            // already configured routes uncertain too. Keep their resources
+            // and prevent any later start until reset.
             self.routing_failed = true;
             if let Some(owned) = self
                 .conexant_codecs
@@ -263,7 +263,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.configure_analog_route_policy(graph, route, id, channel, options, policy)
     }
     /// Linux's vmaster EAPD operation. Live DMA may continue; any failed effect
-    /// blocks future starts until reset, while all buffers remain retained.
+    /// blocks future starts until reset, while all buffers remain held.
     pub fn set_conexant_outputs_enabled(
         &mut self,
         graph: &CodecGraph,
@@ -281,7 +281,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Mute/unmute a retained CX20561 DAC route at its advertised 0dB gain.
+    /// Mute/unmute a CX20561 DAC route at its advertised 0dB gain.
     /// The two source-authorized DACs use physical minimum gain when no mute
     /// bit exists. Existing PCM DMA may continue. No mixer cache or external
     /// volume is inferred; unmute explicitly reapplies this route's 0dB level.
@@ -327,8 +327,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
 
-    /// Called only after every actual stream stop has acknowledged, before CORB
-    /// and RIRB stop. Unknown codec effects remain retained through error/reset.
+    /// Called only after every stream stop has acknowledged, before CORB
+    /// and RIRB stop. Unknown codec effects remain held through error/reset.
     pub(super) fn shutdown_conexant_codecs(&mut self) -> Result<(), Error> {
         for index in 0..self.conexant_codecs.len() {
             let state = self.conexant_codecs[index].clone();

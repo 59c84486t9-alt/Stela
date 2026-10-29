@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native register encodings from pinned include/linux/rtsx_pci.h.
-//! Actual native RTSX MMIO and internal register addresses.
+//! Native RTSX MMIO and internal register addresses.
 use crate::bus::mmio::Mmio;
 pub(super) trait Registers {
     fn read32(&mut self, at: usize) -> u32;

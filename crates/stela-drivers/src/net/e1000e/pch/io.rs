@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright(c) 1999 - 2018 Intel Corporation.
 // Copyright (c) 2026 Stela contributors
-//! Native access to a retained, actually mapped PCH register window.
+//! Native access to a kept, mapped PCH register window.
 use super::{Fault, Registers};
 use alloc::sync::Arc;
 use core::ptr::NonNull;
@@ -13,8 +13,8 @@ pub struct Mmio {
 }
 impl Mmio {
     /// # Safety
-    /// The entire range is a live exclusive UC mapping of the actual PCH MAC
-    /// BAR, not a physical-address cast. `owner` retains its real PCI reservation,
+    /// The entire range is a live exclusive UC mapping of the PCH MAC
+    /// BAR, not a physical-address cast. `owner` keeps its real PCI reservation,
     /// mapping and power through its final Drop. The complete `Registers`
     /// ordering/exclusion/quiescence contract holds; no unrelated token suffices.
     pub unsafe fn from_owned_window(
@@ -42,13 +42,13 @@ impl Mmio {
         if at.checked_add(4).is_none_or(|end| end > self.bytes) {
             return Err(Fault::OutsideBar);
         }
-        // SAFETY: the constructor retains the live mapping, and full aligned
+        // SAFETY: the constructor keeps the live mapping, and full aligned
         // bounds were checked before creating this raw pointer.
         Ok(unsafe { self.base.as_ptr().add(at).cast() })
     }
 }
 // SAFETY: construction requires the real UC/reservation/exclusion grant, which
-// remains retained; all accesses check complete bounds before volatile use.
+// remains held; all accesses check complete bounds before volatile use.
 unsafe impl Registers for Mmio {
     fn read32(&mut self, at: u32) -> Result<u32, Fault> {
         // SAFETY: pointer validates the entire live aligned u32 access.
@@ -61,13 +61,13 @@ unsafe impl Registers for Mmio {
     }
 }
 
-/// Native PCH NVM MAC/flash windows, retaining their single actual PCI owner.
+/// Native PCH NVM MAC/flash windows, keeping their single PCI owner.
 pub struct NvmMmio {
     mac: Mmio,
     flash: NonNull<u8>,
     flash_bytes: usize,
 }
-// SAFETY: the NVM window constructors retain the actual same-function MAC
+// SAFETY: the NVM window constructors keep the same-function MAC
 // mapping and exclude all other users. The composed PCH owner serializes MAC,
 // PHY and flash accesses; forwarding does not create another reservation.
 unsafe impl Registers for NvmMmio {
@@ -80,8 +80,8 @@ unsafe impl Registers for NvmMmio {
 }
 impl NvmMmio {
     /// # Safety
-    /// These are the actual exclusive UC MAC and separate flash BAR mappings
-    /// of one observed PCH2/LPT function. `owner` retains both complete mappings,
+    /// These are the exclusive UC MAC and separate flash BAR mappings
+    /// of one observed PCH2/LPT function. `owner` keeps both complete mappings,
     /// reservation and power, and the NVM `Registers` contract holds. Neither
     /// pointer may be synthesized from a physical address. There are no other
     /// PHY/NVM/MAC users of this function while these windows are owned.
@@ -92,12 +92,12 @@ impl NvmMmio {
         flash_bytes: usize,
         owner: Arc<dyn core::any::Any>,
     ) -> Result<Self, Fault> {
-        // SAFETY: caller supplies the actual same-function exclusive windows.
+        // SAFETY: caller supplies the same-function exclusive windows.
         unsafe { Self::windows(mac, mac_bytes, flash, flash_bytes, owner) }
     }
     /// # Safety
-    /// `mac` is the actual complete exclusive UC MAC BAR of the observed SPT+
-    /// PCH function. `owner` retains its real reservation/power/mapping and
+    /// `mac` is the complete exclusive UC MAC BAR of the observed SPT+
+    /// PCH function. `owner` keeps its real reservation/power/mapping and
     /// excludes every other register user. Its flash registers really occupy
     /// the MAC's +0xe000 subwindow. The NVM `Registers` contract holds.
     pub unsafe fn from_mac_window(
@@ -108,9 +108,9 @@ impl NvmMmio {
         if mac_bytes < 0xe000 + 20 || (mac.as_ptr() as usize).checked_add(mac_bytes).is_none() {
             return Err(Fault::OutsideBar);
         }
-        // SAFETY: full actual MAC range was checked and caller retains it.
+        // SAFETY: full MAC range was checked and caller keeps it.
         let flash = unsafe { NonNull::new_unchecked(mac.as_ptr().add(0xe000)) };
-        // SAFETY: this is the same actual BAR's checked flash subwindow.
+        // SAFETY: this is the same BAR's checked flash subwindow.
         unsafe { Self::windows(mac, mac_bytes, flash, mac_bytes - 0xe000, owner) }
     }
     unsafe fn windows(
@@ -129,7 +129,7 @@ impl NvmMmio {
         {
             return Err(Fault::OutsideBar);
         }
-        // SAFETY: the public constructor supplies the actual MAC mapping/owner.
+        // SAFETY: the public constructor supplies the MAC mapping/owner.
         let mac = unsafe { Mmio::from_owned_window(mac, mac_bytes, owner) }?;
         Ok(Self {
             mac,
@@ -146,31 +146,31 @@ impl NvmMmio {
         {
             return Err(super::nvm::Error::Bounds);
         }
-        // SAFETY: constructor retains complete native window; full aligned
+        // SAFETY: constructor keeps complete native window; full aligned
         // access is checked before the pointer is subsequently dereferenced.
         Ok(unsafe { self.flash.as_ptr().add(at) })
     }
 }
-// SAFETY: both constructors require the same actual function/UC windows and
+// SAFETY: both constructors require the same function/UC windows and
 // complete serialized NVM grant; all width-specific accesses check full bounds.
 unsafe impl super::nvm::Registers for NvmMmio {
     fn read_mac32(&mut self, at: u32) -> Result<u32, super::nvm::Error> {
         self.mac.read32(at).map_err(|_| super::nvm::Error::Access)
     }
     fn read16(&mut self, at: u32) -> Result<u16, super::nvm::Error> {
-        // SAFETY: the checked pointer is within the retained actual mapping.
+        // SAFETY: the checked pointer is within the mapping.
         Ok(u16::from_le(unsafe {
             self.flash_pointer(at, 2)?.cast::<u16>().read_volatile()
         }))
     }
     fn read32(&mut self, at: u32) -> Result<u32, super::nvm::Error> {
-        // SAFETY: the checked pointer is within the retained actual mapping.
+        // SAFETY: the checked pointer is within the mapping.
         Ok(u32::from_le(unsafe {
             self.flash_pointer(at, 4)?.cast::<u32>().read_volatile()
         }))
     }
     fn write16(&mut self, at: u32, value: u16) -> Result<(), super::nvm::Error> {
-        // SAFETY: the checked pointer is within the retained actual mapping.
+        // SAFETY: the checked pointer is within the mapping.
         unsafe {
             self.flash_pointer(at, 2)?
                 .cast::<u16>()
@@ -179,7 +179,7 @@ unsafe impl super::nvm::Registers for NvmMmio {
         Ok(())
     }
     fn write32(&mut self, at: u32, value: u32) -> Result<(), super::nvm::Error> {
-        // SAFETY: the checked pointer is within the retained actual mapping.
+        // SAFETY: the checked pointer is within the mapping.
         unsafe {
             self.flash_pointer(at, 4)?
                 .cast::<u32>()

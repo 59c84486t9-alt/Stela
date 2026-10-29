@@ -38,7 +38,7 @@ fn exclusive_downstream_leaf_reset_preserves_its_parent_and_sibling() {
             let sibling_output = controller.slot(sibling.slot).unwrap()._output.physical();
             let before = hardware.borrow().nodes[&0].ports.as_ref().unwrap()[1].reset_count;
             let requests = hardware.borrow().requests.len();
-            // SAFETY: no class owner was bound; endpoints are the actual full
+            // SAFETY: no class owner was bound; endpoints are the full
             // configured DCI inventory of this one downstream leaf.
             let fresh =
                 unsafe { controller.reset_and_identify(old, &endpoints, &mut dma) }.unwrap();

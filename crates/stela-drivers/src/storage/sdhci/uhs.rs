@@ -2,14 +2,14 @@
 // Native adaptation of Linux sdhci.c, Copyright 2005-2008 Pierre Ossman;
 // CMD11 adapts MMC core.c, Copyright 2003-2004 Russell King, 2004 Ian Molton,
 // 2005-2008 Pierre Ossman and 2006 Philip Langdale. See ../THIRD_PARTY.md.
-//! Standard v3 Host Control 2 operations with actual DAT/clock observations.
+//! Standard v3 Host Control 2 operations with DAT/clock observations.
 use super::*;
 use crate::storage::mmc::{SdUhsModes, wire::SD_SEND_TUNING};
 
 impl Engine {
     pub(super) fn uhs_modes(&self) -> SdUhsModes {
-        // Vendor-specific voltage, clock and tuning hooks must be qualified
-        // separately; their standard-mode support grants no electrical authority.
+        // Vendor-specific voltage, clock and tuning hooks must be checked
+        // separately; their standard-mode support grants no electrical permission.
         if !matches!(
             self.profile,
             Profile::Standard | Profile::Gli9750 | Profile::Gli9755 | Profile::Gli9767
@@ -42,7 +42,7 @@ impl Engine {
         let result = (|| {
             self.healthy()?;
             self.check_card()?;
-            // CMD11's R1 has completed. The card must actually pull every DAT
+            // CMD11's R1 has completed. The card must pull every DAT
             // line low before its clock stops; one low pin is insufficient.
             self.clock.delay(1_000);
             if self.registers.read32(PRESENT) & DATA_LINES != 0 {
@@ -68,7 +68,7 @@ impl Engine {
             }
             self.registers.write16(HOST_CONTROL2, control | SIGNAL_180);
             // mmc_host_set_uhs_voltage keeps the clock gated for 10 ms,
-            // retaining Linux's margin over the architectural 5-ms minimum.
+            // keeping Linux's margin over the architectural 5-ms minimum.
             // Card VCC stays at its original 3.3/3.0-V supply.
             self.clock.delay(match self.profile {
                 Profile::Gli9750 | Profile::Gli9755 => 110_000,
@@ -274,7 +274,7 @@ impl Engine {
 
     pub(super) fn uhs_failure(&mut self, primary: BlockError) -> BlockError {
         if self.uhs_failed {
-            // A permanent electrical/authority fence already retained its
+            // A permanent electrical/permission fence already kept its
             // cleanup result. Unwinding must neither retry nor touch its BARs.
             return primary;
         }

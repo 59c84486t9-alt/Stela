@@ -218,7 +218,7 @@ pub const SART: &str = "sart,coastguard";
 const UNAWAITED_NUB: [&str; 2] = ["remote-only", "automatic-rail-gating-enabled"];
 
 /// Select the protocol endpoint by its declared compatible under an already
-/// qualified ASC role. Node names are labels (J314s uses iop-gfx-nub0),
+/// checked ASC role. Node names are labels (J314s uses iop-gfx-nub0),
 /// not a second protocol discriminator. Ambiguous endpoints refuse.
 fn rtbuddy_nub<'a>(asc: &Node<'a>, role: &str) -> Result<Node<'a>, String> {
     let children = asc
@@ -311,12 +311,12 @@ pub const SEP_NUB: &str = "iop-nub,sep";
 pub const DCPEXT_ROLE: &[u8] = b"DCPEXT\0";
 pub const DISPEXT: &str = "dispext0,t8112";
 pub const DISPEXT_T6000: &str = "dispext0,t600x";
-/// One native GOP-backed external graph with qualified TRAD/UMMS ownership.
+/// One native GOP-backed external graph with checked TRAD/UMMS ownership.
 /// This admits its resource contract; visible Recovery output still requires
 /// original firmware/kernel execution through that graph.
 pub const T6000_EXTERNAL_OUTPUT_ADMITTED: bool = true;
 
-/// A source-qualified external pipeline family, preserving native identities.
+/// A source-checked external pipeline family, preserving native identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalOutput {
     pub controller: &'static str,
@@ -428,7 +428,7 @@ pub struct Board {
     /// Every PE's CLPC sampler counters in its `cpu-impl-reg`, on a SoC
     /// whose counters are known.
     pub counters: Vec<CounterBlock>,
-    /// CPU CoreSight regions, retaining the PE identity and aperture length.
+    /// CPU CoreSight regions, keeping the PE identity and aperture length.
     pub coresight: Vec<CoreSight>,
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
     /// described them.
@@ -451,7 +451,7 @@ pub struct Board {
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
-    /// DWC3 placements of qualified visible USB DRD families, in DeviceTree order.
+    /// DWC3 placements of checked visible USB DRD families, in DeviceTree order.
     pub usbs: Vec<UsbController>,
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows the
     /// SoC's PMGR ([`pmgr`]).
@@ -460,7 +460,7 @@ pub struct Board {
     pub pmgr_refusals: Vec<PmgrBankRefusal>,
     /// `/arm-io/mcc`, when the DeviceTree shows an `mcc,t8112`.
     pub memory_cache: Option<MemoryCache>,
-    /// Direct T6000 resources; parsing does not grant native RAM/DSB authority.
+    /// Direct T6000 resources; parsing does not grant native RAM/DSB permission.
     pub direct_memory_cache: Option<DirectMemoryCache>,
     /// The CPU clusters' PMGR registers, when the DeviceTree shows the SoC's
     /// PMGR and the SoC row describes them.
@@ -528,7 +528,7 @@ fn single_range(
 /// J473AP `/arm-io/spi1` `function-spi_cs0` bytes `4f 49 50 47`).
 pub const GPIO_FUNCTION: u32 = u32::from_be_bytes(*b"GPIO");
 
-/// One translation instance, retaining its native logical number and the
+/// One translation instance, keeping its native logical number and the
 /// physical `reg` ordinal. Legacy 12-byte descriptors contain kind+owner;
 /// their logical number counts translation occurrences. Modern 16-byte
 /// descriptors additionally encode the logical number. Owner bytes never
@@ -556,10 +556,10 @@ pub struct Iommu {
     pub irq: u32,
     pub mappers: Vec<(u32, u32)>,
     pub apf: Option<(u64, usize)>,
-    /// Separate original die-qualified PMGR clock and power requirements.
+    /// Separate original die-checked PMGR clock and power requirements.
     pub clock_gates: Vec<DomainId>,
     pub power_gates: Vec<DomainId>,
-    /// A retained DART preserves ordinary state while its supply is gated.
+    /// A kept DART preserves ordinary state while its supply is gated.
     pub retention: bool,
     pub sids: Vec<u32>,
     pub remap: Vec<(u8, u8)>,
@@ -867,7 +867,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         aon_fuses,
     } = pmgr_registers(&io, &extent, chip_id)?;
     // The native T8112 PMP image names three independent DVFS controllers.
-    // Their source-qualified protocol does not establish an actual backend.
+    // Their source-checked protocol does not establish a backend.
     if chip_id == 0x8112 && pmp.is_some() {
         pmgr_refusals.extend(
             crate::pmgr::dvfs::T8112

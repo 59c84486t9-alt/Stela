@@ -3,7 +3,7 @@
 //! AMX is undocumented. The semantics follow the hardware-tested emulator of
 //! [corsix/amx](https://github.com/corsix/amx/tree/483714bb051da088d08a66724b22dd08a5db3c99)
 //! with explicit `AMX_VER_M1` through `AMX_VER_M4`, ported in [`model`] under
-//! its MIT license (Copyright (c) 2022 Peter Cawley; `LICENSES/MIT.txt`). M5/M6 semantics are unqualified. The research record is `docs/research/amx.md`.
+//! its MIT license (Copyright (c) 2022 Peter Cawley; `LICENSES/MIT.txt`). M5/M6 semantics are unchecked. The research record is `docs/research/amx.md`.
 //!
 //! Instructions occupy the reserved A64 space `0x00201000 + (operation << 5) +
 //! operand`. Operation 17 takes a five-bit immediate (`set` 0, `clr` 1); every
@@ -17,7 +17,7 @@ pub mod state;
 pub use decode::{AmxInstruction, AmxOperand, AmxOperation, decode};
 pub use state::AmxRegisters;
 
-/// A source-qualified AMX semantic generation. Later generations are not
+/// A source-checked AMX semantic generation. Later generations are not
 /// representable: no generation-label fallback to M2 is authorized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,17 +39,17 @@ impl Generation {
         }
     }
 
-    /// The complete M2 additions qualified by the pinned reference model.
+    /// The complete M2 additions checked by the pinned reference model.
     pub(crate) const fn m2_extensions(self) -> bool {
         matches!(self, Self::M2 | Self::M3 | Self::M4)
     }
 
-    /// Source-qualified nonconsecutive loads and mode-8 type-12 widening.
+    /// Source-checked nonconsecutive loads and mode-8 type-12 widening.
     pub(crate) const fn m3_extensions(self) -> bool {
         matches!(self, Self::M3 | Self::M4)
     }
 
-    /// Source-qualified multi-row X/Y offset alignment.
+    /// Source-checked multi-row X/Y offset alignment.
     pub(crate) const fn aligned_multiple_offsets(self) -> bool {
         matches!(self, Self::M4)
     }

@@ -1,4 +1,4 @@
-//! Actual command effects remain valid across an absolute-quotient rollover.
+//! Command effects remain valid across an absolute-quotient rollover.
 use super::*;
 struct OpaqueTime(Time);
 impl crate::bus::i2c::Timer for OpaqueTime {

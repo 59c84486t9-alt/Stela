@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Native CLC execution retaining the actual stopped-radio/source-policy owner
-//! and exact downloaded input. Raw completions never qualify applied policy.
+//! Native CLC execution keeping the stopped-radio/source-policy owner
+//! and exact downloaded input. Raw completions never check applied policy.
 use super::{CapabilityReport, Mailbox, PCI_TIMEOUT_US, Packet, QueueIo, TransportFailure};
 use crate::net::wifi::mediatek::{
     firmware::{
@@ -22,7 +22,7 @@ pub struct Reply {
     pub dma_released: bool,
     pub frame: Frame,
 }
-/// Only the actual source protocol observation. Neither variant proves that
+/// Only the source protocol observation. Neither variant proves that
 /// a country, channel, power limit or radio permission has been applied.
 #[derive(Debug)]
 pub enum Fact {
@@ -88,29 +88,29 @@ struct Owned<C> {
     interrupted: Option<Reply>,
     remaining: Option<remaining::Chain>,
 }
-/// The actual authority/resource guard is owned, not a borrowed revision or a
-/// promise ending on Err. Any publication retains this entire owner on Drop,
-/// including successful raw completion, until independent genuine quiescence.
+/// The permission/resource guard is owned, not a borrowed revision or a
+/// promise ending on Err. Any publication keeps this entire owner on Drop,
+/// including successful raw completion, until independent quiescence.
 pub struct Execution<C: 'static> {
     owned: Option<Box<Owned<C>>>,
 }
 
 impl<C: 'static> Execution<C> {
     /// # Safety
-    /// `resource` retains the genuine exclusive function/controller claim and
-    /// currently stopped/drained radio, actual firmware/reset/image epoch, and
+    /// `resource` keeps the exclusive function/controller claim and
+    /// currently stopped/drained radio, firmware/reset/image epoch, and
     /// trusted source country/location/ACPI/MTCL/power-limit resources used by
-    /// `inputs`. These actual resources/authority guards must remain valid
+    /// `inputs`. These resources/permission guards must remain valid
     /// through partial/uncertain firmware processing and completed raw facts,
     /// even if this value/mailbox is dropped or its DMA queues are released.
     /// No old radio/policy users remain. Serialize all raw firmware/reset/radio
-    /// and policy mutations with this owner for its entire retained lifetime.
-    /// Changing/revoking those authorities requires stopping/canceling/draining
+    /// and policy mutations with this owner for its entire lifetime.
+    /// Changing/revoking those permissions requires stopping/canceling/draining
     /// real pending radio/firmware/IRQ/work users or source-proven enforcement.
-    /// Merely retaining copied integers or an Arc unrelated to those resources
+    /// Retaining copied integers or an Arc unrelated to those resources
     /// cannot satisfy this contract. The bound observations below do not
-    /// authenticate source-opaque EEPROM fields or provide these authorities.
-    /// This executes only CLC; the full actual CLC→domain→SAR/rate-power chain
+    /// authenticate source-opaque EEPROM fields or provide these permissions.
+    /// This executes only CLC; the full CLC→domain→SAR/rate-power chain
     /// and trusted OS intersection remain required before any radio admission.
     pub unsafe fn prepare<W: QueueIo, F: QueueIo, R: QueueIo>(
         mailbox: &Mailbox<W, F, R>,
@@ -121,7 +121,7 @@ impl<C: 'static> Execution<C> {
         resource: C,
     ) -> Result<Self, Error> {
         Self::check_inputs(mailbox, &auxiliary, &capabilities, &eeprom)?;
-        // An actually completed optional-TLV-absent query is distinct from no
+        // A completed optional-TLV-absent query is distinct from no
         // query and from observed Some(0). The pinned zero-initialized source
         // chip_cap selects one-way C2 protocol in that case, not a capability
         // or policy permission. Preserve the original None in the owned report.
@@ -137,7 +137,7 @@ impl<C: 'static> Execution<C> {
             .try_reserve_exact(plan.requests().len())
             .map_err(|_| Error::NoMemory)?;
         // Reserve the owner itself fallibly before the first device mutation.
-        // Existing plan/encoder/RX transport allocations retain their inherited
+        // Existing plan/encoder/RX transport allocations keep their inherited
         // allocation contracts; this is not a claim that they are all fallible.
         // SAFETY: `Owned` is not zero-sized.
         let storage = unsafe { alloc(Layout::new::<Owned<C>>()) }.cast::<Owned<C>>();
@@ -209,7 +209,7 @@ impl<C: 'static> Execution<C> {
     pub fn plan(&self) -> &Plan {
         &self.owned().plan
     }
-    /// Exact original source observations retained with their genuine guard.
+    /// Original source observations kept with their guard.
     /// This is not a new applied-policy or radio-permission receipt.
     pub(in crate::net::wifi::mediatek) fn source_inputs(&self) -> Inputs {
         self.owned().inputs
@@ -233,9 +233,9 @@ impl<C: 'static> Execution<C> {
         )
     }
 
-    /// Publish each exact source request once through the existing actual
+    /// Publish each source request once through the existing
     /// mailbox/DMA/sequence owner. Successful return is raw protocol completion
-    /// only; keep the stopped radio and policy resources retained afterward.
+    /// only; keep the stopped radio and policy resources kept afterward.
     pub fn execute<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
         mailbox: &mut Mailbox<W, F, R>,
@@ -262,7 +262,7 @@ impl<C: 'static> Execution<C> {
             &state.eeprom,
         )?;
         // From now even a partial/uncertain publication may have changed real
-        // firmware. No error or Drop may release the genuine context owner.
+        // firmware. No error or Drop may release the context owner.
         state.phase = Phase::Quarantined;
         for (request, body) in state.plan.requests().iter().enumerate() {
             debug_assert_eq!(body.chip(), mailbox.identity.chip);
@@ -304,11 +304,11 @@ impl<C: 'static> Execution<C> {
         Ok(())
     }
     /// # Safety
-    /// Independently stop/cancel/drain actual firmware command processing and
+    /// Independently stop/cancel/drain firmware command processing and
     /// every radio TX/RX, policy/image consumer, IRQ/deferred worker and DMA user
     /// of this real context, including uncertain requests/late completions.
     /// WFDMA idle, host timeout, queue removal and one-way DMA completion alone
-    /// are insufficient. This neither qualifies policy nor resets/rebinds the
+    /// are insufficient. This neither checks policy nor resets/rebinds the
     /// mailbox. The caller still owns any independent mailbox/queue teardown.
     pub unsafe fn retire_after_quiesce(&mut self) {
         self.owned_mut().phase = Phase::Retired;
@@ -433,7 +433,7 @@ pub(crate) mod tests {
         bytes
     }
     pub(crate) fn ram(clc: &[u8]) -> Vec<u8> {
-        // Actual private Prepared bytes contain a real downloaded region and a
+        // Private Prepared bytes contain a real downloaded region and a
         // separate non-download CLC region; the complete image hash binds both.
         let mut bytes = vec![0x61; 11];
         bytes.extend_from_slice(clc);
@@ -507,9 +507,9 @@ pub(crate) mod tests {
             drops: &Arc<AtomicUsize>,
         ) -> Result<Execution<Guard>, Error> {
             let guard = Guard::new(&self.model, drops);
-            // SAFETY: guard owns the actual serialized stopped model requester and
+            // SAFETY: guard owns the serialized stopped model requester and
             // source-policy state used by these explicit fixture inputs. Firmware
-            // checks that guard before every actual DMA-read CLC publication.
+            // checks that guard before every DMA-read CLC publication.
             unsafe {
                 Execution::prepare(
                     &self.mailbox,
@@ -530,7 +530,7 @@ pub(crate) mod tests {
         }
         pub(crate) fn release(&mut self) {
             self.drain();
-            // SAFETY: actual modeled firmware/radio/deferred processing and every
+            // SAFETY: modeled firmware/radio/deferred processing and every
             // requester queue user has stopped independently of any MCU response.
             unsafe { self.mailbox.release_after_quiesce() }.unwrap();
         }
@@ -597,7 +597,7 @@ pub(crate) mod tests {
                 );
                 if flags == Some(0) {
                     fixture.drain();
-                    // SAFETY: actual model firmware/policy/radio users stopped.
+                    // SAFETY: model firmware/policy/radio users stopped.
                     unsafe { owner.retire_after_quiesce() };
                     drop(owner);
                     assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -851,7 +851,7 @@ pub(crate) mod tests {
                     }
                 }
                 fixture.drain();
-                // SAFETY: actual model CLC processing/radio/policy users drained.
+                // SAFETY: model CLC processing/radio/policy users drained.
                 unsafe { owner.retire_after_quiesce() };
                 drop(owner);
                 assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -892,7 +892,7 @@ pub(crate) mod tests {
                         .is_some()
                 );
                 fixture.drain();
-                // SAFETY: actual modeled firmware/policy/radio/deferred users stop.
+                // SAFETY: modeled firmware/policy/radio/deferred users stop.
                 unsafe { owner.retire_after_quiesce() };
                 drop(owner);
                 assert_eq!(drops.load(Ordering::Relaxed), 1);

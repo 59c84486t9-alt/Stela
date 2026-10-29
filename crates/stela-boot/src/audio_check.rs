@@ -1,4 +1,4 @@
-//! Explicit native HDA qualification after ExitBootServices. This exercises a
+//! Explicit native HDA validation after ExitBootServices. This exercises a
 //! finite cyclic PCM buffer, not a guest audio bridge or an OEM speaker policy.
 use crate::output;
 use alloc::{format, string::String, vec, vec::Vec};
@@ -32,7 +32,7 @@ use stela_boot_core::options::AudioCheck;
 const POLL_US: u64 = 500;
 const DEADLINE_US: u64 = 5_000_000;
 
-/// Refuse ambiguous routes. Qualification never guesses an OEM output from a
+/// Refuse ambiguous routes. Validation never guesses an OEM output from a
 /// codec/vendor identity. This bounded mode requires one standard analog path
 /// per direction; more complex boards need explicit platform routing policy.
 fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute, String> {
@@ -76,7 +76,7 @@ fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute, String
 /// An explicitly narrower diagnostic for a direct, fixed-gain path whose pin
 /// is already enabled. It does not configure or credit function-group power.
 /// A missing mandatory D0 capability remains an explicit strict-route failure.
-/// This uses actual graph/readback data and never identifies an emulator.
+/// This uses graph/readback data and never identifies an emulator.
 fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
     controller: &mut Controller<R, T>,
     graph: &CodecGraph,

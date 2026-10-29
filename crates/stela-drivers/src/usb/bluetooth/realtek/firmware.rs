@@ -114,7 +114,7 @@ impl<'a> Patch<'a> {
 }
 
 /// Exact vendor config magic, declared size and complete bounded register
-/// entries. Empty entry inventory is legal (the actual RTL8761BU config).
+/// entries. Empty entry inventory is legal (the RTL8761BU config).
 #[derive(Debug)]
 pub struct Configuration<'a> {
     bytes: &'a [u8],

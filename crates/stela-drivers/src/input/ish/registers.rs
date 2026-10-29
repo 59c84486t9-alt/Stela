@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Exact native UC accesses; the IRQ callback shares only defined fixed stores.
+//! Native UC accesses; the IRQ callback shares only defined fixed stores.
 use super::{Error, Result};
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, PhysicalSpan, Protection};
 
@@ -17,10 +17,10 @@ pub(super) const IN_DMA: u32 = 0xf << 16;
 pub(super) const IRQ_ENABLE: u32 = 1;
 pub(super) const BUSY_CLEAR: u32 = 1 << 8;
 
-/// Actual retained native BAR0, or an explicit register peer used by controls.
+/// Native BAR0, or an explicit register peer used by controls.
 /// # Safety
 /// Span and accesses belong to the same exclusively reserved native endpoint,
-/// reset/resource/root epoch as configuration and the actual isolated domain.
+/// reset/resource/root epoch as configuration and the isolated domain.
 /// Reads/writes are exact bounded native DWORD effects. No raw alias or firmware
 /// writer can revoke this owner. The hard IRQ callback may read PISR/I2H and
 /// write only the immutable admitted PIMR mask; process owns every other effect.
@@ -38,8 +38,8 @@ pub struct MappedRegisters {
 }
 impl MappedRegisters {
     /// # Safety
-    /// This is the actual exclusive complete BAR0 resource for the retained PCI
-    /// endpoint. The mapping and its real producer retain power, root/resource
+    /// This is the exclusive complete BAR0 resource for the PCI
+    /// endpoint. The mapping and its real producer keep power, root/resource
     /// assignment and reset/firmware exclusion, with no escaped aliases/views.
     /// Metadata equality cannot establish those device ownership facts.
     pub unsafe fn new(mapping: Mapping) -> core::result::Result<Self, (Error, Mapping)> {
@@ -61,7 +61,7 @@ impl MappedRegisters {
         }
     }
 }
-// SAFETY: original mapping retains the real native resource; every access
+// SAFETY: original mapping keeps the real native resource; every access
 // rechecks live mapping state, alignment and complete bounds. No cached pointer.
 unsafe impl Registers for MappedRegisters {
     fn span(&self) -> PhysicalSpan {
@@ -88,7 +88,7 @@ unsafe impl Registers for MappedRegisters {
             .mapping
             .address(offset as usize, 4)
             .map_err(Error::Mapping)?;
-        // SAFETY: same retained exact-width access; no neighboring W1C replay.
+        // SAFETY: same exact-width access; no neighboring W1C replay.
         unsafe { p.as_ptr().cast::<u32>().write_volatile(value.to_le()) };
         Ok(())
     }

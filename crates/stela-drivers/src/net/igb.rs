@@ -5,7 +5,7 @@
 //!
 //! Native Stela adaptation of Linux's `drivers/net/ethernet/intel/igb` at
 //! `a804c5742bff224d4cb4d25dd383554d598be32b`. Reset, EEPROM/iNVM,
-//! firmware synchronization, PHY and PLL algorithms retain the GPL terms;
+//! firmware synchronization, PHY and PLL algorithms keep the GPL terms;
 //! source hashes and supported subsets are in `THIRD_PARTY.md`.
 //!
 //! One polled advanced-descriptor queue, ordinary Ethernet frames, no
@@ -132,7 +132,7 @@ pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == 0x8086
         && function.class == [2, 0, 0]
@@ -190,7 +190,7 @@ pub struct Igb {
 impl Igb {
     /// # Safety
     /// The caller exclusively owns this physical PCI function after
-    /// ExitBootServices and supplies its actual mapped MMIO/DMA handoff.
+    /// ExitBootServices and supplies its mapped MMIO/DMA handoff.
     /// No firmware or other driver may drive the function afterwards.
     pub unsafe fn new(
         function: &mut Function,

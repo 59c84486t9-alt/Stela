@@ -55,7 +55,7 @@ impl Model {
                 value as u8
             };
             if self.cirrus_cs4210_model && node == 2 && output {
-                // Physical CS4210 gain ceiling is the actual 0dB offset,
+                // Physical CS4210 gain ceiling is the 0dB offset,
                 // despite its incorrectly advertised raw step count.
                 let caps = if self.parameters[&(2, 9)] & (1 << 3) == 0 {
                     self.parameters[&(1, 0x12)]

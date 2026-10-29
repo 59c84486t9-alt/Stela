@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Native adaptation of sdhci-pci-o2micro.c, Copyright 2013 BayHub Technology Ltd.
 // Authors: Peter Guo, Adam Lee, Ernest Zhang.
-//! Actual legacy O2Micro PCI setup, standard clock and power-off sequencing.
+//! Legacy O2Micro PCI setup, standard clock and power-off sequencing.
 use super::super::{BlockError, Clock, registers::*};
 
 const LOCK_WP: usize = 0xd3;
@@ -80,7 +80,7 @@ pub(super) fn power_off(r: &mut dyn Registers) -> Result<(), BlockError> {
         checked32(r, OUTPUT_CLOCK, output)
     })
 }
-/// Retain source cleanup on failure; no card clock is enabled on a failed PLL/CD proof.
+/// Keep source cleanup on failure; no card clock is enabled on a failed PLL/CD proof.
 pub(in crate::storage::sdhci) fn stabilize(
     r: &mut dyn Registers,
     clock: Clock,

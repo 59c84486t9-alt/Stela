@@ -23,7 +23,7 @@ fn read_lane(source: &[u8], offset: usize, element_bytes: usize) -> u64 {
 
 /// Complete one merging FRINT instruction using the central scalable setter.
 /// Raw FPCR and every inactive element remain unchanged. Numerical enables are
-/// effective streaming controls; FA64 retains the precise unsupported boundary.
+/// effective streaming controls; FA64 keeps the precise unsupported boundary.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

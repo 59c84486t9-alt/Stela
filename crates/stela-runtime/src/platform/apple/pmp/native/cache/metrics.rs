@@ -1,4 +1,4 @@
-//! Native MC metrics registration, actual retained queue work and stop drain.
+//! Native MC metrics registration, kept queue work and stop drain.
 //!
 //! Original26A434 T8112 PMP SHA256 b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //!1003344..3378 binds work10042b8;1004170..421c registers live counters;
@@ -6,7 +6,7 @@
 //!10042b8..4584 computes callback traces, clears MCpending and notifies.
 //! Evidence: pmgr/cache-metrics-r1. No firmware executes. Samples/arrival and
 //! command ACK remain service-owned. Numeric increments are software DATA.
-//! Shared Work/actual Invocation binding: pmgr/metrics-shared-work-r1.
+//! Shared Work/Invocation binding: pmgr/metrics-shared-work-r1.
 use super::super::{
     platform::owner::Completion,
     scheduler::{Invocation, Work},
@@ -36,8 +36,8 @@ impl MetricKind {
         }
     }
 }
-/// Live getter destination1007dfc. Cloning keeps the actual counter cell,
-/// never a copied value or any timing/event/completion authority.
+/// Live getter destination1007dfc. Cloning keeps the counter cell,
+/// never a copied value or any timing/event/completion permission.
 #[derive(Clone, Debug)]
 pub struct Counter(Rc<Cell<u64>>);
 impl Counter {
@@ -100,7 +100,7 @@ pub enum Effect {
     },
     Wake,
     /// Actual1030250 queue wait/unlock/relock boundary. May remain Busy while
-    /// this owner's actual queued callback runs, then retires after notification.
+    /// this owner's queued callback runs, then retires after notification.
     DrainWait,
     Trace {
         event: u32,
@@ -108,13 +108,13 @@ pub enum Effect {
     },
     NotifyStop,
 }
-/// Fixed actual queue/registry/trace/waiter owner. No default implementation.
-/// Every reached destination must actually retire, stay Busy or refuse while
-/// retaining its own inner prefix under Request. Source addresses are evidence
+/// Fixed queue/registry/trace/waiter owner. No default implementation.
+/// Every reached destination must retire, stay Busy or refuse while
+/// keeping its own inner prefix under Request. Source addresses are evidence
 /// only, never runtime dispatch keys. Trace-control reads observe the real
-/// retained global source control, not a successful absent observer.
+/// global source control, not a successful absent observer.
 pub trait Backend {
-    /// Actual BindWork destination. None before that source cursor; afterwards
+    /// BindWork destination. None before that source cursor; afterwards
     /// every RegisterWork/Wake/dispatch must reference this same shared Work.
     /// Production factories bind a mandatory Weak service callback, never an
     /// absent callback or local shadow pending state.
@@ -301,7 +301,7 @@ impl<B: Backend> Owner<B> {
     pub fn queued(&self) -> bool {
         self.bound_work.as_ref().is_some_and(Work::pending)
     }
-    /// Preflight foreground service work before retaining/consuming its input.
+    /// Preflight foreground service work before keeping/consuming its input.
     /// Queued-only work is distinct and does not require serialization.
     pub fn callback_executing(&self) -> bool {
         self.callback.is_some()
@@ -318,15 +318,15 @@ impl<B: Backend> Owner<B> {
         .clone())
     }
     /// Source1004204 row+30 registration metadata. It becomes present only
-    /// after both actual metric registrations for that group retire, and grants
-    /// no event, arrival, readiness or completion authority.
+    /// after both metric registrations for that group retire, and grants
+    /// no event, arrival, readiness or completion permission.
     pub fn group_association(&self, group: u32) -> Result<Option<u32>, Error> {
         self.associations
             .get(group as usize)
             .copied()
             .ok_or(Error::Contract("MC metric group exceeds source32 slots"))
     }
-    /// Source W32 increments have already been derived from actual sole Samples
+    /// Source W32 increments have already been derived from sole Samples
     /// by the service; only this source software accumulation occurs here.
     pub fn accumulate(&mut self, group: u32, increments: [u32; 2]) -> Result<(), Error> {
         let counters = self
@@ -431,8 +431,8 @@ impl<B: Backend> Owner<B> {
         self.control = Some(Job::new(serial, ops, Progress::Registered));
         Ok(())
     }
-    /// Invoke only at the service's actual equality-housekeeping cursor1003c94.
-    /// Sets source MCpending then issues actual Wake, whose scheduler owns the
+    /// Invoke only at the service's equality-housekeeping cursor1003c94.
+    /// Sets source MCpending then issues Wake, whose scheduler owns the
     /// sole work.pending cell. Scheduled returns before callback execution.
     pub fn submit_after_housekeeping(&mut self) -> Result<bool, Error> {
         if !self.initialized {
@@ -459,7 +459,7 @@ impl<B: Backend> Owner<B> {
         Ok(true)
     }
     /// Foreground source event tracing may run while callback work is queued;
-    /// it never consumes or replaces the queued work. Retained executing
+    /// it never consumes or replaces the queued work. Executing
     /// callbacks currently require explicit serialization by the caller.
     pub fn begin_event_trace(&mut self, event: EventTrace) -> Result<(), Error> {
         self.idle_control()?;
@@ -545,9 +545,9 @@ impl<B: Backend> Owner<B> {
             Progress::CallbackComplete,
         ))
     }
-    /// Foreground source cursor only. Actual callbacks are entered exclusively
-    /// through dispatch under the scheduler Invocation. A retained DrainWait
-    /// releases its actual queue lock; the parent continues real scheduler and
+    /// Foreground source cursor only. Callbacks are entered exclusively
+    /// through dispatch under the scheduler Invocation. A kept DrainWait
+    /// releases its queue lock; the parent continues real scheduler and
     /// immediate endpoint dispatch independently, never inline fake callback work.
     pub fn advance(
         &mut self,
@@ -587,10 +587,10 @@ impl<B: Backend> Owner<B> {
             }
         }
     }
-    /// Only the actual scheduler-entered callback for the retained Work may
+    /// Only the scheduler-entered callback for the Work may
     /// execute this source callback. Its Work.pending was cleared by scheduler
-    /// before entry; an actual later Wake survives callback return0. Stop may
-    /// retain its independent foreground wait while this callback advances.
+    /// before entry; a later Wake survives callback return0. Stop may
+    /// keep its independent foreground wait while this callback advances.
     pub fn dispatch(
         &mut self,
         invocation: &Invocation,
@@ -693,8 +693,8 @@ impl<B: Backend> Owner<B> {
                         return Err(Error::Backend(reason));
                     }
                     Completion::Retired { value: (), refusal } => {
-                        // Actual resource identity is opaque and cannot be minted
-                        // by metrics. Retain the same Work from source bind onward.
+                        // Resource identity is opaque and cannot be minted
+                        // by metrics. Keep the same Work from source bind onward.
                         if matches!(
                             effect,
                             Effect::BindWork { .. } | Effect::RegisterWork | Effect::Wake
@@ -857,7 +857,7 @@ impl<B: Backend> Owner<B> {
                 Op::CallbackDone => {}
                 Op::StopCheck => {
                     // Source1004280..100429c tests O3f8, not callback-tail
-                    // lifetime. An already retained DrainWait still must retire.
+                    // lifetime. An already kept DrainWait still must retire.
                     if self.mc_pending {
                         job.ops.push_front(Op::StopCheck);
                         job.ops.push_front(Op::Effect(Effect::DrainWait));
@@ -915,7 +915,7 @@ mod tests {
         }
     }
     // Authored destination fault controls stay cfg(test). Queue binding and
-    // callback dispatch themselves use the actual scheduler, with Weak owner
+    // callback dispatch themselves use the scheduler, with Weak owner
     // capture; no production local scheduler or duplicate pending bit exists.
     type Slot = Rc<core::cell::RefCell<alloc::rc::Weak<core::cell::RefCell<Option<Owner<Sink>>>>>>;
     struct Sink {
@@ -1121,7 +1121,7 @@ mod tests {
             let mut latch = InterruptLatch::new();
             let result = o.advance(s, &mut Access::new(0, 100, &mut latch));
             // Authored harness supplies the independent executor while a
-            // foreground source Stop wait is retained. Production root owns it.
+            // foreground source Stop wait is held. Production root owns it.
             if matches!(result, Ok(Progress::Busy { .. }))
                 && o.stopping
                 && (o.queued() || o.callback_executing())
@@ -1192,7 +1192,7 @@ mod tests {
             ))
         ));
         assert!(!o.queued() && o.pending() && !o.callback_executing());
-        // Retry enters the retained scheduler Invocation rather than re-waking
+        // Retry enters the scheduler Invocation rather than re-waking
         // or manufacturing a completion after the weak lookup failure.
         for _ in 0..32 {
             if callback_step(&mut o, &samples).unwrap() == Progress::CallbackComplete {
@@ -1630,10 +1630,10 @@ mod original_tests {
             (0x10302f8, 0x39000409),
             (0x102ff10, 0x3900077f),
             (0x1004310, 0x390fe27f),
-            (0x1004280, 0x394fe268), // Load actual MC-pending byte.
+            (0x1004280, 0x394fe268), // Load MC-pending byte.
             (0x1004284, 0x7100051f),
             (0x1004288, 0x540000c1), // Initial non-one skips drain.
-            (0x100429c, 0x3707ff88), // Retained wait loops on pending bit0.
+            (0x100429c, 0x3707ff88), // Wait loops on pending bit0.
         ] {
             assert_eq!(word(&b, a), v, "{a:x}");
         }

@@ -10,7 +10,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
     pub fn f03_capabilities(&self) -> impl Iterator<Item = &f03::Capabilities> {
         self.f03.iter().map(|engine| &engine.capabilities)
     }
-    /// Read actual queries and drain pending output buffers before enabling
+    /// Read queries and drain pending output buffers before enabling
     /// passthrough interrupts. This opens the transport; it does not establish a
     /// PS/2 mouse protocol or acknowledge a PS/2 command on behalf of a device.
     pub fn initialize_f03(&mut self) -> Result<(), Error> {
@@ -60,7 +60,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
         self.fault(result)
     }
     /// One physical TX write. The returned success means only bus completion;
-    /// command acknowledgements arrive as actual RX records through poll_input.
+    /// command acknowledgements arrive as RX records through poll_input.
     pub fn write_f03(&mut self, function: Function, byte: u8) -> Result<(), Error> {
         self.configured()?;
         let engine = self
@@ -72,7 +72,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
         self.fault(result)
     }
     /// Disable this function's IRQ sources before retiring the open transport.
-    /// Other RMI input engines retain their configured IRQ bits and state.
+    /// Other RMI input engines keep their configured IRQ bits and state.
     pub fn close_f03(&mut self, function: Function) -> Result<(), Error> {
         self.configured()?;
         let index = self

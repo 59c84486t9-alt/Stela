@@ -507,13 +507,13 @@ impl Uat {
     }
 
     /// Physical SGX lifecycle gates every firmware and GPU agent view,
-    /// independently of its retained translation roots and mappings.
+    /// independently of its translation roots and mappings.
     pub(super) fn set_available(&mut self, available: bool) {
         self.available = available;
     }
 
     /// Native GPU power gates execution without preventing the firmware
-    /// agent from completing its retained wake/restore accesses.
+    /// agent from completing its wake/restore accesses.
     pub(super) fn set_gpu_availability(&mut self, available: Rc<Cell<bool>>) {
         self.gpu_available = available;
     }

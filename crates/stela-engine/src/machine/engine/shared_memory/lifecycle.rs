@@ -1,5 +1,5 @@
-//! Reset joins retain the canonical physical domain and real stopped workers.
-//! Off PEs have assigned physical owners, never fabricated architectural frames.
+//! Reset joins keep the canonical physical domain and real stopped workers.
+//! Off PEs have assigned physical owners, never invented architectural frames.
 use super::super::{processors::Peer, publication};
 use super::*;
 
@@ -197,7 +197,7 @@ mod tests {
         (machine, owners)
     }
     // This is the real publication state machine with non-executing owner-local
-    // test Hosts. It proves lifecycle authority, not physical/native execution.
+    // test Hosts. It proves lifecycle permission, not physical/native execution.
     fn hold(machine: &mut Machine<Local, Board>, owners: &mut [WorkerOwner]) -> StoppedWorkers {
         let members: Vec<_> = owners.iter().map(|owner| owner.binding().pe).collect();
         hold_members(
@@ -272,7 +272,7 @@ mod tests {
     type FirstPMachine = Machine<ServiceHost<Local, OwnerServices>, Board>;
     const FIRST_P: usize = 2;
     const SOURCE: u64 = 0x14000;
-    // Deliberately neither PE order nor worker order; PE2 is the host BSP.
+    // Neither PE order nor worker order; PE2 is the host BSP.
     const PERMUTED: [WorkerBinding; 4] = [
         WorkerBinding {
             pe: 3,
@@ -462,7 +462,7 @@ mod tests {
                 assert_eq!(machine.devices.power, [(0, true), (1, true), (3, true)]);
                 release_first_p(&mut machine, held);
             }
-            // SAFETY: actual canonical owners and exclusive borrowed frames;
+            // SAFETY: canonical owners and exclusive borrowed frames;
             // no external writer or concurrent worker. Hosted entry must refuse.
             let cohort = unsafe { machine.shared_native_cohort(&PERMUTED) }.unwrap();
             assert_eq!(cohort.frames.len(), if start_others { 4 } else { 1 });
@@ -601,7 +601,7 @@ mod tests {
         machine.cpu.pc = VA;
         let ram = Arc::clone(&machine.cpu.canonical_memory.as_ref().unwrap().ram);
         let publish = |physical, bytes: &[u8]| {
-            // SAFETY: actual fixture-owned canonical RAM; owners remain held.
+            // SAFETY: fixture-owned canonical RAM; owners remain held.
             unsafe { ram.publish_physical(physical, bytes) }.unwrap();
         };
         for physical in [DATA, OTHER] {
@@ -638,8 +638,8 @@ mod tests {
             );
             u64::from_le_bytes(bytes)
         };
-        // Both actual preparation APIs receive the Machine epoch. No fixture
-        // executes native code or fabricates a target/worker execution receipt.
+        // Both preparation APIs receive the Machine epoch. No fixture
+        // executes native code or invents a target/worker execution receipt.
         drop(machine.native_cohort(&bindings, true).unwrap());
         assert_eq!(read(&mut machine.cpu), 7);
         let Peer::Parked(parked) = &mut machine.peers[1] else {
@@ -658,7 +658,7 @@ mod tests {
         machine.cpu.state.x[0] = VA >> 12;
         machine.system_instruction(TLBI_VAE1IS_X0).unwrap();
         // Refresh only the BSP first. The parked peer still has old metadata
-        // until its next actual preparation consumes the newer global epoch.
+        // until its next preparation consumes the newer global epoch.
         // SAFETY: all real fixture owners are held, and the unexecuted loan is
         // dropped before any Machine mutation. This grants no physical entry.
         drop(unsafe { machine.shared_native_run(bindings[0]) }.unwrap());

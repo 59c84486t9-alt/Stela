@@ -232,7 +232,7 @@ impl TlvIdentity {
     pub fn hardware_label(&self) -> String {
         self.transport.hardware_label()
     }
-    /// Canonical sorted, complete TLV identity. Unknown fields are retained,
+    /// Canonical sorted, complete TLV identity. Unknown fields are held,
     /// duplicates rejected and the versioned schema never masks future bits.
     pub fn canonical_tlvs(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -406,7 +406,7 @@ fn supported_engine(variant: u8, engine: u8) -> bool {
     engine <= 1 || (variant >= 0x20 && engine <= 3)
 }
 
-/// Named fields reused only from prior actual observations after verified IML boot.
+/// Named fields reused only from prior observations after verified IML boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InheritedField {
     SecureBoot,

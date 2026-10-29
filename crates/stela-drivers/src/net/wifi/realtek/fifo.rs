@@ -113,12 +113,12 @@ impl<I: Io> Drop for Attempt<'_, I> {
 /// Execute the source post-download TRX queue/FIFO/H2C initialization only.
 ///
 /// # Safety
-/// Exact requester firmware download actually completed and its MCU ready was
+/// Requester firmware download completed and its MCU ready was
 /// observed; all competing DMA/IRQ/reset/radio workers are stopped/drained.
 /// Source HCI descriptor/index setup already configured every engine enabled
-/// by CR=0xff with real validated native rings and retained requester-domain
+/// by CR=0xff with real validated native rings and kept requester-domain
 /// DMA pins. An old/empty/unowned RX/TX base cannot satisfy this contract.
-/// The actual PCI domain/queue ownership remains retained. Successful LLT and
+/// The PCI domain/queue ownership remains held. Successful LLT and
 /// empty H2C pointer observations do not authorize DMA unmap or a ready radio.
 pub unsafe fn configure<I: Io>(io: &mut I) -> Result<Geometry, Error> {
     let geometry = Geometry::for_profile(io.profile())?;

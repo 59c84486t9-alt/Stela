@@ -32,7 +32,7 @@ impl AliasId {
         self.0
     }
 }
-/// Opaque lookup identity for one genuine registered device/resource owner.
+/// Opaque lookup identity for one registered device/resource owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceId(u64);
 impl ResourceId {
@@ -89,7 +89,7 @@ impl Inner {
     }
     fn finish_lock(&self) -> Guard<'_> {
         // Mandatory completion/retirement cannot abandon a valid publication
-        // merely because another process-context reservation is in progress.
+        // because another process-context reservation is in progress.
         // No provider/user callbacks or final resource releases run while held.
         loop {
             if let Ok(guard) = self.lock() {
@@ -124,13 +124,13 @@ fn quarantine(inner: &Arc<Inner>, record: &Record) {
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_add(1))
             });
-        // Keep the inventory, genuine resource and native root/table provider
-        // alive even after every public authority/mapping/view is dropped.
+        // Keep the inventory, resource and native root/table provider
+        // alive even after every public permission/mapping/view is dropped.
         core::mem::forget(Arc::clone(inner));
     }
 }
 
-/// Cloneable handle to the single activated native root-set authority. It is
+/// Cloneable handle to the single activated native root-set permission. It is
 /// never possible to create a second production inventory after its last Drop.
 #[derive(Clone)]
 pub struct Authority {
@@ -145,12 +145,12 @@ pub struct Status {
 }
 impl Authority {
     /// Build an isolated hosted fixture through the real registry. This is not
-    /// a production authority and never changes the native activation latch.
+    /// a production permission and never changes the native activation latch.
     ///
     /// # Safety
     /// The platform, resources and aliases belong exclusively to this isolated
     /// model. They do not share mappings or native ownership with production or
-    /// another authority. The ordinary platform and alias contracts still apply.
+    /// another permission. The ordinary platform and alias contracts still apply.
     #[cfg(test)]
     pub(crate) unsafe fn isolated_model(
         platform: Arc<dyn MappingPlatform>,
@@ -160,18 +160,18 @@ impl Authority {
         Self::prepare(platform, address_space, aliases)
     }
 
-    /// Import the actual participating native roots and all preexisting aliases.
+    /// Import the participating native roots and all preexisting aliases.
     /// Successful activation is permanent; clone this handle for other users.
     ///
     /// # Safety
-    /// `address_space` identifies the actual complete native root set, with real
-    /// physical/canonical widths. `platform` retains its ownership. `aliases`
+    /// `address_space` identifies the complete native root set, with real
+    /// physical/canonical widths. `platform` keeps its ownership. `aliases`
     /// lists every existing mapping of device resources and RAM (including
-    /// physical-map aliases), with the actual effective PAT/MTRR/cache policy.
+    /// physical-map aliases), with the effective PAT/MTRR/cache policy.
     /// Compatible generic aliases may coexist only as raw-access mappings: no
     /// Rust references may alias a device/driver access. All outside mapping,
     /// cache-policy and root-set changes, including future SMP roots, must
-    /// serialize through this same authority and preserve this inventory.
+    /// serialize through this same permission and preserve this inventory.
     /// No competing driver/resource mapping inventory may exist. Activation
     /// does not remove or retype a preexisting WB alias to permit UC/WC.
     pub unsafe fn activate(
@@ -240,7 +240,7 @@ impl Authority {
             }),
         })
     }
-    /// Register an actual retained resource owner for physical-address-only
+    /// Register a resource owner for physical-address-only
     /// consumers such as an unchanged native GPU mapping ABI. A BAR tuple is
     /// never sufficient; the caller must already possess ResourceBacking.
     pub fn register_resource(&self, resource: Resource) -> Result<ResourceId, Error> {
@@ -283,7 +283,7 @@ impl Authority {
             .push(RegisteredResource { id, resource });
         Ok(id)
     }
-    /// Resolve complete page-rounded coverage to the actual retained owner.
+    /// Resolve complete page-rounded coverage to the owner.
     /// Unknown, partial or unregistered physical spans refuse before mapping.
     pub fn resolve_resource(&self, physical: PhysicalSpan) -> Result<Resource, Error> {
         self.inner
@@ -300,7 +300,7 @@ impl Authority {
             .ok_or(Error::OutsideResource)
     }
     /// Native physical-address-only ABI entry: ownership lookup and mapping
-    /// use the same authority. This never invents ownership from the address.
+    /// use the same permission. This never invents ownership from the address.
     pub fn map_physical(
         &self,
         physical: PhysicalSpan,
@@ -314,7 +314,7 @@ impl Authority {
         self.map(resource, offset, bytes, attribute, protection)
     }
     /// Remove lookup only after all mappings of this resource have retired.
-    /// Independently retained Resource pins continue to own the reservation.
+    /// Independently kept Resource pins continue to own the reservation.
     pub fn unregister_resource(&self, id: ResourceId) -> Result<(), Error> {
         self.inner
             .platform
@@ -341,8 +341,8 @@ impl Authority {
         drop(removed);
         Ok(())
     }
-    /// Snapshot of actual imported or reserved aliases. IDs are valid only for
-    /// this one authority and never reused, including after removal.
+    /// Snapshot of imported or reserved aliases. IDs are valid only for
+    /// this one permission and never reused, including after removal.
     pub fn aliases(&self) -> Result<Vec<(AliasId, ExistingAlias)>, Error> {
         self.inner
             .platform
@@ -356,14 +356,14 @@ impl Authority {
             .collect())
     }
     /// Reserve the full cache-policy span *before* an outside RAM/physmap/root
-    /// table change. This does not establish the actual mapping or cache type.
-    /// Failed/uncertain outside publication retains this reservation until an
-    /// actual removal/rollback acknowledgement permits `retire_alias`.
+    /// table change. This does not establish the mapping or cache type.
+    /// Failed/uncertain outside publication keeps this reservation until a
+    /// removal/rollback acknowledgement permits `retire_alias`.
     ///
     /// # Safety
-    /// The native table owner serializes its publication with this authority,
-    /// covers the entire alias in every participating root, retains ownership
-    /// through removal, and qualifies the actual effective cache policy. No
+    /// The native table owner serializes its publication with this permission,
+    /// covers the entire alias in every participating root, keeps ownership
+    /// through removal, and checks the effective cache policy. No
     /// Rust reference may alias a simultaneously accessed device resource.
     pub unsafe fn reserve_alias(&self, mut alias: ExistingAlias) -> Result<AliasId, Error> {
         self.inner
@@ -395,7 +395,7 @@ impl Authority {
         Ok(id)
     }
     /// # Safety
-    /// Every actual mapping represented by this ID has been removed or never
+    /// Every mapping represented by this ID has been removed or never
     /// published, with real cache/WC completion and all participating root/CPU
     /// TLB acknowledgements. No future outside publication can use the retired
     /// reservation. This operation never removes a page table by itself.
@@ -436,7 +436,7 @@ impl Authority {
         }
         Ok(result)
     }
-    /// Reserve before calling the actual native table adapter. Separate driver
+    /// Reserve before calling the native table adapter. Separate driver
     /// mappings may not overlap even when requesting the same cache policy;
     /// obtain bounded subviews from an existing mapping instead.
     pub fn map(
@@ -532,7 +532,7 @@ impl Authority {
             // SAFETY: the entire Record was initialized exactly once above.
             let record = unsafe { UniqueArc::assume_init(record_storage) }.shareable();
             // Both shared allocations must succeed before any native effect.
-            // This complete lease is private until its actual reply is filled
+            // This complete lease is private until its reply is filled
             // and the corresponding record becomes LIVE.
             lease_storage.write(Lease {
                 authority: Arc::clone(&self.inner),
@@ -549,7 +549,7 @@ impl Authority {
             (record, lease)
         };
         // SAFETY: the single inventory atomically reserved exactly this span,
-        // cache policy and id; record retains the real resource owner.
+        // cache policy and id; record keeps the real resource owner.
         let installed = match unsafe { self.inner.platform.map(&record.resource, record.request) } {
             Ok(mapping) => mapping,
             Err(MapFailure::Unchanged(error)) => {
@@ -575,8 +575,8 @@ impl Authority {
                 return Err(error);
             }
         };
-        // Retain even a malformed reply's nonzero teardown identity. Another
-        // response must not reuse a token merely because its first owner is
+        // Keep even a malformed reply's nonzero teardown identity. Another
+        // response must not reuse a token because its first owner is
         // uncertain/quarantined or has not reached publication yet.
         record.token.store(installed.token, Ordering::Release);
         let base = installed.cpu_base.as_ptr() as usize;
@@ -594,7 +594,7 @@ impl Authority {
             && installed.protection == protection
             && valid_virtual;
         // No handle to this complete lease has escaped or been cloned. Fill
-        // its actual provider reply before any usable mapping is published.
+        // its provider reply before any usable mapping is published.
         lease.installed = Some(installed);
         let published = {
             let mut guard = self.inner.finish_lock();
@@ -686,7 +686,7 @@ impl Mapping {
     fn lease(&self) -> Result<&Shared<Lease>, Error> {
         self.lease.as_ref().ok_or(Error::Retired)
     }
-    /// Observe actual provider execution context and retained lease lifetime,
+    /// Observe provider execution context and kept lease lifetime,
     /// without a device access, root mutation, allocation or retirement.
     pub fn check_current(&self) -> Result<(), Error> {
         let lease = self.lease()?;
@@ -742,10 +742,10 @@ impl Mapping {
             range,
         })
     }
-    /// Compare the original retained mapping-platform authority, checking both
+    /// Compare the original mapping-platform permission, checking both
     /// mappings are still live. Equal numeric root identities are insufficient.
     /// This establishes mapping-service provenance only; it grants no PCI
-    /// root, IOMMU route, device, alias, reset, writer or completion authority.
+    /// root, IOMMU route, device, alias, reset, writer or completion permission.
     pub fn shares_authority(&self, view: &MappingView) -> Result<bool, Error> {
         self.check_current()?;
         view.check_current()?;
@@ -754,8 +754,8 @@ impl Mapping {
         view.address(0, view.bytes())?;
         Ok(Arc::ptr_eq(&lease.authority, &view.lease.authority))
     }
-    /// Compare the exact original installed lease, rather than another mapping
-    /// managed by the same platform authority. Both views must still be live.
+    /// Compare the original installed lease, rather than another mapping
+    /// managed by the same platform permission. Both views must still be live.
     pub fn shares_mapping(&self, view: &MappingView) -> Result<bool, Error> {
         self.check_current()?;
         view.check_current()?;
@@ -768,7 +768,7 @@ impl Mapping {
     /// All device, CPU, callback and worker accesses through every raw pointer
     /// obtained from this mapping have stopped/drained, including posted/WC
     /// writes; no new access may begin. Provider context rules apply. A failed
-    /// actual unmap blocks subsequent address/view access and retains the exact
+    /// unmap blocks subsequent address/view access and keeps the exact
     /// reservation/token for acknowledged retry or permanent quarantine. Busy
     /// refusal before a native callback leaves the mapping unchanged; an
     /// ambiguous/quarantined identity can never authorize a native unmap.
@@ -797,7 +797,7 @@ impl Mapping {
             inventory.unmapping = inventory.unmapping.checked_add(1).ok_or(Error::Exhausted)?;
             lease.record.phase.store(RETIRING, Ordering::Release);
         }
-        // SAFETY: exact retained, non-ambiguous token; caller proves consumer
+        // SAFETY: kept, non-ambiguous token; caller proves consumer
         // drain. The inventory excludes new maps and all pending replies.
         let outcome = unsafe {
             lease
@@ -852,14 +852,14 @@ fn register<T>(pointer: NonNull<u8>) -> Result<*mut T, Error> {
     Ok(pointer.cast())
 }
 
-/// Independently retained bounded view of precisely the same installed mapping.
+/// Independently kept bounded view of precisely the same installed mapping.
 #[derive(Clone)]
 pub struct MappingView {
     lease: Shared<Lease>,
     range: Range<usize>,
 }
 impl MappingView {
-    /// Pure current-context/lifetime observation of this exact retained view.
+    /// Pure current-context/lifetime observation of this exact view.
     pub fn check_current(&self) -> Result<(), Error> {
         self.lease
             .authority
@@ -883,7 +883,7 @@ impl MappingView {
     pub fn read32(&self, offset: usize) -> Result<u32, Error> {
         let register = register::<u32>(self.address(offset, 4)?)?;
         // SAFETY: `address` checked that the live lease covers these bytes and
-        // `register` their alignment; the view retains the lease.
+        // `register` their alignment; the view keeps the lease.
         Ok(u32::from_le(unsafe { register.read_volatile() }))
     }
     /// Store `value` to the 32-bit register at `offset` in this view.
@@ -918,7 +918,7 @@ mod tests {
         drop_context: Option<Authority>,
     }
     // SAFETY: isolated model physical inventory; each backing pins its one
-    // actual model resource. Metadata is immutable and no firmware exists.
+    // model resource. Metadata is immutable and no firmware exists.
     unsafe impl ResourceBacking for Backing {
         fn physical_span(&self) -> PhysicalSpan {
             self.span
@@ -1009,8 +1009,8 @@ mod tests {
         }
     }
     // SAFETY: this models real separate CPU backing and physical inventory;
-    // operations retain actual Box storage until acknowledged unmap. Fault
-    // modes deliberately provide malformed metadata without dereferencing it.
+    // operations keep Box storage until acknowledged unmap. Fault
+    // modes provide malformed metadata without dereferencing it.
     unsafe impl MappingPlatform for Model {
         fn check_context(&self, space: AddressSpace) -> Result<(), Error> {
             if space == SPACE && self.allowed.load(Ordering::Acquire) {
@@ -1167,7 +1167,7 @@ mod tests {
         )
     }
     // SAFETY: unit fixtures represent independent simulated native machines,
-    // not a second authority in any production address space. This private
+    // not a second permission in any production address space. This private
     // helper is cfg(test) only and never bypasses the production activation.
     unsafe fn fixture(model: Arc<Model>, aliases: Vec<ExistingAlias>) -> Authority {
         Authority::prepare(model, SPACE, aliases).unwrap()
@@ -1239,7 +1239,7 @@ mod tests {
         assert_eq!(mapping.shares_mapping(&view), Ok(true));
         drop(view);
         // SAFETY: isolated sequential fixture, every pointer/view user stopped;
-        // genuine original context was restored before this actual unmap.
+        // original context was restored before this unmap.
         unsafe { mapping.retire() }.unwrap();
         assert_eq!(model.live(), 0);
     }
@@ -1258,7 +1258,7 @@ mod tests {
     fn make_device_resource(regions: Vec<DeviceCacheRegion>) -> (Resource, Arc<AtomicUsize>) {
         let dropped = Arc::new(AtomicUsize::new(0));
         // SAFETY: this isolated model owns one whole Registers BAR at this
-        // immutable requester/reset epoch; its model device qualifies precisely
+        // immutable requester/reset epoch; its model device checks precisely
         // the declared register/aperture pages. No RAM/firmware is involved.
         let resource = unsafe {
             Resource::with_device_cache_regions(
@@ -1340,7 +1340,7 @@ mod tests {
         assert_eq!(competing_dropped.load(Ordering::Relaxed), 1);
         let view = aperture.view(0..16).unwrap();
         drop(resource);
-        // SAFETY: register consumers stopped; aperture still retains same BAR.
+        // SAFETY: register consumers stopped; aperture still keeps same BAR.
         unsafe { registers.retire() }.unwrap();
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         // SAFETY: bounded aperture view still exists, so retirement must refuse.
@@ -1388,7 +1388,7 @@ mod tests {
         ));
         authority.unregister_resource(id).unwrap();
         assert_eq!(model.calls(), 0);
-        // Adjacent regions stay separately qualified, even with identical UC.
+        // Adjacent regions stay separately checked, even with identical UC.
         let (adjacent, _) = make_device_resource(vec![
             DeviceCacheRegion {
                 physical: PhysicalSpan::new(BASE, 4096).unwrap(),
@@ -1451,8 +1451,8 @@ mod tests {
             ),
         ] {
             let dropped = Arc::new(AtomicUsize::new(0));
-            // SAFETY: isolated model's genuine owned device BAR; invalid
-            // declaration data is deliberately rejected before publication.
+            // SAFETY: isolated model's owned device BAR; invalid
+            // declaration data is rejected before publication.
             let result = unsafe {
                 Resource::with_device_cache_regions(
                     Box::new(Backing {
@@ -1500,7 +1500,7 @@ mod tests {
             ));
             assert_eq!(model.calls(), 0);
             let alias = authority.aliases().unwrap()[0].0;
-            // SAFETY: model root owner actually removed/drained the alias.
+            // SAFETY: model root owner removed/drained the alias.
             unsafe { authority.retire_alias(alias) }.unwrap();
             model.mode(Mode::RefuseWc);
             assert!(matches!(
@@ -1536,7 +1536,7 @@ mod tests {
         let (model, authority, _, _) = basic();
         let dropped = Arc::new(AtomicUsize::new(0));
         // SAFETY: this device model's prefetchable resource permits only UC in
-        // its one declared page; no source-qualified WC permission exists.
+        // its one declared page; no source-checked WC permission exists.
         let uc_only = unsafe {
             Resource::with_device_cache_regions(
                 Box::new(Backing {
@@ -1732,11 +1732,11 @@ mod tests {
             mapping.view(Range { start: 17, end: 7 }),
             Err(Error::InvalidRange)
         ));
-        // SAFETY: model has no users except the intentionally retained view.
+        // SAFETY: model has no users except the view.
         assert_eq!(unsafe { mapping.retire() }, Err(Error::Busy));
         assert_eq!(model.live(), 1);
         drop(view);
-        // SAFETY: model accesses stopped, no retained views/raw users.
+        // SAFETY: model accesses stopped, no kept views/raw users.
         unsafe { mapping.retire() }.unwrap();
         assert_eq!(model.live(), 0);
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
@@ -1809,7 +1809,7 @@ mod tests {
             assert_eq!(model.calls(), 0);
             let id = authority.aliases().unwrap()[0].0;
             // SAFETY: this model has acknowledged removal of its sole alias;
-            // actual native callers need real removal/cache/TLB ACK first.
+            // native callers need real removal/cache/TLB ACK first.
             unsafe { authority.retire_alias(id) }.unwrap();
             let mut mapped = map(&authority, resource);
             // SAFETY: no model device/CPU users remain.
@@ -1822,7 +1822,7 @@ mod tests {
     #[test]
     fn compatible_effective_uc_alias_is_distinct_from_wb_pte_flags() {
         let model = Model::new();
-        // SAFETY: model describes actual effective UC despite hypothetical WB
+        // SAFETY: model describes effective UC despite hypothetical WB
         // PTE bits (MTRR UC precedence); no cached Rust reference aliases it.
         let authority = unsafe {
             fixture(
@@ -1973,7 +1973,7 @@ mod tests {
             .unwrap();
         assert_eq!(mapping.protection().unwrap(), Protection::ReadOnly);
         assert_eq!(mapping.attribute().unwrap(), CacheAttribute::WriteCombining);
-        // SAFETY: model users stopped and actual modeled WC drain acknowledged.
+        // SAFETY: model users stopped and modeled WC drain acknowledged.
         unsafe { mapping.retire() }.unwrap();
     }
     #[test]
@@ -2072,7 +2072,7 @@ mod tests {
         assert_eq!(model.live(), 1);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         model.state.lock().unwrap().ack = true;
-        // SAFETY: still no consumers; same exact token retried with actual ACK.
+        // SAFETY: still no consumers; same exact token retried with ACK.
         unsafe { mapping.retire() }.unwrap();
         assert_eq!(model.live(), 0);
         let mut second = map(&authority, resource);
@@ -2197,7 +2197,7 @@ mod tests {
             match outcome {
                 Ok(mut mapping) => {
                     successes += 1;
-                    // SAFETY: model consumer threads returned without retaining
+                    // SAFETY: model consumer threads returned without keeping
                     // pointers/views; only this owner remains for retirement.
                     unsafe { mapping.retire() }.unwrap();
                 }
@@ -2236,7 +2236,7 @@ mod tests {
         assert_eq!(authority.unregister_resource(id), Err(Error::Busy));
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         model.state.lock().unwrap().ack = true;
-        // SAFETY: same exact model token, stopped users and actual modeled ACK.
+        // SAFETY: same model token, stopped users and modeled ACK.
         unsafe { mapping.retire() }.unwrap();
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         authority.unregister_resource(id).unwrap();
@@ -2382,7 +2382,7 @@ mod tests {
                 let mut mapping = map(&authority, resource);
                 if scenario == 1 {
                     model.state.lock().unwrap().ack = false;
-                    // SAFETY: model consumers stopped; actual unmap ACK fails.
+                    // SAFETY: model consumers stopped; unmap ACK fails.
                     assert_eq!(unsafe { mapping.retire() }, Err(Error::UnmapFailed));
                     Some(mapping)
                 } else {
@@ -2529,7 +2529,7 @@ mod tests {
             let pending = scope.spawn(|| map_retry(&authority, second));
             ready.wait();
             // SAFETY: model users stopped; the unchecked response must still
-            // exclude actual teardown until identity validation finishes.
+            // exclude teardown until identity validation finishes.
             let retire = unsafe { old.retire() };
             let attempted = model
                 .state
@@ -2556,7 +2556,7 @@ mod tests {
         let release = Arc::new(std::sync::Barrier::new(2));
         model.state.lock().unwrap().unmap_gates = Some((Arc::clone(&ready), Arc::clone(&release)));
         let (attempt, calls, live) = std::thread::scope(|scope| {
-            // SAFETY: model consumers stopped; actual modeled root/cache/TLB
+            // SAFETY: model consumers stopped; modeled root/cache/TLB
             // acknowledgement is held until the test explicitly admits it.
             let retiring = scope.spawn(|| unsafe { old.retire() });
             ready.wait();

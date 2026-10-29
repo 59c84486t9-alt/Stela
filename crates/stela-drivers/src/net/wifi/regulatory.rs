@@ -2,14 +2,14 @@
 // Channel-definition checks follow Linux net/wireless/chan.c:
 // Copyright 2009 Johannes Berg; 2013-2014 Intel Mobile Communications GmbH;
 // 2018-2026 Intel Corporation. See THIRD_PARTY.md.
-//! Shared channel admission; the hardware and OS retain their own policy data.
+//! Shared channel admission; the hardware and OS keep their own policy data.
 //!
 //! The distinction between disabled channels, no-IR, DFS and indoor constraints
 //! follows pinned Linux cfg80211/mac80211 semantics; see THIRD_PARTY.md.
 //! Database inputs are explicitly content-pinned and country-selected by the
 //! normal OS/setup source. No country, DFS exception, default rate or power is
 //! inferred. Parsed vendor receipts and channel flags alone are observations;
-//! native providers must retain the actual programmed controller and policy.
+//! native providers must keep the programmed controller and policy.
 
 use super::{Band, Channel, scan as scan_protocol, station};
 
@@ -31,8 +31,8 @@ pub(crate) use association::{AssociationOwner, NativeManagementUse};
 
 static NEXT_OWNER: super::Identities = super::Identities::new();
 
-/// Actual retained device/reset/firmware owner and fully applied radio policy.
-/// Numbers are provider provenance, not authority or a raw hardware fingerprint.
+/// Device/reset/firmware owner and fully applied radio policy.
+/// Numbers are provider provenance, not permission or a raw hardware fingerprint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeContext {
     pub device: u64,
@@ -48,7 +48,7 @@ pub enum Purpose {
     Data,
 }
 
-/// Deliberately limited to the shared station's initial non-HT profile.
+/// Limited to the shared station's initial non-HT profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Width {
     Legacy20,
@@ -78,7 +78,7 @@ impl LegacyRate {
 
 /// Exact planned TX settings, never settings inferred from a channel/country.
 /// EIRP is in hundredths of dBm; providers must account for antenna/calibration,
-/// hardware rate limits and actual applied power programming. It is a ceiling
+/// hardware rate limits and applied power programming. It is a ceiling
 /// for this submission, not a claim of measured radiated power.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxProfile {
@@ -134,14 +134,14 @@ pub enum Error {
     Unsupported,
 }
 
-/// A view usable only while its qualified HardwarePolicy holds the real guard.
-/// An implementation alone does not confer authority.
+/// A view usable only while its checked HardwarePolicy holds the real guard.
+/// An implementation alone does not confer permission.
 pub trait HardwareLease {
     fn context(&self) -> NativeContext;
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel>;
     fn allows(&mut self, operation: Operation) -> bool;
-    /// Independently qualify the actual original PMF request/BSS/pending Ticket
-    /// before native peer/ROC/auth/assoc RX/TX and every retry. The real retained
+    /// Independently check the original PMF request/BSS/pending Ticket
+    /// before native peer/ROC/auth/assoc RX/TX and every retry. The real kept
     /// service must serialize revocation through all queued/deferred users.
     /// Parsed RSNEs or regulatory permission alone never select this policy.
     fn allows_pmf_authentication(&mut self, _operation: &PmfAuthenticationOperation<'_>) -> bool {
@@ -155,58 +155,58 @@ pub trait HardwareLease {
     ) -> bool {
         false
     }
-    /// Qualify the complete context-bound autonomous radio profile. The default
+    /// Check the complete context-bound autonomous radio profile. The default
     /// refuses; legacy single-rate permission never implies this permission.
     fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
-    /// Qualify these exact current observed/effective queues separately from
+    /// Check these current observed/effective queues separately from
     /// the immutable original association. Existing providers fail closed.
     fn allows_edca(&mut self, _operation: &EdcaOperation<'_>) -> bool {
         false
     }
 }
 
-/// Actual physical radio owner, not an adapter around caller-copied flags.
+/// Physical radio owner, not an adapter around caller-copied flags.
 ///
 /// # Safety
-/// Each acquired lease must bind the same exclusively retained native device,
-/// actual reset/firmware epochs, board/calibration and fully applied policy.
+/// Each acquired lease must bind the same exclusively native device,
+/// reset/firmware epochs, board/calibration and fully applied policy.
 /// Context revisions must never repeat after any relevant change. Return None
 /// while observations, reset, partial programming or lifecycle are uncertain.
 /// `allows` must enforce all hardware/firmware restrictions for the exact
-/// operation, including no-IR/DFS/indoor, rate/preamble/width and actual power.
+/// operation, including no-IR/DFS/indoor, rate/preamble/width and power.
 /// The fixed legacy TX profile must cover every hardware retry; refuse if
-/// firmware can choose unqualified fallback rates, widths or power. Receive
+/// firmware can choose unchecked fallback rates, widths or power. Receive
 /// here is normal station/scan reception, not a disabled-channel monitor mode.
-/// `allows_association` must additionally qualify the exact current context's
+/// `allows_association` must additionally check the current context's
 /// complete source-enabled rate/PHY envelope: local/peer negotiated fields,
 /// basic/automatic ACK and BA responses, firmware rate selection and retries,
 /// all enabled GI/RU/STBC/LDPC/DCM modes, NSS, width/puncture/full channel
-/// footprint, and actually applied per-rate power/calibration/antenna limits.
-/// The context and local source words must be bound to the genuine retained
-/// native capability issuer; parsed/copied facts cannot establish authority.
-/// Do not approve a context using one legacy rate or an unqualified firmware
-/// fallback. Missing any necessary qualification must refuse the operation.
-/// `allows_edca` must independently qualify the exact newly observed/effective
+/// footprint, and applied per-rate power/calibration/antenna limits.
+/// The context and local source words must be bound to the kept
+/// native capability issuer; parsed/copied facts cannot establish permission.
+/// Do not approve a context using one legacy rate or an unchecked firmware
+/// fallback. Missing any necessary validation must refuse the operation.
+/// `allows_edca` must independently check the exact newly observed/effective
 /// queues without widening that immutable association envelope. A previously
 /// allowed Management operation does not approve different queue parameters.
 /// No source default, parsed receipt, country guess or receive observation can
-/// establish these permissions. Missing TX qualification must deny TX while
-/// separately qualified receive may remain possible.
+/// establish these permissions. Missing TX validation must deny TX while
+/// separately checked receive may remain possible.
 ///
 /// The lease must serialize controlled resets, restriction changes and native
 /// submission until dropped. Its concrete type must let the submit closure use
 /// this same physical owner; publication cannot target a different device.
-/// Shared operations acquire hardware authority before OS authority. Provider
-/// and revocation callbacks must preserve this order: never hold OS authority
-/// while synchronously blocking on hardware authority. Use ordered acquisition
-/// or release/coordinate/revalidate without treating released authority as live.
-/// After publication, restrictive revocation must actually stop/cancel/drain
+/// Shared operations acquire hardware permission before OS permission. Provider
+/// and revocation callbacks must preserve this order: never hold OS permission
+/// while synchronously blocking on hardware permission. Use ordered acquisition
+/// or release/coordinate/revalidate without treating released permission as live.
+/// After publication, restrictive revocation must stop/cancel/drain
 /// pending radio work and already armed autonomous MAC responses (or
 /// hardware-enforce the new restriction before emission). Stopping/removing a
 /// restricted context must remain possible without a new transmit permission.
-/// Retain old DMA/key/policy resources through actual completions and users.
+/// Keep old DMA/key/policy resources through completions and users.
 /// Closure return is not air completion, cancellation or retirement proof.
 pub unsafe trait HardwarePolicy {
     type Lease<'a>: HardwareLease
@@ -215,12 +215,12 @@ pub unsafe trait HardwarePolicy {
     fn acquire(&mut self) -> Option<Self::Lease<'_>>;
 }
 
-/// A view of a genuine OS/location policy service's held authority lease.
+/// A view of an OS/location policy service's held permission lease.
 pub trait OsLease {
     fn revision(&self) -> u64;
     fn allows(&mut self, operation: Operation) -> bool;
-    /// Independently qualify the actual original PMF request/BSS/pending Ticket
-    /// before native peer/ROC/auth/assoc RX/TX and every retry. The real retained
+    /// Independently check the original PMF request/BSS/pending Ticket
+    /// before native peer/ROC/auth/assoc RX/TX and every retry. The real kept
     /// service must serialize revocation through all queued/deferred users.
     /// Parsed RSNEs or regulatory permission alone never select this policy.
     fn allows_pmf_authentication(&mut self, _operation: &PmfAuthenticationOperation<'_>) -> bool {
@@ -234,28 +234,28 @@ pub trait OsLease {
     ) -> bool {
         false
     }
-    /// Qualify the complete context-bound autonomous radio profile. The default
+    /// Check the complete context-bound autonomous radio profile. The default
     /// refuses; legacy single-rate permission never implies this permission.
     fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
-    /// Separately qualify the exact PMF RSNE/BSS/current association. Configure
-    /// requires explicit real OS selection; Receive permits only the actual
+    /// Separately check the exact PMF RSNE/BSS/current association. Configure
+    /// requires explicit real OS selection; Receive permits only the
     /// OS receive service including pre-key EAPOL; Authentication permits only
-    /// canonical EAPOL control-port TX. Management and Data require genuine
+    /// canonical EAPOL control-port TX. Management and Data require
     /// authenticated RSN agreement and current OS policy.
     /// Regulatory permission, parsed capabilities and copied epochs cannot
-    /// satisfy this contract. Hold/revoke this authority with the same lease.
+    /// satisfy this contract. Hold/revoke this permission with the same lease.
     fn allows_protected_management(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
     /// Independently authorize opening this PMF controlled port only after the
-    /// genuine OS authenticated handshake and negotiated RSN agreement. The
-    /// native consumer separately requires actual current PTK/GTK/IGTK ACKs.
+    /// OS authenticated handshake and negotiated RSN agreement. The
+    /// native consumer separately requires current PTK/GTK/IGTK ACKs.
     fn allows_protected_port(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
-    /// Qualify these exact current observed/effective queues separately from
+    /// Check these current observed/effective queues separately from
     /// the immutable original association. Existing providers fail closed.
     fn allows_edca(&mut self, _operation: &EdcaOperation<'_>) -> bool {
         false
@@ -265,30 +265,30 @@ pub trait OsLease {
 /// Trusted OS policy boundary. A frontend message or copied country is not it.
 ///
 /// # Safety
-/// Acquire only current authenticated OS/location authority applicable to this
-/// exact native device/reset/firmware context. Return None when absent, expired,
-/// revoked or unqualified. Revisions must not repeat after any relevant change;
+/// Acquire only current authenticated OS/location permission applicable to this
+/// native device/reset/firmware context. Return None when absent, expired,
+/// revoked or unchecked. Revisions must not repeat after any relevant change;
 /// `allows` must intersect all current location/DFS/indoor and operation-specific
-/// rate/width/power restrictions. The lease must genuinely synchronize policy
-/// revocation through native publication, not merely snapshot flags/revisions.
-/// `allows_association` must qualify that same complete enabled context profile,
+/// rate/width/power restrictions. The lease must synchronize policy
+/// revocation through native publication, not snapshot flags/revisions.
+/// `allows_association` must check that same complete enabled context profile,
 /// not one selected rate or metadata observation, for all current location,
 /// full channel footprint, DFS/no-IR/indoor and per-rate power constraints.
-/// `allows_protected_management` must independently qualify the exact original
-/// PMF selection and actual AP/current context: explicit OS selection during
+/// `allows_protected_management` must independently check the original
+/// PMF selection and AP/current context: explicit OS selection during
 /// Configure, selected OS receive/authentication service for Receive and
 /// Authentication, then authenticated RSN agreement for Management/Data.
-/// `allows_protected_port` independently requires completed genuine OS
+/// `allows_protected_port` independently requires completed OS
 /// authentication before opening the port. Synchronize revocation through real
 /// keys, queued/deferred users and autonomous responses. A country service alone
 /// must refuse it.
 /// `allows_edca` must independently inspect the new AP/effective queue arrays
-/// and enforce this exact current country/control-channel rule; the original
-/// context admission does not qualify a later contention/TXOP relaxation.
-/// Shared operations acquire hardware then OS authority. OS provider/revocation
-/// callbacks must not hold OS authority while synchronously waiting for hardware
-/// authority in reverse order. Use compatible ordered acquisition or release,
-/// coordinate and revalidate authority before resuming protected work.
+/// and enforce this current country/control-channel rule; the original
+/// context admission does not check a later contention/TXOP relaxation.
+/// Shared operations acquire hardware then OS permission. OS provider/revocation
+/// callbacks must not hold OS permission while synchronously waiting for hardware
+/// permission in reverse order. Use compatible ordered acquisition or release,
+/// coordinate and revalidate permission before resuming protected work.
 /// Revocation must also coordinate the HardwarePolicy's real pending-work
 /// stop/enforcement/drain obligation. There is no in-driver OS service default.
 pub unsafe trait OsPolicy {
@@ -366,9 +366,9 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         })
     }
 
-    /// Revalidate the exact native plan immediately at publication. Both real
-    /// authority guards remain held throughout `submit`. It returns the
-    /// backend's actual result; this method does not invent ACK, emission,
+    /// Revalidate the native plan immediately at publication. Both real
+    /// permission guards remain held throughout `submit`. It returns the
+    /// backend's result; this method does not invent ACK, emission,
     /// cancellation or air completion.
     ///
     /// # Safety
@@ -422,7 +422,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     }
 }
 
-/// Every TX purpose needs an explicitly qualified profile. None denies it.
+/// Every TX purpose needs an explicitly checked profile. None denies it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Profiles {
     pub probe: Option<TxProfile>,
@@ -608,7 +608,7 @@ mod tests {
     }
 
     // SAFETY: pure model's held flag serializes its only revoke/submit paths.
-    // All authority data is explicit synthetic input; no physical claims are made.
+    // All permission data is explicit synthetic input; no physical claims are made.
     unsafe impl HardwarePolicy for Hardware {
         type Lease<'a> = HardwareGuard;
         fn acquire(&mut self) -> Option<Self::Lease<'_>> {
@@ -617,7 +617,7 @@ mod tests {
         }
     }
 
-    // SAFETY: same serialized pure model, qualified only for its exact native owner.
+    // SAFETY: same serialized pure model, checked only for its native owner.
     unsafe impl OsPolicy for Os {
         type Lease<'a> = OsGuard;
         fn acquire(&mut self, native: NativeContext) -> Option<Self::Lease<'_>> {
@@ -883,7 +883,7 @@ mod tests {
         assert!(hardware.pending.get());
         assert!(hardware.revoke());
         assert!(owner.admit(op).is_err());
-        // Actual completion/cancel/drain is still a separate vendor obligation.
+        // Completion/cancel/drain is still a separate vendor obligation.
         assert!(hardware.pending.get());
         hardware.pending.set(false);
     }

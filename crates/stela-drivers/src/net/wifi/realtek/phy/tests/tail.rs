@@ -6,7 +6,7 @@ use super::*;
 fn tail_registers_and_thermal_reference() {
     let (mut bus, factory, report) = tail_setup(3, 255, 255);
     let before = bus.model.lock().unwrap().get(0x14c0, 4);
-    // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+    // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
     // There is no concurrent RF, packet or reset producer during these serialized effects.
     let initialized = unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
     let power = initialized
@@ -54,7 +54,7 @@ fn tail_registers_and_thermal_reference() {
 #[test]
 fn tail_failure_quarantines() {
     let (mut bus, factory, report) = tail_setup(0, 5, 6);
-    // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+    // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
     // There is no concurrent RF, packet or reset producer during these serialized effects.
     unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -62,7 +62,7 @@ fn tail_failure_quarantines() {
         let (mut bus, factory, report) = tail_setup(0, 5, 6);
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
-            // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+            // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
             // There is no concurrent RF, packet or reset producer during these serialized effects.
             unsafe { factory.finish_initial_phy(&mut bus, &report) }.is_err(),
             "{at}"
@@ -78,7 +78,7 @@ fn tail_failure_quarantines() {
     ] {
         let (mut bus, factory, report) = tail_setup(0, 5, 6);
         bus.model.lock().unwrap().mutate = Some((at, r, w, v));
-        // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+        // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
         // There is no concurrent RF, packet or reset producer during these serialized effects.
         assert!(unsafe { factory.finish_initial_phy(&mut bus, &report) }.is_err());
         assert_eq!(bus.model.lock().unwrap().quarantined, 1);
@@ -86,7 +86,7 @@ fn tail_failure_quarantines() {
     let (mut bus, factory, report) = tail_setup(0, 5, 6);
     bus.panic_register = Some(0x42c);
     assert!(
-        // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+        // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
         // There is no concurrent RF, packet or reset producer during these serialized effects.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             factory.finish_initial_phy(&mut bus, &report)
@@ -103,7 +103,7 @@ fn tail_profile_preflight() {
     let (mut bus, factory, _) = tail_setup(0, 0, 0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
-        // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+        // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
         // There is no concurrent RF, packet or reset producer during these serialized effects.
         unsafe { factory.finish_initial_phy(&mut bus, &other) },
         Err(Error::WrongProfile)
@@ -112,7 +112,7 @@ fn tail_profile_preflight() {
     let (mut bus, factory, _) = tail_setup(0, 0, 0);
     let (_, _, one) = setup(1, 0, 0, 0, true, false);
     assert!(matches!(
-        // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+        // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
         // There is no concurrent RF, packet or reset producer during these serialized effects.
         unsafe { factory.finish_initial_phy(&mut bus, &one) },
         Err(Error::UnsupportedRfLayout)
@@ -122,7 +122,7 @@ fn tail_profile_preflight() {
         let (mut bus, factory, report) = tail_setup(0, 0, 0);
         bus.model.lock().unwrap().set(r, w, 0);
         assert!(matches!(
-            // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+            // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
             // There is no concurrent RF, packet or reset producer during these serialized effects.
             unsafe { factory.finish_initial_phy(&mut bus, &report) },
             Err(Error::DomainOff)
@@ -150,7 +150,7 @@ fn rtl8822c_tail_matches_linux() {
         offset += 20;
         let [pattern, a, b, reference, events] = head;
         let (mut bus, factory, report) = tail_setup(pattern as usize, a as u8, b as u8);
-        // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+        // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
         // There is no concurrent RF, packet or reset producer during these serialized effects.
         let initialized = unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
         let t = initialized.tracking();

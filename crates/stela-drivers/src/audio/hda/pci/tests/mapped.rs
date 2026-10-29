@@ -139,7 +139,7 @@ fn invalid_link_state_precedes_pci_writes() {
         assert_eq!(*registers.bytes.borrow(), before);
     }
     // Known conventional link powered down is valid: initialization obtains
-    // its actual power acknowledgement after PCI clock-bracketed reset.
+    // its power acknowledgement after PCI clock-bracketed reset.
     for (clock, powered) in [(0, 0), (2, 0), (3, (1 << 16) | (1 << 23))] {
         let (mut function, timer, bar) = modern_pci_model_for(0x7e28);
         let registers = MappedModel::new();

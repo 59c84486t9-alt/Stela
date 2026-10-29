@@ -26,7 +26,7 @@ const FIRST_DWORD: u8 = 0;
 const BYTE_BROADCAST_MULTIPLIER: u32 = 0x0101_0101;
 const TABLE_CHUNK_LAST_INDEX: u8 = VECTOR_CHUNK_BYTES as u8 - 1;
 const BYTE_INDEX_VALUES: usize = u8::MAX as usize + 1;
-// Measured whole-table cutoff; larger whole tables retain the scalar mapping.
+// Measured whole-table cutoff; larger whole tables keep the scalar mapping.
 const BYTE_TABLE_SHUFFLE_LIMIT_BYTES: usize = 64;
 const Z_REGISTER_MASK: u8 = 31;
 

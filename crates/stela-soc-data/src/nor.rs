@@ -1,4 +1,4 @@
-//! Source-qualified SPI NOR image geometry and CHRP bank representation.
+//! Source-checked SPI NOR image geometry and CHRP bank representation.
 //! This image is data. Flash commands, selected transactions and durability
 //! remain owned by the native device and block-storage adapters.
 use alloc::{vec, vec::Vec};

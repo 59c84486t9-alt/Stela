@@ -9,10 +9,10 @@
 //! which maps the drivers' shared DMA region one to one, so a driver that
 //! DMAs there by physical address reaches only that region; attaching a
 //! requester moves it to its own domain.
-//! Noncoherent table walks use actual CPUID-qualified CLFLUSH plus MFENCE.
+//! Noncoherent table walks use CPUID-checked CLFLUSH plus MFENCE.
 //! This never attaches by guessing a DMAR scope or changes active firmware
 //! domains. ATS, scalable mode, RMRR preservation, peer groups and AMD-Vi need
-//! their actual platform owners and are not supplied by this backend.
+//! their platform owners and are not supplied by this backend.
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::{
     cell::UnsafeCell,
@@ -103,7 +103,7 @@ pub struct FaultRecord {
     pub read: bool,
 }
 
-/// An actual exclusive, mapped VT-d register window and monotonic deadline.
+/// An exclusive, mapped VT-d register window and monotonic deadline.
 ///
 /// # Safety
 /// All register accesses have their real effects, obey width/order and stay
@@ -117,20 +117,20 @@ pub unsafe trait Registers: Send + Sync {
     fn write64(&self, offset: usize, value: u64);
     fn ticks(&self) -> u64;
     fn timeout_ticks(&self) -> u64;
-    /// Evict actual dirty WB table lines for a noncoherent walker.
+    /// Evict dirty WB table lines for a noncoherent walker.
     ///
     /// # Safety
-    /// The whole CPU span is retained mapped WB RAM, line-aligned, and
-    /// CLFLUSH/`line` have been qualified by actual CPUID on this CPU.
+    /// The whole CPU span is held mapped WB RAM, line-aligned, and
+    /// CLFLUSH/`line` have been checked by CPUID on this CPU.
     unsafe fn flush_table(&self, cpu: NonNull<u8>, bytes: usize, line: usize) {
-        // SAFETY: caller supplied the qualified, retained actual CPU span.
+        // SAFETY: caller supplied the checked, kept CPU span.
         unsafe { flush_table(cpu, bytes, line) };
     }
 }
 
 unsafe fn flush_table(cpu: NonNull<u8>, bytes: usize, line: usize) {
     for offset in (0..bytes).step_by(line) {
-        // SAFETY: caller retains the complete qualified WB CPU span.
+        // SAFETY: caller keeps the complete checked WB CPU span.
         unsafe {
             core::arch::asm!("clflush [{}]", in(reg) cpu.as_ptr().add(offset), options(nostack, preserves_flags));
         }
@@ -157,7 +157,7 @@ pub struct MmioRegisters {
 impl MmioRegisters {
     /// # Safety
     /// `base..base+bytes` is the real exclusively owned UC register window,
-    /// stable across roots and retained until successful shutdown or quarantine.
+    /// stable across roots and kept until successful shutdown or quarantine.
     /// `clock` is monotonic and `timeout` is nonzero and less than half its wrap.
     pub unsafe fn new(
         base: NonNull<u8>,
@@ -188,7 +188,7 @@ impl MmioRegisters {
                 .checked_add(size_of::<T>())
                 .is_some_and(|end| end <= self.bytes)
         );
-        // SAFETY: the full checked register access is in the retained mapping.
+        // SAFETY: the full checked register access is in the mapping.
         unsafe { self.base.as_ptr().add(offset).cast() }
     }
 }
@@ -198,25 +198,25 @@ impl MmioRegisters {
 unsafe impl Send for MmioRegisters {}
 // SAFETY: volatile accesses are serialized by the unit's process-context lock.
 unsafe impl Sync for MmioRegisters {}
-// SAFETY: construction requires the actual UC mapping and monotonic clock.
+// SAFETY: construction requires the UC mapping and monotonic clock.
 unsafe impl Registers for MmioRegisters {
     fn bytes(&self) -> usize {
         self.bytes
     }
     fn read32(&self, offset: usize) -> u32 {
-        // SAFETY: `address` checks the access lies inside the retained uncached register mapping.
+        // SAFETY: `address` checks the access lies inside the uncached register mapping.
         unsafe { self.address::<u32>(offset).read_volatile() }
     }
     fn read64(&self, offset: usize) -> u64 {
-        // SAFETY: `address` checks the access lies inside the retained uncached register mapping.
+        // SAFETY: `address` checks the access lies inside the uncached register mapping.
         unsafe { self.address::<u64>(offset).read_volatile() }
     }
     fn write32(&self, offset: usize, value: u32) {
-        // SAFETY: `address` checks the access lies inside the retained uncached register mapping.
+        // SAFETY: `address` checks the access lies inside the uncached register mapping.
         unsafe { self.address::<u32>(offset).write_volatile(value) }
     }
     fn write64(&self, offset: usize, value: u64) {
-        // SAFETY: `address` checks the access lies inside the retained uncached register mapping.
+        // SAFETY: `address` checks the access lies inside the uncached register mapping.
         unsafe { self.address::<u64>(offset).write_volatile(value) }
     }
     fn ticks(&self) -> u64 {
@@ -271,7 +271,7 @@ impl Table {
 
     fn flush<R: Registers>(&self, registers: &R, line: usize) {
         let pointer = self.cpu.address(0, PAGE).expect("retained table page");
-        // SAFETY: qualified CLFLUSH/line; actual retained page-aligned WB RAM.
+        // SAFETY: checked CLFLUSH/line; page-aligned WB RAM.
         unsafe { registers.flush_table(pointer, PAGE, line) };
     }
 }
@@ -348,7 +348,7 @@ impl<R: Registers> Drop for Guard<'_, R> {
 
 pub fn publish() {
     // SAFETY: MFENCE is in the x86-64 baseline. The default memory clobber
-    // prevents compiler motion; the coherent platform makes actual WB stores
+    // prevents compiler motion; the coherent platform makes WB stores
     // visible before subsequent UC register/descriptor publication.
     unsafe {
         core::arch::asm!("mfence", options(nostack, preserves_flags));
@@ -534,7 +534,7 @@ impl<R: Registers> Unit<R> {
         let state = guard.state();
         unit.publish_tables(state);
         // Mask fault interrupts; fault delivery needs its own registered IRQ
-        // owner, never a firmware handler retained across ownership transfer.
+        // owner, never a firmware handler kept across ownership transfer.
         unit.registers.write32(FECTL, 1 << 31);
         unit.registers.write64(RTADDR, state.root.physical());
         unit.registers.write32(GCMD, ROOT_POINTER);
@@ -549,7 +549,7 @@ impl<R: Registers> Unit<R> {
     /// Publish one owned stopped requester into this already owned unit.
     ///
     /// # Safety
-    /// The claim's actual engine/reset/IRQ/work epoch is stopped and drained,
+    /// The claim's engine/reset/IRQ/work epoch is stopped and drained,
     /// its coherent-DMA/config/root ownership grant remains valid, and no other
     /// owner can resume it before this returned domain's mapping publication.
     pub unsafe fn attach_requester(
@@ -660,7 +660,7 @@ impl<R: Registers> Unit<R> {
                 domain.tables[table].flush(&*self.registers, line);
             }
         }
-        // Orders actual dirty-line eviction before UC command submission.
+        // Orders dirty-line eviction before UC command submission.
         publish();
     }
     /// Make entries that were not present visible to the walker. Without
@@ -751,7 +751,7 @@ impl<R: Registers> Unit<R> {
                 }
             }
         }
-        // Orders actual dirty-line eviction before UC command submission.
+        // Orders dirty-line eviction before UC command submission.
         publish();
     }
     fn wait32(&self, register: usize, mask: u32, set: bool) -> Result<(), VtdError> {
@@ -815,7 +815,7 @@ impl<R: Registers> Unit<R> {
     }
 
     /// Disable after device-specific stop, completion and worker/IRQ drain.
-    /// The unit remains retained on any failed hardware acknowledgement.
+    /// The unit remains held on any failed hardware acknowledgement.
     ///
     /// # Safety
     /// Every requester is stopped/drained and cannot issue further DMA. The
@@ -842,7 +842,7 @@ impl<R: Registers> Drop for Unit<R> {
         // SAFETY: final owner, so no lock/operation can still borrow state.
         let shutdown = unsafe { &*self.state.get() }.shutdown;
         if shutdown {
-            // SAFETY: actual device quiescence, all mappings retired, IOTLB
+            // SAFETY: device quiescence, all mappings retired, IOTLB
             // acknowledgement and TE-off acknowledgement preceded shutdown.
             unsafe {
                 ManuallyDrop::drop(&mut self.state);
@@ -850,7 +850,7 @@ impl<R: Registers> Drop for Unit<R> {
             }
         } else {
             // Hardware may still hold any of these PA references. Deliberately
-            // retain the register owner, tables and pins, including map errors.
+            // keep the register owner, tables and pins, including map errors.
             let _ = QUARANTINED_UNITS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 Some(count.saturating_add(1))
             });
@@ -1012,8 +1012,8 @@ impl DomainState {
     }
 }
 
-/// One actual requester context, hardware DID and non-reused software epoch.
-/// It retains the hardware owner and consumed PCI claim through every DMA lease.
+/// One requester context, hardware DID and non-reused software epoch.
+/// It keeps the hardware owner and consumed PCI claim through every DMA lease.
 /// Final release is process/deferred context, never an IRQ callback.
 pub struct RequesterDomain<R: Registers> {
     unit: ManuallyDrop<Arc<Unit<R>>>,
@@ -1046,10 +1046,10 @@ impl<R: Registers> RequesterDomain<R> {
             .ok_or(DmaError::Unmapped)
     }
     /// # Safety
-    /// The actual device is stopped before disabling, or every enabled DMA
+    /// The device is stopped before disabling, or every enabled DMA
     /// address is published under this owned domain. Device IRQ/work/reset and
     /// configuration ownership remain excluded. This is not a stop/drain ACK.
-    /// Controlled fault probes must retain all possible target backing too.
+    /// Controlled fault probes must keep all possible target backing too.
     pub unsafe fn set_bus_master(&self, enabled: bool) -> Result<(), VtdError> {
         let mut guard = self.unit.lock();
         self.domain(guard.state(), enabled)
@@ -1058,7 +1058,7 @@ impl<R: Registers> RequesterDomain<R> {
             .set_bus_master(enabled)
     }
     /// # Safety
-    /// Actual engines, posted requests, IRQ/work/reset and submissions from
+    /// Engines, posted requests, IRQ/work/reset and submissions from
     /// this owned requester are stopped/drained and cannot restart. No numeric
     /// RID or BusMaster-clear bit alone establishes this proof.
     pub unsafe fn detach(&self) -> Result<RequesterClaim, VtdError> {
@@ -1114,7 +1114,7 @@ impl<R: Registers> Drop for RequesterDomain<R> {
                 false
             }
         };
-        // An unacknowledged context retains its actual claim/tables/unit Arc;
+        // An unacknowledged context keeps its claim/tables/unit Arc;
         // a later attach can neither reuse that RID nor steal its hardware DID.
         if !active {
             // SAFETY: the context's retirement was acknowledged, so no hardware state still needs
@@ -1126,9 +1126,9 @@ impl<R: Registers> Drop for RequesterDomain<R> {
     }
 }
 
-// SAFETY: the platform's takeover contract establishes actual exclusive
+// SAFETY: the platform's takeover contract establishes exclusive
 // requester ownership, coherent WB DMA and stopped ATS/NoSnoop. Real native
-// pages and hardware tables are retained through acknowledged invalidation;
+// pages and hardware tables are held through acknowledged invalidation;
 // every failed/abandoned hardware lifetime preserves its backing. All mutable
 // operations are serialized outside hard IRQ context.
 unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
@@ -1163,7 +1163,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         };
         let mut leaves = Vec::with_capacity(pages.bytes() / PAGE);
         // Build all required table paths first. No leaf may be published until
-        // the owned mapping/pin and complete leaf inventory have been retained.
+        // the owned mapping/pin and complete leaf inventory have been kept.
         for offset in (0..pages.bytes()).step_by(PAGE) {
             leaves.push(
                 domain
@@ -1207,7 +1207,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
             .is_err()
         {
             // An unacknowledged translation is never returned as a live lease;
-            // retain its pin/table inventory and poison further submissions.
+            // keep its pin/table inventory and poison further submissions.
             state.poisoned = true;
             return Err(DmaError::InvalidationFailed);
         }
@@ -1253,7 +1253,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         let mut guard = self.unit.lock();
         self.domain(guard.state(), true)?
             .mapping(info, &range, direction)?;
-        // DMA coherence is an explicit platform/requester qualification, not
+        // DMA coherence is an explicit platform/requester validation, not
         // inferred from ECAP page-table coherency or WB CPU attributes alone.
         publish();
         Ok(())
@@ -1268,7 +1268,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         let mut guard = self.unit.lock();
         self.domain(guard.state(), true)?
             .mapping(info, &range, direction)?;
-        // Caller has observed actual hardware completion before this acquire
+        // Caller has observed hardware completion before this acquire
         // boundary; no completion or cache invalidation is invented here.
         publish();
         Ok(())
@@ -1288,7 +1288,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         let live = self
             .domain(guard.state(), true)?
             .mapping(info, &(offset..end), direction)?;
-        // The takeover/claim contracts independently qualify coherent WB
+        // The takeover/claim contracts independently check coherent WB
         // payload DMA and exclude ATS/NoSnoop and incompatible aliases. ECAP
         // table-walk coherency is not that grant. Scatter mappings do not
         // manufacture a contiguous CPU view.
@@ -1304,8 +1304,8 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
             return Err(DmaError::InvalidRange);
         }
         publish();
-        // SAFETY: this live domain retains its actual aligned WB allocation;
-        // only raw access is exposed. The qualified platform supports these
+        // SAFETY: this live domain keeps its aligned WB allocation;
+        // only raw access is exposed. The checked platform supports these
         // per-word observations during device writes, not atomic whole frames.
         let value = unsafe { pointer.as_ptr().cast::<u32>().read_volatile() };
         publish();
@@ -1319,7 +1319,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         if self.unit.cap & CAP_WRITE_DRAIN == 0 {
             return Err(DmaError::DrainUnavailable);
         }
-        // VT-d section 6.5.4: with DWD support, the actual DW invalidation
+        // VT-d section 6.5.4: with DWD support, the DW invalidation
         // completes queued translated writes through this root path before
         // returning. It neither establishes device stop nor drains peer DMA.
         // The existing operation verifies completion/granularity and performs
@@ -1360,7 +1360,7 @@ mod tests {
     // SAFETY: shared access exposes metadata and raw pointers only.
     unsafe impl Sync for Backing {}
     // SAFETY: this is an explicit native physical-memory model. CPU RAM really
-    // exists and is retained; the named PAs are modeled, not identity-inferred.
+    // exists and is held; the named PAs are modeled, not identity-inferred.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
             self.pointer
@@ -1385,7 +1385,7 @@ mod tests {
     fn pages(bytes: usize, shift: u8, physical: u64, released: Arc<AtomicU64>) -> PinnedPages {
         let size = 1usize << shift;
         let layout = Layout::from_size_align(bytes, size).unwrap();
-        // SAFETY: actual exclusive zeroed model RAM, released by Backing.
+        // SAFETY: exclusive zeroed model RAM, released by Backing.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let backing = Backing {
             pointer,
@@ -1536,7 +1536,7 @@ mod tests {
         }
     }
     // SAFETY: synchronous model of the real registers and acknowledgements.
-    // Timeout injection leaves requests genuinely unacknowledged in the model.
+    // Timeout injection leaves requests unacknowledged in the model.
     unsafe impl Registers for ModelRegisters {
         fn bytes(&self) -> usize {
             4096
@@ -1560,7 +1560,7 @@ mod tests {
             if offset == 0x108 && value & IOTLB_INVALIDATE != 0 && !model.block_iotlb {
                 if value & IOTLB_WRITE_DRAIN != 0 && model.iotlb_granularity == 1 {
                     for (address, word) in model.pending_payload.drain(..) {
-                        // SAFETY: each test retains the actual owned allocation
+                        // SAFETY: each test keeps the owned allocation
                         // through this modeled device-write completion.
                         unsafe { (address as *mut u32).write_volatile(word.to_le()) };
                     }
@@ -1620,7 +1620,7 @@ mod tests {
                     .find(|(_, pointer)| **pointer == cpu.as_ptr() as usize)
                     .unwrap()
                     .0;
-                // SAFETY: retained model table mapping; snapshot represents
+                // SAFETY: model table mapping; snapshot represents
                 // what a noncoherent walker can see after this real eviction.
                 let visible =
                     unsafe { core::slice::from_raw_parts(cpu.as_ptr().cast::<u64>(), PAGE / 8) }
@@ -1628,8 +1628,8 @@ mod tests {
                 model.visible_tables.insert(physical, visible);
                 model.observe_tables();
             }
-            // SAFETY: the model uses actual retained allocated table RAM and
-            // the production CPUID qualification; keep real cache effects too.
+            // SAFETY: the model uses kept allocated table RAM and
+            // the production CPUID validation; keep real cache effects too.
             unsafe { super::flush_table(cpu, bytes, line) };
         }
     }
@@ -1669,8 +1669,8 @@ mod tests {
         };
         let before = registers.0.lock().unwrap().writes.len();
         for value in [0u32, 1, 0x8000_0000, 0x1234_5678, u32::MAX] {
-            // SAFETY: synchronous modeled device producer writes its actual
-            // retained allocation, without a CPU ownership transfer.
+            // SAFETY: synchronous modeled device producer writes its
+            // allocation, without a CPU ownership transfer.
             unsafe { pointer.write_volatile(value.to_le()) };
             assert_eq!(mapping.read_coherent_u32(0), Ok(value));
             assert_eq!(other.read_coherent_u32(0), Ok(0));
@@ -1749,7 +1749,7 @@ mod tests {
                     .push((pointer as usize, 0x1234_abcd));
                 assert_eq!(mapping.read_coherent_u32(0), Ok(0));
                 // SAFETY: modeled engine cannot submit more requests; queued
-                // translated payload remains retained until real model ACK.
+                // translated payload remains held until real model ACK.
                 unsafe { domain.drain_posted_writes() }.unwrap();
                 assert_eq!(mapping.read_coherent_u32(0), Ok(0x1234_abcd));
                 let model = registers.0.lock().unwrap();
@@ -1765,7 +1765,7 @@ mod tests {
                 assert_eq!(writes[1], (GCMD, u64::from(TRANSLATION | WRITE_BUFFER)));
             } else {
                 assert_eq!(
-                    // SAFETY: the model engine submits nothing more; queued payload stays retained
+                    // SAFETY: the model engine submits nothing more; queued payload stays held
                     // until its acknowledgement.
                     unsafe { domain.drain_posted_writes() },
                     Err(DmaError::DrainUnavailable)
@@ -1813,7 +1813,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                // SAFETY: the model engine submits nothing more; queued payload stays retained
+                // SAFETY: the model engine submits nothing more; queued payload stays held
                 // until its acknowledgement.
                 unsafe { domain.drain_posted_writes() },
                 Err(DmaError::InvalidationFailed)
@@ -1826,7 +1826,7 @@ mod tests {
             }
             assert_eq!(mapping.read_coherent_u32(0), Err(DmaError::MappingFailed));
             assert_eq!(
-                // SAFETY: the model engine submits nothing more; queued payload stays retained
+                // SAFETY: the model engine submits nothing more; queued payload stays held
                 // until its acknowledgement.
                 unsafe { domain.drain_posted_writes() },
                 Err(DmaError::MappingFailed)
@@ -1838,7 +1838,7 @@ mod tests {
             assert_eq!(pin_drops.load(Ordering::Relaxed), 0);
             assert_eq!(claim_drops.load(Ordering::Relaxed), 0);
             // Deliberate quarantine: only external platform recovery can
-            // acknowledge the retained hardware lifetime after these faults.
+            // acknowledge the hardware lifetime after these faults.
         }
     }
     #[test]
@@ -1892,13 +1892,13 @@ mod tests {
         assert_eq!(released.load(Ordering::Relaxed), 0);
         registers.0.lock().unwrap().block_iotlb = true;
         assert_eq!(
-            // SAFETY: model is quiescent; an unacknowledged removal retains pins.
+            // SAFETY: model is quiescent; an unacknowledged removal keeps pins.
             unsafe { mapping.unmap() },
             Err(DmaError::InvalidationFailed)
         );
         assert_eq!(released.load(Ordering::Relaxed), 0);
         registers.0.lock().unwrap().block_iotlb = false;
-        // SAFETY: same stopped requester and unreused retained mapping token.
+        // SAFETY: same stopped requester and unreused kept mapping token.
         unsafe { mapping.unmap() }.unwrap();
         assert_eq!(released.load(Ordering::Relaxed), 2);
         assert_eq!(registers.0.lock().unwrap().translation(8, address), None);
@@ -2422,7 +2422,7 @@ mod tests {
     fn noncoherent_table_flushes_precede_root_and_each_mapping_invalidation() {
         let registers = ModelRegisters::new();
         registers.0.lock().unwrap().values.insert(ECAP, 0x10 << 8);
-        // SAFETY: exclusive stopped model with CPUID-qualified native flushes.
+        // SAFETY: exclusive stopped model with CPUID-checked native flushes.
         let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
         let domain =
             // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
@@ -2490,7 +2490,7 @@ mod tests {
         check(unit.iotlb, 1);
         registers.0.lock().unwrap().cache_events.clear();
         registers.0.lock().unwrap().block_iotlb = false;
-        // SAFETY: same stopped requester; retained retry must flush again.
+        // SAFETY: same stopped requester; retry must flush again.
         unsafe { mapping.unmap() }.unwrap();
         check(unit.iotlb, 1);
         // SAFETY: all mappings removed and no model DMA can restart.
@@ -2512,7 +2512,7 @@ mod tests {
         }
         .unwrap();
         let released = Arc::new(AtomicU64::new(0));
-        // One actual 16 KiB native page; VT-d uses four 4 KiB leaves.
+        // One 16 KiB native page; VT-d uses four 4 KiB leaves.
         let pin = pages(16384, 14, 0x8000000, released.clone());
         let mut mapping =
             DmaMapping::map(domain.clone(), pin, Direction::ToDevice, u32::MAX as u64).unwrap();
@@ -2561,7 +2561,7 @@ mod tests {
         );
         assert_eq!(released.load(Ordering::Relaxed), 0);
         registers.0.lock().unwrap().block_iotlb = false;
-        // SAFETY: same stopped requester, retry of retained original mapping.
+        // SAFETY: same stopped requester, retry of kept original mapping.
         unsafe { mapping.unmap() }.unwrap();
         assert_eq!(released.load(Ordering::Relaxed), 1);
         // SAFETY: all mappings are retired and model requester remains stopped.

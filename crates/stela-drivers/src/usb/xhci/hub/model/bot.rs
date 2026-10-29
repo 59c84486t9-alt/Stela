@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Opt-in device-side BOT peer for complete native topology/class rebinding.
-//! Decodes wire CBWs independently and serves RAM media through actual TDs.
+//! Decodes wire CBWs independently and serves RAM media through TDs.
 use alloc::vec::Vec;
 
 const BLOCK_BYTES: usize = 512;
@@ -39,7 +39,7 @@ impl Disk {
     }
 
     pub(super) fn transfer(&mut self, input: bool, address: u64, length: usize) {
-        // SAFETY: the caller supplies the actual retained TD's device-side RAM.
+        // SAFETY: the caller supplies the TD's device-side RAM.
         let wire = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) };
         match core::mem::replace(&mut self.phase, Phase::Command) {
             Phase::Command => {

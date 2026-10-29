@@ -4,7 +4,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{ops::Range, ptr::NonNull};
 use triomphe::Arc;
 
-/// The CPU mapping's actual cache policy. RAM and VRAM are not interchangeable.
+/// The CPU mapping's cache policy. RAM and VRAM are not interchangeable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheAttribute {
     WriteBack,
@@ -29,10 +29,10 @@ pub enum MemoryError {
 /// with holes must select a smaller complete profile or report unavailable.
 /// This is independent of allocation byte capacity, requested alignment, MMIO
 /// pages and the translated guest's page size. It grants no reservation,
-/// mapping, cache policy or firmware-memory import authority.
+/// mapping, cache policy or firmware-memory import permission.
 ///
 /// Constructing this description does not establish physical support. Only a
-/// successful query of the actual allocation provider attests its profile;
+/// successful query of the allocation provider attests its profile;
 /// consumers must also check each returned [`PinnedPages::page_shift`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PageGeometry {
@@ -79,13 +79,13 @@ impl PageGeometry {
     }
 }
 
-/// The platform's real allocator; implementations must retain the reservation
+/// The platform's real allocator; implementations must keep the reservation
 /// and the CPU mapping until the last pin or mapping is released.
 pub trait PageSource {
-    /// Query this actual provider's immutable supported-granule profile.
+    /// Query this provider's immutable supported-granule profile.
     ///
     /// Providers must attest every granule in the range and keep the profile
-    /// stable while users or allocations can retain it. Allocations made through
+    /// stable while users or allocations can keep it. Allocations made through
     /// this provider must return a page shift in that profile. A contiguous byte
     /// allocation or a large alignment alone does not establish a larger granule.
     /// Legacy/unknown providers remain explicitly unavailable; there is no
@@ -105,9 +105,9 @@ pub trait PageSource {
     /// exclusive physical end, including the complete rounded payload tail.
     /// CPU addresses, logical length and a DMA/IOVA limit cannot stand in for
     /// this physical constraint. All ordinary ownership/cache/alignment rules
-    /// still apply. No additional RAM or DMA authority is acquired.
+    /// still apply. No additional RAM or DMA permission is acquired.
     ///
-    /// Providers must select from their actual eligible free memory, rather
+    /// Providers must select from their eligible free memory, rather
     /// than repeatedly allocating and discarding unsuitable pins. An admitted
     /// reservation with no eligible capacity returns `OutOfMemory`; a provider
     /// without constrained selection returns `Unavailable`, without trying an
@@ -141,7 +141,7 @@ pub unsafe trait PageBacking: Send + Sync {
     fn cache_attribute(&self) -> CacheAttribute;
 }
 
-/// A retained pin on a real allocation. Cloning a pin never allocates new pages.
+/// A kept pin on a real allocation. Cloning a pin never allocates new pages.
 #[derive(Clone)]
 pub struct PinnedPages {
     backing: Arc<Box<dyn PageBacking>>,
@@ -151,7 +151,7 @@ pub struct PinnedPages {
 }
 
 impl PinnedPages {
-    /// Accept an actual platform reservation. Validation does not manufacture
+    /// Accept a platform reservation. Validation does not manufacture
     /// physical addresses or change the established cache policy. Scratch and
     /// shared-owner allocation are fallible; any error releases the backing.
     pub fn new(
@@ -213,7 +213,7 @@ impl PinnedPages {
         self.logical_bytes
     }
 
-    /// Actual reserved/mappable bytes, including the final whole-page tail.
+    /// Reserved/mappable bytes, including the final whole-page tail.
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -222,7 +222,7 @@ impl PinnedPages {
         self.alignment
     }
 
-    /// Actual native CPU/DMA page size; never the translated guest granule.
+    /// Native CPU/DMA page size; never the translated guest granule.
     pub fn page_shift(&self) -> u8 {
         self.backing.page_shift()
     }
@@ -235,13 +235,13 @@ impl PinnedPages {
         self.backing.cache_attribute()
     }
 
-    /// Retain the established CPU mapping. Creating an incompatible alias is
+    /// Keep the established CPU mapping. Creating an incompatible alias is
     /// refused; this does not reinterpret WB system RAM as WC VRAM.
     pub fn cpu_mapping(&self, attribute: CacheAttribute) -> Result<CpuMapping, MemoryError> {
         self.cpu_mapping_range(attribute, 0..self.bytes())
     }
 
-    /// Bounded view into the retained full-page CPU mapping. Padding may be
+    /// Bounded view into the full-page CPU mapping. Padding may be
     /// mapped explicitly without changing the allocation's logical length.
     pub fn cpu_mapping_range(
         &self,
@@ -261,7 +261,7 @@ impl PinnedPages {
     }
 }
 
-/// The CPU mapping retains its page pin independently of the caller's handle.
+/// The CPU mapping keeps its page pin independently of the caller's handle.
 /// Raw pointers require the consumer's reservation/fence synchronization; no
 /// Rust slice is exposed while a device can modify the allocation.
 pub struct CpuMapping {
@@ -318,8 +318,8 @@ mod tests {
         }
     }
 
-    // Hosted mapping fixture only. Symbolic physical labels deliberately
-    // differ from the actual owned CPU buffer; this attests no native RAM.
+    // Hosted mapping fixture only. Symbolic physical labels
+    // differ from the owned CPU buffer; this attests no native RAM.
     #[repr(align(8192))]
     struct Buffer([u8; 8192]);
     struct Backing {

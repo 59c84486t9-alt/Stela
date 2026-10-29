@@ -18,7 +18,7 @@ pub(in crate::net::tg3) struct Board {
     pub profile_5761: Option<super::bcm5761::Profile>,
 }
 impl<R: Registers, D: Delay> Hardware<R, D> {
-    /// Only actual matching copper BCM5720/5761/5762 A0 is a packet candidate.
+    /// Only matching copper BCM5720/5761/5762 A0 is a packet candidate.
     pub(super) fn packet_identity(&mut self) -> Result<Identity, Error> {
         self.timer_ready()?;
         // Read static PCI/subsystem denials before identify changes host/MMIO
@@ -41,7 +41,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if !matches!(id.asic, Asic::Bcm5720 | Asic::Bcm5761 | Asic::Bcm5762) {
             return Err(Error::UnsupportedRevision);
         }
-        // Upper bits identify the ASIC, lower 12 retain revision/metal. This
+        // Upper bits identify the ASIC, lower 12 keep revision/metal. This
         // packet backend implements exact A0 deltas; no extrapolated IDs.
         if id.chip_revision & 0xfff != 0 {
             return Err(Error::UnsupportedRevision);
@@ -80,7 +80,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                     | GRC_LCLCTRL_GPIO_OUTPUT2);
             local |= GRC_LCLCTRL_GPIO_OE1 | GRC_LCLCTRL_GPIO_OUTPUT1;
         } else {
-            // tg3_pwrsrc_switch_to_vmain: actual internal port, not BDF.
+            // tg3_pwrsrc_switch_to_vmain: internal port, not BDF.
             self.lock(7)?;
             let result = (|| {
                 let shift = TG3_APE_GPIO_MSG_SHIFT + 4 * u32::from(self.identity.unwrap().function);
@@ -101,7 +101,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let saved_local = self.read(GRC_LOCAL_CTRL)?;
         self.flush(GRC_LOCAL_CTRL, saved_local | GRC_LCLCTRL_AUTO_SEEPROM)?;
         self.wait(100)?;
-        // Decode the actual pinstrap, including Atmel non-power-of-two pages.
+        // Decode the pinstrap, including Atmel non-power-of-two pages.
         // No unrecognized NVM is treated as a functional firmware source.
         let nvcfg = self.nvram_configuration()?;
         let vendor = nvcfg & NVRAM_CFG1_5752VENDOR_MASK;

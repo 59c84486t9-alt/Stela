@@ -416,7 +416,7 @@ mod tests {
             .unwrap();
             map_shared(&mut fw);
             // Unknown commands refuse before DMA; recognized keybag codecs must
-            // validate their actual buffers before refusing unresolved semantics.
+            // validate their buffers before refusing unresolved semantics.
             let request = Frame {
                 service: keystore::ID,
                 tag,

@@ -278,7 +278,7 @@ impl ScalableState {
     ///
     /// # Safety
     ///
-    /// The callback must not retain pointers or references from the view, access
+    /// The callback must not keep pointers or references from the view, access
     /// memory outside the described register buffers, modify pointer/length/mode
     /// fields, or unwind after changing controls. It may update register bytes,
     /// TPIDR2 and FPMR. Guest RAM must not alias this storage or its Rust owner.

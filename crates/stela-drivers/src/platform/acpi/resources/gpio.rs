@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native GPIO OpRegion supplier, following gpiolib-acpi's line ownership.
 //!
-//! The first context member is ACPICA's actual connection-info ABI. ACPICA
+//! The first context member is ACPICA's connection-info ABI. ACPICA
 //! serializes Connection updates; an OSL semaphore additionally serializes all
 //! native line operations. CPU-affine namespace handles never enter callbacks.
 use super::supplier::{DependencyPin, SupplierState};
@@ -31,7 +31,7 @@ pub struct LinePolicy {
 }
 
 /// First native-operation and first synchronization failures are independent
-/// observations; they need not come from the same access. Actual line snapshots
+/// observations; they need not come from the same access. Line snapshots
 /// and partial effects remain owned by the backend through failed cleanup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Failures {
@@ -39,23 +39,23 @@ pub struct Failures {
     pub synchronization: Option<acpi::Error>,
 }
 
-/// Implemented only by native controller adapters retaining actual reservations
+/// Implemented only by native controller adapters keeping reservations
 /// and mappings. An AML pin number cannot instantiate a backend.
 pub trait NativeController: sealed::Sealed + Send + 'static {
     fn device_path(&self) -> &str;
-    /// Match the exact original inspection/reservations, not just a path that
+    /// Match the original inspection/reservations, not just a path that
     /// can be reused after a namespace/session replacement.
     fn matches_device(&self, device: &DeviceResources<'_>) -> Result<(), Error>;
     /// Record a recoverable snapshot before any hardware effect. Partial failures
-    /// retain the pin, snapshot and mapping until acknowledged release/shutdown.
+    /// keep the pin, snapshot and mapping until acknowledged release/shutdown.
     fn request(&mut self, pin: u16, policy: LinePolicy) -> Result<(), acpi::Error>;
     fn read(&mut self, pin: u16) -> Result<bool, acpi::Error>;
     fn write(&mut self, pin: u16, value: bool) -> Result<(), acpi::Error>;
     /// Release only after masked/synchronized native children and acknowledged
     /// restoration. Failure keeps the original snapshot and reservation.
     fn release(&mut self, pin: u16) -> Result<(), acpi::Error>;
-    /// Drain actual native sources and retire original mappings. No new native
-    /// access may begin after success. Failure retains every uncertain owner.
+    /// Drain native sources and retire original mappings. No new native
+    /// access may begin after success. Failure keeps every uncertain owner.
     fn shutdown(&mut self) -> Result<(), acpi::Error>;
 }
 
@@ -108,7 +108,7 @@ fn checked(status: Status) -> Result<(), acpi::Error> {
 }
 impl Context {
     fn acquire(&self) -> Result<(), acpi::Error> {
-        // SAFETY: the original context retains this real provider semaphore.
+        // SAFETY: the original context keeps this real provider semaphore.
         let acquired = checked(unsafe { acpi_os_wait_semaphore(self.semaphore, 1, 1000) });
         if let Err(error) = acquired {
             let _ = self.first_synchronization.compare_exchange(
@@ -164,7 +164,7 @@ impl Context {
         // Admission closes before this wait. Previously admitted operations
         // recheck enabled after acquiring the same native semaphore.
         debug_assert!(!self.enabled.load(Ordering::Acquire));
-        // SAFETY: callback storage retains the original OSL semaphore/provider.
+        // SAFETY: callback storage keeps the original OSL semaphore/provider.
         self.acquire()?;
         // SAFETY: this call holds the native state semaphore and admission closed.
         let state = unsafe { &mut *self.state.get() };
@@ -179,10 +179,10 @@ impl Context {
             }
             Ok(())
         })();
-        // SAFETY: the actual native semaphore unit was acquired above.
+        // SAFETY: the native semaphore unit was acquired above.
         let released = checked(unsafe { acpi_os_signal_semaphore(self.semaphore, 1) });
         self.outcome(result, released)?;
-        // No new native-state access can begin while disabled. Release actual
+        // No new native-state access can begin while disabled. Release
         // suppliers only after restoration, shutdown and synchronization ACKs.
         if release_dependencies {
             state.dependencies.clear();
@@ -196,10 +196,10 @@ impl Context {
         if !self.enabled.load(Ordering::Acquire) {
             return Err(acpi::SUPPORT);
         }
-        // SAFETY: the core retains this original OSL semaphore through callbacks.
+        // SAFETY: the core keeps this original OSL semaphore through callbacks.
         self.acquire()?;
         let result = if self.enabled.load(Ordering::Acquire) {
-            // SAFETY: all native state accesses hold this actual semaphore.
+            // SAFETY: all native state accesses hold this semaphore.
             operation(unsafe { &mut *self.state.get() })
         } else {
             Err(acpi::SUPPORT)
@@ -267,7 +267,7 @@ pub struct Binding<'a> {
 impl<'a> Binding<'a> {
     /// Install a real GPIO address-space handler before firmware `_REG` clients
     /// run. The sealed backend already owns this exact controller's resources.
-    /// The caller retains every actual `_DEP` supplier receipt.
+    /// The caller keeps every `_DEP` supplier receipt.
     pub fn install(
         device: DeviceResources<'a>,
         controller: Box<dyn NativeController>,
@@ -301,7 +301,7 @@ impl<'a> Binding<'a> {
             return Err(Error::Unassigned);
         }
         let mut semaphore = ptr::null_mut();
-        // SAFETY: this live namespace session owns the actual native OSL provider.
+        // SAFETY: this live namespace session owns the native OSL provider.
         checked(unsafe { acpi_os_create_semaphore(1, 1, &mut semaphore) })?;
         let context = Box::into_raw(Box::new(Context {
             info: UnsafeCell::new(ConnectionInfo {
@@ -321,7 +321,7 @@ impl<'a> Binding<'a> {
                 dependencies: core::mem::take(&mut owner.dependencies),
             }),
         }));
-        // SAFETY: the core retains the exact callback storage through termination.
+        // SAFETY: the core keeps the exact callback storage through termination.
         if let Err(error) = unsafe {
             device
                 .handle()
@@ -394,14 +394,14 @@ impl<'a> Binding<'a> {
             }
             Err(error) => {
                 // Install can have succeeded before a namespace invalidation;
-                // callbacks and native owners stay core-retained in either case.
+                // callbacks and native owners stay core-kept in either case.
                 binding.context().enabled.store(false, Ordering::Release);
                 Err(error.into())
             }
         }
     }
     fn context(&self) -> &Context {
-        // SAFETY: Binding borrows the session retaining this actual core context.
+        // SAFETY: Binding borrows the session keeping this core context.
         unsafe { &*self.context }
     }
     pub fn handle(&self) -> Handle<'a> {
@@ -421,7 +421,7 @@ impl<'a> Binding<'a> {
         }
         Dependency::acquire(self.device.handle(), &self.context().supplier)
     }
-    /// Missing `_AEI` means no firmware event resources. Actual native parent IRQ,
+    /// Missing `_AEI` means no firmware event resources. Native parent IRQ,
     /// wake and deferred-work registration are required separately for admission.
     pub fn event_resources(&self) -> Result<Vec<Descriptor>, Error> {
         match evaluate(self.device.handle(), "_AEI") {
@@ -436,7 +436,7 @@ impl<'a> Binding<'a> {
         }
         // `_REG(DISCONNECT)` can access the original live lines during removal.
         let result = if self.installed {
-            // SAFETY: exact installed callback/context remain retained by the core.
+            // SAFETY: installed callback/context remain held by the core.
             unsafe { self.device.handle().remove_region(8, region) }
         } else {
             Ok(())
@@ -468,7 +468,7 @@ unsafe extern "C" fn setup(
     if context.is_null() || out.is_null() || action > 1 {
         return acpi::BAD_PARAMETER.0;
     }
-    // SAFETY: actual ACPICA region context output and core-retained stable storage.
+    // SAFETY: ACPICA region context output and core-kept stable storage.
     unsafe {
         out.write(if action == 0 {
             context
@@ -498,19 +498,19 @@ unsafe extern "C" fn region(
     {
         return acpi::BAD_PARAMETER.0;
     }
-    // Pinned ACPICA exserial.c accepts only Integer writes and passes the actual
+    // Pinned ACPICA exserial.c accepts only Integer writes and passes the
     // source integer's address, even for a wider GPIO field. Never overread it.
     if function == 1 && width > 64 {
         return acpi::SUPPORT.0;
     }
-    // SAFETY: setup returns this original core-retained Context pointer only.
+    // SAFETY: setup returns this original core-kept Context pointer only.
     let context = unsafe { &*handler.cast::<Context>() };
     // SAFETY: ACPICA's context mutex serializes its Connection prefix updates.
     let info = unsafe { *context.info.get() };
     if info.connection.is_null() || info.length == 0 {
         return acpi::BAD_PARAMETER.0;
     }
-    // SAFETY: evregion.c retains the actual field Connection buffer through call.
+    // SAFETY: evregion.c keeps the field Connection buffer through call.
     let raw = unsafe { core::slice::from_raw_parts(info.connection, usize::from(info.length)) };
     let gpio = match parse_gpio_connection(raw) {
         Ok(gpio) => gpio,
@@ -526,10 +526,10 @@ unsafe extern "C" fn region(
     }
     let count = (width as usize).min(gpio.pins.len() - start);
     // exfield.c allocates ceil(width/8) bytes for reads and exserial.c supplies
-    // an actual eight-byte Integer for writes. Byte access avoids rounded u64
+    // an eight-byte Integer for writes. Byte access avoids rounded u64
     // overrun on non-multiple-of-64 Buffer fields.
     let bytes = (width as usize).div_ceil(8);
-    // SAFETY: the unchanged ACPICA caller supplies at least this actual field
+    // SAFETY: the unchanged ACPICA caller supplies at least this field
     // allocation; writes were restricted above to the source Integer's size.
     let value = unsafe { core::slice::from_raw_parts_mut(value.cast::<u8>(), bytes) };
     context
@@ -551,7 +551,7 @@ unsafe extern "C" fn region(
 }
 unsafe extern "C" fn before_termination(raw: *mut c_void) -> Status {
     // SAFETY: provider quiescence has ended all callback/work access; this exact
-    // core-retained context is still live before interpreter/provider teardown.
+    // core-kept context is still live before interpreter/provider teardown.
     let context = unsafe { &*raw.cast::<Context>() };
     context.supplier.close_admission();
     context.enabled.store(false, Ordering::Release);
@@ -619,7 +619,7 @@ pub struct EventMethod<'a> {
 }
 impl EventMethod<'_> {
     /// Process-context AML dispatch after a real native IRQ receipt, never from
-    /// the hard interrupt handler. Preserves the actual method's failure.
+    /// the hard interrupt handler. Preserves the method's failure.
     pub fn evaluate(&self) -> Result<(), acpi::Error> {
         let argument = self.pin.map(|pin| Argument::Integer(u64::from(pin)));
         self.method.evaluate(None, argument.as_slice()).map(|_| ())

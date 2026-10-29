@@ -1,4 +1,4 @@
-//! Actual-current-processor authority for native system RAM execution. This
+//! Current-processor permission for native system RAM execution. This
 //! does not mount, replace or relax the legacy identity-frame platform.
 use crate::machine::engine::publication::WorkerId;
 use alloc::rc::Rc;
@@ -8,7 +8,7 @@ use stela_compiler::TargetCpu;
 const CR0_REQUIRED: u64 = 1 | (1 << 1) | (1 << 5) | (1 << 16) | (1 << 31);
 const CR0_FORBIDDEN: u64 = (1 << 2) | (1 << 3) | (1 << 29) | (1 << 30);
 const CR4_REQUIRED: u64 = (1 << 5) | (1 << 9) | (1 << 10);
-// Global/PCID translations and CET need their own retained root/call contract.
+// Global/PCID translations and CET need their own root/call contract.
 const CR4_FORBIDDEN: u64 = (1 << 7) | (1 << 17) | (1 << 23);
 const EFER_REQUIRED: u64 = (1 << 10) | (1 << 11);
 const IF: u64 = 1 << 9;
@@ -23,7 +23,7 @@ const CPUID_FLOOR_EDX: u32 = (1 << 0)
     | (1 << 26);
 const CPUID_LONG_NX: u32 = (1 << 20) | (1 << 29);
 
-/// Why actual-current-processor native admission refused.
+/// Why current-processor native admission refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCpuError {
     UnsupportedHost,
@@ -117,7 +117,7 @@ impl Observation {
         }
         // Intel SDM 325462-089 Vol.3A and AMD APM24593rev3.44 §7.3.2:
         // AVX hardware establishes aligned WB load atomicity, independently
-        // of OS AVX state. The actual recipe uses only legacy XMM/SSE2.
+        // of OS AVX state. The recipe uses only legacy XMM/SSE2.
         if TargetCpu::atomic_load16_guaranteed(d.vendor, d.cpuid1_ecx) {
             target = target.with_atomic_load16();
         }
@@ -151,7 +151,7 @@ pub struct NativeCpuOwner {
 }
 
 impl NativeCpuOwner {
-    /// Enumerate this actual worker after its Host/control installation.
+    /// Enumerate this worker after its Host/control installation.
     ///
     /// # Safety
     /// The caller exclusively owns this physical processor, bound to `worker`,
@@ -199,7 +199,7 @@ impl Drop for NativeCpuOwner {
 }
 
 /// Opaque non-Send/non-Sync handle lent only by a live physical owner. It grants
-/// no frame, RAM, code-address, source, publication or settlement authority.
+/// no frame, RAM, code-address, source, publication or settlement permission.
 ///
 /// ```compile_fail
 /// fn send<T: Send>() {}
@@ -248,8 +248,8 @@ impl NativeCpuLease {
     }
 }
 
-/// A fresh per-body proof. Default callers retain complete live enumeration;
-/// an owned worker may retain declarations, never this body's exact controls.
+/// A fresh per-body proof. Default callers keep complete live enumeration;
+/// an owned worker may keep declarations, never this body's exact controls.
 #[derive(Debug)]
 pub(crate) struct NativeSystemTarget {
     observed: Observation,
@@ -298,7 +298,7 @@ impl NativeSystemTarget {
         self.observed.controls.apic_id
     }
 
-    /// Retain all four dynamic boundaries, including checked finalization.
+    /// Keep all four dynamic boundaries, including checked finalization.
     pub(crate) fn revalidate(&self) -> Result<(), Refusal> {
         self.revalidate_with(observe, observe_controls)
     }
@@ -624,7 +624,7 @@ mod tests {
     }
 
     // Private observation models exercise the same validators. They are not
-    // a public fake-hardware constructor and establish no CPL0 qualification.
+    // a public fake-hardware constructor and establish no CPL0 validation.
     fn modeled_owner(actual: Observation) -> NativeCpuOwner {
         NativeCpuOwner::admit(WorkerId(17), actual.controls.apic_id, actual).unwrap()
     }

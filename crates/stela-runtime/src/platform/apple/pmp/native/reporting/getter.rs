@@ -1,4 +1,4 @@
-//! Native callable representation retained out of band; never host pointers.
+//! Native callable representation kept out of band; never host pointers.
 use super::super::platform::owner::Completion;
 use super::{record::Layout, resources::Request};
 use alloc::boxed::Box;

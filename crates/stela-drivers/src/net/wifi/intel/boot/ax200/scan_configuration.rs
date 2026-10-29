@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Source reduced SCAN_CFG5 through the actual AX200 command/DMA owner.
+//! Source reduced SCAN_CFG5 through the AX200 command/DMA owner.
 //! Configuration ACK does not start a scan or establish channel/RF permission.
 use super::*;
 use crate::net::wifi::intel::command::Id;
@@ -74,7 +74,7 @@ impl<Q: BootIo, B: BiosIo> Ax200ScanConfiguration<'_, Q, B> {
     pub fn payload(&self) -> Option<&[u8; 12]> {
         self.payload.as_ref()
     }
-    /// Original pending ticket, retained on timeout or uncertain CPU reclaim.
+    /// Original pending ticket, kept on timeout or uncertain CPU reclaim.
     /// A borrowed ticket cannot publish a command or reconstruct this owner.
     pub fn ticket(&self) -> Option<&CommandTicket> {
         self.ticket.as_ref()
@@ -160,9 +160,9 @@ impl<Q: BootIo, B: BiosIo> Ax200ScanConfiguration<'_, Q, B> {
         bytes[8..12].copy_from_slice(&u32::from(rx).to_le_bytes());
         Ok(bytes)
     }
-    /// Publish source cold scan configuration and wait for actual RX/CPU reclaim.
+    /// Publish source cold scan configuration and wait for RX/CPU reclaim.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the exact retained
+    /// `source` supplies fresh exclusive coherent pages for the kept
     /// native requester/domain under RomBoot's publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -171,7 +171,7 @@ impl<Q: BootIo, B: BiosIo> Ax200ScanConfiguration<'_, Q, B> {
         if let Some(error) = self.first_error.as_ref() {
             return Err(error.clone());
         }
-        // SAFETY: exact retained page-source contract forwarded from caller.
+        // SAFETY: exact page-source contract forwarded from caller.
         let result = unsafe { self.advance_inner(source) };
         if let Err(error) = &result
             && !matches!(
@@ -206,7 +206,7 @@ impl<Q: BootIo, B: BiosIo> Ax200ScanConfiguration<'_, Q, B> {
             let bytes = self.prepare()?;
             self.payload = Some(bytes);
             // SAFETY: bytes have no indirect resources, source RF-kill policy
-            // remains enforced and the exact native command owner stays retained.
+            // remains enforced and the native command owner stays held.
             self.ticket = Some(
                 unsafe {
                     self.mcc.setup.lari.radio.initialized.boot.submit_command(

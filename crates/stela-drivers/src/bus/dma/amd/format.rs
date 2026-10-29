@@ -41,7 +41,7 @@ pub enum FormatError {
 }
 
 /// An unencrypted physical address inside the unit's measured address width.
-/// Encryption/coherency and resource authority require separate admission.
+/// Encryption/coherency and resource permission require separate admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PhysicalAddress(u64);
 
@@ -133,7 +133,7 @@ impl PageEntry {
         ))
     }
 
-    /// `force_coherent` requests the FC bit only. The live owner must qualify
+    /// `force_coherent` requests the FC bit only. The live owner must check
     /// the platform's payload coherency before selecting it.
     pub fn page(
         address: PhysicalAddress,
@@ -226,7 +226,7 @@ impl Command {
 
     /// Store the exact sequence into an owned, visible 8-byte semaphore once
     /// preceding commands complete, optionally raising the completion IRQ.
-    /// A numeric address does not retain that semaphore or register its IRQ.
+    /// A numeric address does not keep that semaphore or register its IRQ.
     pub fn completion(
         semaphore: PhysicalAddress,
         sequence: u64,
@@ -254,7 +254,7 @@ impl Command {
     }
 }
 
-/// Compare an actual semaphore observation with a submitted sequence across
+/// Compare a semaphore observation with a submitted sequence across
 /// wrap. The live owner must keep the sequence distance strictly below 2^63;
 /// neither a queue-head observation nor an elapsed timeout is a semaphore.
 pub fn sequence_completed(observed: u64, target: u64) -> bool {

@@ -144,7 +144,7 @@ fn unclaimed_gpio_preserved() {
         let mut controller = create(&model, &mut fixture, config()).unwrap();
         let graph = controller.enumerate_codec(0).unwrap();
         let report = controller.initialize_sigmatel_codec(&graph).unwrap();
-        assert_eq!(report.gpio.data, 0xa5); // Actual readback, including a changing input.
+        assert_eq!(report.gpio.data, 0xa5); // Readback, including a changing input.
 
         let route = graph.analog_route(Direction::Playback, 0x0a, 2).unwrap();
         let stream = controller

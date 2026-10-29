@@ -136,9 +136,9 @@ pub(crate) fn emit(
     for offset in (0..scratch.data_bytes).step_by(VECTOR_CHUNK_BYTES) {
         stack_vector(code, Host::StoreUnaligned, offset, target);
     }
-    // Each packed-P chunk governs up to64 vector bytes. The loop only retains
+    // Each packed-P chunk governs up to64 vector bytes. The loop only keeps
     // values in private stack slots because a C callback may clobber all XMMs
-    // and caller-saved GPRs. Tuple callbacks retain element-major read order.
+    // and caller-saved GPRs. Tuple callbacks keep element-major read order.
     let predicate_chunks = length.bytes().div_ceil(PREDICATE_CHUNK_BITS);
     for chunk in 0..predicate_chunks {
         scalable::read_predicate_chunk(code, operand.predicate, chunk, length);

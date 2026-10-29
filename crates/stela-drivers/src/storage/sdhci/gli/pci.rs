@@ -106,7 +106,7 @@ pub(super) fn prepare(
     clock: Clock,
 ) -> Result<Native, BlockError> {
     validate_clock(clock)?;
-    // These are retained firmware mappings/configuration views, with no Drop
+    // These are held firmware mappings/configuration views, with no Drop
     // that releases a physical resource. Failed PIO admission publishes no
     // command/DMA and leaves the original firmware mapping intact.
     if function.device == 0xe763 {
@@ -218,7 +218,7 @@ pub(super) fn setup<C: ConfigSpace>(
         }
         mapped = false;
         // Keep decode contained through the power transition itself: a D0
-        // soft reset may clear BARs while retaining the previous command word.
+        // soft reset may clear BARs while keeping the previous command word.
         set_pio_command(function, false)?;
         function.config().write16(pm + 4, (control & !0x8003) | 3);
         clock.delay(10_000);
@@ -264,8 +264,8 @@ pub(super) fn setup<C: ConfigSpace>(
         }
         Ok(())
     })();
-    // Close the original window only while the actual function is accessible.
-    // A failed D3/D0 transition retains the unresolved hardware owner instead.
+    // Close the original window only while the function is accessible.
+    // A failed D3/D0 transition keeps the unresolved hardware owner instead.
     let close = if mapped
         && function.config().read32(0) == 0x9750_17a0
         && function.config().read16(pm + 4) & 3 == 0

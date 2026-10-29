@@ -105,7 +105,7 @@ impl<'a> Record<'a> {
                     let packed =
                         u32::from_le_bytes(bytes[V2_LOCATION..V2_LOCATION + 4].try_into().unwrap());
                     // The original index helper extracts [23:3]. The low
-                    // three bits have no qualified placement meaning here.
+                    // three bits have no checked placement meaning here.
                     if packed & ((1 << INDEX_SHIFT) - 1) != 0 {
                         return Err("PMGR v2 power-state location has unqualified low bits");
                     }

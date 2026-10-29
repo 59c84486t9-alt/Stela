@@ -131,7 +131,7 @@ fn layout_configuration_bounds() {
         // model, and MESSAGE belongs to its synthetic route; no source is active.
         unsafe { helper.program(MESSAGE) }.unwrap();
         // SAFETY: The programmed synthetic route and its original backing owners
-        // remain retained; the model has no IRQ callback or device source.
+        // remain held; the model has no IRQ callback or device source.
         unsafe { helper.unmask() }.unwrap();
         drop(
             // SAFETY: Only synchronous RAM accesses occurred. No DMA, posted IRQ, timer

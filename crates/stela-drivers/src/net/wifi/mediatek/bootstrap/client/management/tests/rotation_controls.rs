@@ -5,7 +5,7 @@ use crate::net::wifi::mediatek::mailbox::key::bip::rotation_tests::frame;
 
 fn group_received(driver: &mut Native, model: &Model, index: u8, key: u8, pn: u64) -> Received {
     let mut raw = incoming_bytes(&frame(index, key, pn), None, false);
-    raw[4] = 1; // actual source peer WCID → retained VIF GTK, never the BCMC WCID
+    raw[4] = 1; // source peer WCID → kept VIF GTK, never the BCMC WCID
     let mut events = completed(driver, model, &raw).unwrap();
     assert_eq!(events.len(), 1);
     match events.pop().unwrap() {
@@ -23,7 +23,7 @@ fn native_live_igtk_update_revokes_old_envelopes_and_retains_both_real_rx_window
     let delayed = group_received(&mut driver, &model, 4, 0x55, 101);
     let unicast_delayed = received(&mut driver, &model, 9);
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: genuine modeled OS exchange, empty native queues and independent RX/IRQ/user drain.
+    // SAFETY: modeled OS exchange, empty native queues and independent RX/IRQ/user drain.
     let second = unsafe {
         driver.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
     }
@@ -78,7 +78,7 @@ fn native_live_igtk_update_revokes_old_envelopes_and_retains_both_real_rx_window
         10
     );
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: exact retry of the retained other index; independent model users drained.
+    // SAFETY: exact retry of the other index; independent model users drained.
     let retry = unsafe {
         driver.rotate_management_key(&second, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
     }
@@ -103,7 +103,7 @@ fn native_live_igtk_overlap_never_clears_actual_hardware_integrity_failures() {
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
     let first = attach(&mut driver, epoch);
-    // SAFETY: authentic model key exchange and independently drained actual model users.
+    // SAFETY: authentic model key exchange and independently drained model users.
     let second = unsafe {
         driver.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
     }
@@ -144,7 +144,7 @@ fn native_live_igtk_requires_actual_tx_descriptor_free_and_unmap_drain() {
         .unwrap();
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(matches!(
-        // SAFETY: deliberately incomplete model native drain must refuse before firmware effects.
+        // SAFETY: incomplete model native drain must refuse before firmware effects.
         unsafe {
             driver.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
         },
@@ -168,7 +168,7 @@ fn native_live_igtk_requires_actual_tx_descriptor_free_and_unmap_drain() {
         &first
     ));
     drop(released);
-    // SAFETY: matching actual TX-free, descriptor and unmap complete; independent model RX/IRQ/users drained.
+    // SAFETY: matching TX-free, descriptor and unmap complete; independent model RX/IRQ/users drained.
     let second = unsafe {
         driver.rotate_management_key(&first, 5, &[0x66; 16], PacketNumber::new(200).unwrap())
     }
@@ -206,7 +206,7 @@ fn native_live_igtk_uncertain_firmware_quarantines_old_new_keys_and_requester() 
             _ => model.response.lock().unwrap().drop = true,
         }
         assert!(
-            // SAFETY: native and independent actual model users drained; inject real peer ACK
+            // SAFETY: native and independent model users drained; inject real peer ACK
             // failure.
             unsafe {
                 driver.rotate_management_key(

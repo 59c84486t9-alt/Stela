@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Retained AX200 owner, completed native command DMA and failure models.
+//! AX200 owner, completed native command DMA and failure models.
 use super::*;
 use crate::net::wifi::intel::radio::{
     bios::service::{self, BiosIo, IoError, Object, Request},

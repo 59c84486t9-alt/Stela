@@ -1,6 +1,6 @@
 //! The auxiliary control owner. It holds the `SoftwareImage` and the
 //! source-order cursor, and runs the control tail, lifecycle transitions,
-//! auxiliary configuration and slot reset as retained operations that resume
+//! auxiliary configuration and slot reset as kept operations that resume
 //! after Busy.
 use super::super::super::super::counters::{CaptureIdentity, Captured, Frames, Retained};
 use super::super::super::owner::Completion;
@@ -16,7 +16,7 @@ use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::Cell;
 use stela_contracts::bus::Access;
 
-/// Retained identity of the actual101cff0 context allocation. Cloning carries
+/// Identity of the actual101cff0 context allocation. Cloning carries
 /// that identity, not permission to mark registration complete or set flags.
 #[derive(Clone)]
 pub struct AuxiliaryBinding {
@@ -109,7 +109,7 @@ struct Completed {
     signature: Signature,
 }
 
-/// Actual software control storage and source-order cursor. No method marks a
+/// Software control storage and source-order cursor. No method marks a
 /// provider ready, installs a copied hardware image, consumes a second Frames
 /// receipt, or acknowledges a native command. Registration/configuration
 /// producers of member byte0, saved flags and timer limits remain separate.
@@ -188,7 +188,7 @@ impl Owner {
         self.fault
     }
 
-    /// Context identity only. The root may retain it in the actual registration
+    /// Context identity only. The root may keep it in the registration
     /// resource closure before configure_auxiliary; it grants no admission.
     pub fn auxiliary_binding(&self, slot: usize) -> Result<AuxiliaryBinding, Error> {
         self.auxiliary.get(slot).cloned().ok_or(Error::Contract(
@@ -202,7 +202,7 @@ impl Owner {
     }
     /// Actual101d02c store, admitted only by a live same-allocation callback
     /// receipt produced AFTER that callback's disable retired. Replay returns
-    /// its retained result without reasserting a flag already consumed later.
+    /// its result without reasserting a flag already consumed later.
     pub fn reset_slot(
         &mut self,
         reset: &super::super::super::super::interrupts::AuxiliaryReset,
@@ -235,8 +235,8 @@ impl Owner {
     }
 
     /// Actual101ced0 configuration producer. Inputs are source software
-    /// configuration, never measured readiness. The typed resource must retain
-    /// actual callback registration before the source transition can advance.
+    /// configuration, never measured readiness. The typed resource must keep
+    /// callback registration before the source transition can advance.
     pub fn configure_auxiliary(
         &mut self,
         step: SourceStep<'_>,
@@ -291,7 +291,7 @@ impl Owner {
         self.advance(None, resources, access)
     }
 
-    /// Actual current manager capture and the outer ingestion's activation
+    /// Current manager capture and the outer ingestion's activation
     /// operand are required. CounterContext.activity is P10, not activation
     /// P294. The root caller must forward the same reached source operation.
     pub fn call(
@@ -373,10 +373,10 @@ impl Owner {
         }
     }
 
-    /// One actual101bb08 call within a retained lifecycle operation. Source
+    /// One actual101bb08 call within a lifecycle operation. Source
     /// step distinguishes the activation path's reset/restore invocations;
     /// it is an operation cursor, never a native address or completion flag.
-    /// Modes0/1/2 change only the actual source software/controller effects.
+    /// Modes0/1/2 change only the source software/controller effects.
     pub fn transition(
         &mut self,
         step: SourceStep<'_>,
@@ -578,7 +578,7 @@ impl Owner {
                         self.pending.as_mut().unwrap().cursor = next;
                         if let Err(e) = self.after(after, value) {
                             let text = reason(e);
-                            self.fault = Some(text); // The actual call already retired; never replay it.
+                            self.fault = Some(text); // The call already retired; never replay it.
                             return Completion::Refused(text);
                         }
                         if let Some(reason) = refusal {
@@ -694,7 +694,7 @@ impl Owner {
                 }
                 if state.raw[1] | state.raw[2] != 0 {
                     // Raw native pointer bytes remain provenance only; the
-                    // actual context is the same-owner AuxiliaryBinding.
+                    // context is the same-owner AuxiliaryBinding.
                     put_word(&mut state.raw, 24, slot as u32);
                     out.push(Step::Resource(
                         Operation::RegisterAuxiliary {
@@ -1784,7 +1784,7 @@ mod tests {
                 .filter(|(_, op)| matches!(op, Operation::RegisterAuxiliary { .. }))
                 .count(),
             2
-        ); // Busy then one actual retirement.
+        ); // Busy then one retirement.
     }
 
     #[test]
@@ -1850,7 +1850,7 @@ mod tests {
         )
         .unwrap();
         irq.initialize(&mut Access::new(0, 1, &mut latch)).unwrap();
-        // Retain actual native registration in the typed source resource.
+        // Keep native registration in the typed source resource.
         struct Register<'a> {
             actual: Actual,
             native: &'a mut irq::Owner,
@@ -1992,8 +1992,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(read(0x101b518), 0xf9403908); // Actual provider+70, not PMGR state.
-        assert_eq!(read(0x101b548), 0xf9402d48); // Actual provider+58.
+        assert_eq!(read(0x101b518), 0xf9403908); // Provider+70, not PMGR state.
+        assert_eq!(read(0x101b548), 0xf9402d48); // Provider+58.
         assert_eq!(read(0x101bb90), 0xf900011f); // Zero two timers, preserve third.
         assert_eq!(read(0x101bc88), 0xb9000a93); // Commit mode after reached effects.
     }

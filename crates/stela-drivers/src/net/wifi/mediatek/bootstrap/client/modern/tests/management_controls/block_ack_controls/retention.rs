@@ -13,7 +13,7 @@ fn command_and_unmap_failures_retain_owners() {
             model.response.lock().unwrap().status = 9;
             let permit = admit(&mut owner, &driver, AssociationUse::Management);
             assert!(
-                // SAFETY: The current BA session and native resources remain retained
+                // SAFETY: The current BA session and native resources remain held
                 // under both model guards. Injected command failure establishes
                 // uncertainty and must keep all original owners quarantined.
                 unsafe {
@@ -88,8 +88,8 @@ fn bounded_deferral_preserves_frame() {
     driver.poll(NOW + 68, &Source, &mut Policy(true)).unwrap();
     driver.poll_released().unwrap();
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
-    // SAFETY: The retained frame is still owned after the previous refusal. A
-    // completed response packet freed capacity, and fresh current guards qualify this
+    // SAFETY: The kept frame is still owned after the previous refusal. A
+    // completed response packet freed capacity, and fresh current guards check this
     // same session before bounded consumption.
     unsafe { driver.receive_management_block_ack(&mut owner, permit, &mut retained, NOW + 69) }
         .unwrap();

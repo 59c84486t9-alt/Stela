@@ -1,4 +1,4 @@
-//! Consumed scalar writes retain peripheral prefixes and settlement separately.
+//! Consumed scalar writes keep peripheral prefixes and settlement separately.
 //! A bus error never proves that an earlier RTC/lifecycle/device effect vanished.
 use super::*;
 use stela_engine::machine::engine::CanonicalDeviceMemory;
@@ -62,7 +62,7 @@ impl AppleDevices {
                 } else {
                     let owner = memory_resources::resource_for(&self.bus, device)
                         .expect("exclusive board borrow retains the classified prepared owner");
-                    // SAFETY: the sealed consuming owner retains the whole stopped
+                    // SAFETY: the sealed consuming owner keeps the whole stopped
                     // native cohort and closed synchronous RAM producer set. No RAM
                     // publication, new submission or native resume occurs here.
                     unsafe { owner.write_ram_drain(offset, width, value, now, memory.memory()) }
@@ -112,7 +112,7 @@ impl AppleDevices {
             Err(error) => {
                 // Early RTC/lifecycle refusals can also have reached wires.
                 // A second capture after the register error is empty, never a
-                // replay, and preserves the first reset already retained.
+                // replay, and preserves the first reset already kept.
                 self.capture_reached(cpu, now, None);
                 ConsumedWrite::Unknown { error }
             }

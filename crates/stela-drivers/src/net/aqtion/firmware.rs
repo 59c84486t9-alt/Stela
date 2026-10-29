@@ -34,7 +34,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
         }
         if profile.generation == Generation::Antigua {
             self.write(0xf08, 1)?;
-            // Record before the actual reset store: failure cannot prove the
+            // Record before the reset store: failure cannot prove the
             // router missed it, including failure of a subsequent real wait.
             let mut held = self.reset_ownership.get();
             held.reset_issued = true;
@@ -91,7 +91,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
                 let timeout = self.read(0x348)?.min(3000) as u64 * 1000;
                 if timeout != 0 {
                     // Unlike Linux's log-and-reset policy, fail fast only after
-                    // unwinding locks actually acquired by this attempt.
+                    // unwinding locks acquired by this attempt.
                     for (index, register) in RESET_SEMAPHORES.iter().enumerate() {
                         self.acquire_reset_semaphore(index, *register, timeout)?;
                     }
@@ -340,7 +340,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
                 control |= LINK_DROP;
             }
             self.write(0x36c, control)?;
-            // Donor's ordinary set-state is asynchronous; require actual
+            // Donor's ordinary set-state is asynchronous; require
             // state acknowledgement before publishing/releasing the link.
             self.wait(0x374, 10, 100000, |v| v & LINK_DROP == control & LINK_DROP)?;
         }

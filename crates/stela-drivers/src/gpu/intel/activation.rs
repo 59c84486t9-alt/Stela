@@ -22,49 +22,49 @@ pub struct PciIdentity {
 /// No implementation or fallback is supplied by this GPU module.
 ///
 /// # Safety
-/// Identity/resource metadata is immutable and describes the SAME actual PCI
+/// Identity/resource metadata is immutable and describes the SAME PCI
 /// function and exclusive reservation. The ResourceBacking must itself pin all
 /// teardown-critical root/reset/power state: canonical failed-map quarantine
-/// can retain it independently of this wrapper. This owner retains D0/bridge power,
+/// can keep it independently of this wrapper. This owner keeps D0/bridge power,
 /// excludes removal/relocation/other resets, every other driver/firmware access and all
 /// IRQ/submission/DMA/CT users throughout this probe. GuC-only reset is an
-/// explicit permitted operation within this exclusive actual epoch; it never
+/// explicit permitted operation within this exclusive epoch; it never
 /// substitutes for draining an active driver or excluding other resets. These
 /// prerequisites are not inferred from cleared software flags. `prepare` performs
 /// required original device-WA and PCODE/lmem readiness, not a success flag in their place.
 /// Ordered naturally-aligned MMIO32 operations must use the provided canonical
 /// CPU pointer, honor original read-flush WA and posting/ordering semantics,
 /// never conflate it with a physical/guest address and never fail/unwind.
-/// The clock is qualified monotonic nonnegative nanoseconds and remains below
-/// i64::MAX throughout every admitted deadline and actual sleep/overshoot. GuC
-/// MMIO needs up to two seconds per wait and retains the actual owner throughout
+/// The clock is checked monotonic nonnegative nanoseconds and remains below
+/// i64::MAX throughout every admitted deadline and sleep/overshoot. GuC
+/// MMIO needs up to two seconds per wait and keeps the owner throughout
 /// repeated retries; this contract alone does not admit running firmware or its
 /// requests. Delay honors atomic/sleepable context. All calls
 /// and final Drop occur on the allowed native CPU/process context; no callback
 /// may reenter, activate guest services, or manufacture power/IRQ/coherence.
-/// `finish` drains actual probe accesses/posted writes and prevents new accesses
-/// but keeps ownership retained until the canonical mapping retires. Error
+/// `finish` drains probe accesses/posted writes and prevents new accesses
+/// but keeps ownership kept until the canonical mapping retires. Error
 /// leaves the owner/reservations intact for retry/quarantine. Partial drain
 /// effects on error are allowed; finish retries must safely complete that drain.
 /// Once retirement begins no other device operations resume. `fatal` fail-stops.
 pub unsafe trait ProbeOwner {
-    /// Check CPU/process/retained epoch without accessing BAR mappings. This
+    /// Check CPU/process/kept epoch without accessing BAR mappings. This
     /// also runs during an uncertain-unmap retry when BAR access is forbidden.
     fn check_context(&self) -> Result<(), i32>;
     fn identity(&self) -> PciIdentity;
     fn bar0(&self) -> Resource;
-    /// Actual same-function canonical configuration space, retained in this
+    /// Same-function canonical configuration space, kept in this
     /// exclusive power/reset epoch. Unsupported capability is an explicit Err.
     fn config_space(&self) -> Result<&dyn crate::bus::pci::ConfigSpace, i32>;
     /// # Safety
     /// Live canonical UC GSM pointer, naturally aligned/bounded to eight bytes.
-    /// Perform one genuinely ordered 64-bit MMIO read with the original readq
-    /// semantics. No paired-32 fallback, guest access, unwind or fabricated value.
+    /// Perform one ordered 64-bit MMIO read with the original readq
+    /// semantics. No paired-32 fallback, guest access, unwind or invented value.
     /// Err means the width/capability is unavailable before any read; actual
     /// unexpected device-access faults obey the owner's fail-stop contract.
     unsafe fn read64(&self, pointer: NonNull<u64>) -> Result<u64, i32>;
-    /// Borrow the same retained UC register mapping for actual original
-    /// PCODE/lmem/WA preparation. Any retained view must be released by finish.
+    /// Borrow the same UC register mapping for original
+    /// PCODE/lmem/WA preparation. Any kept view must be released by finish.
     fn prepare(
         &self,
         registers: &MappingView,
@@ -76,7 +76,7 @@ pub unsafe trait ProbeOwner {
     /// Pointer is a live canonical UC, aligned, bounded device register.
     unsafe fn read32(&self, pointer: NonNull<u32>) -> u32;
     /// # Safety
-    /// Same retained mapping and exclusive ordered-access contract as read32.
+    /// Same kept mapping and exclusive ordered-access contract as read32.
     unsafe fn write32(&self, pointer: NonNull<u32>, value: u32);
     fn now_ns(&self) -> i64;
     fn delay_us(&self, minimum: u32, maximum: u32, atomic: bool);
@@ -203,7 +203,7 @@ impl State {
 }
 impl Drop for State {
     fn drop(&mut self) {
-        // SAFETY: no C calls remain; exact original standard allocation/layout.
+        // SAFETY: no C calls remain; original standard allocation/layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -245,7 +245,7 @@ extern "C" fn check_context(p: *mut c_void) -> i32 {
 }
 extern "C" fn read32(p: *mut c_void, offset: u32) -> u32 {
     let c = context(p);
-    // SAFETY: retained bounded canonical view, actual owner, exclusive probe.
+    // SAFETY: bounded canonical view, owner, exclusive probe.
     unsafe { c.owner.read32(c.pointer(offset)) }
 }
 extern "C" fn write32(p: *mut c_void, offset: u32, value: u32) {
@@ -290,8 +290,8 @@ impl Bundle {
             context,
             mapping,
         } = self;
-        // Canonical Drop records/retains the mapping quarantine. Independently
-        // retain callback storage and the real power/reset owner as well.
+        // Canonical Drop records/keeps the mapping quarantine. Independently
+        // keep callback storage and the real power/reset owner as well.
         drop(mapping);
         core::mem::forget(context);
         core::mem::forget(state);
@@ -337,9 +337,9 @@ impl Device {
         {
             return Err(Error::InvalidOwner);
         }
-        // Reserve only the actual register extent. GSM at BAR+8MiB has a
+        // Reserve only the register extent. GSM at BAR+8MiB has a
         // separate same-resource grant/lease; mapping the entire BAR here would
-        // overlap it under the canonical mapping authority.
+        // overlap it under the canonical mapping permission.
         let bytes = 4 * 1024 * 1024;
         let state = State::new()?;
         // Reserve the maintained alloc-only owner before any mapping effect.
@@ -349,7 +349,7 @@ impl Device {
         let context_address =
             context_storage.write(Context { owner, view: None }) as *mut Context as usize;
         // SAFETY: write initialized the complete Context exactly once. The
-        // UniqueArc conversion retains its allocation and stable C address.
+        // UniqueArc conversion keeps its allocation and stable C address.
         let mut context = unsafe { UniqueArc::assume_init(context_storage) };
         debug_assert_eq!(context_address, &*context as *const Context as usize);
         let mapping = match authority.map(
@@ -361,9 +361,9 @@ impl Device {
         ) {
             Ok(mapping) => mapping,
             Err(error) => {
-                // The canonical Error intentionally does not certify whether
-                // a failed provider call left mappings behind. Retain the
-                // actual power/reset epoch even for an ambiguous failure;
+                // The canonical Error does not certify whether
+                // a failed provider call left mappings behind. Keep the
+                // power/reset epoch even for an ambiguous failure;
                 // no CPU access or fictitious rollback may follow it.
                 core::mem::forget(context);
                 return Err(error.into());
@@ -401,7 +401,7 @@ impl Device {
             mapping,
         };
         if result != 0 {
-            // prepare may have had genuine hardware effects; no fake rollback.
+            // prepare may have had hardware effects; no fake rollback.
             bundle.quarantine();
             return Err(Error::Native(result));
         }
@@ -439,7 +439,7 @@ impl Device {
             return Err(Error::Awake);
         }
         let mut result = super::pat::NativeResult::default();
-        // SAFETY: actual State retains same canonical view, descriptor/GT role,
+        // SAFETY: State keeps same canonical view, descriptor/GT role,
         // exclusive owner and acknowledged wake; stack output before effects.
         let status = unsafe { stela_intel_activation_pat(state, &mut result) };
         if status != 0 {
@@ -450,7 +450,7 @@ impl Device {
         }
         Ok(super::pat::Programming::from_native(self, result))
     }
-    /// Explicit original GuC-only reset handshake under the actual owner's
+    /// Explicit original GuC-only reset handshake under the owner's
     /// exclusive no-DMA/no-IRQ/no-CT/no-submission epoch. This is not whole uC
     /// sanitize, driver initialization, software job drain or firmware loading.
     /// A failed exposed reset permanently closes and quarantines this epoch;
@@ -461,8 +461,8 @@ impl Device {
             return Err(Error::Awake);
         }
         let mut result = super::guc_reset::NativeResult::default();
-        // SAFETY: same actual owned State/view and stable Context; acknowledged
-        // GT wake, qualified clock/context and exclusive real epoch exclude all
+        // SAFETY: same owned State/view and stable Context; acknowledged
+        // GT wake, checked clock/context and exclusive real epoch exclude all
         // active users before entry. Stack metadata exists before any effect.
         let status = unsafe { stela_intel_activation_guc_reset(state, &mut result) };
         if status != 0 {
@@ -474,7 +474,7 @@ impl Device {
         Ok(super::guc_reset::Handshake::from_native(self, result))
     }
     /// Acquire the original PF GSM geometry and a separate real same-BAR UC
-    /// mapping. Requires acknowledged root GT wake and actual config-space/
+    /// mapping. Requires acknowledged root GT wake and config-space/
     /// mapping capabilities; establishes neither GGTT initialization nor PAT.
     pub fn probe_gsm<'device>(
         &'device mut self,
@@ -572,27 +572,27 @@ impl Device {
         if !(pointer.as_ptr() as usize).is_multiple_of(8) {
             return Err(Error::InvalidOwner);
         }
-        // SAFETY: actual retained same-resource UC lease; checked complete width,
+        // SAFETY: same-resource UC lease; checked complete width,
         // original PTE index and native owner/context; exclusive Device borrow.
         unsafe { bundle.context.owner.read64(pointer.cast()) }.map_err(Error::Native)
     }
-    /// Original default GuC metadata request, bound to this retained live
+    /// Original default GuC metadata request, bound to this live
     /// native root main-GT owner. No firmware is uploaded or authenticated.
     pub fn guc_firmware(&self) -> Result<super::firmware::Request<'_>, super::firmware::Error> {
         let identity = self.live()?.context.owner.identity();
         let facts = self.facts()?;
         super::firmware::Request::from_native(self, identity, facts)
     }
-    /// Original default HuC request, retaining this actual root main-GT owner.
+    /// Original default HuC request, keeping this root main-GT owner.
     /// Host parsing never establishes firmware availability or WOPCM readiness.
     pub fn huc_firmware(&self) -> Result<super::firmware::HucRequest<'_>, super::firmware::Error> {
         let identity = self.live()?.context.owner.identity();
         let facts = self.facts()?;
         super::firmware::HucRequest::from_native(self, identity, facts)
     }
-    /// Partition/read back actual root-GT WOPCM using the original algorithm.
+    /// Partition/read back root-GT WOPCM using the original algorithm.
     /// Requires acknowledged wake. An exposed write failure permanently closes
-    /// this epoch and retains its canonical owner/view; no cleanup can release
+    /// this epoch and keeps its canonical owner/view; no cleanup can release
     /// forcewake/reset ownership. All result storage is on the stack before IO.
     pub fn prepare_wopcm<'device, 'provider>(
         &'device mut self,
@@ -613,7 +613,7 @@ impl Device {
             )
         };
         let mut result = super::wopcm::NativeResult::default();
-        // SAFETY: SAME private owned C state and actual immutable provider CPU
+        // SAFETY: SAME private owned C state and immutable provider CPU
         // span. C independently checks acknowledged GT/role/firmware bounds.
         // Existing State/Context/mapping storage was reserved before all IO;
         // no allocation or owner release follows an exposed failure.
@@ -641,7 +641,7 @@ impl Device {
         if self.awake || self.poisoned {
             return Err(Error::Awake);
         }
-        // SAFETY: &mut plus CPU affinity and actual ProbeOwner exclude all users.
+        // SAFETY: &mut plus CPU affinity and ProbeOwner exclude all users.
         let status = unsafe { stela_intel_activation_wake(storage) };
         if status != 0 {
             self.poisoned = true;
@@ -655,7 +655,7 @@ impl Device {
         if !self.awake || self.poisoned {
             return Err(Error::Awake);
         }
-        // SAFETY: same actual exclusive native scope; no concurrent firmware.
+        // SAFETY: same exclusive native scope; no concurrent firmware.
         let status = unsafe { stela_intel_activation_sleep(storage) };
         if status != 0 {
             self.poisoned = true;
@@ -675,17 +675,17 @@ impl Device {
             .check_context()
             .map_err(Error::Native)?;
         // A real drain can have partial effects before returning an error.
-        // Freeze all public device/C operations BEFORE attempting it, retaining
-        // the live mapping/view and owners until the drain actually succeeds.
+        // Freeze all public device/C operations BEFORE attempting it, keeping
+        // the live mapping/view and owners until the drain succeeds.
         self.closing = true;
         if !self.drained {
             bundle.context.owner.finish().map_err(Error::Native)?;
             self.drained = true;
-            // No future C/CPU accesses; release our view before actual unmap.
+            // No future C/CPU accesses; release our view before unmap.
             drop(bundle.context.view.take());
         }
-        // SAFETY: acknowledged sleep, actual owner drain, no IRQ/submission,
-        // CPU-affine &mut exclusion. Failed mappings stay retained for retry.
+        // SAFETY: acknowledged sleep, owner drain, no IRQ/submission,
+        // CPU-affine &mut exclusion. Failed mappings stay held for retry.
         unsafe { bundle.mapping.retire()? };
         self.bundle = None;
         Ok(())

@@ -231,7 +231,7 @@ fn invalid_port_map_rejected() {
         assert!(controller.initialize_sigmatel_codec(&graph).is_err());
         if matches!(fault, 4 | 5) {
             // D0 is needed before vendor map reads; an invalid map
-            // therefore retains the earlier D0/GPIO transaction owner.
+            // therefore keeps the earlier D0/GPIO transaction owner.
             assert_eq!(controller.sigmatel_codecs.len(), 1);
             assert!(controller.routing_failed);
             assert_eq!(model.borrow().idt83_amplifier_mode, None);

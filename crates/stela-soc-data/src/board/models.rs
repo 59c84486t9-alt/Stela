@@ -210,7 +210,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         AES,
         MCC,
         // Direct MCC has a native cold owner. Its descriptor must still pass
-        // full source validation and mount requires that actual owner.
+        // full source validation and mount requires that owner.
         memory_resources::COMPATIBLE,
         SPI,
         NOR,

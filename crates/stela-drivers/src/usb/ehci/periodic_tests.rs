@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Actual periodic frame-list/QH/qTD DMA through the retained requester peer.
+//! Periodic frame-list/QH/qTD DMA through the requester peer.
 use super::*;
 
 fn description(packet: u16, transactions: u16, interval: u8) -> Vec<u8> {
@@ -137,7 +137,7 @@ fn periodic_service_follows_actual_microframe_clock_and_frame_list_wrap() {
     m.lock().unwrap().advance_periodic(6);
     assert!(m.lock().unwrap().periodic_services.is_empty());
     assert!(c.poll(&read).unwrap().is_none());
-    m.lock().unwrap().advance_periodic(1); // Actual 14-bit FRINDEX wraps to zero.
+    m.lock().unwrap().advance_periodic(1); // 14-bit FRINDEX wraps to zero.
     assert_eq!(m.lock().unwrap().periodic_services, [0]);
     assert_eq!(c.poll(&read).unwrap().unwrap().actual, 32);
     c.shutdown().unwrap();
@@ -198,7 +198,7 @@ fn periodic_failed_ack_drain_and_cache_ownership_keep_exact_dma_quarantined() {
                 }
             }
             if failure == 4 {
-                // Fresh publication must retain the exact pending owner when
+                // Fresh publication must keep the exact pending owner when
                 // device-cache ownership cannot be transferred.
                 assert!(c.poll(&ticket).unwrap().is_some());
                 assert!(

@@ -41,22 +41,22 @@ pub enum FailureKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransportFailure {
     pub kind: FailureKind,
-    /// Usable means the actual command/transfer has completed and no stale
+    /// Usable means the command/transfer has completed and no stale
     /// DMA, response or worker can touch a subsequently reused buffer.
     pub port: PortState,
 }
 
-/// A live owned MCU transport. The implementation validates actual response
+/// A live owned MCU transport. The implementation validates response
 /// sequence/event framing and returns the donor parser's semantic result
 /// (patch semaphore/status byte, zero for a validated ordinary acknowledgement).
 ///
-/// `scatter` uses MCU FW_SCATTER, has no fabricated MCU response, and must
-/// retain bytes until real TX-DMA completion. On uncertain failure it must
+/// `scatter` uses MCU FW_SCATTER, has no invented MCU response, and must
+/// keep bytes until real TX-DMA completion. On uncertain failure it must
 /// quarantine its DMA/command resources and return `Uncertain`; the downloader
 /// will not attempt cleanup through an unresolved command port. A successful
 /// enqueue alone never permits that transport to release DMA ownership.
 pub trait Transport {
-    /// Pure exact-target validation against this owned transport's actually
+    /// Pure exact-target validation against this owned transport's
     /// observed device identity. No MMIO, DMA publication or commands occur.
     fn validate_firmware(&self, prepared: &Prepared<'_>) -> Result<(), TransportFailure>;
     fn command(&mut self, command: u8, payload: &[u8]) -> Result<u32, TransportFailure>;
@@ -172,7 +172,7 @@ impl<T: Transport> Downloader<T> {
     pub fn report(&self) -> &Report {
         &self.report
     }
-    /// Inspect retained transport diagnostics without issuing another command.
+    /// Inspect kept transport diagnostics without issuing another command.
     pub fn transport(&self) -> &T {
         &self.transport
     }

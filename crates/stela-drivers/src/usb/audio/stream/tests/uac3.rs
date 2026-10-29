@@ -341,7 +341,7 @@ impl Transport for GeneralDevice {
 fn run(c: Vec<u8>, f: impl FnOnce(&mut AudioDevice<GeneralDevice>)) {
     let mut memory = vec![0u64; 256 * 1024];
     let base = memory.as_mut_ptr() as u64;
-    // SAFETY: exclusive model RAM outlives all retained DMA and device owners.
+    // SAFETY: exclusive model RAM outlives all kept DMA and device owners.
     let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
     let mut transport = GeneralDevice::new();
     let binding = plan(&c).unwrap().discover(&mut transport).unwrap();
@@ -460,7 +460,7 @@ fn uac3_discovery_validates_graph_power_domains_and_actual_cluster_relationships
             _ => unreachable!(),
         }
         let mut transport = GeneralDevice::new();
-        // A third cluster exists but has a different actual channel order.
+        // A third cluster exists but has a different channel order.
         let mut wrong = cluster(103);
         wrong[11] = 3;
         wrong[17] = 2;

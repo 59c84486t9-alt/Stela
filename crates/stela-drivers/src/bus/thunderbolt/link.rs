@@ -6,7 +6,7 @@
 //          Rajmohan Mani <rajmohan.mani@intel.com>
 //! Two-ended Gen2/3 USB4-router link bonding and activation from Linux switch.c.
 //! Both real configured router reservations survive partial failure. Native
-//! partner discovery, policy, power and attachment are required, not fabricated.
+//! partner discovery, policy, power and attachment are required, not invented.
 use super::{
     channel::{self, Channel},
     config::{self, Address, Reply, Route, Space},
@@ -27,7 +27,7 @@ static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 pub fn quarantined_reservations() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }
-/// One protected native observation, retaining both actual partner relations.
+/// One protected native observation, keeping both partner relations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObservedLane {
     pub route: Route,
@@ -37,7 +37,7 @@ pub struct ObservedLane {
     pub remote_route: Route,
     pub remote_port: u8,
 }
-/// Physical primary/secondary lane identities from actual protected topology,
+/// Physical primary/secondary lane identities from protected topology,
 /// including reciprocal remote and dual-lane relations. Not port adjacency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Partners {
@@ -48,17 +48,17 @@ pub struct Partners {
     /// Child primary/secondary, then parent primary/secondary observations.
     pub observations: [ObservedLane; 4],
 }
-/// Actual exclusive observed reciprocal link/power transition reservation.
+/// Exclusive observed reciprocal link/power transition reservation.
 ///
 /// # Safety
 /// The partner map is from real native topology/DROM observations, including
 /// both directions and lane0/lane1 membership, at the stated NHI reset and
 /// topology epochs. It belongs to the exact two configured owners until final
-/// restoration/reset or actual transfer, not a new tuple of chosen integers.
+/// restoration/reset or transfer, not a new tuple of chosen integers.
 /// Native software CM owns both ends; policy, router lifetime, CL0/power and
 /// dependent-path serialization are real and stable. No firmware CM may write
 /// the link. Independent NHI/domain/IMR/power/endpoint DMA/IRQ/IOMMU resources
-/// remain held through actual final drain. This does not implement a provider
+/// remain held through final drain. This does not implement a provider
 /// for missing native discovery or _OSC/security/attachment services.
 pub unsafe trait Reservation: Send + Sync {
     fn observed(&self) -> Partners;
@@ -111,7 +111,7 @@ impl Credit {
         ((self.raw >> 20) & 1023) as u16
     }
 }
-/// Actual dual-width/configured observations plus both retained router leases.
+/// Dual-width/configured observations plus both kept router leases.
 /// This does not authorize tunnels or release any independent DMA resource.
 pub struct Linked {
     pub partners: Partners,
@@ -126,7 +126,7 @@ pub struct Linked {
     changed: bool,
 }
 impl Linked {
-    /// Read-only retained native ownership for a dependent local CM operation.
+    /// Read-only kept native ownership for a dependent local CM operation.
     pub(super) fn retained_routers(&self) -> Result<(&Configured, &Configured), Error> {
         let (parent, child) = self.routers.as_ref().ok_or(Error::Topology)?;
         validate_router(parent)?;
@@ -142,7 +142,7 @@ impl Linked {
     /// # Safety
     /// Both real link states have been restored/reset with all dependent path,
     /// power and DMA/IRQ lifetimes satisfied, or both configured owners and the
-    /// exact active link reservation are already independently retained by the
+    /// exact active link reservation are already independently kept by the
     /// native CM. Never substitute these local observations for endpoint drain.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::link::Linked;
@@ -150,7 +150,7 @@ impl Linked {
     /// ```
     pub unsafe fn retire(mut self) {
         if let Some((parent, child)) = self.routers.take() {
-            // SAFETY: caller proves actual restoration or both active transfers.
+            // SAFETY: caller proves restoration or both active transfers.
             unsafe {
                 parent.retire();
                 child.retire();
@@ -428,11 +428,11 @@ pub struct Activate<R: Registers> {
 }
 impl<R: Registers> Activate<R> {
     /// # Safety
-    /// Channel, both retained Configured owners and reciprocal partner
-    /// reservation identify the exact same physical NHI and native ownership/
-    /// reset/topology epochs. All real authority/power/CL0/attachment/IMR/policy
+    /// Channel, both kept Configured owners and reciprocal partner
+    /// reservation identify the same physical NHI and native ownership/
+    /// reset/topology epochs. All real permission/power/CL0/attachment/IMR/policy
     /// and dependent-path grants hold. Channel is exclusively idle. Partners
-    /// are actual observed reciprocal lanes, never inferred adjacent numbers.
+    /// are observed reciprocal lanes, never inferred adjacent numbers.
     /// ```compile_fail
     /// use std::sync::Arc;
     /// use stela_drivers::bus::thunderbolt::{link::{Activate,Reservation},router::Configured,channel::Channel,ring::Registers};
@@ -983,7 +983,7 @@ mod tests {
                         } = link_fixture(map, mode);
                         let mut peer =
                             LinkPeer::new(reservation.partners, generation, dual, mode, 3);
-                        // SAFETY: actual same model NHI/reset/topology epoch, both source-
+                        // SAFETY: same model NHI/reset/topology epoch, both source-
                         // configured owners and observed reciprocal CL0 lanes/power grant.
                         let mut activate = unsafe {
                             Activate::new(channel, parent, child, reservation, cursor.now)
@@ -1007,7 +1007,7 @@ mod tests {
                                 .all(|counter| counter.load(Ordering::Relaxed) == 0)
                         );
                         // SAFETY: both real synthetic configured/router/link reservations
-                        // transfer into independently retained CM lifetime through drain.
+                        // transfer into independently kept CM lifetime through drain.
                         unsafe { linked.retire() };
                         assert!(
                             dropped
@@ -1052,7 +1052,7 @@ mod tests {
                 assert_eq!(peer.credits[i], n(14 + i));
             }
             assert_eq!(peer.pc, [n(18), n(19)]);
-            // SAFETY: each isolated source fixture provides actual same native
+            // SAFETY: each isolated source fixture provides same native
             // requester/epochs, configured leases and observed reciprocal map.
             let mut activate =
                 unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
@@ -1098,8 +1098,8 @@ mod tests {
                 "source map={map} gen={generation} dual={dual} mode={mode} seed={seed}"
             );
             let mut channel = activate.into_channel();
-            // SAFETY: completed actual synthetic link/routers are transferred
-            // to a retained independent model CM lifetime through final drain.
+            // SAFETY: completed synthetic link/routers are transferred
+            // to an independent model CM lifetime through final drain.
             unsafe { linked.retire() };
             channel_release(&mut channel);
             cases += 1;
@@ -1140,8 +1140,8 @@ mod tests {
                 _ => unreachable!(),
             }
             let writes = model.state.lock().unwrap().writes.len();
-            // SAFETY: all negative data is confined to this actual isolated
-            // synthetic requester. No native provider/authority is fabricated.
+            // SAFETY: all negative data is confined to this isolated
+            // synthetic requester. No native provider/permission is invented.
             let result = unsafe {
                 Activate::new(
                     channel,
@@ -1193,7 +1193,7 @@ mod tests {
                 7 => peer.deny_bond = true,
                 _ => unreachable!(),
             }
-            // SAFETY: exact same current synthetic configured leases/map; raw
+            // SAFETY: same current synthetic configured leases/map; raw
             // unsupported PHY and contradictory mode observations cannot grant
             // a native transition or be replaced by successful defaults.
             let mut activate =
@@ -1240,8 +1240,8 @@ mod tests {
                     ..
                 } = link_fixture(1, false);
                 let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 1);
-                // SAFETY: exact same model NHI/domain/epochs and observed reciprocal
-                // CL0 lanes. Both configured owners remain real retained resources.
+                // SAFETY: same model NHI/domain/epochs and observed reciprocal
+                // CL0 lanes. Both configured owners remain real kept resources.
                 let mut activate =
                     unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }
                         .unwrap();
@@ -1345,15 +1345,15 @@ mod tests {
             } = link_fixture(1, false);
             let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
             peer.hold_width = true;
-            // SAFETY: exact same real synthetic configured owners/observations;
-            // delayed hardware or lock responses cannot replace actual readiness.
+            // SAFETY: same real synthetic configured owners/observations;
+            // delayed hardware or lock responses cannot replace readiness.
             let mut activate =
                 unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
             activate.poll(cursor.now).unwrap();
             let mut ack = None;
             for _ in 0..200 {
                 // A lock retry waits at least1ms before publishing the next
-                // actual request. Do not fabricate a reply for an unused slot.
+                // request. Do not invent a reply for an unused slot.
                 if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
                     if let Some(ack) = ack
                         && cursor.now + 1 >= ack + 99
@@ -1425,7 +1425,7 @@ mod tests {
         } = link_fixture(1, false);
         let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
         peer.port_wait_state = Some(1);
-        // SAFETY: exact same actual synthetic partners/epochs; asynchronous
+        // SAFETY: same synthetic partners/epochs; asynchronous
         // secondary connection loss is observed from real config DMA replies.
         let mut activate =
             unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
@@ -1481,7 +1481,7 @@ mod tests {
         } = link_fixture(1, false);
         let writes = model.state.lock().unwrap().writes.len();
         let unmaps = domain.state.lock().unwrap().unmaps;
-        // SAFETY: the same actual model NHI/epoch and configured owners are
+        // SAFETY: the same model NHI/epoch and configured owners are
         // paired. The local null allocator deterministically refuses only this
         // receipt; no global allocator or other test thread is affected.
         let result = unsafe {
@@ -1539,7 +1539,7 @@ mod tests {
                 Ok(Some(Event::Completed { .. }))
             ));
         }
-        // SAFETY: same exact native model reservations and idle channel; nine
+        // SAFETY: same native model reservations and idle channel; nine
         // completed requests still occupy physically unconsumed TX descriptors.
         let mut activate =
             unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
@@ -1568,7 +1568,7 @@ mod tests {
                 ..
             } = link_fixture(1, false);
             let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
-            // SAFETY: same exact actual configured owners/observations/epochs.
+            // SAFETY: same exact configured owners/observations/epochs.
             let mut activate =
                 unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
             if mode == 0 {
@@ -1621,7 +1621,7 @@ mod tests {
             ..
         } = link_fixture(1, false);
         let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
-        // SAFETY: same exact real synthetic native/router/link reservations;
+        // SAFETY: same real synthetic native/router/link reservations;
         // temporary documented lock is a protocol response, not a new owner.
         let mut activate =
             unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
@@ -1656,7 +1656,7 @@ mod tests {
         assert!(locked);
         let linked = result.expect("actual both-ended transition after transient lock");
         let mut channel = activate.into_channel();
-        // SAFETY: both actual model router/link leases transfer into retained
+        // SAFETY: both model router/link leases transfer into kept
         // independent native CM lifetime through real synthetic final drain.
         unsafe { linked.retire() };
         assert!(

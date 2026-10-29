@@ -2,7 +2,7 @@
 //!
 //! This supplies CPU image bytes only. Manifest length/SHA-256 integrity is not
 //! vendor authentication. Original RM ELF/version/signature checks, upload,
-//! reset, IRQ/context services and actual device initialization remain required.
+//! reset, IRQ/context services and device initialization remain required.
 use super::{memory, services::MemoryServices, services::ServiceError};
 use crate::firmware::{Image, Provider, Requirement, Target};
 use core::{ffi::CStr, ffi::c_char, ffi::c_void, ptr, ptr::NonNull};
@@ -22,7 +22,7 @@ pub struct FirmwareBinding<'a> {
 
 impl<'a> FirmwareBinding<'a> {
     /// # Safety
-    /// `architecture` and `implementation` are the actual device's observed
+    /// `architecture` and `implementation` are the device's observed
     /// original NV_ARCH facts (not PCI IDs or a guest's assertions). This binding
     /// and its MemoryServices requester describe the same device/reset epoch.
     /// Keep provider/catalog immutable, CPU-readable and live until all firmware
@@ -155,12 +155,12 @@ unsafe extern "C" fn stela_nvidia_get_firmware(
 /// # Safety
 /// Return only a live firmware token from this adapter, once, after all CPU
 /// readers stop. Provider/service/state/global heap remain live and operations
-/// are serialized, noninterrupt and nonreentrant. No fabricated completion.
+/// are serialized, noninterrupt and nonreentrant. No invented completion.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_nvidia_put_firmware(token: *const c_void) {
-    // SAFETY: original nv_put_firmware filters NULL; unique actual token kind.
+    // SAFETY: original nv_put_firmware filters NULL; unique token kind.
     let token = token.cast_mut().cast::<Token<'_>>();
-    // SAFETY: the raw ownership contract retains token and pinned service.
+    // SAFETY: the raw ownership contract keeps token and pinned service.
     let value = unsafe { &*token };
     // SAFETY: the token keeps its pinned owner service alive.
     let owner = unsafe { &*value.owner };
@@ -206,7 +206,7 @@ mod tests {
     }
 
     // The explicit CPU model attests only its 4KiB geometry. It never exercises
-    // RAM or DMA: unsupported operations are genuine
+    // RAM or DMA: unsupported operations are
     // failures so an accidental dependency cannot masquerade as native success.
     struct Unavailable;
     impl PageSource for Unavailable {
@@ -348,7 +348,7 @@ mod tests {
     fn request(state: *mut c_void, kind: u32, family: u32) -> (*const c_void, *const c_void, u32) {
         let mut buffer = ptr::dangling::<c_void>();
         let mut bytes = 0xabcd;
-        // SAFETY: either NULL or exact live fixture state; distinct writable outputs.
+        // SAFETY: either NULL or live fixture state; distinct writable outputs.
         let token = unsafe { nv_get_firmware(state, kind, family, &mut buffer, &mut bytes) };
         (token, buffer, bytes)
     }
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn original_selectors_cover_architecture_splits_and_all_package_kinds() {
         // Frozen independent expectations from the original nv-firmware*.h switch
-        // bodies at the retained vendor pin. No production enum/selector mirror.
+        // bodies at the vendor pin. No production enum/selector mirror.
         for (arch, implementation, family, hardware, suffix) in [
             (0x160, 6, 1, "tu10x", "tu10x"),
             (0x160, 7, 2, "tu11x", "tu10x"),
@@ -397,7 +397,7 @@ mod tests {
                     unsafe { owner.as_mut().unbind() },
                     Err(ServiceError::Native(0x40))
                 );
-                // SAFETY: no more byte readers, actual unique token, supported context.
+                // SAFETY: no more byte readers, unique token, supported context.
                 unsafe { nv_put_firmware(token) };
                 assert_eq!(owner.firmware_tokens.get(), 0);
                 // SAFETY: every token/caller ended, no hardware was activated.
@@ -465,11 +465,11 @@ mod tests {
             assert_eq!(owner.as_mut().unbind(), Err(ServiceError::Native(0x40)));
         }
         assert_eq!(
-            // SAFETY: second immutable CPU view remains retained by its real token.
+            // SAFETY: second immutable CPU view remains held by its real token.
             unsafe { core::slice::from_raw_parts(again.cast::<u8>(), 32) },
             &DATA.0
         );
-        // SAFETY: last readers stopped, return token then unbind exact owner.
+        // SAFETY: last readers stopped, return token then unbind owner.
         unsafe {
             nv_put_firmware(second);
             owner.as_mut().unbind().unwrap();

@@ -144,7 +144,7 @@ impl BlockRuntime {
                 .is_some_and(|(&base, r)| base < end && r.end > address)
     }
 
-    /// Own an immutable file/code snapshot. Partial trailing bytes are retained
+    /// Own an immutable file/code snapshot. Partial trailing bytes are held
     /// but can never be padded into a fetchable instruction. Same-base replacement
     /// always advances generation, even when the source bytes are identical.
     pub fn register_code(&mut self, base: GuestAddress, source: Vec<u8>) -> Result<u64> {

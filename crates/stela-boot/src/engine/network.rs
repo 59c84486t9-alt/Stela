@@ -164,7 +164,7 @@ impl HostNetwork {
     }
 
     /// Initial plaintext endpoint used by the signing transport; redirects
-    /// retain the full resulting URL and can never downgrade an HTTPS hop.
+    /// keep the full resulting URL and can never downgrade an HTTPS hop.
     pub fn post(
         &mut self,
         host: &str,
@@ -243,7 +243,7 @@ impl HostNetwork {
         self.stack.open_raw(host, port, RELAY_BUFFER)
     }
 
-    /// Sends caller-retained opaque bytes, returning zero under backpressure.
+    /// Sends caller-kept opaque bytes, returning zero under backpressure.
     pub fn relay_write(
         &mut self,
         transfer: &mut Transfer,

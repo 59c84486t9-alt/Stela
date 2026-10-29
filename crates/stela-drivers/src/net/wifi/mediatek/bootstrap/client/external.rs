@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-// Native peer and ROC programming follows the existing source-qualified client;
+// Native peer and ROC programming follows the existing source-checked client;
 // external SAE transport follows Linux mac80211, documented in THIRD_PARTY.md.
-//! Actual preassociation SAE management transport for an OS supplicant. There
-//! is intentionally no boolean completion API or transition to associated.
+//! Preassociation SAE management transport for an OS supplicant. There
+//! is no boolean completion API or transition to associated.
 
 use super::*;
 use station::external::Session;
@@ -86,9 +86,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(session)
     }
 
-    /// Publish one exact OS-generated SAE transaction on the genuine current
+    /// Publish one exact OS-generated SAE transaction on the current
     /// ROC grant. Receipt proves queue ownership, never an air ACK or successful
-    /// authentication. Actual PacketOwner retains this session and controller
+    /// authentication. PacketOwner keeps this session and controller
     /// until descriptor consumption + TX-free + unmap all complete.
     pub fn transmit_external_authentication(
         &mut self,
@@ -139,7 +139,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::Station(station::Error::Timeout));
         }
-        // Recheck restrictive policy at the actual publication boundary.
+        // Recheck restrictive policy at the publication boundary.
         if !policy.allow_management_tx(session.channel()) {
             return Err(Error::Station(station::Error::Regulatory));
         }

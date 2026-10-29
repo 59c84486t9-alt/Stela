@@ -259,7 +259,7 @@ pub struct EhtMcs {
 /// Exact zero-filled Linux `ieee80211_eht_mcs_nss_supp` union observation.
 /// Its first four bytes are the 20-only STA overlay; its three consecutive
 /// three-byte blocks are the firmware's BW80/160/320 overlays. These are raw
-/// peer capabilities, not local directional intersections or TX authority.
+/// peer capabilities, not local directional intersections or TX permission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EhtMcsUnion {
     bytes: [u8; 9],
@@ -356,7 +356,7 @@ impl Eht {
                 offset += 4;
             }
         }
-        // Match the complete Linux EHT-to-station helper: copy the actual
+        // Match the complete Linux EHT-to-station helper: copy the
         // contiguous wire maps into a zeroed union, not typed sparse offsets.
         let mut source_mcs_union = EhtMcsUnion {
             bytes: [0; 9],

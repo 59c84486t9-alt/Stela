@@ -13,7 +13,7 @@ pub(super) struct EngineImage {
     pub placement: Placement,
 }
 
-/// Firmware-owned allocations retained by the engine and its native workers.
+/// Firmware-owned allocations kept by the engine and its native workers.
 pub(super) struct EngineMemory {
     pub heap: Region,
     pub native_resources: NativeResources,

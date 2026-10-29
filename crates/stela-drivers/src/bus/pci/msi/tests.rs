@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained PCI MSI configuration model and shared fixtures.
+//! PCI MSI configuration model and shared fixtures.
 extern crate std;
 use super::*;
 use alloc::vec::Vec;
@@ -106,7 +106,7 @@ impl ConfigSpace for Config {
         self.write(offset, 2, u32::from(value));
     }
 }
-// SAFETY: each width-specific store copies only those bytes under the retained
+// SAFETY: each width-specific store copies only those bytes under the kept
 // Arc/Mutex model; write16 never reads or replays the adjacent Status word.
 // Every access is synchronous RAM with exclusive mutation under that mutex.
 unsafe impl MsiConfigSpace for Config {}
@@ -195,13 +195,13 @@ fn assert_terminal(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>) {
     assert_eq!(helper.mask(), Err(MsiError::TerminalRetirement));
     assert_eq!(helper.disable(), Err(MsiError::TerminalRetirement));
     assert_eq!(
-        // SAFETY: this terminal RAM model retains the original config/root guards.
+        // SAFETY: this terminal RAM model keeps the original config/root guards.
         // No asynchronous source exists; programming must fail before register access.
         unsafe { helper.program(MESSAGE) },
         Err(MsiError::TerminalRetirement)
     );
     assert_eq!(
-        // SAFETY: The terminal model retains the original config/root owners; this
+        // SAFETY: The terminal model keeps the original config/root owners; this
         // rejected unmask must not reach any register or callback.
         unsafe { helper.unmask() },
         Err(MsiError::TerminalRetirement)
@@ -212,7 +212,7 @@ fn assert_terminal(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>) {
     ));
     assert!(matches!(
         // SAFETY: The terminal model has no DMA, IRQ or deferred users. This rejected
-        // release must retain its original owners.
+        // release must keep its original owners.
         unsafe { helper.release() },
         Err(MsiError::TerminalRetirement)
     ));

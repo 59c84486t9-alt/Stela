@@ -76,9 +76,9 @@ pub struct Stop<R: Registers> {
 }
 impl<R: Registers> Stop<R> {
     /// # Safety
-    /// Idle Channel and complete DP tunnel are one exact retained native epoch.
-    /// GPU/host display submissions are closed. Actual independent GPU/connector,
-    /// endpoint payload, DMA/IRQ/IOMMU and power lifetimes remain retained.
+    /// Idle Channel and complete DP tunnel are one native epoch.
+    /// GPU/host display submissions are closed. Independent GPU/connector,
+    /// endpoint payload, DMA/IRQ/IOMMU and power lifetimes remain held.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::{channel::Channel,displayport::{Active,Stop},ring::Registers};
     /// fn stop<R:Registers>(c:Channel<R>,a:Box<Active>){let _=Stop::new(c,a,0);}
@@ -333,7 +333,7 @@ impl<R: Registers> Stop<R> {
                         } else {
                             self.hops_after[i] = words;
                             // Source tb_path_deactivate returns video NFC before
-                            // advancing to either still-retained AUX direction.
+                            // advancing to either still AUX direction.
                             if i == 1 {
                                 self.enter(Stage::NfcRead, now)?;
                             } else if i < 5 {

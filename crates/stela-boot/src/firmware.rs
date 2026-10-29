@@ -36,8 +36,8 @@ use stela_boot_core::pe;
 /// What the host storage check runs with after boot services end.
 pub struct Handoff {
     pub stack_top: usize,
-    /// The genuine builder after activation; configuration factories must
-    /// additionally qualify resources/current context before hardware access.
+    /// The builder after activation; configuration factories must
+    /// additionally check resources/current context before hardware access.
     pub(crate) active_tables: Option<crate::paging::ActivatedTables>,
     /// The firmware's framebuffer, mapped RW+NX, when it has a usable one.
     pub screen: Option<Framebuffer>,
@@ -163,7 +163,7 @@ impl Image {
             } else {
                 PRESENT | NX
             };
-            // Both RVAs lie within the checked actual loaded extent.
+            // Both RVAs lie within the checked loaded extent.
             (
                 extent.start + section.first,
                 extent.start + section.end,
@@ -284,7 +284,7 @@ pub fn take_over(
         return Err("stela.cfg names options that need --system");
     }
     let wifi_platform = host_firmware.wifi_observations();
-    // SAFETY: standalone mount retains identity mappings and this allocator.
+    // SAFETY: standalone mount keeps identity mappings and this allocator.
     let host_firmware = unsafe { crate::host_firmware::identity_catalog(&host_firmware) }?;
     let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(
         "stela.cfg starts with neither --system nor --host-check and names no install or \

@@ -1,4 +1,4 @@
-//! Unchanged-source wire/control comparison; actual DMA effects have separate peers.
+//! Unchanged-source wire/control comparison; DMA effects have separate peers.
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use alloc::vec;

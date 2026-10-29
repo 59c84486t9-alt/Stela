@@ -33,27 +33,27 @@ pub struct Identity {
     pub subsystem: u16,
     pub virtual_function: bool,
 }
-/// The index is the actual PCI configuration BAR index, not the original RM role.
+/// The index is the PCI configuration BAR index, not the original RM role.
 pub struct Aperture {
     pub index: u8,
     pub resource: Resource,
 }
 /// Original REGS/FB/IMEM roles. The C constructor checks their original order
-/// against actual BAR encodings; a caller cannot relabel arbitrary resources.
+/// against BAR encodings; a caller cannot relabel arbitrary resources.
 pub struct Apertures {
     pub registers: Aperture,
     pub framebuffer: Aperture,
     pub instance: Option<Aperture>,
 }
-/// Genuine same-PF power/reset/resource epoch. No implementation is supplied.
+/// Same-PF power/reset/resource epoch. No implementation is supplied.
 ///
 /// # Safety
-/// This owns the actual immutable identity, exclusive D0/parent-bridge/reset/
+/// This owns the immutable identity, exclusive D0/parent-bridge/reset/
 /// removal epoch and Resources of the SAME function as the owned ConfigSpace.
-/// Resources independently retain teardown-critical backing, including canonical
-/// mapping quarantine. Their reported spans/kinds/roles are genuine assigned BARs.
+/// Resources independently keep teardown-critical backing, including canonical
+/// mapping quarantine. Their reported spans/kinds/roles are assigned BARs.
 /// Exclude every other driver, firmware, DMA, IRQ, reset and configuration user.
-/// `check_context` checks the actual allowed process/native CPU without device
+/// `check_context` checks the allowed process/native CPU without device
 /// access, allocation, unwind or reentry. Calls and final release obey the heap,
 /// PageSource, domain and resource owners' real context rules. It supplies no
 /// allocator, IRQ-context predicate, timer or initialized-RM assertion.
@@ -156,7 +156,7 @@ impl<C: ConfigSpace + 'static> Bundle<C> {
         }
         let result = self.owner.check_context();
         if let Err(status) = result {
-            // Preserve the first actual callback-context failure. A later
+            // Preserve the first callback-context failure. A later
             // successful query cannot certify an effect that was uncertain.
             self.callback_failure.set(Some(status));
         }
@@ -180,7 +180,7 @@ unsafe extern "C" fn checked_read<C: ConfigSpace + 'static>(
     }
     // SAFETY: config is disjoint from owner/latch and inside UnsafeCell; its
     // stable owned target has no other Rust/native users. Existing read checks
-    // width/range and accesses the actual ConfigSpace with that exact width.
+    // width/range and accesses the ConfigSpace with that exact width.
     let config = unsafe { (&**this.config.get() as *const C).cast_mut().cast() };
     let mut result = 0;
     // SAFETY: `config` is this callback's live, exclusive target.
@@ -190,7 +190,7 @@ unsafe extern "C" fn checked_read<C: ConfigSpace + 'static>(
     }
     if status != 0 {
         // SAFETY: original C shim supplies a live aligned writable u32. Only a
-        // qualified successful actual access may publish its returned value.
+        // checked successful access may publish its returned value.
         unsafe { value.write(result) };
     }
     status
@@ -207,7 +207,7 @@ unsafe extern "C" fn checked_write<C: ConfigSpace + 'static>(
         return 0;
     }
     // SAFETY: exclusive target access through the disjoint UnsafeCell; existing
-    // write preserves actual width and performs no read/modify/write substitute.
+    // write preserves width and performs no read/modify/write substitute.
     let config = unsafe { (&mut **this.config.get() as *mut C).cast() };
     // SAFETY: `config` is this callback's live, exclusive target.
     let status = unsafe { super::write::<C>(config, offset, width, value) };
@@ -218,8 +218,8 @@ unsafe extern "C" fn checked_write<C: ConfigSpace + 'static>(
 }
 /// Pinned, fully owned prepared metadata. Neither Send nor Sync. No safe C
 /// pointer or runtime-ready token escapes, and no method calls original RM.
-/// Explicit retirement failure retains the whole bundle. Drop uncertainty
-/// deliberately retains that SAME allocation and every actual owner indefinitely;
+/// Explicit retirement failure keeps the whole bundle. Drop uncertainty
+/// keeps that SAME allocation and every owner indefinitely;
 /// it cannot extend a borrow, fake reset/drain or release partially live state.
 pub struct PreparedDevice<C: ConfigSpace + 'static> {
     bundle: Option<Pin<UniqueArc<Bundle<C>>>>,
@@ -237,17 +237,17 @@ fn native_bar(bar: &Aperture) -> Result<NativeBar, Error> {
     })
 }
 impl<C: ConfigSpace + 'static> PreparedDevice<C> {
-    /// Assemble actual native input ownership, without invoking RM.
+    /// Assemble native input ownership, without invoking RM.
     ///
     /// # Safety
     /// `owner`, owned `config`, source and attached `domain` describe the SAME
-    /// actual PF/reset epoch. The domain/address_limit is its real isolated DMA
-    /// policy, not identity DMA or a guessed GPU address width. Actual source
+    /// PF/reset epoch. The domain/address_limit is its real isolated DMA
+    /// policy, not identity DMA or a guessed GPU address width. Source
     /// geometry must already be installed before any RM callers. The heap and
     /// all owned dependencies remain valid through final retirement/quarantine.
-    /// No caller retains configuration/native aliases or may reenter this scope.
+    /// No caller keeps configuration/native aliases or may reenter this scope.
     /// Box/Arc inputs must own their dependencies; borrowed/non-static stand-ins
-    /// cannot survive uncertainty and are intentionally excluded.
+    /// cannot survive uncertainty and are excluded.
     pub unsafe fn prepare(
         config: Box<C>,
         owner: Box<dyn Owner>,
@@ -257,15 +257,15 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
         address_limit: u64,
     ) -> Result<Self, Error> {
         if let Err(status) = owner.check_context() {
-            // No allocation or final owner release is safe in an unqualified
-            // context. These inputs are already wholly owned; retain all of
+            // No allocation or final owner release is safe in an unchecked
+            // context. These inputs are already wholly owned; keep all of
             // them without allocating a bundle or extending any borrow.
             core::mem::forget((config, owner, source, domain));
             return Err(Error::Context(status));
         }
         // Keep every dependency and prepared allocation outside this fallible
         // phase. A provider callback may refuse after context is lost; no `?`
-        // inside the phase may then release the last actual owner.
+        // inside the phase may then release the last owner.
         let (mut apertures, mut services, mut state) = (None, None, None);
         let prepared = (|| {
             let identity = owner.identity();
@@ -312,12 +312,12 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
             // Metadata callbacks cannot authorize the following provider call.
             owner.check_context().map_err(Error::Context)?;
             // SAFETY: stable owned Box target. The private bundle drops services
-            // before source, or BOTH are retained on uncertain context. No
+            // before source, or BOTH are held on uncertain context. No
             // internal lifetime or source reference is exposed to a caller.
             let source_ref: &'static dyn PageSource =
                 unsafe { &*(&*source as *const dyn PageSource) };
-            // SAFETY: caller supplies the actual requester/domain/cache contract.
-            // Retain the original Arc until context is checked on either result;
+            // SAFETY: caller supplies the requester/domain/cache contract.
+            // Keep the original Arc until context is checked on either result;
             // the constructor's error may drop only this non-final clone.
             services = Some(
                 unsafe {
@@ -336,7 +336,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
             owner.check_context().map_err(Error::Context)?;
             state = Some(State::reserve()?);
             // Requalify before the next heap effect; a failed phase still
-            // retains this exact reserved State with all dependency owners.
+            // keeps this reserved State with all dependency owners.
             owner.check_context().map_err(Error::Context)?;
             #[cfg(test)]
             tests::reserve()?;
@@ -346,7 +346,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
         })();
         if let Err(status) = owner.check_context() {
             // Covers success AND error of every callback/reservation above,
-            // including source geometry refusal. Retain all exact ownership;
+            // including source geometry refusal. Keep all exact ownership;
             // no final Arc release, metadata free or allocation is attempted.
             core::mem::forget((
                 config, owner, source, domain, apertures, services, state, prepared,
@@ -354,7 +354,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
             return Err(Error::Context(status));
         }
         let (identity, bars, count, mut storage) = prepared?;
-        // The service owns another Arc, and the actual context remains valid.
+        // The service owns another Arc, and the context remains valid.
         drop(domain);
         storage.write(Bundle {
             services: UnsafeCell::new(services),
@@ -375,7 +375,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
         let context = (this as *mut Bundle<C>).cast();
         // SAFETY: still unpublished. The same existing PciHandle ABI points
         // back to this pinned owned Bundle; no safe reference or raw C pointer
-        // escapes. Per-access callbacks qualify actual context and retain the
+        // escapes. Per-access callbacks check context and keep the
         // first failure before native preparation may publish any state.
         let pci = unsafe { &mut *this.pci.get() };
         *pci = Some(PciHandle {
@@ -398,14 +398,14 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
             subsystem_vendor: u32::from(identity.subsystem_vendor),
             subsystem: u32::from(identity.subsystem),
         };
-        // SAFETY: original C state, pinned actual handle and bounded disjoint
+        // SAFETY: original C state, pinned handle and bounded disjoint
         // CPU inputs. This reads configuration only; error publishes no state.
         let status = unsafe {
             stela_nvidia_prepare_device(this.state.raw(), handle, &id, bars.as_ptr(), count as u32)
         };
         if let Err(status) = this.callback_context() {
             // Configuration callbacks cannot grant a different CPU/context.
-            // Retain the same complete reserved bundle if qualification is lost.
+            // Keep the same complete reserved bundle if validation is lost.
             core::mem::forget(bundle);
             return Err(Error::Context(status));
         }
@@ -439,7 +439,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
         }
         bundle.owner.check_context().map_err(Error::Context)?;
         // SAFETY: exclusive prepared device, no C pointer escaped. Context and
-        // the existing services' actual live counters govern final release.
+        // the existing services' live counters govern final release.
         let this = unsafe { bundle.as_mut().get_unchecked_mut() };
         // SAFETY: `this` is exclusive, and the bound handle never moves out of its cell.
         let handle = unsafe {
@@ -463,7 +463,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
 impl<C: ConfigSpace + 'static> Drop for PreparedDevice<C> {
     fn drop(&mut self) {
         if self.bundle.is_some() && self.retire().is_err() {
-            // Retain actual wholly OWNED state/handles/source/config/resources/
+            // Keep wholly OWNED state/handles/source/config/resources/
             // reset owner, using existing allocation ownership. No borrow is
             // extended and no quarantine registry or late allocation is added.
             if let Some(bundle) = self.bundle.take() {
@@ -649,7 +649,7 @@ mod tests {
     }
     // SAFETY: exclusively allocated model bytes, immutable metadata, no hardware.
     unsafe impl Send for Page {}
-    // SAFETY: only the retained CPU-model pin accesses these bytes, serialized here.
+    // SAFETY: only the CPU-model pin accesses these bytes, serialized here.
     unsafe impl Sync for Page {}
     // SAFETY: zeroed aligned CPU allocation with distinct model PA label, pinned to Drop.
     unsafe impl PageBacking for Page {
@@ -964,9 +964,9 @@ mod tests {
         assert!(matches!(d.retire(), Err(Error::Services(_))));
         drop(d);
         assert_eq!(c.values(), [0; 5]);
-        // This test-only retained token is the actual allocation produced above.
+        // This test-only kept token is the allocation produced above.
         // Its successful real free after Drop exercises still-live State/services,
-        // source and domain, rather than merely observing leaked bookkeeping.
+        // source and domain, rather than observing leaked bookkeeping.
         // SAFETY: the model device is stopped and drained, so nothing still uses what this
         // releases.
         assert_eq!(unsafe { nv_free_pages(state, 1, 0, 0, allocation) }, 0);

@@ -138,7 +138,7 @@ fn an_sae_exchange_associates_like_ieee80211_mgd_assoc() {
     let handle = link.bss().next().unwrap().0;
     done(&model);
     link.service().unwrap();
-    // SAFETY: complete source-model terminal scan and actual old-user drain.
+    // SAFETY: complete source-model terminal scan and old-user drain.
     unsafe { link.retire_scan_after_drain() }.unwrap();
     // An SAE request cannot authenticate with open system.
     assert!(link.join(handle, join.clone(), profile()).is_err());

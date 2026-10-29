@@ -62,7 +62,7 @@ pub struct MappingAttributes {
     pub shareable: bool,
 }
 
-/// Architectural service category, retained even when typed staging is adapted
+/// Architectural service category, kept even when typed staging is adapted
 /// to the ordinary all-writer transfer path. This is not a native wire value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataOperation {
@@ -107,7 +107,7 @@ pub struct DataPart {
 /// Effective CPU controls belong to the per-thread policy, not each ISA family.
 /// Policy callbacks must not reenter or retire this domain while an access is active.
 pub trait DataPolicy {
-    /// Request the machine's actual Device-RAM serializer and native full
+    /// Request the machine's Device-RAM serializer and native full
     /// fences around each callback. This strengthens ordering only; it grants
     /// no translation, physical memory, instruction or MMIO admission.
     fn device_ram_ordering(&self) -> bool {
@@ -179,7 +179,7 @@ pub trait DataPolicy {
     fn validate_data_request(&mut self, _request: DataRequest) -> Result<(), MemoryStatus> {
         Ok(())
     }
-    /// Translate precisely this reached part with its actual read/write intent.
+    /// Translate precisely this reached part with its read/write intent.
     /// A dynamic policy may walk once when the entire part is inside the same
     /// source leaf; it must establish every byte's rights and physical identity.
     /// The default preserves legacy per-byte translation and exact fault address.
@@ -288,8 +288,8 @@ impl MemorySystem {
 enum DomainRole {
     NormalWb,
     SourcePhysicalRam,
-    /// Only actual-CPL0 registration constructs this role. Native entry must
-    /// retain an actual per-worker target proof through checked finalization.
+    /// Only CPL0 registration constructs this role. Native entry must
+    /// keep a per-worker target proof through checked finalization.
     NativeSystemRam,
 }
 
@@ -356,8 +356,8 @@ impl MemoryDomain {
         Self::construct_admitted(address_space, system, views, target, role)
     }
 
-    /// Reserved system RAM has an actual-current-CPL0 target authority and
-    /// retained mapping owner, rather than the legacy identity-frame allocator.
+    /// Reserved system RAM has a current-CPL0 target permission and
+    /// mapping owner, rather than the legacy identity-frame allocator.
     pub(in crate::memory) fn new_native_system_ram(
         system: Arc<MemorySystem>,
         views: Vec<(Arc<MemoryView>, MappingAttributes)>,
@@ -459,7 +459,7 @@ impl MemoryDomain {
 
     /// Retire all matching generations before releasing/changing native rights.
     /// The lifecycle owner serializes this shared mapping generation across all
-    /// snapshots/address spaces retaining its Arc and excludes in-flight native
+    /// snapshots/address spaces keeping its Arc and excludes in-flight native
     /// accesses before native rights changes or unmapping.
     pub fn retire(self: &Arc<Self>, view: &Arc<MemoryView>) -> Result<(), MemoryStatus> {
         let _loan = self.service_loan()?;
@@ -587,7 +587,7 @@ impl MemoryDomain {
 }
 
 struct PhysicalAccess {
-    // Retain every generation intersecting one atomic quantity.
+    // Keep every generation intersecting one atomic quantity.
     first: ResolvedAccess,
     _remaining: Vec<ResolvedAccess>,
     attributes: MappingAttributes,
@@ -630,7 +630,7 @@ pub struct MemoryThread<P> {
     policy: P,
 }
 
-/// The real local monitor plus its mapping/service exclusion loan, retained
+/// The real local monitor plus its mapping/service exclusion loan, kept
 /// through the final infallible CPU/controller settlement.
 pub(crate) struct PreparedLocalClear<'a> {
     clear: monitor::PreparedClear<'a, MemoryBacking, MemoryView, MappingAttributes>,
@@ -643,7 +643,7 @@ impl PreparedLocalClear<'_> {
 }
 
 impl<P: DataPolicy> MemoryThread<P> {
-    /// Match the exact immutable snapshot retained by a source attribute witness.
+    /// Match the exact immutable snapshot kept by a source attribute witness.
     /// Identity alone does not establish effective ARM memory attributes.
     pub(crate) fn has_domain(&self, domain: &Arc<MemoryDomain>) -> bool {
         Arc::ptr_eq(&self.domain, domain)
@@ -683,7 +683,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         self.prepare_body(requirements)
     }
 
-    /// The engine must borrow actual current-owner admission, rather than
+    /// The engine must borrow current-owner admission, rather than
     /// laundering a system domain through the legacy identity-frame mount.
     pub(crate) fn prepare_native_system<'a>(
         &'a mut self,
@@ -783,8 +783,8 @@ impl<P: DataPolicy> MemoryThread<P> {
             .map_err(|_| MemoryStatus::Domain)
     }
 
-    /// Check the retained monitor binding against a borrowed live PE owner.
-    /// Perform this preflight before architectural effects and retain both
+    /// Check the monitor binding against a borrowed live PE owner.
+    /// Perform this preflight before architectural effects and keep both
     /// borrows for the complete entry. This check never changes a reservation.
     pub fn check_event_endpoint(&self, endpoint: &EventEndpoint) -> Result<(), MemoryStatus> {
         self.domain.check_execution()?;
@@ -876,7 +876,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         self.domain.check_data_execution()?;
         let _loan = self.execution_loan()?;
         // SAFETY: The execution loan stays live through callback finalization; the
-        // caller retains the view callback and its disjoint staging/policy borrows.
+        // caller keeps the view callback and its disjoint staging/policy borrows.
         let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
         finalization.map(|()| result)
     }
@@ -925,7 +925,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 .check_execution()
                 .map_err(|status| (status, request.address))?;
             // Same physical machine owner as every existing staged Device-RAM
-            // transaction. Retain it across actual transfer/fault prefix; never
+            // transaction. Keep it across transfer/fault prefix; never
             // copy an ordering receipt or replace the checked policy/ABI.
             let system = Arc::clone(&self.domain.system);
             let _order = system
@@ -933,7 +933,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 .try_lock()
                 .map_err(|_| (MemoryStatus::Domain, request.address))?;
             access::device_ram_fence();
-            // SAFETY: unchanged exact private staging and retained invocation.
+            // SAFETY: unchanged exact private staging and kept invocation.
             let result = unsafe { self.transfer_unordered(view, request) };
             access::device_ram_fence();
             return result;
@@ -962,7 +962,7 @@ impl<P: DataPolicy> MemoryThread<P> {
     }
 
     /// # Safety
-    /// Same private ordinary staging and retained invocation as `transfer`.
+    /// Same private ordinary staging and kept invocation as `transfer`.
     pub(super) unsafe fn transfer_ordinary(
         &mut self,
         view: &mut MemoryContextView,

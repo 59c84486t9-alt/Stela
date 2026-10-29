@@ -150,7 +150,7 @@ impl Drop for Peer {
         self.0.borrow_mut().drops += 1;
     }
 }
-// SAFETY: independent single-threaded register peer retains its actual backing
+// SAFETY: independent single-threaded register peer keeps its backing
 // and models posted effects/failures, engine execution and every access width.
 unsafe impl Registers for Peer {
     fn profile(&self) -> Profile {

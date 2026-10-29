@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Owned AX200 continuation from LARI through actual thermal/device-power
+//! Owned AX200 continuation from LARI through thermal/device-power
 //! commands. Regulatory setup, scanning and a station remain subsequent work.
 use super::*;
 use crate::net::wifi::intel::radio::{
@@ -39,7 +39,7 @@ pub use scan_configuration::{
     Ax200ScanConfiguration, Ax200ScanConfigurationError, Ax200ScanConfigurationPhase,
 };
 
-/// Host wait policy, not firmware completion or authority to release DMA.
+/// Host wait policy, not firmware completion or permission to release DMA.
 #[derive(Clone, Copy, Debug)]
 pub struct Ax200SetupOptions {
     pub clock: Clock,
@@ -74,7 +74,7 @@ pub enum Ax200SetupError {
     Deadline(Kind),
     State,
 }
-/// Source branches derived from the actual retained context and firmware.
+/// Source branches derived from the context and firmware.
 /// These borrowed diagnostics cannot construct or advance another owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SetupDecisions {
@@ -104,7 +104,7 @@ impl<'a, Q: BootIo, B: BiosIo> LariRadio<'a, Q, B> {
     /// enter this AX200-only continuation. No new namespace or MMIO read occurs.
     /// # Safety
     /// The supplied clock is calibrated, monotonic and advancing throughout
-    /// this retained native device epoch. It grants no PCI or BIOS authority.
+    /// this native device epoch. It grants no PCI or BIOS permission.
     pub unsafe fn begin_ax200_setup(
         self,
         options: Ax200SetupOptions,
@@ -184,7 +184,7 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
         let boot = &self.lari.radio.initialized.boot;
         // RomBoot::start has precisely one AX200 free/used/status queue in
         // context, with no auxiliary queue constructor or registration path.
-        // RXQ/RSS helpers therefore take their actual num_rxqs==1 branches.
+        // RXQ/RSS helpers therefore take their num_rxqs==1 branches.
         let entries = usize::from(boot.entries);
         if boot.ax210.is_some()
             || boot.free.region().bytes != entries * 8
@@ -215,7 +215,7 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
             dqa_command: dqa.is_some(),
             firmware_ltr: fw.supports_capability(50),
         });
-        // Resolve the actual ECKV source before any new firmware publication;
+        // Resolve the ECKV source before any new firmware publication;
         // a missing native service leaves the entire request unpublished.
         let clock = self
             .lari
@@ -236,9 +236,9 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
         Ok(())
     }
     /// Advance only on the original command ticket's completed native RX and
-    /// descriptor/TB0 CPU handoff. Timeout retains all uncertain resources.
+    /// descriptor/TB0 CPU handoff. Timeout keeps all uncertain resources.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the exact retained
+    /// `source` supplies fresh exclusive coherent pages for the kept
     /// native requester/domain under RomBoot's publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -266,7 +266,7 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
         }
         if self.phase == Ax200SetupPhase::RegulatoryRequired {
             // This historical setup result must not conceal a later live
-            // requester fault or RF-kill. Bound work to one actual RX buffer.
+            // requester fault or RF-kill. Bound work to one RX buffer.
             self.lari
                 .radio
                 .initialized
@@ -284,8 +284,8 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
             if matches!(progress, Err(Error::CommandReclaim(_)))
                 && self.deadline.as_ref().is_some_and(crate::Deadline::passed)
             {
-                // CPU handoff can fail after actual RX completion. A deadline
-                // ends retries but retains the exact ticket/response and DMA;
+                // CPU handoff can fail after RX completion. A deadline
+                // ends retries but keeps the exact ticket/response and DMA;
                 // it is never a reclamation or stopped-requester proof.
                 return Err(Ax200SetupError::Deadline(command.kind()));
             }
@@ -320,7 +320,7 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
             self.phase = Ax200SetupPhase::RegulatoryRequired;
             return Ok(self.phase);
         };
-        // SAFETY: exact original DMA/page-source contract of this advance call.
+        // SAFETY: original DMA/page-source contract of this advance call.
         self.ticket = Some(
             unsafe {
                 self.lari.radio.initialized.boot.submit_command(

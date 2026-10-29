@@ -1,5 +1,5 @@
 //! Independent command link: ordered wire effects, delayed indexed responses,
-//! status W1C, separate page state and actual original-provider retention.
+//! status W1C, separate page state and original-provider retention.
 use super::*;
 use alloc::{collections::BTreeMap, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
@@ -83,7 +83,7 @@ impl Hardware {
         self.ready_at = self.time.get() + 3;
     }
 }
-// SAFETY: isolated serialized link model; original provider is retained and
+// SAFETY: isolated serialized link model; original provider is held and
 // implements ordered before/after effects, not a physical ownership grant.
 unsafe impl Registers for Port {
     fn layout(&self) -> Layout {

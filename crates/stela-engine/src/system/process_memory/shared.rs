@@ -1,4 +1,4 @@
-//! Snapshot-bound instruction authority for the checked shared-memory family.
+//! Snapshot-bound instruction permission for the checked shared-memory family.
 use super::*;
 use stela_compiler::context::memory::InstructionRequirements;
 const SCTLR_NAA: u64 = 1 << 6;
@@ -37,7 +37,7 @@ impl FixedProcessMemoryControls {
         if !required.valid() || required.contains(InstructionRequirements::LOR) {
             return Err(unsupported());
         }
-        // A legacy raw-control constructor can never manufacture this authority.
+        // A legacy raw-control constructor can never manufacture this permission.
         let identification = self.identification.as_deref().ok_or_else(unsupported)?;
         let field = |register| {
             identification
@@ -65,7 +65,7 @@ impl FixedProcessMemoryControls {
                 return Err(unsupported());
             }
         }
-        // nAA permits quantities crossing SCA16. This bounded service deliberately
+        // nAA permits quantities crossing SCA16. This bounded service
         // has no such relaxation. A pure DMB body has no data requirement.
         if requirements.required_flags & flags::ORDERED != 0
             && requirements.required_profile & profile_requirements::NATIVE_ACCESS != 0

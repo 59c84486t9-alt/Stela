@@ -1,4 +1,4 @@
-//! Source instruction controls through the retained canonical RAM/table owner.
+//! Source instruction controls through the canonical RAM/table owner.
 use super::super::{Controls, SharedMemory, mmu, policy};
 use stela_compiler::context::memory::MemoryStatus;
 
@@ -80,7 +80,7 @@ fn resolve(
     let mapped = match outcome {
         mmu::Outcome::Mapped(mapped) => mapped,
         mmu::Outcome::Fault(fault) => {
-            // A non-GL fetch of GL-only SPRR code has an unqualified GXF
+            // A non-GL fetch of GL-only SPRR code has an unchecked GXF
             // abort-entry contract; do not turn that into an ordinary abort.
             if fault.kind == mmu::FaultKind::Permission
                 && controls.requester.el != 0
@@ -123,7 +123,7 @@ fn resolve(
     Ok(mapped)
 }
 
-/// Arm BTypeNext for an actual completed BR/BLR/RET at this source leaf.
+/// Arm BTypeNext for a completed BR/BLR/RET at this source leaf.
 /// Direct branches/fallthrough clear BTYPE. The source page, not its target,
 /// supplies InGuardedPage; X16/X17 are independently the veneer registers.
 pub(in crate::machine::engine::shared_memory) fn branch_type(word: u32, guarded: bool) -> u8 {
@@ -136,7 +136,7 @@ pub(in crate::machine::engine::shared_memory) fn branch_type(word: u32, guarded:
 }
 
 /// Arm BTypeCompatible_BTI/PAC. Identical source rules to Machine's ordinary
-/// entry check, applied to the actual canonical fetch before native dispatch.
+/// entry check, applied to the canonical fetch before native dispatch.
 pub(in crate::machine::engine::shared_memory) fn target_accepts(
     word: u32,
     btype: u8,
@@ -252,7 +252,7 @@ mod tests {
             Err(MemoryStatus::Unsupported)
         );
         assert_eq!(bytes, [0xa5; 4]);
-        // I clear likewise makes the actual fetch Normal NC, independently
+        // I clear likewise makes the fetch Normal NC, independently
         // of the original MAIR byte. Use the walk's output, not raw metadata.
         controls.translation.sctlr &= !SCTLR_I;
         assert_eq!(instruction(memory, &controls, 0x4000), Ok((word, true)));
@@ -356,7 +356,7 @@ mod tests {
         assert!(failed.descriptor_reads > first.descriptor_reads);
         let mut cold = controls.clone();
         cold.translation.sctlr &= !1;
-        // M=0 is still an actual resolution, but performs no descriptor read.
+        // M=0 is still a resolution, but performs no descriptor read.
         let _ = instruction(memory, &cold, 0x4000);
         let last = memory.source.statistics();
         assert_eq!(last.resolutions, failed.resolutions + 1);

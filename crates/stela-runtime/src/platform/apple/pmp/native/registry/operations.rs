@@ -1,4 +1,4 @@
-//! Retained cold-start and native registry operation retirement.
+//! Cold-start and native registry operation retirement.
 use super::*;
 
 impl<B: memory::Backend> Owner<B>
@@ -8,7 +8,7 @@ where
     pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
         self.claim.check()?;
         // The separate original class4 callback can run while class3 waits for
-        // its AP reply. Retain the actual entry identity captured at delivery.
+        // its AP reply. Keep the entry identity captured at delivery.
         if self.received.is_some() && !self.plan.as_ref().is_some_and(|p| p.callback_active) {
             return self.incoming_step(access);
         }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
 //! RTL8822C firmware hardware-feature report from pinned rtw88/main.c and
-//! efuse.h. Only the actual single-attempt Download creates a Report; pure
+//! efuse.h. Only the single-attempt Download creates a Report; pure
 //! decoding creates diagnostics, never firmware/PHY/ownership evidence.
 use super::{
     identity::{Chip, Profile},
@@ -15,7 +15,7 @@ const LENGTH: usize = 13;
 
 /// Source-decoded capabilities. Zero is the source "ignore" value, not proof
 /// of unavailable hardware. HCI/protocol numbers remain raw source encodings;
-/// future admission must validate them against the actual PCI/PHY policy.
+/// future admission must validate them against the PCI/PHY policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
     /// Width bits: bit 0=20 MHz, bit 1=40 MHz, bit 2=80 MHz. Not regulatory permission.
@@ -31,9 +31,9 @@ pub struct Capabilities {
     pub nss: u8,
 }
 
-/// Immutable reply from this Download's actual request/boot/read/ACK. Profile
+/// Immutable reply from this Download's request/boot/read/ACK. Profile
 /// is a hardware fingerprint, not a unique BDF/reset-epoch credential. Future
-/// PHY admission must retain this report with the same actual control/claim
+/// PHY admission must keep this report with the same control/claim
 /// owner; a report alone never authorizes programming another requester.
 #[derive(Debug)]
 pub struct Report {
@@ -54,7 +54,7 @@ impl Report {
 }
 
 /// Pure source decoder. Caller-supplied bytes are diagnostics only, with no
-/// actual mailbox provenance or radio-readiness claim.
+/// mailbox provenance or radio-readiness claim.
 pub fn decode(sys_cfg1: u32, raw: &[u8; LENGTH]) -> Capabilities {
     let word = u32::from_le_bytes(raw[4..8].try_into().expect("fixed feature word"));
     let bw = (word >> 16) & 7;
@@ -100,7 +100,7 @@ fn identity<I: Io>(io: &mut I) -> Result<Profile, Error> {
 }
 
 /// Called only inside Download's single mutation attempt, after immutable
-/// image target/reparse validation and before the actual MCU reset/download.
+/// image target/reparse validation and before the MCU reset/download.
 pub(super) fn request<I: Io>(io: &mut I) -> Result<(), Error> {
     identity(io)?;
     io.write8(REG_C2HEVT, REQUEST)?;
@@ -110,7 +110,7 @@ pub(super) fn request<I: Io>(io: &mut I) -> Result<(), Error> {
     Ok(())
 }
 
-/// Called only after that same Download requested then observed actual ready,
+/// Called only after that same Download requested then observed ready,
 /// with no raw-I/O escape/reset/mailbox worker between request and this read.
 pub(super) fn read<I: Io>(io: &mut I) -> Result<Report, Error> {
     let profile = identity(io)?;
@@ -281,8 +281,8 @@ mod tests {
             offset += 17;
             let mut io = Registers::new(sys, raw);
             let report = read(&mut io).unwrap();
-            // Actual source ID + 13 byte loads + ACK. Additional native guards
-            // and ACK readback remain separate from donor's actual operations.
+            // Source ID + 13 byte loads + ACK. Additional native guards
+            // and ACK readback remain separate from donor's operations.
             assert_eq!(
                 &io.events[..15 * 16],
                 &trace[offset..offset + 15 * 16],

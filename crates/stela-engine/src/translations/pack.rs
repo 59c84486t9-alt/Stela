@@ -308,10 +308,10 @@ pub struct Store<'a> {
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
     pending: Vec<Pending>,
-    /// Capacity of the retained input buffers; Pending slots are charged separately.
+    /// Capacity of the input buffers; Pending slots are charged separately.
     pending_bytes: usize,
     /// The blocks offered, by page key, PC and context, for the other
-    /// machines sharing the store, oldest first. The bound charges retained
+    /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
     /// allocator node slack/bookkeeping and shared Preparation are excluded.
     shared: BTreeMap<SharedKey, SharedEntry>,
@@ -360,7 +360,7 @@ impl<'a> Store<'a> {
         }
     }
 
-    /// Keep offered blocks and their retained buffers, up to `bound` bytes, for
+    /// Keep offered blocks and their buffers, up to `bound` bytes, for
     /// [`Translations::prepared`]: for machines that share the store. Full,
     /// it forgets the oldest until a new one fits.
     pub fn share(&mut self, bound: usize) {
@@ -415,7 +415,7 @@ impl<'a> Store<'a> {
             return;
         }
         if !self.shared.contains_key(&key) {
-            // Reuse an actual oldest slot if bulk FIFO growth cannot be allocated.
+            // Reuse an oldest slot if bulk FIFO growth cannot be allocated.
             // An empty cache simply declines the optional entry.
             if self.shared_order.try_reserve(1).is_err() && !self.evict_shared() {
                 return;

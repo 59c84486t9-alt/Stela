@@ -12,7 +12,7 @@
 //! These immutable descriptors decode supplied observations and describe the
 //! original driver's physical operations. They neither execute those operations
 //! nor implement MMIO. There is no initial state, current-state setter, BUSY
-//! clear, IRQ wire or completion receipt. Each descriptor retains the missing
+//! clear, IRQ wire or completion receipt. Each descriptor keeps the missing
 //! native effect-owner requirement, which machine admission must report.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub enum Error {
 }
 
 /// Decoded supplied data, without proof of a physical observation or effects.
-/// It is intentionally not an applied-state or settlement token.
+/// It is not an applied-state or settlement token.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
@@ -70,7 +70,7 @@ pub struct Observation {
     pub busy: bool,
 }
 
-/// A source-qualified protocol with an explicitly unqualified effect owner.
+/// A source-checked protocol with an explicitly unchecked effect owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnqualifiedEffects {
     pub controller: Controller,
@@ -91,7 +91,7 @@ pub struct Descriptor {
     irq_control: u64,
 }
 
-/// Qualified geometry of the common T8112 PMP image. No other family's
+/// Checked geometry of the common T8112 PMP image. No other family's
 /// register geometry, code map or interrupt semantics is inferred from it.
 pub const T8112: [Descriptor; 3] = [
     Descriptor {
@@ -161,7 +161,7 @@ impl Descriptor {
     }
 
     /// The original lookup falls back to logical zero for an unknown raw code.
-    /// That fallback is not qualified controller state: preserve the unknown
+    /// That fallback is not checked controller state: preserve the unknown
     /// field explicitly rather than letting it grant a native vote or ACK.
     #[cfg(test)]
     pub fn decode(self, control: u32) -> Result<Observation, Error> {
@@ -173,7 +173,7 @@ impl Descriptor {
     }
 
     /// Exact driver store, not an RMW and not an issued/applied request. Only
-    /// a separately qualified physical sink may execute or complete this write.
+    /// a separately checked physical sink may execute or complete this write.
     #[cfg(test)]
     pub fn request_write(self, logical: u8) -> Result<PhysicalWrite, Error> {
         let code = self
@@ -190,7 +190,7 @@ impl Descriptor {
         })
     }
 
-    /// Driver enable/disable RMW against an actually supplied control word.
+    /// Driver enable/disable RMW against a supplied control word.
     /// Describing it supplies no initial mask, local IRQ or AIC-wire ownership.
     #[cfg(test)]
     pub fn interrupt_control_write(self, observed: u32, enabled: bool) -> PhysicalWrite {
@@ -202,7 +202,7 @@ impl Descriptor {
     }
 
     /// The original ack reads status and writes the complete same word back.
-    /// The receiving bank must qualify its effects; no W1C state is fabricated.
+    /// The receiving bank must check its effects; no W1C state is invented.
     #[cfg(test)]
     pub fn acknowledgment_write(self, observed: u32) -> PhysicalWrite {
         PhysicalWrite {
@@ -212,7 +212,7 @@ impl Descriptor {
         }
     }
 
-    /// Source method100842c tests whole-word equality, not merely bit zero.
+    /// Source method100842c tests whole-word equality, not bit zero.
     #[cfg(test)]
     pub const fn interrupt_pending(self, observed: u32) -> bool {
         observed == 1

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! The 6 GHz ROC20 reservation, qualified under both held providers before
+//! The 6 GHz ROC20 reservation, checked under both held providers before
 //! its request publishes. The grant assigns the hardware band, as for
 //! reserve_channel; the codec's later requests follow it.
 use super::*;

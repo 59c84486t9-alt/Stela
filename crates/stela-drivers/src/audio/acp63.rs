@@ -5,10 +5,10 @@
 //! Copyright (C) 2022, 2023, 2025 Advanced Micro Devices, Inc.
 //!
 //! This is the selector-zero dedicated PDM path, not the separately selected
-//! generic LEGACY/I2S/SOF/SoundWire drivers or ACP70/71/72 hardware. It retains
-//! an actual whole-function PCI D0/board/firmware epoch, qualified requester DMA,
+//! generic LEGACY/I2S/SOF/SoundWire drivers or ACP70/71/72 hardware. It keeps
+//! a whole-function PCI D0/board/firmware epoch, checked requester DMA,
 //! real ACPI child evidence and SoundWire exclusion. No CLKMUX access exists:
-//! ACP63 uses the actual ZSC DSP control boundary during init/retirement.
+//! ACP63 uses the ZSC DSP control boundary during init/retirement.
 use super::acp_pdm::{self, DmaConfig, Profile};
 pub use super::acp_pdm::{
     CAPTURE_FORMAT, CapturePeriod, Error, Identity, Phase, Position, Registers, State,
@@ -58,8 +58,8 @@ impl Profile for PinkSardine {
     }
 }
 
-/// The actual child at _ADR2 of this exact PCI function's ACPI companion.
-/// A matching string/ID from another namespace or a fabricated child is no grant.
+/// The child at _ADR2 of this exact PCI function's ACPI companion.
+/// A matching string/ID from another namespace or an invented child is no grant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DmicChild {
     pub address: u64,
@@ -69,20 +69,20 @@ pub struct DmicChild {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WovObservation {
     Value(u64),
-    /// ACPI was actually evaluated; missing method or genuine evaluation
+    /// ACPI was evaluated; missing method or evaluation
     /// failure uses the pinned source's default-on policy AFTER child discovery.
     EvaluatedFailure,
     /// No working native evaluation service/evidence: never default-on.
     Unavailable,
 }
 
-/// Actual same-function SoundWire enumeration and whole-function arbitration.
+/// Same-function SoundWire enumeration and whole-function arbitration.
 /// A pin-mode value by itself supplies neither absence nor idle ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundWireOwnership {
     EnumeratedAbsent,
     /// The real controller/firmware/worker owner has quiesced every SoundWire
-    /// engine and retained exclusive exclusion throughout this PDM ownership.
+    /// engine and kept exclusive exclusion throughout this PDM ownership.
     QuiescedExclusive,
     ActiveOrUnknown,
 }
@@ -90,7 +90,7 @@ pub enum SoundWireOwnership {
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     pub ownership: Ownership,
-    /// Actual result of snd_amd_acp_find_config for this function: only zero
+    /// Result of snd_amd_acp_find_config for this function: only zero
     /// selects the dedicated ps PCI driver, not LEGACY8/DMIC16 or SOF flags.
     pub acp_config: Option<u32>,
     pub child: Option<DmicChild>,
@@ -135,15 +135,15 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, PinkSardine> {
     /// Claim without hardware effects or inferred firmware/platform resources.
     ///
     /// # Safety
-    /// The retained native requester/BAR/domain must name this exact rev63,
-    /// class048000 function and actual coherent RAM/root path. The platform owns
-    /// actual PCI D0, board power/clocks, firmware/SOF/AML/SMM and other-CPU
+    /// The kept native requester/BAR/domain must name this exact rev63,
+    /// class048000 function and coherent RAM/root path. The platform owns
+    /// PCI D0, board power/clocks, firmware/SOF/AML/SMM and other-CPU
     /// exclusion throughout the epoch. Child/_WOV/selector observations must
-    /// come from this function's actual evaluated ACPI and source policy.
-    /// SoundWire exclusion must be established by its actual controller/worker
+    /// come from this function's evaluated ACPI and source policy.
+    /// SoundWire exclusion must be established by its controller/worker
     /// owner and same-function inventory, including mixed pin modes; no parallel
     /// SoundWire child can run under this whole-function reset/ATU/IRQ owner.
-    /// Contain native INTx/MSI/MSI-X delivery and retain all roots, mappings,
+    /// Contain native INTx/MSI/MSI-X delivery and keep all roots, mappings,
     /// pins and firmware exclusion through failed stop/reset/drain or drop.
     pub unsafe fn claim(
         registers: R,
@@ -153,7 +153,7 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, PinkSardine> {
     ) -> Result<Self, Error> {
         Self::claim_profile(registers, timer, config.direct()?, domain)
     }
-    /// Poll actual source period completion and copy one ordered period while
+    /// Poll source period completion and copy one ordered period while
     /// DMA runs. Coalesced events, consumed position and pre/post-copy overwrite
     /// checks use the source ISR->PCM-pointer/coherent-buffer contract. Discard
     /// the entire destination on failure; it may be partly modified. No active
@@ -164,13 +164,13 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, PinkSardine> {
     ) -> Result<Option<CapturePeriod>, Error> {
         self.read_completed_period(destination)
     }
-    /// Source PDM/controller quiet with original PCI D0/board epoch retained.
+    /// Source PDM/controller quiet with original PCI D0/board epoch kept.
     /// This dedicated source parks ZSC, without an invented CLKMUX or optional
     /// PGFSM power-off policy borrowed from a different generation's driver.
     pub fn suspend_held_d0(&mut self) -> Result<(), Error> {
         self.suspend_retained(false)
     }
-    /// Restore the actual original PCI/domain epoch and PTE/ring into Prepared;
+    /// Restore the original PCI/domain epoch and PTE/ring into Prepared;
     /// explicit start is source trigger RESUME and begins a new capture epoch.
     pub fn resume_held_d0(&mut self) -> Result<(), Error> {
         self.resume_retained()

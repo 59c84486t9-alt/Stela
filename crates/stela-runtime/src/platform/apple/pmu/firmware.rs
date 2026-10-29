@@ -4,7 +4,7 @@
 //! sixteen-byte logical windows. Its 16138 helper splits these into consecutive
 //! eight-byte SPMI commands. mac13j `_readMem`/`_writeMem` (VA9d592f8..597b8)
 //! use the same low/high address and repeated data-window sequence for reads
-//! and writes. This owner implements those sequences over actual retained
+//! and writes. This owner implements those sequences over kept
 //! bytes. It supplies no PMIC reset, execution, ID, status or Ready value.
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -93,7 +93,7 @@ impl FirmwareMemory {
     }
 
     /// The complete logical window, or its exact eight-byte prefix/tail. A
-    /// failed command retains previous commands. A repeated partial prefix or
+    /// failed command keeps previous commands. A repeated partial prefix or
     /// a direction change without a new address pair refuses before effects.
     /// No lost-response retry semantics are inferred for completed windows.
     pub fn prepare(
@@ -511,7 +511,7 @@ mod tests {
         let put = |controller: &mut Spmi, access: &mut Access<'_>, word: u32| {
             controller.write(4, Width::Word, u64::from(word), access)
         };
-        // A completed command may leave an actual retained SRAM half-window.
+        // A completed command may leave a SRAM half-window.
         // Master clock/quiesce neither discards that state nor completes it.
         put(
             &mut controller,
@@ -745,7 +745,7 @@ mod tests {
         ] {
             assert_eq!(stela_formats::sha256(&data[offset..offset + bytes]), digest);
         }
-        // Positive original board records and the actual dispatch/container consumers.
+        // Positive original board records and the dispatch/container consumers.
         for (offset, bytes, digest) in [
             (
                 0x5b75cusize,
@@ -808,7 +808,7 @@ mod tests {
             stela_formats::sha256(&kc[0x2d552f8..0x2d552f8 + 1216]),
             "f6a80ac867c834d37f1e75c71a9f4b0d908ef3bac3193b1f0490019ae4c990fe"
         );
-        // These exact encoded entries retain image descriptor/upload functions.
+        // These exact encoded entries keep image descriptor/upload functions.
         // This fixture does not infer normal-entry reachability from their presence.
         for (offset, code) in [
             (0x155f68, 0x158c0u32),
@@ -849,7 +849,7 @@ mod tests {
             u32::from_le_bytes(data[0x155f30..0x155f34].try_into().unwrap()),
             u32::from(PORTS.chunk)
         );
-        // Replay every original image byte through the actual AP-facing memory
+        // Replay every original image byte through the AP-facing memory
         // owner; this proves transport/storage only, never PMIC execution/Ready.
         for (offset, bytes) in [(0x1f9b20, 0x2270usize), (0x1fbd90, 0x2c78)] {
             let image = &data[offset..offset + bytes];

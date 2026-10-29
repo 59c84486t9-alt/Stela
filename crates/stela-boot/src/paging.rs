@@ -51,7 +51,7 @@ pub struct Tables {
     _local: PhantomData<*mut ()>,
 }
 
-/// One successful UEFI allocation retained as LOADER_DATA for this boot.
+/// One successful UEFI allocation kept as LOADER_DATA for this boot.
 /// This non-Clone private owner is minted only by new_table's real allocation;
 /// its internal physical identifier is not itself a construction capability.
 struct AllocatedTablePage {
@@ -221,8 +221,8 @@ impl Tables {
         if index >= ENTRIES || !self.pages.iter().any(|page| page.physical == table) {
             return None;
         }
-        // SAFETY: exact original allocation of this retained builder; caller
-        // keeps its actual current identity mapping across the root transition.
+        // SAFETY: original allocation of this builder; caller
+        // keeps its current identity mapping across the root transition.
         Some(unsafe { (table as *const u64).add(index).read_volatile() })
     }
     fn observe(
@@ -254,7 +254,7 @@ impl Tables {
     }
 }
 
-/// Retained actual allocations, moved out of the consumed builder. Numeric
+/// Allocations, moved out of the consumed builder. Numeric
 /// table roots supplied by a caller cannot construct this private owner.
 struct FrameCatalog {
     root: u64,
@@ -271,8 +271,8 @@ impl FrameCatalog {
         if index >= ENTRIES || !self.pages.iter().any(|page| page.physical == table) {
             return None;
         }
-        // SAFETY: this catalog retains the exact original allocated frame;
-        // callers establish actual CPU/current-root lifetime before access.
+        // SAFETY: this catalog keeps the original allocated frame;
+        // callers establish CPU/current-root lifetime before access.
         Some(unsafe { (table as *const u64).add(index).read_volatile() })
     }
     fn observe(
@@ -367,10 +367,10 @@ fatal_handler!(fatal_page_fault, "'P'");
 /// # Safety
 /// Boot services have ended and interrupts are disabled. `tables` maps every
 /// byte the code, stack and data in use touch. The current firmware mappings
-/// still reach every actual table allocation until CR3 changes. Nothing else
+/// still reach every table allocation until CR3 changes. Nothing else
 /// runs or mutates those allocations during this transition.
 pub unsafe fn activate(tables: Tables) -> Result<ActivatedTables, RootError> {
-    // Original firmware identity mappings still reach the genuine fresh
+    // Original firmware identity mappings still reach the fresh
     // LoaderData allocations until this controlled transition completes.
     active::validate_cpu()?;
     tables.validate_table_aliases()?;

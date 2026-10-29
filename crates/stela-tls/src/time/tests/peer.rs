@@ -85,7 +85,7 @@ fn repeated_connections_require_fresh_full_handshakes_while_the_control_resumes(
         )
         .unwrap();
         // A real cache-enabled control establishes that the reference server
-        // and record pump actually offer and process usable resumptions.
+        // and record pump offer and process usable resumptions.
         config.resumption = rustls::client::Resumption::default();
         let control = Arc::new(config);
         let peer = server(version);

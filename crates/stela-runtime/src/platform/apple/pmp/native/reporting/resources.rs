@@ -1,4 +1,4 @@
-//! Actual owners required by the source endpoint. No successful defaults.
+//! Owners required by the source endpoint. No successful defaults.
 use super::super::platform::owner::Completion;
 use super::wire::Buffer;
 use alloc::rc::Rc;
@@ -25,13 +25,13 @@ impl WaitKey {
     }
 }
 
-/// Canonical AP allocation, with retained mapping/descriptor ownership. Dropping
-/// this value is not unmap/release. A write returns its actual byte prefix,
+/// Canonical AP allocation, with kept mapping/descriptor ownership. Dropping
+/// this value is not unmap/release. A write returns its byte prefix,
 /// including on post-effect refusal; Busy/Refused commit no bytes. Reads return
 /// exactly the requested extent or refuse, never a private database mirror.
 pub trait Mapping {
     fn geometry(&self) -> Buffer;
-    /// Actual runtime104b23c equivalent, derived by the cache/map owner.
+    /// Runtime104b23c equivalent, derived by the cache/map owner.
     fn synchronization_granule(&self) -> Result<u64, &'static str>;
     fn write(
         &mut self,
@@ -55,7 +55,7 @@ pub trait Mapping {
         access: &mut Access<'_>,
     ) -> Completion<()>;
 }
-/// Source failure may retire a map attempt, but is never a fabricated mapping.
+/// Source failure may retire a map attempt, but is never an invented mapping.
 pub enum MapResult<M> {
     Mapped(M),
     SourceError(u32),
@@ -69,7 +69,7 @@ pub trait Wake {
 }
 pub trait Resources {
     type Mapping: Mapping;
-    /// Claim the actual singleton RTKit builtin endpoint4 and global DB work.
+    /// Claim the singleton RTKit builtin endpoint4 and global DB work.
     fn claim(&mut self, request: &Request, access: &mut Access<'_>) -> Completion<()>;
     fn map(
         &mut self,
@@ -79,7 +79,7 @@ pub trait Resources {
         access: &mut Access<'_>,
     ) -> Completion<MapResult<Self::Mapping>>;
     fn dsb_sy(&mut self, request: &Request, access: &mut Access<'_>) -> Completion<()>;
-    /// Read and convert the actual configured native clock, not supplied time.
+    /// Read and convert the configured native clock, not supplied time.
     fn converted_clock(&mut self, request: &Request, access: &mut Access<'_>) -> Completion<u64>;
     fn send(
         &mut self,

@@ -1,6 +1,6 @@
 //! Physical AP lifetime and processor-local native resources. Startup ACKs
 //! prove entry/ownership only; the runtime publication protocol separately
-//! requires an actual recovered native loan before any CPU settlement.
+//! requires a recovered native loan before any CPU settlement.
 use super::{bootstrap, firmware, resources, topology, tsc_sync};
 use crate::{
     apic::{self, Apic},
@@ -62,7 +62,7 @@ struct Argument {
     processor: topology::Processor,
     source: topology::Snapshot,
     effective_pat: u64,
-    // An explicit authored diagnostic request, never execution/ISA authority.
+    // An explicit authored diagnostic request, never execution/ISA permission.
     #[cfg(feature = "diagnostics")]
     fp_qualification: bool,
     stack_bottom: u64,
@@ -97,7 +97,7 @@ impl Processor {
         self.argument.processor.apic_id
     }
 
-    /// This is startup evidence, never runtime quiescence authority.
+    /// This is startup evidence, never runtime quiescence permission.
     pub(crate) fn observation(&self) -> &topology::Snapshot {
         assert_eq!(self.argument.status.load(Ordering::Acquire), READY);
         // SAFETY: the owning AP wrote this once before Release READY and never
@@ -111,7 +111,7 @@ impl Processor {
 
     pub(crate) fn descriptors(&self) -> interrupts::Observation {
         assert_eq!(self.argument.status.load(Ordering::Acquire), READY);
-        // SAFETY: one immutable publication before READY, retained for boot.
+        // SAFETY: one immutable publication before READY, kept for boot.
         unsafe { (&*self.argument.descriptors.get()).expect("ready AP descriptors") }
     }
 
@@ -155,7 +155,7 @@ impl Processor {
 }
 
 pub(crate) struct Executors {
-    /// BSP is deliberately absent: it already owns its local HostOwner.
+    /// BSP is absent: it already owns its local HostOwner.
     processors: Vec<Processor>,
 }
 
@@ -184,7 +184,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     // Its own GDT, IDT and stack: the low page is the next AP's.
     argument.status.store(ENTERED, Ordering::Release);
     let initialized = (|| {
-        // SAFETY: CPL0 on the actual selected AP, with private descriptors.
+        // SAFETY: CPL0 on the selected AP, with private descriptors.
         let observed =
             unsafe { firmware::observe() }.map_err(|_| "AP source-control capture refused")?;
         if !observed.matches(argument.processor) {
@@ -202,7 +202,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                 stela_engine::machine::mmu::placement::Placement::FiveLevel
             ))
             .map_err(|_| "AP native controls refused")?;
-        // The trampoline installs the BSP's already-qualified effective PAT;
+        // The trampoline installs the BSP's already-checked effective PAT;
         // The offline trampoline installed the complete validated BSP image.
         let source = topology::Snapshot {
             pat: argument.effective_pat,
@@ -231,7 +231,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         if argument.fp_qualification {
             host::fp_diagnostic::check(&mut owner.host())?;
         }
-        // Retain the actual installed private root/control state, not the
+        // Keep the installed private root/control state, not the
         // earlier loader root observed before Host initialization.
         let installed =
             // SAFETY: CPL0 on the selected AP, after its private descriptors were installed.
@@ -306,7 +306,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
 /// `capture` is the immutable loader-owned copy, validated before EBS. `sender`
 /// addresses the live local APIC (identity UC mapping or x2APIC), and `tsc_hz`
 /// is the calibrated source clock. No firmware call may follow. Keep all AP
-/// resources retained on delivery failure; no uncertain AP is admitted here.
+/// resources kept on delivery failure; no uncertain AP is admitted here.
 pub(crate) unsafe fn quiesce_firmware_aps(
     capture: &firmware::Capture,
     sender: &Apic,
@@ -359,7 +359,7 @@ pub(crate) unsafe fn quiesce_firmware_aps(
     for index in targets {
         let processor = source[index];
         let id = destination(index)?;
-        // SAFETY: source identity, actual BSP exclusion, full destination set
+        // SAFETY: source identity, BSP exclusion, full destination set
         // and source clock were checked before any effect. No SIPI is sent.
         unsafe { sender.init_only(id, tsc_hz) }.map_err(|cause| StartupFailure::FirmwareInit {
             processor_number: processor.processor_number,
@@ -384,7 +384,7 @@ pub(crate) unsafe fn quiesce_firmware_aps(
 /// owned and immutable as metadata. The caller already called native_smp::validate.
 /// The post-EBS loader already called quiesce_firmware_aps before reclaiming
 /// firmware boot-services RAM; INIT delivery is not an AP READY observation.
-/// No native guest execution is admitted merely by returning this startup set.
+/// No native guest execution is admitted by returning this startup set.
 pub(crate) unsafe fn start(
     handoff: &'static Handoff,
     capture: &'static firmware::Capture,
@@ -403,7 +403,7 @@ pub(crate) unsafe fn start(
     );
     let mut processors = Vec::with_capacity(cores - 1);
     let mut started: Vec<Starting> = Vec::with_capacity(cores - 1);
-    // SAFETY: CPL0, actual BSP; PAT exists under the validated native floor.
+    // SAFETY: CPL0, BSP; PAT exists under the validated native floor.
     let memory_source = unsafe { firmware::observe() }.map_err(|_| StartupFailure::Resources)?;
     let source_expected = topology::Snapshot {
         pat: memory_source.pat,
@@ -557,7 +557,7 @@ pub(crate) unsafe fn start(
         // has left the low page, and each installs its private host beside
         // the others while the BSP takes their TSC synchronization in turn.
         loop {
-            // A sealed hardware exception is an actual failed startup, not a
+            // A sealed hardware exception is a failed startup, not a
             // timeout or a synthetic READY. Return without reusing any owned
             // AP/low-page resource whose execution remains uncertain.
             if let Some(cause) =
@@ -642,10 +642,10 @@ fn serve(
                 } = started.swap_remove(index);
                 let installed = processor.observation();
                 let descriptors = processor.descriptors();
-                // This is the actual Acquire READY publication after high
-                // entry, private Host/context qualification and retained
+                // This is the Acquire READY publication after high
+                // entry, private Host/context validation and kept
                 // observations; no new success flag or runtime stopped-worker
-                // authority is inferred from the log record.
+                // permission is inferred from the log record.
                 crate::output::arguments(format_args!(
                     "NATIVE READY slot={slot} apic={destination:#x} cr3={:#x} cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} gdt={:#x} idt={:#x} gs={:#x}\n",
                     installed.cr3,

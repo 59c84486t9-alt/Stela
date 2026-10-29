@@ -117,7 +117,7 @@ impl Mouse {
             events.push(Input::Motion { dx, dy });
         }
         {
-            // +128 IntelliMouse detents cannot fit one Input; retain the sum.
+            // +128 IntelliMouse detents cannot fit one Input; keep the sum.
             if wheel == 128 {
                 events.push(Input::MouseWheel(127));
                 events.push(Input::MouseWheel(1));

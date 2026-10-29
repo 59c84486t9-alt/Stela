@@ -167,7 +167,7 @@ impl Capability {
     }
 }
 
-/// Actual command-return bytes. Optional fields absent from the version or
+/// Command-return bytes. Optional fields absent from the version or
 /// returned length remain None rather than being manufactured as zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectorStatus {

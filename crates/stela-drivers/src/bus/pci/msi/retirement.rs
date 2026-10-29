@@ -23,26 +23,26 @@ impl<C: MsiConfigSpace> DisabledMsiConfig<C> {
         Ok(self.owner.as_ref().ok_or(MsiError::Released)?.0.address)
     }
     /// Run exactly one scoped device-specific stop using the original config.
-    /// Its return value is retained verbatim, including an original stop error.
+    /// Its return value is held verbatim, including an original stop error.
     /// The attempt is latched before the closure can have any effects; neither
     /// an error nor unwinding authorizes a second uncertain reset/PM sequence.
     ///
     /// # Safety
-    /// Process/deferred context serializes every actual device/config user.
-    /// The callback performs only the actual supported terminal BM/reset/PM or
+    /// Process/deferred context serializes every device/config user.
+    /// The callback performs only the supported terminal BM/reset/PM or
     /// vendor-stop sequence, with bounded completion and original diagnostics.
     /// It must not replace, swap, move out, clone or duplicate the original C,
     /// retire/unmap its resources, or escape configuration/mapping ownership
     /// or raw views through the return value, captured state or other aliases.
     /// A scoped borrow alone does not prevent owned/raw escapes.
     /// It cannot re-enable MSI/MSI-X/INTx/BM, change BDF/identity/BAR assignment/root
-    /// routing, or perform save/restore that republishes delivery. An actual
+    /// routing, or perform save/restore that republishes delivery. A
     /// supported function reset may clear config while all original resources
-    /// remain retained; no later device/config operation may assume the old
+    /// remain held; no later device/config operation may assume the old
     /// running epoch. Callback/device sources cannot access invalidated BARs.
     /// Quiescence and posted-write/domain completion are proved independently;
     /// BM-clear or Transaction Pending alone is not that proof. All original
-    /// power/root/IRQ/DMA owners remain retained through failure and quarantine.
+    /// power/root/IRQ/DMA owners remain held through failure and quarantine.
     pub unsafe fn with_device_stop<T>(
         &mut self,
         stop: impl FnOnce(&mut C) -> T,
@@ -54,15 +54,15 @@ impl<C: MsiConfigSpace> DisabledMsiConfig<C> {
         self.stop_attempted = true;
         Ok(stop(owner.0.config()))
     }
-    /// Transfer the exact original owners without touching powered-down or
+    /// Transfer the original owners without touching powered-down or
     /// reset configuration space. This does not infer stop from scoped access.
     ///
     /// # Safety
-    /// The actual source and its DMA/posted writes are stopped/drained. The
+    /// The source and its DMA/posted writes are stopped/drained. The
     /// real registry has subsequently drained pending CPU vectors, callbacks
     /// and deferred/timer/reset users, and none can restart. Every mapping,
     /// cache, domain and IOTLB retirement obligation remains owned until its
-    /// actual completion. An out-of-band stop can establish these facts without
+    /// completion. An out-of-band stop can establish these facts without
     /// using with_device_stop; the presence of an attempt proves none of them.
     pub unsafe fn release_after_drain(&mut self) -> Result<Released<C>, MsiError> {
         self.owner.take().ok_or(MsiError::Released)

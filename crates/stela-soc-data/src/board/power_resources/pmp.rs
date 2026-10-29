@@ -83,7 +83,7 @@ mod tests {
     fn fixture() -> Vec<u8> {
         let mut records = [[0u8; PMGR_DEVICE]; 4];
         // Two physical domains, a virtual member and a non-PMP source. The
-        // canonical IDs deliberately differ from the grouping source byte.
+        // canonical IDs differ from the grouping source byte.
         for (index, (id, source)) in [(78u16, 2), (79, 2), (368, 2), (9, 0)]
             .into_iter()
             .enumerate()

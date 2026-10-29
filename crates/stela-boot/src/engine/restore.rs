@@ -5,11 +5,11 @@
 //! pieces on the USB's FAT32 partition. [`Mode::Install`] erases the stick
 //! SSD and installs recoveryOS without the macOS system image; macOS is
 //! installed from recoveryOS. [`Mode::Update`] (`--update-restore`) runs
-//! Apple's stock update. The opt-in, unqualified option study
+//! Apple's stock update. The opt-in, unchecked option study
 //! (`--restore-study`) reads an exact IPSW extent on an explicitly selected
 //! raw partition with the study's options ([`Mode::Study`]). Neither source
 //! is an ANS namespace or a pointer into translated memory. Live USB
-//! qualification and the complete intact SEP trust route remain research
+//! validation and the complete intact SEP trust route remain research
 //! requirements.
 use super::{
     bundle::{self, Bytes},
@@ -48,7 +48,7 @@ pub enum Mode {
     /// system image when the payload holds it ([`Route::Stock`]), else
     /// without ([`Route::Recovery`]).
     Install,
-    /// The original restore's explicit development-board policy: retain and
+    /// The original restore's explicit development-board policy: keep and
     /// report FDR failures, but allow restored to continue past them.
     DevelopmentInstall,
     /// The same, with the inventory's Update identity: restored_update
@@ -200,7 +200,7 @@ const READ_AHEAD_DEPTH: usize = 4;
 /// commands.
 const PREFETCH_CHUNKS: usize = 8;
 
-/// Native services retained for the whole restore session.
+/// Native services kept for the whole restore session.
 pub struct Services {
     pub signer: Option<stela_runtime::restore::tss::Signer>,
     pub fdr_storage: Option<Box<dyn BlockDevice>>,
@@ -208,7 +208,7 @@ pub struct Services {
 }
 
 /// libimobiledevice uses one 1 MiB buffer per direction. Keep the same finite
-/// bound while retaining bytes under either guest or host TCP backpressure.
+/// bound while keeping bytes under either guest or host TCP backpressure.
 const PROXY_BUFFER: usize = network::RELAY_BUFFER;
 const PROXY_READ: usize = 64 << 10;
 const PROXY_CONNECTIONS: usize = 4;

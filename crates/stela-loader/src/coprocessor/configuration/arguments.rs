@@ -1,7 +1,7 @@
-//! Embedded argument policy for a source-qualified initial native preparation.
+//! Embedded argument policy for a source-checked initial native preparation.
 //!
 //! The selected policy owner establishes that its complete callback/write graph
-//! retains the embedded record. This helper checks that original record and its
+//! keeps the embedded record. This helper checks that original record and its
 //! consumer bounds; it does not infer override absence from empty bytes/hashes.
 use super::{Action, Field, Provenance, source_record};
 use crate::coprocessor::Staged;
@@ -22,7 +22,7 @@ impl Staged {
     /// Firmware 0xdd68 copies the original count/data and 0x13be8 bounds length to
     /// 1024. 0xd99c rejects option widths >= that length. The selected initial
     /// native format 1 producers do not replace bArg; an alternate callback or
-    /// override policy needs its own qualification before choosing this action.
+    /// override policy needs its own validation before choosing this action.
     pub fn embedded_arguments(&self, selected_provider: Provenance) -> Result<Embedded> {
         selected_provider.validate()?;
         let (_, bytes) = source_record(self, ARGUMENTS)?;

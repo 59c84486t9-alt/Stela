@@ -1,7 +1,7 @@
 //! Linear ownership at native worker boundaries. This is the control-plane
 //! protocol, not an AP transport or a replacement for recovering a native exit.
 //! Only Machine preparation can create a native loan, and only Machine recovery
-//! can consume its actual returned payload. A stop ACK alone has no such power.
+//! can consume its returned payload. A stop ACK alone has no such power.
 use super::Host;
 use alloc::{sync::Arc, vec::Vec};
 
@@ -17,7 +17,7 @@ pub struct WorkerBinding {
     /// physical worker and the ordering of the publication roster.
     pub pe: usize,
     /// Fixed physical owner. A nonzero guest boot PE may belong to BSP worker 0;
-    /// every owner must still publish and execute on its exact qualified Host.
+    /// every owner must still publish and execute on its exact checked Host.
     pub worker: WorkerId,
 }
 
@@ -69,7 +69,7 @@ struct Slot {
     stop: Option<(u64, StopPhase)>,
     services: Option<Arc<service::ServiceIdentity>>,
     // At most one closed allocation for this fixed physical owner. It grants
-    // no service/stop authority and is reusable only after unique ownership.
+    // no service/stop permission and is reusable only after unique ownership.
     closed_services: Option<Arc<service::ServiceIdentity>>,
 }
 
@@ -90,8 +90,8 @@ enum OwnerState {
     Held { generation: u64, run: Option<u64> },
 }
 
-/// One authority per actual executor. The board transfers it to the assigned
-/// physical worker and retains it there. It cannot be cloned or substituted by
+/// One permission per executor. The board transfers it to the assigned
+/// physical worker and keeps it there. It cannot be cloned or substituted by
 /// a numeric worker ID. Obtaining that worker's Host must still enforce its
 /// physical-owner/GS check; this protocol never makes Host or Cpu Send.
 #[derive(Debug)]
@@ -122,14 +122,14 @@ pub(in crate::machine::engine) mod sealed {
 }
 
 /// A complete prepared native frame. Implementations are sealed to the engine;
-/// they must retain every native-reachable service/code pin and perform actual
+/// they must keep every native-reachable service/code pin and perform
 /// Host execution and exit capture. Cpu and Host are never payload members.
 pub trait NativeFrame: sealed::NativeFrame + Send {
     type Returned: Send;
     fn execute(self, host: &mut dyn Host) -> Self::Returned;
 }
 
-/// The actual native frame and all reachable services/code pins travel with
+/// The native frame and all reachable services/code pins travel with
 /// this loan. Dropping a loan or its return never marks a worker recovered.
 #[derive(Debug)]
 #[must_use = "return the actual native frame to Machine recovery"]
@@ -148,7 +148,7 @@ pub struct NativeReturned<T> {
 }
 
 /// A refusal returns the still-owned payload/token, rather than losing the
-/// actual frame or letting a caller replace it with a parked snapshot.
+/// frame or letting a caller replace it with a parked snapshot.
 #[derive(Debug)]
 pub struct WithPayload<T, E = PublicationError> {
     pub error: E,
@@ -187,16 +187,16 @@ pub struct NativeStopReceipt {
     command: NativeStopCommand,
 }
 
-/// A whole cohort is held only after every actual payload has been recovered
-/// and every actual native owner has invalidated its dispatch state. Retain
-/// this linear release authority until the controller's final ACK commit.
+/// A whole cohort is held only after every payload has been recovered
+/// and every native owner has invalidated its dispatch state. Keep
+/// this linear release permission until the controller's final ACK commit.
 #[derive(Debug)]
 #[must_use = "release the same stopped cohort only after controller ACK"]
 pub struct StoppedWorkers {
     request: StopRequest,
 }
 
-/// Linear authority to rejoin one selectively released execution round. Every
+/// Linear permission to rejoin one selectively released execution round. Every
 /// omitted owner remains physically held in the original stopped generation.
 #[derive(Debug)]
 #[must_use = "recover and invalidate every released owner before rejoining"]
@@ -312,7 +312,7 @@ impl WorkerPublications {
         }
     }
 
-    /// Machine alone supplies the complete actual frame/service/code loan.
+    /// Machine alone supplies the complete frame/service/code loan.
     /// No run can start until the previous return and any stop release finished.
     #[cfg_attr(
         not(test),
@@ -356,9 +356,9 @@ impl WorkerPublications {
         }
     }
 
-    /// Called only after Acquire of the actual AP publication. The trusted
+    /// Called only after Acquire of the AP publication. The trusted
     /// Machine callback must complete precise fault/retirement/frame recovery.
-    /// A failed callback retains the real return and blocks all stop credit.
+    /// A failed callback keeps the real return and blocks all stop credit.
     pub(in crate::machine::engine) fn recover<T, E>(
         &mut self,
         mut returned: NativeReturned<T>,
@@ -519,7 +519,7 @@ impl WorkerPublications {
 
     /// The first join borrows the complete Cpu/peers view, so all workers
     /// must be held in the same generation, including unaffected PEs. A later
-    /// targeted-only join requires disjoint actual per-PE owner borrows.
+    /// targeted-only join requires disjoint per-PE owner borrows.
     pub(in crate::machine::engine) fn require_stopped(
         &self,
         count: usize,
@@ -559,7 +559,7 @@ impl WorkerPublications {
     }
 
     /// Call after dropping the successful ProcessorWrite lease, after ACK.
-    /// Dispatch remains blocked until each actual owner consumes its release.
+    /// Dispatch remains blocked until each owner consumes its release.
     pub fn release(
         &mut self,
         held: StoppedWorkers,
@@ -593,8 +593,8 @@ impl WorkerPublications {
         Ok(releases)
     }
 
-    /// Release only owners with actual prepared native frames. The complete
-    /// stopped request remains retained; omitted owners never lose their hold.
+    /// Release only owners with prepared native frames. The complete
+    /// stopped request remains held; omitted owners never lose their hold.
     pub fn release_for_run(
         &mut self,
         held: StoppedWorkers,
@@ -654,8 +654,8 @@ impl WorkerPublications {
         ))
     }
 
-    /// Every released owner must have supplied a new, actually recovered native
-    /// return. Retained idle owners keep their original physical Held receipt;
+    /// Every released owner must have supplied a new, recovered native
+    /// return. Idle owners keep their original physical Held receipt;
     /// only the released owners receive fresh fence/invalidation commands.
     pub fn request_rejoin(
         &mut self,
@@ -706,8 +706,8 @@ impl WorkerPublications {
     }
 
     /// Reconstitute the original complete all-writer hold only after all new
-    /// actual-owner invalidation receipts were accepted. No receipt is rebased
-    /// and no guest power/park state substitutes for physical owner authority.
+    /// owner invalidation receipts were accepted. No receipt is rebased
+    /// and no guest power/park state substitutes for physical owner permission.
     pub fn rejoin(
         &mut self,
         running: RunningCohort,
@@ -858,8 +858,8 @@ impl WorkerOwner {
         })
     }
 
-    /// This effect runs on the executor's actual Host after its frame returned.
-    /// It qualifies dispatch invalidation only; it does not replace complete
+    /// This effect runs on the executor's Host after its frame returned.
+    /// It checks dispatch invalidation only; it does not replace complete
     /// Machine cache/service/regime settlement or imply a hardware power state.
     pub fn invalidate(
         &mut self,
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     // Only this test double, not a production native lane, is implemented here.
-    // Its actual borrowed state and exit cannot be replaced by an ACK integer.
+    // Its borrowed state and exit cannot be replaced by an ACK integer.
     #[derive(Debug)]
     struct FrameLoan<'a> {
         state: &'a mut GuestState,
@@ -1184,7 +1184,7 @@ mod tests {
             hosts.iter().map(|host| host.calls).collect::<Vec<_>>(),
             [2, 2]
         );
-        // Initial publication + first full stop + only two actual runs per PE.
+        // Initial publication + first full stop + only two runs per PE.
         assert_eq!(
             hosts
                 .iter()
@@ -1239,8 +1239,8 @@ mod tests {
             .unwrap();
         let returned = owners[1].execute(loan, &mut hosts[1]).unwrap();
         publications.recover(returned, |_| Ok::<_, ()>(())).unwrap();
-        // Corrupt only the retained request, never manufacture a Host receipt.
-        // The idle owner's actual old-generation hold cannot be promoted.
+        // Corrupt only the request, never manufacture a Host receipt.
+        // The idle owner's old-generation hold cannot be promoted.
         let generation = running.request.generation;
         running.request.generation += 1;
         assert_eq!(
@@ -1580,7 +1580,7 @@ mod tests {
         let held = hold(&mut publications, &mut owners, &mut hosts, request);
         publications.require_stopped(2, &[0, 1]).unwrap();
         assert_eq!(hosts.map(|host| host.invalidations), [2, 2]);
-        drop(held); // Losing the release authority keeps the safe stop held.
+        drop(held); // Losing the release permission keeps the safe stop held.
         assert_eq!(
             publications.dispatch(0, 0).unwrap_err().error,
             PublicationError::StopBusy
@@ -1877,7 +1877,7 @@ mod tests {
         }];
         let settled = machine.processor_write().apply(&paused).unwrap();
         assert_eq!(settled.paused(0), Some(true));
-        // This exclusive actual-owner borrow lasts through the infallible ACK.
+        // This exclusive owner borrow lasts through the infallible ACK.
         drop(settled);
         let publications = machine.native_publication.as_mut().unwrap();
         for release in publications.release(held).unwrap() {
@@ -1922,7 +1922,7 @@ mod tests {
                         concurrent_entry: Some(barrier),
                         ..LocalHost::default()
                     };
-                    // The barrier is inside actual Host::execute, so both
+                    // The barrier is inside Host::execute, so both
                     // disjoint frames must enter before either can return.
                     let returned = owner.execute(loan, &mut host).unwrap();
                     sender.send((owner, returned, host)).unwrap();

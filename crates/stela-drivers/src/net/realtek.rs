@@ -18,7 +18,7 @@
 //! 8111E/E-VL/F), 38 (RTL8411), 40/42 (8168G/8111G), 44 (RTL8411B) and
 //! 46 (8168H/8111H and 8168M), 51 (8168EP/8111EP) and 52 (8168FP/8117).
 //! PHY IDs `001c:c800` (internal FE/GE) and `001c:c912` (RTL8211B) are accepted only
-//! with actual copper-gigabit capabilities. Versions 25/26 require their exact
+//! with copper-gigabit capabilities. Versions 25/26 require their exact
 //! `rtl_nic/rtl8168d-1.fw`/`rtl_nic/rtl8168d-2.fw` resource and matching PHY
 //! firmware-readiness sentinel; 34 requires `rtl_nic/rtl8168e-3.fw`.
 //! Versions 32/33/35/36/38/40/42/44/46 require exact revision firmware and the
@@ -28,7 +28,7 @@
 //! never embedded or copied.
 //!
 //! MAC40/42/44 use checked PHY/MAC OCP, explicit shared FIFO ownership, and
-//! their exact PHY/start paths; MAC44 retains the donor's licensed RX fix.
+//! their exact PHY/start paths; MAC44 keeps the donor's licensed RX fix.
 //! MAC46 adds real ADC-bias calibration and saw-count timer programming;
 //! EEE advertisement and MAC TX-LPI are cleared, including on link-up.
 //! MAC51/52 use the exact EP/FP OOB ERI namespace and bounded CMAC ownership.
@@ -37,13 +37,13 @@
 //! MAC61/63/64/65/66/70 (RTL8125/8126) require a checked BAR through 0x604a, their exact
 //! revision firmware, a validated internal NBASE PHY and real 2.5G
 //! capability. Their distinct FIFO/IRQ/doorbell/RX/EPHY and legacy descriptor
-//! setup precede DMA. Carrier uses actual polled PHY BMCR/BMSR with a 10 ms
-//! cache; EEE is disabled; advertising is capped to actual PHY and MAC capability.
+//! setup precede DMA. Carrier uses polled PHY BMCR/BMSR with a 10 ms
+//! cache; EEE is disabled; advertising is capped to PHY and MAC capability.
 //! MAC28/31 use the DP MDIO gate and bounded initial DASH driver-start
 //! notification/acknowledgement. Their integrated RTL8211B identity erratum
-//! is an observable classification correction; MDIO returns actual values.
+//! is an observable classification correction; MDIO returns values.
 //! Failed DP command ports require reset/reinitialization, without retries.
-//! RTL9151AS retains the raw extended XID, verifies the larger 0x60b4 aperture,
+//! RTL9151AS keeps the raw extended XID, verifies the larger 0x60b4 aperture,
 //! and binds firmware to the full primary/extended identity; unlisted values fail.
 //! Versions 18 and later with a completion signal in the handoff send it
 //! from one MSI-X or MSI vector when a frame arrives or the link changes,
@@ -51,7 +51,7 @@
 //! RTL8139, 100Mbps-only chips, ancient unsupported version 01, external PHY
 //! variants, SFP/TBI, DASH stop/release and power lifecycle, suspend/resume,
 //! and jumbo frames are
-//! outside this slice. This is not a whole-family hardware qualification.
+//! outside this slice. This is not a whole-family hardware validation.
 //!
 //! DMA buffers live until reboot even on startup/transmit errors. OWN is the
 //! sole ownership transfer; timed-out transmit slots are never overwritten.
@@ -147,7 +147,7 @@ pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == 0x10ec
         && revision::pci_candidate(function.device)
@@ -247,8 +247,8 @@ impl Realtek {
     /// The image is borrowed only for this call; its allocation is never copied.
     ///
     /// # Safety
-    /// Caller exclusively owns the actual controller and its segment's PCI
-    /// configuration. Handoff ECAM/MMIO and DMA resources must be actual mapped
+    /// Caller exclusively owns the controller and its segment's PCI
+    /// configuration. Handoff ECAM/MMIO and DMA resources must be mapped
     /// uncached/device-accessible machine ranges. Firmware and other drivers
     /// must not access them, including during BAR sizing and upstream ASPM edits.
     pub unsafe fn new(
@@ -526,7 +526,7 @@ fn detect_revision<R: Registers>(
         }
         return Ok(revision);
     }
-    // The actual first BAR must cover and map the extended word before I/O.
+    // The first BAR must cover and map the extended word before I/O.
     require_range(EXTENDED_REGISTER_BYTES)?;
     let raw = registers.read32(TX_CONFIG_V2);
     if raw == u32::MAX {
@@ -649,7 +649,7 @@ fn publish<R: Registers, T: Timer>(
         r.read8(COMMAND);
         if revision.version == 34 {
             // Linux rtl_rar_exgmac_set: both EXGMAC address representations,
-            // including reserved bytes which may retain stale firmware state.
+            // including reserved bytes which may keep stale firmware state.
             hw.eri_write(0xe0, 15, low)?;
             hw.eri_write(0xe4, 15, high)?;
             hw.eri_write(

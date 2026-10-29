@@ -40,7 +40,7 @@ impl core::fmt::Display for SharedBindingError {
 }
 impl core::error::Error for SharedBindingError {}
 
-/// One group/system, retained by its facades and returned immutable snapshot.
+/// One group/system, kept by its facades and returned immutable snapshot.
 #[cfg_attr(
     not(host_memory),
     expect(
@@ -501,7 +501,7 @@ pub(crate) mod tests {
         let ptr = backing
             .host_pointer(offset, bytes, AccessKind::Read)
             .unwrap();
-        // SAFETY: real retained pinned Normal-WB storage; exact baseline-fitting part.
+        // SAFETY: real kept pinned Normal-WB storage; exact baseline-fitting part.
         unsafe { crate::memory::access::read_part(ptr.as_ptr(), bytes, TargetCpu::Baseline) }
             .unwrap()
     }
@@ -900,7 +900,7 @@ pub(crate) mod tests {
             memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 73), &mut [])
         }
         .unwrap();
-        // SAFETY: independent storage, deliberately with the same ASID.
+        // SAFETY: independent storage, with the same ASID.
         let other_domain = unsafe {
             other.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 73), &mut [])
         }

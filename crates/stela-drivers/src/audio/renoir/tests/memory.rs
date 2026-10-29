@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained page backing and allocation for the synchronous model.
+//! Page backing and allocation for the synchronous model.
 use super::*;
 
 // SAFETY: uniquely owned aligned CPU storage with no exposed safe mutable
@@ -9,11 +9,11 @@ unsafe impl Send for Backing {}
 // SAFETY: same stable UnsafeCell storage, raw volatile access only.
 unsafe impl Sync for Backing {}
 
-// SAFETY: actual owned CPU RAM, immutable symbolic non-contiguous physical
+// SAFETY: owned CPU RAM, immutable symbolic non-contiguous physical
 // labels used only by the model domain, never dereferenced as CPU addresses.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
-        // SAFETY: stable retained allocation, UnsafeCell permits DMA writes.
+        // SAFETY: stable allocation, UnsafeCell permits DMA writes.
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
     }
     fn physical_pages(&self) -> &[u64] {

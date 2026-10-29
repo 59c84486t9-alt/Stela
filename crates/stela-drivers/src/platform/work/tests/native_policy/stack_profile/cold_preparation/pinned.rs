@@ -1,5 +1,5 @@
-//! Real mmap allocation owners retained by opaque pins; PA labels are hosted
-//! model metadata only and never qualify native physical/cache/device access.
+//! Real mmap allocation owners kept by opaque pins; PA labels are hosted
+//! model metadata only and never check native physical/cache/device access.
 use super::*;
 use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageBacking, PinnedPages};
 use core::{ops::Range, ptr::NonNull};
@@ -34,8 +34,8 @@ struct PinScene {
 }
 impl PinScene {
     fn runtime(&self) -> Pin<&Runtime<64>> {
-        // SAFETY: setup retains this exact pinned Executor until every callback
-        // joins or the observed fatal path intentionally retains all ownership.
+        // SAFETY: setup keeps this exact pinned Executor until every callback
+        // joins or the observed fatal path keeps all ownership.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<64>))
         }
@@ -69,9 +69,9 @@ struct Source {
     scene: Arc<PinScene>,
     index: usize,
 }
-// SAFETY: this wrapper owns the original actual mmap object, not just bounds
+// SAFETY: this wrapper owns the original mmap object, not just bounds
 // or a lifetime token. Its Arc keeps both real PROT_NONE guards and RAM alive.
-// Exported page views share THAT actual allocation owner until exact release.
+// Exported page views share THAT allocation owner until exact release.
 unsafe impl StackBacking for Source {
     fn bounds(&self) -> Range<usize> {
         self.actual.bounds()
@@ -142,8 +142,8 @@ impl Drop for View {
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: CPU-model view retains the SAME real exclusively owned mmap object;
-// its actual usable bytes are mapped/zeroed and guards excluded. Immutable PA
+// SAFETY: CPU-model view keeps the SAME real exclusively owned mmap object;
+// its usable bytes are mapped/zeroed and guards excluded. Immutable PA
 // labels/granule metadata are symbolic and never used for DMA/native evidence.
 // Dropping the view cannot munmap while Runtime still holds the real owner.
 unsafe impl PageBacking for View {
@@ -187,7 +187,7 @@ fn mappings(f: &Arc<PinScene>, dropped: &Arc<AtomicUsize>) -> Vec<Stack> {
         .collect()
 }
 unsafe extern "C" fn marker(pointer: *mut c_void) {
-    // SAFETY: queue retains this exact Scene/code until real completion.
+    // SAFETY: queue keeps this exact Scene/code until real completion.
     let f = unsafe { &*pointer.cast::<PinScene>() };
     f.marked.fetch_add(1, Ordering::Relaxed);
     if f.case == Case::Park {
@@ -198,7 +198,7 @@ unsafe extern "C" fn marker(pointer: *mut c_void) {
     }
 }
 unsafe extern "C" fn creator(pointer: *mut c_void) {
-    // SAFETY: retained Scene, actual Foreground frame and all owners survive join.
+    // SAFETY: Scene, Foreground frame and all owners survive join.
     let f = unsafe { &*pointer.cast::<PinScene>() };
     let r = f.runtime();
     let authority = f.authority();
@@ -295,8 +295,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     assert_eq!(r.owned_escrows.get(), 0);
     assert_eq!(f.pins_dropped.load(Ordering::Relaxed), 1);
     if f.case == Case::Good {
-        // SAFETY: original cold frame was actually reseeded/cancelled; this
-        // finite marker fits the real kernel-sized owned worker and stays retained.
+        // SAFETY: original cold frame was reseeded/cancelled; this
+        // finite marker fits the real kernel-sized owned worker and stays held.
         unsafe {
             r.queue
                 .execute_general_with_requirement(kernel(), marker, pointer)
@@ -330,7 +330,7 @@ fn run(case: Case) {
         marked: AtomicUsize::new(0),
         binding: Mutex::new(None),
     });
-    // SAFETY: actual same-thread fixture, code and real mmap owners remain retained.
+    // SAFETY: same-thread fixture, code and real mmap owners remain held.
     let queue = unsafe { Queue::<64>::new(cpu.clone(), f.clone()) }.unwrap();
     let executor =
         Executor::new_hosted_profile_for_test(queue, mappings(&f, &dropped), policy(), profile())
@@ -340,15 +340,15 @@ fn run(case: Case) {
         .store(r.get_ref() as *const Runtime<64> as u64, Ordering::Release);
     let pointer = Arc::as_ptr(&f).cast_mut().cast();
     if case == Case::Park {
-        // SAFETY: queue-retained ordinary peer wakes only the actual bound creator.
+        // SAFETY: queue-kept ordinary peer wakes only the bound creator.
         unsafe { r.queue.execute(Kind::General, marker, pointer) }.unwrap();
     }
-    // SAFETY: exact retained Foreground callback and all mapping owners survive join.
+    // SAFETY: exact Foreground callback and all mapping owners survive join.
     unsafe { r.call_foreground(creator, pointer, cpu.ticks() + 1_000_000_000) }.unwrap();
     r.drain(cpu.ticks() + 1_000_000_000).unwrap();
     assert_eq!(f.entered.load(Ordering::Acquire), 0);
     if let Some((binding, wake)) = f.binding.lock().unwrap().take() {
-        // SAFETY: actual callbacks completed; all external fixture producers stopped.
+        // SAFETY: callbacks completed; all external fixture producers stopped.
         drop(unsafe { r.detach_binding(wake.context_id()) }.unwrap());
         drop(binding);
         drop(wake);
@@ -364,7 +364,7 @@ fn run(case: Case) {
     );
     r.queue.close().unwrap();
     // SAFETY: no device/IRQ/other producer exists, frames joined and binding detached;
-    // actual pin release completed under fresh authority. Retained backing is still valid.
+    // pin release completed under fresh permission. Backing is still valid.
     unsafe { r.retire() }.unwrap();
     drop(executor);
     assert_eq!(

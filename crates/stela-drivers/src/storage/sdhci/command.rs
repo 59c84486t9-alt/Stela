@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Actual command, response, FIFO and ADMA2 completion; no inferred DMA stop.
+//! Command, response, FIFO and ADMA2 completion; no inferred DMA stop.
 use super::*;
 
 pub(super) use crate::storage::mmc::wire::*;
@@ -108,7 +108,7 @@ impl Engine {
             if dma {
                 if let Err(error) = self.registers.dma_ready() {
                     // An unacknowledged native PCI grant cannot be recovered
-                    // by an SD command/data reset. Retain its original epoch.
+                    // by an SD command/data reset. Keep its original epoch.
                     self.fault = Some(error.clone());
                     return Err(error);
                 }
@@ -123,7 +123,7 @@ impl Engine {
                     );
                 } else {
                     control |= if wide { ADMA64 } else { ADMA32 };
-                    // One aligned descriptor covers the retained contiguous bounce
+                    // One aligned descriptor covers the contiguous bounce
                     // range. A zero16-bit length encodes exactly65536bytes.
                     self.descriptors.write(0, 0x23u16); // VALID | END | TRAN
                     self.descriptors.write(2, data.bytes as u16);
@@ -218,7 +218,7 @@ impl Engine {
             self.registers.write32(INTERRUPT, DATA_END | DMA_END);
             fence(Ordering::Acquire);
         } else if response == Response::Busy {
-            // R1b completion requires actual busy release, including DAT0.
+            // R1b completion requires busy release, including DAT0.
             self.wait_interrupt(DATA_END, DATA_US)?;
             self.registers.write32(INTERRUPT, DATA_END);
             if self.registers.read32(PRESENT) & (INHIBIT_DATA | DATA0) != DATA0 {

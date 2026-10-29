@@ -1,4 +1,4 @@
-//! GL9767 native retained-configuration, ordinary SD and failure regressions.
+//! GL9767 native kept-configuration, ordinary SD and failure regressions.
 use super::*;
 use crate::{bus::dma::RegionAllocator, storage::sdhci::model::*};
 use alloc::{collections::BTreeMap, vec};
@@ -328,7 +328,7 @@ fn port() -> (Port67, Rc<RefCell<Hardware>>, Rc<RefCell<State>>) {
 }
 fn initialize_port(p: &mut Port67) -> Result<(), BlockError> {
     // Distinct MMIO peer shares only the original card register namespace;
-    // the actual original Function is passed to the production initialization.
+    // the original Function is passed to the production initialization.
     struct Mmio(Rc<RefCell<Hardware>>, Rc<RefCell<State>>);
     impl Registers for Mmio {
         fn read8(&mut self, a: usize) -> u8 {
@@ -378,7 +378,7 @@ fn host(
         let mut c = card.borrow_mut();
         c.caps2 = CAP_SDR50 | CAP_SDR104;
         c.uhs_functions = 0x1f;
-        c.scr[2] = 0x80; // Actual card declares SD3 before requesting S18R/UHS.
+        c.scr[2] = 0x80; // Card declares SD3 before requesting S18R/UHS.
         c.max_current = 200;
     }
     if adma {
@@ -438,7 +438,7 @@ fn native_gl9767_source_phy_reset_debounce_pio_and_shutdown_use_original_config(
 fn native_gl9767_uhs_clock_negotiation_and_v4_dma_have_real_payloads() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: retained model RAM backs every descriptor and actual payload transfer.
+    // SAFETY: model RAM backs every descriptor and payload transfer.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, state) = host(&mut dma, true, true);
     let mut disk = host.poll().unwrap().unwrap();
@@ -483,7 +483,7 @@ fn native_gl9767_active_sd_express_or_refused_pci_reset_never_starts_sd_commands
 fn native_gl9767_observed_removal_changes_debounce_and_fences_every_old_alias() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: independent removable-card model retains all original buffers.
+    // SAFETY: independent removable-card model keeps all original buffers.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, state) = host(&mut dma, false, false);
     let mut disk = host.poll().unwrap().unwrap();
@@ -522,7 +522,7 @@ fn native_gl9767_pio_flush_and_reset_reject_express_or_lost_power_decode_without
         for reset in [false, true] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: revoked original owner retains every descriptor and payload range.
+            // SAFETY: revoked original owner keeps every descriptor and payload range.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut host, card, state) = host(&mut dma, false, false);
             let mut disk = host.poll().unwrap().unwrap();
@@ -559,7 +559,7 @@ fn native_gl9767_one_ocp_latch_at_command_clear_contains_power_once_and_preserve
     for failure in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all original RAM remains retained after permanent overcurrent fencing.
+        // SAFETY: all original RAM remains held after permanent overcurrent fencing.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut host, card, state) = host(&mut dma, false, false);
         let mut disk = host.poll().unwrap().unwrap();
@@ -587,7 +587,7 @@ fn native_gl9767_one_ocp_latch_at_command_clear_contains_power_once_and_preserve
 fn native_gl9767_absent_card_debounce_never_accepts_allones_after_effect_readback() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: vanished-controller admission retains its original model RAM and aliases.
+    // SAFETY: vanished-controller admission keeps its original model RAM and aliases.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, state) = host(&mut dma, false, false);
     let mut disk = host.poll().unwrap().unwrap();
@@ -612,7 +612,7 @@ fn native_gl9767_absent_card_debounce_never_accepts_allones_after_effect_readbac
 fn native_gl9767_ocp_primary_survives_secondary_power_authority_loss_without_stale_mmio() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the lost native power epoch retains every original model DMA allocation.
+    // SAFETY: the lost native power epoch keeps every original model DMA allocation.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut host, card, state) = host(&mut dma, false, false);
     let mut disk = host.poll().unwrap().unwrap();
@@ -724,7 +724,7 @@ fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_
             "A" => {
                 // The unchanged donor aliases PCI's int status with the out
                 // register value: returnstatus0 makes its condition succeed.
-                // Stela requires the actual register ACK and refuses poll6.
+                // Stela requires the register ACK and refuses poll6.
                 assert_eq!((number(2), number(3)), (1, 1), "donor status alias {line}");
                 state.borrow_mut().reset_ack_poll = Some(number(1) as usize);
                 let result = initialize_port(&mut port);

@@ -24,8 +24,8 @@ fn preassociation_denial_and_guarded_retry() {
         state.auth_hardware.set(hardware);
         protection.selected.set(!hardware);
         assert!(
-            // SAFETY: The original scan, request and DMA backing remain retained. One
-            // hardware/OS policy factor is deliberately denied; acquisition must
+            // SAFETY: The original scan, request and DMA backing remain held. One
+            // hardware/OS policy factor is denied; acquisition must
             // reject before publishing authentication or issuing a new DMA command.
             unsafe {
                 driver.join_modern_pmf(
@@ -61,7 +61,7 @@ fn preassociation_denial_and_guarded_retry() {
         protection.selected.set(true);
         // SAFETY: Both policy factors were restored for the same original observation
         // and native owner. The rejected attempt published no request; retry is
-        // serialized by fresh model leases and retains all DMA backing.
+        // serialized by fresh model leases and keeps all DMA backing.
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
@@ -96,7 +96,7 @@ fn pending_publication_guard_revision() {
         let (mut driver, model, join, observed, mut owner, state, protection) = preparing();
         // SAFETY: The initial request uses its original observation and native
         // backing before any revision change. Both guards serialize publication and
-        // retain pending frame DMA for the later revocation checks.
+        // keep pending frame DMA for the later revocation checks.
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
@@ -144,7 +144,7 @@ fn pending_publication_guard_revision() {
         let (mut foreign, foreign_state, _) = authority_pmf(observed, &join, &model);
         assert!(
             // SAFETY: Both model owners and the pending DMA remain live. This newly
-            // branded owner is intentionally foreign despite matching context values;
+            // branded owner is foreign despite matching context values;
             // authentication must reject it before altering the original ticket.
             unsafe {
                 driver.poll_pmf_authentication(
@@ -205,8 +205,8 @@ fn authentication_retry_tickets() {
     let first = driver.station().pmf_authentication().unwrap().0;
     finish_tx(&model);
     // SAFETY: The original authentication TX completed through the synchronous device
-    // peer, and its DMA owner remains retained until release. Current guards qualify
-    // this exact owner and pending ticket.
+    // peer, and its DMA owner remains held until release. Current guards check
+    // this owner and pending ticket.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,
@@ -234,8 +234,8 @@ fn authentication_retry_tickets() {
     assert_eq!(first.epoch(), retried.epoch());
     assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
     // SAFETY: The retried authentication TX completed through the same synchronous
-    // peer. Its ticket and native-memory owner remain retained while fresh leases
-    // qualify completion and later release.
+    // peer. Its ticket and native-memory owner remain held while fresh leases
+    // check completion and later release.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,
@@ -247,8 +247,8 @@ fn authentication_retry_tickets() {
     .unwrap();
     driver.poll_released().unwrap();
     incoming(&model, &response(0xb0, &[0, 0, 2, 0, 0, 0]), None, false);
-    // SAFETY: The injected authentication response is backed by the retained RX queue
-    // and current retry context. Fresh hardware/OS guards qualify it before
+    // SAFETY: The injected authentication response is backed by the RX queue
+    // and current retry context. Fresh hardware/OS guards check it before
     // publishing the association ticket and its DMA.
     unsafe {
         driver.poll_pmf_authentication(

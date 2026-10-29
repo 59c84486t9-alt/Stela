@@ -12,7 +12,7 @@
 //! Memory operations stage a complete transfer before any register or memory
 //! effect. M1 pair transfers outside 128-byte alignment raise an alignment
 //! fault before any memory access, as observed natively. Later-generation
-//! unaligned multi-row transfers remain outside the qualified domain.
+//! unaligned multi-row transfers remain outside the checked domain.
 mod extract;
 mod float;
 mod fused;
@@ -43,7 +43,7 @@ pub trait AmxMemory {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AmxError {
     Memory(MemoryFault),
-    /// A source-qualified transfer alignment fault, before any memory access.
+    /// A source-checked transfer alignment fault, before any memory access.
     /// Native M1 reports ISV=0: the width is diagnostic, not an ISS SAS field.
     Alignment {
         address: u64,
@@ -73,7 +73,7 @@ pub fn execute(
 
 /// Apply an operation using the declared semantic generation. All submodes
 /// follow that generation of the pinned reference, including source-defined
-/// unchanged-state modes. `execute` retains the existing M2 contract.
+/// unchanged-state modes. `execute` keeps the existing M2 contract.
 pub fn execute_for(
     generation: Generation,
     registers: &mut AmxRegisters,

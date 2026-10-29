@@ -151,7 +151,7 @@ impl PaBits {
         IPS_PA_BITS[ips as usize]
     }
 }
-/// Actual CPU availability plus its selected TG0/TG1 fallback. Every value must
+/// CPU availability plus its selected TG0/TG1 fallback. Every value must
 /// come from the CPU owner; no default/reset or firmware inference is supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GranuleSupport {

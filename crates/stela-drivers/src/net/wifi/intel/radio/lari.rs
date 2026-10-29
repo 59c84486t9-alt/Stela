@@ -3,7 +3,7 @@
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Pure source BIOS LARI/extension wire preparation, not a BIOS observation,
-//! trusted source selector, actual command completion or regulatory authority.
+//! trusted source selector, command completion or regulatory permission.
 use super::super::{command::Id, firmware::Firmware};
 use alloc::vec::Vec;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,7 @@ pub struct Value {
     pub source: Source,
     pub revision: u8,
 }
-/// Unavailable means the actual qualified BIOS selection was exhausted;
+/// Unavailable means the checked BIOS selection was exhausted;
 /// NotObserved must not be converted to it by missing capture/AML support.
 /// These public pure inputs themselves prove neither condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,7 +149,7 @@ impl Plan {
             words[8] = value.value;
         }
         // Exact donor predicate includes fields beyond older payload prefixes.
-        // Retain the complete semantic words even when only that prefix sends.
+        // Keep the complete semantic words even when only that prefix sends.
         let change = words.iter().any(|v| *v != 0).then(|| {
             words
                 .iter()
@@ -380,8 +380,8 @@ mod tests {
             Plan::prepare(&fw, 0, unavailable()),
             Err(Error::ExtensionVersion(2))
         );
-        // Exact source predicate can send an old all-zero prefix when only a
-        // later semantic field is nonzero; retain that distinction explicitly.
+        // Source predicate can send an old all-zero prefix when only a
+        // later semantic field is nonzero; keep that distinction explicitly.
         let b = firmware(Some(1), 0, 0);
         let fw = Firmware::parse(&b).unwrap();
         let mut inputs = unavailable();

@@ -298,7 +298,7 @@ pub(in crate::x86_64) fn emit(
             target,
         );
         Host::And.register(code, VALUE, RIGHT, target);
-        // The one-leaf raw base has no FP core call, even with retained enables.
+        // The one-leaf raw base has no FP core call, even with kept enables.
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, 0, VALUE, target);
     } else {
         rounding_control(code);

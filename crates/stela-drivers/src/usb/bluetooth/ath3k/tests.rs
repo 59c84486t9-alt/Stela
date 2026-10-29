@@ -106,7 +106,7 @@ impl Io for Model {
     }
 }
 fn device(kind: Kind, revision: u16) -> Device {
-    // Intentionally raw vendor interface: no interrupt IN or bulk IN exists.
+    // Raw vendor interface: no interrupt IN or bulk IN exists.
     let config = vec![
         9, 2, 25, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 1, 0xff, 0, 0, 0, 7, 5, 2, 2, 64, 0, 0,
     ];
@@ -518,7 +518,7 @@ fn native_body_timeout_and_failed_stop_preserve_bytes_and_terminal_raw_owner() {
     use crate::bus::dma::RegionAllocator;
     let mut backing = vec![0u64; 64 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: retained backing exclusively owns all controller and raw DMA pages.
+    // SAFETY: backing exclusively owns all controller and raw DMA pages.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
     hardware.borrow_mut().silence_transfer = Some(4);

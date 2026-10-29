@@ -115,7 +115,7 @@ fn selected_source_metadata_is_typed_and_duplicate_fields_refuse() {
         "decoded retained verbatim"
     );
     // Typed parsing preserves metadata; the Apple Entry intake separately
-    // validates digests, selected IDs and actual original file contents.
+    // validates digests, selected IDs and original file contents.
     for repeated in [
         format!(r#""target":{target},"#),
         format!(r#""sources":[{source}],"#),
@@ -302,7 +302,7 @@ fn external_pipe_geometry_uses_the_same_actual_framebuffer() -> Result<(), Bundl
         bytes.fill(0x42);
         Ok(())
     };
-    // A visible display cannot retain physical-board geometry without a
+    // A visible display cannot keep physical-board geometry without a
     // real backing resource when the native GOP is unavailable.
     assert!(
         verified

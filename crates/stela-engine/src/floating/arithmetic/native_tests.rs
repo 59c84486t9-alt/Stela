@@ -1,4 +1,4 @@
-//! Full-state qualification of the emitted S/D full path and precise fallback.
+//! Full-state validation of the emitted S/D full path and precise fallback.
 use super::*;
 use crate::execution::platform::Mapping;
 use stela_compiler::{

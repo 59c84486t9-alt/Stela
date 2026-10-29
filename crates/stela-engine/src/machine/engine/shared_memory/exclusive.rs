@@ -1,4 +1,4 @@
-//! Stopped system-service exclusives use the native lane's actual owner.
+//! Stopped system-service exclusives use the native lane's owner.
 use super::*;
 use crate::{
     memory::domain::{CheckedMemoryEntry, MemoryFault},
@@ -43,7 +43,7 @@ fn invoke(
 ) -> Result<ExclusiveResult, MemoryStatus> {
     request.data = core::ptr::from_mut(&mut data).cast();
     let mut fault = None;
-    // SAFETY: the typed prepared owner retains the actual native target, RAM
+    // SAFETY: the typed prepared owner keeps the native target, RAM
     // and source policy. All 32 staging bytes are initialized/private/disjoint;
     // only the existing validated callback can access them during this borrow.
     unsafe {
@@ -285,7 +285,7 @@ mod tests {
             // registered.
             unsafe { ram.publish_physical(PA, &original) }.unwrap();
             let memory = machine.cpu.canonical_memory.as_mut().unwrap();
-            // This is the actual POSIX model's prepared authority, not a
+            // This is the POSIX model's prepared permission, not a
             // forged production CPL0/current-worker proof.
             let entry = memory
                 .memory

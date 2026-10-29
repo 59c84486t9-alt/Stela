@@ -1,4 +1,4 @@
-//! Independent SMBus peripheral: actual count-bearing responses and commands.
+//! Independent SMBus peripheral: count-bearing responses and commands.
 use super::super::InterruptError;
 use super::*;
 use crate::bus::smbus as wire;
@@ -102,7 +102,7 @@ impl Bus for Wire {
             _ => panic!("wrong SMBus protocol"),
         }
         // A destructive read or mutation has already happened, but host
-        // outputs are committed only on actual successful completion.
+        // outputs are committed only on successful completion.
         if h.fail_operation == Some(h.effects.len()) {
             return Err(failure());
         }

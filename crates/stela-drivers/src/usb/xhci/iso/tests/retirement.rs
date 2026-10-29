@@ -92,7 +92,7 @@ fn stalled_cancellation_retains_buffers() {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
         let mut dma =
-        // SAFETY: The stalled-cancellation fixture retains this vector throughout all
+        // SAFETY: The stalled-cancellation fixture keeps this vector throughout all
         // queued transfers and model callbacks. No physical controller or background
         // worker can access it after the test scope.
         unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };

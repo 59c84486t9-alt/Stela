@@ -107,8 +107,8 @@ pub struct Entry {
     pub recovery: Vec<UnqualifiedFaultRecovery>,
 }
 
-/// A rebased immutable template. Persisted fault tags remain unqualified until
-/// the exact retained input/profile/template passes compiler plan qualification.
+/// A rebased immutable template. Persisted fault tags remain unchecked until
+/// the exact input/profile/template passes compiler plan validation.
 #[derive(Debug, Clone)]
 pub struct StoredBlock {
     pub native: NativeBlock,
@@ -171,7 +171,7 @@ impl Entry {
     }
 
     /// Reconstruct only a source-backed retirement shape. This never mints a
-    /// guest-access site or grants memory-effect authority from a portable tag.
+    /// guest-access site or grants memory-effect permission from a portable tag.
     fn retirement_at(&self, point: RetirementPoint, page: u64) -> Option<RetirementPoint> {
         use stela_compiler::Lifter as _;
         let relative = point
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn stored_source_witness_requires_the_exact_admitted_compiler_prefix() {
         // The compiler stops at B, but the complete offered analysis input is
-        // retained. Changing that suffix must not silently change its witness.
+        // kept. Changing that suffix must not silently change its witness.
         let source = words(&[0x1400_0002, 0xd503_201f, 0xd65f_03c0]);
         let entry = proved(&source, 0x40).expect("relocatable branch");
         assert_eq!(entry.source_bytes, 4);
@@ -1043,7 +1043,7 @@ mod tests {
             assert!(!bad.consistent(), "{name}");
             let mut record = Record::new(translator, key);
             record.insert(bad);
-            // The actual writer recomputes lengths and checksum: this reaches
+            // The writer recomputes lengths and checksum: this reaches
             // the loader's source geometry check, not a checksum failure.
             assert_eq!(
                 Record::decode(&record.encode(), &translator, &key),

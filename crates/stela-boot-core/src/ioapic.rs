@@ -2,7 +2,7 @@
 // Copyright (C) 1997, 1998, 1999, 2000, 2009 Ingo Molnar, Hajnalka Szabo
 // Multiple IO-APIC support (C) 1999 Ken-ichi Yaku and Hidemi Kishimoto;
 // further tested and cleaned up by Zach Brown and Ingo Molnar.
-//! Actual legacy IOAPIC ownership and redirection ordering. Protocol references:
+//! Legacy IOAPIC ownership and redirection ordering. Protocol references:
 //! Linux a804c5742bff224d4cb4d25dd383554d598be32b, arch/x86/kernel/apic/io_apic.c
 //! and arch/x86/include/asm/io_apic.h (Ingo Molnar and contributors), recorded
 //! in stela-drivers/src/platform/THIRD_PARTY.md. CPU/IDT/AP bootstrap is never
@@ -25,9 +25,9 @@ const CONFIG: u32 = 0xff | 7 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | MASK;
 const MAX_PINS: usize = 120;
 
 /// # Safety
-/// Real IOREGSEL/IOWIN accesses to the one retained, root-stable UC mapping.
+/// Real IOREGSEL/IOWIN accesses to the one kept, root-stable UC mapping.
 /// No other firmware/CPU/controller owner may touch the selector/window.
-/// Every index passed here is <= 0xff. Operations must order actual MMIO.
+/// Every index passed here is <= 0xff. Operations must order MMIO.
 pub unsafe trait Registers: Send + Sync {
     fn read(&self, index: u8) -> u32;
     fn write(&self, index: u8, value: u32);
@@ -36,8 +36,8 @@ pub unsafe trait Registers: Send + Sync {
 pub struct Mmio(usize);
 impl Mmio {
     /// # Safety
-    /// `base` is an exclusive actual UC IOAPIC mapping of at least 32 bytes,
-    /// aligned to 4 KiB and retained across all roots through final release or
+    /// `base` is an exclusive UC IOAPIC mapping of at least 32 bytes,
+    /// aligned to 4 KiB and kept across all roots through final release or
     /// permanent quarantine. No WB/WC alias exists. No IRQ-context release.
     pub unsafe fn new(base: usize) -> Result<Self, IrqError> {
         if base == 0 || base & 4095 != 0 || base.checked_add(32).is_none() {
@@ -65,10 +65,10 @@ unsafe impl Registers for Mmio {
     }
 }
 
-/// Real contributors to one physical line, retained as an immutable group.
+/// Real contributors to one physical line, kept as an immutable group.
 /// # Safety
 /// Every physical sharer, SCI fixed/GPE source or PCI INTx contributor is
-/// owned/retained here. Mask and stop acknowledge real device effects, drain
+/// owned/kept here. Mask and stop acknowledge real device effects, drain
 /// workers/timers/posted writes and exclude new causes until enable. No final
 /// release in IRQ context. No missing sharer may keep this line asserted.
 /// SharedHandlers membership and this source group must describe the same
@@ -77,7 +77,7 @@ pub unsafe trait Devices: Send {
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
     /// # Safety
-    /// The owned route and every retained callback are fully published.
+    /// The owned route and every callback are fully published.
     unsafe fn enable(&mut self) -> Result<(), IrqError>;
 }
 
@@ -101,13 +101,13 @@ pub struct Unit<R: Registers, P: Platform> {
     quarantined: AtomicU64,
 }
 // SAFETY: all selector/window and claim access is serialized by IRQ-save lock.
-// The platform confines operations to the owning CPU. Arc lifetime is retained
+// The platform confines operations to the owning CPU. Arc lifetime is held
 // through every route or quarantined route; no hard-IRQ allocation/release.
 unsafe impl<R: Registers, P: Platform> Sync for Unit<R, P> {}
 
 impl<R: Registers, P: Platform> Unit<R, P> {
     /// # Safety
-    /// Exclusive selector/window owner, matched actual MADT physical unit and
+    /// Exclusive selector/window owner, matched MADT physical unit and
     /// ID. CPU adapter is initialized on the same BSP; local APIC EOI broadcast
     /// suppression is disabled and remains disabled through final retirement.
     /// No other CPU/SMM/firmware can program these redirection entries. Pin
@@ -216,7 +216,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         }
     }
     /// # Safety
-    /// Validated actual MADT electrical route, no NMI/PIRQ alias and ownership
+    /// Validated MADT electrical route, no NMI/PIRQ alias and ownership
     /// of every physical sharer. All contributors are stopped/drained with no
     /// old firmware/CPU callback, pending interrupt or worker. The initially
     /// masked entry is not evidence of this grant. Complete group retirement
@@ -227,7 +227,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         devices: Box<dyn Devices>,
     ) -> Result<Pin<R, P>, IrqError> {
         self.platform.check_cpu()?;
-        // This slice has an end-to-end level completion proof through actual
+        // This slice has an end-to-end level completion proof through
         // Remote IRR/EOI. Edge IOAPIC drain is not inferred from MSI coverage.
         if line.trigger != Trigger::Level {
             return Err(IrqError::Unsupported);
@@ -280,7 +280,7 @@ impl<R: Registers, P: Platform> Drop for Guard<'_, R, P> {
 }
 
 /// Process/deferred source; real callback/source group is owned by Registry.
-/// An abandoned programmed pin retains/quarantines its unit, contributors and
+/// An abandoned programmed pin keeps/quarantines its unit, contributors and
 /// claim rather than permitting uncertain delivery into a reused vector.
 pub struct Pin<R: Registers, P: Platform> {
     unit: ManuallyDrop<Arc<Unit<R, P>>>,
@@ -309,7 +309,7 @@ impl<R: Registers, P: Platform> Pin<R, P> {
     }
 }
 
-/// Constructorless actual pin/epoch endpoint, retained by the fixed callback
+/// Constructorless pin/epoch endpoint, kept by the fixed callback
 /// group. Final Drop remains process/deferred, even though mask is IRQ-safe.
 pub struct ParentMask<R: Registers, P: Platform> {
     unit: Arc<Unit<R, P>>,
@@ -324,9 +324,9 @@ impl<R: Registers, P: Platform> ParentMask<R, P> {
     /// Process context on the owning CPU. The native callback has returned and
     /// its pending flag is clear. The source handler acknowledged or locally
     /// masked every contributor it observed; any outstanding deferred worker
-    /// retains its disabled contributor until that device's work completes.
+    /// keeps its disabled contributor until that device's work completes.
     /// No callback/source-owner retirement overlaps this operation. A new
-    /// physical event after unmask is handled by the same retained callback.
+    /// physical event after unmask is handled by the same callback.
     pub unsafe fn rearm(&self) -> Result<(), IrqError> {
         self.unit.platform.check_cpu()?;
         let _guard = self.unit.lock();
@@ -352,9 +352,9 @@ impl<R: Registers, P: Platform> ParentMask<R, P> {
         Ok(())
     }
 }
-// SAFETY: Pin alone creates this endpoint from its actual Unit/claim. The
+// SAFETY: Pin alone creates this endpoint from its Unit/claim. The
 // existing IRQ-save selector lock checks the nonwrapping epoch and performs
-// actual MASK/readback without allocation, callbacks or final owner release.
+// MASK/readback without allocation, callbacks or final owner release.
 unsafe impl<R: Registers, P: Platform> stela_drivers::bus::irq::ParentMask for ParentMask<R, P> {
     fn mask(&self) -> Result<(), IrqError> {
         self.unit.platform.check_cpu()?;
@@ -372,7 +372,7 @@ unsafe impl<R: Registers, P: Platform> stela_drivers::bus::irq::ParentMask for P
         }
     }
 }
-// SAFETY: devices and unit are retained, physical ownership comes from claim's
+// SAFETY: devices and unit are held, physical ownership comes from claim's
 // explicit grant. The canonical registry alone publishes/releases callbacks.
 unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
     fn mask(&mut self) -> Result<(), IrqError> {
@@ -418,7 +418,7 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
         if low & MASK == 0 || low & (REMOTE_IRR | DELIVERY) != 0 {
             return Err(IrqError::Drain);
         }
-        // From this point failure retains the complete route claim. LOW MASK
+        // From this point failure keeps the complete route claim. LOW MASK
         // was acknowledged before any HIGH/destination change (Linux mask_entry).
         self.retired = false;
         self.target = Some(target);
@@ -458,7 +458,7 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
         }
         // Contributors may assert while IOAPIC is still masked; enabling the
         // final route observes an already asserted level and delivers it.
-        // SAFETY: `program` published the route and every retained callback before unmask.
+        // SAFETY: `program` published the route and every callback before unmask.
         unsafe { self.devices.enable() }?;
         let _guard = self.unit.lock();
         let low = self.unit.low(self.pin)?;
@@ -521,7 +521,7 @@ impl<R: Registers, P: Platform> Drop for Pin<R, P> {
                 (*self.unit.epochs.get())[usize::from(self.pin)] = 0;
             }
         }
-        // Actual registry retirement proved callback lifetime + CPU/IOAPIC
+        // Registry retirement proved callback lifetime + CPU/IOAPIC
         // drain; only this process-context final release frees contributors.
         // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
         unsafe {
@@ -639,7 +639,7 @@ mod tests {
                     assert_ne!(old & MASK, 0, "electrical/vector changed before mask");
                     assert_eq!(old & (REMOTE_IRR | DELIVERY), 0);
                 }
-                // Actual hardware does not allow software to clear RO RemoteIRR.
+                // Hardware does not allow software to clear RO RemoteIRR.
                 h.regs[i] = (v & !(REMOTE_IRR | DELIVERY)) | old & (REMOTE_IRR | DELIVERY);
                 h.events.push(if v & MASK != 0 { "mask" } else { "unmask" });
                 h.service();
@@ -751,7 +751,7 @@ mod tests {
         struct FailedDemux(Arc<ParentMask<Io, Cpu>>);
         impl Handler for FailedDemux {
             fn handle(&self) -> Disposition {
-                // Actual callback cannot ACK its device. It must acknowledge
+                // Callback cannot ACK its device. It must acknowledge
                 // parent MASK before Registry's EOI instead of returning live.
                 stela_drivers::bus::irq::ParentMask::mask(&*self.0).unwrap();
                 Disposition::Handled
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(registration.handled(), Ok(1));
         assert_eq!(Arc::strong_count(&group), 2);
         assert_eq!(Arc::strong_count(&first), 2);
-        // A second actual delivery remains possible; removal must mask first,
+        // A second delivery remains possible; removal must mask first,
         // stop every contributor, then drain CPU EOI and IOAPIC RemoteIRR.
         registration.retire().unwrap();
         let h = b.hw.lock().unwrap();

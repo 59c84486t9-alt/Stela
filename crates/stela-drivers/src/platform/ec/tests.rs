@@ -361,7 +361,7 @@ fn unchanged_linux_query_dispatch_identity_and_io_resource_order() {
             peripheral.borrow_mut().status |= SCI;
             let receipt = ec.poll_query().unwrap();
             assert_eq!(receipt.is_some(), number(3) == 0);
-            assert_eq!(number(4), 1); // one actual donor QUERY transaction
+            assert_eq!(number(4), 1); // one donor QUERY transaction
             assert_eq!(number(5), i32::from(QUERY));
             assert_eq!(number(6), 1); // one byte, including the zero reply
             assert_eq!(peripheral.borrow().commands.as_slice(), [QUERY]);
@@ -503,7 +503,7 @@ fn region_deadline_covers_all_bytes_and_failed_enable_is_cleaned_up() {
     let error = ec.read_region(0, 16).unwrap_err();
     assert_eq!(error.kind, ErrorKind::Timeout(Phase::Output));
     // BURST_ENABLE took effect but its response never reached OBF. The
-    // acknowledged disable cleans the actual flag before releasing the lock.
+    // acknowledged disable cleans the flag before releasing the lock.
     assert!(!error.burst_cleanup_failed);
     assert_eq!(m.borrow().status & BURST, 0);
     assert!(!m.borrow().locked);

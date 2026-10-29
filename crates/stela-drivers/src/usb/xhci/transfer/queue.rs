@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Submitted ordinary TDs remain owned until a matching terminal completion or
 //! acknowledged endpoint cancellation. Ring occupancy is an address property,
-//! not merely the count of tickets a caller happened to poll.
+//! not the count of tickets a caller happened to poll.
 use super::*;
 use core::sync::atomic::AtomicU64;
 
@@ -110,7 +110,7 @@ impl Queue {
             }
             status => {
                 // Stopped (including length-invalid and short-packet stopped)
-                // and every error retain DMA until Stop/Reset/SetDequeue ACK.
+                // and every error keep DMA until Stop/Reset/SetDequeue ACK.
                 self.recovery = true;
                 self.clear_tt |= matches!(
                     status,

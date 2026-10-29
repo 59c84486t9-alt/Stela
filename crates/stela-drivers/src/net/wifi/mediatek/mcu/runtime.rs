@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Unified WM device/BSS/station command envelopes and actual result records.
+//! Unified WM device/BSS/station command envelopes and result records.
 //! Command-specific payload construction and native mailbox ownership remain
 //! independent; an encoded packet is never an installed firmware context.
 use super::{Encoder, Event};
@@ -57,7 +57,7 @@ impl Packet {
 pub struct ResultRecord<'a> {
     pub command: Command,
     pub sequence: u8,
-    /// Actual little-endian firmware status. Nonzero is firmware failure, not
+    /// Little-endian firmware status. Nonzero is firmware failure, not
     /// a host sequence mismatch and never an installed-context acknowledgement.
     pub status: u32,
     pub reserved: [u8; 3],
@@ -104,8 +104,8 @@ impl Encoder {
 }
 impl<'a> Event<'a> {
     /// Check a real non-unsolicited UNI result against the outstanding command
-    /// and sequence. The owner additionally requires actual TX DMA completion,
-    /// actual RX provenance/fresh epoch and deadline/no-late-reply serialization.
+    /// and sequence. The owner additionally requires TX DMA completion,
+    /// RX provenance/fresh epoch and deadline/no-late-reply serialization.
     /// Scan/radio/key transitions cannot be inferred from an unrelated event.
     pub fn uni_result(&self, packet: &Packet) -> Result<ResultRecord<'a>, Error> {
         if self.unsolicited || self.sequence == 0 {

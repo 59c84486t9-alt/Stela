@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2015, Intel Corporation.
-//! Native UC access retaining original PCI and complete resource reservations.
+//! Native UC access keeping original PCI and complete resource reservations.
 use super::*;
 use crate::bus::{
     mmio::owned::{CacheAttribute, Mapping, Protection, Resource},
@@ -16,7 +16,7 @@ pub struct NativeResources {
     /// profiles need no shadow MMIO view. Never map the child resource region
     /// with an independent owner overlapping this reservation.
     pub shadow: Option<Mapping>,
-    /// Actual reserved MEMBAR2 table/PBA mappings from the shared MSI-X owner.
+    /// Reserved MEMBAR2 table/PBA mappings from the shared MSI-X owner.
     pub msix: Option<crate::bus::pci::msix::MappedBar>,
 }
 pub struct NativeRegisters {
@@ -32,11 +32,11 @@ impl NativeRegisters {
         self.bars[index].clone()
     }
     /// # Safety
-    /// All resources belong to this exact actual VMD parent/reset epoch. Own
+    /// All resources belong to this exact VMD parent/reset epoch. Own
     /// all firmware-enumerated child config/reset/routing resources exclusively;
-    /// the actual VMD parent is already in D0 before mapping/shadow access.
-    /// Every child engine, DMA/IRQ and work item has actually stopped/drained.
-    /// The mapping authority grants real UC/RW CPU mappings, not physical-number
+    /// the VMD parent is already in D0 before mapping/shadow access.
+    /// Every child engine, DMA/IRQ and work item has stopped/drained.
+    /// The mapping permission grants real UC/RW CPU mappings, not physical-number
     /// casts. All access is process/deferred context; no callback or foreign
     /// config writer accesses the CFGBAR while a host/child borrow exists.
     /// No child BAR is reassigned without reserving its complete routed span.
@@ -92,7 +92,7 @@ impl NativeRegisters {
         }
         let function = resources.requester.into_function();
         // Preserve original BAR classification, verified again against sized
-        // descriptors by Host initialization's retained producer contract.
+        // descriptors by Host initialization's producer contract.
         let descriptors = core::array::from_fn(|i| {
             let span = resources.bars[i].physical_span();
             (
@@ -111,8 +111,8 @@ impl NativeRegisters {
             msix: resources.msix,
         })
     }
-    /// Actual stopped owners after Host::retire. Mappings still require their
-    /// authority's acknowledged retire; dropping a Mapping quarantines it.
+    /// Stopped owners after Host::retire. Mappings still require their
+    /// permission's acknowledged retire; dropping a Mapping quarantines it.
     pub fn into_parts(self) -> Parts {
         (
             self.function,
@@ -154,7 +154,7 @@ fn pointer(mapping: &Mapping, offset: usize, width: u8) -> Result<core::ptr::Non
 }
 fn read(mapping: &Mapping, offset: usize, width: u8) -> Result<u64, Error> {
     let p = pointer(mapping, offset, width)?;
-    // SAFETY: checked live UC view, bounds/alignment, exclusive retained epoch.
+    // SAFETY: checked live UC view, bounds/alignment, exclusive kept epoch.
     Ok(unsafe {
         match width {
             1 => u64::from(p.as_ptr().read_volatile()),
@@ -165,7 +165,7 @@ fn read(mapping: &Mapping, offset: usize, width: u8) -> Result<u64, Error> {
         }
     })
 }
-// SAFETY: claim requires actual resources, stopped child hierarchy, exclusive
+// SAFETY: claim requires resources, stopped child hierarchy, exclusive
 // parent/CFGBAR access and native UC mappings. No raw pointer survives access.
 unsafe impl Registers for NativeRegisters {
     fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error> {

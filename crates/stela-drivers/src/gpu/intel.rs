@@ -1,4 +1,4 @@
-//! Native Intel packet construction using retained Xe and i915 emitters. This module
+//! Native Intel packet construction using kept Xe and i915 emitters. This module
 //! does not initialize a device, map GPU memory, submit jobs or expose Metal.
 use core::marker::PhantomData;
 
@@ -10,7 +10,7 @@ pub mod guc_reset;
 pub mod pat;
 pub mod wopcm;
 
-/// The actual VM's supported width, supplied by the device/VM owner.
+/// The VM's supported width, supplied by the device/VM owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum AddressBits {
@@ -24,7 +24,7 @@ pub enum AddressSpace {
     PerProcess,
 }
 
-/// The retained i915 packet form selected by the actual engine policy. This
+/// The kept i915 packet form selected by the engine policy. This
 /// enum is not a device-support or Metal-feature declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -43,7 +43,7 @@ pub enum CommandError {
 }
 
 /// Exact shader/resource policy for a direct Gen12.5+ COMPUTE_WALKER. This is
-/// a packet input, not device qualification. The physical owner supplies actual
+/// a packet input, not device validation. The physical owner supplies
 /// installed state bases, CFE/scratch, mappings/lifetimes, limits, cache policy,
 /// async throttling and workarounds. Encoded fields come from the original
 /// hosted Intel helpers and the selected compiled binary. Push-bearing shaders,
@@ -57,7 +57,7 @@ pub struct ComputeDispatch {
     pub threads: u32,
     pub right_mask: u32,
     pub groups: [u32; 3],
-    /// Actual selected kernel's offset from instruction state base, aligned 64.
+    /// Selected kernel's offset from instruction state base, aligned 64.
     pub kernel_offset: u32,
     /// Offset from the installed surface state base, aligned 32.
     pub binding_table_offset: u32,
@@ -74,7 +74,7 @@ pub struct ComputeDispatch {
     pub walk_order: u32,
     pub uses_sampler: u32,
     pub post_sync_mocs: u32,
-    /// The actual total compiled push requirement; this path requires zero.
+    /// The total compiled push requirement; this path requires zero.
     pub push_bytes: u32,
 }
 
@@ -105,7 +105,7 @@ unsafe extern "C" {
 }
 
 /// Exclusively borrowed CPU storage for Intel command packets. C receives
-/// native pointers only during a method call and retains none. Storage may be
+/// native pointers only during a method call and keeps none. Storage may be
 /// ordinary RAM; its physical placement and DMA visibility are the queue owner's
 /// responsibility. Completion of these methods establishes no GPU execution.
 pub struct CommandBuffer<'a> {
@@ -182,7 +182,7 @@ impl<'a> CommandBuffer<'a> {
     /// bounds before modifying storage; does not initialize or submit a queue.
     pub fn compute_dispatch(&mut self, dispatch: &ComputeDispatch) -> Result<(), CommandError> {
         // SAFETY: the slice is exclusively borrowed for this call, the input
-        // has the asserted C layout, and C retains neither pointer.
+        // has the asserted C layout, and C keeps neither pointer.
         result(unsafe { stela_intel_compute_dispatch(&mut self.native, dispatch) })
     }
 

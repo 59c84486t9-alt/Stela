@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
-//! Private receive authority borrowing the actual programmed native owner.
+//! Private receive permission borrowing the programmed native owner.
 use super::*;
 use crate::net::wifi::{
     intel::mcc::channel,
@@ -52,12 +52,12 @@ impl<'a, Q: BootIo, B: BiosIo> Hardware<'_, 'a, Q, B> {
     }
 }
 // SAFETY: private construction borrows the unique fully ACKed original native
-// MAC/board/MCC owner and its retained Country selection, never public receipts.
+// MAC/board/MCC owner and its Country selection, never public receipts.
 // Its exclusive mutable borrow serializes controlled reset/programming through
-// the actual HCMD handoff. Only forced-passive receive is admitted; every TX
-// operation (including autonomous association/ACK) is refused. The retained OS
+// the HCMD handoff. Only forced-passive receive is admitted; every TX
+// operation (including autonomous association/ACK) is refused. The kept OS
 // attachment must coordinate post-publication revocation with this native owner
-// or actual hardware enforcement, as required by unsafe begin_scan.
+// or hardware enforcement, as required by unsafe begin_scan.
 unsafe impl<'p, 'a, Q: BootIo, B: BiosIo> HardwarePolicy for Hardware<'p, 'a, Q, B> {
     type Lease<'g>
         = Guard<'g, 'p, 'a, Q, B>
@@ -69,7 +69,7 @@ unsafe impl<'p, 'a, Q: BootIo, B: BiosIo> HardwarePolicy for Hardware<'p, 'a, Q,
             return None;
         }
         // A pending country-change notification invalidates the private applied
-        // epoch; it is not consumed as a fabricated replacement MCC authority.
+        // epoch; it is not consumed as an invented replacement MCC permission.
         if boot.hcmd.has_matching(0xc9, 0) {
             return None;
         }
@@ -118,8 +118,8 @@ pub(super) struct Os<'p, O: CountryIo + OsPolicy> {
     pub(super) service: &'p mut O,
     pub(super) selection_revision: u64,
 }
-// SAFETY: unsafe begin_scan qualifies the two interfaces as the SAME genuine
-// selection/DB service. Delegation returns its actual lease, not copied flags.
+// SAFETY: unsafe begin_scan checks the two interfaces as the SAME
+// selection/DB service. Delegation returns its lease, not copied flags.
 unsafe impl<O: CountryIo + OsPolicy> OsPolicy for Os<'_, O> {
     type Lease<'g>
         = O::Lease<'g>
@@ -132,7 +132,7 @@ unsafe impl<O: CountryIo + OsPolicy> OsPolicy for Os<'_, O> {
         self.service.acquire(native)
     }
 }
-/// Protocol-only adapter used *inside* the actual guarded publication closure,
+/// Protocol-only adapter used *inside* the guarded publication closure,
 /// after the complete exact request was checked under both real leases. It is
 /// never exposed or installed as a HardwarePolicy/OsPolicy provider.
 pub(super) struct CheckedRequest<'r>(pub(super) &'r protocol::Request);
@@ -186,7 +186,7 @@ pub(super) fn observe<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
         service: parts.os,
         selection_revision: parts.selection.revision,
     };
-    // Actual H then O guards also cover observed/advertised-channel result
+    // H then O guards also cover observed/advertised-channel result
     // checks; copied earlier admission cannot admit newly revoked reception.
     let mut guard = hardware.acquire().ok_or(Ax200ScanError::Regulatory(
         regulatory::Error::HardwareUnavailable,

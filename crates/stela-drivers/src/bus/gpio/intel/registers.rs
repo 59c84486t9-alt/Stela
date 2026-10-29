@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Actual retained UC mappings. MMIO alone never authorizes native pad access.
+//! UC mappings. MMIO alone never authorizes native pad access.
 use super::Error;
 use crate::bus::mmio::owned::Mapping;
 #[cfg(feature = "native-acpi")]

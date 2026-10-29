@@ -2,7 +2,7 @@
 // Copyright (c) 2015, Intel Corporation.
 //! Firmware-assigned, polled NVMe attachment below an owned VMD hierarchy.
 //!
-//! This consumes the actual host, not an MCFG alias for a synthetic segment.
+//! This consumes the host, not an MCFG alias for a synthetic segment.
 //! The platform supplies the domain every child requester's DMA goes through,
 //! as VMD forwards it under the parent's requester ID: an IOMMU domain or the
 //! named passthrough domain. There is no hotplug or BAR reassignment.
@@ -31,7 +31,7 @@ impl<R> Drop for Returned<R> {
         }
     }
 }
-/// Receives the exact original stopped parent Function, resource reservations
+/// Receives the original stopped parent Function, resource reservations
 /// and configuration mappings, only after the NVMe engine retired every RAM
 /// mapping and its register mapping and then successfully stopped this Host.
 /// This handoff does not detach the IOMMU domain or unmap parent configuration.
@@ -42,13 +42,13 @@ pub struct RetiredHierarchy<R = NativeRegisters>(Rc<RefCell<Returned<R>>>);
 pub type Attachment<R = NativeRegisters> =
     Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)>;
 impl<R> RetiredHierarchy<R> {
-    /// The owned NVMe teardown and actual Host stop published original owners.
+    /// The owned NVMe teardown and Host stop published original owners.
     /// This does not certify domain detach or final parent mapping retirement.
     pub fn is_ready(&self) -> bool {
         self.0.borrow().0.is_some()
     }
 
-    /// None means retirement has not completed, or an uncertain effect retained
+    /// None means retirement has not completed, or an uncertain effect kept
     /// the hierarchy. Success returns original owners, never an active Host.
     /// The platform must finish its real domain/alias retirement and final
     /// mapping unmaps under those original owners. Retired NVMe namespace and
@@ -56,7 +56,7 @@ impl<R> RetiredHierarchy<R> {
     /// attempting a final config unmap whose domain binding pins that mapping.
     ///
     /// # Safety
-    /// The actual old requester/alias domain attachment has retired under its
+    /// The old requester/alias domain attachment has retired under its
     /// real platform owner, and all stale NVMe namespace/controller handles
     /// have been dropped. A returned owner or unmapped RAM alone authorizes no
     /// reset, reassignment or new DMA attachment. Final mapping unmaps still
@@ -80,8 +80,8 @@ pub struct FirmwareBar {
 }
 impl FirmwareBar {
     /// # Safety
-    /// `bytes` is the actual complete firmware-sized NVMe BAR0 reservation for
-    /// `child` at this host's retained assignment/reset epoch. It is not an
+    /// `bytes` is the complete firmware-sized NVMe BAR0 reservation for
+    /// `child` at this host's assignment/reset epoch. It is not an
     /// estimate, a new allocation or a size probe with decode enabled. The
     /// original VMD resource owner reserves the whole routed interval, including
     /// rounded mapping pages, exclusively from RAM and other child resources.
@@ -121,7 +121,7 @@ impl FirmwareBar {
                 window.prefetchable == prefetchable && window.translate(bus_start, bytes).is_ok()
             })
             .ok_or(Error::InvalidResource)?;
-        // This is the actual original parent reservation, not a new overlapping
+        // This is the original parent reservation, not a new overlapping
         // child ResourceBacking manufactured from physical address metadata.
         let resource = host.io().resource(index + 1);
         let physical = window.translate(bus_start, bytes)?;
@@ -176,25 +176,25 @@ fn block(error: Error) -> BlockError {
     }
 }
 
-/// Attach the selected firmware NVMe through actual VMD child configuration,
+/// Attach the selected firmware NVMe through VMD child configuration,
 /// original parent resource reservations and the shared domain-owned engine.
 /// Both success and error return a retirement handle. It receives original
-/// owners only if actual teardown completed, including teardown on failed NVMe
-/// initialization. Uncertain effects retain the original hierarchy/domain.
+/// owners only if teardown completed, including teardown on failed NVMe
+/// initialization. Uncertain effects keep the original hierarchy/domain.
 ///
 /// # Safety
 /// `domain` meets the [`DmaDomain`] contract for its kind for the parent
 /// requester and every alias/child requester in this hierarchy: an isolated
 /// domain is installed on all of them, while the passthrough domain covers
 /// them by leaving their DMA untranslated. Either way it drains translated
-/// payload writes and observes coherent completions, and retains the IOMMU,
+/// payload writes and observes coherent completions, and keeps the IOMMU,
 /// alias and hierarchy reset/assignment owners it needs.
 /// All other children and parent engines, IRQs and work are stopped/drained;
 /// no other native source registration or child driver exists. Firmware/foreign
 /// access, reset, removal, sleep and resource reassignment remain excluded for
 /// this consumed host's complete lifetime. `authority` is the original real
-/// native mapping authority for these retained resources and native CPU roots.
-/// `bar` was claimed from this same actual host and complete firmware assignment.
+/// native mapping permission for these resources and native CPU roots.
+/// `bar` was claimed from this same host and complete firmware assignment.
 /// All calls/final releases obey the providers' process/deferred context rules.
 pub unsafe fn attach(
     host: Host<NativeRegisters>,
@@ -205,7 +205,7 @@ pub unsafe fn attach(
     clock: Clock,
     label: String,
 ) -> Attachment {
-    // SAFETY: the public native boundary retains the actual mapping authority;
+    // SAFETY: the public native boundary keeps the mapping permission;
     // only this private factory seam varies in independent protocol tests.
     unsafe {
         attach_with_registers(host, bar, domain, pages, clock, label, |bar| {
@@ -220,10 +220,10 @@ pub unsafe fn attach(
     }
 }
 
-// Same actual hierarchy/engine sequence for native mappings and the independent
+// Same hierarchy/engine sequence for native mappings and the independent
 // cfg(test) register peer. This never exposes a public model attachment route.
-// SAFETY: the caller retains the matching original hierarchy/domain authority,
-// and the factory retains registers for that exact selected controller.
+// SAFETY: the caller keeps the matching original hierarchy/domain permission,
+// and the factory keeps registers for that exact selected controller.
 unsafe fn attach_with_registers<R: Registers + 'static>(
     host: Host<R>,
     bar: FirmwareBar,
@@ -281,12 +281,12 @@ unsafe fn attach_with_registers_using<R: Registers + 'static>(
             phase: Phase::Claimed,
         });
         // Admit the shared NVMe controller's complete operation budget before
-        // discovery performs any actual CFGBAR/config or mapping effects.
+        // discovery performs any CFGBAR/config or mapping effects.
         crate::storage::nvme::validate_clock(clock)?;
         let prepared = Hierarchy::discover(lifecycle.host.as_mut().expect("retained"), &bar);
         lifecycle.hierarchy = Some(prepared.map_err(block)?);
         let registers = registers(&bar)?;
-        // SAFETY: caller grants the actual original hierarchy/domain identity; the
+        // SAFETY: caller grants the original hierarchy/domain identity; the
         // reservation-backed mapping and consumed lifecycle refer to its selected
         // controller. No independent numeric-domain assertion is used as proof.
         unsafe { attach_policy(registers, lifecycle, pages, domain, clock, label) }
@@ -361,7 +361,7 @@ impl<R: Registers> Lifecycle<R> {
 }
 // SAFETY: the consumed original host serializes every child config effect.
 // Real register readback proves Command changes; the owned engine independently
-// stops NVMe, drains this same retained domain and unmaps before release.
+// stops NVMe, drains this same domain and unmaps before release.
 unsafe impl<R: Registers> owned::Lifecycle for Lifecycle<R> {
     fn prepare(&mut self) -> Result<(), BlockError> {
         if self.phase != Phase::Claimed {

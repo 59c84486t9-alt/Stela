@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Actual MLD scheduler/DMA ownership, reserved HCMD queue and empty teardown.
+//! MLD scheduler/DMA ownership, reserved HCMD queue and empty teardown.
 use super::*;
 #[path = "ax200_coexistence_tests.rs"]
 mod coexistence_tests;
@@ -38,7 +38,7 @@ fn peer_ready<'a>(
     short: bool,
 ) -> Ax200LegacyPeer<'a, Model, ClockBios, ScanOs> {
     let link = mld_bound(catalog, empty, source, native, policy, short);
-    // SAFETY: original genuine finite-rate provider and native owner model.
+    // SAFETY: original finite-rate provider and native owner model.
     let mut peer =
         unsafe { link.begin_mld_peer(parameters()) }.unwrap_or_else(|_| panic!("MLD peer"));
     // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
@@ -140,7 +140,7 @@ fn exercise(bytes: &[u8]) {
     let policy = Arc::new(PolicyState::default());
     let peer = peer_ready(&catalog, &empty, &source, &native, &policy, false);
     let baseline = native.domain.records.lock().unwrap().live.len();
-    // SAFETY: exact original exclusive requester and actual policy lifetime.
+    // SAFETY: original exclusive requester and policy lifetime.
     let mut queue =
         unsafe { peer.begin_mld_management_queue() }.unwrap_or_else(|_| panic!("queue owner"));
     let at_sync = policy.clone();
@@ -415,7 +415,7 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
         let source = Source::default();
         let policy = Arc::new(PolicyState::default());
         let peer = peer_ready(&catalog, &empty, &source, &native, &policy, true);
-        // SAFETY: original exclusive requester and finite actual-policy model.
+        // SAFETY: original exclusive requester and finite policy model.
         let mut queue =
             unsafe { peer.begin_mld_management_queue() }.unwrap_or_else(|_| panic!("queue"));
         // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated

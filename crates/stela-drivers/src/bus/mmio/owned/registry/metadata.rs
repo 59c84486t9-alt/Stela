@@ -57,7 +57,7 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let mut storage = reserve::<Dropped>().unwrap();
         let original = storage.write(Dropped(Arc::clone(&dropped))) as *mut Dropped;
-        // SAFETY: write initialized the entire retained value exactly once.
+        // SAFETY: write initialized the entire value exactly once.
         let unique = unsafe { UniqueArc::assume_init(storage) };
         assert_eq!(&*unique as *const Dropped, original);
         let shared = unique.shareable();

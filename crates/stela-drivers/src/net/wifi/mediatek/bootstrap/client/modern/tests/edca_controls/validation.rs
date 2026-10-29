@@ -38,7 +38,7 @@ fn peer_channel_and_receiver_preflight() {
     }
     let frame = beacon(&driver, 1, |_| {});
     let mut raw = incoming_bytes(&frame, None, false);
-    raw[13] = 40; // Actual RXD3 CH_FREQ, independently accepted by source policy.
+    raw[13] = 40; // RXD3 CH_FREQ, independently accepted by source policy.
     device_receive(&model.queues[&0xd4520], &raw, true, 0);
     assert!(matches!(
         driver.poll(NOW, &Source, &mut Channels),
@@ -46,7 +46,7 @@ fn peer_channel_and_receiver_preflight() {
     ));
     assert!(!driver.pending_edca());
     let mut corrupt = frame;
-    corrupt[1] |= 0x04; // More fragments: no dynamic observation authority.
+    corrupt[1] |= 0x04; // More fragments: no dynamic observation permission.
     assert!(observe(&mut driver, &model, &corrupt).is_err());
     assert_eq!(commands(&model), before);
 }
@@ -88,7 +88,7 @@ fn key_installation_invalidates_observation() {
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
-    // SAFETY: The first pairwise key belongs to this retained requester and its model
+    // SAFETY: The first pairwise key belongs to this requester and its model
     // OS exchange. No old key/frame user is active; current guards serialize
     // installation before the pending CPU observation becomes stale.
     unsafe {

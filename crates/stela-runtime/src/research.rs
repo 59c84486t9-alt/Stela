@@ -1,4 +1,4 @@
-//! Unadmitted device protocols retained with their original executable models.
+//! Unadmitted device protocols kept with their original executable models.
 //!
 //! This module is compiled only by Runtime unit tests. Native Board composition
 //! has no model admission or dependency on these incomplete protocols.

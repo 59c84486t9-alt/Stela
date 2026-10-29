@@ -3,7 +3,7 @@
 use super::{IoError, Profile, Registers};
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
 
-/// Retains both the real mapping and its original platform/device owner. No
+/// Keeps both the real mapping and its original platform/device owner. No
 /// numeric MMIO address is admitted. Automatic ACPI resource/power attachment
 /// still needs a real producer of the ownership in `claim`'s contract.
 pub struct NativeRegisters<P> {
@@ -13,14 +13,14 @@ pub struct NativeRegisters<P> {
 }
 impl<P: 'static> NativeRegisters<P> {
     /// # Safety
-    /// `platform` is the original unique actual AMDI0061/0062 ACPI controller,
+    /// `platform` is the original unique AMDI0061/0062 ACPI controller,
     /// `_CRS` reservation, clock/reset/power and board pin/firmware ownership,
     /// including every single/dual/quad lane described to memory operations.
-    /// It retains the entire stopped controller epoch even when leaked. The
+    /// It keeps the entire stopped controller epoch even when leaked. The
     /// supplied mapping covers that exact resource, not another controller or
     /// RAM. No firmware/AML/IRQ/DMA/other CPU accesses it; no reset, relocation,
-    /// power removal or pin reuse occurs while retained. `profile` is from that
-    /// actual hardware session. The grant must outlive every register access.
+    /// power removal or pin reuse occurs while kept. `profile` is from that
+    /// hardware session. The grant must outlive every register access.
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,
@@ -46,7 +46,7 @@ impl<P: 'static> NativeRegisters<P> {
     /// The original Controller was successfully released, all other accesses
     /// stopped and its last completed opcode/posted-write readbacks drained.
     /// No access may begin through any extracted pointer. Failure returns and
-    /// retains this complete native owner; no fabricated unmap acknowledgement.
+    /// keeps this complete native owner; no invented unmap acknowledgement.
     pub unsafe fn retire(mut self) -> Result<P, Self> {
         // SAFETY: caller supplies the original controller/user drain above.
         if unsafe { self.mapping.retire() }.is_err() {
@@ -55,21 +55,21 @@ impl<P: 'static> NativeRegisters<P> {
         Ok(self.platform)
     }
 }
-// SAFETY: claim retains the original unique platform grant and checked live UC
+// SAFETY: claim keeps the original unique platform grant and checked live UC
 // mapping; every volatile access checks width/bounds, and failures may follow
-// effects. Controller serializes access and deliberately retains faulted owners.
+// effects. Controller serializes access and keeps faulted owners.
 unsafe impl<P: 'static> Registers for NativeRegisters<P> {
     fn profile(&self) -> Profile {
         self.profile
     }
     fn read8(&mut self, offset: usize) -> Result<u8, IoError> {
         let pointer = self.mapping.address(offset, 1).map_err(|_| IoError)?;
-        // SAFETY: exclusive live owned UC byte; address checked actual bounds.
+        // SAFETY: exclusive live owned UC byte; address checked bounds.
         Ok(unsafe { pointer.as_ptr().read_volatile() })
     }
     fn write8(&mut self, offset: usize, value: u8) -> Result<(), IoError> {
         let pointer = self.mapping.address(offset, 1).map_err(|_| IoError)?;
-        // SAFETY: exclusive live owned UC byte; address checked actual bounds.
+        // SAFETY: exclusive live owned UC byte; address checked bounds.
         unsafe { pointer.as_ptr().write_volatile(value) };
         Ok(())
     }

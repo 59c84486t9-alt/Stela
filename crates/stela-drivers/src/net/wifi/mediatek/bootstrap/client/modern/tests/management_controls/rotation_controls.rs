@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Actual policy admission spans live native IGTK command/ACK/DMA publication.
+//! Policy admission spans live native IGTK command/ACK/DMA publication.
 use super::*;
 
 #[test]
@@ -10,7 +10,7 @@ fn rotation_revokes_old_namespace() {
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     let before = model.response.lock().unwrap().client_commands.len();
     state.allowed.set(false);
-    // SAFETY: genuine modeled exchange/drain, but actual OS policy has revoked publication.
+    // SAFETY: modeled exchange/drain, but OS policy has revoked publication.
     assert!(
         // SAFETY: The original session and native backing remain live and model users
         // are quiescent. Revoked OS permission must deny rotation before publishing a
@@ -34,7 +34,7 @@ fn rotation_revokes_old_namespace() {
     ));
     state.allowed.set(true);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
-    // SAFETY: exact modeled requester/admission and independently drained old users.
+    // SAFETY: modeled requester/admission and independently drained old users.
     let second = unsafe {
         driver.rotate_management_key_modern(
             &mut owner,
@@ -60,7 +60,7 @@ fn rotation_revokes_old_namespace() {
     ));
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert!(
-        // SAFETY: The delayed envelope retains its old session, whose key namespace
+        // SAFETY: The delayed envelope keeps its old session, whose key namespace
         // was replaced. Current validation must reject it before invoking the
         // callback or borrowing the stale body.
         unsafe {
@@ -74,7 +74,7 @@ fn rotation_revokes_old_namespace() {
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     state.allowed.set(false);
     assert!(
-        // SAFETY: The current envelope and requester remain retained, but OS policy
+        // SAFETY: The current envelope and requester remain held, but OS policy
         // was revoked. Fresh guard checks must deny consumption before the callback
         // can produce an effect.
         unsafe {
@@ -115,8 +115,8 @@ fn canonical_pending_block_ack_prevents_rotation() {
         Err(ClientError::Unsupported)
     ));
     assert!(driver.station().block_ack_idle());
-    // Exercise the defensive boundary against a genuine canonical pending BA
-    // owner independently of a native queue. This is an actual Station issuance,
+    // Exercise the defensive boundary against a canonical pending BA
+    // owner independently of a native queue. This is a Station issuance,
     // not an invented boolean or an always-empty native queue check. The public
     // native initiation above remains refused until protected OS BA MLME exists.
     let action = driver
@@ -128,7 +128,7 @@ fn canonical_pending_block_ack_prevents_rotation() {
     assert!(driver.state().transmit_ba[6].is_none());
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     let before = model.response.lock().unwrap().client_commands.len();
-    // SAFETY: negative drain control; the actual pending canonical owner must refuse.
+    // SAFETY: negative drain control; the pending canonical owner must refuse.
     assert!(matches!(
         // SAFETY: The canonical BA action stays owned in this software fixture, with
         // no physical requester. Rotation must reject that pending user before
@@ -152,7 +152,7 @@ fn canonical_pending_block_ack_prevents_rotation() {
     ));
     drop(action);
     // Whole-association teardown is the real retirement boundary; never clear
-    // pending state directly merely to make a live key update pass.
+    // pending state directly to make a live key update pass.
     stop(&mut driver, &model);
     drop(driver);
     drop(first);
@@ -171,7 +171,7 @@ fn removed_context_prevents_rotation() {
     let log = model.bar.0.lock().unwrap().log.len();
     // SAFETY: removed real context must refuse the producer, not repurpose its copied peer/epoch.
     assert!(
-        // SAFETY: The old session and backing stay retained after disconnect. Its
+        // SAFETY: The old session and backing stay held after disconnect. Its
         // removed context must be rejected before policy effects, key publication or
         // any modeled MMIO access.
         unsafe {

@@ -6,7 +6,7 @@
 //! SWFLAG, MDIC, HV paging, debug ports and host-wakeup access follow the
 //! pinned Linux e1000e shared code. This component does not admit a PCH MAC
 //! to the network probe. [`cold`] composes only its declared unmanaged 82579
-//! reset/NVM/PHY/MAC/queue profile behind actual owned unsafe grants. Other
+//! reset/NVM/PHY/MAC/queue profile behind owned unsafe grants. Other
 //! generations and canonical native admission remain separate. It never applies the
 //! discrete 82574L's PHY page or RAR policy to an integrated PCH controller.
 
@@ -85,22 +85,22 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Complete PCH MAC register accesses with the real reservation retained.
+/// Complete PCH MAC register accesses with the real reservation kept.
 ///
 /// # Safety
-/// The implementation owns the actual powered, exclusively claimed PCH MAC,
+/// The implementation owns the powered, exclusively claimed PCH MAC,
 /// uncached mapping and PCI resource through its lifetime, with DMA/IRQ/work
 /// already stopped. No SMM, firmware or other user accesses these registers or
 /// resets the PHY concurrently. Accesses are bounded, aligned, little-endian,
 /// volatile and ordered; an error never invents an observation or successful
 /// write. Reads flush this function's posted writes. Resource release must not
-/// abandon pending native CPU accesses. A merely unrelated token is insufficient.
+/// abandon pending native CPU accesses. An unrelated token is insufficient.
 pub unsafe trait Registers: 'static {
     fn read32(&mut self, offset: u32) -> Result<u32, Fault>;
     fn write32(&mut self, offset: u32, value: u32) -> Result<(), Fault>;
 }
 
-/// Minimum actual hardware delays; polling is additionally bounded by count.
+/// Minimum hardware delays; polling is additionally bounded by count.
 pub trait Delay {
     fn delay(&mut self, microseconds: u64);
 }
@@ -111,7 +111,7 @@ impl Delay for Clock {
 }
 
 /// A checked HV register. Wakeup registers use the source's extended u16 index;
-/// all other pages expose only their 32 actual MDIO register lanes.
+/// all other pages expose only their 32 MDIO register lanes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Register {
     page: u16,
@@ -134,8 +134,8 @@ pub struct Identity {
 }
 
 /// One exclusive PHY-access epoch. Any hardware/control failure poisons it;
-/// Drop retains the actual register owner after an uncertain operation. A fresh
-/// object requires the constructor's actual reset/quiescence ownership grant.
+/// Drop keeps the register owner after an uncertain operation. A fresh
+/// object requires the constructor's reset/quiescence ownership grant.
 pub struct Phy<R: Registers, D: Delay> {
     io: Option<R>,
     delay: D,
@@ -146,11 +146,11 @@ pub struct Phy<R: Registers, D: Delay> {
 }
 impl<R: Registers, D: Delay> Phy<R, D> {
     /// # Safety
-    /// `kind` describes the actual observed PCH PCI cohort: 82579 (PCH2) or
+    /// `kind` describes the observed PCH PCI cohort: 82579 (PCH2) or
     /// I217/I218/I219 using the I217 PHY. The caller owns the exact physical
     /// requester's reset epoch exclusively, has drained DMA/IRQ/work and has
     /// not reused a prior failed PHY access epoch without real reset/recovery.
-    /// `delay` must provide the requested minimum actual elapsed hardware time.
+    /// `delay` must provide the requested minimum elapsed hardware time.
     /// This grant neither proves full MAC initialization nor admits network I/O.
     pub unsafe fn new(kind: Kind, io: R, delay: D) -> Self {
         Self {
@@ -187,7 +187,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
     }
 
     fn acquire(&mut self) -> Result<(), Error> {
-        // This first boot profile deliberately refuses ME-owned/reset-blocked
+        // This first boot profile refuses ME-owned/reset-blocked
         // hardware before any write; it does not claim coexistence with ME.
         let fw = self.read_mac(FWSM)?;
         if fw & FW_VALID != 0 {
@@ -216,7 +216,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
             }
             self.delay.delay(1000);
         }
-        // An unacknowledged claim is uncertain. Try the source's clear, retain
+        // An unacknowledged claim is uncertain. Try the source's clear, keep
         // the owner on the final failure, and never retry this access epoch.
         let cleanup = (|| {
             let value = self.read_mac(EXTCNF_CTRL)?;
@@ -378,7 +378,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
 impl<R: Registers, D: Delay> Drop for Phy<R, D> {
     fn drop(&mut self) {
         if self.poisoned {
-            // Preserve the actual reservation/mapping, including an uncertain
+            // Preserve the reservation/mapping, including an uncertain
             // semaphore/page state. Only an external real reset can recover it.
             if let Some(owner) = self.io.take() {
                 core::mem::forget(owner);
@@ -480,7 +480,7 @@ mod tests {
         }
     }
     // SAFETY: this test owns one deterministic register model; no concurrent
-    // user accesses it during an operation and no actual device is touched.
+    // user accesses it during an operation and no device is touched.
     unsafe impl Registers for Io {
         fn read32(&mut self, at: u32) -> Result<u32, Fault> {
             let mut s = self.state.borrow_mut();
@@ -790,7 +790,7 @@ mod tests {
         let base = core::ptr::NonNull::new(bytes.as_mut_ptr().cast::<u8>()).unwrap();
         let owner: Arc<dyn core::any::Any> = Arc::new(());
         // SAFETY: this test supplies a stable exclusive native allocation,
-        // which stands in for an actual prequalified UC mapping only here.
+        // which stands in for a prequalified UC mapping only here.
         let mut io = unsafe { io::Mmio::from_owned_window(base, 32, owner) }.unwrap();
         io.write32(28, 0x1234_5678).unwrap();
         assert_eq!(io.read32(28).unwrap(), 0x1234_5678);

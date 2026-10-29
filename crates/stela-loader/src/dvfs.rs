@@ -70,7 +70,7 @@ pub struct Table {
 fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
     // The original J314s tree has separate PCPU (table 5) and PCPU1
     // (table 13) records. The suffix identifies a domain, not a core count;
-    // each table retains its own identity and uses its core type's OPPs.
+    // each table keeps its own identity and uses its core type's OPPs.
     let (cluster_type, suffix) = if let Some(suffix) = domain.strip_prefix("ECPU") {
         (b'E', suffix)
     } else if let Some(suffix) = domain.strip_prefix("PCPU") {

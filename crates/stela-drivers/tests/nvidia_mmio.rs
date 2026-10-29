@@ -117,7 +117,7 @@ impl Model {
     fn reenter(&self) {
         let reenter = self.state.lock().unwrap().reenter.take();
         if let Some((physical, address, bytes)) = reenter {
-            // SAFETY: deliberately model native callback reentry while the
+            // SAFETY: model native callback reentry while the
             // adapter's entry guard is held; neither nested call may act.
             unsafe {
                 assert!(os_map_kernel_space(physical, bytes, 1).is_null());
@@ -126,9 +126,9 @@ impl Model {
         }
     }
 }
-// SAFETY: model maps genuine retained allocations, never physical addresses as
+// SAFETY: model maps kept allocations, never physical addresses as
 // pointers. It preserves the request and exact aligned CPU range through ack.
-// Fault modes intentionally return malformed/uncertain replies for refusal tests.
+// Fault modes return malformed/uncertain replies for refusal tests.
 unsafe impl MappingPlatform for Model {
     fn check_context(&self, space: AddressSpace) -> Result<(), MappingError> {
         if space == SPACE && self.allowed.load(Ordering::Acquire) {
@@ -162,7 +162,7 @@ unsafe impl MappingPlatform for Model {
             return Err(MapFailure::Unchanged(MappingError::UnsupportedCache));
         }
         let offset = (request.physical.start() - backing.span.start()) as usize;
-        // SAFETY: actual pinned model allocation, full request bounds checked
+        // SAFETY: pinned model allocation, full request bounds checked
         // against its immutable physical reservation; never derive VA from PA.
         let cpu = unsafe {
             ptr::addr_of_mut!((*backing.window.0.get()).0)
@@ -256,7 +256,7 @@ fn rejected(
 ) {
     let before = services.status();
     let calls = model.calls();
-    // SAFETY: retained installed service/model, serialized process-context call.
+    // SAFETY: installed service/model, serialized process-context call.
     assert!(unsafe { os_map_kernel_space(physical, bytes, mode) }.is_null());
     assert_eq!(services.status().live, before.live);
     assert_eq!(services.status().failed_maps, before.failed_maps + 1);
@@ -277,7 +277,7 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     }
     let model = Model::new();
     // SAFETY: isolated CPU model machine, complete alias inventory, genuine
-    // retained backing and explicit all-root/cache/context acknowledgements.
+    // backing and explicit all-root/cache/context acknowledgements.
     let authority = unsafe {
         Authority::activate(
             model.clone(),
@@ -514,8 +514,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     // did not map.
     unsafe { os_unmap_kernel_space(restored, PAGE) };
 
-    // A canonical independent view keeps its actual backing alive; NVIDIA gets
-    // no alternate authority, widened pointer or safe Rust reference to it.
+    // A canonical independent view keeps its backing alive; NVIDIA gets
+    // no alternate permission, widened pointer or safe Rust reference to it.
     let mut parent = authority
         .map_physical(
             PhysicalSpan::new(BASE + 8 * PAGE, PAGE).unwrap(),
@@ -532,7 +532,7 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     unsafe { parent.retire() }.unwrap();
 
     // Another real canonical consumer may have a platform map in flight.
-    // Original void unmap ends raw access now, retaining the same ledger slot
+    // Original void unmap ends raw access now, keeping the same ledger slot
     // and Mapping until the native owner reaches a true quiescent retry point.
     // SAFETY: the installed test services own the model BAR and refuse any address or length they
     // did not map.
@@ -619,12 +619,12 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
     assert_eq!(services.status().refused_calls, refused + 2);
     assert_eq!(services.status().pending, 0);
     assert_eq!(services.authority_status().unwrap().quarantined, 0);
-    assert_eq!(model.calls().1, calls.1 + 1); // one actual acknowledged retire
+    assert_eq!(model.calls().1, calls.1 + 1); // one acknowledged retire
     // SAFETY: the model device is stopped and drained, so nothing still uses what this releases.
     unsafe { other.retire() }.unwrap();
 
     // Busy returned AFTER entering native unmap makes canonical state uncertain.
-    // Do not infer that Busy means unchanged: retain/block access and retry the
+    // Do not infer that Busy means unchanged: keep/block access and retry the
     // exact token. The model verifies the same token/request on every attempt.
     // SAFETY: the installed test services own the model BAR and refuse any address or length they
     // did not map.
@@ -692,8 +692,8 @@ fn original_global_abi_retains_real_canonical_leases_and_quarantines_failures() 
         Ok(0)
     );
 
-    // Failed retirement consumes the void native ABI into actual canonical
-    // quarantine. The provider's allocation/token and resource stay retained.
+    // Failed retirement consumes the void native ABI into canonical
+    // quarantine. The provider's allocation/token and resource stay held.
     // SAFETY: the installed test services own the model BAR and refuse any address or length they
     // did not map.
     let failed = unsafe { os_map_kernel_space(BASE + 9 * PAGE, PAGE, 1) };

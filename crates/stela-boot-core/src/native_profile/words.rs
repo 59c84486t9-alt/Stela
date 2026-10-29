@@ -112,7 +112,7 @@ impl RegisterSummary {
 
 const MAX_WORDS: usize = stela_compiler::block::MAX_BLOCK_INSTRUCTIONS;
 
-/// A small immutable copy made while the actual source owner is borrowed.
+/// A small immutable copy made while the source owner is borrowed.
 /// Histogram searches wait until after the phase End timestamp.
 pub struct Captured {
     words: [u32; MAX_WORDS],

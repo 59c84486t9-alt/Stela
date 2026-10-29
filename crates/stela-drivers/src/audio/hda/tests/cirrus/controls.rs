@@ -369,7 +369,7 @@ mod power {
                     .configure_cirrus_route(&graph, &input, mic, 0, capture())
                     .unwrap();
             }
-            // A firmware/native binding outside the retained route set must
+            // A firmware/native binding outside the route set must
             // refuse before any quiet/power effect, independent of the ledger.
             model.borrow_mut().bindings.insert(2, (out.tag() << 4) | 1);
             assert_eq!(

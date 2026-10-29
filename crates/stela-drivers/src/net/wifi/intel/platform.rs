@@ -2,7 +2,7 @@
 // Copyright (C) 2021-2026 Intel Corporation
 //! Pure owned-observation/resource and packed-package contracts for Intel Wi-Fi
 //! UEFI data from fw/uefi.{c,h} and PNVM source policy from fw/pnvm.c.
-//! Actual GetVariable calls and permanent EBS/root-switch storage belong to boot.
+//! GetVariable calls and permanent EBS/root-switch storage belong to boot.
 //! Raw length/hash/provenance integrity does not authenticate a vendor signature
 //! or grant redistribution rights, calibration validity or regulatory permission.
 use super::{firmware::Family, identity::Profile};
@@ -18,7 +18,7 @@ pub const NOT_FOUND: u64 = (1 << 63) | 14;
 const DATA_LICENSE: &str = "LicenseRef-Local-UEFI-Observation";
 
 /// The initial AX200/AX210 raw capture set. This describes observations only;
-/// BIOS authority/GLAI, table revisions and firmware capabilities are separate.
+/// BIOS permission/GLAI, table revisions and firmware capabilities are separate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Variable {
@@ -62,7 +62,7 @@ macro_rules! descriptor {
     };
 }
 /// Sole descriptor table for raw identity, lookup minima and collection bounds.
-/// The 4096-byte native limits deliberately preserve a separate BoundExceeded
+/// The 4096-byte native limits preserve a separate BoundExceeded
 /// observation; they are not Linux limits or permission to treat data as absent.
 pub const VARIABLE_DESCRIPTORS: [VariableDescriptor; 16] = [
     descriptor!(
@@ -203,7 +203,7 @@ impl Observation {
         }
     }
     /// Bound a size observed from the real UEFI query *before* allocating.
-    /// Zero is returned intact for an actual successful empty variable; it is
+    /// Zero is returned intact for a successful empty variable; it is
     /// never synthesized to represent an error or absence. No retries occur here.
     pub fn bounded_bytes(stage: Stage, status: u64, reported_bytes: u64) -> Result<usize, Self> {
         bounded_bytes(stage, status, reported_bytes, MAX_VARIABLE_BYTES)
@@ -229,7 +229,7 @@ pub struct Observations {
     pub oem_pnvm: Observation,
     pub reduced_power: Observation,
     pub step: Observation,
-    /// Raw evidence only; never evaluated GLAI/device ACPI authority.
+    /// Raw evidence only; never evaluated GLAI/device ACPI permission.
     pub radio: [Observation; RADIO_VARIABLE_COUNT],
 }
 impl Observations {
@@ -255,7 +255,7 @@ fn revision(sha: [u8; 32], attributes: u32) -> String {
     let digest: String = sha.iter().map(|b| format!("{b:02x}")).collect();
     format!("sha256:{digest};attributes:{attributes:08x}")
 }
-/// Capture metadata over owned temporary bytes or actual permanent mapped
+/// Capture metadata over owned temporary bytes or permanent mapped
 /// slices. An owned Vec must pass through boot's permanent page handoff before
 /// root switch/EBS; this type does not itself reserve or protect its storage.
 pub struct CapturedVariable<B = Vec<u8>> {
@@ -323,7 +323,7 @@ pub enum PackageError {
     ObservationMismatch,
 }
 /// The donor's packed 14-byte wrapper. Header fields remain original metadata:
-/// Linux consumes the actual returned variable length, not an invented total
+/// Linux consumes the returned variable length, not an invented total
 /// size/revision/SKU-count whitelist. Bare TLV parsers validate its payload.
 #[derive(Clone, Copy, Debug)]
 pub struct Package<'a> {
@@ -415,8 +415,8 @@ fn load_image<'a>(
     }
     Ok(image)
 }
-/// Retain exact raw radio evidence without interpreting it or granting GLAI,
-/// ACPI, vendor-authentication or fallback authority. PNVM and STEP have their
+/// Keep exact raw radio evidence without interpreting it or granting GLAI,
+/// ACPI, vendor-authentication or fallback permission. PNVM and STEP have their
 /// separate typed entry points and are refused by this radio-only interface.
 pub fn load_radio_image<'a>(
     variable: Variable,

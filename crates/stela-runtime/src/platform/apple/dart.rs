@@ -1,7 +1,7 @@
 //! Native Apple DART generation selection. Chip placement selects an explicit
 //! register/table profile; a compatible string is never a generation alias.
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
-//! See `docs/research/dart-iommu.md` for evidence and qualification limits.
+//! See `docs/research/dart-iommu.md` for evidence and validation limits.
 use stela_soc_data::dart::{DAPF_BYTES, TRANSLATION_WINDOW_LIMIT};
 pub(crate) mod descriptor;
 pub mod gen3;
@@ -97,13 +97,13 @@ impl Dart {
         })
     }
 
-    /// Actual construction profile, retained independently of optional views.
+    /// Construction profile, kept independently of optional views.
     pub fn profile(&self) -> Profile {
         self.profile
     }
 
     /// Constructed incoming-SID capacity, independent of enable/configuration
-    /// and lifecycle. Native masters validate their actual owner before mapping.
+    /// and lifecycle. Native masters validate their owner before mapping.
     pub fn stream_capacity(&self) -> usize {
         match &self.model {
             Model::Legacy(model) => model.stream_capacity(),
@@ -168,7 +168,7 @@ impl Dart {
     }
 
     /// Whether this generation implements a native paired UMMS view. This
-    /// does not qualify optional hardware capture/performance/configuration
+    /// does not check optional hardware capture/performance/configuration
     /// forms: unsupported accesses still refuse inside the selected family.
     /// The query never attaches a view or changes a device's state.
     pub fn supports_smmu(&self) -> bool {

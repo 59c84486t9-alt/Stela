@@ -58,7 +58,7 @@ use stela_formats::sha256;
 #[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub struct Artifact {
-    /// Identity includes path, fat-slice offset, and exact source hash.
+    /// Identity includes path, fat-slice offset, and source hash.
     pub id: String,
     pub path: String,
     pub sha256: String,

@@ -114,7 +114,7 @@ impl Configuration {
         })
     }
     /// Configure the source's outside-scratch fault log with explicit cold or
-    /// retained history. No Apple reset value or physical fault producer is
+    /// history. No Apple reset value or physical fault producer is
     /// inferred. A log inside scratch must remain that canonical storage owner.
     pub fn with_fault_history(
         mut self,
@@ -129,7 +129,7 @@ impl Configuration {
         Ok(self)
     }
 
-    /// Configure either retained-history owner.
+    /// Configure either kept-history owner.
     pub fn with_retained(
         self,
         kind: Retained,
@@ -143,7 +143,7 @@ impl Configuration {
     }
 
     /// Configure the source's outside-scratch off-to-wake source
-    /// (`info-off2wake_source`) with explicit cold or retained history.
+    /// (`info-off2wake_source`) with explicit cold or kept history.
     /// `_readOff2WakeSource` reads and acknowledges it exactly as
     /// `_readFaultLog` does its log (see `fault`); no wake producer is inferred.
     pub fn with_wake_source_history(
@@ -159,7 +159,7 @@ impl Configuration {
         Ok(self)
     }
 
-    /// Bind real retained SRAM bytes to the AP address/data ports. This grants
+    /// Bind real kept SRAM bytes to the AP address/data ports. This grants
     /// no firmware execution, control/status, silicon identity or reset state.
     pub fn with_firmware_sram(
         mut self,
@@ -198,7 +198,7 @@ impl Configuration {
     }
 
     /// Request construction of a stopped native Stela protected-loader owner over
-    /// this configuration's supplied SRAM and known startup routes. The actual
+    /// this configuration's supplied SRAM and known startup routes. The
     /// device owner must instantiate that state. This is not
     /// an Apple reset/handoff observation or firmware execution admission.
     /// Authentication, service initialization and starting remain explicit
@@ -211,7 +211,7 @@ impl Configuration {
         Ok(self)
     }
 
-    /// Explicit oscillator for this actual native PMIC control/SRAM owner.
+    /// Explicit oscillator for this native PMIC control/SRAM owner.
     /// This is separate from the RTC, with no inherited rate, firmware/reset
     /// observation, initialized-service or successful-execution implication.
     pub fn with_native_pmic_epoch(mut self, epoch: PmicEpoch) -> Result<Self, &'static str> {
@@ -243,7 +243,7 @@ impl Configuration {
                     .flat_map(|profile| profile.windows().iter().copied()),
             )
     }
-    /// Retain the source's identity register extent without fabricating silicon
+    /// Keep the source's identity register extent without inventing silicon
     /// identity bytes. Access stops explicitly until that separate contract exists.
     pub fn with_unqualified_identity(mut self, identity: Window) -> Result<Self, &'static str> {
         let end = u32::from(identity.base) + u32::from(identity.bytes);
@@ -257,7 +257,7 @@ impl Configuration {
         Ok(self)
     }
 
-    /// Retain the PMIC firmware mailbox (`fw-mcom-address`) and host doorbell
+    /// Keep the PMIC firmware mailbox (`fw-mcom-address`) and host doorbell
     /// (`fw-host-irq-address`). Their answers come from PMIC firmware, which
     /// does not execute, so every access is an explicit unsupported requirement.
     pub fn with_unqualified_firmware_mailbox(
@@ -295,7 +295,7 @@ pub(super) fn overlaps(a: Window, b: Window) -> bool {
 }
 
 /// Consumed initial resources for one validated configuration. These plain
-/// values carry no running PMIC, oscillator, stream or completion authority;
+/// values carry no running PMIC, oscillator, stream or completion permission;
 /// device constructors accept `Configuration`, never a mutable `Resources`.
 #[derive(Debug)]
 pub struct Resources {

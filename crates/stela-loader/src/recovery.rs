@@ -37,7 +37,7 @@
 //! base-system-volume-auth-blob` once the directory's manifest is shown to
 //! sign it, and the OS environment is `recoveryos`.
 //!
-//! A directory qualifies by evidence, as `stela_loader::installed` chooses
+//! A directory checks by evidence, as `stela_loader::installed` chooses
 //! a Preboot directory: its objects carry one manifest whose SHA-384 is the
 //! directory's name, that manifest records the digest of every object the
 //! boot loads, and the BaseSystem image exists. `<group>/boot/active`
@@ -105,7 +105,7 @@ pub struct Evidence {
     pub named_by: Option<String>,
     /// The BaseSystem image's length.
     pub image_bytes: Option<u64>,
-    /// Every requirement that failed; empty when the directory qualifies.
+    /// Every requirement that failed; empty when the directory checks.
     pub problems: Vec<String>,
 }
 
@@ -333,7 +333,7 @@ fn evaluate<R: ReadAt>(
 }
 
 /// The boot directory of `found` the evidence shows to be bootable:
-/// `<group>/boot/active`'s when it names one, else the one that qualifies.
+/// `<group>/boot/active`'s when it names one, else the one that checks.
 pub fn select<R: ReadAt>(
     container: &mut Container<R>,
     found: &Found,
@@ -547,7 +547,7 @@ fn manifest_id(manifest: Option<&im4m::Manifest>, key: &str) -> Result<Option<u3
 }
 
 /// Build the bundle of the recoveryOS `found` names, from the directory
-/// [`select`] qualifies, with `options` (the console boot-args, ECID and
+/// [`select`] checks, with `options` (the console boot-args, ECID and
 /// placement); `model`, when given, must be the DeviceTree's.
 pub fn prepare<R: ReadAt>(
     container: &mut Container<R>,

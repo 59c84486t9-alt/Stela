@@ -4,7 +4,7 @@
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
 //! Ordered MAC-version lookup, adapted from Linux's rtl_chip_infos.
-//! Linux's symbolic revision suffix is retained, rather than its enum ordinal.
+//! Linux's symbolic revision suffix is held, rather than its enum ordinal.
 
 /// Detected MAC revision; this does not imply the startup path is implemented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub struct Revision {
     pub name: &'static str,
     pub firmware: Option<&'static str>,
     pub xid: u16,
-    /// Actual TX_CONFIG_V2 word, present only for the primary extended-XID marker.
+    /// TX_CONFIG_V2 word, present only for the primary extended-XID marker.
     pub extended_xid: Option<u32>,
 }
 

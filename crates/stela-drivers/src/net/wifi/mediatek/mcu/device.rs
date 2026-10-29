@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Initial station-interface DEV_INFO/BSS_BASIC requests, not associated BSS
-//! configuration. Preserve actual allocated caller indices and source command
+//! configuration. Preserve allocated caller indices and source command
 //! order; command construction cannot establish an acknowledged firmware context.
 use super::runtime::Command;
 use crate::net::Mac;
 
-/// Actual retained native interface resources. `band_index` is the source
+/// Native interface resources. `band_index` is the source
 /// firmware resource selector (MT7921/22 initially0, non-MLO MT7925 initiallyff),
 /// not the RF 2.4/5GHz band. This codec does not allocate these indices.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +35,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// The exact two source requests in actual submission order. Only ordinary
+/// The exact two source requests in submission order. Only ordinary
 /// station/non-MLO registration is supported; an AP/P2P/NAN context is not
 /// silently represented by the station connection type.
 pub struct Requests {
@@ -88,7 +88,7 @@ impl Requests {
         bss[24..26].copy_from_slice(&context.broadcast_wcid.to_le_bytes());
         bss[30..32].copy_from_slice(&context.broadcast_wcid.to_le_bytes());
         bss[35] = context.link_index;
-        // BSSID, beacon/DTIM, PHY and rates intentionally remain source-zero.
+        // BSSID, beacon/DTIM, PHY and rates remain source-zero.
         // Association-specific BSS updates are separate real command payloads.
         Ok(Self {
             context,

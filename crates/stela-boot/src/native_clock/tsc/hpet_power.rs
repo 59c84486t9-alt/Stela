@@ -52,14 +52,14 @@ impl PowerControl {
             && basic[2] & (1 << 3) != 0
             && monitor.is_some_and(|value| value[2] & 3 == 3 && value[3] & (15 << 28) != 0);
         let package = if pc10 {
-            // SAFETY: the actual Intel MWAIT/PC10 enumeration above is the
+            // SAFETY: the Intel MWAIT/PC10 enumeration above is the
             // Linux gate for MSR_PKG_CST_CONFIG_CONTROL on this owning CPU.
             Some(unsafe { crate::cpu::msr::rdmsr(PACKAGE_LIMIT) })
         } else {
             None
         };
         // Only construction uses the large capture representation. IRQ reads
-        // retain the small exact observation above and never build a Snapshot.
+        // keep the small exact observation above and never build a Snapshot.
         let mut snapshot = Snapshot::default();
         snapshot.records[0] = record(0, identity);
         snapshot.records[1] = record(1, basic);
@@ -87,7 +87,7 @@ impl PowerControl {
         })
     }
 
-    /// Same actual IRQ-qualified CPU as capture; no mapping or process-only
+    /// Same IRQ-checked CPU as capture; no mapping or process-only
     /// operation occurs here. Changed observations retire this source epoch.
     pub(in crate::native_clock) fn check(
         &self,
@@ -101,7 +101,7 @@ impl PowerControl {
             return Err(WorkError::CorruptContext);
         }
         if let Some(expected) = self.package {
-            // SAFETY: the retained live CPUID gate was rechecked above; this
+            // SAFETY: the live CPUID gate was rechecked above; this
             // source only observes the control and never disables deep idle.
             if unsafe { crate::cpu::msr::rdmsr(PACKAGE_LIMIT) } != expected {
                 return Err(WorkError::CorruptContext);

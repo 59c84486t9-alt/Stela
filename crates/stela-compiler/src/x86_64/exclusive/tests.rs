@@ -127,7 +127,7 @@ mod native_component {
         assert_eq!(*payload, observation.expected);
         assert!(payload.validate(request.bytes).is_some());
         observation.calls += 1;
-        // A fault deliberately dirties private staging to prove no destination is
+        // A fault dirties private staging to prove no destination is
         // committed. This adversarial test double is not the runtime service.
         *payload = observation.output;
         view.record(observation.status, request.address, request.pc, 0);

@@ -1,6 +1,6 @@
-//! Retained native transaction context from matching LLB106a0.
+//! Native transaction context from matching LLB106a0.
 //!
-//! The emitter qualifies five independent four-bit fields and their packing,
+//! The emitter checks five independent four-bit fields and their packing,
 //! not names such as privilege, security, QoS or channel IDs. Every physical
 //! claim carries this exact context. Its route must explicitly accept those
 //! fields before dispatch; unknown initial context and raw0 are not neutral.
@@ -11,7 +11,7 @@ const TAG: u32 = 0x1c;
 const FIELDS: u32 = (15 << 5) | (15 << 10) | (15 << 15) | (15 << 20) | (15 << 25);
 
 /// Fields in the original source order (raw groups0,5,10,15,20). Their
-/// physical meaning remains a requirement of the actual checked route.
+/// physical meaning remains a requirement of the checked route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fields([u8; 5]);
 impl Fields {
@@ -54,7 +54,7 @@ impl Snapshot {
     }
 }
 
-/// The checked physical route explicitly accepted this exact claim's actual
+/// The checked physical route explicitly accepted this exact claim's
 /// known fields. A token is private to one cursor, ticket and effect kind;
 /// accepting a previous context cannot authorize another access or a retry.
 #[derive(Debug)]
@@ -128,7 +128,7 @@ impl PacketCursor {
         });
         Ok(())
     }
-    /// The same engine transfers its actually retained context to a fresh job.
+    /// The same engine transfers its context to a fresh job.
     /// This is not a public snapshot restoration or another captured handoff.
     pub(crate) fn inherit_control(&mut self, context: Snapshot) -> Result<(), Error> {
         if self.control.is_some()
@@ -144,7 +144,7 @@ impl PacketCursor {
         self.control = Some(context);
         Ok(())
     }
-    /// Execute one source-qualified context change. This changes real retained
+    /// Execute one source-checked context change. This changes real kept
     /// instruction state; it does not authorize any target bank, physical
     /// security interpretation or controller completion.
     pub fn advance_control(&mut self) -> Result<Snapshot, Error> {

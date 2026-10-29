@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Actual current-association hardware/OS guards around management effects.
+//! Current-association hardware/OS guards around management effects.
 //! Attaching this transport sends robust management (including Block Ack
 //! actions) to the OS as authenticated observations. It does not automatically
 //! run native non-PMF BA MLME under an inferred protection policy. Initial
@@ -21,7 +21,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// The legacy port command cannot grant this permission.
     ///
     /// # Safety
-    /// configure_modern's exact requester/retention/revocation contract applies.
+    /// configure_modern's requester/retention/revocation contract applies.
     /// The real OS has completed authentication for this original RSN agreement.
     pub unsafe fn authorize_port_pmf<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -34,7 +34,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if context.pmf().is_none() {
             return Err(Error::WrongProfile);
         }
-        // SAFETY: same exclusive native owner and genuine protected-port guard.
+        // SAFETY: same exclusive native owner and protected-port guard.
         unsafe {
             authority.consume_native_association(
                 admission,
@@ -63,7 +63,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// fresh guarded authenticated consuming API for delayed management effects.
     ///
     /// # Safety
-    /// configure_modern's real same-requester authority, retention, revocation
+    /// configure_modern's real same-requester permission, retention, revocation
     /// and stop/drain contract applies to all synchronous/deferred RX users.
     pub unsafe fn poll_pmf<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -102,19 +102,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
-    /// Install the initial GTK/IGTK batch for this actual modern association.
-    /// The returned transport retains the same private context as the native
+    /// Install the initial GTK/IGTK batch for this modern association.
+    /// The returned transport keeps the same private context as the native
     /// peer and canonical Station. This does not negotiate PMF or open a port.
     /// Exact retries preserve the original Session and advanced receive IPN.
     ///
     /// # Safety
-    /// The same-controller retained hardware/OS authority and real revocation
-    /// contract of configure_modern applies. The actual OS authenticated exchange
+    /// The same-controller kept hardware/OS permission and real revocation
+    /// contract of configure_modern applies. The OS authenticated exchange
     /// supplied this IGTK/IPN for this exact association. Before this initial
     /// combined batch, independently stop/drain every old GTK hardware RX/TX,
     /// DMA/IRQ/work and external deferred key user. Empty native queues and the
     /// canonical BA-record check do not prove that external fence. Serialize
-    /// all key/reset/policy operations; uncertain completion retains the entire
+    /// all key/reset/policy operations; uncertain completion keeps the entire
     /// owner. No live IGTK rekey or negotiated PMF policy is supplied here.
     pub unsafe fn install_management_key_modern<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -143,8 +143,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         Self::management_drained(s)?;
         let key = s.gtk.as_mut().ok_or(Error::NoKey)?;
-        // SAFETY: inherited exact retained requester/policy and independent old
-        // hardware/RX/IRQ/deferred-user fence. Guards span the actual command,
+        // SAFETY: inherited requester/policy and independent old
+        // hardware/RX/IRQ/deferred-user fence. Guards span the command,
         // response and DMA retirement, not just a copied permission precheck.
         let igtk = unsafe {
             authority.publish_association(
@@ -169,15 +169,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 
     /// Revalidate the original authenticated envelope and current OS/hardware
-    /// policy at its actual consuming callback. Retaining/reading Received is a
+    /// policy at its consuming callback. Retaining/reading Received is a
     /// historical observation, never permission to apply a delayed transition.
     /// The OS owns negotiated PMF, SA Query matching/retry/timers and all MLME
     /// decisions; this transport supplies none of those policy effects.
     ///
     /// # Safety
-    /// configure_modern's same-requester retained-authority/revocation contract
+    /// configure_modern's same-requester kept-permission/revocation contract
     /// applies. The callback applies only the real OS policy for this original
-    /// association; further deferred effects must retain and revalidate their
+    /// association; further deferred effects must keep and revalidate their
     /// original context rather than inherit a copied epoch or this return value.
     pub unsafe fn with_management_modern<H: HardwarePolicy, O: OsPolicy, T>(
         &mut self,
@@ -191,7 +191,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.modern.is_none() {
             return Err(Error::WrongPhase);
         }
-        // SAFETY: inherited exact same-requester and consuming-effect contract.
+        // SAFETY: inherited same-requester and consuming-effect contract.
         unsafe {
             authority.publish_association(
                 admission,
@@ -204,14 +204,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 
     /// Publish a typed OS-selected protected departure or SA Query under the
-    /// current association's actual Management guards. PTK firmware PN/IV/MIC
+    /// current association's Management guards. PTK firmware PN/IV/MIC
     /// ownership and exact Session/key identity span real DMA/TX-free/unmap.
     /// No host nonce, successful air ACK or automatic MLME effect is invented.
     ///
     /// # Safety
-    /// configure_modern's same-controller retained hardware/OS authority and
+    /// configure_modern's same-controller kept hardware/OS permission and
     /// enforced revocation/drain contract applies through all deferred TX users.
-    /// The actual OS separately authorizes negotiated protection and the typed
+    /// The OS separately authorizes negotiated protection and the typed
     /// message for this association; a Session proves transport/key ownership.
     pub unsafe fn transmit_management_modern<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -230,8 +230,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let (config, mut owner, grant) =
             Self::prepare_submission(s, &bytes, Some(session.ptk), true, true)?;
         owner.management = s.management.clone();
-        // SAFETY: inherited exact retained requester and real deferred-user
-        // revocation contract. Both actual page allocation and producer write
+        // SAFETY: inherited requester and real deferred-user
+        // revocation contract. Both page allocation and producer write
         // occur inside the same acquired hardware/OS guards.
         let result = unsafe {
             authority.publish_association(

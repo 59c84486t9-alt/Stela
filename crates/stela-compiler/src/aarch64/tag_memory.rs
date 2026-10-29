@@ -87,7 +87,7 @@ pub enum Operand {
 }
 
 impl Operand {
-    /// Public descriptors must retain the register roles and scaled immediate
+    /// Public descriptors must keep the register roles and scaled immediate
     /// ranges of an allocated encoding before any runtime callback can execute.
     pub const fn is_valid(self) -> bool {
         match self {

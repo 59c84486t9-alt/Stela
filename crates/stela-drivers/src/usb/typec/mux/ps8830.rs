@@ -2,7 +2,7 @@
 // Copyright (C) 2024 Linaro Ltd.
 // Copyright (c) 2026 Stela contributors
 //! Parade PS8830 power/reset and register protocol from pinned ps883x.c.
-//! Actual six named rails, XO clock and reset GPIO are required; native graph
+//! Six named rails, XO clock and reset GPIO are required; native graph
 //! binding and upstream orientation/mux routing remain the platform's job.
 use super::{
     Error, Mode, Orientation, Pin, Power, PowerOperation, Registers, Route, Supply,

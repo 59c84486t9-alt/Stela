@@ -5,8 +5,8 @@
 // Copyright (C) 2026 Stela contributors
 //! Owned indexed MSI-X programming for native PCI devices.
 //!
-//! Layout/programming follows pinned Linux PCI MSI. The actual PCI/config/reset
-//! and UC BAR mappings stay retained through failures. Masking is never a DMA,
+//! Layout/programming follows pinned Linux PCI MSI. The PCI/config/reset
+//! and UC BAR mappings stay held through failures. Masking is never a DMA,
 //! device-cause, callback, posted-write or interrupt-controller drain proof.
 use super::{
     Address, EcamConfig, Function,
@@ -32,14 +32,14 @@ static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IoError;
 
-/// Actual retained BAR resource and native accesses, including partial mappings.
+/// BAR resource and native accesses, including partial mappings.
 /// # Safety
-/// Metadata is immutable and describes an actually reserved complete BAR in the
+/// Metadata is immutable and describes a reserved complete BAR in the
 /// same function/reset epoch as the enclosing PCI owner. `accessible` reports
-/// real retained UC read/write mappings, not merely a numerically valid range.
+/// real kept UC read/write mappings, not a numerically valid range.
 /// Reads/writes are aligned native PCI DWORD effects and maintain required
 /// ordering; errors may follow an effect. No competing driver/firmware may
-/// relocate/reset/revoke/access the MSI-X table while this backing is retained.
+/// relocate/reset/revoke/access the MSI-X table while this backing is held.
 pub unsafe trait BarAccess {
     fn physical_span(&self) -> PhysicalSpan;
     fn accessible(&self, offset: u64, bytes: u64) -> bool;
@@ -110,7 +110,7 @@ pub type Owners<C, B> = (Function<C>, RetainedOwner, [Option<B>; 6]);
 
 /// Unique function/table owner. Operations and final Drop belong to process or
 /// deferred context, including fallible replay-state allocation and its release.
-/// Numerical message storage never replaces the caller's retained route owners.
+/// Numerical message storage never replaces the caller's route owners.
 pub struct MsixConfig<C: MsiConfigSpace = EcamConfig, B: BarAccess = MappedBar> {
     owners: Option<Owners<C, B>>,
     layout: Layout,
@@ -125,12 +125,12 @@ pub struct MsixConfig<C: MsiConfigSpace = EcamConfig, B: BarAccess = MappedBar> 
 }
 impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     /// # Safety
-    /// Own the actual unique function/config/root/reset epoch and BAR resources,
+    /// Own the unique function/config/root/reset epoch and BAR resources,
     /// with memory decoding already enabled. BAR array indices are hardware
-    /// BIRs. Retained ownership must be genuine, not an inert numeric token.
-    /// Actual old MSI/MSI-X/INTx sources, callbacks, CPU pending/posted messages
+    /// BIRs. Ownership must be genuine, not an inert numeric token.
+    /// Old MSI/MSI-X/INTx sources, callbacks, CPU pending/posted messages
     /// and work have drained. MSI-X disabled alone does not prove that. Native
-    /// MSI routing must be qualified separately. Process/deferred context only.
+    /// MSI routing must be checked separately. Process/deferred context only.
     /// No hardware writes occur on constructor errors; all owners are returned.
     pub unsafe fn new(
         function: Function<C>,
@@ -332,7 +332,7 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         self.open = false;
         Ok(())
     }
-    // Both APIs share the index/entry core. Legacy mode deliberately preserves
+    // Both APIs share the index/entry core. Legacy mode preserves
     // the original all-mask trace and discards nonzero replay after success.
     fn program_entry(
         &mut self,
@@ -402,11 +402,11 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     /// Program vector zero; all unused vectors remain individually masked.
     /// Successful legacy use invalidates all nonzero indexed replay messages.
     /// # Safety
-    /// Message belongs to the actual qualified IRQ registry/route for this
-    /// function/root epoch, including any real interrupt-remapping authority.
+    /// Message belongs to the checked IRQ registry/route for this
+    /// function/root epoch, including any real interrupt-remapping permission.
     /// The whole affected source set, old posted messages, callbacks and work
     /// have drained before this legacy all-mask transition. Masking alone is
-    /// insufficient. Keep all actual DMA/IRQ owners retained. Process/deferred
+    /// insufficient. Keep all DMA/IRQ owners kept. Process/deferred
     /// context only; this primitive does not validate route authorization.
     pub unsafe fn program(&mut self, message: MsiMessage) -> Result<(), Error> {
         self.program_entry(0, message, true)
@@ -416,10 +416,10 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     /// remaining replay slots before hardware access. Function Mask temporarily
     /// holds peer delivery; peer messages and pending bits remain untouched.
     /// # Safety
-    /// Retain the actual uniquely owned function/reset/root and qualified route
+    /// Keep the uniquely owned function/reset/root and checked route
     /// for the full message, without guessing remapped-address encodings. The
-    /// target's actual source, posted messages, callbacks and work are stopped
-    /// and drained before retargeting; other live routes/callbacks stay retained
+    /// target's source, posted messages, callbacks and work are stopped
+    /// and drained before retargeting; other live routes/callbacks stay held
     /// and published throughout. No concurrent table/config/reset access.
     /// Process/deferred context only; masking never proves retirement.
     pub unsafe fn program_indexed(&mut self, index: u16, message: MsiMessage) -> Result<(), Error> {
@@ -462,9 +462,9 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     }
     /// Activate only entry zero and invalidate all nonzero replay messages.
     /// # Safety
-    /// The actual callback/route is installed and published. Any nonzero live
+    /// The callback/route is installed and published. Any nonzero live
     /// sources, pending/posted messages, callbacks and work are stopped/drained
-    /// before changing to this legacy set. Retain all requester, source/work,
+    /// before changing to this legacy set. Keep all requester, source/work,
     /// reset/DMA and interrupt-controller owners. Process/deferred context only.
     pub unsafe fn unmask(&mut self) -> Result<(), Error> {
         self.unmask_entries(&[0], true)
@@ -474,20 +474,20 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     /// mask is cleared; Function Mask is cleared last. Unselected entries stay
     /// masked. This allocates nothing and never writes device-owned PBA state.
     /// # Safety
-    /// Every selected entry has an actual authorized retained route and already
+    /// Every selected entry has an authorized route and already
     /// published callback. Removed entries have independently stopped/drained
     /// source, posted messages, CPU pending/inflight callbacks and deferred work.
-    /// Retain the real function/reset/root, DMA and interrupt-controller owners;
+    /// Keep the real function/reset/root, DMA and interrupt-controller owners;
     /// no concurrent table/config/reset access. Process/deferred context only.
     pub unsafe fn unmask_indices(&mut self, indices: &[u16]) -> Result<(), Error> {
         self.unmask_entries(indices, false)
     }
-    /// Return exact owners only after independent real source/IRQ/work drain.
+    /// Return owners only after independent real source/IRQ/work drain.
     /// # Safety
     /// Device is stopped across ALL table entries; old pending/posted MSI-X
     /// writes, callbacks and all deferred/reset/timer users have drained and cannot restart. DMA lease,
     /// fence, coherency and IOMMU retirement remain independently owned. Mapped
-    /// BARs must be explicitly retired by their actual owner after this return.
+    /// BARs must be explicitly retired by their owner after this return.
     pub unsafe fn release(&mut self) -> Result<Owners<C, B>, Error> {
         self.disable()?;
         self.owners.take().ok_or(Error::Released)

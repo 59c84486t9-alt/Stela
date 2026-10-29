@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Empty-payload SMBus Quick through the actual retained configuration owner.
+//! Empty-payload SMBus Quick through the configuration owner.
 use super::*;
 
 #[test]

@@ -1,5 +1,5 @@
 //! Original native PMP registry producer and class4 callback. Allocations are
-//! actual class1 client objects; no numeric slot/DMA address grants ownership.
+//! class1 client objects; no numeric slot/DMA address grants ownership.
 use super::{Progress, Step, memory};
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::Cell;
@@ -48,12 +48,12 @@ pub enum Synchronization {
     Prepare,
     Complete,
 }
-/// Original mode2 mapping prepare4a734 and complete4a7e0, including actual
+/// Original mode2 mapping prepare4a734 and complete4a7e0, including
 /// descriptor flags/cache guards, DC IVAC/CIVAC and DSB SY where reached.
-/// The canonical owner must retain affected writers and each reached prefix.
+/// The canonical owner must keep affected writers and each reached prefix.
 /// No default, unrelated MFENCE or queue-enqueue completion is supplied here.
 pub trait PublicationMapping: Mapping {
-    /// Source memcpy effects, retained under this operation across partial
+    /// Source memcpy effects, kept under this operation across partial
     /// copies, busy and refusal. Output storage remains owned and stable until
     /// retirement. Retired-with-refusal may not replay a copied prefix.
     fn read_publication(
@@ -89,10 +89,10 @@ pub enum CallbackStep {
     },
     Refused(Error),
 }
-/// Moved-in actual native invocation/context owner. Shared input is the live
+/// Moved-in native invocation/context owner. Shared input is the live
 /// mapped AP buffer, not a staged copy: callback RAM effects must occur through
 /// that same mapping and survive busy/refusal. Local-set ignores accepted;
-/// incoming-set uses the actual native callback's zero/nonzero return.
+/// incoming-set uses the native callback's zero/nonzero return.
 pub trait Callback<B: memory::Backend> {
     fn apply(
         &mut self,
@@ -113,7 +113,7 @@ pub struct Configuration {
     pub name: [u8; 48],
     pub unit: [u8; 8],
     pub value_type: [u8; 8],
-    /// Original native bits0..4: remote, AP writable, metadata, retained name,
+    /// Original native bits0..4: remote, AP writable, metadata, kept name,
     /// and remote-only value. Preserve source bits rather than infer policy.
     pub flags: u32,
 }
@@ -213,7 +213,7 @@ struct Incoming {
     result: u32,
 }
 
-/// Owns the actual class1 client, persistent AP buffers, registry objects and
+/// Owns the class1 client, persistent AP buffers, registry objects and
 /// class3/class4 slots. Startup/exit does not replace this owner or allocations.
 /// There is no reset/cancel/drop-time AP cleanup or generic readiness setter.
 pub struct Owner<B: memory::Backend> {
@@ -230,7 +230,7 @@ pub struct Owner<B: memory::Backend> {
     completion: Option<Completion>,
     regions: Option<Option<Vec<memory::Region>>>,
 }
-/// Failed admission returns the actual claims/client, including any reached
+/// Failed admission returns the claims/client, including any reached
 /// mapping/remote-allocation prefix. It does not silently drop those resources.
 pub struct Admission<B: memory::Backend> {
     pub reason: Error,
@@ -283,8 +283,8 @@ where
             regions: None,
         })
     }
-    /// None means init has not retired. Some(None) is actual AP unavailability;
-    /// Some(Some(rows)) retains the actual read table, which is not authority.
+    /// None means init has not retired. Some(None) is AP unavailability;
+    /// Some(Some(rows)) keeps the read table, which is not permission.
     pub fn regions(&self) -> Option<&Option<Vec<memory::Region>>> {
         self.regions.as_ref()
     }
@@ -373,7 +373,7 @@ where
             index,
         }
     }
-    /// `None` requires an actually absent configured native callback. Missing
+    /// `None` requires an absent configured native callback. Missing
     /// invocation support for a present callback must refuse, never become None.
     pub fn begin_add(
         &mut self,
@@ -449,7 +449,7 @@ where
         }
         ops.extend([Operation::ApplyLocalCallback, Operation::CommitSet]);
         self.begin(ops, index, None, data.to_vec(), None)?;
-        // Original115ec updates the actual local value before AP publication.
+        // Original115ec updates the local value before AP publication.
         if let Some(value) = &mut self.entries[index].as_mut().unwrap().value {
             value[..data.len()].copy_from_slice(data);
         }

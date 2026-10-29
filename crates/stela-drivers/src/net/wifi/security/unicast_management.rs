@@ -5,8 +5,8 @@
 // Copyright (C) 2020-2023 Intel Corporation. See THIRD_PARTY.md.
 //! Hardware-verified unicast robust-management CCMP/GCMP receive authentication.
 //! This is a selected-key crypto boundary, not PMF negotiation, software CCMP
-//! decryption or current-station delivery. Vendor status must come from actual
-//! completed RX under its retained peer/key owner, exactly as for data.
+//! decryption or current-station delivery. Vendor status must come from
+//! completed RX under its peer/key owner, exactly as for data.
 
 use super::{Error, KeyIdentity, KeyScope, KeySlot, PacketNumber, management};
 use crate::net::{
@@ -22,7 +22,7 @@ const MANAGEMENT_HEADER: usize = 24;
 
 /// One original integrity-checked frame and consumed PTK management PN. No
 /// public constructor or Clone. A delayed station consumer must consume this
-/// and separately recheck its actual association and still-installed PTK.
+/// and separately recheck its association and still-installed PTK.
 #[derive(Debug)]
 pub struct Authenticated<'a> {
     mpdu: &'a Mpdu,
@@ -50,7 +50,7 @@ impl KeySlot {
     /// Authenticate one ordinary unicast robust-management frame for `local`.
     /// Peer transmitter and BSSID must match this exact acknowledged PTK. Data
     /// counters 0..15 are independent; copied hardware replay flags never skip
-    /// counter16. This grants no authority to change a station's association.
+    /// counter16. This grants no permission to change a station's association.
     pub fn authorize_unicast_management<'a>(
         &mut self,
         mpdu: &'a Mpdu,

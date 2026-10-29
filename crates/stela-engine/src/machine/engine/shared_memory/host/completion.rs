@@ -1,4 +1,4 @@
-//! Borrow the same canonical RAM while every actual native owner remains held.
+//! Borrow the same canonical RAM while every native owner remains held.
 use super::*;
 use crate::machine::{
     Stop,
@@ -6,7 +6,7 @@ use crate::machine::{
 };
 use crate::memory::CanonicalRamService;
 
-/// Actual canonical RAM and the exact all-worker stop remain borrowed through a
+/// Canonical RAM and the exact all-worker stop remain borrowed through a
 /// controller's own prepared effect and ACK. This does not implement Apple DRAM,
 /// cache-power or external DMA effects. No numeric completion can construct it.
 /// Dropping without explicit settlement fails the canonical owner and keeps
@@ -26,14 +26,14 @@ impl<H: Host, T: NativeTransport> HeldRamService<'_, H, T> {
         self.ram.as_ref().expect("live canonical service")
     }
     /// No caller can change inventory/generation while this exclusive borrow
-    /// and the actual non-Clone stopped token remain live.
+    /// and the non-Clone stopped token remain live.
     pub fn validate_current(&self) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
         self.memory().validate_current()?;
         self.inventory
             .require_all_held(self.held.as_ref().expect("actual held cohort"))
             .map_err(|_| stela_compiler::context::memory::MemoryStatus::Domain)
     }
-    /// Complete coherent CPU memory on the actual BSP helper and every held
+    /// Complete coherent CPU memory on the BSP helper and every held
     /// source worker. Each owner must apply its real fence and return the exact
     /// session receipt before continuing. No DMA/DRAM/cache-power completion or
     /// architectural DSB retirement is implied by this CPU-only operation.
@@ -62,9 +62,9 @@ impl<H: Host, T: NativeTransport> HeldRamService<'_, H, T> {
             }
         }
     }
-    /// End only RAM exclusion, keeping the SAME actual worker stop and open
+    /// End only RAM exclusion, keeping the SAME worker stop and open
     /// owner-local sessions for a synchronous controller/CPU transaction.
-    /// Only engine continuation code can consume the returned stop authority.
+    /// Only engine continuation code can consume the returned stop permission.
     pub(in crate::machine::engine) fn finish_memory(mut self) -> publication::StoppedWorkers {
         if self.validate_current().is_err() {
             self.transport
@@ -86,7 +86,7 @@ impl<H: Host, T: NativeTransport> HeldRamService<'_, H, T> {
         }
         self.fence_cpu_memory();
         // End byte/mapping exclusion only after controller settlement, before
-        // allowing the actual owners to leave their same-generation hold.
+        // allowing the owners to leave their same-generation hold.
         drop(self.ram.take());
         *self.selected = None;
         for session in self.sessions.drain(..) {
@@ -110,7 +110,7 @@ impl<H: Host, T: NativeTransport> Drop for HeldRamService<'_, H, T> {
 }
 impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// Recover/hold every assigned native worker, complete synchronous modeled
-    /// copyout through the SAME Host/RAM, fence each actual physical owner, then
+    /// copyout through the SAME Host/RAM, fence each physical owner, then
     /// exclude native loans and every canonical physical writer. No raw serial
     /// RAM lane or second memory owner is admitted.
     ///
@@ -121,21 +121,21 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// the held workers and completed synchronous transfer are excluded. This
     /// includes independently advancing queued/background jobs which know this
     /// registered RAM's Arc. Paused synchronous device requests may remain
-    /// retained only when the actual exclusive Devices owner excludes their
+    /// only when the exclusive Devices owner excludes their
     /// advancement through the whole service. Writer gates or transfer(Ok) do
     /// not establish an empty I/O command queue. There may be no reentrant
     /// monitor/RAM write, CPU settlement or
     /// interrupt/migration while the returned all-writer gates are held. The
-    /// actual prepared controller/request must be retained through its effect,
+    /// prepared controller/request must be held through its effect,
     /// faults and ACK before finish; unavailable DRAM/gating effects still
     /// refuse. CPU visibility is not a generic cache/DRAM/DMA drain.
     pub unsafe fn prepare_native_ram_service(&mut self) -> Result<HeldRamService<'_, H, T>, Stop> {
-        // SAFETY: same retained owner and provider contract; the caller does not
+        // SAFETY: same owner and provider contract; the caller does not
         // need the disjoint Devices borrow for this service.
         unsafe { self.prepare_native_ram_service_parts() }.map(|(_, service)| service)
     }
 
-    /// The same live service, split from its actual Devices receiver so the
+    /// The same live service, split from its Devices receiver so the
     /// prepared controller/request can remain borrowed through commit/ACK.
     ///
     /// # Safety
@@ -212,7 +212,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
 }
 
 impl<H: Host, T: NativeTransport> ServiceHost<H, T> {
-    /// Consume the SAME actual stopped token; never close/reopen a generation
+    /// Consume the SAME stopped token; never close/reopen a generation
     /// between recovering a source frame and performing its device service.
     pub(in crate::machine::engine) fn borrow_ram_service<'a>(
         &'a mut self,

@@ -1,4 +1,4 @@
-//! Original tokenless RM physical mapping ABI over the canonical MMIO authority.
+//! Original tokenless RM physical mapping ABI over the canonical MMIO permission.
 //!
 //! This module owns only returned-VA/size -> Mapping lease bookkeeping. Actual
 //! resource registration, aliases, effective cache policy, native roots and TLB
@@ -61,7 +61,7 @@ struct Lease {
 }
 
 /// Pinned native installation for the original global, tokenless mapping hooks.
-/// It retains a clone of the one canonical Authority, not a BAR/resource table.
+/// It keeps a clone of the one canonical Permission, not a BAR/resource table.
 /// No resources are registered here. This handle is neither Send nor Sync.
 pub struct MmioServices {
     authority: Authority,
@@ -136,7 +136,7 @@ impl MmioServices {
     /// All native callers have stopped/drained and cannot restart, including
     /// callbacks/workers with raw addresses. The install lifetime/context and
     /// serialization contract still applies. Failure leaves the slot installed.
-    /// Canonically quarantined leases retain actual platform/resources without
+    /// Canonically quarantined leases keep platform/resources without
     /// this object; their failure remains a real teardown error in diagnostics.
     /// Live AND pending leases refuse uninstall. Drain pending retirements at
     /// real quiescent points, and before attempting final uninstall.
@@ -170,8 +170,8 @@ impl MmioServices {
         }
     }
 
-    /// Actual shared-authority state, including uncertain maps that never
-    /// returned a VA and quarantine from every native authority consumer.
+    /// Shared-permission state, including uncertain maps that never
+    /// returned a VA and quarantine from every native permission consumer.
     pub fn authority_status(&self) -> Result<AuthorityStatus, MappingError> {
         self.authority.status()
     }
@@ -179,7 +179,7 @@ impl MmioServices {
     /// Retry pending exact canonical tokens, using their existing ledger slots.
     /// No adapter allocation, queue or worker is created. Returns the number
     /// retired if all attempts succeed; an error may follow earlier progress,
-    /// which remains visible in status. Busy retains the pending Mapping even
+    /// which remains visible in status. Busy keeps the pending Mapping even
     /// if the platform was called and canonical state is already uncertain.
     ///
     /// # Safety
@@ -187,7 +187,7 @@ impl MmioServices {
     /// hooks in the real platform/global heap's process/deferred context. Every
     /// pending lease's initial unmap has already proved complete raw CPU/device/
     /// callback/worker and posted/WC drain; no future access may restart. Retry
-    /// at actual quiescent points and before uninstall. Never infer that Busy
+    /// at quiescent points and before uninstall. Never infer that Busy
     /// means a platform callback was not entered or a raw VA is usable again.
     pub unsafe fn drain_pending_retirements(self: Pin<&mut Self>) -> Result<usize, Error> {
         let _entry = Entry::acquire()?;
@@ -205,14 +205,14 @@ impl MmioServices {
                 continue;
             }
             // SAFETY: initial unmap permanently ended raw access; retry the
-            // same retained canonical token in owner-established context.
+            // same canonical token in owner-established context.
             match unsafe { services.retire(at) } {
                 Ok(()) => retired += 1,
                 Err(error) => {
                     services.record_unmap_failure(error);
                     failure.get_or_insert(error);
                     if error == Error::Mapping(MappingError::Busy) {
-                        at += 1; // retained in this same slot
+                        at += 1; // in this same slot
                     }
                     // Other failures consumed this slot into quarantine; its
                     // swapped-in neighbor still needs inspection at this index.
@@ -233,7 +233,7 @@ impl MmioServices {
         }
         let span = PhysicalSpan::new(physical, bytes)?;
         let size = usize::try_from(bytes).map_err(|_| MappingError::InvalidRange)?;
-        // Validate genuine context and complete rounded ownership BEFORE any
+        // Validate context and complete rounded ownership BEFORE any
         // allocator operation. map_physical repeats lookup and atomically
         // reserves the resource/cache range; no GPU BAR metadata is trusted.
         drop(self.authority.resolve_resource(span)?);
@@ -283,8 +283,8 @@ impl MmioServices {
     /// # Safety
     /// This pending slot has permanently stopped/drained all raw users/effects.
     unsafe fn retire(&mut self, at: usize) -> Result<(), Error> {
-        // SAFETY: caller proves complete raw-user drain; Mapping retains the
-        // genuine platform/resource and validates exact canonical identity.
+        // SAFETY: caller proves complete raw-user drain; Mapping keeps the
+        // platform/resource and validates exact canonical identity.
         match unsafe { self.leases[at].mapping.retire() } {
             Ok(()) => {
                 self.leases.swap_remove(at);
@@ -294,8 +294,8 @@ impl MmioServices {
             Err(error) => {
                 self.unmap_quarantines = self.unmap_quarantines.saturating_add(1);
                 // Fatal/ambiguous failures consume into canonical permanent
-                // quarantine, retaining actual owners and uncertain aliases.
-                // Busy instead retains the exact token without guessing if
+                // quarantine, keeping owners and uncertain aliases.
+                // Busy instead keeps the exact token without guessing if
                 // native unmap ran, for explicit native-owner retry above.
                 self.leases.swap_remove(at);
                 Err(error.into())
@@ -345,7 +345,7 @@ fn with_installed<R>(fallback: R, call: impl FnOnce(&mut MmioServices) -> R) -> 
         refuse();
         return fallback;
     }
-    // SAFETY: unsafe install retains this pinned native object; global entry
+    // SAFETY: unsafe install keeps this pinned native object; global entry
     // ownership excludes all other callbacks before constructing this borrow.
     call(unsafe { &mut *pointer })
 }

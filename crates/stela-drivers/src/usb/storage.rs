@@ -1,6 +1,6 @@
 //! SCSI-transparent USB disks over native BOT and UAS owners. Logical units
 //! share their transport's serialized command/tag/DMA and quarantine boundary.
-//! Every command carries the actual transport LUN; uncertain DMA prevents
+//! Every command carries the transport LUN; uncertain DMA prevents
 //! publication of any disk belonging to the interface.
 // SPDX-License-Identifier: GPL-2.0-only AND GPL-2.0-or-later
 // Protocol/SCSI references: Linux usb-storage, Matthew Dharm and contributors;
@@ -63,7 +63,7 @@ enum Caching {
     WriteBack,
 }
 
-/// SCSI semantics are shared across BOT and UAS; each transport retains its
+/// SCSI semantics are shared across BOT and UAS; each transport keeps its
 /// own framing, LUN address type, command ownership and uncertainty boundary.
 trait Scsi {
     type Lun: Copy + Default + PartialEq + core::fmt::Display;
@@ -357,7 +357,7 @@ pub(super) fn discover_retained(
     Ok((storage, disks))
 }
 
-/// Discover block devices through an actual configured UAS interface.
+/// Discover block devices through a configured UAS interface.
 /// Use [`discover_uas_retained`] to keep initially empty interfaces for rescan.
 ///
 /// # Safety
@@ -370,12 +370,12 @@ pub unsafe fn discover_uas(
     dma: &mut dyn DmaAllocator,
     failures: &mut Vec<(String, BlockError)>,
 ) -> Result<Vec<UsbDisk>, BlockError> {
-    // SAFETY: this caller grants the identical retained-constructor contract.
+    // SAFETY: this caller grants the identical constructor contract.
     unsafe { discover_uas_retained(controller, device, binding, dma, failures) }
         .map(|(_, disks)| disks)
 }
 
-/// Retain a UAS interface independently of the current ready-media inventory.
+/// Keep a UAS interface independently of the current ready-media inventory.
 ///
 /// # Safety
 /// The exclusive attachment/configuration/unconfigured endpoint requirements of
@@ -410,11 +410,11 @@ fn discover_uas_units<T: Scsi<Lun = uas::Lun>>(
     if owner.borrow().poisoned() {
         return Err(quarantined());
     }
-    // The initial INQUIRY establishes the actual ANSI level. Failure to learn
+    // The initial INQUIRY establishes the ANSI level. Failure to learn
     // it keeps the source's conservative eight-unit sequential fallback.
     let version = initial.as_ref().map_or(0, |bytes| bytes[2] & 0x0f);
     let mut disks = Vec::new();
-    // The source scans actual LUN0 before REPORT LUNS. A real attached unit
+    // The source scans LUN0 before REPORT LUNS. A real attached unit
     // must survive a report that omits zero; an absent unit is never invented.
     let initial_present = initial
         .as_ref()
@@ -462,7 +462,7 @@ fn discover_uas_units<T: Scsi<Lun = uas::Lun>>(
             if owner.borrow().poisoned() {
                 return Err(quarantined());
             }
-            // Sequential fallback stops at the first actual absent logical
+            // Sequential fallback stops at the first absent logical
             // unit, not at a present card-reader slot with no inserted media.
             if found
                 .as_ref()
@@ -576,7 +576,7 @@ fn publish_unit<T: Scsi>(
     Ok(())
 }
 
-/// Linux's initial 4 KiB report grows to the actual list extent. Stela's native
+/// Linux's initial 4 KiB report grows to the list extent. Stela's native
 /// transfer bound is explicit: an oversized, malformed or unstable list cannot
 /// become an apparently complete prefix of disks.
 fn report_luns<T: Scsi<Lun = uas::Lun>>(
@@ -600,7 +600,7 @@ fn report_luns<T: Scsi<Lun = uas::Lun>>(
                 {
                     continue;
                 }
-                // Source command failures fall back to actual sequential
+                // Source command failures fall back to sequential
                 // INQUIRY. A poisoned host can never enter this fallback.
                 Err(_) => return Ok(None),
             }
@@ -793,7 +793,7 @@ fn probe_identified<T: Scsi>(
             ) {
                 Ok(mode) => scsi::write_protected(&mode)
                     .ok_or(BlockError::Unsupported("short MODE SENSE data"))?,
-                // MODE SENSE is optional only when the unit actually reports an
+                // MODE SENSE is optional only when the unit reports an
                 // unsupported CDB. USB/transport errors cannot default to writable.
                 Err(BlockError::Sense(sense)) if sense.key == Sense::ILLEGAL_REQUEST => false,
                 Err(error) => return Err(error),

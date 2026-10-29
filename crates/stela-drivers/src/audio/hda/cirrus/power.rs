@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! CS421x D3hot and retained-route resume adapted from cs421x_suspend and
+//! CS421x D3hot and kept-route resume adapted from cs421x_suspend and
 //! cs421x_init in Linux sound/hda/codecs/cirrus/cs421x.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. Native route replay uses Stela's
-//! retained graph/stream/amp authority, not a fabricated codec register cache.
+//! graph/stream/amp permission, not an invented codec register cache.
 use super::super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, Registers, StreamId, Verb, WidgetKind,
 };
@@ -34,7 +34,7 @@ pub(super) struct SavedRoute {
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// Called before the controller's actual SD_RUN write. A retained route
+    /// Called before the controller's SD_RUN write. A kept route
     /// never licenses DMA while its owning codec is suspended or replaying.
     pub(in crate::audio::hda) fn require_cirrus_route_power(
         &self,
@@ -128,7 +128,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
 
-    /// Suspend an actual CS4210/CS4213 to D3hot after every DMA stream has
+    /// Suspend a CS4210/CS4213 to D3hot after every DMA stream has
     /// acknowledged stop. Pin quiet precedes DAC/ADC D3; CS4210 then sets PDREF
     /// before AFG D3. The command link and every DMA/route allocation stay owned.
     /// This codec boundary does not claim PCI/ACPI system suspend support.
@@ -143,8 +143,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         let state = self.cirrus_active(graph)?;
         self.cirrus_d3_authority(graph)?;
-        // Every actual retained route must have a replay recipe. Refuse any
-        // unrelated converter/control owner instead of dropping its authority.
+        // Every kept route must have a replay recipe. Refuse any
+        // unrelated converter/control owner instead of dropping its permission.
         let routes: Vec<_> = self
             .routes
             .iter()
@@ -211,7 +211,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .iter()
             .position(|owned| owned.address == graph.address)
             .ok_or(Error::NeedsReset)?;
-        // Retain the power transition before the first pin/rail effect.
+        // Keep the power transition before the first pin/rail effect.
         self.cirrus_codecs[index].active = false;
         self.cirrus_codecs[index].suspended = true;
         self.cirrus_codecs[index].suspended_speaker_control = speaker;
@@ -269,7 +269,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         if result.is_err() {
             // A failed replay cannot release any previously authoritative path
-            // or converter. Partial actual effects are retained until reset.
+            // or converter. Partial effects are held until reset.
             self.routes
                 .retain(|(_, route)| route.codec_address() != graph.address);
             self.routes.extend(old_routes);
@@ -281,8 +281,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     /// Resume an owned CS421x on the same live link and allocation generation.
-    /// Revalidate actual capabilities/defaults after AFG wake, perform the exact
-    /// source startup, restore the retained speaker control and replay actual
+    /// Revalidate capabilities/defaults after AFG wake, perform the exact
+    /// source startup, restore the speaker control and replay
     /// stopped PCM routes. Any failure keeps all owners and requires reset.
     pub fn resume_cirrus_cs421x(&mut self, graph: &CodecGraph) -> Result<(), Error> {
         self.cirrus_guard(graph)?;

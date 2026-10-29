@@ -582,7 +582,7 @@ fn original_j473_views_resolve_all_ten_source_constructed_owners() {
             .processor_associations(cpus.chip, &root, &cpus.processors, 0)
             .is_err()
     );
-    // Source-integrity witnesses pin actual normal-mode constructor and
+    // Source-integrity witnesses pin normal-mode constructor and
     // consumer instruction spans, independently of synthetic fixtures.
     for (offset, count, expected) in [
         (

@@ -49,7 +49,7 @@ fn recipient_response_retains_session() {
     let proof = observe(&mut driver, &model, &delete(true), 102, NOW + 5);
     consume(&mut driver, &mut owner, proof, NOW + 6);
     state.allowed.set(false);
-    // Actual firmware disable needs no new TX permission and publishes no DELBA.
+    // Firmware disable needs no new TX permission and publishes no DELBA.
     driver.progress_block_ack_stop().unwrap();
     assert!(driver.station().block_ack_idle());
     assert!(model.response.lock().unwrap().receive_ba.is_empty());

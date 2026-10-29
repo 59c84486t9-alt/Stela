@@ -14,7 +14,7 @@
 //! clamped, with sleep requests and reset releases clear; PIPE is clamped and
 //! reset, its mux on the dummy PIPE that stands in for the absent SuperSpeed
 //! PHY (the xHCI driver's reset then skips the PHY-ready poll, KC
-//! 0x4457e68). Other configuration/tuning words start zero and retain
+//! 0x4457e68). Other configuration/tuning words start zero and keep
 //! documented writes.
 //! These are emulated-die handoff choices, not captured iBoot/reset values.
 //! Power and lock handshakes settle synchronously. SuperSpeed, DP and USB4
@@ -24,7 +24,7 @@
 //! View 1 is the core event block. `configureUSB2` sets its
 //! `AUSBC_CORE_EVT_BLK_C0_USB2_CTL` LOAD_CNT (bit 3) and EVT_EN (bit 0) bits
 //! (0x3149ad8 and 0x3149c40, named by the driver's own log strings). They are
-//! retained. After ungating the USB2 PHY clocks it reads
+//! kept. After ungating the USB2 PHY clocks it reads
 //! `C0_UTMI_CLK_ACTIVE.EVT_CNT` at +0x20 (0x314a1f4) and only logs "EVT_CNT
 //! is 0" when it is zero; both outcomes continue identically. Inferred: the
 //! UTMI clock runs while the PHY is out of RESET and SIDDQ with its reference
@@ -92,7 +92,7 @@ const MUX_DATA: u32 = 7;
 /// `PIPEHANDLER_MUX_CTRL_{CLK,DATA}_DUMMY`).
 const MUX_DUMMY: u32 = 4 << 3 | 2;
 
-/// Digital outputs consumed by the USB core. A retained lifecycle pause is
+/// Digital outputs consumed by the USB core. A kept lifecycle pause is
 /// distinct from an electrical disconnect and from the controller reset line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usb2State {
@@ -243,7 +243,7 @@ impl AtcPhy {
             CTL => RESET | PORT_RESET | APB_RESET_N | SIDDQ,
             SIG => VBUS_FORCE | HOST,
             // Full32 tuning storage; Linux names bits29/30 as clock gating.
-            // Analog trim values are retained, with no analog calibration claim.
+            // Analog trim values are held.
             MISCTUNE => u32::MAX,
             POWER_CTRL => SMALL | BIG | CLAMP | CORE_APB_N | CORE_PHY_N,
             MISC => MISC_RESET_N | LANE_SWAP,
@@ -466,7 +466,7 @@ mod tests {
         assert!(p.usb2_state().controller_reset);
         assert!(!p.usb2_state().ready);
         assert_eq!(rd(&mut p, &mut a, USBCTL), u64::from(ISOLATE));
-        // A non-retained loss also clears the actual pipehandler release.
+        // A non-kept loss also clears the pipehandler release.
         wr(&mut p, &mut a, AON, RESET_N);
         p.set_power(false, false);
         p.set_power(true, false);

@@ -258,7 +258,7 @@ fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc:
         SOURCE_VECTOR,
         HALF_FIELD_TO_DWORD_TOP - HALF_TO_SINGLE_FRACTION_SHIFT,
     );
-    // The guard retains exponent mask 31; 31 >> 2 gives 7, and 7 << 27 is
+    // The guard keeps exponent mask 31; 31 >> 2 gives 7, and 7 << 27 is
     // exactly the S-vs-H exponent bias adjustment. Reuse that constant.
     ShiftOpcode::RightDword.emit(code, HALF_MAXIMUM_VECTOR, HALF_MAXIMUM_TO_BIAS_BITS);
     ShiftOpcode::LeftDword.emit(code, HALF_MAXIMUM_VECTOR, SINGLE_BIAS_POSITION);

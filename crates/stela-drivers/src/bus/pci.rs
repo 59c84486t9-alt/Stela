@@ -60,7 +60,7 @@ const D2_DELAY_US: u64 = 200;
 const D2: u16 = 2;
 const D3HOT: u16 = 3;
 
-/// The legacy entry requires only its actual maximum 10 ms exit delay. Keep
+/// The legacy entry requires only its maximum 10 ms exit delay. Keep
 /// that exact contract when sharing the provider-based PM transition path.
 struct PowerUpClock<'a>(&'a Clock);
 // SAFETY: this borrowed original Clock performs canonical checked real waits;
@@ -182,7 +182,7 @@ pub trait ConfigSpace {
 }
 
 /// A function's 4 KiB of ECAM configuration space.
-/// A context-bound config transport. Owned and retained-owned arms delegate
+/// A context-bound config transport. Owned and kept-owned arms delegate
 /// every effect to the original mapping owner; no copied pointer bypass exists.
 pub struct EcamConfig {
     transport: EcamTransport,
@@ -200,8 +200,8 @@ impl EcamConfig {
             _context: core::marker::PhantomData,
         }
     }
-    /// Borrow exactly one actual whole-boot configuration owner. The exclusive
-    /// borrow cannot outlive or duplicate its original retained resource grant.
+    /// Borrow exactly one whole-boot configuration owner. The exclusive
+    /// borrow cannot outlive or duplicate its original resource grant.
     pub fn from_retained(config: &'static mut owned::OwnedConfig) -> Self {
         Self {
             transport: EcamTransport::Retained(config),
@@ -216,7 +216,7 @@ impl EcamConfig {
     }
     unsafe fn raw(base: u64) -> Self {
         Self {
-            // SAFETY: caller owns this actual live mapped UC ECAM function
+            // SAFETY: caller owns this live mapped UC ECAM function
             // and excludes every competing accessor for the transport life.
             transport: EcamTransport::Raw(unsafe { Mmio::new(base) }),
             _context: core::marker::PhantomData,
@@ -361,7 +361,7 @@ impl<C: ConfigSpace> Function<C> {
         Self::try_new(address, config).ok()
     }
 
-    /// Return the actual config owner on absent/CRS responses. No device
+    /// Return the config owner on absent/CRS responses. No device
     /// quiescence or mapping-retirement permission follows from either value.
     pub fn try_new(address: Address, config: C) -> Result<Self, C> {
         let id = config.read32(VENDOR);
@@ -378,9 +378,9 @@ impl<C: ConfigSpace> Function<C> {
         })
     }
 
-    /// Scan actual config owners and release each read-only observation before
-    /// returning copied discovery DATA. The callbacks retain all mapping/root
-    /// authority; the result grants no current configuration or device access.
+    /// Scan config owners and release each read-only observation before
+    /// returning copied discovery DATA. The callbacks keep all mapping/root
+    /// permission; the result grants no current configuration or device access.
     pub fn inventory_with<E>(
         window: &EcamWindow,
         mut open: impl FnMut(Address) -> Result<Option<Self>, E>,
@@ -539,8 +539,8 @@ impl<C: ConfigSpace> Function<C> {
         self.power_up_with_timer(&PowerUpClock(clock))
     }
 
-    /// Run the identical transition under an actual retained native timer or
-    /// an explicitly qualified symbolic device model. Validate before config
+    /// Run the identical transition under a native timer or
+    /// an explicitly checked symbolic device model. Validate before config
     /// access; a provider failure never becomes a successful hardware delay.
     pub(crate) fn power_up_with_timer(
         &mut self,
@@ -836,7 +836,7 @@ impl Function {
             };
             let offset =
                 (u64::from(bus) << 20) | (u64::from(device) << 15) | (u64::from(function) << 12);
-            // SAFETY: forwarded actual exclusive mapped-window contract.
+            // SAFETY: forwarded exclusive mapped-window contract.
             let config = unsafe { EcamConfig::raw(window.base + offset) };
             (address, config)
         };
@@ -934,8 +934,8 @@ mod tests {
             function: 0,
         };
         let (owner, counters) = owned::tests::fixture(address);
-        // Deliberately retained whole-boot owner, exactly as the production
-        // LegacyControllerOwner will retain its original config and BAR leases.
+        // Whole-boot owner, exactly as the production
+        // LegacyControllerOwner will keep its original config and BAR leases.
         let owner = Box::leak(Box::new(owner));
         let mut config = EcamConfig::from_retained(owner);
         config.write32(0x40, 0xa5c3_5a7e);
@@ -1370,8 +1370,8 @@ mod tests {
             config.bar_masks[0] = 0xffff_c000;
             let mut function =
                 Function::new(Address::default_for_tests(), SoftReset(config)).unwrap();
-            // This model qualifies PMCSR/BAR effects, not real time. Capture
-            // the actual requested wait instead of passing an invalid Clock.
+            // This model checks PMCSR/BAR effects, not real time. Capture
+            // the requested wait instead of passing an invalid Clock.
             let mut delays = Vec::new();
             function
                 .power_up_with(|us| {

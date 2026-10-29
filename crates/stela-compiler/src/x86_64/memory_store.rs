@@ -12,7 +12,7 @@ const HALFWORD_BYTES: u8 = 2;
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;
 const VECTOR_BYTES: u8 = 16;
-/// Wide stores stage their sources in XMM0/XMM1. XMM2 is never a retained
+/// Wide stores stage their sources in XMM0/XMM1. XMM2 is never a kept
 /// input at this boundary; a full-width shuffle also avoids a merge dependency.
 const HIGH_QWORD_SCRATCH_XMM: u8 = 2;
 const DUPLICATE_HIGH_QWORD: u8 = 0xee;
@@ -45,7 +45,7 @@ pub(super) fn aligned_register_offset(
 /// RAX is the address; displacement is zero or the second pair element's size.
 /// RDX (pending writeback), R8 (second integer value), RDI and guest state survive.
 /// RCX, R10 and XMM2 are scratch on the crossing path. The selected XMM0/XMM1
-/// source remains whole, including where the block retains XMM0 for a later
+/// source remains whole, including where the block keeps XMM0 for a later
 /// instruction.
 pub(super) fn emit(code: &mut Code, bytes: u8, displacement: u8, source: Source, aligned: bool) {
     emit_marking(code, bytes, displacement, source, aligned, &mut None);

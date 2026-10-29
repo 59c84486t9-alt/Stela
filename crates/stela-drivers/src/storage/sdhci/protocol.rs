@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual SDHCI effects behind the shared SD/MMC card protocol.
+//! SDHCI effects behind the shared SD/MMC card protocol.
 use super::{command::*, *};
 #[cfg(test)]
 pub(super) use crate::storage::mmc::capacity;
@@ -96,7 +96,7 @@ impl Host for Engine {
         self.tune()
     }
     fn sd_max_current_ma(&self) -> u32 {
-        // Captured from the actual selected VCC supply's MAX_CURRENT field.
+        // Captured from the selected VCC supply's MAX_CURRENT field.
         self.max_current_ma
     }
     fn mmc_width(&self) -> u8 {
@@ -131,7 +131,7 @@ impl Host for Engine {
 impl Engine {
     pub(super) fn retire_error(&mut self, primary: BlockError) -> BlockError {
         if self.uhs_failed {
-            // The electrical path already powered off and retained both cleanup
+            // The electrical path already powered off and kept both cleanup
             // outcomes. Shared card-protocol unwinding must not replace them.
             return primary;
         }

@@ -9,7 +9,7 @@ fn programming_faults_revoke_authorization() {
         model.lock().unwrap().fail_read = Some((offset, width));
         assert_eq!(
             // SAFETY: The synthetic route and exact RAM config owners remain
-            // retained; the injected read failure cannot start device work or
+            // kept; the injected read failure cannot start device work or
             // invalidate backing.
             unsafe { helper.program(MESSAGE) },
             Err(MsiError::FailedRead { offset })
@@ -32,12 +32,12 @@ fn programming_faults_revoke_authorization() {
         model.lock().unwrap().block_write = Some((offset, width));
         assert_eq!(
             // SAFETY: The rejected write targets live RAM owned by the fixture; no
-            // source is active and the synthetic route/config guards stay retained.
+            // source is active and the synthetic route/config guards stay held.
             unsafe { helper.program(MESSAGE) },
             Err(MsiError::Readback { offset })
         );
         assert_eq!(
-            // SAFETY: The rejected write revoked authorization while retaining its model
+            // SAFETY: The rejected write revoked authorization while keeping its model
             // owners; unmask must reject before publishing delivery.
             unsafe { helper.unmask() },
             Err(MsiError::NotProgrammed)
@@ -62,7 +62,7 @@ fn enable_and_mask_faults_retain_owners() {
     unsafe { helper.program(MESSAGE) }.unwrap();
     model.lock().unwrap().block_write = Some((0x52, 2));
     assert_eq!(
-        // SAFETY: The route and backing owners remain retained across the blocked
+        // SAFETY: The route and backing owners remain held across the blocked
         // enable write; the RAM model has no physical interrupt delivery.
         unsafe { helper.unmask() },
         Err(MsiError::Readback { offset: 0x52 })
@@ -71,7 +71,7 @@ fn enable_and_mask_faults_retain_owners() {
     model.lock().unwrap().fail_read = Some((COMMAND, 2));
     assert!(
         // SAFETY: The isolated model has no async users or DMA; the injected read fault
-        // makes release fail while retaining both exact owners.
+        // makes release fail while keeping both owners.
         unsafe { helper.release() }.is_err()
     );
     let count = quarantined_configurations();
@@ -87,12 +87,12 @@ fn unacknowledged_enable_quarantines() {
     let config_drops = f.config_drops.clone();
     let root_drops = f.root_drops.clone();
     let (mut helper, model) = attach(f);
-    // SAFETY: The fixture retains the synthetic route and RAM config/root guards; no
+    // SAFETY: The fixture keeps the synthetic route and RAM config/root guards; no
     // source is active before the enable-ack fault is armed.
     unsafe { helper.program(MESSAGE) }.unwrap();
     model.lock().unwrap().fail_enable_ack = true;
     assert_eq!(
-        // SAFETY: The programmed model route and owners remain retained. A lost read
+        // SAFETY: The programmed model route and owners remain held. A lost read
         // acknowledgement changes only RAM state and must quarantine the owner.
         unsafe { helper.unmask() },
         Err(MsiError::FailedRead { offset: 0x52 })

@@ -1,5 +1,5 @@
-//! Authored actual native-entry/context/#UD recovery FP qualification.
-//! No ARM image is modified, no target is widened and no result is fabricated
+//! Authored native-entry/context/#UD recovery FP validation.
+//! No ARM image is modified, no target is widened and no result is invented
 //! from a copied frame. Run only before production frames/artifacts are lent.
 mod helper;
 
@@ -92,7 +92,7 @@ stela_native_fp_seed_divide:
     movdqu xmm14, [rip + {seed} + 224]
     movdqu xmm15, [rip + {seed} + 240]
     fxsave64 [rdi + {expected}]
-    // Modern Intel need not update FOP for a masked divide. Seed the actual
+    // Modern Intel need not update FOP for a masked divide. Seed the
     // architectural registers through FXRSTOR, then reobserve with FXSAVE.
     // Expected comparison bytes are that real observation, never a patched
     // report or a claim that the masked divide had to set these fields.
@@ -244,7 +244,7 @@ stela_native_fp_stack_ok:
     pop rbp
     ret
 
-// Baseline-only poison bodies are copied intact into this actual Host's arena.
+// Baseline-only poison bodies are copied intact into this Host's arena.
 // Their only architectural guest-frame mutation records that execution reached
 // the real callee, independently of return-register or FP comparisons.
 .global stela_native_fp_normal
@@ -372,10 +372,10 @@ fn pointer(image: &Image, start: usize) -> u64 {
     u64::from_le_bytes(image.0[start..start + 8].try_into().expect("FXSAVE field"))
 }
 
-/// Actual native owner startup diagnostic, before guest frames/artifacts are
+/// Native owner startup diagnostic, before guest frames/artifacts are
 /// published. The current physical Host/GS/root, code arena and private stack
-/// remain installed until all four actual returns complete. Source-only until
-/// a fresh actual run qualifies every case and its meaningful FP pointer seed.
+/// remain installed until all four returns complete. Source-only until
+/// a fresh run checks every case and its meaningful FP pointer seed.
 pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
     let bodies = [
         (
@@ -426,8 +426,8 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             }
             state().native = true;
             let entered = super::rdtsc();
-            // SAFETY: this actual startup Host owns the installed code/body,
-            // retained private GuestState/context/probe and real recovery slot.
+            // SAFETY: this startup Host owns the installed code/body,
+            // private GuestState/context/probe and real recovery slot.
             // The wrapper restores the complete caller legacy state before any
             // Rust comparison; it uses no wider instruction or control write.
             unsafe {

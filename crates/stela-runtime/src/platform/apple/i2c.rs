@@ -61,7 +61,7 @@ const TRANSFER_CONFIGURATION: u8 = 0xb; // CONTROL, TIMEOUT and RX_CONFIG.
 /// zero tunables. `_initRegs` rewrites them only from tunables
 /// (0x2cc0718..0x2cc0780) and `executeIICCommand` read-modify-writes
 /// RX_CONFIG (0x2cc1080), so the driver relies on that reset image; it always
-/// writes CONTROL, TIMEOUT and MASK, which stay unqualified until written.
+/// writes CONTROL, TIMEOUT and MASK, which stay unchecked until written.
 const RESET_CONFIGURATION: u8 = 0x38;
 
 fn configuration_bit(offset: u64) -> u8 {
@@ -85,7 +85,7 @@ pub enum TargetError {
 
 /// One seven-bit I2C target. `write` is the buffered write phase, followed by
 /// `read.len()` clocks in the read phase. `stop=false` permits split block reads;
-/// the target retains its register cursor until STOP or another selector.
+/// the target keeps its register cursor until STOP or another selector.
 /// An error must leave target state and the supplied read buffer unchanged.
 /// Controller reset aborts framing, without resetting the target's hardware.
 pub trait I2cTarget {
@@ -96,7 +96,7 @@ pub trait I2cTarget {
     fn advance(&mut self) {}
 }
 
-/// An electrically present target whose protocol has not been qualified.
+/// An electrically present target whose protocol has not been checked.
 /// It refuses accesses instead of presenting the target as absent (NACK).
 pub struct Unmodeled(pub &'static str);
 impl I2cTarget for Unmodeled {

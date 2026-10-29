@@ -95,7 +95,7 @@ fn startup_errata_and_duplex() {
             controller
                 .configure_analog_route(&graph, &input, mic, 0, capture())
                 .unwrap();
-            assert_eq!(model.borrow().route_controls[&(5, 0xf01)], 1); // Actual connection1.
+            assert_eq!(model.borrow().route_controls[&(5, 0xf01)], 1); // Connection1.
             for channel in 0..2 {
                 assert_eq!(model.borrow().amplifiers[&(5, false, 0, channel)], 0x1f);
                 assert!(

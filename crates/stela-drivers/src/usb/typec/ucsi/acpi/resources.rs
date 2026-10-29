@@ -29,7 +29,7 @@ fn number(bytes: &[u8]) -> u64 {
 /// Accept fixed writable Memory32Fixed or fixed consumer Word/DWord/QWord
 /// address descriptors. Relocatable, translated, producer and read-only ranges
 /// cannot authorize direct CPU mailbox access. Unknown non-memory descriptors
-/// are skipped, retaining the template's bounds and optional checksum checks.
+/// are skipped, keeping the template's bounds and optional checksum checks.
 pub fn mailbox_resource(template: &[u8]) -> Result<MemoryResource, ResourceError> {
     let mut offset = 0;
     let mut memory = None;

@@ -201,7 +201,7 @@ fn deliver(peer: &Rc<RefCell<model::CancelModel>>, dci: u8, bytes: &[u8]) {
         .take()
         .expect("actual native IN TD armed");
     assert!(bytes.len() <= length);
-    // SAFETY: only the peer owns this actual submitted DMA until this completion.
+    // SAFETY: only the peer owns this submitted DMA until this completion.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, bytes.len());
     }
@@ -369,7 +369,7 @@ fn actual_composite_ep0_dma_initialization_and_discovery_preserve_standard_input
 fn actual_wrong_slot_nonce_and_old_success_or_error_replies_cannot_requalify_reconnect() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: retained native owners use this exclusive backing allocation.
+    // SAFETY: native owners use this exclusive backing allocation.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut found, peer, _) = fixture(&mut dma, tests::PROFILE, 0xc539, false);
     let input = vendor(&mut found);
@@ -521,7 +521,7 @@ fn actual_stop_restart_stall_and_external_output_revoke_protocol_without_reusing
 fn stale_actual_member_cannot_mutate_shared_current_group_or_consume_current_dma() {
     let mut ram = vec![0u64; 2 * 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: both separately addressed native controllers retain this backing.
+    // SAFETY: both separately addressed native controllers keep this backing.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut old, _, _) = fixture(&mut dma, tests::PROFILE, 0xc539, false);
     let (mut current, peer, trap) = fixture(&mut dma, tests::PROFILE, 0xc539, false);
@@ -535,8 +535,8 @@ fn stale_actual_member_cannot_mutate_shared_current_group_or_consume_current_dma
     let current_link = input.receiver.clone();
     let current_commands = peer.borrow().seen.clone();
     let bytes = ram.clone();
-    // A current standard owner with the vendor member's Link retains its
-    // genuine identity; the mismatched member seal refuses before MMIO/state.
+    // A current standard owner with the vendor member's Link keeps its
+    // identity; the mismatched member seal refuses before MMIO/state.
     let standard = current
         .inputs
         .iter_mut()
@@ -557,8 +557,8 @@ fn stale_actual_member_cannot_mutate_shared_current_group_or_consume_current_dma
     let own_link = stale.receiver.clone();
     stale.controller = current_controller;
     stale.receiver = current_link;
-    // Keep the genuine old SlotId while injecting a mismatched current group.
-    // No current numeric credential is installed in this retained old owner.
+    // Keep the old SlotId while injecting a mismatched current group.
+    // No current numeric credential is installed in this old owner.
     trap.set(true);
     assert!(stale.receiver_snapshot().is_err());
     assert!(stale.poll_hid().inputs.is_empty());
@@ -572,7 +572,7 @@ fn stale_actual_member_cannot_mutate_shared_current_group_or_consume_current_dma
         snapshot(vendor(&mut current)).routes[0].version,
         Some(Version { major: 2, minor: 0 })
     );
-    // Advance only the existing authored clock seam; expire an actual sent
+    // Advance only the existing authored clock seam; expire a sent
     // Feature request through the current-member snapshot path without sleep.
     let live = vendor(&mut current);
     let deadline = snapshot(live).pending.unwrap().deadline_us;

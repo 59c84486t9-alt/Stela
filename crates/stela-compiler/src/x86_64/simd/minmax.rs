@@ -86,7 +86,7 @@ fn raw_selection(
 
 /// Legacy SSE selects operand2 on a zero tie. Symmetric selection followed by
 /// sign AND (maximum) or OR (minimum) gives Arm's standard zero sign. Plain
-/// AH=1 retains operand2 instead. No inactive scalar lane undergoes FP work.
+/// AH=1 keeps operand2 instead. No inactive scalar lane undergoes FP work.
 fn selection(
     code: &mut Code,
     operation: MinMaxOperation,

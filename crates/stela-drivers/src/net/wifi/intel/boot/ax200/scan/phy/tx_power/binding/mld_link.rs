@@ -97,7 +97,7 @@ pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     // mac_ctxt_init. Both SESSION_PROT_CMD branches return before any command:
     // TE_MAX differs from SESSION_PROTECT_CONF_ASSOC and
     // TE_BSS_STA_AGGRESSIVE_ASSOC. This owner never starts a session or peer.
-    // The actual public unassign callback also removes/re-adds the link when
+    // The public unassign callback also removes/re-adds the link when
     // there is no peer/association. That resets FW state to PHY_INVALID before
     // the shared remove_chanctx callback may unref/REMOVE the unique PHY0.
     // No parent ownership escapes until all four real ACK/reclaims complete.
@@ -129,7 +129,7 @@ fn remove_link_bytes(length: usize) -> Vec<u8> {
 fn encode(address: [u8; 6], changes: u32, active: bool) -> Vec<u8> {
     let mut bytes = alloc::vec![0;208];
     bytes[..4].copy_from_slice(&2u32.to_le_bytes()); // original MODIFY
-    // Actual link0/mac0/PHY0, source listen_lmac0. This source non-MLO legacy
+    // Link0/mac0/PHY0, source listen_lmac0. This source non-MLO legacy
     // 20 MHz station has no BSS/HT/HE/EHT/DTIM/QoS negotiation or session yet.
     bytes[16..22].copy_from_slice(&address);
     bytes[24..28].copy_from_slice(&changes.to_le_bytes());

@@ -1,4 +1,4 @@
-//! Actual endpoint4 resources and independently dispatched publication ACK.
+//! Endpoint4 resources and independently dispatched publication ACK.
 use super::*;
 use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
@@ -342,7 +342,7 @@ impl scheduler::Callback for Input {
             return done(0);
         };
         if reporting::wire::kind(raw) == 1 {
-            // Retain every actual refresh command. An ACK behind one remains
+            // Keep every refresh command. An ACK behind one remains
             // independently dispatchable; a bool cannot discard duplicate input.
             if let Err(e) = self.shared.wake() {
                 return Completion::Refused(e);

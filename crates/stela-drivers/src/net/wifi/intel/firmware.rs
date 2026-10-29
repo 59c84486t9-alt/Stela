@@ -85,7 +85,7 @@ pub enum ImageKind {
     Sniffer,
 }
 
-/// Exact raw metadata, with input coordinates and padding retained.
+/// Exact raw metadata, with input coordinates and padding kept.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tlv<'a> {
     pub kind: u32,
@@ -110,8 +110,8 @@ pub struct CommandVersion {
     pub notification_version: u8,
 }
 
-/// LMAC, UMAC and persistent paging payloads, in actual input order. Separator
-/// sections never become DMA payloads. The transport must retain paging until
+/// LMAC, UMAC and persistent paging payloads, in input order. Separator
+/// sections never become DMA payloads. The transport must keep paging until
 /// the device has stopped; an ALIVE notification alone does not release it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelfLoadPlan<'a> {
@@ -362,7 +362,7 @@ impl<'a> Firmware<'a> {
                     }
                     singleton(&mut image.iml, data, kind)?;
                 }
-                _ => {} // Retained below, never interpreted as a ready device.
+                _ => {} // Below, never interpreted as a ready device.
             }
             image.tlvs.push(Tlv {
                 kind,

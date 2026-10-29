@@ -37,7 +37,7 @@ fn mld_activation_refuses_unapproved_rate_or_power_before_publication() {
             .unwrap_or(0);
         let syncs = native.domain.records.lock().unwrap().syncs;
         assert_eq!(
-            // SAFETY: same-epoch model owners retain exclusive source RAM and
+            // SAFETY: same-epoch model owners keep exclusive source RAM and
             // policy state while the explicit denial is tested before publication.
             unsafe { link.advance(&source) },
             Err(Ax200BindingError::Regulatory(regulatory::Error::OsDenied))
@@ -70,9 +70,9 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
         let policy = Arc::new(PolicyState::default());
         let (power, _, _) = powered(&catalog, &empty, &source, &native, &policy, true);
         authorize(&policy);
-        // SAFETY: same retained finite source response/revocation model.
+        // SAFETY: same finite source response/revocation model.
         let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
-        // SAFETY: Source supplies exclusive model RAM; Native retains this
+        // SAFETY: Source supplies exclusive model RAM; Native keeps this
         // requester/domain and policy, with no asynchronous device access.
         unsafe { link.advance(&source) }.unwrap();
         for index in 0..target {
@@ -86,7 +86,7 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
                 assert_eq!(link.phase(), Ax200BindingPhase::AuthenticationRequired);
                 native.revoked.store(true, Ordering::SeqCst);
                 link.begin_remove().unwrap();
-                // SAFETY: revocation changes only the retained model policy;
+                // SAFETY: revocation changes only the model policy;
                 // ordered removal still owns the same source and DMA mappings.
                 unsafe { link.advance(&source) }.unwrap();
             }
@@ -97,7 +97,7 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
         }
         .delay(20);
         let error = Ax200BindingError::Deadline(kind);
-        // SAFETY: only the model clock advanced; the timed-out link retains
+        // SAFETY: only the model clock advanced; the timed-out link keeps
         // its original source/domain and unreclaimed DMA buffers.
         assert_eq!(unsafe { link.advance(&source) }, Err(error.clone()));
         assert_eq!(link.phase(), Ax200BindingPhase::Failed);

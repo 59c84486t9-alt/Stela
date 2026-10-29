@@ -94,7 +94,7 @@ pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo>(
 ) -> Vec<MacCommand> {
     // Source removes this cold vif's power contribution first. An unactivated
     // link has no phy_ctxt, so disable_link's active-change is a source no-op;
-    // the actual REMOVE remains mandatory, before actual MAC removal.
+    // the REMOVE remains mandatory, before MAC removal.
     alloc::vec![
         MacCommand {
             kind: MacCommandKind::Power,

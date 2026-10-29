@@ -44,10 +44,10 @@ pub struct Vote {
     pub bounds: Option<Bounds>,
 }
 
-/// Exact source packet pair checked by VM1010c64..1010da0. First is settled
+/// Source packet pair checked by VM1010c64..1010da0. First is settled
 /// logical DVFS state (+0x320/+0x328); Second is issued (+0x330/+0x338).
 /// VM1017370 and VM1017a50 own their distinct updates. Equal numbers supplied
-/// by a caller do not establish actual controller completion.
+/// by a caller do not establish controller completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketPair {
     First,
@@ -75,8 +75,8 @@ pub enum ConstraintState {
     Unmet(UnmetVote),
 }
 
-/// Immutable requested/resolved requirements. Applied state is deliberately
-/// absent: only actual controller/effect owners can produce that authority.
+/// Immutable requested/resolved requirements. Applied state is
+/// absent: only controller/effect owners can produce that permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolution {
     requested: u64,
@@ -139,7 +139,7 @@ impl Resolution {
     }
 }
 
-/// One source-qualified family policy over the exact owned AP source table.
+/// One source-checked family policy over the exact owned AP source table.
 /// This model computes requirements. It owns no controller, PMGR transition,
 /// packet producer, transport publication or successful completion token.
 pub struct Policy {
@@ -186,7 +186,7 @@ impl Policy {
         FORCED_ON
     }
 
-    /// Source VM1010a3c..1010a48 retains old bits outside the selected mask,
+    /// Source VM1010a3c..1010a48 keeps old bits outside the selected mask,
     /// then ORs the full incoming word. It does not mask the incoming request.
     pub fn merge_request(&self, previous: u64, incoming: u64) -> Result<u64, &'static str> {
         self.validate_bits(previous | incoming)?;

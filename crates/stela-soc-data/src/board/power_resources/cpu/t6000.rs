@@ -277,9 +277,9 @@ mod tests {
         row[32..32 + name.len()].copy_from_slice(name.as_bytes());
         row
     }
-    // Authored geometry deliberately differs from the original J314s SKU.
+    // Authored geometry differs from the original J314s SKU.
     // IDs, names and PS indices are independent; only reviewed counter order
-    // and the source's actual fields join these records.
+    // and the source's fields join these records.
     fn authored(mutation: u8) -> (Vec<u8>, Vec<Identity>) {
         let mut cpus = Vec::new();
         let mut profiles = Vec::new();

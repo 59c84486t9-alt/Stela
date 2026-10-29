@@ -29,7 +29,7 @@ use std::os::fd::AsRawFd;
 /// host-page rounding may include the file's final partial page, whose padding
 /// is never exposed through the safe guest-memory API.
 ///
-/// Retained allocation storage keeps the file descriptor. MAP_PRIVATE prevents our writes
+/// Allocation storage keeps the file descriptor. MAP_PRIVATE prevents our writes
 /// from modifying the file; it does not freeze unrelated writes/truncation to
 /// that inode. Source identity, provenance and stability for the entire mapping
 /// lifetime are the caller's responsibility. Truncation can cause native faults.
@@ -336,7 +336,7 @@ impl OwnedMemory {
                     (NativeStorage::private_file(native, file), None)
                 }
             };
-            // Register retained ownership before any later operation can fail.
+            // Register kept ownership before any later operation can fail.
             let limit = limits.get(&spec.guest_address);
             memory.allocations.push(Allocation {
                 shared_backing: None,

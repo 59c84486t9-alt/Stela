@@ -62,7 +62,7 @@ impl Register {
     }
 }
 
-/// Actual initial readbacks, never reset guesses. LEN is programmed, not SVL.
+/// Initial readbacks, never reset guesses. LEN is programmed, not SVL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Readbacks {
     pub cpacr_el1: u64,

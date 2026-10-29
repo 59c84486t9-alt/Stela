@@ -9,7 +9,7 @@
 //! Owned HDMI/DP codec routing, adapted from pinned Linux HDMI/nvhdmi/ELD
 //! sources: the nvhdmi MODEL_LEGACY and MODEL_GENERIC profiles, not a vendor
 //! wildcard. MODEL_GENERIC codecs are DP-MST capable: each pin device entry is
-//! its own port. Display programming stays with the actual GPU port owner.
+//! its own port. Display programming stays with the GPU port owner.
 use super::{CodecGraph, Controller, ControllerToken, Registers, StreamId, Verb, WidgetKind};
 use crate::{
     audio::{Direction, Error, PcmFormat, Phase},
@@ -59,7 +59,7 @@ pub struct DisplayAudioIdentity {
     pub pin: u8,
     /// The pin's DP-MST device entry; 0 for a pin without one.
     pub device: u8,
-    /// Actual GPU connector identity, not a guessed pin-to-port arithmetic map.
+    /// GPU connector identity, not a guessed pin-to-port arithmetic map.
     pub port: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +72,7 @@ pub struct DisplayAudioState {
 /// Coordinate an HDA function with its GPU display-audio route.
 ///
 /// # Safety
-/// Retain the matching HDA function, GPU connector/sink and device entry,
+/// Keep the matching HDA function, GPU connector/sink and device entry,
 /// exclusive audio route, powered HDA registers/link and firmware exclusion
 /// throughout attachment, errors, reset and controller Drop. Register access
 /// and bounded stream/codec stop must remain valid after an observe failure.
@@ -88,7 +88,7 @@ pub struct DisplayAudioState {
 ///
 /// The platform must supply the requester, IOMMU, MMIO, DMA and power grants;
 /// numeric BDF/port identities do not supply those resources. The constructor
-/// also requires unique, coherent, identity-reachable RAM retained for the boot.
+/// also requires unique, coherent, identity-reachable RAM kept for the boot.
 pub unsafe trait DisplayAudioPort {
     fn identity(&self) -> DisplayAudioIdentity;
     fn observe(&self, deadline_us: u64) -> Result<DisplayAudioState, Error>;
@@ -211,8 +211,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::UnsupportedTopology);
         }
-        // Fresh enumeration includes inherited PCM, actual connection expansion,
-        // pin capabilities and defaults. A mutable public graph is no authority.
+        // Fresh enumeration includes inherited PCM, connection expansion,
+        // pin capabilities and defaults. A mutable public graph is no permission.
         let actual = self.enumerate_codec(graph.address)?;
         if actual.vendor_id != graph.vendor_id || actual.revision_id != graph.revision_id {
             return Err(Error::InvalidCodecGraph);
@@ -290,7 +290,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// the codec command transport. Intel/AMD vendor profiles are refused.
     ///
     /// # Safety
-    /// `owner` must retain and coordinate this controller/function, graph codec,
+    /// `owner` must keep and coordinate this controller/function, graph codec,
     /// physical pin and device entry. Its unsafe trait contract applies through
     /// failures, reset and controller Drop.
     pub unsafe fn attach_hdmi_port(
@@ -389,8 +389,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Ok(HdmiSink { state, eld: None });
         }
         let size = self.verb(Verb::short(codec, pin, 0xf2e, 8)?)?;
-        // Same donor compatibility fallback: a genuine zero length means 128,
-        // never a missing service or fabricated monitor/ELD-valid bit.
+        // Same donor compatibility fallback: a zero length means 128,
+        // never a missing service or invented monitor/ELD-valid bit.
         let size = if size == 0 {
             128
         } else {
@@ -417,7 +417,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     /// Explicit polled hotplug/ELD service. A failed/changed snapshot first
-    /// stops any actual PCM route; a new valid snapshot requires fresh prepare.
+    /// stops any PCM route; a new valid snapshot requires fresh prepare.
     pub fn poll_hdmi_sink(&mut self, id: HdmiPortId) -> Result<HdmiSink, Error> {
         let index = self.hdmi_index(id)?;
         if self.routing_failed {
@@ -495,7 +495,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         packet[4] = map.order.len() as u8 - 1;
         packet[7] = map.allocation;
         packet[3] = 0u8.wrapping_sub(packet.iter().fold(0u8, |s, b| s.wrapping_add(*b)));
-        // Stop -> write entire union -> verify actual DIP RAM -> transmit.
+        // Stop -> write entire union -> verify DIP RAM -> transmit.
         self.route_control(codec, pin, 0x730, 0xf30, 0)?;
         self.route_control(codec, pin, 0x732, 0xf32, 0)?;
         for byte in packet {
@@ -510,8 +510,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.route_control(codec, pin, 0x730, 0xf30, 0)?;
         self.route_control(codec, pin, 0x732, 0xf32, 0xc0)
     }
-    /// Prepare actual digital converter, mux, count, slots, packet and pin for
-    /// 2..8ch LPCM, constrained by this sink's actual ELD. No HBR/non-PCM alias.
+    /// Prepare digital converter, mux, count, slots, packet and pin for
+    /// 2..8ch LPCM, constrained by this sink's ELD. No HBR/non-PCM alias.
     pub fn prepare_hdmi(
         &mut self,
         id: HdmiPortId,
@@ -600,7 +600,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if digital == u32::MAX {
             return Err(Error::RouteRejected);
         }
-        let digital = (digital as u8 & !0x21) | 1; // actual LPCM + enabled; retain unrelated channel-status controls.
+        let digital = (digital as u8 & !0x21) | 1; // LPCM + enabled; keep unrelated channel-status controls.
         // Reserve all owners BEFORE GPU or codec effects, including failed ACK.
         self.streams[usize::from(stream.descriptor_index())]
             .as_mut()
@@ -638,7 +638,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.verb(Verb::short(graph.address, pin, 0x734, slot)?)?;
             }
             // NVIDIA stereo ignores ASP remapping; the fixed FL/FR map is
-            // validated above. Wider maps must actually read back every slot.
+            // validated above. Wider maps must read back every slot.
             if format.channels > 2 {
                 for slot in map.slots {
                     let value = self.verb(Verb::short(graph.address, pin, 0xf34, slot & 15)?)?;
@@ -676,7 +676,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.hdmi_record(index, error)
         })
     }
-    /// Standard IEC958 digital-output enable, with live retained sink/route
+    /// Standard IEC958 digital-output enable, with live sink/route
     /// validation. This does not change coding type, PCM format, rate or GPU
     /// association; the DMA clock may continue while the output is disabled.
     pub fn set_hdmi_enabled(&mut self, id: HdmiPortId, enabled: bool) -> Result<(), Error> {
@@ -787,7 +787,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     pub(super) fn retire_hdmi_after_reset(&mut self) -> Result<(), Error> {
-        // A lost command ACK may prevent pre-reset codec cleanup. The actual
+        // A lost command ACK may prevent pre-reset codec cleanup. The
         // full link/command reset restores unambiguous verbs; re-enumerate the
         // original codec/pin before proving quiet and releasing any old owner.
         for index in 0..self.hdmi_ports.len() {
@@ -909,8 +909,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Ok(())
         })();
         if let Err(error) = result {
-            // A normal hotplug is recoverable after actual cleanup. A failed
-            // stop/command/access keeps the route, first error and exact owners.
+            // A normal hotplug is recoverable after cleanup. A failed
+            // stop/command/access keeps the route, first error and owners.
             self.hdmi_record(index, error);
             if let Err(cleanup) = self.hdmi_close_index(index) {
                 self.routing_failed = true;

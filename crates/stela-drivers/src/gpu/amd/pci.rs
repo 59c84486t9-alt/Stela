@@ -1,5 +1,5 @@
 //! amdgpu's PCI probe admission, run by the unchanged amdgpu_drv.c. This binds
-//! the result to an actual borrowed PCI function; it neither reserves resources
+//! the result to a borrowed PCI function; it neither reserves resources
 //! nor initializes, enables or claims the device.
 use crate::bus::pci::{Address, ConfigSpace, Function};
 use core::ffi::c_int;
@@ -77,7 +77,7 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// The probe's result for one function, retained with its BAR owner by
+/// The probe's result for one function, kept with its BAR owner by
 /// matched attachment.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Admission {
@@ -113,7 +113,7 @@ impl Admission {
 }
 
 /// The admission of this exact function. Borrowing prevents mutation or
-/// rebinding of its Function while this is retained.
+/// rebinding of its Function while this is held.
 pub struct MatchedFunction<'function, C> {
     function: &'function Function<C>,
     admission: Admission,
@@ -202,7 +202,7 @@ pub unsafe fn identify<C: ConfigSpace>(
         force_asic_type: policy.force_asic_type,
     };
     let mut matched = NativeMatch::default();
-    // SAFETY: scalar inputs and output with asserted layouts; C retains none,
+    // SAFETY: scalar inputs and output with asserted layouts; C keeps none,
     // and the caller excludes concurrent use of the module parameters.
     let status = unsafe { stela_amd_pci_match(&observed, &native_policy, &mut matched) };
     if status != 0 {

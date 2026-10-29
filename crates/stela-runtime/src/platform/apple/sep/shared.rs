@@ -6,7 +6,7 @@
 //! TXMB's base is a separately mapped IOVA (`_mapStandaloneChannel`,
 //! 0x2d654f4). The directory and ordinary channel sizes round to the SEP
 //! page size (4 or 16 KiB). This decoder grants no boot acknowledgement or
-//! authority to consume a channel whose own content protocol is unknown.
+//! permission to consume a channel whose own content protocol is unknown.
 use super::{
     super::asc::Message,
     message::{self, Frame},
@@ -19,7 +19,7 @@ const NULL: u32 = u32::from_be_bytes(*b"null");
 const TXMB: u32 = u32::from_be_bytes(*b"TXMB");
 const WIRE_PAGE_SHIFT: u32 = 12;
 const WIRE_PAGE: u64 = 1 << WIRE_PAGE_SHIFT;
-/// Stela's directory bound, not a fabricated channel-count register.
+/// Stela's directory bound, not an invented channel-count register.
 const MAX_CHANNELS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -33,7 +33,7 @@ impl<H: Host> Session<'_, H> {
     }
 
     fn raw_timing(&mut self, ext: &mut [u8], value: u8) -> Result<(), BlockError> {
-        // R1b establishes actual busy release, but CMD13 must follow host
+        // R1b establishes busy release, but CMD13 must follow host
         // timing/clock changes. Ordinary mmc_switch sends CMD13 too early.
         self.execute(
             SWITCH,
@@ -76,7 +76,7 @@ impl<H: Host> Session<'_, H> {
         } else {
             self.raw_timing(ext, 2)?;
             self.host_timing(info, Timing::MmcHs200, hs_hz)?;
-            // Only an actual controller response-CRC failure may be ignored
+            // Only a controller response-CRC failure may be ignored
             // here, as in mmc_switch_status(false). Card errors stay errors.
             self.host.mmc_switch_status(self.rca, false)?;
             info.clock_hz = self.host.set_clock(200_000_000)?;

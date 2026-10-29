@@ -21,7 +21,7 @@ mod tsc_sync;
 ///
 /// # Safety
 /// `handoff` is the live immutable loader record and all reserved regions are
-/// retained in the shared physmap. This does not admit shared guest execution.
+/// in the shared physmap. This does not admit shared guest execution.
 pub(crate) unsafe fn validate(
     handoff: &crate::handoff::Handoff,
     requested: Option<usize>,
@@ -149,7 +149,7 @@ pub(crate) unsafe fn validate(
     {
         return Err("native SIPI page is not owned low memory");
     }
-    // SAFETY: the caller retains the immutable loader allocation.
+    // SAFETY: the caller keeps the immutable loader allocation.
     let capture = unsafe { firmware::captured(handoff.native_processors) }
         .map_err(firmware::Error::message)?;
     if requested.is_none() && cores != capture.core_count as usize {

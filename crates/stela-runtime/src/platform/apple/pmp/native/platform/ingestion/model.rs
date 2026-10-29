@@ -520,7 +520,7 @@ mod tests {
                 }
             }
             assert_eq!(model.output_source, table.records()[i][4]);
-            assert_eq!(u(c + 0x74), 0); // compiled default only: actual output range still resolves SOC row+10
+            assert_eq!(u(c + 0x74), 0); // compiled default only: output range still resolves SOC row+10
             let raw_max = u(c + 0x25c);
             let initialized_max = if i == 1 && raw_max == 0 { 128 } else { raw_max };
             let expected_shift = if initialized_max == 0 {
@@ -534,7 +534,7 @@ mod tests {
             (0x100467c, 0xb9425d09), // load current K25c
             (0x1004680, 0x35000069), // preserve nonzero range
             (0x1004684, 0x52801009), // default128
-            (0x1004688, 0xb9025d09), // retain before generic initializer
+            (0x1004688, 0xb9025d09), // keep before generic initializer
             (0x1004690, 0x9400540f), // BL10196cc
         ] {
             assert_eq!(u(a), word, "{a:x}");

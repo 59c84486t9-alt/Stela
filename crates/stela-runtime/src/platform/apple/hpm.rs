@@ -472,7 +472,7 @@ impl Hpm {
             .checked_add(read.len())
             .filter(|&end| end <= self.response.len())
             .ok_or("HPM read exceeds the 64-byte register protocol")?;
-        // Fixed-size reads may clock beyond a register's actual data. The
+        // Fixed-size reads may clock beyond a register's data. The
         // public protocol defines a length followed by that many bytes only.
         if end > usize::from(self.response[0]) + 1 {
             return Err("HPM read beyond the described register payload");

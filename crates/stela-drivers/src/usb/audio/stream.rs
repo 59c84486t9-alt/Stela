@@ -112,7 +112,7 @@ pub struct AudioDevice<T: Transport> {
     progress: Progress,
     poisoned: bool,
     power_owners: Vec<super::PowerDomain>,
-    /// First failure is retained even if cleanup itself fails.
+    /// First failure is held even if cleanup itself fails.
     pub last_fault: Option<Error>,
     /// The last rate change's (requested, running) rates when the clock
     /// reported another; 0 running means it could not be read.
@@ -142,13 +142,13 @@ enum Cached {
 }
 
 impl AudioDevice<super::Native> {
-    /// Query an advertised UAC2 terminal connector through actual native EP0.
-    /// The returned channel observation grants no routing or PCM authority.
+    /// Query an advertised UAC2 terminal connector through native EP0.
+    /// The returned channel observation grants no routing or PCM permission.
     pub fn connector_status(&mut self, terminal: u8) -> Result<super::ConnectorStatus, Error> {
         self.ready()?;
         self.transport.connector_status(terminal)
     }
-    /// Create an idle owner for the actual optional UAC1/UAC2 AC status endpoint.
+    /// Create an idle owner for the optional UAC1/UAC2 AC status endpoint.
     /// Call `start`, poll and drain notices explicitly, then acknowledge `stop`.
     pub fn status_notifications(
         &self,
@@ -220,7 +220,7 @@ impl<T: Transport> AudioDevice<T> {
     pub fn binding(&self) -> &Binding {
         &self.binding
     }
-    /// Historical software accounting; poll validates the actual native owner.
+    /// Historical software accounting; poll validates the native owner.
     pub fn progress(&self) -> Progress {
         let mut p = self.progress;
         p.queued_playback = self.output.queued();
@@ -250,7 +250,7 @@ impl<T: Transport> AudioDevice<T> {
                 && !self.power_owners.iter().any(|d| d.id == domain.id)
             {
                 // Initially selected by class attachment; acknowledge zero again
-                // before retaining a power owner, including an unused sibling.
+                // before keeping a power owner, including an unused sibling.
                 self.transport.alternate(format.interface, 0)?;
                 self.power_owners.push(domain);
                 domain.awake(&mut self.transport, self.binding.graph.control_interface)?;
@@ -276,7 +276,7 @@ impl<T: Transport> AudioDevice<T> {
         }
         let active = self.playback.is_some() || self.capture.is_some();
         // Full UAC3 clock entities may share the stream's power domain. Their
-        // controls are usable only after actual D0 recovery, before any DMA.
+        // controls are usable only after D0 recovery, before any DMA.
         if let Err(error) = self.prepare_power() {
             return self.fail(error);
         }
@@ -354,7 +354,7 @@ impl<T: Transport> AudioDevice<T> {
             .ok_or(Error::Format)?;
         Ok(f.clone())
     }
-    /// Start a finite or continuous playback queue with actual interleaved PCM.
+    /// Start a finite or continuous playback queue with interleaved PCM.
     /// A continuous producer must replenish it before all submitted packets
     /// complete; starvation is an explicit underrun, never implicit silence.
     pub fn start_playback(
@@ -562,7 +562,7 @@ impl<T: Transport> AudioDevice<T> {
         self.transport.preflight(&[format.data])?;
         let clock = self.powered_clock(&format, rate)?;
         // Beyond preflight, an unsuccessful live power observation invalidates
-        // the session's authority even if it does not acquire a new domain.
+        // the session's permission even if it does not acquire a new domain.
         *effects_attempted = true;
         self.prepare_power()?;
         self.input.endpoint = Some(format.data);
@@ -918,7 +918,7 @@ impl<T: Transport> AudioDevice<T> {
                 break;
             }
             // A fractional zero-frame interval still consumes USB service time.
-            // Submit its actual ZLP TD rather than compressing sample cadence.
+            // Submit its ZLP TD rather than compressing sample cadence.
             for b in &mut packet.buffer.bytes_mut()[..bytes] {
                 *b = self.output_pcm.pop_front().unwrap();
             }
@@ -1040,7 +1040,7 @@ impl<T: Transport> AudioDevice<T> {
         }
         let now = self.transport.now_us();
         // No completion (or indefinitely empty input) is not healthy streaming.
-        // Include four actual service intervals for unusual long-bInterval alts.
+        // Include four service intervals for unusual long-bInterval alts.
         let deadline = |f: &Format| 1_000_000u64.max(u64::from(f.service_microframes) * 125 * 4);
         if self
             .playback
@@ -1166,7 +1166,7 @@ impl<T: Transport> AudioDevice<T> {
 
 impl<T: Transport> Drop for AudioDevice<T> {
     fn drop(&mut self) {
-        // DMA storage lives for the boot. An uncertain stop is retained and
+        // DMA storage lives for the boot. An uncertain stop is held and
         // quarantined by Transport; it never licenses reuse by this owner.
         let _ = self.shutdown();
     }

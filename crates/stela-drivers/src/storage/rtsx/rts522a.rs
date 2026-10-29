@@ -16,7 +16,7 @@ impl Engine {
     pub(super) fn rts522a_optimize_phy(&mut self) -> Result<(), BlockError> {
         let revision = self.read_reg(DUMMY_REG_RESET_0)? & 15;
         self.write_reg(RTS522A_PM_CTRL3, D3_DELINK_MODE_EN, 0)?;
-        // Only the actual silicon A revision needs these five fixes. PCI's
+        // Only the silicon A revision needs these five fixes. PCI's
         // revision byte and later silicon revisions cannot select this table.
         if revision == 0 {
             for (at, value) in [
@@ -89,7 +89,7 @@ impl Engine {
     }
     pub(super) fn rts522a_disable_ocp(&mut self, budget: Budget) -> Result<(), BlockError> {
         // Capture status before disabling the detector. Preserve an earlier
-        // actual event across a later ordinary power-off with zero status.
+        // event across a later ordinary power-off with zero status.
         let status = self.read_reg_before(REG_OCPSTAT, Some(budget))?;
         if status != 0 || self.ocp_status.is_none() {
             self.ocp_status = Some(status);

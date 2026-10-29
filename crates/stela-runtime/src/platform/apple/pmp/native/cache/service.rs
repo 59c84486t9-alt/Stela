@@ -1,8 +1,8 @@
-//! Native MC command/event service on the actual quota/PTD and AMCC owners.
+//! Native MC command/event service on the quota/PTD and AMCC owners.
 //!
 //! Original26A434 T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //!100326c initializes the sole MC samples allocation;10037a4..1003cbc
-//! consumes commands, conditionally copies/clears actual arrivals, accumulates,
+//! consumes commands, conditionally copies/clears arrivals, accumulates,
 //! schedules work, publishes, then ACKs a consumed nonzero low12 command ID.
 //!10040b0..10042b8 starts after real defaults/registration/allocation and stops
 //! after real pending work drains. No Apple firmware executes here.
@@ -43,7 +43,7 @@ impl From<&'static str> for Error {
     }
 }
 
-/// Non-reissuable native recipient association, not startup or ACK authority.
+/// Non-reissuable native recipient association, not startup or ACK permission.
 pub struct Claim {
     local: LocalNotifications,
     request: Range,
@@ -73,7 +73,7 @@ impl Claim {
     }
 }
 
-/// Actual registry-resolved directional counts. They describe ranges, never
+/// Registry-resolved directional counts. They describe ranges, never
 /// command consumption, readiness, cache capacity or event completion.
 #[derive(Clone, Copy)]
 pub struct Configuration {
@@ -81,7 +81,7 @@ pub struct Configuration {
     pub command_words: u32,
 }
 
-/// Borrows of actual retained owners, rechecked at every service advance.
+/// Borrows of kept owners, rechecked at every service advance.
 /// Keeping the same numeric profile on a replacement object is insufficient.
 pub struct Sources<'a, M: owner::Backend, I: ingestion::Backend> {
     pub manager: &'a owner::Owner<M>,
@@ -90,7 +90,7 @@ pub struct Sources<'a, M: owner::Backend, I: ingestion::Backend> {
 }
 
 /// Sole source O3e0 allocation. Initial zero bytes are software initialization,
-/// not observed hardware counters or a fabricated copied-frame receipt.
+/// not observed hardware counters or an invented copied-frame receipt.
 pub struct Samples {
     groups: Vec<[u8; GROUP_BYTES]>,
 }
@@ -272,7 +272,7 @@ impl<B: metrics::Backend> Owner<B> {
     pub fn metrics(&self) -> &metrics::Owner<B> {
         &self.metrics
     }
-    /// Source10045a8 updates O2a0 data; it grants no work/readiness authority.
+    /// Source10045a8 updates O2a0 data; it grants no work/readiness permission.
     pub fn apply_registry_control(
         &mut self,
         control: metrics::RegistryControl,
@@ -457,7 +457,7 @@ impl<B: metrics::Backend> Owner<B> {
                         }
                         (Stage::Stop, metrics::Progress::Drained) => self.stage(Stage::StopCommit),
                         // Draining cooperatively executes real queued work;
-                        // its return precedes the retained stop-wait completion.
+                        // its return precedes the stop-wait completion.
                         (Stage::Stop, metrics::Progress::CallbackComplete) => {}
                         (Stage::TraceEnter, metrics::Progress::TraceComplete) => {
                             self.stage(Stage::Gate)
@@ -1159,7 +1159,7 @@ mod tests {
                 &mut Access::new(0, 1000, &mut self.latch),
             );
             // Independent real scheduler progress while the foreground Stop
-            // retains its authored destination wait. Never inline advance().
+            // keeps its authored destination wait. Never inline advance().
             if matches!(result, Ok(Progress::Busy { .. }))
                 && self
                     .service
@@ -1335,7 +1335,7 @@ mod tests {
         f.start();
         assert_eq!(f.service.run_state(), 1);
         assert_eq!(f.sink.borrow().registrations.len(), 8);
-        assert_eq!(f.native.phase(), native::Phase::Dormant); // No whole-PMP readiness claim.
+        assert_eq!(f.native.phase(), native::Phase::Dormant); //
         assert!(f.service.publisher.awaiting_publication());
         f.service.begin_stop().unwrap();
         assert_eq!(f.finish(), Ok(Progress::Stopped));

@@ -22,7 +22,7 @@ const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
 const TSS_SELECTOR: u16 = 0x18;
 const IST_BYTES: usize = 64 * 1024;
-// Explicit space retained below the largest entry image for the baseline Rust
+// Explicit space kept below the largest entry image for the baseline Rust
 // handler. Runtime/disassembly stack-budget validation remains a required gate.
 const HANDLER_STACK_BYTES: usize = 32 * 1024;
 
@@ -100,7 +100,7 @@ struct Pointer {
 }
 
 // The real GPR/CPU Frame remains unchanged. Each entry image lives below it
-// on that actual retained IST; ordinary and terminal vectors use distinct
+// on that IST; ordinary and terminal vectors use distinct
 // allocations. Returning nested ordinary entries are explicitly refused.
 global_asm!(
     r#"
@@ -146,7 +146,7 @@ stela_xstate_slot:
     and rsp, -64
 
     // No Rust or FP/SIMD instruction precedes this save. The controls are
-    // those configuration qualified (`EntryAbi::extended`).
+    // those configuration checked (`EntryAbi::extended`).
     cmp qword ptr gs:[{extended}], 0
     jne stela_xstate_save_extended
     mov qword ptr [rsp + r11 + {format}], {fxsave}
@@ -175,7 +175,7 @@ stela_xstate_save_extended:
     test r9, 2
     jnz stela_xstate_header
     // XCR0.SSE does not gate legacy SSE execution. XSAVE(mask1) leaves
-    // XMM/MXCSR untouched in this compatible legacy area; retain them first.
+    // XMM/MXCSR untouched in this compatible legacy area; keep them first.
     fxsave64 [rsp]
     mov qword ptr [rsp + r11 + {format}], {xsave_legacy}
 stela_xstate_header:
@@ -298,7 +298,7 @@ stela_interrupt_mxcsr:
     terminal_handler = sym terminal_interrupt,
 );
 
-// Separate terminal IST resources are retained for NMI/DF/MCE. They cannot
+// Separate terminal IST resources are held for NMI/DF/MCE. They cannot
 // return through an interrupted transition or overwrite a normal entry image.
 extern "sysv64" fn terminal_interrupt(frame: *mut Frame, image: *const u8) -> ! {
     saved_state::terminal(frame, image)
@@ -379,7 +379,7 @@ pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
     if tables.xstate.is_some() {
         output::fatal("native xstate descriptor owner cannot be reinstalled");
     }
-    // SAFETY: install_on owns this actual CPU and permanently pinned Tables,
+    // SAFETY: install_on owns this CPU and permanently pinned Tables,
     // including both distinct IST arrays, before HostOwner or AP READY.
     let owner = unsafe { super::xstate::XstateOwner::capture() }.unwrap_or_else(|error| {
         output::arguments(format_args!("native xstate entry refused: {error:?}\n"));
@@ -396,7 +396,7 @@ pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
             output::fatal("native IST cannot retain full xstate image and handler budget");
         }
     }
-    // SAFETY: the configured ABI is inseparable from this actual retained
+    // SAFETY: the configured ABI is inseparable from this kept
     // owner and the real private stacks. No controls or feature flags change.
     unsafe { host::local::configure_xstate(&mut tables.local, &owner) }
         .unwrap_or_else(|_| output::fatal("native xstate local configuration refused"));
@@ -479,7 +479,7 @@ pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_
     }
 }
 
-/// Actual processor-local descriptor/control observations, for validating the
+/// Processor-local descriptor/control observations, for validating the
 /// owned AP startup path. These numbers do not grant a native frame lease.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Observation {

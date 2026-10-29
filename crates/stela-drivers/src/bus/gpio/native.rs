@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2026 Stela contributors
-//! Native GPIO suppliers joined to actual firmware/resource reservations.
+//! Native GPIO suppliers joined to firmware/resource reservations.
 //!
 //! This adapter is ordinary process/deferred GPIO I/O. It exposes no parent
 //! IRQ, wake, named pin mux or system-sleep capability. The ACPICA binding owns
-//! serialization and retains the actual namespace/region-handler lifecycle.
+//! serialization and keeps the namespace/region-handler lifecycle.
 use super::{amd, intel};
 use crate::bus::mmio::owned::{Authority, CacheAttribute, Mapping, Protection};
 use crate::platform::acpi::{self, Value, resources};
@@ -38,7 +38,7 @@ enum Engine {
 }
 
 /// Native controller backend, constructed only by matching live ACPICA identity,
-/// exact current resources and reservations from the actual post-EBS root broker.
+/// current resources and reservations from the post-EBS root broker.
 /// Its reservations remain alive through successful restoration and unmapping.
 pub struct Device {
     engine: Engine,
@@ -48,8 +48,8 @@ pub struct Device {
     first_error: Option<Error>,
 }
 impl Device {
-    /// Attach one genuine firmware controller. `expected_hid` selects the driver
-    /// table only after ACPICA verifies it against this exact original handle;
+    /// Attach one firmware controller. `expected_hid` selects the driver
+    /// table only after ACPICA verifies it against this original handle;
     /// a supplied string cannot substitute for physical/native resource ownership.
     pub fn attach(
         device: &DeviceResources<'_>,
@@ -221,7 +221,7 @@ fn box_amd(
     value: amd::Controller<amd::NativeRegisters>,
 ) -> Result<Box<amd::Controller<amd::NativeRegisters>>, Error> {
     let layout = Layout::new::<amd::Controller<amd::NativeRegisters>>();
-    // SAFETY: nonzero actual-controller layout; the native allocator returns
+    // SAFETY: nonzero controller layout; the native allocator returns
     // exclusive storage with the requested size/alignment or a null failure.
     let pointer = unsafe { alloc(layout) }.cast::<amd::Controller<amd::NativeRegisters>>();
     if pointer.is_null() {
@@ -385,7 +385,7 @@ impl NativeController for Device {
                 self.retired = true;
                 // Original controller restoration and all mapping retirements
                 // acknowledged. Only metadata/OSL storage remains in the core;
-                // the actual broker can now admit a fresh physical owner.
+                // the broker can now admit a fresh physical owner.
                 self.reservations.clear();
                 Ok(())
             }

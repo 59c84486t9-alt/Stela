@@ -201,7 +201,7 @@ fn tfh_descriptors_preserve_full_iovas_and_reject_invalid_regions() {
         bytes: 15,
     }])
     .unwrap();
-    // An actual attached domain may legitimately assign IOVA0. A TB uses
+    // An attached domain may legitimately assign IOVA0. A TB uses
     // its explicit nonzero length/count, not a null-pointer convention.
     Tfd::encode(&[Region {
         address: 0,

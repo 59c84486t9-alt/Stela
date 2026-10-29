@@ -74,7 +74,7 @@ fn rx_recycling_visibility_and_producer_faults_keep_real_dma_and_requester() {
         let mut boot = command_ready(boot, &empty, &source, &domain, &state);
         if failure == 3 {
             boot.replenish_completed_receive().unwrap();
-            // SAFETY: This sole model owner retains its original Source/Domain and RAM;
+            // SAFETY: This sole model owner keeps its original Source/Domain and RAM;
             // the empty fixture command has no indirect objects before receive-fault injection.
             let ticket = unsafe { boot.submit_command(command_id(), &[], &source) }.unwrap();
             complete(

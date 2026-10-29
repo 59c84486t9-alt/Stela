@@ -231,7 +231,7 @@ pub(super) fn merge_scalar(code: &mut Code) {
 /// Round one Double in XMM6 to IEEE Half fields in EAX, or preserve signed zero.
 ///
 /// The caller clears R10D once; accepted lanes OR fresh IXC into it. Nonzero
-/// inputs and rounded results retain the mature Half exponent 2..30 guards.
+/// inputs and rounded results keep the mature Half exponent 2..30 guards.
 /// Callers own enabled-exception policy, finite-domain proofs, staging, fallback
 /// cleanup and guest commit. No frame, host environment, store or CALL is emitted.
 /// Clobbers RAX/RCX/RDX/R9/R10 and flags; every XMM and other GPR survives.

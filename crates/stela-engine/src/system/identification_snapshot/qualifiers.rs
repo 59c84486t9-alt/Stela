@@ -284,7 +284,7 @@ impl Snapshot {
             .map_err(Unsupported::BaseSpe)
     }
 
-    /// Actual feature facts only: ordinary 4KB stage1 and FEAT_D128 absent. TCR,
+    /// Feature facts only: ordinary 4KB stage1 and FEAT_D128 absent. TCR,
     /// TCR2, effective sizes/TBI/TBID/MTX and current control generation remain
     /// the existing mutable control owner's responsibility.
     pub fn check_base_el10_4k(&self) -> Result<(), Unsupported> {

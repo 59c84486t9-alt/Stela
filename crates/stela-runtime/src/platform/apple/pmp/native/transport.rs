@@ -1,4 +1,4 @@
-//! Actual PTD effects, never service replies inferred from a resource request.
+//! PTD effects, never service replies inferred from a resource request.
 use super::{Error, Operation, Packets, Value};
 use alloc::vec::Vec;
 use {

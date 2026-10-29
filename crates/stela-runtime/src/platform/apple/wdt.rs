@@ -16,7 +16,7 @@
 //! disarmed at zero, as m1n1 leaves the primary one, and BITE_TIME/BARK_TIME
 //! start at zero as Stela's disabled boot handoff image.
 //!
-//! The DT reg[1] panic-save scratch (panic-save-flag-bit) retains full32
+//! The DT reg[1] panic-save scratch (panic-save-flag-bit) keeps full32
 //! RMWs (`AppleARMWatchdogTimer::_handlePEHaltRestart`, kernel file 0x1ca4a88).
 //! reg[2] commands the separate watchdog mechanism. Writing 0 disarms it
 //! (`AppleARMWatchdogTimer::_disarmWatchdogMechanism`, 0x1ca6114);
@@ -27,7 +27,7 @@
 //! armed, the mechanism requests a reset. That comparator is inferred from
 //! the driver's arithmetic. It starts disarmed; command readback is unproved
 //! and refuses. reg[3], the AP watchdog configuration, and reg[4], the panic
-//! force-power-off flags, retain full32 RMWs: `start` sets configuration
+//! force-power-off flags, keep full32 RMWs: `start` sets configuration
 //! bits [5:4] to 1, `_writeApWatchdogConfiguration` (0x1ca5da0) replaces its
 //! low byte with expiry flags and `_clearApWatchdogConfiguration`
 //! (0x1ca6134) clears it; the panic path sets the force-power-off bit. Both
@@ -36,7 +36,7 @@
 //! depends on them. Every side register starts zero in Stela's boot handoff.
 //! No side register changes the three primary timers.
 //! When the DT assigns panic-save and force-power-off the same physical
-//! word, both views share its full32 storage; separate layouts retain
+//! word, both views share its full32 storage; separate layouts keep
 //! separate words. Command/configuration aliases require separate evidence.
 //!
 //! `CoreTrigger` is one `trigger-config` word in a CPU's CoreSight region,
@@ -146,7 +146,7 @@ impl AppleWdt {
 
     /// DT reg[1] and reg[4] name the same full32 flags word (original
     /// T6000: panic-save bit 0 and force-power-off bit 2 at 0x2922b8020).
-    /// Both logical views retain the actual word, including unrelated bits.
+    /// Both logical views keep the word, including unrelated bits.
     pub fn with_shared_panic_flags(mut self) -> Self {
         self.side = true;
         self.power_off = PowerOff::PanicSave;
@@ -320,7 +320,7 @@ impl MmioDevice for AppleWdt {
     }
 }
 
-/// One watchdog `trigger-config` word: retains the bits of its mask.
+/// One watchdog `trigger-config` word: keeps the bits of its mask.
 pub struct CoreTrigger {
     mask: u32,
     value: u32,

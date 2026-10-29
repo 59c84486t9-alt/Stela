@@ -71,7 +71,7 @@ fn dedicated_source_child_wov_selector_soundwire_and_pin_admission_are_exact() {
         let device = Arc::new(Mutex::new(Device::new(0x63)));
         let clock = device.lock().unwrap().clock.clone();
         assert!(
-            // SAFETY: Model and Domain retain the same mutex-serialized
+            // SAFETY: Model and Domain keep the same mutex-serialized
             // Device and its fixture register state. The model has no
             // physical PCI or firmware actor, and no capture pages are mapped.
             unsafe {
@@ -90,7 +90,7 @@ fn dedicated_source_child_wov_selector_soundwire_and_pin_admission_are_exact() {
     for wov in [WovObservation::Value(7), WovObservation::EvaluatedFailure] {
         let device = Arc::new(Mutex::new(Device::new(0x63)));
         let clock = device.lock().unwrap().clock.clone();
-        // SAFETY: this model's actually discovered child/firmware/whole
+        // SAFETY: this model's discovered child/firmware/whole
         // function owner supplies the source-default _WOV failure policy.
         let mut controller = unsafe {
             Controller::claim(

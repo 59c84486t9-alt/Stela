@@ -1,14 +1,14 @@
-//! Actual shared native type2/target1 interrupt-controller storage and wires.
+//! Shared native type2/target1 interrupt-controller storage and wires.
 //!
 //! Original26A434 T8112 PMP SHA256
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //!1026280/102628c/10263f8,1026194 and10326a0 pin this native protocol.
 //! Generic AIC register facts (paired readback, SW/HW OR, automatic claim mask)
-//! are independently retained from local Asahi aic.md and AIC2 header comments;
+//! are independently kept from local Asahi aic.md and AIC2 header comments;
 //! no reference implementation is copied. Fresh evidence: native-irq-device-r1.
 //!
 //! This is NEW Stela software hardware state, never measured Apple reset state.
-//! All words and relocation are explicit. Real peripheral owners must retain
+//! All words and relocation are explicit. Real peripheral owners must keep
 //! their electrical input handles. No request, enable or ACK creates an input.
 use super::{Device, Error, Placement, Route};
 use alloc::{
@@ -23,7 +23,7 @@ use {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arbitration {
-    /// Native priority/reset arbitration is unqualified. Multiple deliverable
+    /// Native priority/reset arbitration is unchecked. Multiple deliverable
     /// sources refuse IACK before changing any mask, rather than picking one.
     RefuseAmbiguous,
 }
@@ -42,8 +42,8 @@ pub struct Configuration {
 #[derive(Clone)]
 pub struct ProducerIdentity(Weak<dyn Any>);
 impl ProducerIdentity {
-    /// Retain the allocation identity of the actual peripheral model. This
-    /// does not prove any source-ID/event meaning; root must qualify that route.
+    /// Keep the allocation identity of the peripheral model. This
+    /// does not prove any source-ID/event meaning; root must check that route.
     /// Weak ownership avoids a peripheral->wire->peripheral allocation cycle.
     pub fn for_owner<T: Any>(owner: &Rc<T>) -> Self {
         let erased: Rc<dyn Any> = owner.clone();
@@ -83,7 +83,7 @@ pub struct InputSnapshot {
     pub registered: bool,
     pub producer_alive: bool,
     pub line_alive: bool,
-    /// Retained last level, not a current observation after owner abandonment.
+    /// Last level, not a current observation after owner abandonment.
     pub last_level: Option<bool>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,7 +98,7 @@ pub struct Snapshot {
     pub applied_sequence: u64,
     pub ordered_sequence: u64,
 }
-/// Alias factory for one actual storage allocation. Clones share this state;
+/// Alias factory for one storage allocation. Clones share this state;
 /// there is no separate AP AIC/PTD register image or duplicated IRQ queue.
 #[derive(Clone)]
 pub struct Controller(Rc<RefCell<Storage>>);
@@ -106,8 +106,8 @@ pub struct Controller(Rc<RefCell<Storage>>);
 pub struct DeviceView(Rc<RefCell<Storage>>, Placement);
 #[derive(Clone)]
 pub struct RouteView(Rc<RefCell<Storage>>);
-/// Sole source wire capability. It is deliberately not Clone. A producer must
-/// change it only when its actual model effect changes this electrical level.
+/// Sole source wire capability. It is not Clone. A producer must
+/// change it only when its model effect changes this electrical level.
 /// Dropping it is not a deassert/reset; subsequent relevant accesses refuse.
 pub struct HardwareLine {
     storage: Weak<RefCell<Storage>>,
@@ -133,7 +133,7 @@ impl Controller {
             ));
         }
         // The selected original event path extracts only ten source bits. No
-        // larger source count is advertised without a qualified encoding.
+        // larger source count is advertised without a checked encoding.
         if source_count > 1024 || control & !1 != 0 {
             return Err(Error::Refused(
                 "native controller source count or control fields are unqualified",
@@ -192,9 +192,9 @@ impl Controller {
     pub fn same_route(&self, view: &RouteView) -> bool {
         Rc::ptr_eq(&self.0, &view.0)
     }
-    /// Registration retains actual peripheral allocation identity and its
+    /// Registration keeps peripheral allocation identity and its
     /// supplied real initial model level. Binding itself creates no event.
-    /// Abandoned/duplicate source bindings cannot silently reset retained state.
+    /// Abandoned/duplicate source bindings cannot silently reset kept state.
     pub fn bind_source(
         &self,
         source: u32,
@@ -465,7 +465,7 @@ impl Storage {
     }
     fn order(&mut self) {
         // This storage serializes applied MMIO effects through the same borrow.
-        // The boundary covers only its actual applied words, not another
+        // The boundary covers only its applied words, not another
         // peripheral's unfinished callback, RAM drain, readiness or cache flush.
         self.ordered_sequence = self.applied_sequence;
     }
@@ -579,7 +579,7 @@ mod tests {
     use core::cell::Cell;
     use stela_contracts::interrupt::InterruptLatch;
 
-    // Authored NEW profile, deliberately not a production/reset default.
+    // Authored NEW profile, not a production/reset default.
     fn configuration(count: u32) -> Configuration {
         let groups = (count as usize).div_ceil(32);
         let mut masks = vec![u32::MAX; groups];
@@ -658,7 +658,7 @@ mod tests {
         line.set_level(&producer, owner.get()).unwrap();
         assert!(Device::irq_pending(&mut a_view, &mut a).unwrap());
         assert_eq!(read(&mut b_view, 0xc000, &mut a), 0x10040);
-        assert_eq!(read(&mut a_view, 0x6408, &mut a), 1); // Actual claim masked source.
+        assert_eq!(read(&mut a_view, 0x6408, &mut a), 1); // Claim masked source.
         assert!(!route.irq_pending(&mut a).unwrap());
         assert_eq!(
             controller.snapshot().unwrap().inputs[64].last_level,
@@ -917,7 +917,7 @@ mod tests {
             native.advance_signal(&signal, &mut a),
             Completion::Refused("native source requires its actual live peripheral owner and line")
         ));
-        assert_eq!(controller.snapshot().unwrap().applied_sequence, 2); // control enable, then actual target store.
+        assert_eq!(controller.snapshot().unwrap().applied_sequence, 2); // control enable, then target store.
         assert_eq!(controller.snapshot().unwrap().masks[2], 1);
         let actual = Rc::new(Cell::new(false));
         let producer = ProducerIdentity::for_owner(&actual);
@@ -947,8 +947,8 @@ mod tests {
             u32::from_le_bytes(bytes[va - 0xfff000..va - 0xfff000 + 4].try_into().unwrap())
         };
         assert_eq!(w(0x10326ac), 0x12002908); // Original count read masks11bits; new profile additionally bounds event encoding.
-        assert_eq!(w(0x10262a4), 0x528c000a); // Actual SWset6000.
-        assert_eq!(w(0x10261b4), 0x528c4019); // Actual SWclear6200.
+        assert_eq!(w(0x10262a4), 0x528c000a); // SWset6000.
+        assert_eq!(w(0x10261b4), 0x528c4019); // SWclear6200.
         assert_eq!(w(0x1026478), 0x528cc008); // Maskclear6600.
         assert_eq!(w(0x1026480), 0x528c8008); // Maskset6400.
         assert_eq!(w(0x10261e4), 0x92402776); // Event source low10.

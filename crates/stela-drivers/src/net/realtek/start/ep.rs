@@ -23,7 +23,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             for &(address, clear, set) in FP_EPHY {
                 // Pinned rtl_ephy_read/write mask offsets with1f: donor59
                 // both encode the same physical register19.
-                // Retain both table entries/transactions, not an invented bank.
+                // Keep both table entries/transactions, not an invented bank.
                 self.ephy(address & 0x1f, clear, set)?;
             }
         }

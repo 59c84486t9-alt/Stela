@@ -20,7 +20,7 @@ pub struct EntryMetadata {
     mask: u64,
 }
 impl EntryMetadata {
-    /// Decode only the tags emitted by the actual standard-save entry. This
+    /// Decode only the tags emitted by the standard-save entry. This
     /// pure operation grants no CPU, stack or image ownership.
     pub fn save_format(&self) -> Option<SaveFormat> {
         match (self.format, self.mask) {
@@ -92,8 +92,8 @@ struct Component {
     compact_alignment: bool,
 }
 
-/// Assembly metadata is installed only with its actual descriptor owner. A
-/// copied number/ABI record is not a CPU, backing or entry authority.
+/// Assembly metadata is installed only with its descriptor owner. A
+/// copied number/ABI record is not a CPU, backing or entry permission.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct EntryAbi {
@@ -101,8 +101,8 @@ pub struct EntryAbi {
     pub image_bytes: u64,
     pub supported_mask: u64,
     pub xsave_available: u64,
-    /// 1 when the controls `configure_xstate` qualified enable XSAVE
-    /// (CR4.OSXSAVE). Entries use these qualified controls, which stay fixed
+    /// 1 when the controls `configure_xstate` checked enable XSAVE
+    /// (CR4.OSXSAVE). Entries use these checked controls, which stay fixed
     /// for the owner's lifetime, instead of reading CR0, CR4, EFER, IA32_XSS
     /// and IA32_XFD again: under a hypervisor each read is a VM exit, and
     /// every native block entry and return crosses this boundary.

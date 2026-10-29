@@ -39,7 +39,7 @@ struct State {
 }
 
 /// A 32-bit or paired 64-bit memory BAR. A probe returns the size mask;
-/// writes to partial lanes update only those lanes and retain type bits.
+/// writes to partial lanes update only those lanes and keep type bits.
 #[derive(Debug, Clone)]
 pub struct MemoryBar {
     index: u8,
@@ -143,7 +143,7 @@ impl ConfigSpace {
     }
     /// The owned-bank adapter currently implements standard memory routing,
     /// bus mastering, INTx masking and secondary reset only. Capability state
-    /// needs an actual endpoint protocol, not an arbitrary RW register image.
+    /// needs an endpoint protocol, not an arbitrary RW register image.
     pub(super) fn check_header_contract(&self, bridge: bool) -> Result<(), &'static str> {
         for register in &self.registers {
             let d = register.description;

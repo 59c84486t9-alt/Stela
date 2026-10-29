@@ -1,4 +1,4 @@
-//! Actual PTD counter-frame capture and irreversible source-ordered copying.
+//! PTD counter-frame capture and irreversible source-ordered copying.
 //!
 //! Original26A434 t8112pmp SHA256
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
@@ -21,7 +21,7 @@ type Error = &'static str;
 const ENTRIES_PER_BLOCK: u32 = 8;
 const SELECTED_BITS: u32 = 128;
 
-/// Unique association issued by the actual native PMP owner. Dropping it or
+/// Unique association issued by the native PMP owner. Dropping it or
 /// its frame storage never reopens admission; owner abandonment invalidates it.
 pub struct Claim {
     local: LocalNotifications,
@@ -46,7 +46,7 @@ impl Claim {
 }
 
 /// Source ordinal and PTD indices are different identities. These numbers
-/// describe the parsed slice and grant no consumption/completion authority.
+/// describe the parsed slice and grant no consumption/completion permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     pub ordinal: u32,
@@ -56,9 +56,9 @@ pub struct Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
     pub value: u64,
-    /// Native copied layout: timestamp0..53, NEW54, DROPPED55, retained byte56..63.
+    /// Native copied layout: timestamp0..53, NEW54, DROPPED55, kept byte56..63.
     pub metadata: u64,
-    /// Actual PTD entry copied, not proof of a hardware counter event. Initial
+    /// PTD entry copied, not proof of a hardware counter event. Initial
     /// software cells stay explicitly distinguishable from copied entries.
     pub copied: bool,
 }
@@ -134,7 +134,7 @@ impl Discarded {
         self.captured_at
     }
 }
-/// One actual manager SOC-DEV-PKT pending capture, shared by all platform
+/// One manager SOC-DEV-PKT pending capture, shared by all platform
 /// evaluations and copies in that cycle. Numeric desired masks cannot create
 /// it. Later manager capture invalidates it for new consumption.
 pub struct Captured {
@@ -145,7 +145,7 @@ pub struct Captured {
     chunks: Vec<u128>,
     at: u64,
 }
-/// Retained identity of an actual manager capture. This contains no selected
+/// Identity of a manager capture. This contains no selected
 /// bits or completion claim. It lets a source callback revalidate its same
 /// capture after Busy without cloning the pending observation or resurveying.
 pub struct CaptureIdentity {
@@ -154,7 +154,7 @@ pub struct CaptureIdentity {
     start: u32,
     count: u32,
 }
-/// Read-only retained storage when the source skips bulk consumption. Initial
+/// Read-only kept storage when the source skips bulk consumption. Initial
 /// software bytes remain marked Frame::copied=false; this is not a copy receipt
 /// or evidence of counter events, arrival, source eligibility or completion.
 pub struct Retained {
@@ -168,7 +168,7 @@ impl Retained {
     }
 }
 impl Captured {
-    /// Pure selection from this retained observation, not arrival authority.
+    /// Pure selection from this observation, not arrival permission.
     pub fn bits(&self, start: u32, count: u32) -> Result<u128, Error> {
         let offset = start
             .checked_sub(self.start)
@@ -228,11 +228,11 @@ pub struct Progress {
     pub next_entry: Option<u32>,
 }
 
-/// All source-ordinal buffers for one actual native PTD recipient. Software
-/// initialization clears low15 bytes and explicitly retains caller-declared
+/// All source-ordinal buffers for one native PTD recipient. Software
+/// initialization clears low15 bytes and explicitly keeps caller-declared
 /// byte15; it never asserts original allocator/reset or counter observations.
-/// Source lifecycle/selection/packet owners must invoke this at their actual
-/// bulk-copy stage and separately retain all later descriptor/provider effects.
+/// Source lifecycle/selection/packet owners must invoke this at their
+/// bulk-copy stage and separately keep all later descriptor/provider effects.
 pub struct Frames {
     claim: Claim,
     identity: Rc<()>,
@@ -253,7 +253,7 @@ impl Frames {
         }
         Ok(())
     }
-    /// Same actual native recipient, not merely another Frames over this PTD.
+    /// Same native recipient, not another Frames over this PTD.
     /// The supplied liveness Rc is the existing native claim identity; it does
     /// not mint a recipient, revive an owner or authorize a capture/consume.
     pub(in crate::platform::apple::pmp::native) fn validate_native_recipient(
@@ -416,7 +416,7 @@ impl Frames {
         }
     }
     /// Manager VA100f820 captures its whole selected range in <=128-bit chunks
-    /// before individual platform predicates. Retain this object through the
+    /// before individual platform predicates. Keep this object through the
     /// predicates and bulk copies; do not resurvey pending state at ingestion.
     pub fn capture_pending(&mut self, access: &Access<'_>) -> Result<Captured, Error> {
         self.claim.check()?;
@@ -462,7 +462,7 @@ impl Frames {
         self.begin(captured, ordinal, desired, Destination::Buffer)
     }
     /// Source VA10112c8..10112d8 and 101164c pass a NULL destination to
-    /// bulk consumption. Retain actual consume prefixes without touching any
+    /// bulk consumption. Keep consume prefixes without touching any
     /// software frame byte or invalidating the previous copied-cell receipt.
     /// Activity-zero generic ingestion must not schedule a second bulk copy.
     pub fn begin_discard(
@@ -473,11 +473,11 @@ impl Frames {
     ) -> Result<(), Error> {
         self.begin(captured, ordinal, desired, Destination::Discard)
     }
-    /// Source VA10115d4..10115f8 consumes the first actual slice entry into a
+    /// Source VA10115d4..10115f8 consumes the first slice entry into a
     /// temporary, then reads its VALUE low32 for freshness. It does not read
-    /// metadata as a clock or replace the retained platform buffer. The source
-    /// caller must qualify its separate freshness-arm and selection predicates.
-    /// Frozen pending bits are deliberately not retested, including bit0.
+    /// metadata as a clock or replace the platform buffer. The source
+    /// caller must check its separate freshness-arm and selection predicates.
+    /// Frozen pending bits are not retested, including bit0.
     pub fn consume_freshness(
         &mut self,
         captured: &Captured,
@@ -553,9 +553,9 @@ impl Frames {
         let captured = self.capture_pending(access)?;
         self.begin_copy(&captured, ordinal, desired)
     }
-    /// Consume at most one actual entry. A later failure leaves every earlier
+    /// Consume at most one entry. A later failure leaves every earlier
     /// entry consumed and, when requested, cell copied. No callback, allocation
-    /// or fallible step occurs between consume and its retained software effects.
+    /// or fallible step occurs between consume and its software effects.
     /// Frozen selection is not retested against NEW after source snapshot races.
     pub fn step(&mut self, access: &mut Access<'_>) -> Result<CopyStep, Error> {
         self.claim.check()?;
@@ -590,7 +590,7 @@ impl Frames {
         Ok(CopyStep::Consumed { relative })
     }
     /// Finish the bulk-copy stage only. Generic extraction, auxiliary providers
-    /// and MC arrival OR occur later and require their own actual owners.
+    /// and MC arrival OR occur later and require their own owners.
     pub fn finish_copy(&mut self) -> Result<Copied, Error> {
         self.claim.check()?;
         let pending = self
@@ -920,7 +920,7 @@ mod tests {
         assert!(frames.finish_copy().is_err());
         bank.set_lifecycle(LIVE, &mut Access::new(0, 14, &mut latch));
         publish(&local, 16, 5000, 15, &mut latch); // newer publication on already consumed prefix
-        publish(&local, 80, 6000, 16, &mut latch); // overwrite creates actual DROPPED
+        publish(&local, 80, 6000, 16, &mut latch); // overwrite creates DROPPED
         assert_eq!(
             bank.consume_entry(19, &mut Access::new(0, 17, &mut latch))
                 .unwrap()
@@ -1264,7 +1264,7 @@ mod tests {
             .consume_freshness(&captured, 0, &mut Access::new(0, 45, &mut latch))
             .unwrap();
         assert_eq!(entry.value as u32, 7); // source LDR W8 of the copied VALUE
-        assert_eq!(entry.metadata, 42 << 10 | 2); // distinct actual transport metadata
+        assert_eq!(entry.metadata, 42 << 10 | 2); // distinct transport metadata
         assert!(
             frames
                 .consume_freshness(&captured, 0, &mut Access::new(0, 46, &mut latch))
@@ -1501,7 +1501,7 @@ mod tests {
             );
         }
         assert!(cells[..16].iter().all(|cell| !cell.copied));
-        assert_eq!(local.bank().requests().len(), 4); // actual input writes only
+        assert_eq!(local.bank().requests().len(), 4); // input writes only
         assert_eq!(local.asserted(), 0); // source IRQ routing not admitted here
     }
 }

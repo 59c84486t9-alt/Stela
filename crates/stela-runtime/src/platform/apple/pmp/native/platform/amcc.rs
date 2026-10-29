@@ -51,7 +51,7 @@ impl Configuration {
 }
 
 /// Move the real copy receipt when source P10 is nonzero. The no-bulk path
-/// retains actual same-owner storage without consuming any selected entry.
+/// keeps same-owner storage without consuming any selected entry.
 pub enum Input {
     Copied(Copied),
     Retained(Retained),
@@ -83,7 +83,7 @@ struct CapturedState {
     capture: CaptureIdentity,
 }
 
-/// Sole specialized software fields. The generic owner retains its actual
+/// Sole specialized software fields. The generic owner keeps its
 /// input receipt; this wrapper never clones it or reconsumes PTD entries.
 pub struct Owner<B: Backend> {
     identity: Rc<()>,
@@ -132,7 +132,7 @@ impl<B: Backend> Owner<B> {
         self.identity.clone()
     }
     /// The later MC event's source1003ad8..1003bbc operation, not Capture.
-    /// Copy every selected actual group before clearing low96 arrival bits.
+    /// Copy every selected group before clearing low96 arrival bits.
     /// Unequal masks leave both destinations and arrivals untouched.
     pub(in crate::platform::apple::pmp::native) fn copy_completed_groups(
         &mut self,
@@ -149,7 +149,7 @@ impl<B: Backend> Owner<B> {
             return Ok(None);
         }
         // Source1003b34 skips the frame read for every empty group. When a
-        // copy is reached, preflight the full retained buffer before any write.
+        // copy is reached, preflight the full buffer before any write.
         let low_mask = (1u128 << (4 * GROUPS)) - 1;
         if self.arrived & low_mask != 0 {
             self.generic.cells(frames)?;
@@ -193,7 +193,7 @@ impl<B: Backend> Owner<B> {
         activation: u32,
     ) -> Result<(), Error> {
         // A prior-pending-only Capture does not increment P14. The source
-        // dispatcher may omit its Postprocess unless forced; the next actual
+        // dispatcher may omit its Postprocess unless forced; the next
         // Capture then replaces that optional post context. The dispatcher
         // still owns whether to call the prior post hook.
         if self.batch.is_some()
@@ -381,7 +381,7 @@ impl<B: Backend> Owner<B> {
         Ok(())
     }
     /// Both source query slots have specialized fallback behavior. Slot50 is
-    /// deliberately not an alias of generic.query() or of generic rates.
+    /// not an alias of generic.query() or of generic rates.
     pub fn query(
         &self,
         slot: Query,
@@ -422,7 +422,7 @@ impl<B: Backend> Owner<B> {
             0
         })
     }
-    /// Source MC group bytes, revalidated through the actual retained generic
+    /// Source MC group bytes, revalidated through the generic
     /// receipt on every new view. The later MC event owner decides when to copy.
     pub fn group<'a>(&self, frames: &'a Frames, group: usize) -> Result<GroupView<'a>, Error> {
         let cells = self.generic.cells(frames)?;
@@ -436,7 +436,7 @@ impl<B: Backend> Owner<B> {
             cells: &cells[start..start + GROUP_ENTRIES],
         })
     }
-    /// Source activation store resets generic P14 only; retained AMCC buffers,
+    /// Source activation store resets generic P14 only; AMCC buffers,
     /// metrics and arrival words survive. This is not activation completion.
     pub fn apply_source_activation_reset(&mut self) -> Result<(), Error> {
         if self.batch.is_some() {
@@ -449,7 +449,7 @@ impl<B: Backend> Owner<B> {
         Ok(())
     }
 }
-/// Borrowed data only; it carries no event-stage, arrival-clear or ACK authority.
+/// Borrowed data only; it carries no event-stage, arrival-clear or ACK permission.
 pub struct GroupView<'a> {
     cells: &'a [Frame],
 }

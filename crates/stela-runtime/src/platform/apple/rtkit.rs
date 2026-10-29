@@ -59,17 +59,17 @@
 //! `_handleEPRollCall` (0xfffffe000b6746e8) requires at VersionOk. The
 //! rail-gated AP-power wake is not modeled and refuses.
 //!
-//! Retained CPU stop follows a completed IOP sleep request: the AP's power
+//! CPU stop follows a completed IOP sleep request: the AP's power
 //! table at VA `0xfffffe0007cd8620` maps RTBuddy states 0/1/2/3 to wire
 //! 0x201/0x220/0x202/0, while `powerStatePreservesMemory` at
 //! `0xfffffe000b669488` admits only states below 3. RTBuddy waits for the
 //! sleep ACK, disables outbox delivery, then calls `stopCPU(false, ...)`
-//! (`0xfffffe000b661328..0xfffffe000b6615f4`). The ASC RUN edge retains
-//! protocol and endpoint state. On retained CPU resume, ordinary management
+//! (`0xfffffe000b661328..0xfffffe000b6615f4`). The ASC RUN edge keeps
+//! protocol and endpoint state. On kept CPU resume, ordinary management
 //! announces running (type7/0x20) without a new HELLO or roll call. The AP
 //! sets status4 before RUN and invokes wakeQuiesced only for prior status3
 //! (`0xfffffe000b6617a0..0xfffffe000b661884`); sleep ACKs set status2,
-//! so a retained CPU wake does not depend on another IOP power request.
+//! so a CPU wake does not depend on another IOP power request.
 //! Original DCP transition `0x230c0` runs its low-power helper `0x235bc`,
 //! announces sleep through `0x236ec`, and blocks in `0xf824`. After hardware
 //! return, `0x232fc..0x23330` invokes callbacks back to the saved running
@@ -90,7 +90,7 @@
 //! takes no AP message; with no buffer, `_checkForCrashGated` (0x466b214)
 //! returns before reading or forcing anything. The other system endpoints
 //! are services of Apple's firmware this coprocessor does not have, so they
-//! are listed only when their actual endpoint owners are supplied through
+//! are listed only when their endpoint owners are supplied through
 //! [`SystemEndpoints`]. Every other management message refuses.
 //!
 //! Application endpoints also send on their own (the SMC's board
@@ -148,7 +148,7 @@ pub const FIRST_APPLICATION: u8 = 0x20;
 /// An application endpoint of the coprocessor.
 pub trait Endpoint: Any {
     /// A physical reset loses the endpoint session without replying to the
-    /// AP. Every endpoint must qualify its own native ownership first.
+    /// AP. Every endpoint must check its own native ownership first.
     fn check_reset(&self) -> Result<(), &'static str> {
         Err("RTKit endpoint volatile-state reset is not modeled")
     }
@@ -163,7 +163,7 @@ pub trait Endpoint: Any {
     /// Messages the enabled endpoint sends on its own, such as events
     /// from the board, collected at each device advance. Output already
     /// appended is committed even if a later asynchronous operation fails;
-    /// the endpoint must retain only unfinished work for retry.
+    /// the endpoint must keep only unfinished work for retry.
     fn poll(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         Ok(())
     }
@@ -187,7 +187,7 @@ enum Stage {
 }
 
 /// Optional native system services with independent endpoint ownership. The
-/// caller must supply actual protocol/resource implementations; these slots
+/// caller must supply protocol/resource implementations; these slots
 /// never create a successful empty service or borrow application endpoint0x20.
 #[derive(Default)]
 pub struct SystemEndpoints {
@@ -205,7 +205,7 @@ pub struct RtKit {
     /// The wake state acknowledged when enumeration completes.
     wake: Option<u64>,
     iop_power: u64,
-    /// The wrapper halted this CPU after a retained-sleep handshake.
+    /// The wrapper halted this CPU after a sleep handshake.
     cpu_stopped: bool,
     ap_power: u64,
     power_nap: bool,
@@ -233,9 +233,9 @@ impl RtKit {
 
     /// Original RTBuddy consumes trace and IOReporting on system endpoints3/4.
     /// Enumerate only moved-in owners and route their control, input, polling
-    /// and reset through the same actual endpoint session as application work.
+    /// and reset through the same endpoint session as application work.
     /// AP allocation, clock, mapping and queue resources remain their owners'
-    /// responsibility; attaching an endpoint supplies no such authority.
+    /// responsibility; attaching an endpoint supplies no such permission.
     pub fn with_system_endpoints(
         endpoints: Vec<(u8, Box<dyn Endpoint>)>,
         system: SystemEndpoints,
@@ -269,7 +269,7 @@ impl RtKit {
         })
     }
 
-    /// Join actual native resources after the cold ASC and DART have both
+    /// Join native resources after the cold ASC and DART have both
     /// been placed, before the AP begins enumeration. A previously queued
     /// HELLO remains the same message; the session is never restarted/replaced.
     pub fn attach_cold_system_endpoints(
@@ -299,7 +299,7 @@ impl RtKit {
         self
     }
 
-    /// The reached IOP power state, for retained device-state hooks.
+    /// The reached IOP power state, for kept device-state hooks.
     /// A rejected management message does not change this value.
     pub fn iop_power(&self) -> u64 {
         self.iop_power
@@ -877,7 +877,7 @@ mod tests {
             mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
             mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap();
             mgmt(&mut rtkit, ENDPOINT_CONTROL, 0x20 << 32 | ENABLE).unwrap();
-            assert!(rtkit.stop().is_err()); // Awake, not retained sleep.
+            assert!(rtkit.stop().is_err()); // Awake, not kept sleep.
             mgmt(&mut rtkit, IOP_POWER, 0).unwrap();
             assert!(rtkit.stop().is_err()); // Memory-loss power state.
             mgmt(&mut rtkit, IOP_POWER, sleep).unwrap();

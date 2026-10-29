@@ -1,4 +1,4 @@
-//! Retained source DB program over the actual AP mapping. One source queue/lock
+//! Source DB program over the AP mapping. One source queue/lock
 //! serializes jobs; receive ACK remains independent. No firmware is executed.
 use super::super::platform::owner::Completion;
 use super::{
@@ -21,7 +21,7 @@ impl Default for Registration {
     }
 }
 impl Registration {
-    /// Retain one token for one actual source registration; do not recreate it
+    /// Keep one token for one source registration; do not recreate it
     /// on a Busy/refusal retry. It is not a channel ID or a PTD completion.
     pub fn new() -> Self {
         Self(Rc::new(()))
@@ -213,7 +213,7 @@ impl<R: Resources> Owner<R> {
         }
         Ok(())
     }
-    /// Only the constructor-selected AP allocation mode is qualified. Enter
+    /// Only the constructor-selected AP allocation mode is checked. Enter
     /// never advertises an AP-owned address back to its allocator.
     pub fn enter(&mut self, local_heap: bool) -> Result<(), &'static str> {
         self.available()?;
@@ -276,7 +276,7 @@ impl<R: Resources> Owner<R> {
     pub fn awake(&mut self) {
         self.sleeping = false;
     }
-    /// Once-only source registration. A returned source error is retained;
+    /// Once-only source registration. A returned source error is held;
     /// submitting the same token again never publishes or reallocates a channel.
     pub fn register(
         &mut self,
@@ -357,7 +357,7 @@ impl<R: Resources> Owner<R> {
         Ok(None)
     }
     /// Source1007d04 global wrapping allocation precedes the DB attempt, even
-    /// when D8 is absent. Caller supplies the same actual zeroed Counter/token.
+    /// when D8 is absent. Caller supplies the same zeroed Counter/token.
     pub fn register_mc(
         &mut self,
         token: Registration,
@@ -369,7 +369,7 @@ impl<R: Resources> Owner<R> {
         }
         self.available()?;
         // No replay after a failed DB attempt: the token is installed by
-        // register, or retained in a pending job before the caller can retry.
+        // register, or kept in a pending job before the caller can retry.
         let ordinal = self.ordinal.wrapping_add(1);
         // Original MC producer1004194 forms VA1035b06 (file36b06):
         // b"DSID Stats\0", including the space, SHA256 b6c69d456fba4884fe70cfa8fe0ef376054f3d7889f0e846ebff4004417bcca3.
@@ -394,7 +394,7 @@ impl<R: Resources> Owner<R> {
             Ok(result) => Ok(result),
             Err(e) => {
                 // Structural/capacity refusal must not cause another n++ when
-                // the actual source caller retries the same registration.
+                // the source caller retries the same registration.
                 self.returned.push((token, RegistrationResult::Refused(e)));
                 Err(e)
             }
@@ -426,7 +426,7 @@ impl<R: Resources> Owner<R> {
         }
     }
     /// Label words are source metadata, not getter results. Refresh writes only
-    /// value lanes and will preserve labels and gaps actually present in AP RAM.
+    /// value lanes and will preserve labels and gaps present in AP RAM.
     pub fn labels(&mut self, channel: u64, labels: &[(u32, u64)]) -> Result<(), &'static str> {
         self.available()?;
         if !self.active {
@@ -719,7 +719,7 @@ impl<R: Resources> Owner<R> {
                 let expected = self.receiver.0.borrow_mut().buffer.take().unwrap();
                 let geometry = mapping.geometry();
                 let granule = mapping.synchronization_granule();
-                // Retain the actual object even if the provider broke its
+                // Keep the object even if the provider broke its
                 // contract. No Ready, replacement, implicit free or fake map.
                 self.mapping = Some(mapping);
                 if geometry != expected {
@@ -872,7 +872,7 @@ impl<R: Resources> Owner<R> {
         }
         Ok(())
     }
-    /// Explicit cleanup of a poisoned provider/geometry contract; the actual
+    /// Explicit cleanup of a poisoned provider/geometry contract; the
     /// mapping still requires ordered unmap/release. Never silently restart it.
     pub fn release_failed_entry(&mut self, state: u8) -> Result<(), &'static str> {
         self.identity_available()?;
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_eq!(owner.registration_result(&token), None);
         assert_eq!(step(&mut owner).unwrap(), Progress::Busy { deadline: None });
-        // Update is actually queued while the synchronous registration waits.
+        // Update is queued while the synchronous registration waits.
         assert!(matches!(
             receive(&owner, wire::UPDATE),
             Completion::Retired { .. }

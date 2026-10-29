@@ -1,6 +1,6 @@
 //! Verified selected-bundle provenance, distinct from its post-load live ADT.
 //! No hash chooses a source family, creates hardware ownership or authenticates
-//! an Apple container/signature. The actual resource factory checks geometry.
+//! an Apple container/signature. The resource factory checks geometry.
 mod clpc;
 mod cpus;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
@@ -14,7 +14,7 @@ use {
     stela_soc_data::board::assigned::SourceIdentity,
 };
 
-/// Retains the verified original and exact selected metadata. Original bytes
+/// Keeps the verified original and exact selected metadata. Original bytes
 /// are never exposed mutably or installed as a guest memory region. Live ADT
 /// bytes stay in Entry.live_tree, after all runtime fixed-offset patches.
 pub struct Intake {
@@ -155,8 +155,8 @@ impl Intake {
             }
             digest(&source.container_sha256)?;
             let decoded = digest(&source.decoded_sha256)?;
-            // dtre is the actual Image4 payload tag; normal/restore component
-            // names are retained verbatim rather than rewritten or guessed.
+            // dtre is the Image4 payload tag; normal/restore component
+            // names are held verbatim rather than rewritten or guessed.
             if source.payload_type == "dtre" {
                 if selected.replace(index).is_some() {
                     return Err("selected bundle has ambiguous DeviceTree source identities".into());
@@ -245,12 +245,12 @@ impl Intake {
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
-    /// Exact raw selected bundle.json digest, not a digest fabricated from a
+    /// Exact raw selected bundle.json digest, not a digest invented from a
     /// filename/model or a reserialization that loses ignored source fields.
     pub fn manifest_sha256(&self) -> [u8; 32] {
         self.manifest_sha256
     }
-    /// Caller supplies its actual runtime profile chip. The source-family
+    /// Caller supplies its runtime profile chip. The source-family
     /// factory must cross-check it against these selected IDs and source/live
     /// geometry. This operation grants no lifecycle or native executor state.
     pub fn topology_identity(&self, chip: Chip) -> Result<SourceIdentity, String> {
@@ -263,7 +263,7 @@ impl Intake {
                 soc: self.soc,
                 board: self.board,
                 // Artifact/input-set binding is the exact selected manifest.
-                // The actual live tree gets its own SourceBindings digest.
+                // The live tree gets its own SourceBindings digest.
                 input_set_sha256: self.manifest_sha256,
                 adapted_set_sha256: None,
             },
@@ -271,7 +271,7 @@ impl Intake {
         })
     }
     /// Recheck selected identity and the entire verified prepared CPU sequence
-    /// after runtime patches. PMGR/resource qualification remains independent.
+    /// after runtime patches. PMGR/resource validation remains independent.
     pub fn validate_live(&self, bytes: &[u8]) -> Result<(), String> {
         let tree = DeviceTree::parse(bytes).map_err(|e| format!("live selected ADT: {e}"))?;
         if word(&tree, "chip-id")? != self.soc || word(&tree, "board-id")? != self.board {

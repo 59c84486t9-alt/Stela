@@ -11,7 +11,7 @@ use publication::{
 };
 use stela_compiler::{GuestState, context::ExecutionContext};
 
-/// Synchronous transport to the already-held actual native owner. Failure must
+/// Synchronous transport to the already-held native owner. Failure must
 /// stop before any later source/controller effect or ACK can occur.
 pub trait ServiceTransport {
     fn apply(
@@ -22,8 +22,8 @@ pub trait ServiceTransport {
     fn fail_stopped(&mut self, reason: &'static str) -> !;
 }
 
-/// Empty allocation storage only; entries are rebuilt from actual inventory
-/// and recovered frames within each round. No entry carries owner authority.
+/// Empty allocation storage only; entries are rebuilt from inventory
+/// and recovered frames within each round. No entry carries owner permission.
 #[derive(Default)]
 pub(super) struct RoundScratch {
     pub(super) bindings: Vec<publication::WorkerBinding>,
@@ -39,8 +39,8 @@ impl RoundScratch {
 }
 
 /// The one existing Machine Host interface, with scoped physical-owner routing.
-/// Canonical RAM access stays on its retained all-writer owner. The local Host
-/// remains the BSP's actual Host, including native entry and diagnostic reports.
+/// Canonical RAM access stays on its all-writer owner. The local Host
+/// remains the BSP's Host, including native entry and diagnostic reports.
 pub struct ServiceHost<H, T> {
     pub(super) local: H,
     pub(super) transport: T,
@@ -50,14 +50,14 @@ pub struct ServiceHost<H, T> {
     pub(super) round_scratch: RoundScratch,
     pub(super) retained_hold: Option<publication::StoppedWorkers>,
 }
-/// Existing fixed-owner execution/stop transport, retaining the actual frame
+/// Existing fixed-owner execution/stop transport, keeping the frame
 /// loans and generation-bound owner tokens. No metadata-only completion exists.
 ///
 /// # Safety
-/// Every submitted frame must be joined and actually recovered before return,
-/// including error paths. Stop/release operate on all actual assigned owners;
+/// Every submitted frame must be joined and recovered before return,
+/// including error paths. Stop/release operate on all assigned owners;
 /// a missing native return or effect must fail stopped without freeing loans.
-/// `hold_all` must consume each actual owner's `WorkerOwner::invalidate`
+/// `hold_all` must consume each owner's `WorkerOwner::invalidate`
 /// receipt, including its CPU memory barrier, before returning the held cohort.
 /// Opening source-service sessions does not issue another owner fence.
 pub unsafe trait NativeTransport: ServiceTransport {
@@ -73,10 +73,10 @@ pub unsafe trait NativeTransport: ServiceTransport {
         inventory: &mut publication::WorkerPublications,
         frames: Vec<super::NativeRun<'a>>,
     ) -> Vec<super::NativeRunObservation>;
-    /// Execute prepared frames while retaining the actual idle-owner holds.
+    /// Execute prepared frames while keeping the idle-owner holds.
     /// The fallback preserves the complete original stop/release protocol;
     /// physical transports may selectively release the exact frame roster and
-    /// rejoin their real returns under the retained stopped request.
+    /// rejoin their real returns under the stopped request.
     fn execute_held<'a>(
         &mut self,
         local: &mut dyn Host,
@@ -128,13 +128,13 @@ impl<H: Host, T: ServiceTransport> ServiceHost<H, T> {
         self.services = services;
         Ok(())
     }
-    /// Return every actual session for publication close before cohort release.
+    /// Return every session for publication close before cohort release.
     pub fn end_services(&mut self) -> Vec<WorkerServices> {
         self.selected = None;
         core::mem::take(&mut self.services)
     }
     /// Transfer only empty storage. Every next session still comes from the
-    /// freshly validated actual held inventory, never from retained authority.
+    /// freshly validated held inventory, never from kept permission.
     pub(super) fn take_empty_service_buffer(&mut self) -> Vec<WorkerServices> {
         if !self.services.is_empty() || self.selected.is_some() {
             self.transport
@@ -187,7 +187,7 @@ impl<H: Host, T: ServiceTransport> ServiceHost<H, T> {
 impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn memory_barrier(&mut self) {
         // Source helpers may have performed canonical copyout on the BSP;
-        // complete those stores as well as the source PE's actual native ones.
+        // complete those stores as well as the source PE's native ones.
         self.local.memory_barrier();
         if self.source_service() {
             self.effect(HostEffect::MemoryBarrier);
@@ -224,7 +224,7 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.local.native_timing_work_end(work, started);
     }
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
-        // SAFETY: the retained canonical owner supplies mapping and all-reader
+        // SAFETY: the canonical owner supplies mapping and all-reader
         // exclusion. No identity/raw-RAM fallback is admitted by this adapter.
         unsafe { self.ram.read_physical(physical, buffer).is_ok() }
     }
@@ -311,7 +311,7 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     }
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
         self.native_entry();
-        // SAFETY: caller retains the existing installed system block contract;
+        // SAFETY: caller keeps the existing installed system block contract;
         // stopped source services are excluded above.
         unsafe { self.local.execute(code, state) }
     }
@@ -322,7 +322,7 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         context: &mut ExecutionContext,
     ) -> Option<NativeExit> {
         self.native_entry();
-        // SAFETY: caller retains actual context/code/frame owners on this BSP.
+        // SAFETY: caller keeps context/code/frame owners on this BSP.
         unsafe { self.local.execute_context(code, state, context) }
     }
     fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
@@ -495,9 +495,9 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             panic!("{reason}");
         }
     }
-    // SAFETY: this one-worker test transport actually consumes/recover every
+    // SAFETY: this one-worker test transport consumes/recover every
     // sealed frame and uses the real publication stop/effect/release protocol.
-    // It does not forge CPL0 admission or claim actual native code execution.
+    // It does not forge CPL0 admission or claim native code execution.
     unsafe impl NativeTransport for OneWorker {
         fn initialize(
             &mut self,
@@ -668,8 +668,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         );
         let held = machine.hold_native_services().unwrap();
         assert!(machine.host.source_service());
-        // An open genuine stopped-worker session supplies no local or remote
-        // executable read authority, even before selecting its source worker.
+        // An open stopped-worker session supplies no local or remote
+        // executable read permission, even before selecting its source worker.
         bytes.fill(0xa5);
         assert!(!machine.host.read_native(NativeCode(0x8001), &mut bytes));
         assert_eq!(bytes, [0xa5; 3]);
@@ -710,7 +710,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
                 .unwrap();
             machine.host.services[0].accept(receipt).unwrap();
             assert!(machine.host.select_native_service(WorkerId(17)));
-            machine.host.memory_barrier(); // actual owner command and receipt
+            machine.host.memory_barrier(); // owner command and receipt
             machine.release_native_services(held);
             assert!(machine.host.services.is_empty());
             assert!(machine.host.selected.is_none());
@@ -735,8 +735,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     #[test]
     fn canonical_ram_close_capacity_is_reused_by_the_next_scheduler_open() {
         let (mut machine, _) = memory_service_machine(false);
-        // SAFETY: closed model with the actual canonical owner, no external
-        // writer/native entry. Explicit finish consumes every actual receipt.
+        // SAFETY: closed model with the canonical owner, no external
+        // writer/native entry. Explicit finish consumes every receipt.
         unsafe { machine.prepare_native_ram_service() }
             .unwrap()
             .finish();
@@ -816,7 +816,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             machine.release_native_services(held);
         }));
         assert!(stopped.is_err());
-        // Publication retains the actual open session; no release occurred and
+        // Publication keeps the open session; no release occurred and
         // no emptied allocation was installed after the refused close.
         assert_eq!(machine.host.services.capacity(), 0);
         let inventory = machine.native_publication.as_mut().unwrap();
@@ -886,7 +886,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         let mut host = ServiceHost::new(Local, RosterTransport(Vec::new()), ram);
         let mut allocation = None;
         let mut metadata_allocation = None;
-        // Change both actual source membership and owner order between fully
+        // Change both source membership and owner order between fully
         // closed inventories. The BSP's worker 17 belongs to nonzero PE 7.
         for members in [[7, 2, 11], [11, 7, 2], [9, 3, 7]] {
             let bindings: Vec<_> = members
@@ -927,7 +927,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             assert_empty_scratch(&scratch);
             scratch.bindings.extend(inventory.bindings());
             assert_eq!(scratch.bindings, bindings);
-            // These plain lists model only exact roster metadata. The actual
+            // These plain lists model only exact roster metadata. The
             // owner commands and receipts below remain linear and unchanged.
             scratch
                 .expected
@@ -1009,7 +1009,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
         // worker or other writer admitted.
         let (devices, mut service) = unsafe { machine.prepare_native_ram_service_parts() }.unwrap();
-        assert_eq!(devices.calls, 1); // actual disjoint receiver, not a clone
+        assert_eq!(devices.calls, 1); // disjoint receiver, not a clone
         assert!(service.memory().belongs_to(&ram));
         service.validate_current().unwrap();
         service.fence_cpu_memory();
@@ -1205,7 +1205,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         let mut machine = branch_source_machine();
         let pc = machine.cpu.pc;
         machine.set_breakpoints(&[pc]);
-        // SAFETY: the actual closed one-worker model excludes external writers.
+        // SAFETY: the closed one-worker model excludes external writers.
         assert_eq!(unsafe { machine.native_round() }, Err(Stop::Breakpoint(pc)));
         let roster_len = machine
             .native_publication
@@ -1222,7 +1222,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
                 .all(|(_, capacity)| *capacity >= roster_len)
         );
         for _ in 0..8 {
-            // Every call opens/closes actual generation-bound sessions, then
+            // Every call opens/closes generation-bound sessions, then
             // releases the owner before the next breakpoint entry.
             // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
             // device worker or other writer admitted.
@@ -1231,7 +1231,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
             assert!(machine.host.services.is_empty());
         }
-        // A prior roster is never a substitute for the actual current binding.
+        // A prior roster is never a substitute for the current binding.
         let inventory = machine.native_publication.take().unwrap();
         assert!(matches!(
             // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
@@ -1242,8 +1242,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         assert_empty_scratch(&machine.host.round_scratch);
         assert_eq!(scratch_storage(&machine.host.round_scratch), allocation);
         machine.native_publication = Some(inventory);
-        // Refuse before obtaining a stop when actual canonical ownership is
-        // absent; retain capacity even though this round did collect bindings.
+        // Refuse before obtaining a stop when canonical ownership is
+        // absent; keep capacity even though this round did collect bindings.
         let memory = machine.cpu.canonical_memory.take().unwrap();
         assert!(matches!(
             // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
@@ -1260,8 +1260,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             machine.cpu.pc,
             machine.cpu.retired,
         );
-        // The genuine native admission refusal retains the held owner/session.
-        // It still restores empty metadata instead of caching that authority.
+        // The native admission refusal keeps the held owner/session.
+        // It still restores empty metadata instead of caching that permission.
         assert!(matches!(
             // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
             // device worker or other writer admitted.
@@ -1302,7 +1302,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         assert!(machine.take_trace_hits().is_empty());
         assert!(machine.host.services.is_empty());
         machine.set_breakpoints(&[]);
-        // Reenter the actual released owner. The host's CPL0 refusal follows
+        // Reenter the released owner. The host's CPL0 refusal follows
         // the trace, and cannot stand in for successful native execution.
         assert!(matches!(
             // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA,
@@ -1332,8 +1332,8 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             machine.cpu.pc,
             machine.cpu.retired,
         );
-        // SAFETY: closed one-worker model fixture, actual canonical byte owner,
-        // no concurrent writer. The real CPL0 authority must refuse on this host.
+        // SAFETY: closed one-worker model fixture, canonical byte owner,
+        // no concurrent writer. The real CPL0 permission must refuse on this host.
         let stop = unsafe { machine.native_round() }.unwrap_err();
         assert!(matches!(stop, crate::machine::Stop::Unsupported(_)));
         assert_eq!(

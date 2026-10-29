@@ -6,7 +6,7 @@
 //!
 //! Explicit held-D0, polled continuous capture: 48kHz stereo S32_LE. The source PCM
 //! hardware descriptor excludes S24_LE despite its broader DAI declaration.
-//! Actual platform power, coherent requester DMA and firmware arbitration are
+//! Platform power, coherent requester DMA and firmware arbitration are
 //! supplied by the native owner; firmware/SOF, I2S, PM and guest publication
 //! remain separate. Raven revision00 is a different driver and never admitted.
 use super::acp_pdm::{self, DmaConfig, Profile};
@@ -50,7 +50,7 @@ impl Profile for Renoir {
     }
 }
 
-/// Actual SMBIOS strings. All fields are observed, including genuinely empty
+/// SMBIOS strings. All fields are observed, including empty
 /// strings; missing/unavailable SMBIOS does not grant the default board profile.
 /// This information only excludes known source boards; it never grants a mic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub struct Config<'a> {
     /// Successful _WOV evaluation on this exact PCI function's ACPI handle.
     pub wov: Option<u64>,
     pub board: Option<BoardIdentity<'a>>,
-    /// Actual result of source snd_amd_acp_find_config policy for this function.
+    /// Result of source snd_amd_acp_find_config policy for this function.
     /// Only successful zero selects rn-pci-acp3x. Nonzero legacy/SOF selectors
     /// choose different drivers; unavailable selector evidence refuses too.
     pub acp_config: Option<u32>,
@@ -89,13 +89,13 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Renoir> {
     /// # Safety
     /// The platform must exclusively arbitrate this exact revision01/class048000
     /// PCI function away from SOF/firmware, AML/SMM, other CPUs and workers. It
-    /// must hold actual PCI D0 and board power/clocks throughout the owned epoch,
-    /// and supply current same-function ACPI/selector and genuine SMBIOS facts.
-    /// `domain` must be the actual isolated, coherent DMA domain attached to
+    /// must hold PCI D0 and board power/clocks throughout the owned epoch,
+    /// and supply current same-function ACPI/selector and SMBIOS facts.
+    /// `domain` must be the isolated, coherent DMA domain attached to
     /// this requester; no PA/CPU/IOVA equality is inferred. The register provider
-    /// retains the real UC/RW BAR, original stopped PCI owner and contained
+    /// keeps the real UC/RW BAR, original stopped PCI owner and contained
     /// INTx/MSI/MSI-X delivery. Power, firmware exclusion and every resource stay
-    /// retained after failures/drop until an acknowledged reset or shutdown.
+    /// after failures/drop until an acknowledged reset or shutdown.
     pub unsafe fn claim(
         registers: R,
         timer: T,
@@ -120,7 +120,7 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Renoir> {
             domain,
         )
     }
-    /// Quiesce and retain the original capture/DMA/native owners in PCI D0.
+    /// Quiesce and keep the original capture/DMA/native owners in PCI D0.
     /// The platform must keep the original board/firmware/resource epoch held.
     /// Default source policy uses `power_gate=false`; true additionally performs
     /// the pinned optional ACP PGFSM power-off handshake, with a real deadline.
@@ -128,14 +128,14 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Renoir> {
     pub fn suspend_held_d0(&mut self, power_gate: bool) -> Result<(), Error> {
         self.suspend_retained(power_gate)
     }
-    /// Restore source power/reset/clock/IRQs and the same retained PTE/ring.
-    /// A retained capture returns Prepared; explicit start performs source
+    /// Restore source power/reset/clock/IRQs and the same PTE/ring.
+    /// A kept capture returns Prepared; explicit start performs source
     /// trigger RESUME in a new position/consumer epoch. No automatic DMA start,
-    /// new allocation or fabricated interrupted PCM continuity is introduced.
+    /// new allocation or invented interrupted PCM continuity is introduced.
     pub fn resume_held_d0(&mut self) -> Result<(), Error> {
         self.resume_retained()
     }
-    /// Deliver one actual source-completed period while PDM/DMA keep running.
+    /// Deliver one source-completed period while PDM/DMA keep running.
     /// Returns None until an acknowledged period IRQ and the source hardware
     /// pointer establish a whole available period. Coalesced events may expose
     /// multiple periods, each returned once in capture order. `destination`
@@ -144,7 +144,7 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Renoir> {
     /// This follows the pinned Linux period-IRQ/ALSA-pointer/coherent-buffer
     /// contract. It does not infer completion from a bare counter, transfer
     /// exclusive CPU ownership, invalidate an active ring, or promise an atomic
-    /// stereo-frame read. Actual coherent words are copied through the retained
+    /// stereo-frame read. Coherent words are copied through the kept
     /// domain; pointer checks before/after detect producer wrap into the copied
     /// period. On any error discard the entire destination (it may be partly
     /// modified); no period is consumed, the first error and all owners remain,

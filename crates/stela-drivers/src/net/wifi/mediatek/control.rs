@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Source-backed PCIe ownership, WFDMA stop and firmware-state polling. These
-//! are actual register observations, not a firmware epoch or DMA/IRQ fence.
+//! are register observations, not a firmware epoch or DMA/IRQ fence.
 use super::registers::{self, BarIo, Registers};
 
 mod cold_start;
@@ -111,10 +111,10 @@ pub struct Control<I: BarIo> {
 }
 impl<I: BarIo> Control<I> {
     /// # Safety
-    /// The clock is actually calibrated for this native execution CPU and the
+    /// The clock is calibrated for this native execution CPU and the
     /// register file belongs to this exclusive live requester. The caller
     /// serializes all ring/MCU/IRQ/power users against these global ownership
-    /// and engine changes, and retains actual DMA pins and requester ownership
+    /// and engine changes, and keeps DMA pins and requester ownership
     /// until a separately established complete hardware/CPU drain. This object
     /// neither claims the PCI function nor constructs a fresh firmware epoch.
     pub unsafe fn new(registers: Registers<I>, clock: crate::Clock) -> Result<Self, Error> {
@@ -196,12 +196,12 @@ impl<I: BarIo> Control<I> {
                 });
             }
             // mt76_poll_msec_tick(..., tick=1). State transitions are read
-            // from the actual device after each delay, never inferred by time.
+            // from the device after each delay, never inferred by time.
             self.clock.delay(1000);
         }
     }
     /// The common MT792xe MT_CONN_ON_LPCTL request retries at most ten 50ms polls. ASPM
-    /// requires a minimum 2ms wake delay before each actual status read.
+    /// requires a minimum 2ms wake delay before each status read.
     pub fn driver_own(&mut self, aspm_supported: bool) -> Result<DriverOwned, Error> {
         self.guard(false)?;
         self.driver_owned = false;
@@ -267,7 +267,7 @@ impl<I: BarIo> Control<I> {
         let result = self.poll(MT_CONN_ON_MISC, 7, 1, 1_000_000);
         self.finish(result)
     }
-    /// Observe N9-ready bits after the caller's actual download/start exchange.
+    /// Observe N9-ready bits after the caller's download/start exchange.
     /// Even success proves only this register state, not which firmware was
     /// loaded, a new command epoch, calibration, regulatory setup or association.
     pub fn poll_n9_ready(&mut self) -> Result<Observation, Error> {
@@ -359,8 +359,8 @@ mod tests {
         }
     }
     fn setup(chip: Chip, model: Model) -> Control<Model> {
-        // SAFETY: exclusive serialized model; a deliberately compressed local
-        // TSC scale bounds fault tests, never qualifies physical timing.
+        // SAFETY: exclusive serialized model; a compressed local
+        // TSC scale bounds fault tests, never checks physical timing.
         unsafe {
             Control::new(
                 Registers::new(chip, model),

@@ -1,4 +1,4 @@
-//! Actual native UAS reset/owner transfer controls. Source-only until qualified.
+//! Native UAS reset/owner transfer controls. Source-only until checked.
 use super::*;
 use crate::{
     block::BlockDevice,
@@ -8,7 +8,7 @@ use crate::{
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
 
-/// No allocation is permitted after the initial actual native construction.
+/// No allocation is permitted after the initial native construction.
 /// This observes the production path, including its whole controller pool.
 struct NoAllocation;
 impl DmaAllocator for NoAllocation {
@@ -45,7 +45,7 @@ fn native_fixture(
         crate::usb::xhci::model::reset_fixture(memory, speed, context, 1);
     let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
     let mut failures = Vec::new();
-    // SAFETY: this fixture exclusively owns the genuine attachment and all DCIs.
+    // SAFETY: this fixture exclusively owns the attachment and all DCIs.
     let (storage, mut disks) = unsafe {
         super::super::discover_uas_retained(
             controller.clone(),
@@ -70,7 +70,7 @@ fn dma_bytes(allocations: &[(u64, usize)]) -> Vec<Vec<u8>> {
     allocations
         .iter()
         .map(|&(address, length)| {
-            // SAFETY: geometry comes from the actual retained controller owners;
+            // SAFETY: geometry comes from the controller owners;
             // exclusive fixture RAM outlives every snapshot and native owner.
             unsafe { core::slice::from_raw_parts(address as *const u8, length) }.to_vec()
         })
@@ -140,7 +140,7 @@ fn native_root_uas_reuses_three_original_owners_across_96_resets_and_real_io() {
                 assert_eq!(disk.identity().blocks, 1024 * (epoch as u64 + 1));
                 disk.write(7, &[epoch as u8; 512]).unwrap();
                 // The unchanged peer advertises write-through. Explicitly issue
-                // a real transport SYNCHRONIZE CACHE CDB and consume its actual
+                // a real transport SYNCHRONIZE CACHE CDB and consume its
                 // matching Status IU rather than crediting a no-op disk flush.
                 current
                     .borrow_mut()
@@ -207,7 +207,7 @@ fn native_uas_failed_reset_retains_all_three_original_owners_and_bytes() {
                     assert_eq!(contents(&old.transport), before);
                 }
                 // A live identity query bypasses the permanent raw-slot fence.
-                // Both old and actual most recent Enable grant stay unusable.
+                // Both old and most recent Enable grant stay unusable.
                 let actual_slot = *hardware.borrow().enables.last().unwrap();
                 assert!(controller.borrow_mut().device(id).is_err());
                 assert!(controller.borrow().test_device_id(actual_slot).is_err());
@@ -233,8 +233,8 @@ fn native_uas_failed_reset_retains_all_three_original_owners_and_bytes() {
     }
 }
 
-/// Run real native READ with the Command TD completion intentionally unread.
-/// The payload and matching Status IU are actually completed first.
+/// Run real native READ with the Command TD completion unread.
+/// The payload and matching Status IU are completed first.
 fn read_with_unread_command(host: &mut Host) -> NativeTicket {
     let command = command_iu(1, [0; 8], &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
     host.engine.command.bytes_mut().fill(0);
@@ -291,7 +291,7 @@ fn native_uas_old_same_pointer_ticket_cannot_consume_unread_current_completion()
             let (controller, device, hardware, mut dma) =
                 crate::usb::xhci::model::reset_fixture(&mut memory, speed, context, 1);
             let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
-            // SAFETY: exclusive genuine fixture attachment and unconfigured DCIs.
+            // SAFETY: exclusive fixture attachment and unconfigured DCIs.
             let mut old = unsafe {
                 Host::new(
                     controller.clone(),

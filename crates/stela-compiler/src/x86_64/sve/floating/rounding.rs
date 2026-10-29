@@ -54,7 +54,7 @@ pub(crate) fn emit(
         return Ok(false);
     }
     // Current-direction ROUND wins only in these measured SSE4.1 SVL128 tiers.
-    // Other widths, forms and lengths retain the mature per-chunk mapping.
+    // Other widths, forms and lengths keep the mature per-chunk mapping.
     let checked_current_direction = target.supports(TargetCpu::Sse41)
         && length.bytes() == CHECKED_CURRENT_DIRECTION_VECTOR_BYTES
         && matches!(

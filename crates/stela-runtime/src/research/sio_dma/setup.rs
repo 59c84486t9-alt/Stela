@@ -24,8 +24,8 @@ struct Row {
     value: u64,
 }
 
-/// One actual physical device access to perform outside the firmware borrow.
-/// A mapped range does not qualify its hardware: the actual routed bank must
+/// One physical device access to perform outside the firmware borrow.
+/// A mapped range does not check its hardware: the routed bank must
 /// accept this access and its normal PMGR preflight/settle still applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
@@ -59,7 +59,7 @@ pub enum EffectResult {
     Written,
 }
 
-/// Routed access failures retain their original type and detail. Platform
+/// Routed access failures keep their original type and detail. Platform
 /// code neither depends on the machine's error type nor replaces its reason.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FinishError<E> {
@@ -177,8 +177,8 @@ impl TunableProgram {
         Ok(Some(effect))
     }
 
-    /// Retire only the claimed actual result. A failed routed access releases
-    /// the claim for retry, retaining phase and any earlier read result.
+    /// Retire only the claimed result. A failed routed access releases
+    /// the claim for retry, keeping phase and any earlier read result.
     /// The caller propagates Access(E) intact; it must not substitute success.
     pub fn finish_effect<E>(
         &mut self,
@@ -299,7 +299,7 @@ mod tests {
     }
 
     /// Only the one injected refusal is synthetic. All accepted accesses go
-    /// through a real GPIO model and change its actual output state.
+    /// through a real GPIO model and change its output state.
     struct RefuseWriteOnce {
         bank: Gpio,
         reads: usize,
@@ -369,7 +369,7 @@ mod tests {
             Some(true)
         );
         // Another owner changes the bank after our read. A retry must execute
-        // the retained write2, not repeat the read and recalculate from0xe.
+        // the write2, not repeat the read and recalculate from0xe.
         bus.device_mut::<RefuseWriteOnce>(id)
             .unwrap()
             .bank

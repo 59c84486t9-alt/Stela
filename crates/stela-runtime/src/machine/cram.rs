@@ -7,9 +7,9 @@
 //! 0x368a8/0x3c2a0 independently has the size and release consumers.
 //!
 //! These consumers do NOT disclose an original initial register value, the
-//! actual unit/limit, physical sharing, or untouched memory contents. No chip
-//! supplies defaults here. A register image and actual retained aperture owner
-//! must agree before this component exists. No production backing is qualified.
+//! unit/limit, physical sharing, or untouched memory contents. No chip
+//! supplies defaults here. A register image and kept aperture owner
+//! must agree before this component exists. No production backing is checked.
 use stela_engine::memory::backing::BackingId;
 use stela_engine::memory::backing::MappingId;
 
@@ -80,9 +80,9 @@ impl Geometry {
     }
 }
 
-/// Read-only identity of an actual canonical backing and its current aperture
-/// mapping. This metadata grants no completion authority and has no public
-/// constructor. The retained backing capability, not this snapshot, owns RAM.
+/// Read-only identity of a canonical backing and its current aperture
+/// mapping. This metadata grants no completion permission and has no public
+/// constructor. The kept backing capability, not this snapshot, owns RAM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackingState {
     pub(crate) backing: BackingId,
@@ -100,20 +100,20 @@ pub(crate) mod sealed {
     pub trait Prepared {}
 }
 
-/// Retains the actual canonical aperture reservation/view. Initialization must
-/// come from actual admitted allocation authority, separately from loaded file bytes.
+/// Keeps the canonical aperture reservation/view. Initialization must
+/// come from admitted allocation permission, separately from loaded file bytes.
 /// No allocation, copy, second RAM layer or zero initialization is implied.
 pub trait ApertureBacking: sealed::Backing {
     type Error;
     type Prepared<'a>: PreparedAperture
     where
         Self: 'a;
-    /// Read the actual live backing/view identity and allocation generation,
+    /// Read the live backing/view identity and allocation generation,
     /// not a cached expected state or a claim derived from the written count.
     /// A retired/replaced view must no longer appear active.
     fn state(&self) -> BackingState;
     /// Check the complete old identity/generation and target extent before any
-    /// mapping effect. The guard retains exclusive actual ownership through
+    /// mapping effect. The guard keeps exclusive ownership through
     /// commit, including all-worker quiescence and dispatch/map invalidation.
     /// Failure or dropping the guard must leave the mapping unchanged.
     fn prepare(
@@ -123,8 +123,8 @@ pub trait ApertureBacking: sealed::Backing {
     ) -> Result<Self::Prepared<'_>, Self::Error>;
 }
 
-/// An actual prepared canonical-RAM mapping mutation, not a status ACK.
-/// Commit must be infallible after preflight, activate/revoke the actual view,
+/// A prepared canonical-RAM mapping mutation, not a status ACK.
+/// Commit must be infallible after preflight, activate/revoke the view,
 /// preserve the backing identity/reservation and advance its generation once.
 pub trait PreparedAperture: sealed::Prepared {
     fn commit(self) -> BackingState;
@@ -133,7 +133,7 @@ pub trait PreparedAperture: sealed::Prepared {
 #[derive(Debug)]
 pub struct Initialization<B> {
     pub error: CramError,
-    /// Refusal returns the actual backing authority to its caller.
+    /// Refusal returns the backing permission to its caller.
     pub backing: B,
 }
 
@@ -144,7 +144,7 @@ pub enum WriteError<E> {
 }
 
 /// One explicitly supplied cache owner. Sharing it between PEs requires
-/// separately qualified physical ownership; MPIDR/core type is not a selector.
+/// separately checked physical ownership; MPIDR/core type is not a selector.
 /// It has no Default, Clone, implicit initial state, reset or power-loss model.
 #[derive(Debug)]
 pub struct Cram<B> {
@@ -220,9 +220,9 @@ impl<B: ApertureBacking> Cram<B> {
         &self.backing
     }
 
-    /// Source-qualified preserved-field RMW: allocate from empty, or release
+    /// Source-checked preserved-field RMW: allocate from empty, or release
     /// fully. Other field changes and nonzero reconfiguration refuse before
-    /// any backing effect. Ready follows actual commit, never the written bit.
+    /// any backing effect. Ready follows commit, never the written bit.
     pub fn write(&mut self, value: u64) -> Result<(), WriteError<B::Error>> {
         self.check().map_err(WriteError::Register)?;
         let changed = (value ^ self.word) & !COUNT;
@@ -258,8 +258,8 @@ impl<B: ApertureBacking> Cram<B> {
             || committed.generation != generation
             || self.backing.state() != committed
         {
-            // Retain actual partial/broken-owner effects, report failure, and
-            // never expose the old or fabricated Ready as a successful result.
+            // Keep partial/broken-owner effects, report failure, and
+            // never expose the old or invented Ready as a successful result.
             self.poisoned = true;
             return Err(WriteError::Register(CramError::BackingContract));
         }
@@ -336,7 +336,7 @@ mod tests {
         fn new(geometry: Geometry, units: u8) -> Self {
             let bytes = geometry.capacity() as usize;
             let layout = Layout::from_size_align(bytes, PAGE_BYTES).unwrap();
-            // SAFETY: nonempty valid layout retained by Storage for deallocation.
+            // SAFETY: nonempty valid layout kept by Storage for deallocation.
             let pointer = NonNull::new(unsafe { alloc(layout) }).unwrap();
             // SAFETY: the allocation is `bytes` long and nothing else refers to it.
             unsafe { pointer.as_ptr().write_bytes(0xa5, bytes) };
@@ -381,7 +381,7 @@ mod tests {
                 .resolve(address, 1, AccessKind::Read)
                 .ok()?;
             // SAFETY: No native execution or other writer exists in this test owner;
-            // resolution retains the actual view/backing for the access.
+            // resolution keeps the view/backing for the access.
             Some(unsafe { access.host_ptr().as_ptr().read() })
         }
         fn write(&mut self, address: u64, value: u8) {
@@ -465,7 +465,7 @@ mod tests {
     impl PreparedAperture for Prepared<'_> {
         fn commit(self) -> BackingState {
             if let Some(old) = self.owner.view.take() {
-                // This test retains no native/execution loans. The real
+                // This test keeps no native/execution loans. The real
                 // production guard must preflight all native/map owners.
                 self.owner.domain.as_ref().unwrap().retire(&old).unwrap();
             }
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(component.backing().read(base), Some(0x7e));
         let old = component.backing().view.as_ref().unwrap().clone();
         let allocated = component.read().unwrap();
-        // The original release preserves the written Ready=1, but actual
+        // The original release preserves the written Ready=1, but
         // committed revocation clears it. Writing Ready is not completion.
         component.write(allocated & !COUNT).unwrap();
         assert_eq!(component.read().unwrap(), empty);
@@ -776,7 +776,7 @@ mod tests {
             fn read_ram(&mut self, physical: u64, out: &mut [u8]) -> bool {
                 if let Some(entry) = &self.entry {
                     let mut entry = entry.borrow_mut();
-                    // A failed RAM probe outside the actual reservation may
+                    // A failed RAM probe outside the reservation may
                     // belong to a real peripheral provider, not unknown RAM.
                     return entry.range(physical, out.len()).is_some() && entry.read(physical, out);
                 }
@@ -822,7 +822,7 @@ mod tests {
                         .unwrap();
                 }
                 // Register-window fixtures reject data faults; full entry routes
-                // them through the actual Machine regime and canonical backing.
+                // them through the Machine regime and canonical backing.
                 self.runner.set_ranges(
                     self.code
                         .iter()
@@ -873,7 +873,7 @@ mod tests {
                         self.output_prefix,
                         self.patches
                     ));
-                    // SAFETY: This exact installed RX image remains owned and idle.
+                    // SAFETY: This installed RX image remains owned and idle.
                     let image = unsafe { core::slice::from_raw_parts(entry as *const u8, *length) };
                     std::fs::OpenOptions::new()
                         .write(true)
@@ -939,8 +939,8 @@ mod tests {
             }
             fn invalidate_translations(&mut self) {}
             fn counter(&mut self) -> u64 {
-                // Full entry receives actual elapsed host time in the declared
-                // 24MHz counter domain; bounded isolated register replays retain
+                // Full entry receives elapsed host time in the declared
+                // 24MHz counter domain; bounded isolated register replays keep
                 // their explicit fixed-time scenario. Never tick from a poll.
                 self.clock.as_ref().map_or(0, |clock| {
                     (clock.elapsed().as_nanos() * 24_000_000 / 1_000_000_000) as u64
@@ -1072,7 +1072,7 @@ mod tests {
         fn allocation_and_release(input: Input) {
             for (aff2, expected) in [(0, 15), (1, 16)] {
                 // Chosen test descriptor only, not an Apple reset value or
-                // production physical aperture authority.
+                // production physical aperture permission.
                 let geometry = Geometry::new(0x1000_0000, 18, 16).unwrap();
                 let mut cram = Cram::new(
                     geometry,
@@ -1154,7 +1154,7 @@ mod tests {
         impl EntryGuard {
             fn new() -> Self {
                 // SAFETY: Reserve only; never replace host mappings or expose guest RAM
-                // directly to native code. Actual accesses use the canonical view.
+                // directly to native code. Accesses use the canonical view.
                 let pointer = unsafe {
                     libc::mmap(
                         APERTURE as *mut _,
@@ -1588,8 +1588,8 @@ mod tests {
                 assert_eq!(entry.committed[0].1.len(), CAPACITY);
             }
             assert!(entry.write(ENTRY_BASE, &bytes));
-            // Underlying allocation-pattern bytes never become readable merely
-            // by existing. Only actual full-reservation initialization (where
+            // Underlying allocation-pattern bytes never become readable
+            // by existing. Only full-reservation initialization (where
             // declared), original loading and committed guest stores are known.
             let mut untouched = [0; 8];
             assert_eq!(entry.read(APERTURE, &mut untouched), initialize_reservation);
@@ -1606,7 +1606,7 @@ mod tests {
                     "sha256":hex::encode(sha2::Sha256::digest(bytes))})
                 })
                 .collect::<Vec<_>>();
-            entry.committed.clear(); // actual initialization is separate from guest stores
+            entry.committed.clear(); // initialization is separate from guest stores
             entry.redact = mount_sep; // no runtime entropy/key bytes enter evidence logs
             drop(bytes); // no parallel original-code RAM buffer survives
             let shared = std::rc::Rc::new(std::cell::RefCell::new(entry));
@@ -1718,7 +1718,7 @@ mod tests {
                 assert!(!sep.booted());
                 assert!(!sep.pending());
             } else if initialize_reservation {
-                // Continue the qualified physical alias using actual shared
+                // Continue the checked physical alias using shared
                 // host time. The next input is the original SEP outbox/control
                 // bank; this bounded fixture has no physical device provider.
                 let Stop::Unsupported(requirement) = &stop else {

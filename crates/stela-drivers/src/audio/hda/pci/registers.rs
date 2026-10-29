@@ -13,7 +13,7 @@ use crate::{
     bus::pci::{Address, ConfigSpace, Function},
 };
 
-/// One prepared PCI function retained exclusively throughout MMIO/reset use.
+/// One prepared PCI function kept exclusively throughout MMIO/reset use.
 /// The mutable borrow prevents another typed owner from changing PCI state.
 pub struct PciRegisters<'a, R, C> {
     pub(super) inner: R,
@@ -74,7 +74,7 @@ impl Prepared {
         })
     }
 
-    /// Claim native MMIO while retaining the exact prepared PCI function.
+    /// Claim native MMIO while keeping the exact prepared PCI function.
     ///
     /// # Safety
     /// The BAR must be identity mapped uncached with the lifetime/exclusive
@@ -89,14 +89,14 @@ impl Prepared {
         let inner = unsafe { MmioRegisters::claim(self.base, self.bytes) }
             .map_err(|_| AttachError::InvalidBar)?;
         // SAFETY: inner was just claimed from this prepared BAR. The caller
-        // retains its mapping/DMA lifetime and exclusive platform ownership;
+        // keeps its mapping/DMA lifetime and exclusive platform ownership;
         // bind_registers rechecks the function identity and BAR association.
         unsafe { self.bind_registers(function, inner) }
     }
 }
 
 impl<R, C> PciRegisters<'_, R, C> {
-    /// Mandatory identity-selected configuration for this retained function.
+    /// Mandatory identity-selected configuration for this function.
     pub fn config(&self) -> Config {
         self.identity.config()
     }

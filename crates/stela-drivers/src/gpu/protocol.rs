@@ -1,8 +1,8 @@
 //! Byte encoding for the proposed guest Metal frontend/native driver boundary.
 //!
 //! A decoded message is untrusted data, never authorization or execution proof.
-//! The actual IOUserClient/transport must authenticate its task, resolve handles
-//! in that connection and retain real memory/device ownership. No transport,
+//! The IOUserClient/transport must authenticate its task, resolve handles
+//! in that connection and keep real memory/device ownership. No transport,
 //! device registration, command submission or completion is supplied here.
 use core::num::NonZeroU64;
 
@@ -15,7 +15,7 @@ const MINOR: u16 = 0;
 const RESPONSE_FLAG: u16 = 1;
 
 /// Typed operations describe a wire vocabulary, not available driver features.
-/// The dispatcher must refuse operations lacking actual backend admission.
+/// The dispatcher must refuse operations lacking backend admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum Operation {
@@ -72,7 +72,7 @@ pub enum Error {
     OutputLength,
 }
 
-/// The connection's actual negotiated message ceiling, including the header.
+/// The connection's negotiated message ceiling, including the header.
 /// Large code/data travels through separately registered bounded resources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {

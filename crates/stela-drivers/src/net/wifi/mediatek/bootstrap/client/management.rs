@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Native key/TX ownership follows the existing MediaTek client. Robust frame,
 // SA Query and firmware CCMP rules follow the pinned Linux mac80211/mt7925
-// sources and original notices retained in mediatek/THIRD_PARTY.md.
+// sources and original notices kept in mediatek/THIRD_PARTY.md.
 //! Key-bound protected-management transport for a real OS management service.
-//! This is deliberately not PMF negotiation or a station management policy:
+//! This is not PMF negotiation or a station management policy:
 //! authenticated observations never disconnect, open a port or admit 6GHz.
 
 use super::*;
@@ -15,7 +15,7 @@ mod block_ack;
 mod modern;
 mod rotation;
 
-/// Actual retained transport namespace. No public constructor, Clone or mutable
+/// Transport namespace. No public constructor, Clone or mutable
 /// fields. Its existence proves key installation, not negotiated PMF policy.
 /// The real OS service must own SA Query transactions, timers and departure/
 /// action decisions; this backend never infers those from authenticated bytes.
@@ -43,8 +43,8 @@ impl Session {
     pub const fn management_key(&self) -> bip::Identity {
         self.igtk
     }
-    /// Exact retained MMIE 4/5 receive identities; firmware delivery/air overlap
-    /// remains unqualified and no hardware integrity error is ignored.
+    /// Kept MMIE 4/5 receive identities; firmware delivery/air overlap
+    /// remains unchecked and no hardware integrity error is ignored.
     pub const fn receive_management_keys(&self) -> [Option<bip::Identity>; 2] {
         self.igtks
     }
@@ -53,10 +53,10 @@ impl Session {
     }
 }
 
-/// Original completed RX and authenticated plaintext. Retains the original
+/// Original completed RX and authenticated plaintext. Keeps the original
 /// requester/association/key namespace, including while queued by the OS. The
-/// transport retains its original association epoch and, for modern links, the
-/// actual AssociationContext. Body access is a historical observation; acting
+/// transport keeps its original association epoch and, for modern links, the
+/// AssociationContext. Body access is a historical observation; acting
 /// on it requires with_management or guarded with_management_modern
 /// to recheck the original namespace under the serialized current Client.
 pub struct Received {
@@ -85,7 +85,7 @@ impl Received {
 }
 
 /// Bounded OS-generated robust management messages. SA Query transaction IDs
-/// remain opaque OS bytes; this does not fabricate randomness, retries, timers
+/// remain opaque OS bytes; this does not invent randomness, retries, timers
 /// or successful transaction matching. Departure publication does not itself
 /// remove the local peer: the OS must call the ordinary disconnect/drain path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,8 +150,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 
     pub(super) fn validate_management(s: &Owned<I, Q, C>, session: &Session) -> Result<(), Error> {
-        // Exact retained object first: copied numbers or an equal peer/profile
-        // from another Client cannot create authority or trigger MMIO.
+        // Kept object first: copied numbers or an equal peer/profile
+        // from another Client cannot create permission or trigger MMIO.
         if s.management
             .as_ref()
             .is_none_or(|current| !core::ptr::eq(current.as_ref(), session))
@@ -188,7 +188,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
-    // Check every retained native user, including canonical pending/quarantined
+    // Check every native user, including canonical pending/quarantined
     // BA records whose native queue may not yet exist. The independent unsafe
     // hardware/RX/IRQ/external-deferred-user fence remains required as well.
     pub(super) fn management_drained(s: &Owned<I, Q, C>) -> Result<(), Error> {
@@ -223,7 +223,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // BIP-CMAC-128 is the suite an RSNE without one selects.
         let cipher = cipher.unwrap_or(ManagementCipher::Cmac128);
         // SAFETY: caller checked all native users and supplies the independent
-        // actual old hardware/RX/IRQ/deferred-key-user drain and authentic input.
+        // old hardware/RX/IRQ/deferred-key-user drain and authentic input.
         let outcome = unsafe {
             key.install_igtk(
                 controller.state_mut().mailbox.as_mut().unwrap(),
@@ -271,10 +271,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(session)
     }
 
-    /// Attach an actual initial GTK/IGTK batch and retain a protected-management
+    /// Attach an initial GTK/IGTK batch and keep a protected-management
     /// transport for the real OS service. Does not authorize a controlled port,
     /// negotiate PMF, process a departure or override association admission.
-    /// Exact retries retain the original advanced IPN and transport object.
+    /// Exact retries keep the original advanced IPN and transport object.
     ///
     /// # Safety
     /// The real OS authenticated exchange supplied this IGTK/IPN for this exact
@@ -283,7 +283,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// the checked empty CPU/TX queues below alone cannot establish that fence.
     /// Serialize this with every other key/publication/reset/policy operation.
     /// Modern associations use install_management_key_modern instead, enclosing
-    /// the actual key command in Owner::publish_association Management guards.
+    /// the key command in Owner::publish_association Management guards.
     /// This API does not implement live IGTK rekey. The OS management policy must
     /// separately establish negotiated protection before publishing or applying
     /// management effects; a returned Session grants transport only.
@@ -306,7 +306,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::ModernAdmissionRequired);
         }
         Self::management_drained(s)?;
-        // SAFETY: inherited authenticated-input and independent actual drain contract.
+        // SAFETY: inherited authenticated-input and independent drain contract.
         let igtk = unsafe {
             Self::install_management_parts(
                 &mut s.controller,
@@ -321,10 +321,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Self::management_session(s, epoch, ptk, gtk, igtk)
     }
 
-    /// Consume one native authenticated observation only while its actual
+    /// Consume one native authenticated observation only while its
     /// original peer, PTK, GTK and IGTK remain current. The synchronous callback
-    /// runs with exclusive Client access; an OS deferring work again must retain
-    /// its own association-scoped policy and revalidate at its actual effects.
+    /// runs with exclusive Client access; an OS deferring work again must keep
+    /// its own association-scoped policy and revalidate at its effects.
     pub fn with_management<T>(
         &mut self,
         received: Received,
@@ -339,9 +339,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
 
     /// Publish exact OS-selected protected unicast departure/SA Query bytes.
     /// The real OS owns negotiated management policy and all transaction/state
-    /// semantics. Firmware owns the acknowledged PTK's actual CCMP PN/IV/MIC;
+    /// semantics. Firmware owns the acknowledged PTK's CCMP PN/IV/MIC;
     /// no caller-supplied counter or raw data/control frame is accepted. Actual
-    /// descriptor+TX-free+unmap retirement retains the original Session/keys.
+    /// descriptor+TX-free+unmap retirement keeps the original Session/keys.
     pub fn transmit_management(
         &mut self,
         session: &Session,

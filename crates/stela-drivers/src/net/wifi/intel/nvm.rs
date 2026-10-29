@@ -7,7 +7,7 @@
 use super::{command::Id, firmware::Firmware};
 use alloc::vec::Vec;
 
-/// These three source call sites deliberately use WIDE_ID without version
+/// These three source call sites use WIDE_ID without version
 /// bits. The documented payload ABI version is not a header-version override.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -58,7 +58,7 @@ pub struct Information {
     pub rx_chains: u32,
     pub lar_enabled: u32,
     /// Firmware's declared valid prefix. Remaining exact array words remain
-    /// retained in channel_profiles and raw, without becoming valid channels.
+    /// in channel_profiles and raw, without becoming valid channels.
     pub channel_count: usize,
     pub channel_profiles: Vec<u32>,
     pub raw: Vec<u8>,
@@ -138,7 +138,7 @@ pub struct HardwareAddress {
     pub source: AddressSource,
 }
 impl HardwareAddress {
-    /// Pure source byte permutation, not an observation of actual CSR state.
+    /// Pure source byte permutation, not an observation of CSR state.
     pub fn decode(word0: u32, word1: u32) -> [u8; 6] {
         let first = word0.to_le_bytes();
         let second = word1.to_le_bytes();
@@ -147,8 +147,8 @@ impl HardwareAddress {
     pub fn valid(bytes: [u8; 6]) -> bool {
         bytes[0] & 1 == 0 && bytes != [0; 6]
     }
-    /// An actual consumer reads strap registers first and requests OTP words
-    /// only on invalid strap. Missing required OTP words are not fabricated.
+    /// A consumer reads strap registers first and requests OTP words
+    /// only on invalid strap. Missing required OTP words are not invented.
     pub fn select(strap: [u32; 2], otp: Option<[u32; 2]>) -> Result<Self, Error> {
         let bytes = Self::decode(strap[0], strap[1]);
         if Self::valid(bytes) {

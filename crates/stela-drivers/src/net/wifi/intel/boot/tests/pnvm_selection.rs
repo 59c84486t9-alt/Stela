@@ -75,7 +75,7 @@ fn actual_alive_bios_source_scratch_doorbell_and_raw_notification_preserve_table
         );
         assert_eq!(domain.records.lock().unwrap().live.len(), live + added);
         assert!(matches!(
-            // SAFETY: The completed PNVM state still retains its original Source/Domain and
+            // SAFETY: The completed PNVM state still keeps its original Source/Domain and
             // platform buffers; this duplicate begin cannot gain a second publication owner.
             unsafe { boot.begin_pnvm(&provider, observations, &source) },
             Err(Error::State)
@@ -146,7 +146,7 @@ fn zero_sku_requests_nothing_and_missing_capture_or_bad_bios_never_fake_fallback
         let calls = source.calls.load(Ordering::Relaxed);
         state.lock().unwrap().ops.clear();
         // SAFETY: The spy forwards this same profile catalog, including deliberate missing
-        // inputs; boot retains its original Domain and Source for any allowed publication.
+        // inputs; boot keeps its original Domain and Source for any allowed publication.
         let result = unsafe { boot.begin_pnvm(&spy, observations, &source) };
         match mode {
             0 => {
@@ -219,7 +219,7 @@ fn ax200_retains_actual_bios_receipts_and_explicit_pre_v2_no_payload_transfer() 
     let maps = domain.records.lock().unwrap().maps;
     let live = domain.records.lock().unwrap().live.len();
     assert_eq!(
-        // SAFETY: The AX200 provider/observations match the retained model profile/SKU;
+        // SAFETY: The AX200 provider/observations match the model profile/SKU;
         // Source/Domain stay exclusive while the pre-v2 path publishes only its doorbell.
         unsafe { boot.begin_pnvm(&provider, observations, &source) }.unwrap(),
         PnvmProgress::Waiting

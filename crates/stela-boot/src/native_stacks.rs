@@ -1,7 +1,7 @@
 //! Dynamic native kernel stacks from real canonical WB RAM pins.
 //! Proposal only: inclusion waits for the reviewed RootPublication provider.
-//! The metadata budget is the actual Runtime job/stack resource budget; data
-//! pages are allocated fallibly for each new stack, with a genuine absent guard.
+//! The metadata budget is the Runtime job/stack resource budget; data
+//! pages are allocated fallibly for each new stack, with an absent guard.
 use crate::{
     native_memory,
     native_mmio::{QualifiedRam, RootPublication},
@@ -24,14 +24,14 @@ use stela_drivers::{
 };
 
 const PAGE: usize = 4096;
-const STACK_PAGES: usize = 4; // Exact original THREAD_SIZE for this native profile.
+const STACK_PAGES: usize = 4; // Original THREAD_SIZE for this native profile.
 // Original kstack_end/THREAD_SIZE arithmetic also needs a THREAD_SIZE-aligned
 // stack base. Reserve eight pages: three unused, one absent guard, four data.
 const SLOT_PAGES: usize = STACK_PAGES * 2;
 const MAPPED_PAGES: usize = STACK_PAGES + 1;
 const GUARD_OFFSET: usize = STACK_PAGES - 1;
 const ENTRIES: usize = 512;
-const RIGHTS: u64 = 1 | 2 | (1 << 63); // Supervisor RW, NX; actual WB is qualified.
+const RIGHTS: u64 = 1 | 2 | (1 << 63); // Supervisor RW, NX; WB is checked.
 const ACCESSED_DIRTY: u64 = (1 << 5) | (1 << 6);
 static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 
@@ -43,7 +43,7 @@ fn reserve(publication: &Arc<RootPublication>, ram: QualifiedRam) -> Result<Tabl
     ids.try_reserve_exact(ram.physical_pages().len())
         .map_err(|_| WorkError::Full)?;
     // Own every RAM/root/pin before the FIRST alias effect. On any failure,
-    // Table::drop either retires all registered aliases or retains this entire
+    // Table::drop either retires all registered aliases or keeps this entire
     // preallocated bundle; uncertain retirement can never release the RAM.
     let mut table = Table {
         publication: ManuallyDrop::new(publication.clone()),
@@ -52,13 +52,13 @@ fn reserve(publication: &Arc<RootPublication>, ram: QualifiedRam) -> Result<Tabl
         reachable: false,
     };
     for &physical in table.ram.physical_pages() {
-        // SAFETY: the qualified RAM page is owned by this table, which retires every reserved alias
+        // SAFETY: the checked RAM page is owned by this table, which retires every reserved alias
         // before releasing it.
         let result = unsafe {
             publication.authority().reserve_alias(ExistingAlias {
                 physical: PhysicalSpan::new(physical, PAGE as u64).map_err(failed)?,
                 // Conservative registry reservation matches imported unknown RAM.
-                // Actual WB authority is QualifiedRam, never this None value.
+                // WB permission is QualifiedRam, never this None value.
                 attribute: None,
             })
         };
@@ -120,8 +120,8 @@ pub(crate) struct Source {
     poisoned: AtomicBool,
     cache_bits: u64,
 }
-// SAFETY: only qualified same-CPU process code accesses State, under held.
-// RootPublication validates actual retained CPU/scope/root/control authority
+// SAFETY: only checked same-CPU process code accesses State, under held.
+// RootPublication validates kept CPU/scope/root/control permission
 // before any mutable read. No exclusive borrow crosses callbacks or suspension.
 unsafe impl Send for Source {}
 // SAFETY: shared references rely on the same argument as `Send` above.
@@ -134,7 +134,7 @@ impl Drop for Held<'_> {
 }
 
 impl Source {
-    /// Build the actual table/VA metadata reservation before child admission.
+    /// Build the table/VA metadata reservation before child admission.
     /// `slots` is the same real Runtime resource budget, not a task catalog cap.
     /// NativeMemory registration/root/cache policy may not be retargeted while
     /// this source or any stack pin/alias/frame remains; Pin alone does not
@@ -171,7 +171,7 @@ impl Source {
             .try_reserve_exact(slots)
             .map_err(|_| WorkError::Full)?;
         records.resize(slots, None);
-        // Root construction retains the image's ordinary Arc allocation policy.
+        // Root construction keeps the image's ordinary Arc allocation policy.
         // Every per-child data/alias/Box allocation below is fallible BEFORE PID.
         let source = Arc::new(Self {
             publication: ManuallyDrop::new(publication),
@@ -259,7 +259,7 @@ impl Source {
         }
         Ok(())
     }
-    /// Actual process teardown only after all Runtime frames/Backing owners
+    /// Process teardown only after all Runtime frames/Backing owners
     /// have ended. All CPU-checking objects must finally Drop BEFORE the outer
     /// Clock Installed::retire. Full global kthreadd/WQ roots are image lifetime.
     pub(crate) fn retire(&self) -> Result<(), WorkError> {
@@ -279,8 +279,8 @@ impl Source {
             // SAFETY: no stack slot is live, so clearing the parent unmaps no stack in use.
             unsafe { guard.replace_parent(state.parent, None) }.map_err(failed)?;
             // Full current-root reload joins page-walk caches BEFORE any PD/PT
-            // pin release. Inactive retained roots flush on their next reload;
-            // this provider's genuine single-CPU/PGE0/PCID0 gate is mandatory.
+            // pin release. Inactive kept roots flush on their next reload;
+            // this provider's single-CPU/PGE0/PCID0 gate is mandatory.
             // SAFETY: the guard holds the current root of this single CPU.
             if unsafe { guard.flush_root() }.is_err() {
                 self.poisoned.store(true, Ordering::Release);
@@ -331,9 +331,9 @@ struct Backing {
     published: bool,
     uncertain: bool,
 }
-// SAFETY: actual qualified WB data is mapped supervisor RW+NX in every retained
-// root. Exactly the preceding VA page remains absent. The actual pin, table,
-// root, scope and alias owners remain retained until complete TLB retirement.
+// SAFETY: checked WB data is mapped supervisor RW+NX in every kept
+// root. Exactly the preceding VA page remains absent. The pin, table,
+// root, scope and alias owners remain held until complete TLB retirement.
 unsafe impl StackBacking for Backing {
     fn bounds(&self) -> Range<usize> {
         self.bounds.clone()
@@ -526,7 +526,7 @@ impl Source {
             }
         }
         // Guard dropped and native IF restored BEFORE registry/pin final drops.
-        // Root publication and data owner remain retained throughout this join.
+        // Root publication and data owner remain held throughout this join.
         state.slots[backing.slot] = None;
         Ok(())
     }
@@ -545,7 +545,7 @@ impl Drop for Backing {
         // SAFETY: each field is dropped once, after the leaf entries were cleared and flushed or
         // never published.
         unsafe {
-            // Table retains RAM/root/pin if alias retirement fails, even after
+            // Table keeps RAM/root/pin if alias retirement fails, even after
             // successful leaf clear/TLB acknowledgement or preflight refusal.
             ManuallyDrop::drop(&mut self.allocation);
             ManuallyDrop::drop(&mut self.source);

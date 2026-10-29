@@ -58,7 +58,7 @@ fn device(id: u32, shared: u8) -> Rc<RefCell<Model>> {
         (0xf << 20) | (1 << 6) | if id == 0x1013_4207 { 1 << 10 } else { 0 },
     );
     m.parameters.insert((0x11, 0x10), 25 << 8);
-    m.parameters.insert((0x11, 0x0f), 0); // Inherits actual AFG D0.
+    m.parameters.insert((0x11, 0x0f), 0); // Inherits AFG D0.
     m.cirrus_model = true;
     drop(m);
     model

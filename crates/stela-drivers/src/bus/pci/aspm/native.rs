@@ -4,7 +4,7 @@
 // Copyright (C) Zhang Yanmin (yanmin.zhang@intel.com)
 // Copyright (C) Shaohua Li (shaohua.li@intel.com)
 // Copyright (c) 2026 Stela contributors
-//! ASPM policy through retained original bridge owners, without enumeration.
+//! ASPM policy through kept original bridge owners, without enumeration.
 //! Link Control layout/order follows the pinned Linux PCI ASPM implementation.
 use super::{BRIDGE_BUSES, PCIE_ASPM, PCIE_FLAGS, PCIE_LINK_CONTROL};
 use crate::bus::pci::{
@@ -33,8 +33,8 @@ pub struct RootBus {
     pub bus: u8,
 }
 
-/// Complete actual bridge inventory and root-bus declarations for one segment.
-/// Configuration mappings and their actual root/resource epochs stay owned.
+/// Complete bridge inventory and root-bus declarations for one segment.
+/// Configuration mappings and their root/resource epochs stay owned.
 /// No raw ECAM window, synthetic Function, or freshly enumerated alias is used.
 pub struct Topology<C: MsiConfigSpace> {
     bridges: Vec<Function<C>>,
@@ -42,12 +42,12 @@ pub struct Topology<C: MsiConfigSpace> {
 }
 impl<C: MsiConfigSpace> Topology<C> {
     /// # Safety
-    /// These are the original exclusively owned Functions for every actual
+    /// These are the original exclusively owned Functions for every
     /// bridge in the endpoint's segment, including unconfigured bridges. Roots
     /// are the complete real firmware/root-complex root buses, not guessed bus
     /// zero or inferred from absence. The native producer owns firmware/ACPI
     /// ASPM policy, bridge routing/reset/removal and all config writers for this
-    /// retained epoch; none can race or re-enable the policy. Every C performs
+    /// epoch; none can race or re-enable the policy. Every C performs
     /// real native narrow writes (or belongs to an explicit independent model).
     /// Numeric topology validation below does not establish this grant.
     pub unsafe fn new(bridges: Vec<Function<C>>, roots: Vec<RootBus>) -> Self {

@@ -1,4 +1,4 @@
-//! Actual ring/context/interrupt model coverage of runtime topology ownership.
+//! Ring/context/interrupt model coverage of runtime topology ownership.
 use super::{model::*, tests::controller, *};
 use crate::bus::dma::RegionAllocator;
 use alloc::collections::BTreeMap;
@@ -20,7 +20,7 @@ fn runtime_hub_bitmap_disconnect_reconnect_retires_old_alias_before_fresh_bindin
             let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, unbound_leaf(speed))]);
             let mut backing = vec![0u64; 512 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: all original/fresh rings and bitmap TDs retain this RAM.
+            // SAFETY: all original/fresh rings and bitmap TDs keep this RAM.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut c, model) = controller(&mut dma, context, nodes);
             let mut failures = Vec::new();
@@ -113,7 +113,7 @@ fn runtime_hub_chain_disconnect_stops_queued_bitmaps_and_children_before_parent_
     ]);
     let mut backing = vec![0u64; 1024 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both pending hub interrupt buffers and all leaf DMA stay retained.
+    // SAFETY: both pending hub interrupt buffers and all leaf DMA stay held.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
@@ -197,7 +197,7 @@ fn runtime_failed_retirement_never_replaces_that_owner_and_sibling_survives() {
         ]);
         let mut backing = vec![0u64; 512 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: uncertain Stop retains original contexts, TDs and bitmap owner.
+        // SAFETY: uncertain Stop keeps original contexts, TDs and bitmap owner.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
@@ -369,10 +369,10 @@ fn runtime_repeated_root_attachment_reuses_slots_without_reusing_aliases() {
     let nodes = BTreeMap::from([(0, unbound_leaf(SUPER_SPEED))]);
     let mut backing = vec![0u64; 512 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: every exhausted epoch retains its separate fixture context/rings.
+    // SAFETY: every exhausted epoch keeps its separate fixture context/rings.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, 32, nodes);
-    // Deliberately select a lower software budget than the real fixture's32;
+    // Select a lower software budget than the real fixture's32;
     // no hardware capability or successful allocation is invented.
     c.max_slots = 2;
     c.slots.truncate(3);
@@ -492,7 +492,7 @@ fn runtime_usb2_multi_tt_bitmap_uses_acknowledged_alternate_and_physical_port31(
     let nodes = BTreeMap::from([(0, hub), (15, unbound_leaf(FULL_SPEED))]);
     let mut backing = vec![0u64; 1024 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both alternate endpoints and full four-byte bitmap retain RAM.
+    // SAFETY: both alternate endpoints and full four-byte bitmap keep RAM.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
@@ -538,7 +538,7 @@ fn runtime_usb2_initial_ped_zero_is_baselined_from_reset_ack_without_churning_id
         let nodes = BTreeMap::from([(0, unbound_leaf(HIGH_SPEED))]);
         let mut backing = vec![0u64; 512 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: both actual reset handshake and later aliases retain RAM.
+        // SAFETY: both reset handshake and later aliases keep RAM.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, context, nodes);
         model.borrow_mut().root_status = Some(PP);
@@ -586,7 +586,7 @@ fn runtime_hub_recovery_acknowledges_cools_rechecks_and_publishes_fresh_subtree(
                 ]);
                 let mut backing = vec![0u64; 1024 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: every retired and newly enumerated slot retains its RAM.
+                // SAFETY: every retired and newly enumerated slot keeps its RAM.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut c, model) = controller(&mut dma, context, nodes);
@@ -839,7 +839,7 @@ fn runtime_nested_hub_recovery_preserves_unaffected_upstream_sibling() {
         ]);
         let mut backing = vec![0u64; 1024 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: nested and sibling contexts retain separate DMA throughout.
+        // SAFETY: nested and sibling contexts keep separate DMA throughout.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, 64, nodes);
         model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << 10);
@@ -886,7 +886,7 @@ fn runtime_hub_recovery_repower_never_expands_the_reserved_current_contract() {
     }
     let mut backing = vec![0u64; 1024 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: budget refusal and persistent OC retain every original allocation.
+    // SAFETY: budget refusal and persistent OC keep every original allocation.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut c, model) = controller(&mut dma, 64, nodes);
     model.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(SUPER_SPEED) << 10);

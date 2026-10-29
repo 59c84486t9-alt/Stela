@@ -61,7 +61,7 @@ impl NativeResult {
     }
 }
 
-/// One original verified WOPCM partition in the actual retained native epoch.
+/// One original verified WOPCM partition in the native epoch.
 /// Both real mutable device ownership and original provider Image stay borrowed.
 /// Drop performs no sleep/reset/drain/unmap and never invents rollback of locks.
 /// There is no READY, BO, GGTT, authentication, upload or submission capability.

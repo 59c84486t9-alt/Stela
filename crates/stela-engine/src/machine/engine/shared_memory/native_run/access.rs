@@ -1,7 +1,7 @@
-//! Linear recovered memory-access authority and original fault prefixes.
+//! Linear recovered memory-access permission and original fault prefixes.
 use super::*;
 
-/// Non-Clone authority obtained only by consuming a real recovered settlement.
+/// Non-Clone permission obtained only by consuming a real recovered settlement.
 /// Public request diagnostics cannot construct or replace this owner.
 #[derive(Debug)]
 pub(in crate::machine::engine) struct RecoveredAccess<const WRITE: bool> {
@@ -250,7 +250,7 @@ mod tests {
                         });
                     }
                 }
-                // The CPU lease ended before taking the actual all-writer gates.
+                // The CPU lease ended before taking the all-writer gates.
                 owners.memory()?.memory().validate_current().unwrap();
             }
             let (bytes, count) = match shape {
@@ -282,7 +282,7 @@ mod tests {
         }
     }
     type TestMachine = Machine<ServiceHost<Local, OneWorker>, Device>;
-    /// Protocol model only: the real publication loan is actually returned
+    /// Protocol model only: the real publication loan is returned
     /// after CPL0 refusal on this POSIX runner. Its failure diagnostics are
     /// replaced ONLY here to drive continuation adversaries. No native memory
     /// callback/CPL0 execution is claimed by these tests.
@@ -359,7 +359,7 @@ mod tests {
                 .transport
                 .execute(&mut cohort.host.local, cohort.inventory, cohort.frames);
         let mut settlement = reports.pop().unwrap().settlement.take().unwrap();
-        assert!(settlement.status.is_err()); // actual CPL0 refusal, never a success substitute
+        assert!(settlement.status.is_err()); // CPL0 refusal, never a success substitute
         let (pair, bytes) = match instruction.operation {
             Operation::MemoryPair { bytes, .. } => (true, usize::from(bytes) * 2),
             _ => (

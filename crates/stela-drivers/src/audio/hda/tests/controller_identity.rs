@@ -46,7 +46,7 @@ fn recycled_controller_dma_storage_does_not_revive_stream_or_graph_handles() {
     first.shutdown().unwrap();
     drop(first);
     let base = fixture._backing.as_mut_ptr() as u64;
-    // SAFETY: actual modeled shutdown acknowledged all engines stopped;
+    // SAFETY: modeled shutdown acknowledged all engines stopped;
     // the old controller and all buffer handles have been dropped. Only
     // copied graph/stream metadata remains, with no CPU/DMA storage rights.
     fixture.allocator =

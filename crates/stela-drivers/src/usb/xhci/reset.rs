@@ -1,4 +1,4 @@
-//! Exclusive leaf reset and fresh identification. Generic resets retain old
+//! Exclusive leaf reset and fresh identification. Generic resets keep old
 //! hardware IDs; the root-leaf service reuses proved-retired storage with a fresh
 //! generation while the old raw hardware-slot fence remains permanent.
 // SPDX-License-Identifier: GPL-2.0-only
@@ -18,7 +18,7 @@ pub(super) enum Ownership {
     /// Disable Slot completed; a later Enable Slot may hand this ID back.
     Retired,
     /// That Enable Slot was acknowledged while the old device's port still
-    /// held its current grant, and deliberately remains unaddressed.
+    /// held its current grant, and remains unaddressed.
     Tombstone,
 }
 impl Controller {
@@ -39,7 +39,7 @@ impl Controller {
         Ok(())
     }
     /// Permanently block class reconstruction failure; this is not a claim
-    /// that hardware/DMA has stopped. All original allocations remain retained.
+    /// that hardware/DMA has stopped. All original allocations remain held.
     #[cfg(test)]
     pub(crate) fn quarantine_slot(&mut self, id: impl DeviceRef) {
         // This notification has no result channel. A retired generation
@@ -122,12 +122,12 @@ impl Controller {
             self.original_parent(device.id),
         )?;
         let consumer = self.slot(slot).unwrap().consumer;
-        // Reobserve root and every actual ancestor before invalidating the
+        // Reobserve root and every ancestor before invalidating the
         // leaf. A failed shared supply cannot authorize private class recovery.
         during(
             "observe reset device physical ancestry",
             // Preflight requires a leaf. Its device status cannot supply a
-            // hub power contract; observe the root and every actual parent.
+            // hub power contract; observe the root and every parent.
             self.observe_current_ancestors_for(device.id, false),
         )?;
         let parent = attachment
@@ -203,7 +203,7 @@ impl Controller {
         result
     }
     /// Reset one exclusively owned leaf, reusing complete native storage when
-    /// it is directly attached to a root port. Downstream topology retains the
+    /// it is directly attached to a root port. Downstream topology keeps the
     /// original nonrecycling service until a parent/subtree reuse proof exists.
     ///
     /// # Safety
@@ -797,7 +797,7 @@ pub(crate) mod tests {
                                     .push((td.trb, 26 << 24, TRANSFER_EVENT, slot, dci));
                             }
                             // Spec4.6.9 requires stopped TD events before Stop ACK.
-                            // Defer both until the host actually polls the device.
+                            // Defer both until the host polls the device.
                             if self.fault != Fault::SilentStop(dci) {
                                 self.deferred.push((
                                     at,
@@ -861,7 +861,7 @@ pub(crate) mod tests {
                         self.enabled[usize::from(slot)] = false;
                         // Successful Disable invalidates the peer's endpoint
                         // fetch/dequeue state. A later rejected Address must not
-                        // inherit old DCIs merely because the numeric ID recurs.
+                        // inherit old DCIs because the numeric ID recurs.
                         self.cursors.retain(|(s, _, _), _| *s != slot);
                         if self.fault == Fault::WrongDisableSlot {
                             returned = slot + 1;
@@ -1134,7 +1134,7 @@ pub(crate) mod tests {
                     dci,
                 );
                 // Status may be posted after this data TD has completed. Keep
-                // the actual completed phase when waiting for that separate IU.
+                // the completed phase when waiting for that separate IU.
                 task.data_complete = true;
             }
             if let Some(td) = self.pending.remove(&status_key) {
@@ -1650,7 +1650,7 @@ pub(crate) mod tests {
             );
             assert!(shared.borrow_mut().endpoint_ready(old.slot, 1).is_err());
             // Disable Slot only revokes DMA: the physical device may still draw
-            // current. Release follows actual port reset and its required ACKs.
+            // current. Release follows port reset and its required ACKs.
             assert_eq!(
                 shared.borrow().power.retained(old.slot),
                 !matches!(fault, Fault::Reserve | Fault::SilentReserve),
@@ -1790,7 +1790,7 @@ pub(crate) mod tests {
             let other = shared.borrow_mut().fresh_slot().unwrap();
             if other_state < 2 {
                 // Corrupt the software ownership inventory directly, as this
-                // test intends; do not invent a qualified physical hub parent.
+                // test intends; do not invent a checked physical hub parent.
                 let mut controller = shared.borrow_mut();
                 let source = controller.slots[usize::from(old.slot)]
                     .as_ref()

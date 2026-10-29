@@ -114,7 +114,7 @@ pub(in crate::x86_64) fn emit(
         let enhanced_start = code.len();
         resolve(code, enhanced, enhanced_start);
         // Enhanced BFDOT uses guest RC under both AH values; status/traps are
-        // suppressed by its ISA semantics, including FullA64 retained enables.
+        // suppressed by its ISA semantics, including FullA64 kept enables.
         rounding_control(code);
         numerical::install_mxcsr(code, &frame);
         for chunk in 0..length.chunks() {

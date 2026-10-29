@@ -5,7 +5,7 @@
 // Copyright (c) 2005 Rich Townsend
 //! Smart Battery/manager/charger protocol over an owned native SMBus host.
 //!
-//! Raw values retain SBS units, specification scaling, signed current and exact
+//! Raw values keep SBS units, specification scaling, signed current and exact
 //! identity block lengths. Charging policy and native EC-SMBus discovery are
 //! separate. A failed selector/alarm write cannot be retried through this owner.
 use crate::bus::smbus::{self, Address, Block, Bus, Transaction};
@@ -20,9 +20,9 @@ const SERIAL: u8 = 0x1c;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Topology {
-    /// Actual firmware/platform discovery established a single direct battery.
+    /// Firmware/platform discovery established a single direct battery.
     Single,
-    /// Actual firmware/platform discovery established an SBS manager/selector.
+    /// Firmware/platform discovery established an SBS manager/selector.
     Managed,
 }
 
@@ -79,10 +79,10 @@ impl Information {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
-    /// SBS 0.1 kelvin units, not a fabricated Celsius conversion.
+    /// SBS 0.1 kelvin units, not an invented Celsius conversion.
     pub temperature: u16,
     pub voltage: u16,
-    /// Signed current, retaining charging/discharging direction.
+    /// Signed current, keeping charging/discharging direction.
     pub current: i16,
     pub average_current: i16,
     pub remaining_capacity: u16,
@@ -110,7 +110,7 @@ impl<B: Bus> Sbs<B> {
     /// Own the native host and firmware arbitration for the complete sequence,
     /// not only each individual transaction. No competing firmware/driver may
     /// change battery selection, unit mode or alarm during a public operation.
-    /// Topology must come from actual platform/firmware discovery; absence of a
+    /// Topology must come from platform/firmware discovery; absence of a
     /// responding manager does not authorize silently falling back to Single.
     pub unsafe fn claim(bus: B, topology: Topology, pec: bool) -> Result<Self, Error> {
         let mut this = Self {
@@ -138,7 +138,7 @@ impl<B: Bus> Sbs<B> {
     }
 
     /// Reads fresh information/state, then revalidates selector presence and
-    /// actual unit/serial identity before publishing one coherent observation.
+    /// unit/serial identity before publishing one coherent observation.
     pub fn refresh(&mut self, slot: u8) -> Result<Option<&Snapshot>, Error> {
         self.snapshot = None;
         self.ready()?;
@@ -177,7 +177,7 @@ impl<B: Bus> Sbs<B> {
     }
 
     /// Writes native capacity units only after fresh identity validation, and
-    /// acknowledges the alarm only after actual readback and revalidation.
+    /// acknowledges the alarm only after readback and revalidation.
     pub fn set_alarm(&mut self, capacity: u16) -> Result<(), Error> {
         self.ready()?;
         let old = self.snapshot.take().ok_or(Error::NotPresent)?;
@@ -202,7 +202,7 @@ impl<B: Bus> Sbs<B> {
         Ok(())
     }
 
-    /// None means the actual charger status does not implement the mandatory
+    /// None means the charger status does not implement the mandatory
     /// bit or returned all ones, as checked by the Linux SBS driver.
     pub fn charger_online(&mut self) -> Result<Option<bool>, Error> {
         self.ready()?;

@@ -33,7 +33,7 @@ mod checked_finalization {
     fn checked_entry_returns_healthy_body_result() {
         let (_, _, mut thread) = fixture();
         let entry = thread.prepare(MemoryRequirements::default()).unwrap();
-        // SAFETY: no native pointer is retained or accessed by this body.
+        // SAFETY: no native pointer is held or accessed by this body.
         assert_eq!(unsafe { entry.with_checked_view(|_| 37) }, Ok(37));
     }
 
@@ -202,7 +202,7 @@ mod checked_finalization {
     fn local_alignment_late_failure_preserves_external_provenance() {
         let (_, domain, mut thread) = fixture();
         let mut fault = None;
-        // SAFETY: this body records a local fault; it retains only copied scalars.
+        // SAFETY: this body records a local fault; it keeps only copied scalars.
         let result = unsafe {
             thread.with_checked_view(|context| {
                 context.record(MemoryStatus::Alignment, GUEST_BASE + 1, TEST_PC, 5);
@@ -254,7 +254,7 @@ mod checked_finalization {
     fn malformed_fault_status_fails_finalization() {
         let (_, _, mut thread) = fixture();
         assert_eq!(
-            // SAFETY: The fixture retains the domain, callback, and backing for this call.
+            // SAFETY: The fixture keeps the domain, callback, and backing for this call.
             // Only the fault sidecar is changed; no staging or view pointer escapes.
             unsafe {
                 thread.with_checked_view(|context| {
@@ -270,7 +270,7 @@ mod checked_finalization {
     fn legacy_result_does_not_assert_successful_finalization() {
         let (_, domain, mut thread) = fixture();
         assert_eq!(
-            // SAFETY: The fixture retains the domain and callback. The closure accesses
+            // SAFETY: The fixture keeps the domain and callback. The closure accesses
             // no guest pointers and changes only the atomic failure flag.
             unsafe {
                 thread.with_view(|_| {
@@ -307,7 +307,7 @@ struct Storage {
     layout: Layout,
 }
 
-// SAFETY: this owner retains raw storage without lending Rust references.
+// SAFETY: this owner keeps raw storage without lending Rust references.
 unsafe impl Send for Storage {}
 // SAFETY: byte accesses go through the tested execution domain.
 unsafe impl Sync for Storage {}
@@ -321,7 +321,7 @@ impl Drop for Storage {
 
 fn backing() -> Arc<MemoryBacking> {
     let layout = Layout::from_size_align(STORAGE_BYTES, SCA_BYTES).unwrap();
-    // SAFETY: valid nonempty layout retained for its matching deallocation.
+    // SAFETY: valid nonempty layout kept for its matching deallocation.
     let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let storage = Arc::new(Storage { pointer, layout });
     // SAFETY: storage owns stable raw bytes and rights; no Rust references
@@ -383,8 +383,8 @@ mod system_reads {
         }
     }
     fn physical_fixture() -> (Arc<MemoryBacking>, Arc<MemoryDomain>) {
-        // Synthetic software mapping authority tests actual native memory
-        // recipes only. CPL0/source-CPU entry is separately qualified.
+        // Synthetic software mapping permission tests native memory
+        // recipes only. CPL0/source-CPU entry is separately checked.
         assert!(TargetCpu::X86_64_V2.supported());
         let backing = backing();
         let readonly = AccessPermissions {
@@ -431,7 +431,7 @@ mod system_reads {
             flags: flags::EXCLUSIVE | if write { flags::WRITE } else { 0 },
             pc: TEST_PC,
         };
-        // SAFETY: retained exact native-capable fixture/storage/events and
+        // SAFETY: native-capable fixture/storage/events and
         // initialized private staging. No production admission is asserted.
         unsafe {
             thread.with_checked_view(|view| {
@@ -475,7 +475,7 @@ mod system_reads {
             flags: 0,
             pc: TEST_PC,
         };
-        // SAFETY: same retained real native fixture, read-only source view
+        // SAFETY: same real native fixture, read-only source view
         // and private destination. Fallback host writeback stays gated.
         let status =
             unsafe { reader.with_checked_view(|view| (view.callback)(view, &request)) }.unwrap();
@@ -586,7 +586,7 @@ mod access_intent {
         }
     }
     fn callback(thread: &mut MemoryThread<Directed>, request: MemoryRequest) -> MemoryFault {
-        // SAFETY: every fixture retains initialized disjoint typed staging,
+        // SAFETY: every fixture keeps initialized disjoint typed staging,
         // canonical backing, private context and exact request for this call.
         unsafe {
             thread.with_checked_view(|view| {
@@ -834,7 +834,7 @@ fn invoke(
         pc: TEST_PC,
     };
     // SAFETY: the synchronous callback receives valid ABI objects and private
-    // staging disjoint from raw guest storage, with no retained pointers.
+    // staging disjoint from raw guest storage, with no kept pointers.
     unsafe {
         thread.with_view(|context| {
             let status = (context.callback)(context, &request);
@@ -854,7 +854,7 @@ fn snapshot(backing: &MemoryBacking, bytes: usize) -> Vec<u8> {
         .map(|offset| {
             let pointer = backing.host_pointer(offset, 1, AccessKind::Read).unwrap();
             // SAFETY: tests inspect after synchronous execution; no byte access
-            // overlaps this exact live one-byte native read.
+            // overlaps this live one-byte native read.
             unsafe { access::read_part(pointer.as_ptr(), 1, TargetCpu::Baseline) }.unwrap() as u8
         })
         .collect()

@@ -303,7 +303,7 @@ mod tests {
             pointer: NonNull<u8>,
             layout: Layout,
         }
-        // SAFETY: no byte references escape; Arc retains the allocation through entry.
+        // SAFETY: no byte references escape; Arc keeps the allocation through entry.
         unsafe impl Send for Storage {}
         // SAFETY: tests serialize native entry and all observations of the raw bytes.
         unsafe impl Sync for Storage {}
@@ -806,7 +806,7 @@ mod tests {
         }
     }
     mod retained {
-        //! Repeated scalable entry on one retained CPU.
+        //! Repeated scalable entry on one CPU.
         use super::super::ScalableGuest;
         use super::fixture::{Fixture, access};
         use crate::{

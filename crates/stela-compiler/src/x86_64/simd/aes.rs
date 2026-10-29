@@ -102,7 +102,7 @@ fn mix_columns(code: &mut Code, inverse: bool) {
     packed(code, Host::MoveAligned, LEFT, RESULT);
     rotate_column(code, RIGHT, LEFT, BYTE_BITS);
     packed(code, Host::Xor, RESULT, RIGHT);
-    // RESULT = a XOR rot8(a), LEFT retains a.
+    // RESULT = a XOR rot8(a), LEFT keeps a.
     xtime(code, RESULT);
     packed(code, Host::Xor, RESULT, RIGHT);
     rotate_column(code, RIGHT, LEFT, BYTE_BITS * 2);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! HDA host DMA with retained real RAM pins and device-domain IOVAs.
+//! HDA host DMA with kept real RAM pins and device-domain IOVAs.
 //! BDL and cAVS host-stream sequence adapt pinned SOF hda-stream.c.
 //! Copyright(c) 2018 Intel Corporation
 use super::{Controller, Error, Phase, Registers, registers::*};
@@ -54,7 +54,7 @@ impl Buffer {
     fn copy_to(&self, offset: usize, bytes: &[u8]) -> Result<(), Error> {
         let pointer = self.cpu.address(offset, bytes.len())?;
         // SAFETY: this buffer is CPU-owned and caller prevents concurrent DMA;
-        // checked real retained RAM mapping, non-overlapping source slice.
+        // checked real kept RAM mapping, non-overlapping source slice.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.as_ptr(), bytes.len()) };
         Ok(())
     }
@@ -181,8 +181,8 @@ impl Stream {
             return Err(Error::Buffer);
         }
         let pointer = self.data.cpu.address(offset, bytes.len())?;
-        // SAFETY: actual stopped DMA and successful sync transferred ownership;
-        // bounds checked retained mapping and non-overlapping destination.
+        // SAFETY: stopped DMA and successful sync transferred ownership;
+        // bounds checked mapping and non-overlapping destination.
         unsafe {
             core::ptr::copy_nonoverlapping(pointer.as_ptr(), bytes.as_mut_ptr(), bytes.len())
         };
@@ -203,7 +203,7 @@ impl Stream {
         self.running = false;
     }
     unsafe fn complete_stopped(&mut self) -> Result<(), Error> {
-        // SAFETY: caller verified every host stream stopped and the actual
+        // SAFETY: caller verified every host stream stopped and the
         // requester BME clear/readback, then drained this original domain.
         unsafe {
             if self.data.dma.address().is_ok() {
@@ -239,10 +239,10 @@ impl Stream {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn complete_stopped_dma(&mut self) -> Result<(), Error> {
-        // Check the actual complete requester, including ICCmax and loader,
+        // Check the complete requester, including ICCmax and loader,
         // rather than trusting one stream's software running flag. Firmware
         // remains alive for pause/restart, but cannot initiate translated DMA
-        // once the original requester is genuinely contained.
+        // once the original requester is contained.
         for index in 0..self.input_streams + self.output_streams {
             if self.registers.read8(Bar::Hda, stream_base(index))? & RUN != 0 {
                 return Err(Error::Busy);
@@ -255,12 +255,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         self.registers.set_bus_master(false)?;
         self.dma_contained = true;
-        // Drain every retained domain before any CPU ownership transfer.
+        // Drain every domain before any CPU ownership transfer.
         // Distinct streams may hold distinct domains for this same requester.
         for stream in [&self.pcm, &self.boot, &self.iccmax].into_iter().flatten() {
             // SAFETY: every host engine/submission path is stopped, native
             // mastering is acknowledged contained, and all original owners
-            // remain retained. This is payload completion, not cache sync.
+            // remain held. This is payload completion, not cache sync.
             unsafe { stream.domain.drain_posted_writes()? };
         }
         for stream in [&mut self.pcm, &mut self.boot, &mut self.iccmax]
@@ -333,7 +333,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             )?;
             self.update(Bar::Hda, self.spib + 4, mask, mask)?;
         }
-        // Read actual hardware programming rather than report a posted write
+        // Read hardware programming rather than report a posted write
         // as completion. No device status byte is ever dword-RMW'd.
         if self.read(Bar::Hda, base + BDLPL)? != data_bdl as u32
             || self.read(Bar::Hda, base + BDLPU)? != (data_bdl >> 32) as u32
@@ -411,7 +411,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             stream.index
         };
         if run && self.dma_contained {
-            // Publication above relinquished CPU ownership before an actual
+            // Publication above relinquished CPU ownership before a
             // BME enable can make any device request possible again.
             self.dma_contained = false;
             self.registers.set_bus_master(true)?;

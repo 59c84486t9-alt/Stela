@@ -1,4 +1,4 @@
-//! Source-qualified CPMU coordinates, independent of PE clocks and events.
+//! Source-checked CPMU coordinates, independent of PE clocks and events.
 //! H13–H17 definitions and original 26A434 consumers are pinned in
 //! `docs/research/core-pmu.md`; M6 uses its own original accessor tables.
 use super::{Chip, Encoding, Width, events, monitor};
@@ -86,7 +86,7 @@ impl Layout {
                 width: Width::Bits64,
                 counters: &M6_COUNTERS,
                 // Original mac18g's PMESR writer writes zero to both
-                // registers. No programmable event selector is qualified.
+                // registers. No programmable event selector is checked.
                 selectors: 0,
                 events: events::Set::Unqualified,
                 unqualified_controls: &M6_UNQUALIFIED,

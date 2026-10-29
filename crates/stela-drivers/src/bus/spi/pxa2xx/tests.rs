@@ -135,7 +135,7 @@ impl Hardware {
         let high = control & 2 != 0;
         let active = high == self.active_high[usize::from(selected)];
         if active && (!self.active || selected != self.selected) {
-            // The actual selector latches separately from the level. The
+            // The selector latches separately from the level. The
             // independent silicon peer requires at least two input cycles.
             assert!(
                 self.time.0.get().wrapping_sub(self.select_at)
@@ -163,7 +163,7 @@ impl Drop for Peer {
     }
 }
 // SAFETY: isolated original register/peripheral/timer backing. The peer models
-// actual FIFO serial effects independently from the production transfer logic.
+// FIFO serial effects independently from the production transfer logic.
 unsafe impl Registers for Peer {
     fn description(&self) -> Description {
         self.0.borrow().description

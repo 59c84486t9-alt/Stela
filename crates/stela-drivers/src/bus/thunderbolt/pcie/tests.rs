@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual mapped-DMA PCIe tunnel controls; no physical qualification claim.
+//! Mapped-DMA PCIe tunnel controls.
 use super::*;
 use crate::bus::thunderbolt::{
     config::{Encoded, PacketType},
@@ -13,8 +13,8 @@ struct NativeReservation {
     current: AtomicBool,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: actual isolated symbolic requester, router/link, HopIDs, credits and
-// endpoint authority are retained by this fixture; no native admission implied.
+// SAFETY: isolated symbolic requester, router/link, HopIDs, credits and
+// endpoint permission are held by this fixture; no native admission implied.
 unsafe impl Reservation for NativeReservation {
     fn grant(&self) -> Grant {
         self.grant
@@ -50,7 +50,7 @@ fn fixture(credits: LaneCredits) -> Fixture {
         ..
     } = link_fixture_with_protocol(1, false, 0x100101);
     let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 3);
-    // SAFETY: exact actual modeled configured routers and protected link.
+    // SAFETY: modeled configured routers and protected link.
     let mut activate =
         unsafe { link::Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
     let linked = Box::new(drive_link(
@@ -303,7 +303,7 @@ fn actual_pcie_tunnel_source_order_credits_priority_and_repeated_local_reuse() {
                 mut cursor,
                 dropped,
             } = f;
-            // SAFETY: same modeled link/requester and actual protected native reservation.
+            // SAFETY: same modeled link/requester and protected native reservation.
             let mut activate =
                 unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
             let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -335,7 +335,7 @@ fn actual_pcie_tunnel_source_order_credits_priority_and_repeated_local_reuse() {
                 }
             }
             let start = peer.writes.len();
-            // SAFETY: host submission is closed; independent resources retained.
+            // SAFETY: host submission is closed; independent resources kept.
             let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
             let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
             channel = stop.into_channel();
@@ -362,7 +362,7 @@ fn actual_pcie_tunnel_source_order_credits_priority_and_repeated_local_reuse() {
                 Ok(r) => r,
                 Err(_) => panic!("live local return"),
             };
-            // SAFETY: exact original same-epoch link/real reservation returned by complete stop.
+            // SAFETY: original same-epoch link/real reservation returned by complete stop.
             let mut again =
                 unsafe { Activate::new(channel, reusable.link, reusable.reservation, cursor.now) }
                     .unwrap();
@@ -370,7 +370,7 @@ fn actual_pcie_tunnel_source_order_credits_priority_and_repeated_local_reuse() {
             let mut channel = again.into_channel();
             drop(reservation);
             assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 0));
-            // SAFETY: complete actual synthetic CM transfer through final device drain.
+            // SAFETY: complete synthetic CM transfer through final device drain.
             unsafe { active.retire() };
             assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 1));
             channel_release(&mut channel);
@@ -441,7 +441,7 @@ fn every_pcie_activation_write_lost_ack_controller_error_and_readback_refusal_re
                 mut cursor,
                 dropped,
             } = f;
-            // SAFETY: complete isolated model link, protected allocations and endpoint authority.
+            // SAFETY: complete isolated model link, protected allocations and endpoint permission.
             let mut activate =
                 unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
             fail_actual_write(
@@ -482,13 +482,13 @@ fn every_pcie_stop_write_lost_ack_controller_error_and_readback_refusal_retains_
                 mut cursor,
                 dropped,
             } = f;
-            // SAFETY: same actual modeled lifetime and retained native authority.
+            // SAFETY: same modeled lifetime and kept native permission.
             let mut activate =
                 unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
             let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
             let channel = activate.into_channel();
             peer.writes.clear();
-            // SAFETY: independent host submission and endpoint resources stay retained.
+            // SAFETY: independent host submission and endpoint resources stay held.
             let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
             fail_actual_write(
                 &mut peer,
@@ -536,7 +536,7 @@ fn pcie_preflight_refuses_bad_grants_without_any_new_publication() {
             _ => unreachable!(),
         }
         let writes = model.state.lock().unwrap().writes.len();
-        // SAFETY: same model requester; intentionally invalid metadata is refused.
+        // SAFETY: same model requester; invalid metadata is refused.
         let result = unsafe { Activate::new(channel, linked, reservation, cursor.now) };
         assert!(result.is_err());
         assert_eq!(model.state.lock().unwrap().writes.len(), writes);
@@ -563,7 +563,7 @@ fn pcie_ltssm_detect_timeout_and_guard_revocation_never_publish_enable() {
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: same actual modeled CM link and retained endpoint control.
+        // SAFETY: same modeled CM link and kept endpoint control.
         let mut activate =
             unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
         activate.poll(cursor.now).unwrap();
@@ -612,7 +612,7 @@ fn each_actual_pending_hop_and_changed_owned_hop_refuses_local_pcie_reuse() {
                 mut cursor,
                 dropped,
             } = f;
-            // SAFETY: same actual modeled requester, protected link and allocations.
+            // SAFETY: same modeled requester, protected link and allocations.
             let mut activate =
                 unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
             let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -623,7 +623,7 @@ fn each_actual_pending_hop_and_changed_owned_hop_refuses_local_pcie_reuse() {
             } else {
                 peer.paths[hop / 2].raw[hop % 2][0] ^= 1;
             }
-            // SAFETY: admission closed and full independent resources retained.
+            // SAFETY: admission closed and full independent resources kept.
             let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
             stop.poll(cursor.now).unwrap();
             let mut failed = false;
@@ -657,13 +657,13 @@ fn stopped_pcie_guard_revocation_and_unconsumed_completions_keep_exact_owners() 
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: same actual isolated CM lifetime and endpoint reservation.
+        // SAFETY: same isolated CM lifetime and endpoint reservation.
         let mut activate =
             unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
         let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
         let mut channel = activate.into_channel();
         if revoked {
-            // SAFETY: actual synthetic submission is closed through local stop.
+            // SAFETY: synthetic submission is closed through local stop.
             let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
             let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
             channel = stop.into_channel();
@@ -696,7 +696,7 @@ fn post_publication_native_revocation_or_actual_hotplug_never_releases_partial_p
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: actual isolated model requester and retained native authorities.
+        // SAFETY: isolated model requester and kept native permissions.
         let mut activate =
             unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
         activate.poll(cursor.now).unwrap();
@@ -782,13 +782,13 @@ fn unchanged_linux_pcie_complete_write_transcript_matches_actual_native_dma() {
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: actual native model configured routers and reciprocal link,
-        // exact protected source HopIDs/credits and retained endpoint authority.
+        // SAFETY: native model configured routers and reciprocal link,
+        // exact protected source HopIDs/credits and kept endpoint permission.
         let mut activate =
             unsafe { Activate::new(channel, linked, reservation.clone(), cursor.now) }.unwrap();
         let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
         let channel = activate.into_channel();
-        // SAFETY: modeled submission is closed and independent resources retained.
+        // SAFETY: modeled submission is closed and independent resources kept.
         let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
         let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
         let mut channel = stop.into_channel();
@@ -830,7 +830,7 @@ fn unchanged_linux_pcie_complete_write_transcript_matches_actual_native_dma() {
             Err(_) => panic!("actual local owner return"),
         };
         drop(reservation);
-        // SAFETY: independent synthetic CM transfer retains the stopped actual link.
+        // SAFETY: independent synthetic CM transfer keeps the stopped link.
         unsafe { reusable.link.retire() };
         drop(reusable.reservation);
         assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));

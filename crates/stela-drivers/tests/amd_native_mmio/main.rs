@@ -1,5 +1,5 @@
-//! Canonical-owner model in a separate test process: one real Authority::activate
-//! call, immutable synthetic PCI/resources and actual native C policy/ABI.
+//! Canonical-owner model in a separate test process: one real Permission::activate
+//! call, immutable synthetic PCI/resources and native C policy/ABI.
 //! No physical GPU, page table, cache-policy or hardware activation is modeled
 //! as completed by a production adapter.
 extern crate alloc;
@@ -97,7 +97,7 @@ impl Drop for Backing {
         self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: test-only exclusive immutable synthetic resource, retained by the
+// SAFETY: test-only exclusive immutable synthetic resource, kept by the
 // canonical owner. It neither stands in for physical ownership nor drives a GPU.
 unsafe impl ResourceBacking for Backing {
     fn physical_span(&self) -> PhysicalSpan {
@@ -150,9 +150,9 @@ struct ModelState {
 }
 #[derive(Default)]
 struct Model(Mutex<ModelState>);
-// SAFETY: isolated CPU model. Its own aligned allocation is exact and retained
+// SAFETY: isolated CPU model. Its own aligned allocation is exact and kept
 // through acknowledged unmap or the canonical quarantine. No native root/cache
-// implementation is claimed; production requires the actual mount provider.
+// implementation is claimed; production requires the mount provider.
 unsafe impl MappingPlatform for Model {
     fn check_context(&self, _: AddressSpace) -> Result<(), MmioError> {
         Ok(())
@@ -175,7 +175,7 @@ unsafe impl MappingPlatform for Model {
         }
         let bytes = usize::try_from(request.physical.bytes()).unwrap();
         let layout = Layout::from_size_align(bytes, 4096).unwrap();
-        // SAFETY: nonempty checked model allocation, retained below.
+        // SAFETY: nonempty checked model allocation, kept below.
         let address = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         state.next_token += 1;
         let token = state.next_token;
@@ -228,7 +228,7 @@ unsafe impl MappingPlatform for Model {
 fn canonical_amd_attachment() {
     let model = Arc::new(Model::default());
     // SAFETY: a single isolated CPU test process, complete empty model alias
-    // inventory and one canonical authority. This does not activate real MMIO.
+    // inventory and one canonical permission. This does not activate real MMIO.
     let authority = unsafe {
         Authority::activate(
             model.clone(),
@@ -274,7 +274,7 @@ fn canonical_amd_attachment() {
     {
         let window = si.registers().unwrap();
         assert_eq!(window.bytes(), 16384);
-        // SAFETY: pointer is only inspected and never retained outside borrow.
+        // SAFETY: pointer is only inspected and never kept outside borrow.
         let base = unsafe { window.native_base() }.unwrap().as_ptr() as usize;
         assert_eq!(window.direct_dword(0).unwrap().as_ptr() as usize, base);
         assert_eq!(
@@ -295,9 +295,9 @@ fn canonical_amd_attachment() {
     assert_eq!(si.registers().err(), Some(Error::Retired));
     assert_eq!(authority.status().unwrap().live, 0);
 
-    // Actual boot ordering: registers precede discovery and kernel doorbell BO
-    // creation. Retain original C's register view while attaching doors later.
-    // SAFETY: same immutable synthetic original match and retained resource.
+    // Boot ordering: registers precede discovery and kernel doorbell BO
+    // creation. Keep original C's register view while attaching doors later.
+    // SAFETY: same immutable synthetic original match and kept resource.
     let mut staged = unsafe {
         AttachedBars::attach(
             &authority,
@@ -323,7 +323,7 @@ fn canonical_amd_attachment() {
     assert_eq!(failed.rollback, Rollback::NotAttempted);
     assert_eq!(retained.direct_dword(0).unwrap(), pointer);
     assert!(staged.doorbells().unwrap().is_none());
-    // SAFETY: same original owner retries actual reservation after unchanged failure.
+    // SAFETY: same original owner retries reservation after unchanged failure.
     unsafe { staged.attach_kernel_doorbells(&authority, doors(0x190000, false)) }.unwrap();
     assert_eq!(staged.doorbells().unwrap().unwrap().bytes(), 8192);
     assert_eq!(retained.direct_dword(0).unwrap(), pointer);
@@ -337,11 +337,11 @@ fn canonical_amd_attachment() {
         .count();
     assert_eq!(register_maps, 1);
     let before = model.0.lock().unwrap().calls;
-    // SAFETY: deliberately duplicate original reservation, rejected pre-map.
+    // SAFETY: duplicate original reservation, rejected pre-map.
     assert!(unsafe { staged.attach_kernel_doorbells(&authority, doors(0x1a0000, false)) }.is_err());
     assert_eq!(model.0.lock().unwrap().calls, before);
     assert_eq!(
-        // SAFETY: model accesses stopped, but retained C view still pins its lease.
+        // SAFETY: model accesses stopped, but kept C view still pins its lease.
         unsafe { staged.retire() },
         Err(Error::Mapping(MmioError::Busy))
     );
@@ -350,8 +350,8 @@ fn canonical_amd_attachment() {
     unsafe { staged.retire() }.unwrap();
     assert_eq!(authority.status().unwrap().live, 0);
 
-    // IP-discovery/Vega+ policy: actual logical extent includes paging+MES
-    // pages, distinct from the deliberately larger reserved physical span.
+    // IP-discovery/Vega+ policy: logical extent includes paging+MES
+    // pages, distinct from the larger reserved physical span.
     // SAFETY: the isolated model pins both original-role resources/reservation.
     let mut modern = unsafe {
         AttachedBars::attach(
@@ -378,7 +378,7 @@ fn canonical_amd_attachment() {
         assert_eq!(door.physical.start(), 0x301000);
         assert_eq!(door.physical.bytes(), 16384);
     }
-    // Failed teardown blocks new views and retains exact canonical token for
+    // Failed teardown blocks new views and keeps exact canonical token for
     // acknowledged retry rather than freeing or manufacturing completion.
     model.0.lock().unwrap().fail_unmaps = 1;
     assert_eq!(
@@ -388,7 +388,7 @@ fn canonical_amd_attachment() {
     );
     assert_eq!(modern.registers().err(), Some(Error::Retired));
     assert_eq!(modern.doorbells().err(), Some(Error::Retired));
-    // SAFETY: original model drain still holds; retry targets retained token.
+    // SAFETY: original model drain still holds; retry targets kept token.
     unsafe { modern.retire() }.unwrap();
     assert_eq!(authority.status().unwrap().live, 0);
 
@@ -399,7 +399,7 @@ fn canonical_amd_attachment() {
         (5, u32::MAX, Some(doors(0x400000, false))),
     ];
     for (bar, chip, door) in malformed {
-        // SAFETY: deliberately invalid model facts, expected refusal pre-map.
+        // SAFETY: invalid model facts, expected refusal pre-map.
         let error = unsafe {
             AttachedBars::attach(&authority, &pci, chip, chip, registers(0x500000, bar), door)
         }
@@ -422,7 +422,7 @@ fn canonical_amd_attachment() {
             _ => unreachable!(),
         }
         assert!(
-            // SAFETY: deliberately malformed isolated-owner input.
+            // SAFETY: malformed isolated-owner input.
             unsafe {
                 AttachedBars::attach(
                     &authority,
@@ -437,7 +437,7 @@ fn canonical_amd_attachment() {
         );
     }
     assert!(
-        // SAFETY: unaligned backing deliberately fails complete-page ownership.
+        // SAFETY: unaligned backing fails complete-page ownership.
         unsafe {
             AttachedBars::attach(
                 &authority,
@@ -457,7 +457,7 @@ fn canonical_amd_attachment() {
 
     // Failed second map rolls back the first unpublished window exactly once.
     model.0.lock().unwrap().fail_map = calls + 2;
-    // SAFETY: genuine isolated model ownership, platform injects unchanged error.
+    // SAFETY: isolated model ownership, platform injects unchanged error.
     let error = unsafe {
         AttachedBars::attach(
             &authority,
@@ -509,14 +509,14 @@ fn canonical_amd_attachment() {
     assert_eq!(authority.status().unwrap().quarantined, 1);
 
     // A primary uncertain map failure has no returned window to roll back;
-    // canonical ownership still quarantines its actual resource/allocation.
+    // canonical ownership still quarantines its resource/allocation.
     {
         let mut state = model.0.lock().unwrap();
         state.fail_map = state.calls + 1;
         state.fail_uncertain = true;
     }
     let (reg, reg_drops) = resource(0xd00000, 16384, ResourceKind::Registers);
-    // SAFETY: isolated model intentionally returns an uncertain partial map.
+    // SAFETY: isolated model returns an uncertain partial map.
     let error = unsafe {
         AttachedBars::attach(
             &authority,
@@ -537,8 +537,8 @@ fn canonical_amd_attachment() {
     assert_eq!(reg_drops.load(Ordering::Relaxed), 0);
     assert_eq!(authority.status().unwrap().quarantined, 2);
     // A late uncertain doorbell map cannot invalidate previously published
-    // RMMIO. The canonical owner retains only that uncertain doorbell backing.
-    // SAFETY: separate exact model resources; no hardware consumers.
+    // RMMIO. The canonical owner keeps only that uncertain doorbell backing.
+    // SAFETY: separate model resources; no hardware consumers.
     let mut late = unsafe {
         AttachedBars::attach(
             &authority,
@@ -560,7 +560,7 @@ fn canonical_amd_attachment() {
         state.fail_map = state.calls + 1;
         state.fail_uncertain = true;
     }
-    // SAFETY: the model injects uncertain mapping, requiring retained ownership.
+    // SAFETY: the model injects uncertain mapping, requiring kept ownership.
     let failed = unsafe { late.attach_kernel_doorbells(&authority, kernel) }.unwrap_err();
     assert_eq!(failed.stage, Stage::Doorbells);
     assert_eq!(failed.rollback, Rollback::NotAttempted);

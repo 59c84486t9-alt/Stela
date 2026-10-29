@@ -1,4 +1,4 @@
-//! Native system services joined to the actual cold PMP ASC and DMA owners.
+//! Native system services joined to the cold PMP ASC and DMA owners.
 use super::{AppleDevices, ExplicitRuntimeConfiguration};
 use crate::platform::apple::asc::Asc;
 use crate::platform::apple::pmp;
@@ -26,7 +26,7 @@ impl AppleDevices {
         board: &Board,
     ) -> Result<Option<&'static str>, String> {
         // Services::t8112 carries source-specific reporting/trace defaults.
-        // A direct MCC owner supplies no qualification for that protocol.
+        // A direct MCC owner supplies no validation for that protocol.
         if board.memory_cache.is_none() || board.direct_memory_cache.is_some() {
             return Ok(Some(
                 "PMP reporting/trace endpoints unavailable: this memory family has no source-qualified T8112 system-service profile; no AP buffer service is advertised",
@@ -46,14 +46,14 @@ impl AppleDevices {
         ))
     }
 
-    /// Join before the first guest instruction, after every actual device is
-    /// placed and before RTKit enumeration. Retains the existing ASC session.
+    /// Join before the first guest instruction, after every device is
+    /// placed and before RTKit enumeration. Keeps the existing ASC session.
     ///
     /// # Safety
     /// The native DMA binding's persistent canonical RAM, held/fenced physical
     /// worker and closed synchronous producer contracts apply to every future
-    /// service/transfer. The supplied clock reads the actual installed native
-    /// owner. Neither this method nor endpoint attachment qualifies raw V1.
+    /// service/transfer. The supplied clock reads the installed native
+    /// owner. Neither this method nor endpoint attachment checks raw V1.
     pub unsafe fn bind_native_pmp_services(
         &mut self,
         board: &Board,
@@ -84,7 +84,7 @@ impl AppleDevices {
         {
             return Err("native PMP system services require the actual mounted RTKit ASC".into());
         }
-        // SAFETY: same actual source graph and persistent canonical owner.
+        // SAFETY: same source graph and persistent canonical owner.
         let broker = unsafe { self.bind_native_pmp_dma(board, ram, configuration) }?;
         // SAFETY: native callbacks run only under the same held/fenced owner.
         let (services, endpoints) =
@@ -114,7 +114,7 @@ impl AppleDevices {
     /// # Safety
     /// The persistent cold binding contract remains valid: real canonical
     /// workers are held/fenced, Devices excludes all independent producers,
-    /// and the associated actual ASC controls whether native work may advance.
+    /// and the associated ASC controls whether native work may advance.
     pub(super) unsafe fn service_native_pmp_services(
         &mut self,
         cpu: usize,

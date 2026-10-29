@@ -41,7 +41,7 @@ pub(super) fn firmware_payload(bytes: &[u8]) -> Result<&[u8], Error> {
             {
                 return Err(Error::FirmwareImage);
             }
-            // A cAVS LPRO selection requires actual clock preparation that this
+            // A cAVS LPRO selection requires clock preparation that this
             // held-D0 HPRO profile does not own. Do not silently ignore it.
             if word(bytes, offset)? == 6 {
                 if !(size - 8).is_multiple_of(8) {

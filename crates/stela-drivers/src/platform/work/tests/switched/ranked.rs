@@ -20,7 +20,7 @@ impl Binding {
     }
 }
 // SAFETY: no C owner or foreign state exists in this hosted scheduler
-// fixture. Actual retained Runtime stacks/CPU/tickets remain real; hooks
+// fixture. Runtime stacks/CPU/tickets remain real; hooks
 // perform only bounded metadata checks, never allocation/drop or switching.
 unsafe impl SwitchBinding for Binding {
     unsafe fn attach(&self, view: &TaskContext) -> Result<(), WorkError> {
@@ -111,10 +111,10 @@ struct Ranked {
 impl Ranked {
     /// # Safety
     /// setup must have published the live pinned Executor runtime, and that
-    /// Executor must remain retained while this reference is used.
+    /// Executor must remain held while this reference is used.
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
         // SAFETY: setup wrote this pointer from the already pinned Runtime before
-        // callback admission. The Executor retains that allocation through every use here.
+        // callback admission. The Executor keeps that allocation through every use here.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>))
         }
@@ -146,16 +146,16 @@ impl Ranked {
     }
 }
 /// # Safety
-/// p must be the queue-retained Arc pointer for Ranked; the returned borrow
+/// p must be the queue-kept Arc pointer for Ranked; the returned borrow
 /// must end before that owner can be released.
 unsafe fn ranked<'a>(p: *mut c_void) -> &'a Ranked {
     // SAFETY: The caller supplies the aligned Arc::as_ptr allocation of this fixture
-    // type. Its queue retains the Arc while callbacks use this shared reference.
+    // type. Its queue keeps the Arc while callbacks use this shared reference.
     unsafe { &*p.cast::<Ranked>() }
 }
 unsafe extern "C" fn timer(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
@@ -181,8 +181,8 @@ unsafe extern "C" fn timer(p: *mut c_void) {
         },
         Err(WorkError::Unavailable)
     );
-    // Base remains NORMAL; a genuine process-lock donor may still boost
-    // effective service priority. Restore it before actual completion.
+    // Base remains NORMAL; a process-lock donor may still boost
+    // effective service priority. Restore it before completion.
     let boosted = Snapshot {
         base: BasePolicy::Normal,
         effective: 0,
@@ -210,7 +210,7 @@ unsafe extern "C" fn timer(p: *mut c_void) {
 }
 unsafe extern "C" fn low(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
@@ -271,9 +271,9 @@ unsafe extern "C" fn low(p: *mut c_void) {
     f.rank(2, BasePolicy::Fifo(60), 39, false);
     f.rank(3, BasePolicy::Fifo(80), 19, false);
     r.reschedule().unwrap();
-    f.event(2); // high genuinely blocked; boosted low runs before medium
+    f.event(2); // high blocked; boosted low runs before medium
     assert_eq!(f.handle(1).snapshot().unwrap().effective, 19);
-    f.rank(1, BasePolicy::Fifo(20), 79, true); // deboost before actual wake
+    f.rank(1, BasePolicy::Fifo(20), 79, true); // deboost before wake
     f.bindings[3].blocked.store(false, Ordering::Release);
     f.wakes.lock().unwrap()[3].as_ref().unwrap().wake().unwrap();
     r.reschedule().unwrap();
@@ -282,7 +282,7 @@ unsafe extern "C" fn low(p: *mut c_void) {
 }
 unsafe extern "C" fn medium(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     f.bind(2);
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
@@ -311,7 +311,7 @@ unsafe extern "C" fn medium(p: *mut c_void) {
 }
 unsafe extern "C" fn high(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
@@ -337,7 +337,7 @@ unsafe extern "C" fn high(p: *mut c_void) {
 }
 unsafe extern "C" fn stale(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     assert_eq!(f.handle(1).snapshot(), Err(WorkError::Closed));
     let before = Snapshot {
@@ -361,9 +361,9 @@ unsafe extern "C" fn stale(p: *mut c_void) {
     );
 }
 unsafe extern "C" fn fifo_peer(p: *mut c_void) {
-    // SAFETY: p is this queue's retained Ranked Arc through callback join.
+    // SAFETY: p is this queue's Ranked Arc through callback join.
     let f = unsafe { ranked(p) };
-    // SAFETY: setup published this retained pinned Runtime before submission.
+    // SAFETY: setup published this pinned Runtime before submission.
     let r = unsafe { f.runtime() };
     f.bind(1);
     f.rank(1, BasePolicy::Fifo(60), 39, false);
@@ -374,25 +374,25 @@ unsafe extern "C" fn fifo_peer(p: *mut c_void) {
     f.rank(1, BasePolicy::Normal, 120, false);
 }
 unsafe fn normal_peer(p: *mut c_void, index: usize) {
-    // SAFETY: caller forwards this queue's retained Ranked Arc and real task index.
+    // SAFETY: caller forwards this queue's Ranked Arc and real task index.
     let f = unsafe { ranked(p) };
     f.bind(index);
-    // SAFETY: setup published this retained pinned Runtime before submission.
+    // SAFETY: setup published this pinned Runtime before submission.
     unsafe { f.runtime() }.yield_now().unwrap();
 }
 unsafe extern "C" fn normal_peer_two(p: *mut c_void) {
-    // SAFETY: queue retains the matching Ranked fixture, whose binding two is idle.
+    // SAFETY: queue keeps the matching Ranked fixture, whose binding two is idle.
     unsafe { normal_peer(p, 2) };
 }
 unsafe extern "C" fn normal_peer_three(p: *mut c_void) {
-    // SAFETY: queue retains the matching Ranked fixture, whose binding three is idle.
+    // SAFETY: queue keeps the matching Ranked fixture, whose binding three is idle.
     unsafe { normal_peer(p, 3) };
 }
 unsafe extern "C" fn firmware_turns(p: *mut c_void) {
-    // SAFETY: p is this queue's retained Ranked Arc, and the executor remains
+    // SAFETY: p is this queue's Ranked Arc, and the executor remains
     // pinned with all guarded mappings until every firmware turn has joined.
     let f = unsafe { ranked(p) };
-    // SAFETY: setup published the retained pinned Runtime before submission.
+    // SAFETY: setup published the pinned Runtime before submission.
     let r = unsafe { f.runtime() };
     for turn in 0..8 {
         assert_eq!(r.firmware_current(), Ok(true));
@@ -448,7 +448,7 @@ fn roundtrip(mode: u64) {
         stop: AtomicBool::new(false),
         mode,
     });
-    // SAFETY: The queue retains the fixture Arc and same-thread CpuModel. setup stores
+    // SAFETY: The queue keeps the fixture Arc and same-thread CpuModel. setup stores
     // the pinned runtime pointer before admitting any callback that can read it.
     let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
@@ -482,12 +482,12 @@ fn roundtrip(mode: u64) {
     r.attach_service_domain(domain.clone()).unwrap();
     *f.domain.lock().unwrap() = Some(domain.clone());
     let p = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: The service callback receives the queue-retained fixture Arc pointer.
+    // SAFETY: The service callback receives the queue-kept fixture Arc pointer.
     // The pinned executor and its dedicated service stack survive until service join.
     let service = unsafe { r.start_service(timer, p) }.unwrap();
     assert!(r.step().unwrap());
     let firmware = if mode == 3 {
-        // SAFETY: the queue retains this Ranked Arc and static callback through
+        // SAFETY: the queue keeps this Ranked Arc and static callback through
         // all yielded firmware frames, which are joined before stack release.
         Some(unsafe { r.start_firmware(firmware_turns, p) }.unwrap())
     } else {
@@ -499,7 +499,7 @@ fn roundtrip(mode: u64) {
         [low, medium, high]
     };
     let jobs = callbacks
-        // SAFETY: The callback and context identify this queue's retained fixture Arc.
+        // SAFETY: The callback and context identify this queue's fixture Arc.
         // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
         .map(|callback| unsafe { r.queue().execute(Kind::General, callback, p) }.unwrap());
     let mut attempts = 0;
@@ -545,7 +545,7 @@ fn roundtrip(mode: u64) {
             8
         );
     }
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     let reuse = unsafe { r.queue().execute(Kind::General, stale, p) }.unwrap();
     while !r.queue().completed(reuse).unwrap() {
@@ -557,11 +557,11 @@ fn roundtrip(mode: u64) {
         assert!(r.step().unwrap());
     }
     // SAFETY: stop_producers ran and the service ticket completed above. No
-    // external producer can publish more work; this test still retains the domain Arc.
+    // external producer can publish more work; this test still keeps the domain Arc.
     unsafe { domain.retire() }.unwrap();
     for binding in &f.bindings {
         let retained =
-            // SAFETY: Binding storage is retained by the fixture on the dispatcher thread.
+            // SAFETY: Binding storage is held by the fixture on the dispatcher thread.
             // The runtime checks completed/pending state before returning or releasing that owner.
             unsafe { r.detach_binding(ContextId(binding.id.load(Ordering::Acquire))) }.unwrap();
         drop(retained);

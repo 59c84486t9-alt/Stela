@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Bounded original ALSA ABI5 topology admission for direct SOF DMIC capture.
 //! The selected pipeline must contain HOST, BUFFER, DMIC DAI and SCHEDULER,
-//! joined by actual topology edges. Unsupported processing, UUID, multi-core,
+//! joined by topology edges. Unsupported processing, UUID, multi-core,
 //! runtime controls and other DAI types refuse before any IPC or DMA effect.
 //! Structs/tokens adapt pinned Linux asoc.h, sof/{topology,dai-intel}.h and
 //! ipc3-topology.c. Copyright(c) 2018 Intel Corporation
@@ -139,7 +139,7 @@ fn component(
     Ok(message)
 }
 
-/// Keeps the original topology identity and actual firmware-table bytes.
+/// Keeps the original topology identity and firmware-table bytes.
 /// It is a DMIC graph capability, never evidence that physical audio ran.
 pub struct DmicTopology {
     messages: Vec<Vec<u8>>,
@@ -162,8 +162,8 @@ impl DmicTopology {
     /// Parse only a direct capture pipeline from the original catalog topology.
     ///
     /// # Safety
-    /// `nhlt` is the retained, unmodified ACPI NHLT table of this controller's
-    /// actual machine. `board` is the exact board key selected using actual
+    /// `nhlt` is the kept, unmodified ACPI NHLT table of this controller's
+    /// machine. `board` is the exact board key selected using
     /// firmware/machine identity, with the catalog topology chosen by that
     /// machine policy. Platform pin/clock/power ownership excludes firmware,
     /// OEM/AML and other drivers for these microphones. A matching string,
@@ -615,7 +615,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if topology.hardware != self.identity.hardware() {
             return Err(Error::Topology);
         }
-        // Retain exact board evidence before the first potentially partial IPC.
+        // Keep exact board evidence before the first potentially partial IPC.
         self.graph = Some(Installed {
             host: topology.host,
             format: topology.format,

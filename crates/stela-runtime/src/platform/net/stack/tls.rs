@@ -26,7 +26,7 @@ fn tls_error(error: stela_tls::channel::ChannelError) -> NetError {
 
 impl<L: Link, C: Clock> Stack<L, C> {
     /// Validate TLS inputs before opening TCP or publishing a ClientHello. The
-    /// config retains its genuine provider and time source; native callers must
+    /// config keeps its provider and time source; native callers must
     /// obtain those from the admitted boot owner, never captured clock metadata.
     pub fn open_tls(
         &mut self,
@@ -59,7 +59,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         })
     }
 
-    /// Poll one bounded TLS/TCP turn. Output consumption follows actual TCP
+    /// Poll one bounded TLS/TCP turn. Output consumption follows TCP
     /// acceptance, and input never consumes more than the TLS record capacity.
     /// Errors leave ownership with the caller, which must close the transfer.
     pub fn read_tls(

@@ -50,8 +50,8 @@ fn exercise(bytes: &[u8]) {
     let (power, _, _) = powered(&catalog, &empty, &source, &native, &policy, false);
     assert!(power.phy.scan.mac.is_mld());
     authorize(&policy);
-    // SAFETY: this same-device model retains every source basic response rate
-    // and actual programmed ceiling through native deactivation/reset or stop.
+    // SAFETY: this same-device model keeps every source basic response rate
+    // and programmed ceiling through native deactivation/reset or stop.
     let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
     let at_sync = policy.clone();
     native.domain.records.lock().unwrap().device_sync_hook = Some(Arc::new(move || {
@@ -62,7 +62,7 @@ fn exercise(bytes: &[u8]) {
         );
     }));
     assert_eq!(
-        // SAFETY: Source allocates exclusive model RAM for this retained
+        // SAFETY: Source allocates exclusive model RAM for this kept
         // requester/domain; its policy guard remains held through publication.
         unsafe { link.advance(&source) }.unwrap(),
         Ax200BindingPhase::Waiting(BindingCommandKind::AttachPhy)
@@ -101,13 +101,13 @@ fn exercise(bytes: &[u8]) {
         drop(records);
         assert!(matches!(
             // SAFETY: completion was synchronous; injected CPU-sync failure
-            // retains the same mapped command and receive buffers for retry.
+            // keeps the same mapped command and receive buffers for retry.
             unsafe { link.advance(&source) },
             Err(Ax200BindingError::Boot(Error::CommandReclaim(_)))
         ));
         assert!(link.first_error().is_none());
         native.domain.records.lock().unwrap().cpu_sync_fail = None;
-        // SAFETY: the failed reclaim retained the live mappings, same source
+        // SAFETY: the failed reclaim kept the live mappings, same source
         // and requester; clearing the injection adds no device or worker.
         unsafe { link.advance(&source) }.unwrap();
         link.replenish_completed_receive().unwrap();
@@ -117,7 +117,7 @@ fn exercise(bytes: &[u8]) {
     let acquired = policy.acquired.load(Ordering::SeqCst);
     link.begin_remove().unwrap();
     // SAFETY: revocation starts ordered removal in the same no-device model;
-    // the link still retains all DMA mappings and the source owner.
+    // the link still keeps all DMA mappings and the source owner.
     unsafe { link.advance(&source) }.unwrap();
     let commands = link.commands()[3..].to_vec();
     assert_eq!(
@@ -141,7 +141,7 @@ fn exercise(bytes: &[u8]) {
         emitted_binding(&link, &native);
         complete_link(&link, &native, &command);
         // SAFETY: this synchronous model completed the current removal ACK;
-        // the retained domain/source still own every pending DMA allocation.
+        // the domain/source still own every pending DMA allocation.
         unsafe { link.advance(&source) }.unwrap();
         link.replenish_completed_receive().unwrap();
         if index < 3 {
@@ -184,7 +184,7 @@ fn exercise(bytes: &[u8]) {
     );
     assert_eq!(
         // SAFETY: the PHY removal ACK was published synchronously above; the
-        // same owner retains its checked receive buffers through reclamation.
+        // same owner keeps its checked receive buffers through reclamation.
         unsafe { phy.advance(&source) }.unwrap(),
         Ax200PhyPhase::Removed
     );

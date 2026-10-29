@@ -50,8 +50,8 @@ pub enum Direction {
 }
 
 /// A refused device access. Earlier device, wire or transition effects may
-/// already be retained by their owners; this error alone proves no byte prefix
-/// and grants no replay or source-retirement authority.
+/// already be held by their owners; this error alone proves no byte prefix
+/// and grants no replay or source-retirement permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmioError {
     /// No device is mapped at this guest PA.
@@ -136,7 +136,7 @@ impl<'a> Access<'a> {
     }
 }
 
-/// Effective supply, clock, DMA-quiesce and reset inputs of one actual native
+/// Effective supply, clock, DMA-quiesce and reset inputs of one native
 /// device. Retention describes that device's declared ordinary-state contract,
 /// not a request to reconstruct software configuration after a destructive edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +148,8 @@ pub struct LifecycleState {
     pub retention: bool,
 }
 
-/// An actual native device's complete lifecycle boundary. Capability does not
-/// imply every proposed state is qualified. The machine checks every affected
+/// A native device's complete lifecycle boundary. Capability does not
+/// imply every proposed state is checked. The machine checks every affected
 /// device without side effects before acknowledging the controller request,
 /// then commits the checked state before any subsequent client activity.
 /// A commit must not fail or generate synthetic completion of canceled work.
@@ -261,7 +261,7 @@ pub struct Bus {
     advance_statistics: AdvanceStatistics,
 }
 
-/// Actual owner inventory and time-advance work; aliases are not owners.
+/// Owner inventory and time-advance work; aliases are not owners.
 #[cfg(feature = "native-profile")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AdvanceStatistics {
@@ -292,7 +292,7 @@ impl Bus {
         self.devices.push(device);
         id
     }
-    /// Install one actual device and all its ranges atomically. Validate both
+    /// Install one device and all its ranges atomically. Validate both
     /// existing and proposed ownership before publishing any route or device.
     /// Each binding is (guest PA, length, device offset).
     pub fn install(
@@ -400,7 +400,7 @@ impl Bus {
         Ok(())
     }
     /// Pure whole-range preflight for a new explicitly owned resource. It
-    /// reserves nothing and publishes no model or aperture. Callers retain
+    /// reserves nothing and publishes no model or aperture. Callers keep
     /// exclusive Bus access through their complete batch publication.
     pub fn check_free(&self, start: u64, len: u64) -> Result<(), MapError> {
         if len == 0 {

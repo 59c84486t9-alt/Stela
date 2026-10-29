@@ -19,7 +19,7 @@
 //! (0x42f97f0), `goOnBus` (0x42f4ef8) and `updateLPMPolicy` (0x43037f4)
 //! program — GUCTL1, GUID, GTXFIFOPRIDEV, the DCFG speed maximum and LPM
 //! capability, the DCTL LPM and U1/U2 fields, the wakeup and suspend event
-//! enables — is retained where no modeled link observes it (the field
+//! enables — is held where no modeled link observes it (the field
 //! constants say why); other fields, offsets and widths refuse.
 //!
 //! GCTL.PRTCAPDIR selects the dual-role core's host (1) or device (2)
@@ -57,7 +57,7 @@ pub const PLATFORM_WINDOW_STRIDE: u64 = 0x4000;
 /// (26, `goOnBus`) and DEV_DECOUPLE_L1L2_EVT (31, `initDeviceController`,
 /// KC 0x42fa004). They shape LPM exit, the SuperSpeed clock source and
 /// suspend event reporting, none of which a high-speed link that never
-/// enters L1 or suspend observes; they are retained only.
+/// enters L1 or suspend observes; they are held only.
 const GUCTL1_FIELDS: u32 = 1 << 24 | 1 << 26 | 1 << 31;
 /// DCTL: run, soft reset, the LPM NYET threshold (23:20) and the
 /// SuperSpeed U1/U2 accept/initiate enables (12:9), which no high-speed
@@ -88,7 +88,7 @@ const RX_EMPTY: u32 = 1 << 17;
 const MAX_PACKET_CONTROL: usize = 512;
 /// DEPCFG parameter 0 burst size (25:22). Bursts are SuperSpeed-only; a
 /// high-speed link never observes them, so a bulk endpoint's value is
-/// retained only. Apple's driver sets 15 on every bulk endpoint.
+/// only. Apple's driver sets 15 on every bulk endpoint.
 const BURST: u32 = 0xf << 22;
 const CMD_FAILURE: u32 = 1 << 12;
 const PRTCAP: u32 = 3 << 12;
@@ -97,7 +97,7 @@ const PRTCAP_DEVICE: u32 = 2 << 12;
 
 /// Minimal port boundary until the independent Type-C model lands. A new
 /// connection generation is a detach: the driver ends its own transfers.
-/// The provider must derive readiness from its actual PHY/role lifecycle.
+/// The provider must derive readiness from its PHY/role lifecycle.
 pub trait PortState {
     fn generation(&self) -> u64;
     fn high_speed_device_ready(&self) -> bool;
@@ -151,7 +151,7 @@ struct Event {
     value: u32,
 }
 
-/// Independent ordinary-domain controls. Clock/retained power pauses keep
+/// Independent ordinary-domain controls. Clock/kept power pauses keep
 /// configuration; quiesce inhibits DMA while MMIO remains available.
 #[derive(Clone, Copy)]
 struct Lifecycle {
@@ -223,7 +223,7 @@ pub struct Dwc3 {
 
 impl Dwc3 {
     /// IRQs are event-buffer wires, supplied by placement, never inferred from
-    /// the event number. Production Apple routing still requires qualification.
+    /// the event number. Production Apple routing still requires validation.
     pub fn new(irqs: [AicInput; RINGS]) -> Self {
         Self {
             lifecycle: Lifecycle {
@@ -277,7 +277,7 @@ impl Dwc3 {
     /// complete, and keep what is written, while the physical ATC PHY reset
     /// is held. The drivers release that reset before core initialization
     /// and establish no other register's access while it is held, which
-    /// stays unqualified, not a claim that physical reset makes the rest
+    /// stays unchecked, not a claim that physical reset makes the rest
     /// of MMIO inaccessible.
     fn mmio_ready_at(&self, offset: Option<u64>) -> Result<(), &'static str> {
         if !self.lifecycle.powered {
@@ -331,7 +331,7 @@ impl Dwc3 {
         }
     }
 
-    /// No DMA work runs concurrently with a machine boundary. Non-retained
+    /// No DMA work runs concurrently with a machine boundary. Non-kept
     /// supply loss cancels both personalities using the ordinary reset image;
     /// already committed guest RAM bytes are never undone or completed again.
     pub fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
@@ -363,7 +363,7 @@ impl Dwc3 {
         }
     }
 
-    /// Independent physical outputs from the actual PHY. Reset sources are
+    /// Independent physical outputs from the PHY. Reset sources are
     /// ORed; neither a PMGR release nor a PHY release can clear the other.
     pub fn set_phy_state(
         &mut self,
@@ -406,7 +406,7 @@ impl Dwc3 {
     }
 
     /// The adapter cancels its external peer session before further service.
-    /// It retains its own retry flag if that cancellation reports failure.
+    /// It keeps its own retry flag if that cancellation reports failure.
     pub fn take_session_reset(&mut self) -> bool {
         core::mem::take(&mut self.session_reset)
     }
@@ -801,7 +801,7 @@ impl Dwc3 {
         })
     }
 
-    /// A transaction adapter whose borrow retains the actual DMA stream.
+    /// A transaction adapter whose borrow keeps the DMA stream.
     pub fn peer<'a, 'b, 'c>(&'a mut self, dma: &'a mut Port<'b, 'c>) -> Peer<'a, 'b, 'c> {
         Peer {
             controller: self,
@@ -1164,7 +1164,7 @@ impl MmioDevice for Dwc3 {
             GCTL => {
                 // GBLHIBERNATIONEN (bit 1), which AppleT8112USBXHCI::reset
                 // sets, has no effect on a core built without hibernation
-                // (GHWPARAMS1.EN_PWROPT): it is retained only.
+                // (GHWPARAMS1.EN_PWROPT): it is held only.
                 const GCTL_CONFIG: u32 =
                     0xfff8_0000 | (1 << 16) | PRTCAP | CORE_RESET | (1 << 10) | (3 << 6) | 0x1f;
                 if value & !GCTL_CONFIG != 0
@@ -1726,7 +1726,7 @@ mod tests {
         port.access.now = 1_999_000;
         dwc.set_power(true, true, port.access);
         assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(10));
-        // Queue another actual command; reset cancels it while preserving
+        // Queue another command; reset cancels it while preserving
         // the previous event already committed to guest RAM.
         assert!(
             port.memory
@@ -1791,7 +1791,7 @@ mod tests {
         // A SuperSpeed maximum connects at high speed; full speed refuses.
         write(&mut dwc, DCFG, 4 | 1 << 22, &mut access);
         assert!(dwc.write(DCFG, Width::Word, 1, &mut access).is_err());
-        // DCTL test control refuses; the LPM threshold is retained.
+        // DCTL test control refuses; the LPM threshold is held.
         assert!(
             dwc.write(DCTL, Width::Word, u64::from(RUN | 1 << 1), &mut access)
                 .is_err()
@@ -1840,7 +1840,7 @@ mod tests {
             dwc.write(base + 12, Width::Word, u64::from(CMDACT | 1), &mut access)
                 .is_err()
         );
-        // A bulk endpoint retains its SuperSpeed burst; an interrupt
+        // A bulk endpoint keeps its SuperSpeed burst; an interrupt
         // endpoint's burst field refuses.
         write(&mut dwc, base + 4, 5 << 25 | CFG_COMPLETE, &mut access);
         write(&mut dwc, base + 8, BURST | 512 << 3 | 2 << 1, &mut access);
@@ -2232,7 +2232,7 @@ mod tests {
     #[test]
     fn host_enumeration_reaches_real_control_trb_dma_and_event_buffers() {
         use crate::platform::usb::host::Host;
-        // A small synthetic guest driver: posts actual TRBs between host
+        // A small synthetic guest driver: posts TRBs between host
         // steps. It supplies test descriptors; production has no descriptors.
         let device = vec![18, 1, 0, 2, 0, 0, 0, 64, 0x34, 0x12, 0, 1, 0, 1, 0, 0, 0, 1];
         let config = vec![

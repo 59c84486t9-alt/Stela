@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Stela contributors
 //! Real UCSI ACPI shared-memory transport, following pinned Linux ucsi_acpi.c.
 //! Discovery, mapping lifetime, AML execution and Notify dispatch are supplied
-//! by the native platform. The optional attachment module binds actual ACPICA
+//! by the native platform. The optional attachment module binds ACPICA
 //! handles, owned mailbox mappings and dependency leases.
 
 use super::{Transport, TransportError, Version};
@@ -22,8 +22,8 @@ pub const DSM_UUID: [u8; 16] = [
     0xc2, 0x98, 0x83, 0x6f, 0xa4, 0x7c, 0xe4, 0x11, 0xad, 0x36, 0x63, 0x10, 0x42, 0xb5, 0x00, 0x8f,
 ];
 
-/// Evaluates this actual PNP0CA0 device's _DSM, with the specified UUID and
-/// revision. The provider must retain its namespace handle and return real
+/// Evaluates this PNP0CA0 device's _DSM, with the specified UUID and
+/// revision. The provider must keep its namespace handle and return real
 /// firmware errors. Evaluation includes the required empty arguments package.
 /// A missing result object must return `DsmNoResult`, as Linux rejects a null
 /// `_DSM` object even when the AML evaluation status itself reports success.
@@ -48,7 +48,7 @@ impl<D: Dsm> Mailbox<D> {
     /// `base` must be eight-byte aligned. `base..base+bytes` must be the
     /// device's real _CRS UCSI mailbox, mapped
     /// coherently as normal write-back memory for this object's lifetime. The
-    /// caller retains the mapping lease and serializes CPU ownership; firmware
+    /// caller keeps the mapping lease and serializes CPU ownership; firmware
     /// may update it concurrently under the UCSI protocol. No Rust references
     /// may alias these bytes. `dsm` must evaluate this same physical device.
     pub unsafe fn new(base: NonNull<u8>, bytes: usize, dsm: D) -> Result<Self, TransportError> {
@@ -203,7 +203,7 @@ mod tests {
             fail: None,
             controls: Vec::new(),
         };
-        // SAFETY: the boxed allocation is stable and retained by each test;
+        // SAFETY: the boxed allocation is stable and kept by each test;
         // test code accesses its bytes only between serialized transport calls.
         let mailbox = unsafe { Mailbox::new(base, size, firmware) }.unwrap();
         (memory, mailbox)

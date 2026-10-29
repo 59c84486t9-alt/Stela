@@ -107,7 +107,7 @@ fn power_clock_and_actual_iova_limit_failures_do_not_publish_dma() {
 #[test]
 fn successful_but_late_power_and_reset_accesses_do_not_advance_initialization() {
     // Both a successful request effect and its successful ready read must
-    // fit the phase budget. The clock advances inside that actual access.
+    // fit the phase budget. The clock advances inside that access.
     for write in [false, true] {
         for (offset, request, ready, phase) in [
             (0x141c, 1, 0, Phase::PowerOn),

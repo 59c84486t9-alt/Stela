@@ -8,8 +8,8 @@
 //! record per SID, with a separate pending bitmap at TRAD4000. Its numbered
 //! fault taxonomy and ordinary TRAD direction are recovered from the native
 //! decoder. Other header fields, auxiliary AXI data and secondary-capture
-//! behavior remain unqualified. Observations retain every raw summary bit;
-//! failed DMA never fabricates a complete header from the known fields.
+//! behavior remain unchecked. Observations keep every raw summary bit;
+//! failed DMA never invents a complete header from the known fields.
 use alloc::{vec, vec::Vec};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
@@ -79,7 +79,7 @@ pub enum Level {
 
 /// A supplied original TRAD summary, not a generated fault header. The
 /// native classifier at mac18g92889b4..9288cc0 and jump table9288e68
-/// identify these fields. Unknown bits are retained without interpretation.
+/// identify these fields. Unknown bits are held without interpretation.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedSummary {

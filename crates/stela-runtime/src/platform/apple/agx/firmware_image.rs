@@ -20,7 +20,7 @@ const MAX_ENTRIES: usize = 32;
 const MAGIC: &[u8; 8] = b"rkosftab";
 
 /// The immutable source identity carried into a native program binding.
-/// Hashes describe the actual accepted bytes, not a behavior-dispatch key.
+/// Hashes describe the accepted bytes, not a behavior-dispatch key.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Source {
@@ -34,7 +34,7 @@ pub struct Source {
 
 /// A complete borrowed FTAB from the loader's immutable decoded input.
 /// The expected digest binds it to the caller's preserved input receipt.
-/// Image4 authentication and qualification of a changed source remain the
+/// Image4 authentication and validation of a changed source remain the
 /// loader/registry's independent obligations.
 #[cfg(test)]
 pub struct Ftab<'a> {
@@ -84,7 +84,7 @@ impl<'a> Ftab<'a> {
 
     /// The source wrapper selects instance0 without strict instance filtering.
     /// It calls the physical revision getter even for a one-entry table.
-    /// `Image::revision` retains full-word knownness and the source's special
+    /// `Image::revision` keeps full-word knownness and the source's special
     /// discriminator8f rule; an omitted input cannot become revision0.
     pub fn select_t6000(&self, identity: &Image) -> Result<Selected<'a>, &'static str> {
         let revision = identity

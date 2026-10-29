@@ -363,7 +363,7 @@ pub(super) fn select_with_controller(
         .filter(|candidate| candidate.1 == maximum)
         .collect();
     // Unlike Realtek cfgselector, ASIX has no source-backed preconfiguration
-    // silicon check. At equal supported coverage retain a usable CDC alternative
+    // silicon check. At equal supported coverage keep a usable CDC alternative
     // over an ASIX-only candidate; unrelated configurations still tie normally.
     if !maximum.1 && finalists.iter().any(|candidate| candidate.3) {
         finalists.retain(|candidate| !candidate.2 || candidate.3);
@@ -487,7 +487,7 @@ pub(super) mod tests {
         ]
     }
 
-    /// Descriptor-only selection fixture. Its synthetic identity deliberately
+    /// Descriptor-only selection fixture. Its synthetic identity
     /// grants no access to an addressed controller.
     pub(crate) fn device(configurations: Vec<Vec<u8>>) -> Device {
         let count = configurations.len() as u8;
@@ -510,8 +510,8 @@ pub(super) mod tests {
         }
     }
 
-    /// Class-binding fixture whose authority belongs to the controller that
-    /// actually completed Address Device. Never substitute a hardware slot
+    /// Class-binding fixture whose permission belongs to the controller that
+    /// completed Address Device. Never substitute a hardware slot
     /// number or another controller's otherwise identical descriptor fixture.
     pub(crate) fn addressed_device(
         controller: &Controller,
@@ -1150,8 +1150,8 @@ pub(super) mod tests {
                 dev.speed = speed;
                 configuration::select_with_controller(&mut dev, Some(&controller)).unwrap();
                 assert_eq!(dev.configuration_value(), 9);
-                // This exact source-listed SanDisk enclosure refuses UAS even
-                // on a capable stream host; retain the usable BOT alternative.
+                // This source-listed SanDisk enclosure refuses UAS even
+                // on a capable stream host; keep the usable BOT alternative.
                 dev.descriptor[8..12].copy_from_slice(&[0x81, 0x07, 0xe8, 0x55]);
                 configuration::select_with_controller(&mut dev, Some(&controller)).unwrap();
                 assert_eq!(dev.configuration_value(), 7);

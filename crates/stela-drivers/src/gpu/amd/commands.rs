@@ -72,10 +72,10 @@ impl<'a> ComputeEncoder<'a> {
     /// `info` must point to a live, aligned, fully initialized `radeon_info` from
     /// the exact linked Mesa build. It must remain readable and immutable for
     /// `'a`, including against concurrent C access. Its capabilities must describe
-    /// the actual initialized device. The pointer is never retained by C beyond
+    /// the initialized device. The pointer is never kept by C beyond
     /// an encoding call. A PCI identity alone cannot satisfy this contract.
     /// Encoding tests may borrow immutable native model fixtures, which do not
-    /// authorize submission or qualify hardware support.
+    /// authorize submission or check hardware support.
     pub unsafe fn borrow_initialized(info: *const c_void) -> Result<Self, CommandError> {
         Ok(Self {
             info: NonNull::new(info.cast_mut()).ok_or(CommandError::Invalid)?,
@@ -83,7 +83,7 @@ impl<'a> ComputeEncoder<'a> {
         })
     }
 
-    /// Encode the actual generation-specific compute queue setup. An empty
+    /// Encode the generation-specific compute queue setup. An empty
     /// output slice requests the required size through `BufferTooSmall`.
     pub fn preamble(
         &self,

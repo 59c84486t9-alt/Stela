@@ -2,10 +2,10 @@
 // Linux HID reference: Copyright (c) 1999 Andreas Gal;
 // 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
 // 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
-// Retained source identities and adaptation scope: ../THIRD_PARTY.md.
-//! Usage-driven native consumers of actual HID frames. The descriptor remains
+// Source identities and adaptation scope: ../THIRD_PARTY.md.
+//! Usage-driven native consumers of HID frames. The descriptor remains
 //! authoritative; no VID/PID, device name or caller-supplied capability selects
-//! a control. Touch packets retain count/time and contact IDs; hybrid packets
+//! a control. Touch packets keep count/time and contact IDs; hybrid packets
 //! are not silently combined into an invented complete touch frame.
 use super::descriptor::{Descriptor, Frame, ReportType, Sample, Value};
 use alloc::vec::Vec;
@@ -30,7 +30,7 @@ pub enum Event {
         usage: u16,
         pressed: bool,
     },
-    /// Absolute values change only on observed changes; relative values retain
+    /// Absolute values change only on observed changes; relative values keep
     /// every nonzero report. The field index disambiguates repeated controls.
     Gamepad(Control),
     Touch(TouchPacket),
@@ -52,7 +52,7 @@ pub struct Control {
     pub field: usize,
     pub element: usize,
     pub usage: u32,
-    /// Hat switches retain their actual logical range and null state. Axes are
+    /// Hat switches keep their logical range and null state. Axes are
     /// not normalized or clamped; button values keep their descriptor width.
     pub value: i64,
     pub minimum: i64,
@@ -81,8 +81,8 @@ pub struct TouchPacket {
     pub application: usize,
     pub contact_count: Option<i64>,
     pub scan_time: Option<i64>,
-    /// Only contacts actually present in this packet. A missing field is None,
-    /// never zero, and count zero does not fabricate releases for omitted IDs.
+    /// Only contacts present in this packet. A missing field is None,
+    /// never zero, and count zero does not invent releases for omitted IDs.
     pub contacts: Vec<Contact>,
 }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Actual retained controller and independent full-packet CRC/peripheral peers.
+//! Controller and independent full-packet CRC/peripheral peers.
 use super::*;
 
 #[test]

@@ -1,4 +1,4 @@
-//! Actual Source-owned HPET counter with live control and power eligibility.
+//! Source-owned HPET counter with live control and power eligibility.
 use super::{hpet::Descriptor, tsc::PowerControl};
 use crate::{
     engine::host::RootIdentity,
@@ -16,9 +16,9 @@ const ENABLED: u32 = 1;
 const LEGACY: u32 = 2;
 const TIMER_INTERRUPTS: u32 = 4 | 0x4000;
 
-/// These are actual distinct resource owners, never a caller-provided
-/// pointer/lifetime facade. The scoped diagnostic path deliberately retains its
-/// finite RAM epoch; the production path retains immutable RootIdentity only.
+/// These are distinct resource owners, never a caller-provided
+/// pointer/lifetime facade. The scoped diagnostic path keeps its
+/// finite RAM epoch; the production path keeps immutable RootIdentity only.
 enum Owner {
     Scoped(HpetMapping),
     Native(NativeHpetMapping),
@@ -56,16 +56,16 @@ impl Owner {
     }
     unsafe fn retire_mapping(&mut self) -> Result<(), WorkError> {
         match self {
-            // SAFETY: forwarded complete actual reader/IRQ/controller drain;
-            // each variant retains its own original resource/root authority.
+            // SAFETY: forwarded complete reader/IRQ/controller drain;
+            // each variant keeps its own original resource/root permission.
             Self::Scoped(owner) => unsafe { owner.retire_mapping() },
-            // SAFETY: same drain, using the production registry's actual owner.
+            // SAFETY: same drain, using the production registry's owner.
             Self::Native(owner) => unsafe { owner.retire_mapping() },
         }
     }
 }
 
-/// Owns genuine Source mapping/root pin. No caller-provided pointer or generic
+/// Owns Source mapping/root pin. No caller-provided pointer or generic
 /// lifetime token can instantiate this counter. There is no automatic stop in
 /// Drop: uncertain state remains quarantined by the owned Mapping registry.
 enum Eligibility {
@@ -84,11 +84,11 @@ pub(crate) struct Counter {
 }
 impl Counter {
     /// # Safety
-    /// Original running-counter owner retains control/exclusion and guarantees
+    /// Original running-counter owner keeps control/exclusion and guarantees
     /// no stop/reset/counter-write/rate/decode/suspend discontinuity for the
-    /// entire source lifetime. Actual firmware/SMM/native route users cannot
+    /// entire source lifetime. Firmware/SMM/native route users cannot
     /// alter this resource. Descriptor/mapping authenticity alone is no such
-    /// continuity guarantee. Consumers check actual same CPU before raw reads.
+    /// continuity guarantee. Consumers check same CPU before raw reads.
     pub(crate) unsafe fn attach_running(owned: HpetMapping) -> Result<Self, WorkError> {
         Self::attach(Owner::Scoped(owned), false)
     }
@@ -124,10 +124,10 @@ impl Counter {
         // return all ones after the first access. Only read this owned block;
         // no route or reserved bit is written to make it appear available.
         let original_config = working_config(base)?;
-        // SAFETY: process-qualified genuine Source UC mapping of exact span.
+        // SAFETY: process-checked Source UC mapping of exact span.
         let geometry = unsafe { descriptor.geometry(read32(base, 0), read32(base, 4))? };
         let pending_mask = (1u32 << geometry.timers) - 1;
-        // SAFETY: same authentic retained exact register mapping.
+        // SAFETY: same authentic exact register mapping.
         if original_config & LEGACY != 0 || unsafe { read32(base, 0x20) } & pending_mask != 0 {
             return Err(WorkError::Busy);
         }
@@ -154,14 +154,14 @@ impl Counter {
             original_config,
         };
         if started {
-            // SAFETY: non-Clone ExclusiveHpet was consumed; actual controller
+            // SAFETY: non-Clone ExclusiveHpet was consumed; controller
             // handoff excludes all writers/in-flight routes. Only main enable
             // changes, preserving all reserved configuration bits.
             unsafe {
                 write32(base, 0x10, original_config | ENABLED);
             }
         }
-        // SAFETY: same retained process/resource. Readback orders prior write.
+        // SAFETY: same process/resource. Readback orders prior write.
         if unsafe { read32(base, 0x10) } & (ENABLED | LEGACY) != ENABLED {
             return Err(WorkError::Unavailable);
         }
@@ -190,7 +190,7 @@ impl Counter {
             Owner::Native(_) => Err(WorkError::Unavailable),
         }
     }
-    /// Only a genuine native resource plus eligible live platform can back
+    /// Only a native resource plus eligible live platform can back
     /// an unbounded counter epoch. Scoped/C0 calibration does not mint one.
     pub(crate) fn continuous_period(&self) -> Result<u32, WorkError> {
         self.owned.check_irq_cpu()?;
@@ -222,7 +222,7 @@ impl Counter {
             control.check(self.identity())?;
         }
         // SAFETY: caller first validates this real owner/IRQ CPU. Geometry
-        // bounds every register; MMIO is the original retained UC mapping.
+        // bounds every register; MMIO is the original UC mapping.
         unsafe {
             let geometry = self
                 .descriptor()
@@ -256,8 +256,8 @@ impl Counter {
         self.owned.identity()
     }
     /// A short active-spin reference, never an HPET continuity/PC10 grant.
-    /// Require the genuine production owner and the exact retained CPU identity;
-    /// validate period/routing controls on both sides of the actual sample.
+    /// Require the production owner and the exact CPU identity;
+    /// validate period/routing controls on both sides of the sample.
     pub(crate) fn calibration_sample(
         &self,
         identity: &Arc<RootIdentity>,
@@ -272,7 +272,7 @@ impl Counter {
     pub(crate) fn ns(&self, ticks: u64) -> Result<u64, WorkError> {
         self.geometry.ns(ticks).map_err(|_| WorkError::Exhausted)
     }
-    /// Qualify genuine same physical CPU/root before the cached register read;
+    /// Check same physical CPU/root before the cached register read;
     /// no process-only Mapping call is made inside an ISR.
     pub(crate) fn read_irq(&self) -> Result<u64, WorkError> {
         if self.closing || self.retired {
@@ -284,7 +284,7 @@ impl Counter {
         // into two bus reads. Use ordered UC dword transactions and admit a
         // low word only when both surrounding high observations agree.
         for _ in 0..8 {
-            // SAFETY: actual retained same CPU/allroot UC source, exact
+            // SAFETY: same CPU/allroot UC source, exact
             // aligned implemented high/low counter dwords inside live map.
             let (first, low, last) = unsafe {
                 (
@@ -301,7 +301,7 @@ impl Counter {
         }
         Err(WorkError::Unavailable)
     }
-    /// Verify actual advancement when a normal sample equals the preceding
+    /// Verify advancement when a normal sample equals the preceding
     /// value. This is a C0 liveness probe, not a TSC rate or time grant.
     /// Linux hpet_counting uses a 200,000 raw-cycle budget; the finite read cap
     /// also prevents a broken/unavailable TSC from making this loop unbounded.
@@ -326,9 +326,9 @@ impl Counter {
 
     /// # Safety
     /// Every Clock/Runtime/cached pointer/IRQ-entry user has finally stopped and
-    /// drained before this process call. The actual immutable identity (and a
+    /// drained before this process call. The immutable identity (and a
     /// diagnostic source's finite scope) remains live until acknowledged unmap. Wholeblock ownership is
-    /// retained and no future source reader may start.
+    /// and no future source reader may start.
     pub(crate) unsafe fn retire(&mut self) -> Result<(), WorkError> {
         if self.retired {
             return Err(WorkError::Closed);
@@ -336,13 +336,13 @@ impl Counter {
         self.owned.check_process()?;
         self.closing = true;
         if self.started {
-            // SAFETY: actual process/source ownership retained after complete
+            // SAFETY: process/source ownership kept after complete
             // reader drain. Preserve firmware's original stopped configuration.
             let current = unsafe { read32(self.base, 0x10) };
             if current & (ENABLED | LEGACY) != ENABLED {
                 return Err(WorkError::CorruptContext);
             }
-            // SAFETY: sole actual wholeblock owner; no routes were changed.
+            // SAFETY: sole wholeblock owner; no routes were changed.
             // RMW preserves current reserved bits without assuming they stay
             // constant between separate register observations.
             unsafe {
@@ -356,7 +356,7 @@ impl Counter {
             }
             self.started = false;
         }
-        // SAFETY: real source consumer drain plus its retained actual root owner.
+        // SAFETY: real source consumer drain plus its root owner.
         unsafe { self.owned.retire_mapping() }?;
         self.retired = true;
         Ok(())
@@ -366,11 +366,11 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 unsafe fn read32(base: usize, offset: usize) -> u32 {
-    // SAFETY: callers validate actual UC mapping, register bounds and alignment.
+    // SAFETY: callers validate UC mapping, register bounds and alignment.
     unsafe { read_volatile((base + offset) as *const u32) }
 }
 unsafe fn write32(base: usize, offset: usize, value: u32) {
-    // SAFETY: callers supply genuine exclusive handoff and exact writable map.
+    // SAFETY: callers supply exclusive handoff and exact writable map.
     unsafe { write_volatile((base + offset) as *mut u32, value) }
 }
 

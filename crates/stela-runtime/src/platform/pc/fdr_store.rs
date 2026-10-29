@@ -1,6 +1,6 @@
 //! Durable, bounded FDR host-response storage in a preallocated file view.
 //!
-//! Two independent slots retain the previous commit while the next payload,
+//! Two independent slots keep the previous commit while the next payload,
 //! then its header, are flushed. Checksums detect damage; they authenticate
 //! neither the records nor their author. The caller supplies an exclusive
 //! block-device view of exactly [`FILE_BYTES`], never a whole filesystem.

@@ -2,11 +2,11 @@
 // Copyright (C) 2021 MediaTek Inc.
 //! Bounded MT79xx Bluetooth firmware parsing and WMT download framing adapted
 //! from pinned Linux btmtk.c. The explicit native initializer requires observed
-//! silicon/ROM/flavor, exact Provider input and genuine EP0 WMT events. Image
-//! authenticity, physical/radio qualification and guest services remain separate.
+//! silicon/ROM/flavor, exact Provider input and EP0 WMT events. Image
+//! authenticity, physical/radio validation and guest services remain separate.
 //! Normal USB initialization is separate from the source WLAN restart path;
 //! the pinned source establishes no mandatory cross-function probe order.
-//! Each function retains its genuine resource owner. A failed firmware setup,
+//! Each function keeps its resource owner. A failed firmware setup,
 //! a command timeout and a completed dump run btusb_mtk_reset as Linux does:
 //! the btmtk subsystem reset, then a queued USB reset that rebinds the device.
 pub mod coredump;
@@ -53,7 +53,7 @@ pub struct Attempt {
     pub metadata: Option<FirmwareMetadata>,
     pub sections: Vec<SectionReceipt>,
     pub pending_wmt: Option<WmtCommandReceipt>,
-    /// Latest parsed actual EP0 observation, including a response rejected by
+    /// Latest parsed EP0 observation, including a response rejected by
     /// subsequent timing/interrupt/status validation. It never credits success.
     pub last_wmt: Option<WmtEvent>,
     pub endpoint_reset_option_completed: bool,
@@ -371,7 +371,7 @@ mod tests {
             if op == 0x1009 && self.fault == Fault::TrailingEvent {
                 response.extend_from_slice(&[0xff, 0]);
             }
-            // Genuine interrupt event framing still crosses USB transfers.
+            // Interrupt event framing still crosses USB transfers.
             self.events.push_back(response[..1].to_vec());
             self.events.push_back(response[1..].to_vec());
             Ok(())

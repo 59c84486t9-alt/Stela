@@ -38,7 +38,7 @@ fn standard_capability_extents() {
         unsafe { helper.program(MESSAGE) }.unwrap();
         drop(
             // SAFETY: Only synchronous RAM programming occurred; no DMA, posted vector,
-            // callback or deferred user exists before releasing the exact owners.
+            // callback or deferred user exists before releasing the owners.
             unsafe { helper.release() }.unwrap(),
         );
     }
@@ -83,7 +83,7 @@ fn adjacent_extents_and_unknown_versions() {
         }
         let (error, owners) = match
         // SAFETY: Unknown versions are held in live RAM with the exact Function/root
-        // guards retained. No physical delivery exists; admission must reject before
+        // guards kept. No physical delivery exists; admission must reject before
         // writes.
         unsafe { MsiConfig::new(f.function, f.root) } {
             Err(e) => e,

@@ -2,7 +2,7 @@
 // Copyright 1993 -- 1997 Drew Eckhardt, Frederic Potter, David Mosberger-Tang
 // Copyright 1997 -- 2000 Martin Mares <mj@ucw.cz>
 // Copyright (c) 2026 Stela contributors
-//! Retained endpoint PCI PM, with stable main power supplied by the producer.
+//! Endpoint PCI PM, with stable main power supplied by the producer.
 //! PMCSR sequences follow Linux pci.c at cc9de5d4b5ab6459f5774946aa3195ad51236fa8.
 //! This owns real configuration effects, not platform rails or a wake route.
 use super::{CapabilityError, ConfigSpace, Function, Layout, msi::MsiConfigSpace};
@@ -57,7 +57,7 @@ pub unsafe trait Timer {
     fn check(&self) -> Result<(), Error>;
     fn wait_us(&self, microseconds: u64) -> Result<(), Error>;
 }
-// SAFETY: the canonical checked Clock supplies actual calibrated elapsed ticks
+// SAFETY: the canonical checked Clock supplies calibrated elapsed ticks
 // and modular waits. No private timer or absolute counter deadline is used.
 unsafe impl Timer for crate::Clock {
     fn check(&self) -> Result<(), Error> {
@@ -71,7 +71,7 @@ unsafe impl Timer for crate::Clock {
 
 /// The original endpoint configuration, platform power/exclusion and timing
 /// owners. Access is withheld throughout D3hot or an uncertain transition.
-/// Unfinished Drop retains all three, including the actual stable-rail grant.
+/// Unfinished Drop keeps all three, including the stable-rail grant.
 pub struct Power<C: MsiConfigSpace, T: Timer, P> {
     function: Option<Function<C>>,
     timer: Option<T>,
@@ -137,15 +137,15 @@ fn discover<C: MsiConfigSpace>(c: &C) -> Result<(u16, u16), Error> {
 
 impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
     /// # Safety
-    /// Transfer the original actual endpoint and its exclusive configuration/
-    /// resource ownership. `platform` is the actual originating stable-rail,
-    /// reset/removal/firmware/multifunction exclusion owner, retained until
+    /// Transfer the original endpoint and its exclusive configuration/
+    /// resource ownership. `platform` is the originating stable-rail,
+    /// reset/removal/firmware/multifunction exclusion owner, kept until
     /// verified D0 release; a caller-created flag, number or unrelated object
-    /// is never this authority. It keeps main/auxiliary rails and links valid for
+    /// is never this permission. It keeps main/auxiliary rails and links valid for
     /// this entire lifetime, including D3hot; firmware, peers and multifunction
     /// siblings cannot revoke them. The device/board admits this PM sequence.
-    /// These are actual producer grants, not facts inferred from PCI IDs. This
-    /// does not obtain ACPI/platform wake, auxiliary-power or D3cold authority.
+    /// These are producer grants, not facts inferred from PCI IDs. This
+    /// does not obtain ACPI/platform wake, auxiliary-power or D3cold permission.
     /// All operations/final releases obey the original process-context rules.
     pub unsafe fn attach(
         function: Function<C>,
@@ -212,7 +212,7 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         }
     }
 
-    /// Access the exact original function only after actual D0 validation.
+    /// Access the original function only after D0 validation.
     ///
     /// # Safety
     /// Preserve the original function/config owner, address, resource and PM
@@ -231,11 +231,11 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         Ok(result)
     }
 
-    /// Configure actual PME generation and acknowledge its old status, as
+    /// Configure PME generation and acknowledge its old status, as
     /// Linux __pci_pme_active does. This does not install a platform wake route.
     ///
     /// # Safety
-    /// On enable, the caller owns this actual device's prepared wake source,
+    /// On enable, the caller owns this device's prepared wake source,
     /// platform route and auxiliary-power/board/multifunction coordination for
     /// the intended state. On disable, wake/IRQ users cannot race this change.
     pub unsafe fn configure_pme(&mut self, wake: WakeState, enable: bool) -> Result<(), Error> {
@@ -269,12 +269,12 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
     /// Enter stable-rail D3hot. No MMIO or automatic engine restart follows.
     ///
     /// # Safety
-    /// Actual submissions/engines are stopped, all translated/peer/bypass DMA
+    /// Submissions/engines are stopped, all translated/peer/bypass DMA
     /// and posted writes completed, and interrupts/callbacks/work are masked
-    /// and drained. Retain their original owners and payloads through resume
+    /// and drained. Keep their original owners and payloads through resume
     /// and full device reinitialization. BusMaster-clear below is a containment
     /// check, never this completion proof. Device-specific wake is already
-    /// programmed under actual board/platform authority if PME is enabled.
+    /// programmed under board/platform permission if PME is enabled.
     pub unsafe fn suspend(&mut self) -> Result<(), Error> {
         if self.state != State::D0 {
             return Err(Error::State);

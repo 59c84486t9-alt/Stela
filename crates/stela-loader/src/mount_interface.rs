@@ -32,7 +32,7 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// external drive, and `--storage` may share the USB with the install medium.
 /// Revision 6: [`CHOSEN_DISK`] stands for the partition Install macOS chose.
 /// Revision 7: erase installs select `--development-restore` with `--tss`,
-/// retaining the original DEV-board FDR failure policy without an FDR proxy.
+/// keeping the original DEV-board FDR failure policy without an FDR proxy.
 /// Revision 8: `--recovery-bundle` is gone; a recoveryOS boot reads the
 /// disk's own recoveryOS or is refused. Revision 9: the data partition's
 /// bundles, install medium and translation store are under `stela/`, not

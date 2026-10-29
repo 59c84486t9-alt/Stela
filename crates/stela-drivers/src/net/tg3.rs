@@ -9,15 +9,15 @@
 //! queue with requester-domain DMA and explicit retirement. BCM5761 requires
 //! function-zero NIC wiring and recognized NVM; its original CLKREQ setting
 //! selects the source per-speed send-BD workaround. These
-//! bounded source-reviewed packet profiles have native model qualification;
-//! hardware remains unqualified. See `tg3/THIRD_PARTY.md`. Managed, SerDes and
+//! bounded source-reviewed packet profiles have native model validation;
+//! hardware remains unchecked. See `tg3/THIRD_PARTY.md`. Managed, SerDes and
 //! all other ASIC/revision profiles explicitly refuse.
 //!
-//! All named chips have an APE window. MDIO takes the actual per-function APE
+//! All named chips have an APE window. MDIO takes the per-function APE
 //! PHY grant, even when management firmware is not running. Linux's ignored
 //! lock failures, firmware timeout fallback and silent stop timeout are
-//! deliberately errors here. An uncertain operation poisons and retains the
-//! actual register owner, never permitting a new epoch by object reconstruction.
+//! errors here. An uncertain operation poisons and keeps the
+//! register owner, never permitting a new epoch by object reconstruction.
 mod filter;
 mod geometry;
 pub use filter::ReceiveFilter;
@@ -74,16 +74,16 @@ impl From<crate::bus::pci::CapabilityError> for Error {
     }
 }
 
-/// Actual serialized PCI/MAC/APE register ownership.
+/// Serialized PCI/MAC/APE register ownership.
 ///
 /// # Safety
-/// Implementors retain one real exclusively reserved PCI function, its actual
+/// Implementors keep one real exclusively reserved PCI function, its
 /// configuration mapping, and its UC MAC BAR0 and APE BAR2 mappings. Reads and
 /// writes are ordered native little-endian device accesses with complete bounds
-/// checks and errors on removal. Config writes use actual required widths;
+/// checks and errors on removal. Config writes use required widths;
 /// there are no other firmware/SMM/driver/IRQ users. MMIO must remain powered
 /// and mapped until the owner is explicitly retired. A caller-supplied identity,
-/// address cast, unrelated retention token or mock cannot grant native authority.
+/// address cast, unrelated retention token or mock cannot grant native permission.
 pub unsafe trait Registers {
     fn function_number(&self) -> u8;
     fn config_read32(&mut self, at: u16) -> Result<u32, Error>;
@@ -95,7 +95,7 @@ pub unsafe trait Registers {
     fn ape_write32(&mut self, at: u32, value: u32) -> Result<(), Error>;
 }
 
-/// Original calibrated timing retained in the device's qualified context.
+/// Original calibrated timing kept in the device's checked context.
 /// The shared timer checks unavailable rates and uses modular elapsed ticks;
 /// its successful waits preserve the complete requested minimum duration.
 pub use crate::bus::pci::power::Timer as Delay;

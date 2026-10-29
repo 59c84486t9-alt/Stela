@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Linux USB HID lifecycle/control reference and retained notices:
+// Linux USB HID lifecycle/control reference and kept notices:
 // usb/THIRD_PARTY.md and the parent HID module.
-//! Acknowledged native HID endpoint stop/restart and retained diagnostics.
+//! Acknowledged native HID endpoint stop/restart and kept diagnostics.
 use super::*;
 
 impl UsbInput {
@@ -14,7 +14,7 @@ impl UsbInput {
     pub fn descriptor(&self) -> Option<&Descriptor> {
         self.translator.descriptor()
     }
-    /// Actual descriptor bytes, even when boot fallback was selected.
+    /// Descriptor bytes, even when boot fallback was selected.
     pub fn report_descriptor(&self) -> &[u8] {
         &self.report_descriptor
     }
@@ -56,7 +56,7 @@ impl UsbInput {
         })
     }
 
-    /// Resume polling this same retained device after an acknowledged stop.
+    /// Resume polling this same device after an acknowledged stop.
     /// Retired slot aliases and poisoned endpoints are rejected by the controller.
     pub fn restart(&mut self) -> Result<(), BlockError> {
         self.invalidate_touch();

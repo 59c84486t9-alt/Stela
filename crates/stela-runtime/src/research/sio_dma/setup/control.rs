@@ -4,8 +4,8 @@ use super::{Effect, EffectResult, FinishError, Request, TunableProgram};
 use crate::research::sio_dma::Error;
 use stela_contracts::dma::Port;
 
-/// A physical map range qualified by the actual owner. Geometry alone does
-/// not qualify its registers; requests still use checked machine MMIO.
+/// A physical map range checked by the owner. Geometry alone does
+/// not check its registers; requests still use checked machine MMIO.
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalRange {
     pub base: u64,
@@ -33,7 +33,7 @@ struct Pending {
     program: Option<TunableProgram>,
 }
 
-/// The controller generation qualifies a program-local effect ticket. A stale
+/// The controller generation checks a program-local effect ticket. A stale
 /// result from a previous SET_PARAM cannot retire an identical new operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlEffect {
@@ -139,7 +139,7 @@ impl TunableControl {
             .is_some_and(|pending| pending.phase == Phase::Table)
     }
 
-    /// Acquire RAM through the actual IOMMU stream before exposing a physical
+    /// Acquire RAM through the IOMMU stream before exposing a physical
     /// effect. A fault keeps the request/fields for retry and emits no ACK.
     pub fn dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), Error> {
         let Some(pending) = self
@@ -205,7 +205,7 @@ impl TunableControl {
 
     /// Peek the committed ACK; the transport must commit delivery before
     /// releasing it. Original VA0x45b8/0x45d4 returns request kind3 in high32,
-    /// not a fabricated zero status. Request parameter is absent from ACK.
+    /// not an invented zero status. Request parameter is absent from ACK.
     pub fn reply(&self) -> Option<u64> {
         self.pending
             .as_ref()

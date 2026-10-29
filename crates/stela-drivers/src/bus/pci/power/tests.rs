@@ -132,7 +132,7 @@ impl ConfigSpace for Config {
     }
 }
 // SAFETY: this independent device model implements real-width PCI writes and
-// PMCSR W1C/RO/reset behavior; no production hardware authority is fabricated.
+// PMCSR W1C/RO/reset behavior; no production hardware permission is invented.
 unsafe impl MsiConfigSpace for Config {}
 struct ModelTimer(Rc<RefCell<Device>>);
 impl Drop for ModelTimer {
@@ -213,7 +213,7 @@ fn fixture(no_reset: bool) -> (Function<Config>, ModelTimer, Rc<RefCell<Device>>
 }
 fn owner(no_reset: bool) -> (Owner, Rc<RefCell<Device>>) {
     let (function, timer, device) = fixture(no_reset);
-    // SAFETY: one actual independent model with original exclusively owned
+    // SAFETY: one independent model with original exclusively owned
     // config/timing handles; stable modeled rails and no concurrent actors.
     let power = unsafe { Power::attach(function, timer, Platform(device.clone()), D3_DELAY) }
         .unwrap_or_else(|(error, _, _, _)| panic!("valid model: {error:?}"));
@@ -345,10 +345,10 @@ fn unsupported_wake_and_bus_master_refuse_before_effects() {
 fn d3hot_only_pme_is_armed_in_d0_for_the_actual_target_state() {
     let (function, timer, d) = fixture(true);
     d.borrow_mut().put_word(PM + 2, 3 | (1 << 14));
-    // SAFETY: same actual isolated original configuration/platform owner.
+    // SAFETY: same isolated original configuration/platform owner.
     let mut power = unsafe { Power::attach(function, timer, Platform(d.clone()), D3_DELAY) }
         .unwrap_or_else(|_| panic!("D3hot-only wake capability"));
-    // SAFETY: fixture's actual D3hot wake setup and route are prepared in D0.
+    // SAFETY: fixture's D3hot wake setup and route are prepared in D0.
     unsafe { power.configure_pme(WakeState::D3hot, true) }.unwrap();
     assert_eq!(d.borrow().word(CSR) & (STATE | PME_ENABLE), PME_ENABLE);
     suspend(&mut power).unwrap();
@@ -556,7 +556,7 @@ fn unwinding_original_function_access_keeps_its_owner_quarantined() {
     let (mut power, d) = owner(true);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: no extraction, resource change or concurrent consumer. The
-        // test deliberately unwinds before the callback can return normally.
+        // test unwinds before the callback can return normally.
         let _ = unsafe { power.with_d0::<()>(|_| panic!("device callback failure")) };
     }));
     assert!(result.is_err());
@@ -593,7 +593,7 @@ fn owned_native_config_is_the_same_original_mapping_through_d0_release() {
     // effects. Only D0 accesses are tested; PMCSR hardware is modeled above.
     let mut power = unsafe { Power::attach(function, timer, Platform(d), D3_DELAY) }
         .unwrap_or_else(|_| panic!("valid original native owner"));
-    // SAFETY: retain the actual function, change only native Command.
+    // SAFETY: keep the function, change only native Command.
     unsafe { power.with_d0(|f| f.config().write16(4, INTX_DISABLE)) }.unwrap();
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
     let (function, _, _) = power.release().unwrap_or_else(|_| panic!("verified D0"));
@@ -646,7 +646,7 @@ fn unchanged_linux_pm_functions_match_3072_source_cases() {
                     panic!("exact native word store");
                 };
                 assert_eq!(offset, CSR);
-                // Native omits RO/reserved bits; all actual writable effects
+                // Native omits RO/reserved bits; all writable effects
                 // and the complete resulting hardware image match Linux.
                 let writable = STATE | PME_ENABLE | DATA_SELECT | PME_STATUS;
                 assert_eq!(written & writable, raw & writable);
@@ -657,7 +657,7 @@ fn unchanged_linux_pm_functions_match_3072_source_cases() {
                 suspend(&mut power).unwrap();
                 let d = d.borrow();
                 // Linux's ordinary low-power RMW replays PME_Status. The
-                // native transition deliberately preserves a pending event.
+                // native transition preserves a pending event.
                 assert_eq!(d.word(CSR), after | (before & PME_STATUS));
                 let Effect::Word(offset, written) = d.effects[1] else {
                     panic!("native PMCSR store after decoding containment");

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Packet-list ownership above the actual xHCI service-interval queue.
-//! The native controller validates schedules from its own MFINDEX and retained
+//! Packet-list ownership above the xHCI service-interval queue.
+//! The native controller validates schedules from its own MFINDEX and kept
 //! endpoint queue. This adapter never invents a guest frame calendar.
 use super::*;
 use core::sync::atomic::{Ordering, fence};
@@ -24,7 +24,7 @@ pub(super) struct IsoRequest {
 impl Device {
     /// Queue a bounded list of consecutive ASAP service intervals. Each entry
     /// is one native TD, including a zero-length entry. Packet lengths partition
-    /// `out` for OUT endpoints; IN requires an empty `out`. Up to eight retained
+    /// `out` for OUT endpoints; IN requires an empty `out`. Up to eight kept
     /// requests and 128 uncollected packets per endpoint are permitted, with at
     /// most 32 packets and 64 KiB of bounce storage in one request.
     ///
@@ -42,12 +42,12 @@ impl Device {
     }
 
     /// Queue consecutive service intervals starting at a caller-selected native
-    /// microframe, or preserve the native ASAP policy. The actual addressed
+    /// microframe, or preserve the native ASAP policy. The addressed
     /// endpoint supplies the interval and queued continuation. The controller
     /// preflights every requested slot before payload allocation or publication,
     /// then validates each TD again as it is submitted. Clock movement or a
     /// controller failure during publication cancels the entire endpoint through
-    /// its real acknowledgement path; failed retirement retains all buffers.
+    /// its real acknowledgement path; failed retirement keeps all buffers.
     ///
     /// Explicit requests require an encodable first phase, the controller's
     /// scheduling window, and Contiguous Frame ID capability for continuation.
@@ -89,8 +89,8 @@ impl Device {
         {
             return Err(BlockError::Unsupported("forwarded ISO request queue limit"));
         }
-        // This is only an extent preflight against the retained original
-        // descriptor. Native submit_iso independently validates its actual
+        // This is only an extent preflight against the original
+        // descriptor. Native submit_iso independently validates its
         // configured recipe, route, controller capability and ring ownership.
         let payload = if let Some(companion) = endpoint.companion {
             usize::from(companion.bytes_per_interval)
@@ -205,7 +205,7 @@ impl Device {
         if let Some(error) = failure {
             self.cancel(address)?;
             // No successful submission returned this identity. Earlier requests
-            // retain their cancellation completions; this failed call returns
+            // keep their cancellation completions; this failed call returns
             // its error directly instead of exposing a phantom completion.
             self.completed.retain(|done| done.request != request);
             return Err(error);
@@ -213,7 +213,7 @@ impl Device {
         Ok(request)
     }
 
-    /// Observe only actual terminal packet events. This does not release the
+    /// Observe only terminal packet events. This does not release the
     /// request buffer or turn a transport failure into DMA retirement.
     pub(super) fn collect_isochronous(&mut self, request: Request) -> Result<(), BlockError> {
         let pending = self.iso_requests.get_mut(&request).unwrap();

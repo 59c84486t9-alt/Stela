@@ -10,8 +10,8 @@
 // Copyright 2026 Google LLC. BIP-GMAC nonce and AAD follow Linux
 // net/mac80211/aes_gmac.c: Copyright 2015, Qualcomm Atheros, Inc.
 // Original notices and source pin in THIRD_PARTY.md.
-//! Group robust-management authentication under an actually retained IGTK.
-//! Authentication is not PMF negotiation, current-association/port authority,
+//! Group robust-management authentication under an IGTK.
+//! Authentication is not PMF negotiation, current-association/port permission,
 //! physical key completion or permission to act on a delayed management frame.
 
 use super::{KeyIdentity, KeyScope, PacketNumber, valid_receive_observations};
@@ -148,7 +148,7 @@ impl<'a> Authenticated<'a> {
     }
 }
 
-// Kept only by an actual vendor key owner; pending/uncertain keys cannot call
+// Kept only by a vendor key owner; pending/uncertain keys cannot call
 // authenticate. AES expanded keys and CMAC subkeys are zeroized on real drain.
 // The native owner still controls ACK, namespace, generation and retirement.
 pub(crate) struct BipKey {
@@ -436,7 +436,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     fn gtk() -> KeyIdentity {
-        // SAFETY: independent pure protocol oracle, no actual hardware namespace/users.
+        // SAFETY: independent pure protocol oracle, no hardware namespace/users.
         let mut slot = unsafe { KeySlot::new(7) }.unwrap();
         let ticket = slot
             .begin_install(
@@ -527,7 +527,7 @@ mod tests {
             ]
         );
         let mut hash = Sha256::new();
-        // 384 exact unchanged source CMAC/AAD/IPN helper cases; no hardware claim.
+        // 384 exact unchanged source CMAC/AAD/IPN helper cases.
         for i in 0usize..384 {
             let body = i % 131;
             let len = 24 + body + 18;

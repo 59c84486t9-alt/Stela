@@ -14,9 +14,9 @@ use core::{
 static QUARANTINED_MAPPINGS: AtomicU64 = AtomicU64::new(0);
 static QUARANTINED_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// Cumulative retained resources whose owner dropped an active DMA lease.
+/// Cumulative kept resources whose owner dropped an active DMA lease.
 /// These monotonic counters saturate instead of wrapping. They do not claim
-/// that retained pages or translations have been reclaimed by reset.
+/// that pages or translations have been reclaimed by reset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QuarantineStatus {
     pub mappings: u64,
@@ -91,10 +91,10 @@ pub struct DomainMapping {
 /// fit `address_limit`. Mapping identifiers must be
 /// unique until successful unmap; IOVAs must not alias other live allocations.
 /// `unmap` must remove translations and complete all required invalidations
-/// before success. On failure it must retain the mapping/domain reservation so
+/// before success. On failure it must keep the mapping/domain reservation so
 /// a retry cannot target reused state. Sync operations perform the platform's
-/// actual cache/ordering work for the given direction, not just compiler
-/// fences. A domain may not shut down while any lease retains its Arc.
+/// cache/ordering work for the given direction, not just compiler
+/// fences. A domain may not shut down while any lease keeps its Arc.
 /// Implementations may require process/deferred context for every operation
 /// and final release; Send/Sync does not imply hard-IRQ-safe release.
 pub unsafe trait DmaDomain: Send + Sync {
@@ -104,7 +104,7 @@ pub unsafe trait DmaDomain: Send + Sync {
         DomainKind::Isolated
     }
     /// # Safety
-    /// Retain the supplied page pin and this domain until successful quiescent
+    /// Keep the supplied page pin and this domain until successful quiescent
     /// unmap; uncertain teardown must quarantine both. Prefer `DmaMapping`.
     unsafe fn map(
         &self,
@@ -126,7 +126,7 @@ pub unsafe trait DmaDomain: Send + Sync {
         direction: Direction,
     ) -> Result<(), DmaError>;
     /// # Safety
-    /// As for `sync_for_device`, and actual hardware completion establishes
+    /// As for `sync_for_device`, and hardware completion establishes
     /// CPU ownership of this range before cache invalidation or CPU access.
     unsafe fn sync_for_cpu(
         &self,
@@ -138,8 +138,8 @@ pub unsafe trait DmaDomain: Send + Sync {
     /// Observe one little-endian word while the device may keep writing.
     ///
     /// Unlike `sync_for_cpu`, this transfers no ownership. Implementations
-    /// must independently qualify coherent device/CPU access to the actual
-    /// mapping's retained RAM; CPU WB policy or an ordering fence alone cannot
+    /// must independently check coherent device/CPU access to the
+    /// mapping's RAM; CPU WB policy or an ordering fence alone cannot
     /// grant that capability. Read from those exact pins, without accepting a
     /// caller's unrelated CPU pointer. Never invalidate a live device buffer.
     /// Each aligned word is an observation, not an atomic multiword snapshot
@@ -159,31 +159,31 @@ pub unsafe trait DmaDomain: Send + Sync {
     }
 
     /// Complete previously issued translated DMA payload writes through this
-    /// domain's actual owned remapper/root path.
+    /// domain's owned remapper/root path.
     ///
     /// This does not stop a device, drain IRQ/work callbacks, remove mappings,
     /// or certify posted MSI, peer/bypass traffic, or accesses outside that
     /// translated payload path. Success must
-    /// come from actual hardware completion, not BusMaster-clear, a CPU fence,
+    /// come from hardware completion, not BusMaster-clear, a CPU fence,
     /// or translation invalidation without its required write-drain semantics.
-    /// Failure must retain the domain, translations, pins and root owners.
+    /// Failure must keep the domain, translations, pins and root owners.
     ///
     /// # Safety
     /// Device engines and submissions are stopped and cannot issue new DMA.
-    /// The driver retains all target backing, configuration and root owners
+    /// The driver keeps all target backing, configuration and root owners
     /// through this operation and subsequent IRQ/work drain and unmapping.
     unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
         Err(DmaError::DrainUnavailable)
     }
 }
 
-/// Keeps the actual page pin and domain alive until quiescence, unmap and
+/// Keeps the page pin and domain alive until quiescence, unmap and
 /// completed IOTLB invalidation. The consumer owns device completion/fences.
 ///
 /// A lease dropped without successful explicit `unmap` is quarantined: its
-/// domain and pins are deliberately retained. Drop cannot establish device
+/// domain and pins are held. Drop cannot establish device
 /// quiescence, and must never return potentially active DMA pages to a heap.
-/// `quarantine_status` makes abandoned leases and retained bytes observable.
+/// `quarantine_status` makes abandoned leases and kept bytes observable.
 pub struct DmaMapping {
     domain: Option<Arc<dyn DmaDomain>>,
     pages: Option<DmaPages>,
@@ -199,7 +199,7 @@ impl DmaMapping {
         address_limit: u64,
     ) -> Result<Self, DmaError> {
         let pages = pages.into();
-        // SAFETY: the lease retains pages/domain through acknowledged unmap,
+        // SAFETY: the lease keeps pages/domain through acknowledged unmap,
         // quarantining them if a caller drops it without proving quiescence.
         let mapping = unsafe { domain.map(&pages, direction, address_limit)? };
         let mut lease = Self {
@@ -243,18 +243,18 @@ impl DmaMapping {
 
     pub fn sync_for_device(&self, range: Range<usize>) -> Result<(), DmaError> {
         let domain = self.domain(&range)?;
-        // SAFETY: private token/direction came from this retained domain; the
-        // live lease and checked range preserve its actual reserved bounds.
+        // SAFETY: private token/direction came from this domain; the
+        // live lease and checked range preserve its reserved bounds.
         unsafe { domain.sync_for_device(self.mapping, range, self.direction) }
     }
 
     /// # Safety
     /// The device has completed the relevant reads/writes and cannot access
     /// the range until the next ownership transfer. The consumer must observe
-    /// the actual hardware completion/fence before reading CPU memory.
+    /// the hardware completion/fence before reading CPU memory.
     pub unsafe fn sync_for_cpu(&self, range: Range<usize>) -> Result<(), DmaError> {
         let domain = self.domain(&range)?;
-        // SAFETY: token/direction/bounds are retained and checked; the caller
+        // SAFETY: token/direction/bounds are held and checked; the caller
         // establishes hardware completion and CPU ownership of the range.
         unsafe { domain.sync_for_cpu(self.mapping, range, self.direction) }
     }
@@ -268,14 +268,14 @@ impl DmaMapping {
         if !offset.is_multiple_of(4) || self.direction == Direction::ToDevice {
             return Err(DmaError::InvalidRange);
         }
-        // SAFETY: this retained private token/direction and checked aligned
-        // range name the actual mapping. Safe CPU aliases expose no writers;
+        // SAFETY: this private token/direction and checked aligned
+        // range name the mapping. Safe CPU aliases expose no writers;
         // raw CPU access already requires the caller's synchronization.
         unsafe { domain.read_coherent_u32(self.mapping, offset, self.direction) }
     }
 
     /// Release only after hardware completion and a stopped submission path.
-    /// An invalidation failure retains the complete lease for retry/reset.
+    /// An invalidation failure keeps the complete lease for retry/reset.
     ///
     /// # Safety
     /// All device accesses to this mapping have finished, submissions and IRQ
@@ -283,7 +283,7 @@ impl DmaMapping {
     /// backend and backing's process/deferred-context restrictions apply.
     pub unsafe fn unmap(&mut self) -> Result<(), DmaError> {
         let domain = self.domain.as_ref().ok_or(DmaError::Unmapped)?;
-        // SAFETY: the caller supplied hardware quiescence; this retained
+        // SAFETY: the caller supplied hardware quiescence; this kept
         // mapping was created by exactly this domain and has not been reused.
         unsafe { domain.unmap(self.mapping)? };
         self.domain = None;
@@ -328,7 +328,7 @@ mod tests {
     unsafe impl Send for ModelBacking {}
     // SAFETY: no safe CPU references or asynchronous writes in this model.
     unsafe impl Sync for ModelBacking {}
-    // SAFETY: this model's owned RAM represents one retained physical page;
+    // SAFETY: this model's owned RAM represents one physical page;
     // no hardware DMA or privileged physical mapping is claimed by the test.
     unsafe impl PageBacking for ModelBacking {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -357,7 +357,7 @@ mod tests {
         }
     }
     struct ModelDomain;
-    // SAFETY: synchronous model, no actual hardware translations. The test
+    // SAFETY: synchronous model, no hardware translations. The test
     // specifically verifies resource ownership when no quiescence is proven.
     unsafe impl DmaDomain for ModelDomain {
         unsafe fn map(
@@ -400,7 +400,7 @@ mod tests {
     fn abandoning_active_dma_retains_real_backing_and_domain_and_reports_quarantine() {
         let released = Arc::new(AtomicUsize::new(0));
         let layout = Layout::from_size_align(4096, 4096).unwrap();
-        // SAFETY: actual uniquely owned model RAM, released only by backing.
+        // SAFETY: uniquely owned model RAM, released only by backing.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let pages = PinnedPages::new(
             Box::new(ModelBacking {
@@ -427,7 +427,7 @@ mod tests {
         // the checks above independently prove its own backing/domain remain.
         assert!(after.mappings > before.mappings);
         assert!(after.bytes >= before.bytes + 4096);
-        // Deliberate retained allocation: no fake completion/reset is supplied.
+        // Deliberate kept allocation: no fake completion/reset is supplied.
     }
 
     #[test]
@@ -451,7 +451,7 @@ mod tests {
         ] {
             let released = Arc::new(AtomicUsize::new(0));
             let layout = Layout::from_size_align(4096, 4096).unwrap();
-            // SAFETY: actual zeroed, uniquely retained model RAM.
+            // SAFETY: zeroed, uniquely kept model RAM.
             let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
             let pin = PinnedPages::new(
                 Box::new(ModelBacking {

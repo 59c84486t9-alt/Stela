@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Complete source RDMAC mode, independently checked alongside raw frame I/O.
+//! Complete source RDMAC mode, checked alongside raw frame I/O.
 use super::*;
 
 fn parts_for(chip: u32) -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {

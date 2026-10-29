@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2007 Alexey Starikovskiy
-//! ACPI EC-SMB-HC transactions through the actual owned EC address space.
+//! ACPI EC-SMB-HC transactions through the owned EC address space.
 //!
 //! Linux `drivers/acpi/sbshc.c` supplies the register/protocol reference. Polling
 //! observes the ACPI-defined STATUS-before-PROTOCOL completion boundary instead
@@ -47,21 +47,21 @@ enum Protocol {
     ProcessCall = 12,
 }
 
-/// Actual EC byte transactions, including their original failure evidence.
+/// EC byte transactions, including their original failure evidence.
 /// # Safety
-/// These are ordered accesses to the same retained, exclusively owned native
-/// EC/reset epoch. A successful write acknowledges the EC's actual byte effect;
+/// These are ordered accesses to the same kept, exclusively owned native
+/// EC/reset epoch. A successful write acknowledges the EC's byte effect;
 /// errors may follow an effect. This provider establishes byte-level EC
-/// arbitration only. Host::claim separately requires the caller's actual
+/// arbitration only. Host::claim separately requires the caller's
 /// whole-mailbox firmware/AML ownership grant across a host operation.
 pub unsafe trait EcAccess {
     fn read(&mut self, address: u8) -> Result<u8, ec::Error>;
     fn write(&mut self, address: u8, value: u8) -> Result<(), ec::Error>;
 }
 
-// SAFETY: Ec's construction/Registers/FirmwareLock contracts retain the actual
+// SAFETY: Ec's construction/Registers/FirmwareLock contracts keep the
 // EC and acknowledge each ordered byte operation; Host additionally requires
-// exclusive authority over the complete EC-SMB-HC sequence.
+// exclusive permission over the complete EC-SMB-HC sequence.
 unsafe impl<R: ec::Registers, T: Timer, G: ec::FirmwareLock> EcAccess for ec::Ec<R, T, G> {
     fn read(&mut self, address: u8) -> Result<u8, ec::Error> {
         ec::Ec::read(self, address)
@@ -112,7 +112,7 @@ pub struct Error {
     /// At least one native EC write was attempted. An error does not authorize
     /// automatic replay, including when firmware reports terminal failure.
     pub published: bool,
-    /// Last actually acknowledged byte, even if that access crossed a deadline.
+    /// Last acknowledged byte, even if that access crossed a deadline.
     pub last_read: Option<ObservedRead>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,7 +132,7 @@ pub struct AlarmProgress {
     pub data: [Option<u8>; 2],
 }
 
-/// Polled host; uncertain writes/timeouts retain the actual EC owner on Drop.
+/// Polled host; uncertain writes/timeouts keep the EC owner on Drop.
 pub struct Host<E: EcAccess + 'static, T: Timer + 'static = Clock> {
     owners: Option<(E, T)>,
     descriptor: Descriptor,
@@ -147,14 +147,14 @@ pub struct Host<E: EcAccess + 'static, T: Timer + 'static = Clock> {
 }
 impl<E: EcAccess + 'static, T: Timer + 'static> Host<E, T> {
     /// # Safety
-    /// Actual ACPI0001/ACPI0005 identity and its `_EC` result were evaluated
-    /// under the retained namespace/resource owner. Own the matching live EC,
+    /// ACPI0001/ACPI0005 identity and its `_EC` result were evaluated
+    /// under the namespace/resource owner. Own the matching live EC,
     /// all host registers and firmware/AML arbitration across whole operations,
     /// not just individual EC bytes. No competing host command or ALARM handler
     /// may modify the mailbox. Existing native queries remain the platform's
     /// responsibility; this owner does not install or consume them. Timer is an
-    /// actually advancing, qualified monotonic source. Providers own their
-    /// retained resources; borrowed nonstatic owners cannot satisfy quarantine.
+    /// advancing, checked monotonic source. Providers own their
+    /// resources; borrowed nonstatic owners cannot satisfy quarantine.
     /// Process/deferred context.
     pub unsafe fn claim(
         space: E,
@@ -221,7 +221,7 @@ impl<E: EcAccess + 'static, T: Timer + 'static> Host<E, T> {
             .0
             .read(self.descriptor.offset + register)
             .map_err(ErrorKind::Ec)?;
-        // Preserve actual acknowledged evidence before checking elapsed time.
+        // Preserve acknowledged evidence before checking elapsed time.
         // A deadline never authorizes publishing the caller's read output.
         self.last_read = Some(ObservedRead {
             address: self.descriptor.offset + register,
@@ -270,7 +270,7 @@ impl<E: EcAccess + 'static, T: Timer + 'static> Host<E, T> {
                 && self.status & (DONE | RESERVED_STATUS) == 0
                 && matches!(self.status & CODE, 7 | 0x10..=0x13 | 0x17..=0x1a | 0x1f);
             // A fully observed firmware NACK/access-denied/etc. completion is
-            // not uncertain host execution. Return its actual error without
+            // not uncertain host execution. Return its error without
             // automatically replaying it or permanently disabling this host.
             self.quarantined |= uncertain_ec || (self.published && !terminal_error);
             if self.error.is_none() {
@@ -293,7 +293,7 @@ impl<E: EcAccess + 'static, T: Timer + 'static> Host<E, T> {
         pec: bool,
     ) -> Result<(), ErrorKind> {
         let start = self.start()?;
-        // Preflight all caller input before any actual EC access.
+        // Preflight all caller input before any EC access.
         if let Transaction::WriteBlock { data, .. } = &transaction
             && !(1..=smbus::MAX_BLOCK).contains(&data.len())
         {
@@ -385,7 +385,7 @@ impl<E: EcAccess + 'static, T: Timer + 'static> Host<E, T> {
         }
         Ok(())
     }
-    /// Read and acknowledge one real hardware alarm. Retain partial evidence on
+    /// Read and acknowledge one real hardware alarm. Keep partial evidence on
     /// an EC failure; after a failed ACK it is never automatically retried.
     pub fn poll_alarm(&mut self) -> Result<Option<Alarm>, Error> {
         let result = (|| {

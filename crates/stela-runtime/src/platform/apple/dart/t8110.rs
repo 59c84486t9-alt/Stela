@@ -57,7 +57,7 @@
 //! The transaction-limit configuration at +0x228/+0x22c is saved on resume
 //! (0xcc678..0xcc684), restored through the write-or-verify helper
 //! (0xcc9cc..0xcc9f0), and clamped to zero by `clamp_tlimits`
-//! (0xc8bd0..0xc8be0). Each full-word value retains writes, initially zero.
+//! (0xc8bd0..0xc8be0). Each full-word value keeps writes, initially zero.
 //! DMA is synchronous with no outstanding transaction queue, so the clamp
 //! has no queued transaction to drain; no physical credit rate is invented.
 //!
@@ -131,7 +131,7 @@
 //!   for an invalid entry, its level in [13:12]. As for gen3, the complete
 //!   status header, the auxiliary AXI fields (`_DART_ERR_SID_AXI_ID`
 //!   0xfffffe0009f319a4), a second fault on a pending stream and a record
-//!   read after acknowledgement are unqualified and refuse. ERROR,
+//!   read after acknowledgement are unchecked and refuse. ERROR,
 //!   ERROR_ADDRESS and ERROR_STREAMS are unused: SPTM's CLEAR_ERR raises a
 //!   violation from 2.2 (0xfffffff0270cfdf8), so they refuse. ERROR_MASK
 //!   moves to 0x4060 (SPTM table file 0x159d0); SPTM only writes it zero,
@@ -156,7 +156,7 @@
 //!   window's end has no recovered register (iBoot's DART driver maps only
 //!   0x4000 or 0xc000 bytes, J604 iBoot VA 0x100c1b90ef0), so it refuses.
 //!
-//! Full family evidence, capability gates and qualification gaps are in
+//! Full family evidence, capability gates and validation gaps are in
 //! `docs/research/dart-iommu.md`. The paired SMMU view exposes the capture
 //! count of this cacheless implementation, not a physical chip's dump.
 use super::descriptor::Format;
@@ -222,13 +222,13 @@ const TLB_STREAM: u32 = 0xff;
 /// SPTM's invalidation requests (file 0xc8618..0xc8718): OP 0 and 4 on
 /// every instance, OP 1 for one stream, optionally (bit 14) bounded by the
 /// range words at +0x98/+0xa0, and OP 2 with its parameter at +0x84. Bits
-/// 13 and 15 qualify a request further: SPTM's whole-DART flush is OP 0
+/// 13 and 15 check a request further: SPTM's whole-DART flush is OP 0
 /// with bit 13, and bit 15 too from version 2.2 on (file 0xcd7cc..0xcd7dc).
 /// A ranged stream flush is OP 1 with bits 13 and 14, adding bit 12 unless
 /// its caller passes a nonzero flag (T8112 VA 0xfffffff0270d2c20..
 /// 0xfffffff0270d2c2c, T8132 VA 0xfffffff0270d5940). With no translation
 /// cached, each completes at once whatever subset it names; the words are
-/// retained.
+/// kept.
 const TLB_OPS: [u32; 4] = [TLB_OP_FLUSH_ALL, TLB_OP_FLUSH_STREAM, 2 << 8, 4 << 8];
 const TLB_QUALIFIERS: u32 = 1 << 12 | 1 << 13 | 1 << 14 | 1 << 15;
 const TLB_PARAMETER: u64 = 0x84;
@@ -262,7 +262,7 @@ const TLIMITS: [u64; 2] = [0x228, 0x22c];
 /// absent here (their words refuse), so no counter interrupt is ever
 /// pending. At 0x720 power-up writes one bit per stream from SPTM's set of
 /// streams in use (file 0xcc948); whether these gate the error interrupt
-/// per stream is unrecovered, so they are retained and the error
+/// per stream is unrecovered, so they are held and the error
 /// interrupt follows ERROR_MASK alone.
 const PERF_INTERRUPT_ENABLE: u64 = 0x700;
 const PERF_INTERRUPT_STATUS: u64 = 0x704;
@@ -765,7 +765,7 @@ impl Dart {
     }
 
     /// Latch a fault: revision 1.0's first ERROR, or revision 2.2's
-    /// stream record, whose second capture is unqualified and refuses.
+    /// stream record, whose second capture is unchecked and refuses.
     fn report(
         &mut self,
         sid: usize,
@@ -1645,7 +1645,7 @@ mod tests {
         dart.set_power(false, true, &mut a);
         dart.set_power(true, true, &mut a);
         assert_eq!(dart.read(PROTECT_LOCK, Width::Word, &mut a), Ok(1));
-        // Reset assertion clears state even when the supply retained it.
+        // Reset assertion clears state even when the supply it.
         dart.set_reset(true, &mut a);
         assert!(dart.read(TCR + 4, Width::Word, &mut a).is_err());
         assert!(dart.write(TCR, Width::Word, 1, &mut a).is_err());
@@ -1789,8 +1789,8 @@ mod tests {
         assert!(plain.read(DAPF_OFFSET, Width::Word, &mut access).is_err());
     }
 
-    /// Original programming inputs are qualified independently of active APF
-    /// transfer semantics. This fixture intentionally preserves that refusal.
+    /// Original programming inputs are checked independently of active APF
+    /// transfer semantics. This fixture preserves that refusal.
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_pmp_apf_programming_retains_all_slices_without_granting_dma() {
@@ -2058,7 +2058,7 @@ mod tests {
                 d.translate(&mut ram, 4, 0, 0, false, &mut a),
                 Err(DmaError::Fault(Fault::NoTtbr as u32))
             );
-            // A second fault of a pending stream is unqualified.
+            // A second fault of a pending stream is unchecked.
             assert_eq!(
                 d.translate(&mut ram, 1, dva, dva + 3, true, &mut a),
                 Err(DmaError::Unsupported(
@@ -2068,7 +2068,7 @@ mod tests {
             assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(1 << 4 | 1 << 1));
             assert_eq!(d.read(record + 8, Width::Word, &mut a), Ok(0x200_4010));
             assert_eq!(d.read(record + 12, Width::Word, &mut a), Ok(HIGH >> 32));
-            // The complete status header and auxiliary data are unqualified.
+            // The complete status header and auxiliary data are unchecked.
             for offset in [record, record + 4, record + 0x18] {
                 assert!(d.read(offset, Width::Word, &mut a).is_err());
             }

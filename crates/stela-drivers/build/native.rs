@@ -205,9 +205,9 @@ impl Linux {
         build.objects(crc_objects);
         linux_archive(&build, "stela-linux", &kernel, &upstream);
         // A callable target-ABI fixture plus host helpers only. It links the
-        // SAME production common archive/Rust heap as the actual unit binary;
+        // SAME production common archive/Rust heap as the unit binary;
         // never mix duplicate native/hosted common archives. The standalone
-        // C suites below retain their separate sanitizer-linked programs.
+        // C suites below keep their separate sanitizer-linked programs.
         if env::var("TARGET").ok() == env::var("HOST").ok()
             && matches!(
                 env::var("CARGO_CFG_TARGET_OS").as_deref(),
@@ -298,7 +298,7 @@ impl Linux {
         ] {
             tests.add(&build, name, &format!("{COMPAT}/stela/{source}"), &archives);
         }
-        // This fixture observes actual calls with the ELF linker's --wrap.
+        // This fixture observes calls with the ELF linker's --wrap.
         if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
             let mut deferred = build.clone();
             for symbol in [
@@ -462,7 +462,7 @@ fn linux_archive(
         .remove_flag("-Wconversion")
         .remove_flag("-Wsign-conversion")
         // Linux scripts/Makefile.warn disables these outside W=3. Unchanged
-        // helpers compare signed counts and retain unused public parameters.
+        // helpers compare signed counts and keep unused public parameters.
         .flag("-Wno-sign-compare")
         .flag("-Wno-unused-parameter")
         // Linux's top-level Makefile builds every file with -Wno-pointer-sign:
@@ -550,7 +550,7 @@ impl Tests {
         self.programs.push((name.replace('-', "_"), program));
     }
 
-    /// An actual Rust-hosted fixture with its own exact child selector.
+    /// A Rust-hosted fixture with its own exact child selector.
     pub fn add_rust(&mut self, name: &'static str, body: &'static str) {
         self.rust.push((name, body));
     }

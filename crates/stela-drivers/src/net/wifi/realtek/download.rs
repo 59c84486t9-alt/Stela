@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
-//! RTL8822C firmware reset, reserved-page transfer, IDDMA and actual ready
+//! RTL8822C firmware reset, reserved-page transfer, IDDMA and ready
 //! polling, adapted from pinned rtw88/{mac,fw,util}.c. The lower native beacon
 //! TXBD queue is an explicit dependency. Downloaded firmware is not a radio:
 //! HCI setup, OTP, calibration, channel, MLME and keys are separate operations.
@@ -33,7 +33,7 @@ impl From<Error> for StartError {
 pub enum State {
     Idle,
     Quarantined,
-    /// Actual REG_MCUFW_CTRL ready observed; HCI index reset and radio setup remain.
+    /// REG_MCUFW_CTRL ready observed; HCI index reset and radio setup remain.
     FirmwareReady,
 }
 
@@ -46,7 +46,7 @@ pub struct Download<I: Io> {
     feature_requested: bool,
 }
 impl<I: Io> Download<I> {
-    /// `boundary` is the actual validated RTL8822C FIFO reserved-page boundary,
+    /// `boundary` is the validated RTL8822C FIFO reserved-page boundary,
     /// established by prior MAC initialization, not an invented default.
     pub fn new(io: I, boundary: u16) -> Result<Self, Error> {
         if boundary > 0x7ff {
@@ -62,7 +62,7 @@ impl<I: Io> Download<I> {
     pub fn state(&self) -> State {
         self.state
     }
-    /// Continue actual native HCI/radio initialization only after the exact
+    /// Continue native HCI/radio initialization only after the exact
     /// REG_MCUFW_CTRL ready status was observed. This grants no Ethernet/carrier state.
     pub fn after_firmware_ready(&mut self) -> Result<&mut I, Error> {
         if self.state != State::FirmwareReady || self.feature_requested {
@@ -81,7 +81,7 @@ impl<I: Io> Download<I> {
     pub fn start_with_hardware_features(&mut self, staged: &Staged<'_>) -> Result<(), StartError> {
         self.start_inner(staged, true)
     }
-    /// Consume the one actual report produced after this object's request and
+    /// Consume the one report produced after this object's request and
     /// successful firmware boot. This is capability data, not PHY readiness.
     /// The source report helper is independent of OTP reads; Stela consumes it
     /// immediately after boot to keep the fresh mailbox exclusively owned.
@@ -115,7 +115,7 @@ impl<I: Io> Download<I> {
         if staged.profile.chip() != Chip::Rtl8822C || staged.profile != profile {
             return Err(Error::WrongChip.into());
         }
-        // Staged fields are diagnostic and mutable, whereas Image retains
+        // Staged fields are diagnostic and mutable, whereas Image keeps
         // the immutable Provider binding. Revalidate both before touching I/O.
         let hardware = profile.hardware_key();
         let revision = profile.revision_key();
@@ -212,7 +212,7 @@ impl<I: Io> Download<I> {
             self.region(section.download_address, section.data)?;
         }
         // Exact donor six-register restore order and access widths. H2CQ_CSR
-        // intentionally restores FULL, not an earlier register observation.
+        // restores FULL, not an earlier register observation.
         self.io.write8(REG_TXDMA_PQ_MAP + 1, pq)?;
         self.io.write8(REG_CR, cr)?;
         self.io.write32(REG_H2CQ_CSR, BIT_H2CQ_FULL)?;
@@ -258,7 +258,7 @@ impl<I: Io> Download<I> {
                 u32::from(BCN_VALID),
                 u32::from(BCN_VALID),
             )?;
-            // SAFETY: cleared actual BCN_VALID before this exact payload,
+            // SAFETY: cleared BCN_VALID before this exact payload,
             // then observed its new hardware event under exclusive I/O.
             unsafe { self.io.beacon_consumed() }
         });
@@ -824,7 +824,7 @@ mod tests {
         }
         // SAFETY: both synchronous hardware models are serialized. A source
         // beacon-valid event is produced only after the real native queue has
-        // published actual model IOVAs and the modeled device copied bytes.
+        // published model IOVAs and the modeled device copied bytes.
         unsafe impl Io for Combined {
             fn profile(&self) -> Profile {
                 self.control.profile()

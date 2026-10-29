@@ -1,10 +1,10 @@
-//! Actual trace destination: DMA mappings, source work and native context.
+//! Trace destination: DMA mappings, source work and native context.
 use super::*;
 use alloc::collections::VecDeque;
 use core::sync::atomic::{Ordering, fence};
 pub(super) struct Shared {
     pub init_started: Cell<bool>,
-    // Retained product of the actual initializer's terminal return. The trace
+    // Product of the initializer's terminal return. The trace
     // owner's initialized cell is written one source step before that return.
     pub init_complete: Cell<bool>,
     pub runtime: scheduler::WeakRuntime,
@@ -159,8 +159,8 @@ impl trace::Backend for Resources {
                 }
             }
             trace::Effect::Ordering(order) => {
-                // Executed on the actual cooperative BSP under Services safety
-                // contract, after required actual DMA synchronization. No MCC ACK.
+                // Executed on the cooperative BSP under Services safety
+                // contract, after required DMA synchronization. No MCC ACK.
                 fence(match order {
                     trace::Ordering::ReservationFull => Ordering::SeqCst,
                     trace::Ordering::TimestampRelease => Ordering::Release,

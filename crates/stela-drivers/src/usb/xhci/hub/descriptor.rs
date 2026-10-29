@@ -133,7 +133,7 @@ pub(super) fn child(
     })
 }
 
-/// Actual BOS sublink attributes, retained for the port-status speed IDs.
+/// BOS sublink attributes, kept for the port-status speed IDs.
 pub(in super::super) struct Ssp {
     attributes: Vec<u32>,
 }

@@ -39,7 +39,7 @@
 //! `0xfffffff0270d6d20` allows absent enable/write-disable/IOA lock fields;
 //! `0xfffffff0270d75a0` requires matching limits across apertures/planes.
 //! Its CTRR selector requests cache-status only for AMCC and does not consume
-//! master-lock or broadcast. Their publication alone qualifies no MMIO effects.
+//! master-lock or broadcast. Their publication alone checks no MMIO effects.
 //!
 //! SPTM's register reader requires lower/upper limits and AMCC's lock, while
 //! enable/write-disable and IOA's lock may be absent. Limits must agree across

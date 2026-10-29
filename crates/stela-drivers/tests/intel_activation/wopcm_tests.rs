@@ -1,4 +1,4 @@
-//! Actual Provider + canonical Mapping + original native WOPCM RAM model only.
+//! Provider + canonical Mapping + original native WOPCM RAM model only.
 use super::*;
 use intel::{firmware, wopcm};
 
@@ -29,7 +29,7 @@ pub(super) fn owned_wopcm_contract(authority: &Authority, platform: &Platform, n
     device.sleep().unwrap();
     device.retire().unwrap();
 
-    // Actual owned BMG row with explicit synthetic runtime GMDID input; exact
+    // Owned BMG row with explicit synthetic runtime GMDID input; exact
     // real Provider target and original GuC image, not a production fact guess.
     for (device_id, graphics, name, total, guc_size) in [
         (0xe202, 2001, "xe/bmg_guc_70.bin", 0x800000, 0x7f3000),
@@ -129,14 +129,14 @@ pub(super) fn owned_wopcm_contract(authority: &Authority, platform: &Platform, n
             assert_eq!(device.wake(), Err(Error::Closing));
             assert_eq!(device.sleep(), Err(Error::Closing));
             assert_eq!(device.retire(), Err(Error::Awake));
-            drop(device); // canonical quarantine + retained exact context/state
+            drop(device); // canonical quarantine + kept exact context/state
             assert_eq!(counts.context_checks.load(Ordering::SeqCst), checks);
             assert_eq!(counts.wopcm_reads.load(Ordering::SeqCst), reads);
             assert_eq!(counts.sleep_writes.load(Ordering::SeqCst), 0);
             assert_eq!(counts.finished.load(Ordering::SeqCst), 0);
             assert_eq!(counts.dropped.load(Ordering::SeqCst), 0);
             assert_eq!(counts.reservation_dropped.load(Ordering::SeqCst), 0);
-            // Prove the actual allocator was still armed across failure+Drop.
+            // Prove the allocator was still armed across failure+Drop.
             let layout = Layout::from_size_align(8, 8).unwrap();
             // SAFETY: intentional allocation-null probe, null is never dereferenced.
             let pointer = unsafe { std::alloc::alloc(layout) };

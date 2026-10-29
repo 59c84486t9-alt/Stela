@@ -1,5 +1,5 @@
 //! Original kernel cacheless configuration. This does not authorize a mount;
-//! the caller must retain its actual Prepared MCC owner and canonical memory
+//! the caller must keep its Prepared MCC owner and canonical memory
 //! completion admission. The bundle's default arguments are unchanged here.
 use crate::boot_args::BOOT_LINE_LENGTH;
 use alloc::string::String;

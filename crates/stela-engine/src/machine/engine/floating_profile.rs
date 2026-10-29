@@ -13,7 +13,7 @@ use stela_compiler::{
 
 const STRATUM: u32 = 4096;
 // Earlier real-app attribution contains over 2,000 distinct service words.
-// Keep useful detail across workloads while retaining a fixed per-engine bound.
+// Keep useful detail across workloads while keeping a fixed per-engine bound.
 const ROW_LIMIT: usize = 4096;
 const FAMILY_COUNT: usize = 13;
 

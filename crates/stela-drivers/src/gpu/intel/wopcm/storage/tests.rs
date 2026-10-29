@@ -45,11 +45,11 @@ struct Allocation {
     model: Arc<Model>,
 }
 // SAFETY: exclusively owned, aligned, zeroed model RAM; physical labels are
-// symbolic and never used for an actual native translation or dereference.
+// symbolic and never used for a native translation or dereference.
 unsafe impl Send for Allocation {}
 // SAFETY: immutable metadata and no concurrent model/device access to the RAM.
 unsafe impl Sync for Allocation {}
-// SAFETY: retains its exact zeroed allocation and immutable page inventory until
+// SAFETY: keeps its exact zeroed allocation and immutable page inventory until
 // every CPU/DMA pin ends; Drop frees only that same model allocation.
 unsafe impl PageBacking for Allocation {
     fn cpu_base(&self) -> NonNull<u8> {
@@ -94,7 +94,7 @@ impl PageSource for Arc<Model> {
         }
         let layout = Layout::from_size_align(bytes, PAGE_BYTES).unwrap();
         // SAFETY: nonzero validated test layout; the resulting model owner
-        // retains/frees this allocation and does not expose safe Rust aliases.
+        // keeps/frees this allocation and does not expose safe Rust aliases.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         PinnedPages::new(
             Box::new(Allocation {
@@ -111,7 +111,7 @@ impl PageSource for Arc<Model> {
     }
 }
 // SAFETY: isolated synchronous ownership peer. It supplies no physical IOMMU or
-// hardware proof, retains exact symbolic tokens and refuses programmed faults.
+// hardware proof, keeps exact symbolic tokens and refuses programmed faults.
 unsafe impl DmaDomain for Model {
     unsafe fn map(
         &self,
@@ -125,8 +125,8 @@ unsafe impl DmaDomain for Model {
         let cpu = pages.cpu_mapping(CacheAttribute::WriteBack).unwrap();
         let pointer = cpu.address(0, pages.bytes()).unwrap();
         assert_ne!(pointer.as_ptr() as u64, 0x80000000);
-        // SAFETY: observe the completed actual copy while the canonical pin
-        // is retained; this synchronous peer has no device/concurrent writer.
+        // SAFETY: observe the completed copy while the canonical pin
+        // is held; this synchronous peer has no device/concurrent writer.
         let copied = unsafe { core::slice::from_raw_parts(pointer.as_ptr(), pages.bytes()) };
         let expected = self.expected.lock().unwrap();
         assert_eq!(&copied[..expected.len()], expected.as_slice());
@@ -245,14 +245,14 @@ fn failed_visibility_or_invalidation_retains_exact_mapping_for_retry() {
     backing.publish().unwrap();
     model.unmap_failure.store(true, Ordering::Relaxed);
     assert_eq!(
-        // SAFETY: no actual hardware/GGTT/user exists in this synchronous model.
+        // SAFETY: no hardware/GGTT/user exists in this synchronous model.
         unsafe { backing.retire() },
         Err(Error::Dma(DmaError::InvalidationFailed))
     );
     assert_eq!(backing.mapping.address(), Ok(0x80000000));
     assert_eq!(model.released.load(Ordering::Relaxed), 0);
     model.unmap_failure.store(false, Ordering::Relaxed);
-    // SAFETY: unchanged model quiescence and the same still-retained token.
+    // SAFETY: unchanged model quiescence and the same still token.
     unsafe { backing.retire() }.unwrap();
     drop(backing);
     assert_eq!(model.released.load(Ordering::Relaxed), 1);

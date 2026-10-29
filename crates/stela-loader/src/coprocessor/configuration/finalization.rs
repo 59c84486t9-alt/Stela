@@ -1,7 +1,7 @@
-//! Native format1 UUID-header/dseg finalization after actual map selection.
+//! Native format1 UUID-header/dseg finalization after map selection.
 //!
 //! These are original image metadata effects. Proposed mappings and provenance
-//! remain claims until the parent retains actual allocation/mapping/fetch owners.
+//! remain claims until the parent keeps allocation/mapping/fetch owners.
 use super::{Configured, Provenance};
 use crate::coprocessor::publication;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
@@ -14,8 +14,8 @@ const RECORD_BYTES: usize = 16;
 const ENTRY_BYTES: usize = 32;
 
 pub struct Input {
-    /// Actual selected descriptor+0x265; bit2 skips native finalization. Other
-    /// bits retain their independent native effects with the parent owners.
+    /// Selected descriptor+0x265; bit2 skips native finalization. Other
+    /// bits keep their independent native effects with the parent owners.
     pub descriptor_flags: u8,
     pub provenance: Provenance,
 }

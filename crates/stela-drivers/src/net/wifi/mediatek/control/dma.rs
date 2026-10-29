@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2023 MediaTek Inc.
 //! Polling WFDMA enablement from mt792x_dma.c. Installation of every queue,
-//! its exact descriptor format and actual coherent DMA ownership precede this.
+//! its exact descriptor format and coherent DMA ownership precede this.
 use super::{
     BUSY, BarIo, Control, DISABLE, Error, MT_MCU2HOST_SW_INT_ENA, MT_PCIE_MAC_INT_ENABLE,
     MT_UWFDMA0_GLO_CFG_EXT1, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT, MT_WFDMA0_GLO_CFG,
@@ -33,7 +33,7 @@ pub struct DmaEnabled {
     pub polling_interrupts_masked: bool,
 }
 impl<I: BarIo> Control<I> {
-    /// Disable actual host WFDMA, PCIe MAC and MCU software interrupt enables.
+    /// Disable host WFDMA, PCIe MAC and MCU software interrupt enables.
     /// Readback confirms device mask state; it never proves pending IRQ/CPU
     /// callbacks drained or reserves a platform interrupt route/vector.
     pub fn mask_interrupts(&mut self) -> Result<(), Error> {
@@ -106,12 +106,12 @@ impl<I: BarIo> Control<I> {
     /// # Safety
     /// Every queue the chip/firmware can select (including ordinary data TX/RX,
     /// TX-free and event queues, not only the three boot mailbox queues) is
-    /// actually installed or demonstrably disabled under this chip's hardware
+    /// installed or demonstrably disabled under this chip's hardware
     /// contract. Its current descriptors/buffers have the exact donor format,
-    /// valid retained canonical pins and IOMMU mappings for this requester,
+    /// valid kept canonical pins and IOMMU mappings for this requester,
     /// sufficient complete sizes and synchronized visibility. Descriptor index
     /// resets below must not discard live DMA/software ownership. This exact
-    /// actual requester is qualified for coherent WB RAM with NoSnoop/ATS off,
+    /// requester is checked for coherent WB RAM with NoSnoop/ATS off,
     /// valid 32-bit DMA addresses and the current ordinary descriptor profile.
     /// All prior IRQ/deferred/firmware command work is drained, and no competing
     /// path changes engine state/masks/rings. All queue/requester/pin owners
@@ -155,7 +155,7 @@ impl<I: BarIo> Control<I> {
             }
             self.modify(MT_WFDMA_DUMMY_CR, 0, MT_WFDMA_NEED_REINIT)?;
             // Linux enables IRQs here. Stela's serialized polling path keeps
-            // the actual sources masked and verifies them after final writes.
+            // the sources masked and verifies them after final writes.
             self.verify_masks()?;
             let actual = self.read_control(MT_WFDMA0_GLO_CFG)?;
             if actual & (CONFIG | ENABLE) != CONFIG | ENABLE {

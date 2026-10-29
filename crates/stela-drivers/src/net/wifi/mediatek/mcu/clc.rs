@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Exact CLC envelopes and raw response facts. No parsed flag or generic
-//! completion grants an applied country, power, location or radio authority.
+//! completion grants an applied country, power, location or radio permission.
 use super::{Encoder, Error as EventError, Event};
 use crate::net::wifi::mediatek::{
     firmware::clc::{Completion, Request},
@@ -88,7 +88,7 @@ impl Event<'_> {
                 actual: self.sequence,
             }));
         }
-        // These actual source response parser paths remove the generic header;
+        // These source response parser paths remove the generic header;
         // neither specifies a station result record or an expected EID here.
         Ok(self.payload)
     }

@@ -202,7 +202,7 @@ pub enum Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Format {
-    /// Actual UAC3 high-capability cluster ID; maps are retained in Binding.
+    /// UAC3 high-capability cluster ID; maps are held in Binding.
     pub cluster_id: Option<u16>,
     /// UAC3 power ownership, awakened before alternate selection and DMA.
     pub power_domain: Option<super::PowerDomain>,
@@ -260,7 +260,7 @@ pub struct Binding {
     pub graph: Graph,
     pub formats: Vec<Format>,
     pub speed: u8,
-    /// Unsupported advertised alternates retained without hiding the reason.
+    /// Unsupported advertised alternates kept without hiding the reason.
     pub unsupported: Vec<(u8, u8, &'static str)>,
 }
 
@@ -766,7 +766,7 @@ impl Binding {
         }
         // Other class owners cannot coordinate future alternate changes with
         // this audio owner. Do not claim any of their descriptor-advertised DCIs.
-        // In-function AS alternates may reuse endpoints; actual simultaneous
+        // In-function AS alternates may reuse endpoints; simultaneous
         // playback/capture plans are checked again at start.
         for format in &formats {
             let endpoints = format.endpoints();

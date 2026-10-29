@@ -1,9 +1,9 @@
 //! Shared native 802.11 frame and security boundaries.
 //!
-//! Vendor transports supply normalized MPDUs, preserving the actual Protected
+//! Vendor transports supply normalized MPDUs, preserving the Protected
 //! bit and removing FCS and vendor alignment padding. Decryption observations
 //! never imply association, authentication, replay validation or Ethernet
-//! carrier. Station management and scanning require actual vendor commands
+//! carrier. Station management and scanning require vendor commands
 //! and completion/retirement. The OS owns credentials and WPA authentication.
 
 mod allocation;
@@ -35,7 +35,7 @@ pub enum Band {
     Ghz6,
 }
 
-/// Actual received radio information. This is not regulatory permission to TX.
+/// Received radio information. This is not regulatory permission to TX.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RadioStatus {
     pub band: Band,
@@ -104,7 +104,7 @@ pub enum Timestamp {
     Full64(u64),
 }
 
-/// Retained aggregation observations. Single-MPDU replay checks refuse them;
+/// Aggregation observations. Single-MPDU replay checks refuse them;
 /// `security::aggregate` checks aggregates after the backend reorders them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Aggregation {

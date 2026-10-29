@@ -7,7 +7,7 @@
 //! The PS DMA engine shares ACP63 PTE/PCM layout; its power and ZSC/IRQ/PME
 //! sequencing is distinct. This whole-function owner admits no active or
 //! wake-enabled SoundWire manager. Mixed SoundWire/PDM service requires the
-//! separate shared controller authority and is deliberately refused here.
+//! separate shared controller permission and is refused here.
 //! SOF, I2S, ACP7D/E/F and an Apple audio frontend are separate backends.
 use super::acp_pdm::{self, Profile};
 pub use super::acp_pdm::{
@@ -36,7 +36,7 @@ impl Profile for Ps70 {
     const CLEAR_CONTROL_ON_QUIET: bool = false;
     fn parked_control(control: u32) -> bool {
         // A failed init before CONTROL was enabled can still retire after an
-        // actual reset, disabled address group1/BME, domain drain and parked ZSC.
+        // reset, disabled address group1/BME, domain drain and parked ZSC.
         matches!(control, 0 | 1)
     }
     const ZSC_BEFORE_INTERRUPTS: bool = true;
@@ -89,19 +89,19 @@ impl Profile for Ps70 {
 
 pub type Controller<R, T> = acp_pdm::Controller<R, T, Ps70>;
 impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Ps70> {
-    /// Claim the exact retained direct-PS function without hardware effects.
+    /// Claim the exact direct-PS function without hardware effects.
     ///
     /// # Safety
-    /// The platform owns the exact class048000 function, actual PCI D0 and
+    /// The platform owns the exact class048000 function, PCI D0 and
     /// board power/clocks, coherent DMA root/domain and complete firmware/SOF/
     /// AML/SMM/CPU exclusion throughout the epoch. The real same-function
     /// selector, child and evaluated _WOV observations must satisfy Config's
-    /// source contract. SoundWire absence/exclusion must come from its actual
+    /// source contract. SoundWire absence/exclusion must come from its
     /// enumerator/controller owner, never an ID or a caller-invented boolean.
     /// The register check additionally refuses active/wake-enabled managers;
     /// no SoundWire owner may enable them after this check. Native interrupts
     /// must remain contained. Keep all roots/pins/native owners through failed
-    /// stop/reset/drain or drop, until actual acknowledged retirement.
+    /// stop/reset/drain or drop, until acknowledged retirement.
     pub unsafe fn claim(
         registers: R,
         timer: T,
@@ -110,7 +110,7 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Ps70> {
     ) -> Result<Self, Error> {
         Self::claim_profile(registers, timer, config.direct()?, domain)
     }
-    /// Copy one source-completed period using the actual retained coherent
+    /// Copy one source-completed period using the coherent
     /// domain, with pre/post-copy overrun checks. Discard destination on error.
     pub fn capture_period(
         &mut self,
@@ -118,14 +118,14 @@ impl<R: Registers, T: Timer> acp_pdm::Controller<R, T, Ps70> {
     ) -> Result<Option<CapturePeriod>, Error> {
         self.read_completed_period(destination)
     }
-    /// Quiet direct PDM and park ZSC under the same actual PCI D0/board epoch.
+    /// Quiet direct PDM and park ZSC under the same PCI D0/board epoch.
     /// This is controller PM; D3cold, S3/S0ix and SoundWire wake are not granted.
     /// CONTROL remains asserted as required by acp70_deinit, not ACP63's zero.
     pub fn suspend_held_d0(&mut self) -> Result<(), Error> {
         self.suspend_retained(false)
     }
     /// Revalidate the original native/domain epoch, perform ACP70 init and
-    /// restore its retained PTE/ring. Explicit start begins a new PCM epoch.
+    /// restore its PTE/ring. Explicit start begins a new PCM epoch.
     pub fn resume_held_d0(&mut self) -> Result<(), Error> {
         self.resume_retained()
     }

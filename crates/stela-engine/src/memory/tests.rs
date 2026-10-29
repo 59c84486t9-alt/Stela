@@ -490,7 +490,7 @@ fn invalid_file_extents_offsets_types_and_access_decline_before_mapping() {
         .open(temporary.path())
         .unwrap();
     assert!(
-        // SAFETY: The test retains the temporary inode unchanged. The write-only
+        // SAFETY: The test keeps the temporary inode unchanged. The write-only
         // descriptor is rejected by construction before any mapped access.
         unsafe { OwnedMemory::map_files(vec![file_spec(address, page, write_only_file, 0)]) }
             .is_err()

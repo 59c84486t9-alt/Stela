@@ -37,7 +37,7 @@ pub enum Error {
     PacketNumber,
 }
 
-/// Exact source crypto helper observations, not an authentication receipt.
+/// Source crypto helper observations, not an authentication receipt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Crypto {
     pub decrypted: bool,
@@ -114,7 +114,7 @@ pub struct Normalized {
 }
 
 /// Source create_skb logical byte result, without its SKB/page allocator. The
-/// caller supplies already CPU-owned bytes and an actual parsed MAC length.
+/// caller supplies already CPU-owned bytes and a parsed MAC length.
 fn copy_bytes(
     raw: &[u8],
     header: usize,
@@ -124,7 +124,7 @@ fn copy_bytes(
 ) -> Result<Vec<u8>, Error> {
     let len = raw.len().checked_sub(pad).ok_or(Error::Length)?;
     // Source removes the reported tail only when len > tail. Reject the other
-    // case here rather than presenting retained CRC/MIC bytes as normalized.
+    // case here rather than presenting kept CRC/MIC bytes as normalized.
     if len <= tail {
         return Err(Error::Length);
     }
@@ -162,7 +162,7 @@ fn radio(metadata: Metadata) -> Result<RadioStatus, Error> {
     };
     // Zero means not measured. Refuse unrepresentable magnitudes rather than
     // reproducing a narrowing wrap into a positive signal. No beacon-average
-    // override is fabricated without the actual source per-link state.
+    // override is invented without the source per-link state.
     let energy = |n: u8| (1..=128).contains(&n).then(|| (-(i16::from(n))) as i8);
     let a = energy(raw.energy[0]);
     let b = energy(raw.energy[1]);
@@ -277,7 +277,7 @@ pub(crate) fn normalize(
 
 impl Observation<'_> {
     /// Normalize diagnostic CPU-owned bytes. This grants no native key or
-    /// receive epoch; actual transport receipts retain their separate owner.
+    /// receive epoch; transport receipts keep their separate owner.
     pub fn normalize(&self, fw: &Firmware<'_>, family: Family) -> Result<Normalized, Error> {
         normalize(
             self.metadata(),
@@ -336,7 +336,7 @@ mod tests {
     fn protected_frame() -> Vec<u8> {
         let mut bytes = vec![0; 24];
         bytes[..2].copy_from_slice(&0x4208u16.to_le_bytes());
-        bytes.extend([1, 0, 0, 0x60, 0, 0, 0, 0]); // retained PN=1, index=1
+        bytes.extend([1, 0, 0, 0x60, 0, 0, 0, 0]); // PN=1, index=1
         bytes.extend([0xa5, 0x5a]); // pad is after header AND IV
         bytes.extend(b"payload");
         bytes.extend([0xcc; 8]); // source reported MIC/CRC tail

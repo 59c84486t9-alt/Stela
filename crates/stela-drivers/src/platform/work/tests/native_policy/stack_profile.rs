@@ -1,4 +1,4 @@
-//! Actual stack geometry controls dispatch; descriptors alone grant no native authority.
+//! Stack geometry controls dispatch; descriptors alone grant no native permission.
 use super::super::super::StackBacking;
 use super::*;
 use core::sync::atomic::AtomicUsize;
@@ -46,18 +46,18 @@ fn all_mixed_roles_use_their_actual_geometry_with_rust_workers_first() {
     let f = Fixture::new();
     let (executor, cpu, dropped) = support::executor(f.clone());
     let r = executor.runtime();
-    // SAFETY: Case and fixture/code remain retained by this queue until actual join.
+    // SAFETY: Case and fixture/code remain held by this queue until join.
     unsafe { r.start_service(record, f.context(100, kernel(), false)) }.unwrap();
-    // SAFETY: control uses an independent actual ordinary-size reserved continuation.
+    // SAFETY: control uses an independent ordinary-size reserved continuation.
     unsafe { r.start_firmware(record, f.context(101, ordinary(), false)) }.unwrap();
-    // SAFETY: serial GPE context remains retained through completion.
+    // SAFETY: serial GPE context remains held through completion.
     unsafe {
         r.queue
             .execute_gpe(record, f.context(102, ordinary(), false))
     }
     .unwrap();
     for i in 0..2 {
-        // SAFETY: each accepted role owns its actual permit and immutable retained Case.
+        // SAFETY: each accepted role owns its permit and immutable kept Case.
         unsafe {
             r.queue
                 .execute(Kind::Notify, record, f.context(110 + i, ordinary(), false))
@@ -82,14 +82,14 @@ fn all_mixed_roles_use_their_actual_geometry_with_rust_workers_first() {
         .unwrap();
     }
     for i in 0..4 {
-        // SAFETY: default General requirement is ordinary; retained callback fits that actual extent.
+        // SAFETY: default General requirement is ordinary; callback fits that extent.
         unsafe {
             r.queue
                 .execute(Kind::General, record, f.context(200 + i, ordinary(), false))
         }
         .unwrap();
     }
-    // SAFETY: actual Foreground and its immutable Case survive every exchange.
+    // SAFETY: Foreground and its immutable Case survive every exchange.
     unsafe {
         r.call_foreground(
             record,
@@ -116,7 +116,7 @@ fn ordinary_backlog_cannot_borrow_idle_kernel_workers() {
     let (executor, cpu, dropped) = support::executor(f.clone());
     let r = executor.runtime();
     for i in 0..4 {
-        // SAFETY: all four ordinary callbacks retain real blocked frames until explicit release.
+        // SAFETY: all four ordinary callbacks keep real blocked frames until explicit release.
         unsafe {
             r.queue
                 .execute(Kind::General, record, f.context(i, ordinary(), true))
@@ -125,7 +125,7 @@ fn ordinary_backlog_cannot_borrow_idle_kernel_workers() {
     }
     while r.step().unwrap() {}
     assert_eq!(f.parked.lock().unwrap().len(), 4);
-    // SAFETY: retained ordinary callback may wait in the queue; no idle-worker success is implied.
+    // SAFETY: ordinary callback may wait in the queue; no idle-worker success is implied.
     let waiting = unsafe {
         r.queue
             .execute(Kind::General, record, f.context(10, ordinary(), false))
@@ -156,7 +156,7 @@ fn queued_requirements_reject_unsupported_geometry_before_transfer_or_sequence()
     let before = r.queue.lock().unwrap().state().next;
     let unavailable = StackRequirement::exact(64 * 1024, 4096, 4096).unwrap();
     assert_eq!(
-        // SAFETY: rejection must not accept this retained Case or run its callback.
+        // SAFETY: rejection must not accept this Case or run its callback.
         unsafe {
             r.queue.execute_general_with_requirement(
                 unavailable,
@@ -175,7 +175,7 @@ fn queued_requirements_reject_unsupported_geometry_before_transfer_or_sequence()
 fn rejected_profile(kind: u8) {
     let f = Fixture::new();
     let cpu = test_support::CpuModel::new();
-    // SAFETY: same-thread model retains Fixture, with no hardware/foreign producer.
+    // SAFETY: same-thread model keeps Fixture, with no hardware/foreign producer.
     let q = unsafe { Queue::<64>::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
     let mut stacks = support::stacks(&dropped, if kind == 0 { 21 } else { 20 });
@@ -216,7 +216,7 @@ fn rejected_profile(kind: u8) {
         Executor::new_hosted_for_test(q.clone(), test_support::stacks(&dropped)).unwrap();
     f.publish(executor.runtime());
     assert_eq!(
-        // SAFETY: typed request must refuse before any profile was genuinely constructed.
+        // SAFETY: typed request must refuse before any profile was constructed.
         unsafe {
             q.execute_general_with_requirement(kernel(), record, f.context(1, kernel(), false))
         },
@@ -240,7 +240,7 @@ fn oldest_compatible_jobs_preserve_order_within_each_actual_pool() {
     let r = executor.runtime();
     for tag in 0..6 {
         let required = if tag % 2 == 0 { kernel() } else { ordinary() };
-        // SAFETY: each explicit immutable Case fits its requested actual geometry and remains retained through join.
+        // SAFETY: each explicit immutable Case fits its requested geometry and remains held through join.
         unsafe {
             r.queue.execute_general_with_requirement(
                 required,

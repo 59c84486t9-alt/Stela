@@ -185,7 +185,7 @@ pub(in crate::board) mod fixture_support {
             .into_iter()
             .flat_map(u64::to_le_bytes)
             .collect::<Vec<_>>();
-        // Deliberately identical display names; physical views select owners.
+        // Identical display names; physical views select owners.
         encode(
             &[
                 ("name", b"same"),

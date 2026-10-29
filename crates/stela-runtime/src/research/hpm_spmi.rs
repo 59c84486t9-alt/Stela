@@ -11,7 +11,7 @@
 //! here complete before their SPMI ACK; polling never manufactures readiness.
 //!
 //! enterRTPC/exitRTPC at 9791cf0/9791e50 use SPMI Sleep/Wakeup, not mailbox
-//! registers. Their actual power effects and indexed output levels belong to
+//! registers. Their power effects and indexed output levels belong to
 //! the backend. No SN201202x body or firmware identity is supplied here and
 //! no board compatible is admitted. CD3217/18 and ccg3pa2 are not substitutes.
 use alloc::vec::Vec;
@@ -25,7 +25,7 @@ const READ_DATA: u16 = 0x20;
 const WRITE_DATA: u16 = 0xa0;
 
 /// One captured native response. The backend supplies every readable wire byte,
-/// including any qualified tail beyond its reported length; transport adds none.
+/// including any checked tail beyond its reported length; transport adds none.
 #[derive(Clone)]
 pub struct Register {
     bytes: Vec<u8>,
@@ -45,15 +45,15 @@ impl Register {
     }
 }
 
-/// Actual HPM register owner. Selection must validate a real readable or writable
+/// HPM register owner. Selection must validate a real readable or writable
 /// register before reporting ready; writes execute the whole staged body once.
 /// Clone preparation must not publish external effects before acceptance. There
-/// is deliberately no default register body, ready reply or fabricated IRQ.
+/// is no default register body, ready reply or invented IRQ.
 pub trait Registers: Clone {
     fn select(&mut self, register: u8, now: u64) -> Result<(), SlaveError>;
     fn read(&mut self, register: u8, now: u64) -> Result<Register, SlaveError>;
     fn write(&mut self, register: u8, bytes: &[u8], now: u64) -> Result<(), SlaveError>;
-    /// An accepted RTPC transition owns its actual power state and retains the
+    /// An accepted RTPC transition owns its power state and keeps the
     /// mailbox state. Unknown power/retention/output behavior must refuse.
     fn command(&mut self, _command: Command, _now: u64) -> Result<(), SlaveError> {
         Err(SlaveError::Unsupported(
@@ -259,7 +259,7 @@ mod tests {
         }
         fn write(&mut self, _: u8, bytes: &[u8], _: u64) -> Result<(), SlaveError> {
             self.writes += 1;
-            // Deliberately mutate the preparation before refusing: neither
+            // Mutate the preparation before refusing: neither
             // that mutation nor its count may escape a failed mailbox call.
             self.bytes[0] = bytes[0];
             if bytes.len() != self.bytes.len() || bytes[0] == 0xff {

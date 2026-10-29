@@ -27,7 +27,7 @@ const OVERRUN: i32 = 0xe000_02e1u32 as i32;
 pub(crate) trait Service {
     fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>), &'static str>;
 
-    /// Actual interface close/termination, distinct from retained CPU sleep.
+    /// Interface close/termination, distinct from kept CPU sleep.
     fn transport_closed(&mut self);
 
     fn pending(&self) -> bool {
@@ -240,7 +240,7 @@ impl Interfaces {
             return Ok(Vec::new());
         };
         // The repeated AFKEPV2 total includes its 24 message/command bytes.
-        // Retain the producer-owned request on every validation refusal.
+        // Keep the producer-owned request on every validation refusal.
         request
             .payload
             .len()
@@ -427,7 +427,7 @@ fn address(window: Option<u64>, dva: u64) -> u64 {
 }
 
 /// A completed service effect and its deterministic transport writes. The
-/// ring owner retains this until input RPTR commits, so a DMA retry never
+/// ring owner keeps this until input RPTR commits, so a DMA retry never
 /// calls the service or appends the same fragment twice.
 pub(super) struct Response {
     pub bytes: Vec<u8>,

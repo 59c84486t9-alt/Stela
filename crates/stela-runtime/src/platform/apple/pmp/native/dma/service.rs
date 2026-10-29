@@ -1,5 +1,5 @@
 //! The executing side of the native PMP DMA pair. `Service` runs one queued
-//! operation per `dispatch` through the actual DMA `Port`, uses the `Coherence`
+//! operation per `dispatch` through the DMA `Port`, uses the `Coherence`
 //! owner for map, synchronize, unmap and release effects, and records the
 //! reply and grant lifetime for the broker.
 use super::super::platform::owner::Completion;
@@ -19,9 +19,9 @@ pub enum Effect {
     Unmap,
     Release,
 }
-/// Actual configured native mapping/cache/barrier owner, with the same retained
+/// Configured native mapping/cache/barrier owner, with the same kept
 /// registered RAM generation and stopped producer cohort as the Port. No
-/// successful default or generic host fence is supplied here. In a qualified
+/// successful default or generic host fence is supplied here. In a checked
 /// coherent WB implementation, its real ordering/copyout fence may establish
 /// visibility of this mapping; that is not MCC eviction, DCS, PTD or MC ACK.
 /// Busy/Refused commit no effect; Retired advances before a later diagnostic.
@@ -35,8 +35,8 @@ pub trait Coherence {
         port: &mut Port<'_, '_>,
     ) -> Completion<()>;
 }
-/// Sole service endpoint retained by AppleDevices. No Port/reference/callback is
-/// stored across calls. State is released before actual Port/cache callbacks,
+/// Sole service endpoint kept by AppleDevices. No Port/reference/callback is
+/// stored across calls. State is released before Port/cache callbacks,
 /// so nested broker submissions cannot reenter a held RefCell borrow.
 pub struct Service {
     state: Rc<RefCell<State>>,
@@ -55,7 +55,7 @@ impl Service {
     pub fn has_work(&self) -> bool {
         self.pending.is_some() || !self.state.borrow().queue.is_empty()
     }
-    /// One actual queued operation per call. The root selects the actual DART
+    /// One queued operation per call. The root selects the DART
     /// DeviceId/instance and canonical allocator/RAM owners for this pair.
     /// A successful return means service dispatch, not protocol publication.
     pub fn dispatch(

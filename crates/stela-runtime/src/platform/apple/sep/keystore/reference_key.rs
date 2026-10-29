@@ -3,7 +3,7 @@
 //! The AP's `oc` constructor returns a dictionary with `rk` metadata. Its
 //! public reader expects `kt` and a compact `pub` inside that dictionary.
 //! The later operation sends the entire returned blob as its `rk` value.
-//! We retain a fresh public seed plus an authenticated policy/point, deriving
+//! We keep a fresh public seed plus an authenticated policy/point, deriving
 //! the private scalar only from the provisioned machine root and that seed.
 //! Thus the exported reference contains no private scalar, survives reopen,
 //! and cannot authorize a key belonging to another machine or policy.
@@ -268,7 +268,7 @@ pub(super) mod tests {
             let delta = ((instruction << 6) as i32 >> 6) as i64 * 4;
             (pc as i64 + delta) as usize
         };
-        // Actual argument constants, not an application-dependent runtime path.
+        // Argument constants, not an application-dependent runtime path.
         assert_eq!(word(0x1730), 0x1280_0000); // mov w0, #-1
         assert_eq!(word(0x1734), 0x5280_01a1); // mov w1, #13
         assert_eq!(branch(0x173c), 0x8ae18); // constructor
@@ -320,7 +320,7 @@ pub(super) mod tests {
         .unwrap();
         let key = ReferenceKey::open(&root, &encoded).unwrap();
         // Independent Python HMAC-SHA256 plus OpenSSL EC public derivation
-        // and scalar negation, retained in the r2 evidence vector receipt.
+        // and scalar negation, kept in the r2 evidence vector receipt.
         assert_eq!(
             hex::encode(key.secret.to_bytes()),
             "84641805873d19004fe67ed956aff5ddfe2163da2a67baa0397dc7bb171f7a90"

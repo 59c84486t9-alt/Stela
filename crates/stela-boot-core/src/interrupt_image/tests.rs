@@ -11,7 +11,7 @@ fn location(backing: &Backing<BYTES>) -> Location {
 }
 unsafe fn initialize(backing: &Backing<BYTES>, location: Location) {
     let base = backing.as_mut_ptr();
-    // SAFETY: test exclusively owns this initialized actual Backing and its
+    // SAFETY: test exclusively owns this initialized Backing and its
     // checked local offsets; this simulates memory writes, not CPU admission.
     unsafe {
         base.add(location.frame - base.addr())

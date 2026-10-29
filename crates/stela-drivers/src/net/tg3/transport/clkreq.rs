@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! tg3_setup_copper_phy's actual endpoint CLKREQ_BUG workaround.
+//! tg3_setup_copper_phy's endpoint CLKREQ_BUG workaround.
 use super::{phy::Speed, *};
 
 impl<R: Registers, D: Delay> Hardware<R, D> {

@@ -11,7 +11,7 @@ use core::cell::{Cell, RefCell};
 const RESET_ENDPOINT_COMMAND: u32 = 14;
 const SET_DEQUEUE_COMMAND: u32 = 16;
 // The only keyboard usage is in the middle of an otherwise Consumer array.
-// This is a genuine boot-interface usability/admission control: canonical
+// This is a boot-interface usability/admission control: canonical
 // REPORT decoding already handles the selected data; never force legacy mode.
 const MIXED: &[u8] = &[
     5, 1, 9, 6, 0xa1, 1, 0x85, 1, 0x15, 0, 0x25, 4, 0x75, 8, 0x95, 2, 0x0b, 1, 0, 0x0c, 0, 0x0b, 4,
@@ -237,7 +237,7 @@ fn actual_unsigned32_selector_retains_canonical_report_protocol_and_complete_val
     ];
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM retains every actual native controller/DMA owner.
+    // SAFETY: RAM keeps every native controller/DMA owner.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut input, peer, _) = fixture(&mut dma, &bytes);
     assert!(input.descriptor().is_some());
@@ -276,7 +276,7 @@ fn actual_unsigned32_selector_retains_canonical_report_protocol_and_complete_val
 fn actual_stall_retirement_keeps_sparse_binding_and_original_dma_until_ack() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM retains every actual native controller/DMA owner.
+    // SAFETY: RAM keeps every native controller/DMA owner.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut input, peer, _) = fixture(&mut dma, MIXED);
     assert!(input.poll_hid().reports.is_empty());
@@ -311,7 +311,7 @@ fn actual_stall_retirement_keeps_sparse_binding_and_original_dma_until_ack() {
 fn stale_sparse_binding_cannot_touch_current_native_dma_or_consume_its_completion() {
     let mut ram = vec![0u64; 1024 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: both actual controller owners retain this exclusive live RAM.
+    // SAFETY: both controller owners keep this exclusive live RAM.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut old, old_peer, _) = fixture(&mut dma, MIXED);
     let (mut current, peer, trap) = fixture(&mut dma, MIXED);
@@ -344,7 +344,7 @@ fn actual_rejected_boot_descriptor_retains_original_bytes_and_standard_boot_tabl
     let bytes = [5, 7, 0x19, 9, 0x29, 4, 0x75, 8, 0x95, 1, 0x81, 0];
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM outlives every actual native DMA/controller owner.
+    // SAFETY: RAM outlives every native DMA/controller owner.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut input, peer, _) = fixture(&mut dma, &bytes);
     assert_eq!(input.report_descriptor(), bytes);

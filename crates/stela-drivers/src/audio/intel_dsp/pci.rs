@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual ECAM and UC BAR0/BAR4 ownership for the cAVS2.5 SOF profile.
+//! ECAM and UC BAR0/BAR4 ownership for the cAVS2.5 SOF profile.
 //! Intel PCI identities and register facts: pinned Linux pci-tgl.c/hda.h.
 //! Copyright(c) 2020 Intel Corporation
 use super::{Bar, Error, Identity, Registers};
@@ -66,7 +66,7 @@ impl NativeRegisters {
     /// supplied to Controller must remain bound to this requester. Identity,
     /// BAR numbers or equal numeric addresses alone do not supply these grants.
     /// No aliases/firmware/other workers access these resources. Keep grants
-    /// retained through acknowledged DMA/core shutdown and remapper drain.
+    /// through acknowledged DMA/core shutdown and remapper drain.
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         hda: Mapping,
@@ -156,7 +156,7 @@ impl NativeRegisters {
     }
 }
 
-// SAFETY: owns the canonical config owner and two actual UC/RW BAR leases,
+// SAFETY: owns the canonical config owner and two UC/RW BAR leases,
 // validates live assignment/IRQ/PM on managed entry and never exposes aliases.
 // Active drop is quarantined by canonical Mapping/OwnedConfig ownership.
 unsafe impl Registers for NativeRegisters {
@@ -218,7 +218,7 @@ unsafe impl Registers for NativeRegisters {
             .mapping(bar)
             .address(offset, 1)
             .map_err(|_| Error::Register(bar, offset))?;
-        // SAFETY: actual checked exclusive native UC register byte.
+        // SAFETY: checked exclusive native UC register byte.
         Ok(unsafe { pointer.as_ptr().read_volatile() })
     }
     fn read16(&mut self, bar: Bar, offset: usize) -> Result<u16, Error> {

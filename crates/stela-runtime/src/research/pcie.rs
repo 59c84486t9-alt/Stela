@@ -1,7 +1,7 @@
 //! Apple PCIe control/configuration core, independent of host PCI drivers.
 //!
 //! The model is an integration building block, not a loader-admitted Apple
-//! controller. Board facts must place each view and supply actual root-port
+//! controller. Board facts must place each view and supply root-port
 //! configuration images. Downstream USB-A/Ethernet require real endpoint
 //! models and firmware protocols; adding a config header never creates one.
 //! See `docs/research/apple-pcie.md` for evidence and unsupported boundaries.
@@ -112,7 +112,7 @@ impl RootComplex {
         })
     }
     /// The caller must attach an implemented endpoint, then drive peer input
-    /// from that backend's actual presence. Identity alone is insufficient.
+    /// from that backend's presence. Identity alone is insufficient.
     /// `device_function` packs device in bits 7:3 and function in bits 2:0.
     pub fn attach(
         &mut self,
@@ -305,7 +305,7 @@ impl RootComplex {
     }
     /// Return endpoint index, BAR index and relative offset only if both
     /// bridge memory windows and endpoint memory decoding admit every byte.
-    /// Caller routes to that actual endpoint; this is never host passthrough.
+    /// Caller routes to that endpoint; this is never host passthrough.
     pub fn memory_route(&self, address: u64, bytes: u64) -> Result<(usize, u8, u64), &'static str> {
         if !self.service_enabled() {
             return Err("PCIe native controller service is paused");
@@ -388,7 +388,7 @@ impl RootComplex {
             .map_err(|_| DmaError::Unsupported("PCIe requester-to-stream mapping refused"))
     }
     /// DMA transfer admission wrapper uses the existing page/fault-aware port
-    /// supplied by the machine's DART owner, with independently checked SID.
+    /// supplied by the machine's DART owner, with checked SID.
     pub fn dma_read(
         &mut self,
         requester: u16,
@@ -1480,7 +1480,7 @@ mod tests {
         );
         // KC affine VA = file offset + 0xfffffe0007004000. Original
         // ApplePCIEMSIController dispatches to its parent, not a guessed local
-        // MSI status/ack bank. Vtable slots alone do not qualify electrical
+        // MSI status/ack bank. Vtable slots alone do not check electrical
         // capture or retirement behavior in that parent.
         for (offset, opcode) in [
             (0x24285d0, 0x9400ca13u32), // handleInterrupt: assertion call

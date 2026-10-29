@@ -1,6 +1,6 @@
-//! Assigned CPU participants of the actual placed PMGR, not firmware state.
+//! Assigned CPU participants of the placed PMGR, not firmware state.
 //! Physical associations come from the full original source resolver; only the
-//! retained Plan may project them to runtime PEs. A register ACK follows the
+//! Plan may project them to runtime PEs. A register ACK follows the
 //! real stopped-cohort CPU settlement and all model lifecycle preflights.
 mod projection;
 
@@ -17,10 +17,10 @@ use stela_soc_data::board::PowerStates;
 use stela_soc_data::board::assigned::Plan;
 
 impl AppleDevices {
-    /// Cold placement only. Retain `plan` and its source/roster owners through
+    /// Cold placement only. Keep `plan` and its source/roster owners through
     /// execution and pass the returned bindings to canonical preparation before
     /// publishing any worker. The full source graph is never pruned or changed.
-    /// Initial lifecycle is sampled from the actual Stela PMGR model; even an
+    /// Initial lifecycle is sampled from the Stela PMGR model; even an
     /// ACTIVE word is a declared software state, not an Apple handoff capture.
     pub fn connect_processor_power(
         &mut self,
@@ -70,7 +70,7 @@ impl AppleDevices {
             pmgr,
         )?;
         // Recheck after source/placed-state preparation, before publishing the
-        // mapping. The immutable retained Plan cannot be replaced by an ID list.
+        // mapping. The immutable kept Plan cannot be replaced by an ID list.
         plan.revalidate()
             .map_err(|e| format!("CPU power assignment changed: {e:?}"))?;
         let bindings = assigned.bindings();
@@ -87,7 +87,7 @@ impl AppleDevices {
     }
 
     /// The legacy/raw path may preserve configuration/W1C behavior but cannot
-    /// change a CPU's lifecycle without actual execution-owner settlement.
+    /// change a CPU's lifecycle without execution-owner settlement.
     pub(super) fn check_raw_processor_power_write(
         &self,
         physical: u64,
@@ -132,7 +132,7 @@ impl AppleDevices {
     ) -> Result<Option<Request>, DeviceError> {
         let request = self.processor_power_request(physical, bytes, value)?;
         if request.is_some() {
-            // Every actual model's potentially fallible lifecycle hook precedes
+            // Every model's potentially fallible lifecycle hook precedes
             // the CPU owner lease. No queued edge has been applied here.
             self.check_power_request(physical, value)?;
         }
@@ -178,7 +178,7 @@ impl AppleDevices {
     ) -> Result<ConsumedWrite, DeviceError> {
         // apply validates the WHOLE held native cohort, current/parked owners,
         // native controls and exclusive monitors before its first CPU effect.
-        // Retain either actual owner borrow through the controller/client ACK.
+        // Keep either owner borrow through the controller/client ACK.
         let mut unchanged = None;
         let _settled = if let Some(change) = request.change {
             Some(processors.apply(&[change]).map_err(|error| {
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(machine.cpu.state, before);
         assert!(machine.cpu.event);
         // A different physical complex input keeps the PE paused after the
-        // core clock resumes; only the last qualified input releases it.
+        // core clock resumes; only the last checked input releases it.
         write(&mut devices, &mut machine, COMPLEX, 4).unwrap();
         write(&mut devices, &mut machine, CORE, 15).unwrap();
         assert_eq!(machine.processors().paused(0), Some(true));
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(word(&devices, CORE), before);
         assert_eq!(machine.processors().paused(0), Some(false));
         assert_eq!(machine.cpu.state, state);
-        // Remove only the test's deliberate rejection. The actual CPU owner
+        // Remove only the test's deliberate rejection. The CPU owner
         // still refuses supply loss and reset before PMGR/device mutation.
         devices.power_clients.clear();
         for value in [0, (1 << 31) | 15, 0x8000_040f] {

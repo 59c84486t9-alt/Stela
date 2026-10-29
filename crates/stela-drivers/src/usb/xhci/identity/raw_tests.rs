@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Shared hostile raw consumers: no test grants production reuse authority.
+//! Shared hostile raw consumers: no test grants production reuse permission.
 use super::*;
 
 pub(in crate::usb::xhci) fn refuse(controller: &mut Controller, slot: u8, buffer: u64, trb: u64) {

@@ -17,8 +17,8 @@ struct Native {
     router: Option<Configured>,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: actual configured isolated model router and original native CM owner,
-// retained independently of parsed data; one serialized real mapped-DMA channel.
+// SAFETY: configured isolated model router and original native CM owner,
+// independently of parsed data; one serialized real mapped-DMA channel.
 unsafe impl Owner for Native {
     fn inventory(&self) -> &Inventory {
         &self.inventory
@@ -34,7 +34,7 @@ impl Drop for Native {
     fn drop(&mut self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
         if let Some(r) = self.router.take() {
-            // SAFETY: exact isolated configured router transfers to final retained model CM; quarantined owners never drop.
+            // SAFETY: exact isolated configured router transfers to final kept model CM; quarantined owners never drop.
             unsafe { r.retire() };
         }
     }
@@ -69,7 +69,7 @@ fn fixture() -> Fixture {
         router: Some(parent),
         dropped: Arc::new(AtomicUsize::new(0)),
     });
-    // SAFETY: actual isolated child setup transferred to retained model CM without a child command/tunnel publication.
+    // SAFETY: isolated child setup transferred to kept model CM without a child command/tunnel publication.
     unsafe { child.retire() };
     Fixture {
         domain,
@@ -299,7 +299,7 @@ fn actual_drom_frames_probe_chunks_crc_ports_names_and_original_owner() {
                 mut cursor,
                 router_dropped,
             } = f;
-            // SAFETY: actual configured router/native CM source and exact same idle mapped-DMA channel.
+            // SAFETY: configured router/native CM source and same idle mapped-DMA channel.
             let mut read = unsafe { Read::new(channel, owner.clone(), cursor.now) }.unwrap();
             let acquired = drive(&mut peer, &domain, &model, &mut cursor, &mut read).unwrap();
             let mut channel = read.into_channel();
@@ -356,7 +356,7 @@ fn actual_drom_frames_probe_chunks_crc_ports_names_and_original_owner() {
             );
             drop(owner);
             assert_eq!(router_dropped.load(Ordering::Relaxed), 0);
-            // SAFETY: exact original native model CM takes the completed observed data/router before final drain.
+            // SAFETY: original native model CM takes the completed observed data/router before final drain.
             unsafe { acquired.retire() };
             assert_eq!(router_dropped.load(Ordering::Relaxed), 1);
             channel_release(&mut channel);
@@ -389,7 +389,7 @@ fn source_crc32_mismatch_is_explicit_while_v1_uid_and_unknown_revision_fail() {
             mut cursor,
             router_dropped,
         } = f;
-        // SAFETY: same actual model; received integrity/revision failures are never authority.
+        // SAFETY: same model; received integrity/revision failures are never permission.
         let mut read = unsafe { Read::new(channel, owner.clone(), cursor.now) }.unwrap();
         let result = drive(&mut peer, &domain, &model, &mut cursor, &mut read);
         if fault == 0 {
@@ -428,7 +428,7 @@ fn source_read_status_retry_budget_is_global_per_read_and_acked_status_only() {
             mut cursor,
             router_dropped,
         } = f;
-        // SAFETY: exact actual native CM remains held through closed read-status retries.
+        // SAFETY: native CM remains held through closed read-status retries.
         let mut read = unsafe { Read::new(channel, owner.clone(), cursor.now) }.unwrap();
         let result = drive(&mut peer, &domain, &model, &mut cursor, &mut read);
         if exhausted {
@@ -441,7 +441,7 @@ fn source_read_status_retry_budget_is_global_per_read_and_acked_status_only() {
             let acquired = result.expect("three full-body retries plus separate probe budget");
             assert!(acquired.image.crc32.matches());
             assert_eq!(peer.commands.len(), 7);
-            // SAFETY: fully acknowledged model reads transfer to retained native CM.
+            // SAFETY: fully acknowledged model reads transfer to kept native CM.
             unsafe { acquired.retire() };
         }
         let mut channel = read.into_channel();
@@ -471,7 +471,7 @@ fn every_drom_metadata_or_command_write_failure_keeps_original_cm_and_blocks_ret
                 mut cursor,
                 router_dropped,
             } = f;
-            // SAFETY: exact actual native model CM and mapped-DMA configuration ownership.
+            // SAFETY: native model CM and mapped-DMA configuration ownership.
             let mut read = unsafe { Read::new(channel, owner.clone(), cursor.now) }.unwrap();
             read.poll(cursor.now).unwrap();
             let mut failed = false;
@@ -558,7 +558,7 @@ fn malformed_source_lengths_port_observations_and_guard_loss_never_publish_image
             mut cursor,
             router_dropped,
         } = f;
-        // SAFETY: actual isolated router and source; malformed live data cannot grant native rights.
+        // SAFETY: isolated router and source; malformed live data cannot grant native rights.
         let mut read = unsafe { Read::new(channel, owner.clone(), cursor.now) }.unwrap();
         read.poll(cursor.now).unwrap();
         let mut failed = false;
@@ -599,7 +599,7 @@ fn native_drom_clock_admission_precedes_uid_or_any_router_operation() {
             ..
         } = f;
         assert!(matches!(
-            // SAFETY: same actual isolated native CM; invalid native clock budget must refuse
+            // SAFETY: same isolated native CM; invalid native clock budget must refuse
             // before I/O.
             unsafe { Read::new(channel, owner, cursor.now) },
             Err(Error::TimerBudget {
@@ -648,7 +648,7 @@ fn unchanged_linux_drom_acquisition_crc_and_port_metadata_match_actual_native_fr
             mut cursor,
             router_dropped,
         } = f;
-        // SAFETY: actual configured isolated router and original CM, exact source DROM input and real mapped-DMA channel.
+        // SAFETY: configured isolated router and original CM, source DROM input and real mapped-DMA channel.
         let mut read = unsafe { Read::new(channel, owner.clone(), cursor.now) }.unwrap();
         let result = drive(&mut peer, &domain, &model, &mut cursor, &mut read);
         let linux_ret = fields[8].parse::<i32>().unwrap();
@@ -719,7 +719,7 @@ fn unchanged_linux_drom_acquisition_crc_and_port_metadata_match_actual_native_fr
             let mut channel = read.into_channel();
             drop(owner);
             assert_eq!(router_dropped.load(Ordering::Relaxed), 0);
-            // SAFETY: original actual model CM takes the fully read/parsed source observations and router through final native drain.
+            // SAFETY: original model CM takes the fully read/parsed source observations and router through final native drain.
             unsafe { acquired.retire() };
             assert_eq!(router_dropped.load(Ordering::Relaxed), 1);
             channel_release(&mut channel);

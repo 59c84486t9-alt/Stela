@@ -1,4 +1,4 @@
-//! Actual private native-PMIC execution time, not the shared RTC oscillator.
+//! Private native-PMIC execution time, not the shared RTC oscillator.
 use crate::platform::apple::counter::FREQUENCY_HZ;
 
 use stela_soc_data::pmu::PmicEpoch;
@@ -10,7 +10,7 @@ struct Time {
     fraction: u64,
 }
 
-/// Deliberately non-Clone and retained by the actual PMIC control/SRAM owner.
+/// Non-Clone and kept by the PMIC control/SRAM owner.
 pub(super) struct Clock {
     time: Time,
     hz: u64,
@@ -59,8 +59,8 @@ impl Clock {
         Ok(Advance { owner: self, next })
     }
 
-    /// The first actual system-counter value at or after the target native
-    /// cycle, preserving the retained fractional conversion. Due targets keep
+    /// The first system-counter value at or after the target native
+    /// cycle, preserving the fractional conversion. Due targets keep
     /// the current counter; no wrapping, zero fallback or truncated deadline.
     pub fn deadline(&self, now: u64, cycles: u64) -> Result<u64, &'static str> {
         let time = self.at(now)?;
@@ -78,13 +78,13 @@ impl Clock {
             .ok_or("native PMIC timer deadline exceeds the system counter")?;
         // A single system-counter step can advance multiple native cycles.
         // The target may fit while the first reachable time overshoots the
-        // retained cycle horizon; do not publish that unusable deadline.
+        // cycle horizon; do not publish that unusable deadline.
         self.at(deadline)?;
         Ok(deadline)
     }
 }
 
-/// A private consuming preparation that exclusively borrows the actual owner.
+/// A private consuming preparation that exclusively borrows the owner.
 /// It cannot acknowledge another clock, outlive its PMIC or survive intervening
 /// mutation/redispatch. Dropping it has no visible effect.
 pub(in super::super) struct Advance<'a> {
@@ -97,7 +97,7 @@ impl Advance<'_> {
     }
 }
 
-/// Exact original Maverick image1 1ac0..1b2a reload conversion. These are
+/// Original Maverick image1 1ac0..1b2a reload conversion. These are
 /// source register fields, not a measured physical oscillator rate. The native
 /// timer consumes the caller's explicitly declared reference-clock cycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(Reload::from_request(0x1fffe1).shift, 7);
         assert_eq!(Reload::from_request(0x1fffe0).field, 65534);
         assert_eq!(Reload::from_request(0x1fffe1).field, 4095);
-        // These are exact source arithmetic fields, not a saturation/rounding
+        // These are source arithmetic fields, not a saturation/rounding
         // policy inferred from the generation name or nominal period.
         assert_eq!(Reload::from_request(u32::MAX).field, u16::MAX);
     }

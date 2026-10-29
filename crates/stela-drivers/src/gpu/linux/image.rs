@@ -1,7 +1,7 @@
 //! Permanent immutable-image ownership for Linux's borrowed constant names.
 //!
-//! Registration consumes an actual platform capability. It does not establish
-//! page permissions or manufacture image authority. The provider is retained
+//! Registration consumes a platform capability. It does not establish
+//! page permissions or manufacture image permission. The provider is held
 //! permanently because names and caches can survive an individual Linux owner.
 
 use crate::platform::image::NativeReadOnlyImage;
@@ -66,7 +66,7 @@ impl Registry {
     }
 }
 
-// MaybeUninit deliberately has no destructor: even a registry's destruction
+// MaybeUninit has no destructor: even a registry's destruction
 // cannot release an image while an escaped constant name may still borrow it.
 static IMAGE: Registry = Registry::new();
 
@@ -79,7 +79,7 @@ pub struct LinuxImageRegistration {
     _private: (),
 }
 
-/// Transfer actual immutable native-image ownership to Linux for the mount's
+/// Transfer immutable native-image ownership to Linux for the mount's
 /// lifetime, before admitting any dependent constant-name lifecycle.
 ///
 /// There is no replacement or unregister operation. A second or concurrent
@@ -107,7 +107,7 @@ pub unsafe fn register(
 
 /// Classify an address without reading its contents. Missing or unfinished
 /// registration traps: it cannot become false and cause a literal to be freed.
-/// A false result grants no heap-allocation or free authority.
+/// A false result grants no heap-allocation or free permission.
 #[unsafe(no_mangle)]
 extern "C" fn stela_linux_is_rodata(address: *const c_void) -> bool {
     IMAGE.contains(address as usize)
@@ -120,7 +120,7 @@ mod tests {
     use super::*;
     use core::sync::atomic::AtomicUsize;
 
-    /// Empty authority tests registry mechanics only. It classifies no native
+    /// Empty permission tests registry mechanics only. It classifies no native
     /// address and supplies no image, permission or execution-root evidence.
     struct EmptyImage {
         queries: AtomicUsize,

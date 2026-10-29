@@ -56,7 +56,7 @@ pub enum Operation {
     ExceptionReturn {
         key: Option<AuthenticationKey>,
     },
-    /// Hardware ignores the immediate; retaining it identifies the source.
+    /// Hardware ignores the immediate; keeping it identifies the source.
     Undefined {
         immediate: u16,
     },

@@ -3,7 +3,7 @@
 //! Configuration access to devices on a VMD child bus.
 use super::*;
 
-/// Exclusive child configuration borrow. This intentionally supplies no
+/// Exclusive child configuration borrow. This supplies no
 /// `pci::Address`: a 32-bit VMD domain cannot be truncated to an ACPI segment.
 pub struct ChildConfig<'a, R: Registers> {
     pub(super) host: &'a mut Host<R>,
@@ -37,7 +37,7 @@ impl<R: Registers> ChildConfig<'_, R> {
     pub fn write(&mut self, offset: u16, width: u8, value: u32) -> Result<(), Error> {
         self.host.check_live()?;
         let absolute = self.offset(offset, width)?;
-        // Until the shared requester authority accepts synthetic domains, no
+        // Until the shared requester permission accepts synthetic domains, no
         // safe configuration API may enable child DMA. Also catch a byte write
         // of COMMAND and DWORD writes covering COMMAND/Status.
         if offset == COMMAND && value & u32::from(BUS_MASTER) != 0 {
@@ -97,9 +97,9 @@ impl<R: Registers> Host<R> {
     }
 }
 
-// ConfigSpace cannot propagate hardware faults and is deliberately not
-// implemented: a failed read must poison/retain the hierarchy rather than
-// return a fabricated all-ones value that looks like an absent child.
+// ConfigSpace cannot propagate hardware faults and is not
+// implemented: a failed read must poison/keep the hierarchy rather than
+// return an invented all-ones value that looks like an absent child.
 
 pub(super) fn scan<R: Registers>(host: &mut Host<R>) -> Result<Vec<Child>, Error> {
     host.check_live()?;

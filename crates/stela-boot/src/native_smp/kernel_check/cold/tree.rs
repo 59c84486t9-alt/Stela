@@ -1,4 +1,4 @@
-//! Authored publication fixture on the actual retained loader allocation.
+//! Authored publication fixture on the loader allocation.
 use super::{RegisteredSystemRam, source};
 use crate::engine::bundle::live_tree::{LiveTree, Ram, registered::ColdRam};
 use alloc::vec;

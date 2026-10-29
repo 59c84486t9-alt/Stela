@@ -39,7 +39,7 @@ impl NativeMapping {
     }
 }
 
-// SAFETY: this owner only retains an immutable raw mapping descriptor and its
+// SAFETY: this owner only keeps an immutable raw mapping descriptor and its
 // unmap obligation. It provides no safe byte access/protection/remap operation;
 // adoption requires stable storage and externally synchronized raw accesses.
 unsafe impl Send for NativeMapping {}
@@ -116,7 +116,7 @@ impl NativeStorage {
         })
     }
 
-    /// Retain equal-sized guest/publisher aliases of the same private backing.
+    /// Keep equal-sized guest/publisher aliases of the same private backing.
     ///
     /// # Safety
     /// If the checked lengths match and native ranges do not overlap, both
@@ -293,9 +293,9 @@ mod tests {
         assert_eq!(storage.publisher_base(), None);
         drop(storage);
         assert!(mapped(base));
-        // SAFETY: retained private RW raw storage; no guest execution or references.
+        // SAFETY: private RW raw storage; no guest execution or references.
         unsafe { base.as_ptr().write(0x5a) };
-        // SAFETY: the retained storage is still mapped, and nothing writes it concurrently.
+        // SAFETY: the storage is still mapped, and nothing writes it concurrently.
         assert_eq!(unsafe { retained.primary_base().as_ptr().read() }, 0x5a);
         drop(retained);
     }
@@ -322,7 +322,7 @@ mod tests {
         memory.write(allocation.guest_address, &[0x31]).unwrap();
         let storage = Arc::clone(&memory.allocations[0].storage);
         let base = storage.primary_base();
-        // SAFETY: retained raw RW Normal-WB storage with private serialized access;
+        // SAFETY: raw RW Normal-WB storage with private serialized access;
         // no rights changes or external accesses occur while backing exists.
         let backing =
             unsafe { MemoryBacking::new(base, storage.bytes(), permissions(), storage) }.unwrap();
@@ -379,7 +379,7 @@ mod tests {
         let pointer = backing.host_pointer(0, 1, AccessKind::Write).unwrap();
         // SAFETY: `pointer` is a checked writable byte of this test's private storage.
         unsafe { pointer.as_ptr().write(0x42) };
-        // SAFETY: `guest` maps the same retained storage, with no concurrent writer.
+        // SAFETY: `guest` maps the same storage, with no concurrent writer.
         assert_eq!(unsafe { guest.as_ptr().read() }, 0x42);
         drop(first);
         drop(alias);
@@ -393,7 +393,7 @@ mod tests {
         let page = host_page_size().unwrap();
         let primary = anonymous(page);
         let publisher = anonymous(2 * page);
-        // SAFETY: this intentionally mismatched pair is rejected before admission;
+        // SAFETY: this mismatched pair is rejected before admission;
         // both arguments still own independent complete private RAM mappings.
         let result = unsafe {
             NativeStorage::published_aliases(primary, publisher, tempfile::tempfile().unwrap())

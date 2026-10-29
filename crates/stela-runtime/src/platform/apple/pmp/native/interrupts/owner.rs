@@ -1,5 +1,5 @@
 //! The native interrupt controller owner: initialization, source registration,
-//! signals and event dispatch, each retaining its reached prefix across Busy
+//! signals and event dispatch, each keeping its reached prefix across Busy
 //! and refusal. `Handler` callbacks run with a `Signals` context that shares
 //! the current-source state with foreground signals.
 use super::super::platform::owner::Completion;
@@ -8,7 +8,7 @@ use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::Cell;
 use stela_contracts::bus::Access;
 
-/// Actual handler invocation, pinned to the sole consumed hardware event.
+/// Handler invocation, pinned to the sole consumed hardware event.
 /// Cloning this value grants no right to create another dispatch operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -16,7 +16,7 @@ pub struct Event {
     pub word: Option<u32>,
     pub generation: u64,
 }
-/// An actual retained callback/context owner. Busy/Refused must preserve its
+/// A kept callback/context owner. Busy/Refused must preserve its
 /// own completed prefix. Retired-with-refusal prevents callback replay while
 /// the interrupt owner still owes its reached reenable/order/line operations.
 pub trait Handler {
@@ -171,9 +171,9 @@ impl Core {
     }
 }
 
-/// Mutable borrowing context of the sole native controller during its actual
+/// Mutable borrowing context of the sole native controller during its
 /// callback. This shares current-source P68/P70 with foreground Signal. A
-/// callback must retain its own operation prefix before returning Busy; use
+/// callback must keep its own operation prefix before returning Busy; use
 /// begin_signal/advance_signal outside callbacks for an owner-issued token.
 pub struct Signals<'a> {
     core: &'a mut Core,
@@ -213,7 +213,7 @@ impl Signals<'_> {
     pub fn current(&self) -> u32 {
         self.core.current
     }
-    /// A stable monotonically increasing callback source cursor retains its
+    /// A stable monotonically increasing callback source cursor keeps its
     /// target/read/write prefix across an effect-free refusal or callback Busy.
     pub fn set(
         &mut self,
@@ -303,9 +303,9 @@ struct EventWork {
     special: bool,
 }
 
-/// Sole configured native RTKit IRQ registry/controller. It owns actual mapped
+/// Sole configured native RTKit IRQ registry/controller. It owns mapped
 /// device and callback resources; it never manufactures hardware events. Init
-/// and dispatch retain completed prefixes. None of its outcomes is an ACK.
+/// and dispatch keep completed prefixes. None of its outcomes is an ACK.
 pub struct Owner {
     core: Core,
     identity: Rc<()>,
@@ -356,7 +356,7 @@ impl Owner {
             event_generation: 0,
         })
     }
-    /// Actual selected source initialize operation1 (1026008..102618c).
+    /// Selected source initialize operation1 (1026008..102618c).
     /// Software P28/P8c is declared separately; no reset hardware word is supplied.
     pub fn initialize(&mut self, access: &mut Access<'_>) -> Result<u32, Error> {
         if let Some(error) = self.core.fault {
@@ -382,7 +382,7 @@ impl Owner {
                 }
                 3 => {
                     // Source allocates19 buckets, current/active cells, and a
-                    // special callback pair. Reserve actual host storage now;
+                    // special callback pair. Reserve host storage now;
                     // this is software allocation, not observed IRQ readiness.
                     self.entries.try_reserve(19).map_err(|_| {
                         Error::Refused("native interrupt registry allocation failed")
@@ -419,7 +419,7 @@ impl Owner {
         }
         Ok(())
     }
-    /// Actual+38 registration. The real handler contains its sole retained
+    /// Actual+38 registration. The real handler contains its sole kept
     /// context; replacing it preserves the existing source flag cell. Register
     /// keys are not constrained to the hardware count by10262b4.
     pub fn register(&mut self, source: u32, handler: Box<dyn Handler>) -> Result<(), Error> {
@@ -442,7 +442,7 @@ impl Owner {
     /// a missing entry is allocated only when bit9 is set. Low8 controls the
     /// returned source status AFTER that prefix:0 returns0, nonzero8000000b.
     /// Preserve this status separately from controller/command completion.
-    /// The source retains an existing handler rather than deleting it.
+    /// The source keeps an existing handler rather than deleting it.
     pub fn configure_registration(&mut self, source: u32, flags: u32) -> Result<u32, Error> {
         self.mutable_registry()?;
         if source == SPECIAL {
@@ -464,7 +464,7 @@ impl Owner {
         }
         Ok(if flags & 0xff == 0 { 0 } else { 0x8000_000b })
     }
-    /// Begin once at the actual reached source Signal cursor. Keep this token
+    /// Begin once at the reached source Signal cursor. Keep this token
     /// in the root ResourceRequest adapter until advance_signal retires; do not
     /// issue a new token to retry the same consuming/write operation.
     pub fn begin_signal(&mut self, source: u32, enable: bool) -> Result<Signal, Error> {
@@ -526,8 +526,8 @@ impl Owner {
             )),
         }
     }
-    /// Begin one actual native interrupt entry (normal or source special route).
-    /// Invoke only from the actual native CPU/device route. This declaration
+    /// Begin one native interrupt entry (normal or source special route).
+    /// Invoke only from the native CPU/device route. This declaration
     /// creates no event; normal poll must consume the real IACK word first.
     pub fn begin_dispatch(&mut self, special: bool) -> Result<(), Error> {
         self.core.check()?;
@@ -742,9 +742,9 @@ impl Owner {
             }
         }
     }
-    /// Source operations4/5 require snapshot-enabled P8c and genuine saved
+    /// Source operations4/5 require snapshot-enabled P8c and saved
     /// target/mask/control words. This owner does not invent those observations.
-    /// A future suspend owner must retain the count target words, count>>5 mask
+    /// A future suspend owner must keep the count target words, count>>5 mask
     /// words and control+14 around1026058..10260f0 in source order.
     pub fn snapshot_lifecycle_requirement(&self) -> Result<(), Error> {
         self.core.check()?;

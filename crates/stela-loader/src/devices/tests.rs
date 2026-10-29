@@ -1148,7 +1148,7 @@ fn a_device_behind_an_unmodeled_dart_is_hidden_with_it() {
 
 /// Direct AP memory registers do not master through the separate PMP
 /// transport. Model-class admission supplies no native owner or lifecycle
-/// authority: mount must still require the actual joint memory resources.
+/// permission: mount must still require the joint memory resources.
 #[test]
 fn direct_memory_admission_does_not_admit_unsupported_pmp_dma() {
     let mut mcc = node("mcc", Some(b"mcc,t6000\0"), vec![]);
@@ -1217,7 +1217,7 @@ fn direct_memory_admission_does_not_admit_unsupported_pmp_dma() {
         let actual: Vec<_> = tree.node(path).unwrap().properties.iter().collect();
         assert_eq!(actual, expected, "{path}");
     }
-    // A direct-memory class does not exempt an actual declared DMA
+    // A direct-memory class does not exempt a declared DMA
     // dependency from the ordinary unsupported-provider cascade.
     let mut dependent = original;
     dependent

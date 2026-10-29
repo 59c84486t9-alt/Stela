@@ -28,8 +28,8 @@ impl Command {
         }
     }
 }
-/// Source101f534 writes bytes8..31 first, narrowing each retained u64 arg to
-/// low32. Timestamp is a separate final actual write after DMB ISH.
+/// Source101f534 writes bytes8..31 first, narrowing each u64 arg to
+/// low32. Timestamp is a separate final write after DMB ISH.
 pub(super) fn encode_body(event: u32, thread: u32, args: [u64; 4]) -> [u8; 24] {
     let mut body = [0; 24];
     body[..4].copy_from_slice(&event.to_le_bytes());

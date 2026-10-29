@@ -45,7 +45,7 @@ fn stac922x_device(id: u32, inherited_amp: bool) -> Rc<RefCell<Model>> {
     for node in 0x0f..=0x16 {
         m.parameters.insert((node, 9), 0xf << 20);
     }
-    // Actual capture mux output has a broken reported range. The
+    // Capture mux output has a broken reported range. The
     // independent device clamps gain to 0..2 and has no mute bit.
     m.parameters.insert(
         (0x12, 9),

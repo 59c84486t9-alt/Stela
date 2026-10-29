@@ -1,7 +1,7 @@
 //! One physical root's fixed-clock producer, multiplexed through the engine's
 //! existing local APIC timer/vector. No Linux callback enters from this ISR.
 //!
-//! General wall time is an exclusively owned actual HPET64 source, read with
+//! General wall time is an exclusively owned HPET64 source, read with
 //! coherent32 sampling. The old bounded PM path exists only for its explicit
 //! short fixture. No source grants NTP, suspend or cross-CPU synchronization.
 use crate::{
@@ -41,7 +41,7 @@ static ACTIVE: AtomicPtr<State> = AtomicPtr::new(ptr::null_mut());
 // BEFORE loading/dereferencing the owning CPU's registration pointer: checking
 // State.cpu afterward would race real BSP removal and permit a use-after-free.
 static ACTIVE_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
-// A legacy CPUID APIC ID can be narrower than the actual x2APIC ID namespace.
+// A legacy CPUID APIC ID can be narrower than the x2APIC ID namespace.
 // The original HostOwner also owns a distinct permanently pinned GS record on
 // every physical CPU. Validate that live architectural identity BEFORE ACTIVE,
 // so a remote CPU with a colliding legacy ID cannot borrow a removable pointer.
@@ -96,7 +96,7 @@ fn root() -> u64 {
     root
 }
 
-/// Immutable CPU view. The actual !Send HostOwner remains on its processor;
+/// Immutable CPU view. The !Send HostOwner remains on its processor;
 /// its root lease refuses owner destruction while any view still exists.
 pub(crate) struct RootCpu {
     identity: Arc<host::RootIdentity>,
@@ -124,17 +124,17 @@ impl RootCpu {
         if self.closed.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        // The retained immutable Owner identity checks the actual CPU/GS/
+        // The kept immutable Owner identity checks the CPU/GS/
         // descriptors and original root catalog before device access.
         self.identity.check_irq_cpu()
     }
-    /// Caller holds actual local IRQ exclusion. A source fault does not
+    /// Caller holds local IRQ exclusion. A source fault does not
     /// revoke the time-free CPU identity needed to drain/release resources.
     fn sample_ticks(&self) -> Result<u64, WorkError> {
         self.health.check()?;
         let result = (|| {
             self.deadline_control.check()?;
-            // SAFETY: original owner and CPU remain retained. Source checks
+            // SAFETY: original owner and CPU remain held. Source checks
             // real control/power eligibility around the coherent read.
             let mut raw = unsafe { self.source.read()? };
             let previous = self.previous.load(Ordering::Relaxed);
@@ -161,7 +161,7 @@ impl RootCpu {
         self.check_cpu()?;
         let flags = flags_disable();
         let result = self.sample();
-        // SAFETY: exact enclosing save, no switch/callback or migration.
+        // SAFETY: enclosing save, no switch/callback or migration.
         unsafe {
             restore(flags);
         }
@@ -169,7 +169,7 @@ impl RootCpu {
     }
 }
 // SAFETY: immutable root/CPU witnesses are checked before entry; all mutable
-// clock publication is atomic and serialized by actual same-CPU IRQ exclusion.
+// clock publication is atomic and serialized by same-CPU IRQ exclusion.
 // The lease prevents HostOwner destruction, and foreign CPU entry is refused.
 unsafe impl Cpu for RootCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
@@ -201,8 +201,8 @@ unsafe impl Cpu for RootCpu {
     }
 }
 
-/// Continuous-source identity retained with the original physical CPU owner.
-/// Cloning retains ownership; it neither migrates sampling nor rebases time.
+/// Continuous-source identity kept with the original physical CPU owner.
+/// Cloning keeps ownership; it neither migrates sampling nor rebases time.
 #[derive(Clone)]
 pub(crate) struct CounterEpoch {
     cpu: Arc<RootCpu>,
@@ -255,7 +255,7 @@ impl ClockServices {
 pub(crate) use source::ElapsedBounds;
 impl CounterEpoch {
     /// Nominal monotonic nanoseconds for transport deadlines. UTC callers use
-    /// sample/elapsed_bounds, which retain the source's outward uncertainty.
+    /// sample/elapsed_bounds, which keep the source's outward uncertainty.
     pub(crate) fn now_ns(&self) -> Result<u64, WorkError> {
         let sample = self.sample()?;
         self.cpu
@@ -274,7 +274,7 @@ impl CounterEpoch {
         let result = self.cpu.sample_ticks();
         // Restore depends only on the real time-free CPU identity. A failed
         // source must not prevent resources from being drained on that CPU.
-        // SAFETY: exact same CPU's enclosing IRQ save; no switch/callback.
+        // SAFETY: same CPU's enclosing IRQ save; no switch/callback.
         unsafe {
             self.cpu.restore(flags);
         }
@@ -295,7 +295,7 @@ impl CounterEpoch {
         if !Arc::ptr_eq(&self.cpu, &start.epoch.cpu) || !Arc::ptr_eq(&self.cpu, &end.epoch.cpu) {
             return Err(WorkError::InvalidTicket);
         }
-        // A retained old reading never supplies readiness after detach,
+        // A kept old reading never supplies readiness after detach,
         // control/root loss or a source transition.
         self.sample()?;
         let ticks = end
@@ -319,8 +319,8 @@ struct Counter {
 }
 impl Counter {
     fn publish(&self, now: u64) -> Result<(), WorkError> {
-        // SAFETY: source-bound immutable counter registration retains both
-        // aligned atomic words until actual same-CPU detach with IF off.
+        // SAFETY: source-bound immutable counter registration keeps both
+        // aligned atomic words until same-CPU detach with IF off.
         let (word, generation) = unsafe { (self.word.as_ref(), self.generation.as_ref()) };
         if generation.load(Ordering::Acquire) != self.expected {
             return Err(WorkError::Closed);
@@ -359,10 +359,10 @@ struct State {
     raised: UnsafeCell<Option<RaisedWork>>,
     counter: UnsafeCell<Option<Counter>>,
 }
-// SAFETY: pointer fields never leave the actual owning CPU, every effect checks
+// SAFETY: pointer fields never leave the owning CPU, every effect checks
 // affinity first, and process mutation excludes the same real ISR with CLI.
 unsafe impl Send for State {}
-// SAFETY: same CPU and actual IRQ exclusion; no callback accesses mutable State.
+// SAFETY: same CPU and IRQ exclusion; no callback accesses mutable State.
 unsafe impl Sync for State {}
 impl State {
     fn process(&self) -> Result<(), WorkError> {
@@ -400,7 +400,7 @@ impl State {
     }
 }
 struct NativeClock(Arc<State>);
-// SAFETY: time comes from the actual retained hardware counter. Its coherent
+// SAFETY: time comes from the hardware counter. Its coherent
 // reads and elapsed accumulator are serialized by this physical CPU's IRQ save.
 unsafe impl Clock for NativeClock {
     fn cpu(&self) -> &Arc<dyn Cpu> {
@@ -414,7 +414,7 @@ struct NativeIdle {
     state: Arc<State>,
     clock: Arc<dyn Clock>,
 }
-// SAFETY: all notifications are same physical CPU and retained GS/IDT roots;
+// SAFETY: all notifications are same physical CPU and kept GS/IDT roots;
 // pending is published before sleeping's CLI/check/STI;HLT sequence. An incoming
 // IF=0 refuses waiting, so the provider never creates permission for progress.
 unsafe impl Idle for NativeIdle {
@@ -443,7 +443,7 @@ unsafe impl Idle for NativeIdle {
                 .idle
                 .store(deadline.unwrap_or(NONE), Ordering::Relaxed);
             self.state.rearm(now)?;
-            // SAFETY: incoming IF was set, root owns actual IDT/LAPIC. STI's
+            // SAFETY: incoming IF was set, root owns IDT/LAPIC. STI's
             // shadow spans HLT; same-CPU interrupt publication cannot be lost.
             unsafe {
                 asm!("sti", "hlt", "cli", options(nostack));
@@ -460,7 +460,7 @@ unsafe impl Idle for NativeIdle {
     }
 }
 
-/// Own the native registration until the actual service has stopped and joined.
+/// Own the native registration until the service has stopped and joined.
 /// Forgetting this guard pins the real root rather than freeing live ISR state.
 pub(crate) struct Installed {
     state: ManuallyDrop<Arc<State>>,
@@ -504,9 +504,9 @@ pub(crate) struct DriverExecution<'a> {
     scope_leases: Arc<()>,
     _local: PhantomData<*mut ()>,
 }
-/// Immutable process authority for exported native mapping views. A live scope
-/// view prevents the actual !Send execution grant from ending; numerical root
-/// equality alone does not supply this authority or reopen an older scope.
+/// Immutable process permission for exported native mapping views. A live scope
+/// view prevents the !Send execution grant from ending; numerical root
+/// equality alone does not supply this permission or reopen an older scope.
 pub(crate) struct ProcessScope {
     state: Arc<State>,
     generation: u64,
@@ -527,8 +527,8 @@ impl ProcessScope {
         Ok(self.state.cpu_view.clone())
     }
 }
-/// Existing APIC/IDT admission metadata from the actual live root grant. This
-/// retains only the immutable CPU view; it neither moves HostOwner nor reserves
+/// Existing APIC/IDT admission metadata from the live root grant. This
+/// keeps only the immutable CPU view; it neither moves HostOwner nor reserves
 /// another vector or hardware timer.
 pub(crate) struct IrqAdapter {
     root_cpu: Arc<RootCpu>,
@@ -537,7 +537,7 @@ pub(crate) struct IrqAdapter {
     pub(crate) registers: u64,
 }
 impl IrqAdapter {
-    /// Validate this actual retained physical CPU and existing IDT/GS across
+    /// Validate this physical CPU and existing IDT/GS across
     /// every engine root. This supplies no Linux owner or process-entry proof.
     pub(crate) fn check_irq_cpu(&self) -> Result<(), WorkError> {
         self.root_cpu.affinity()
@@ -594,7 +594,7 @@ impl Drop for DriverExecution<'_> {
             .state
             .executing
             .store(false, Ordering::Release);
-        // SAFETY: actual same-CPU owner scope; no C frame/IRQ remains active.
+        // SAFETY: same-CPU owner scope; no C frame/IRQ remains active.
         unsafe {
             restore(self.flags);
         }
@@ -602,16 +602,16 @@ impl Drop for DriverExecution<'_> {
 }
 impl Installed {
     /// # Safety
-    /// Post-EBS actual owning CPU and canonical time-free RootExecution.
+    /// Post-EBS owning CPU and canonical time-free RootExecution.
     /// HPET source owns its UC mapping/controller and the same immutable identity.
     /// No stop/reset/counter-write/rate/decode/suspend discontinuity is allowed.
     /// PM is admitted only under its separate explicit complete sample-gap bound.
     /// No suspend/reset/migration/root replacement occurs before final release.
-    /// Existing all-root IDT/GS/xstate/clock code mappings remain retained. The
+    /// Existing all-root IDT/GS/xstate/clock code mappings remain held. The
     /// hardware timer is quiescent and its sole owner hands it to this mux.
-    /// The ARAT-qualified LAPIC timer's measured rate remains stable and running
-    /// through every actual HLT, including platform/VMM power transitions. No
-    /// reconfiguration invalidates that retained rate/idle contract. A platform
+    /// The ARAT-checked LAPIC timer's measured rate remains stable and running
+    /// through every HLT, including platform/VMM power transitions. No
+    /// reconfiguration invalidates that rate/idle contract. A platform
     /// without ARAT requires a separate real broadcast/deadline producer.
     pub(crate) unsafe fn attach(
         owner: &mut host::HostOwner,
@@ -620,15 +620,15 @@ impl Installed {
     ) -> Result<Self, WorkError> {
         owner.check_root(root_execution)?;
         let identity = root_execution.context().identity().clone();
-        // SAFETY: actual owner/root execution and complete controller/deadline
+        // SAFETY: owner/root execution and complete controller/deadline
         // handoff are supplied by this constructor's existing contract.
         unsafe { Self::attach_identity(identity, source) }
     }
     /// # Safety
-    /// Same actual timer/IDT/controller/rate/ARAT handoff as attach, using the
+    /// Same timer/IDT/controller/rate/ARAT handoff as attach, using the
     /// production resource owner and immutable HostOwner identity. Every old
     /// absence/publication capability must independently close before RAM
-    /// adoption; this clock never retains or recreates one of those grants.
+    /// adoption; this clock never keeps or recreates one of those grants.
     pub(crate) unsafe fn attach_native(
         identity: Arc<host::RootIdentity>,
         source: Prepared,
@@ -636,11 +636,11 @@ impl Installed {
         identity.check_dispatch()?;
         source.admit(&identity)?;
         source.continuous_period()?;
-        // SAFETY: caller retains the genuine physical controller/root/deadline
-        // owner; source admission below checks the exact same identity.
+        // SAFETY: caller keeps the physical controller/root/deadline
+        // owner; source admission below checks the same identity.
         unsafe { Self::attach_identity(identity, source) }
     }
-    /// Actual source and local timer handoff required by the two constructors.
+    /// Source and local timer handoff required by the two constructors.
     unsafe fn attach_identity(
         identity: Arc<host::RootIdentity>,
         source: Prepared,
@@ -650,7 +650,7 @@ impl Installed {
         let deadline_control = tsc::DeadlineControl::capture()?;
         let max_cpuid = deadline_control.max_cpuid();
         let thermal_eax = deadline_control.thermal_eax();
-        // ARAT is the actual local timer's invariant-rate/idle prerequisite;
+        // ARAT is the local timer's invariant-rate/idle prerequisite;
         // the existing guest timer or successful periodic delivery supplies no
         // such proof. Refuse before CLI, calibration, ownership or publication.
         // Keep a source owner outside the IRQ-off closure so failed admission
@@ -678,12 +678,12 @@ impl Installed {
             {
                 return Err(WorkError::Busy);
             }
-            // SAFETY: genuine retained descriptor/root ownership from owner.
+            // SAFETY: descriptor/root ownership from owner.
             let observed = unsafe { interrupts::observe() };
             if host::root_irq_active() {
                 return Err(WorkError::InterruptContext);
             }
-            // SAFETY: exact canonical actual source/root ownership retained;
+            // SAFETY: exact canonical source/root ownership kept;
             // HPET validates the original CPU/root before coherent MMIO reads.
             let previous = unsafe { source.read()? };
             let cpu = Arc::new(RootCpu {
@@ -739,7 +739,7 @@ impl Installed {
                 _local: PhantomData,
             })
         })();
-        // SAFETY: exact enclosing owner-local save, no switch occurred.
+        // SAFETY: enclosing owner-local save, no switch occurred.
         unsafe {
             restore(flags);
         }
@@ -788,12 +788,12 @@ impl Installed {
         })
     }
     /// # Safety
-    /// Called only by the actual main/root dispatcher, which grants interrupt
-    /// delivery through the retained existing IDT/IST/xstate/LAPIC ownership.
-    /// All ISR-reachable publications/code/storage are installed and retained;
+    /// Called only by the main/root dispatcher, which grants interrupt
+    /// delivery through the existing IDT/IST/xstate/LAPIC ownership.
+    /// All ISR-reachable publications/code/storage are installed and kept;
     /// no mutable Host State borrow or native/foreign critical scope survives
     /// this entry. All driver continuations and foreign frames return/join
-    /// before dropping the grant. Preserve the source's qualified sample bound.
+    /// before dropping the grant. Preserve the source's checked sample bound.
     pub(crate) unsafe fn enter_driver_execution(&self) -> Result<DriverExecution<'_>, WorkError> {
         self.state.process()?;
         let scope_leases = Arc::new(());
@@ -840,7 +840,7 @@ impl Installed {
     pub(crate) fn bind_raised(&self, raised: RaisedWork) -> Result<(), WorkError> {
         self.state.process()?;
         let flags = flags_disable();
-        // SAFETY: same owning process, actual local ISR excluded.
+        // SAFETY: same owning process, local ISR excluded.
         let result = unsafe {
             let slot = &mut *self.state.raised.get();
             if slot.is_some() {
@@ -857,8 +857,8 @@ impl Installed {
         result
     }
     /// # Safety
-    /// Exact original wheel_counter_acquire snapshot, with both aligned u64
-    /// words and original image/storage retained in owner. Its producer uses the
+    /// Original wheel_counter_acquire snapshot, with both aligned u64
+    /// words and original image/storage kept in owner. Its producer uses the
     /// same clock Arc/origin and HZ=1000. Wheel polling shares this CAS-max ABI.
     /// Counter release/unregister may occur only AFTER detach_publications.
     pub(crate) unsafe fn bind_counter(
@@ -876,7 +876,7 @@ impl Installed {
         }
         // Keep rejected ownership outside the artificial IRQ-masked scope.
         // Validation/sample/Busy failures must restore flags before releasing
-        // an arbitrary retained original-code/storage/provider owner.
+        // an arbitrary original-code/storage/provider owner.
         let mut candidate = Some(Counter {
             word,
             generation,
@@ -887,7 +887,7 @@ impl Installed {
         });
         let flags = flags_disable();
         let result = (|| {
-            // SAFETY: actual IRQ exclusion and retained immutable snapshot.
+            // SAFETY: IRQ exclusion and kept immutable snapshot.
             let slot = unsafe { &mut *self.state.counter.get() };
             if slot.is_some() {
                 return Err(WorkError::Busy);
@@ -899,7 +899,7 @@ impl Installed {
             *slot = candidate.take();
             Ok(())
         })();
-        // SAFETY: exact same CPU's save.
+        // SAFETY: same CPU's save.
         unsafe {
             restore(flags);
         }
@@ -918,7 +918,7 @@ impl Installed {
                 (&mut *self.state.raised.get()).take(),
             )
         };
-        // SAFETY: restore before actual process-context final owner releases.
+        // SAFETY: restore before process-context final owner releases.
         unsafe {
             restore(flags);
         }
@@ -927,27 +927,27 @@ impl Installed {
         Ok(())
     }
     /// # Safety
-    /// All original producers are stopped, publications detached, actual Timer
+    /// All original producers are stopped, publications detached, Timer
     /// task and every driver continuation joined, and no idle call is active.
     /// Every Runtime, Domain, service receiver, Queue, WakeHandle and executor
     /// whose final release validates Cpu::check_cpu is FINALLY RELEASED before
-    /// this call, while its CPU remains live. Merely retiring/joining such an
+    /// this call, while its CPU remains live. Retiring/joining such an
     /// object and dropping it later is insufficient: this call closes the CPU
-    /// view, so that later qualified release would instead quarantine it.
+    /// view, so that later checked release would instead quarantine it.
     /// Only direct CPU/Clock/Idle Arc clones whose destructors do not validate
     /// that closed view may remain for later release. Drop those final clones
     /// before closing RootExecution or dropping the real !Send HostOwner.
     /// The physical root epoch remains active through any later direct clone
-    /// release. For HPET, a real caller-retained HpetCounter must survive this
-    /// retirement, then stop/drain and retire its actual mapping before that
+    /// release. For HPET, a real caller-kept HpetCounter must survive this
+    /// retirement, then stop/drain and retire its mapping before that
     /// epoch ends. No automatic Drop is permission to unmap a live source.
     /// Permanent adopted IRQ/kernel-image roots have no finite epoch closure.
-    /// Main's actual NativeDomain
+    /// Main's NativeDomain
     /// teardown must enforce this ordering; this method does not perform it.
-    /// A full original kernel image retains kthreadd/global workers for its
+    /// A full original kernel image keeps kthreadd/global workers for its
     /// lifetime, so Installed, DriverExecution and HostOwner remain rooted for
     /// that same lifetime. Such an image has no finite retirement permission;
-    /// this entry is for actually quiescent bounded/failure retirements only.
+    /// this entry is for quiescent bounded/failure retirements only.
     pub(crate) unsafe fn retire(mut self) -> Result<(), WorkError> {
         self.state.process()?;
         let flags = flags_disable();
@@ -958,7 +958,7 @@ impl Installed {
             }
             return Err(WorkError::Busy);
         }
-        // SAFETY: genuine IRQ exclusion; publications must already be drained.
+        // SAFETY: IRQ exclusion; publications must already be drained.
         if unsafe {
             (&*self.state.counter.get()).is_some() || (&*self.state.raised.get()).is_some()
         } {
@@ -1008,7 +1008,7 @@ impl Installed {
         self.state.cpu.closed.store(true, Ordering::Release);
         // SAFETY: the ISR is excluded; the raw Arc belongs to this registration.
         let registration = unsafe { Arc::from_raw(pointer) };
-        // SAFETY: exact enclosing save; a stale vector now takes the host path.
+        // SAFETY: enclosing save; a stale vector now takes the host path.
         unsafe {
             restore(flags);
         }
@@ -1068,7 +1068,7 @@ fn calibrate(cpu: &RootCpu) -> Result<u64, WorkError> {
 pub(crate) fn arm_guest(ticks: Option<u32>) -> bool {
     let flags = flags_disable();
     let result = arm_guest_disabled(ticks);
-    // SAFETY: exact same-CPU save; no callback or switch occurred in the mux.
+    // SAFETY: same-CPU save; no callback or switch occurred in the mux.
     unsafe {
         restore(flags);
     }
@@ -1110,8 +1110,8 @@ fn arm_guest_disabled(ticks: Option<u32>) -> bool {
     true
 }
 
-/// Fast path called by the genuine existing timer-vector entry BEFORE its EOI.
-/// It samples actual elapsed time, atomically publishes counters/reasons, and
+/// Fast path called by the existing timer-vector entry BEFORE its EOI.
+/// It samples elapsed time, atomically publishes counters/reasons, and
 /// rearms the shared minimum. It enters no Linux owner or original callback.
 pub(crate) fn interrupt() {
     if !registration_cpu() {
@@ -1121,7 +1121,7 @@ pub(crate) fn interrupt() {
     if pointer.is_null() {
         return;
     }
-    // SAFETY: same-CPU IRQ entry/removal exclusion retains registration's Arc.
+    // SAFETY: same-CPU IRQ entry/removal exclusion keeps registration's Arc.
     let state = unsafe { &*pointer };
     if state.cpu.affinity().is_err() {
         return;
@@ -1137,11 +1137,11 @@ pub(crate) fn interrupt() {
                     .ok_or(WorkError::Exhausted)?,
                 Ordering::Relaxed,
             );
-            // SAFETY: same-CPU actual entry, no process mutation while IF=0.
+            // SAFETY: same-CPU entry, no process mutation while IF=0.
             if let Some(counter) = unsafe { &*state.counter.get() } {
                 counter.publish(now)?;
             }
-            // SAFETY: same-CPU actual entry, no process mutation while IF=0.
+            // SAFETY: same-CPU entry, no process mutation while IF=0.
             if let Some(raised) = unsafe { &*state.raised.get() } {
                 raised.raise()?;
             }

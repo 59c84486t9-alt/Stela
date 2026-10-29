@@ -62,7 +62,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
     /// Explicit process-context rearm of buffers whose real RX completion and
     /// CPU visibility already finished. Previously returned byte vectors are
     /// owned copies; no device/CPU references to recycled payload RAM escape.
-    /// Staging alone grants no device credit: only actual producer publication
+    /// Staging alone grants no device credit: only producer publication
     /// in source groups of8 does. No allocation, IRQ queue or timeout is used.
     pub fn replenish_completed_receive(&mut self) -> Result<Replenished, Error> {
         if self.state != State::PnvmObserved {
@@ -93,7 +93,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
                     waiting = true;
                     break;
                 }
-                // SAFETY: The exact descriptor's prior actual buffer completion
+                // SAFETY: The exact descriptor's prior buffer completion
                 // proves its device access ended. Other slots stay live.
                 unsafe {
                     self.free
@@ -103,7 +103,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
                 owner.completed = false;
             }
             let buffer = &self.buffers[index];
-            // SAFETY: Actual completed_buffer already transferred this payload to
+            // SAFETY: Completed_buffer already transferred this payload to
             // the CPU and copied it. Return it to DMA before its next pointer.
             unsafe {
                 buffer.allocation.ready_for_device()?;
@@ -140,7 +140,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
             return Err(Error::CompletionCredit);
         }
         if published != 0 {
-            // All actual eligible IDs/leases precede the potentially uncertain
+            // All eligible IDs/leases precede the potentially uncertain
             // producer MMIO, including the initial7 staged descriptors.
             for _ in 0..published {
                 let (slot, vid) = self

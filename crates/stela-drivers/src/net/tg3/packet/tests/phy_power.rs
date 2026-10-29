@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual source PHY power writes through the retained packet/DMA owner.
+//! Source PHY power writes through the packet/DMA owner.
 use super::*;
 
 fn attached(bcm5762: bool) -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {

@@ -35,17 +35,17 @@ pub enum Error {
 /// # Safety
 /// The queue must belong to the exact RTL8822C PCI requester whose exclusive
 /// UC BAR is passed to `NativeIo`. It must build the donor's 48-byte reserved
-/// page TX descriptor and actual beacon TXBD using canonical pinned memory
+/// page TX descriptor and beacon TXBD using canonical pinned memory
 /// and requester-specific DMA mappings, then ring PCI beacon work. The caller
 /// owns no DMA allocation: the implementation copies `data` before returning
-/// and retains descriptor/payload mappings through actual DMA completion or
+/// and keeps descriptor/payload mappings through DMA completion or
 /// acknowledged requester stop. Success means submission, not completion.
-/// Errors may follow publication; Drop and quarantine must retain every
+/// Errors may follow publication; Drop and quarantine must keep every
 /// potentially live DMA resource and its claim until acknowledged quiescence.
 pub unsafe trait BeaconQueue {
     fn submit(&mut self, data: &[u8]) -> Result<(), Error>;
     /// # Safety
-    /// The actual FIFO_PAGE BCN_VALID was cleared before this submission,
+    /// The FIFO_PAGE BCN_VALID was cleared before this submission,
     /// then observed newly set after it, with exclusive requester ownership.
     /// The device copied this reserved page and no longer reads its host
     /// payload/descriptor. This does not authorize unmapping the queue base.
@@ -56,14 +56,14 @@ pub unsafe trait BeaconQueue {
 /// Exact register access plus native reserved-page TX submission.
 ///
 /// # Safety
-/// All reads must be actual volatile observations of the selected, exclusively
+/// All reads must be volatile observations of the selected, exclusively
 /// owned RTL8822C requester; stores must complete in program order. No other
 /// reset/IRQ/firmware worker may touch it during download. Never substitute
 /// cached readiness or manufactured completion. `submit_beacon` follows the
-/// `BeaconQueue` ownership contract; quarantine retains all uncertain DMA,
+/// `BeaconQueue` ownership contract; quarantine keeps all uncertain DMA,
 /// requester and BAR ownership. Delays must wait at least the requested time.
 pub unsafe trait Io {
-    /// Actual requester observation retained when acquiring this interface.
+    /// Requester observation kept when acquiring this interface.
     fn profile(&self) -> Profile;
     fn read8(&mut self, register: u32) -> Result<u8, Error>;
     fn read16(&mut self, register: u32) -> Result<u16, Error>;
@@ -72,20 +72,20 @@ pub unsafe trait Io {
     fn write16(&mut self, register: u32, value: u16) -> Result<(), Error>;
     fn write32(&mut self, register: u32, value: u32) -> Result<(), Error>;
     fn delay_us(&mut self, microseconds: u64);
-    /// Actual monotonic native microseconds for firmware wall-time deadlines.
-    /// Implementations must use the same qualified CPU-affine clock as delays;
+    /// Monotonic native microseconds for firmware wall-time deadlines.
+    /// Implementations must use the same checked CPU-affine clock as delays;
     /// unavailable timing explicitly refuses new elapsed-time command polling.
     fn now_us(&mut self) -> Result<u64, Error> {
         Err(Error::InvalidClock)
     }
     fn submit_beacon(&mut self, data: &[u8]) -> Result<(), Error>;
     /// # Safety
-    /// Same actual new BCN_VALID completion proof as BeaconQueue::consumed.
+    /// Same new BCN_VALID completion proof as BeaconQueue::consumed.
     unsafe fn beacon_consumed(&mut self) -> Result<(), Error>;
     fn quarantine(&mut self);
 }
 
-/// Real volatile MMIO and the native beacon queue. The BAR owner is retained
+/// Real volatile MMIO and the native beacon queue. The BAR owner is held
 /// with the queue on any uncertain download; dropping this adapter cannot
 /// unmap memory still accessible to a quarantined device.
 pub struct NativeIo<Q: BeaconQueue> {
@@ -96,20 +96,20 @@ pub struct NativeIo<Q: BeaconQueue> {
     owned: Option<(Q, Arc<dyn core::any::Any>)>,
 }
 impl<Q: BeaconQueue> NativeIo<Q> {
-    /// Access the retained native queue for later HCI setup and acknowledged
+    /// Access the native queue for later HCI setup and acknowledged
     /// stop/unmap. Queue methods still enforce their own ownership contracts;
-    /// a quarantined download never returns its retained queue this way.
+    /// a quarantined download never returns its queue this way.
     pub fn beacon_queue(&mut self) -> Result<&mut Q, Error> {
         Ok(&mut self.owned.as_mut().ok_or(Error::InvalidState)?.0)
     }
     /// # Safety
-    /// `window` is the actual RTL8822C exclusive uncached BAR, at least BAR_BYTES
-    /// bytes. `owner` retains the real PCI claim and mapped BAR reservation
-    /// through its final Drop. `queue` is configured on that exact requester.
+    /// `window` is the RTL8822C exclusive uncached BAR, at least BAR_BYTES
+    /// bytes. `owner` keeps the real PCI claim and mapped BAR reservation
+    /// through its final Drop. `queue` is configured on that requester.
     /// Device MAC power and validated FIFO page layout must already be set;
     /// all competing DMA/IRQ/reset workers are stopped for this object's life.
     /// The clock is calibrated against the native host timer for this CPU.
-    /// `profile` contains observations read from this exact requester, not a
+    /// `profile` contains observations read from this requester, not a
     /// marketing/device-ID substitute or another adapter's firmware target.
     pub unsafe fn new(
         window: NonNull<u8>,
@@ -131,9 +131,9 @@ impl<Q: BeaconQueue> NativeIo<Q> {
     /// power may be off or left on by prior firmware. All old DMA/IRQ workers
     /// are acknowledged stopped and drained; the native beacon queue is
     /// fresh/idle, its isolated domain owns all mappings and no competing
-    /// power/reset path exists. Caller retains validated FIFO geometry for
+    /// power/reset path exists. Caller keeps validated FIFO geometry for
     /// the later source MAC configuration and download restore boundary.
-    /// After this sequence, actual HCI/beacon-base reconfiguration/readback
+    /// After this sequence, HCI/beacon-base reconfiguration/readback
     /// is required before Download or queue submission. The software queue's
     /// configured flag is not evidence that its base survived a power cycle.
     pub unsafe fn power_on_new(
@@ -144,7 +144,7 @@ impl<Q: BeaconQueue> NativeIo<Q> {
         clock: Clock,
         profile: Profile,
     ) -> Result<Self, super::power::Error> {
-        // SAFETY: caller supplies the actual exclusive mapped requester.
+        // SAFETY: caller supplies the exclusive mapped requester.
         let mut io = unsafe { Self::mapped(window, bytes, queue, owner, clock, profile)? };
         // SAFETY: entry contract requires independent stop/drain and fresh
         // idle queue, not a manufactured reset/firmware completion proof.
@@ -152,7 +152,7 @@ impl<Q: BeaconQueue> NativeIo<Q> {
         Ok(io)
     }
     /// # Safety
-    /// Actual exclusive UC BAR, owned requester, calibrated clock and exact
+    /// Exclusive UC BAR, owned requester, calibrated clock and exact
     /// observed profile. This mapping helper makes no MAC power-state claim.
     unsafe fn mapped(
         window: NonNull<u8>,
@@ -172,7 +172,7 @@ impl<Q: BeaconQueue> NativeIo<Q> {
             return Err(Error::WrongChip);
         }
         Ok(Self {
-            // SAFETY: the constructor's actual UC BAR/ownership contract.
+            // SAFETY: the constructor's UC BAR/ownership contract.
             registers: unsafe { Mmio::new(window.as_ptr() as u64) },
             clock,
             profile,
@@ -192,7 +192,7 @@ impl<Q: BeaconQueue> NativeIo<Q> {
         Ok(())
     }
 }
-// SAFETY: constructor binds the actual exclusive BAR and native beacon queue.
+// SAFETY: constructor binds the exclusive BAR and native beacon queue.
 // Each register operation is a volatile store/load, with no readiness cache.
 unsafe impl<Q: BeaconQueue> Io for NativeIo<Q> {
     fn profile(&self) -> Profile {
@@ -240,7 +240,7 @@ unsafe impl<Q: BeaconQueue> Io for NativeIo<Q> {
             .submit(data)
     }
     unsafe fn beacon_consumed(&mut self) -> Result<(), Error> {
-        // SAFETY: caller supplies the new actual BCN_VALID completion proof;
+        // SAFETY: caller supplies the new BCN_VALID completion proof;
         // constructor binds this queue to the exact exclusive requester/BAR.
         unsafe { self.owned.as_mut().ok_or(Error::InvalidState)?.0.consumed() }
     }
@@ -248,7 +248,7 @@ unsafe impl<Q: BeaconQueue> Io for NativeIo<Q> {
         if let Some((queue, owner)) = self.owned.take() {
             let mut retained = core::mem::ManuallyDrop::new((queue, owner));
             retained.0.quarantine();
-            // No ACKed requester stop exists. Retain queue plus its real BAR
+            // No ACKed requester stop exists. Keep queue plus its real BAR
             // claim indefinitely; clearing MCU enable is not DMA quiescence.
         }
     }
@@ -264,7 +264,7 @@ pub struct Bar {
 impl Bar {
     /// # Safety
     /// `window` is the exclusive uncached BAR of the RTL8822C requester named
-    /// by `profile`, mapped for at least `bytes`, and `owner` retains that
+    /// by `profile`, mapped for at least `bytes`, and `owner` keeps that
     /// claim and mapping. DMA domains used with these registers bind the same
     /// requester, and no other worker resets it while the BAR is in use.
     pub unsafe fn new(
@@ -319,7 +319,7 @@ mod tests {
     fn native_register_adapter_bounds_alignment_and_quarantine_prevent_invalid_access() {
         use core::sync::atomic::AtomicU32;
         struct NoDma;
-        // SAFETY: this fixture owns no DMA, and deliberately refuses every
+        // SAFETY: this fixture owns no DMA, and refuses every
         // submission. It only tests local volatile register window validation.
         unsafe impl BeaconQueue for NoDma {
             fn submit(&mut self, _: &[u8]) -> Result<(), Error> {
@@ -334,7 +334,7 @@ mod tests {
             Arc::new((0..BAR_BYTES / 4).map(|_| AtomicU32::new(0)).collect());
         let owner = Arc::downgrade(&memory);
         let address = memory[0].as_ptr() as u64;
-        // A local interior-mutable virtual register window, not a fabricated
+        // A local interior-mutable virtual register window, not an invented
         // PCI claim passed through NativeIo's public unsafe constructor.
         // There are no concurrent accesses, including atomic operations.
         let mut io = NativeIo {

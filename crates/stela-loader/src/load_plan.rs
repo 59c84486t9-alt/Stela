@@ -111,7 +111,7 @@ pub struct LoadPlan {
     pub rpaths: Vec<String>,
     /// Bounded payloads only; their contents have not been interpreted or applied.
     pub payloads: Vec<Payload>,
-    /// Optional commands whose semantics are deliberately deferred, including unknown commands.
+    /// Optional commands whose semantics are deferred, including unknown commands.
     pub deferred_commands: Vec<OpaqueCommand>,
     pub execution_supported: bool,
     pub unresolved_requirements: Vec<String>,

@@ -41,7 +41,7 @@ impl Binding {
         if interface.number != HCI_INTERFACE {
             return Err("Bluetooth HCI on an interface other than 0");
         }
-        // Do not accept caller-fabricated interface data detached from the device.
+        // Do not accept caller-invented interface data detached from the device.
         if !super::super::xhci::interfaces(&device.configuration).contains(interface) {
             return Err("Bluetooth interface is not in configuration");
         }

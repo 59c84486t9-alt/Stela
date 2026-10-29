@@ -199,7 +199,7 @@ impl Model {
         let mut result = Vec::new();
         for index in 0..entries {
             let pointer = self.translate(bdl + index as u64 * 16, 16, false);
-            // SAFETY: checked retained model descriptor allocation.
+            // SAFETY: checked model descriptor allocation.
             let entry = unsafe { core::slice::from_raw_parts(pointer.as_ptr(), 16) };
             let address = u64::from_le_bytes(entry[..8].try_into().unwrap());
             let bytes = ipc::word(entry, 8).unwrap() as usize;
@@ -315,7 +315,7 @@ impl Model {
                         padding,
                         false,
                     );
-                    // SAFETY: retained model allocation beyond logical CBL.
+                    // SAFETY: model allocation beyond logical CBL.
                     let tail = unsafe { core::slice::from_raw_parts(pointer.as_ptr(), padding) };
                     assert!(tail.iter().all(|byte| *byte == 0xa7));
                 }
@@ -357,7 +357,7 @@ impl Model {
                 offset -= count;
             }
             let address = address.unwrap();
-            // Resolve actual BDL/domain ownership at issue time. Keep the
+            // Resolve BDL/domain ownership at issue time. Keep the
             // payload in the modeled remapper/root fabric after RUN clear.
             let _ = self.translate(address, 1, true);
             self.pending_payload
@@ -365,7 +365,7 @@ impl Model {
             self.produced += 1;
             self.cursor = (self.cursor + 1) % ring;
         }
-        // Deliberately distinct link position: VC0 host capture must use
+        // Distinct link position: VC0 host capture must use
         // vendor DPIB and must not accidentally pass through SD_LPIB.
         self.store(Bar::Hda, 0x84, 37);
         self.store(Bar::Hda, 0x1084, self.cursor as u32);
@@ -439,8 +439,8 @@ unsafe impl Registers for Regs {
     }
 }
 struct Domain(Arc<Mutex<Model>>);
-// SAFETY: one synchronous isolated requester, actual retained CPU RAM and
-// symbolic nonidentity IOVAs; device accesses walk its actual BDL addresses.
+// SAFETY: one synchronous isolated requester, kept CPU RAM and
+// symbolic nonidentity IOVAs; device accesses walk its BDL addresses.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -549,7 +549,7 @@ unsafe impl DmaDomain for Domain {
         let pending = core::mem::take(&mut model.pending_payload);
         for (address, value) in pending {
             let pointer = model.translate(address, 1, true);
-            // SAFETY: exact retained model RAM pin resolved by original
+            // SAFETY: model RAM pin resolved by original
             // token/IOVA; this isolated drain completes issued writes.
             unsafe { pointer.as_ptr().write(value) };
         }
@@ -760,7 +760,7 @@ fn exact_non_page_firmware_payload_bdl_cbl_and_spib_exclude_poison_padding() {
         bytes.extend_from_slice(&payload);
         assert_eq!(ipc::firmware_payload(&bytes).unwrap(), payload);
         let (mut controller, model, source, _) = fixture_image(bytes, BUSY);
-        // The independent peer already read actual BDLEs and checked the
+        // The independent peer already read BDLEs and checked the
         // exact full payload, CBL, SPIB and untouched allocation padding.
         assert_eq!(model.lock().unwrap().expected_firmware, payload);
         controller.shutdown().unwrap();
@@ -805,7 +805,7 @@ fn pending_dma_survives_run_clear_and_failed_drain_without_cpu_ownership() {
             .unwrap();
         let pointer = map.cpu.address(0, 1).unwrap();
         // SAFETY: stopped isolated model, pending writes are still in its
-        // fabric queue rather than this retained CPU RAM allocation.
+        // fabric queue rather than this CPU RAM allocation.
         assert_eq!(unsafe { pointer.as_ptr().read() }, 0xa7);
         assert_eq!(state.unmaps, 0);
     }

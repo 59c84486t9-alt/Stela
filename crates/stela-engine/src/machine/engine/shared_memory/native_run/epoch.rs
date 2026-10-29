@@ -6,7 +6,7 @@ use super::*;
 /// staging; the scheduler additionally applies a finite observation deadline.
 pub const MAX_NATIVE_EPOCH_BODIES: usize = 64;
 
-/// Absolute deadline in the qualified Host::counter domain, never raw TSC or
+/// Absolute deadline in the checked Host::counter domain, never raw TSC or
 /// the guest Clock's lead/lag adjusted domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeEpochDeadline(pub u64);
@@ -30,7 +30,7 @@ impl Limits {
     }
 }
 
-/// Why an actual stepped epoch returned. Failed target/context operations remain
+/// Why a stepped epoch returned. Failed target/context operations remain
 /// failures; a cold or changed successor simply returns to source scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]

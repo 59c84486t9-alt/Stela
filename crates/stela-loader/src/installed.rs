@@ -9,7 +9,7 @@
 //! `boot/active`; a `--boot-hash` names it instead. The LocalPolicy's
 //! signature is the SEP's, so without a [`PolicyAuthority`] its `nsih` only
 //! narrows the choice. Whatever names it, a candidate
-//! `<volume-group>/boot/<hash>/` qualifies by evidence when all three hold,
+//! `<volume-group>/boot/<hash>/` checks by evidence when all three hold,
 //! and exactly one candidate must:
 //!
 //! - its Image4 objects carry one manifest whose SHA-384 is the directory's
@@ -75,7 +75,7 @@ pub struct Evidence {
     /// What named the directory: a LocalPolicy, `boot/active`, the
     /// `--boot-hash`, or nothing (evidence alone).
     pub named_by: Option<String>,
-    /// Every requirement that failed; empty when the directory qualifies.
+    /// Every requirement that failed; empty when the directory checks.
     pub problems: Vec<String>,
 }
 

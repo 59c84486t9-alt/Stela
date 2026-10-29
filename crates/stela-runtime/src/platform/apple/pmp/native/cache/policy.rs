@@ -2,15 +2,15 @@
 //!
 //! Original 26A434 t8112pmp SHA256
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
-//! VA100326c..1003664 joins raw44-byte rows to actual low9 quota seeds;
+//! VA100326c..1003664 joins raw44-byte rows to low9 quota seeds;
 //! VA1003924..1003ab4 consumes low12 requests or low32 byte budget >>17;
 //! VA1003ee8..10040b0 rebuilds defaults and allocates by source tier/class.
 //! VA1003cbc..1003ee8 publishes low12 responses and programs scaled targets.
-//! The source report is docs/research/apple-mcc.md, with exact original windows
+//! The source report is docs/research/apple-mcc.md, with original windows
 //! in .stela/goal-20261022/memory/t8112-zero-pmp-contract-r1. No firmware runs.
 //!
 //! This owner computes policy only. Dirty snapshots describe work; they are
-//! not hardware receipts. The caller must perform actual programming/publication
+//! not hardware receipts. The caller must perform programming/publication
 //! before consuming their matching clear. No PTD, IRQ, readiness, capacity,
 //! occupancy, ACK or independently required event housekeeping is supplied.
 use alloc::{rc::Rc, vec::Vec};
@@ -43,11 +43,11 @@ impl Class {
     }
 }
 
-/// Supplied software configuration and retained source quota-word observations.
-/// The caller owns their provenance and join to the actual quota resource;
+/// Supplied software configuration and kept source quota-word observations.
+/// The caller owns their provenance and join to the quota resource;
 /// numbers here never assert Apple reset state or cache capacity. The pinned
 /// T8112 software defaults are budget/reference64, hardware_scale0,
-/// hardware_multiplier0, feature_word0 and zero slot_flags. Seeds remain actual
+/// hardware_multiplier0, feature_word0 and zero slot_flags. Seeds remain
 /// caller-supplied full32 words, never inferred from the raw table's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Inputs {
@@ -63,8 +63,8 @@ pub struct Inputs {
 }
 impl Inputs {
     /// VA1003dcc..1003de0: W32 ceil division, including wrapping numerator and
-    /// A64 UDIV's zero-divisor result. Retain this unmasked value for the source
-    /// old-target comparison; actual word construction later masks low9.
+    /// A64 UDIV's zero-divisor result. Keep this unmasked value for the source
+    /// old-target comparison; word construction later masks low9.
     pub fn hardware_units(&self, target: u32) -> u32 {
         if self.hardware_scale == 1 {
             udiv(
@@ -82,7 +82,7 @@ fn udiv(numerator: u32, denominator: u32) -> u32 {
     numerator.checked_div(denominator).unwrap_or(0)
 }
 
-/// Every original word/order/duplicate is retained, including opaque+0x24 and
+/// Every original word/order/duplicate is held, including opaque+0x24 and
 /// the complete flags word+0x28. Derived seeds do not overwrite these bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
@@ -131,7 +131,7 @@ pub struct DirtyMasks {
 }
 
 /// Pending source hardware work, bound to this policy and dirty revision.
-/// It grants no hardware authority and is deliberately neither Copy nor Clone.
+/// It grants no hardware permission and is neither Copy nor Clone.
 #[derive(Debug)]
 pub struct HardwareUpdate {
     owner: Rc<()>,
@@ -152,7 +152,7 @@ impl HardwareUpdate {
     }
 }
 
-/// Pending full64 four-lane response. Complete only after actual publication;
+/// Pending full64 four-lane response. Complete only after publication;
 /// clearing a block consumes its exact dirty membership and revision.
 #[derive(Debug)]
 pub struct ResponseBlock {
@@ -174,7 +174,7 @@ impl ResponseBlock {
     }
 }
 
-/// Retained pure policy. There is no Clone/reset-to-ready/effectful backend.
+/// Pure policy. There is no Clone/reset-to-ready/effectful backend.
 /// The service owns source order: defaults -> publish/program -> allocate ->
 /// publish/program. In particular op1 can expose seeded intermediate responses.
 #[derive(Debug)]
@@ -191,8 +191,8 @@ pub struct Policy {
     response_revision: [u64; RESPONSE_BLOCKS],
 }
 impl Policy {
-    /// Parse/qualify the complete source property before installing any state.
-    /// Initial requested fields are zero. Runs defaults, deliberately not the
+    /// Parse/check the complete source property before installing any state.
+    /// Initial requested fields are zero. Runs defaults, not the
     /// allocator: their source-visible publications are separate service work.
     pub fn new(raw_rows: &[u8], inputs: Inputs) -> Result<Self, Error> {
         let (records, tail) = raw_rows.as_chunks::<ROW_BYTES>();
@@ -267,7 +267,7 @@ impl Policy {
         self.dirty
     }
 
-    /// Caller has consumed the source PTD/new-data metadata. Retain the full
+    /// Caller has consumed the source PTD/new-data metadata. Keep the full
     /// lane, even for ignored groups/classes. Return true for every eligible
     /// update, including an unchanged numeric request (VA1003a38); this tells
     /// the caller to run allocation. Flags13:12 and upper bits do not pick class.
@@ -333,9 +333,9 @@ impl Policy {
     }
 
     /// MC startup VA1004138..100416c clears current active requests before
-    /// rebuilding defaults. Retain actual last-input lane provenance; these
+    /// rebuilding defaults. Keep last-input lane provenance; these
     /// zeroes are software lifecycle effects, not newly received PTD lanes.
-    /// Actual defaults publication and metric registration remain the caller's
+    /// Defaults publication and metric registration remain the caller's
     /// effects before allocation. Preflight revision exhaustion before clearing.
     pub fn start_defaults(&mut self) -> Result<(), Error> {
         self.next_revision()?;
@@ -347,8 +347,8 @@ impl Policy {
 
     /// VA1003f80..10040b0: full original first-row tier/class policy. Same-tier
     /// limits overlap; only completed higher tiers reduce remaining budget.
-    /// Class1/feature-retained groups do not enter the dynamic sums. Outputs
-    /// remain dirty until actual service explicitly completes matching work.
+    /// Class1/feature-kept groups do not enter the dynamic sums. Outputs
+    /// remain dirty until service explicitly completes matching work.
     pub fn allocate(&mut self) -> Result<(), Error> {
         let revision = self.next_revision()?;
         let mut seen = 0;
@@ -426,7 +426,7 @@ impl Policy {
         }))
     }
 
-    /// Clear only the matching actual completed hardware operation. A token
+    /// Clear only the matching completed hardware operation. A token
     /// from another policy, an overwritten phase or already consumed work
     /// refuses without changing masks. This method itself programs nothing.
     pub fn complete_hardware(&mut self, update: HardwareUpdate) -> Result<(), Error> {
@@ -443,7 +443,7 @@ impl Policy {
         self.dirty.hardware &= !bit;
         Ok(())
     }
-    /// Clear exactly the dirty members of a matching actual four-lane PTD
+    /// Clear exactly the dirty members of a matching four-lane PTD
     /// publication. Other blocks and pending hardware work remain unchanged.
     pub fn complete_response(&mut self, response: ResponseBlock) -> Result<(), Error> {
         let index = usize::from(response.block);
@@ -716,7 +716,7 @@ mod tests {
             p.allocate().unwrap();
             assert_eq!(p.group(0).unwrap().assigned, if retained { 41 } else { 17 });
             assert_eq!(p.group(0).unwrap().hardware_target, 64);
-            // Retained groups never consume the lower tier's budget.
+            // Groups never consume the lower tier's budget.
             assert_eq!(p.group(1).unwrap().assigned, if retained { 64 } else { 47 });
             assert_eq!(p.group(0).unwrap().slot_flags, flags);
         }
@@ -994,7 +994,7 @@ mod tests {
             ),
             (64, 64, 0, 0, 0)
         );
-        // Authored actual-owner input, deliberately not an original reset claim.
+        // Authored owner input, not an original reset claim.
         source.quota_words = core::array::from_fn(|group| 0x400a_0100 + group as u32);
         let mut p = Policy::new(raw, source).unwrap();
         assert_eq!(p.rows().len(), 22);

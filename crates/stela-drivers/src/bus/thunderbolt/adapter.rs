@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! Actual software-CM adapter control from Linux switch.c/usb4.c.
+//! Software-CM adapter control from Linux switch.c/usb4.c.
 //!
 //! One owned register operation, not a link-pair or tunnel allocator. An
-//! applied change retains its actual reservation until explicit retirement.
+//! applied change keeps its reservation until explicit retirement.
 use super::{
     channel::{self, Channel},
     config::{self, Address, Reply, Route, Space},
@@ -88,13 +88,13 @@ impl Target {
 /// # Safety
 /// Metadata is from real unchanged router/adapter inventory in one live NHI
 /// ownership/reset epoch. Firmware ICM and other actors cannot write this
-/// adapter. The owner retains router/power lifetime and the actual allocation
+/// adapter. The owner keeps router/power lifetime and the allocation
 /// for the requested operation; positive NFC credits are reserved against all
-/// other path/flow-control uses, not merely against the register's total.
-/// Lane/configuration changes have actual link/topology and dependent-path
+/// other path/flow-control uses, not against the register's total.
+/// Lane/configuration changes have link/topology and dependent-path
 /// serialization. No endpoint DMA/IOMMU lifetime ends on this local receipt.
 /// The owner may be dropped only after an unmutated operation, final restoration
-/// or actual transfer of the active reservation. Quarantine retains it forever.
+/// or transfer of the active reservation. Quarantine keeps it forever.
 pub unsafe trait Owner: Send + Sync {
     fn target(&self) -> Target;
     fn operation(&self) -> Operation;
@@ -153,7 +153,7 @@ fn change(operation: Operation, before: u32) -> Result<(u32, u32), Error> {
                 return Err(Error::CreditsOverflow);
             }
             // The donor's allocator supplies legal positive deltas. Also check
-            // the actual observed capacity here; never spill into adjacent bits.
+            // the observed capacity here; never spill into adjacent bits.
             let total = (before >> 20) & NFC_MASK;
             if delta > 0 && next > total as i32 {
                 return Err(Error::CreditsUnavailable);
@@ -168,7 +168,7 @@ fn quarantine(owner: &Arc<dyn Owner>) {
     });
     core::mem::forget(owner.clone());
 }
-/// Actual read/write-ACK/readback result with its retained active reservation.
+/// Read/write-ACK/readback result with its active reservation.
 /// Drop quarantines a changed reservation; it never releases active credits or
 /// router power because a local write completed.
 pub struct Applied {
@@ -181,9 +181,9 @@ pub struct Applied {
 }
 impl Applied {
     /// # Safety
-    /// The actual changed hardware state has been restored/reset with every
-    /// dependent path/DMA/IRQ requirement satisfied, or the exact same active
-    /// reservation has already been transferred to an independently retained
+    /// The changed hardware state has been restored/reset with every
+    /// dependent path/DMA/IRQ requirement satisfied, or the same active
+    /// reservation has already been transferred to an independently kept
     /// native CM owner. This is not an endpoint or IOMMU drain primitive.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::adapter::Applied;
@@ -229,10 +229,10 @@ pub struct Control<R: Registers> {
 }
 impl<R: Registers> Control<R> {
     /// # Safety
-    /// Channel and Owner belong to the exact same physical NHI requester and
+    /// Channel and Owner belong to the same physical NHI requester and
     /// unchanged ownership/reset epoch. The target/capabilities/allocation are
     /// current for that channel and have not been recycled. The software-CM
-    /// channel is exclusively idle; the caller retains all independent native
+    /// channel is exclusively idle; the caller keeps all independent native
     /// topology, security, link and endpoint DMA/IOMMU reservations.
     /// ```compile_fail
     /// use std::sync::Arc;
@@ -266,7 +266,7 @@ impl<R: Registers> Control<R> {
         let _ = self.channel().cancel();
         Err(error)
     }
-    /// After uncertainty the returned channel remains poisoned; Drop retains
+    /// After uncertainty the returned channel remains poisoned; Drop keeps
     /// the unresolved reservation if a write may have reached the adapter.
     pub fn into_channel(mut self) -> Channel<R> {
         self.channel.take().expect("owned channel")
@@ -284,7 +284,7 @@ impl<R: Registers> Control<R> {
             }
             Stage::Write(word, _) => {
                 // Even a failed publication may have reached physical hardware.
-                // Busy/full are known nonpublication; other errors retain owner.
+                // Busy/full are known nonpublication; other errors keep owner.
                 match self
                     .channel()
                     .write(target.route, address, &[word], now, deadline)
@@ -561,7 +561,7 @@ mod tests {
             let (_source, domain, model, mut channel) = channel();
             channel.start(0).unwrap();
             let (owner, dropped) = adapter_owner(operation);
-            // SAFETY: exact same synthetic requester, reset epoch, real adapter
+            // SAFETY: same synthetic requester, reset epoch, real adapter
             // metadata and exclusive credit/link reservation; channel is idle.
             let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
             assert!(control.poll(0).unwrap().is_none());
@@ -595,7 +595,7 @@ mod tests {
             let mut channel = control.into_channel();
             drop(owner);
             assert_eq!(dropped.load(Ordering::Relaxed), 0);
-            // SAFETY: the fixture transfers its actual active reservation into
+            // SAFETY: the fixture transfers its active reservation into
             // an independent synthetic CM lifetime through final modeled drain.
             unsafe { applied.retire() };
             assert_eq!(dropped.load(Ordering::Relaxed), 1);
@@ -610,7 +610,7 @@ mod tests {
             let (_source, domain, model, mut channel) = channel();
             channel.start(0).unwrap();
             let (owner, dropped) = adapter_owner(Operation::NfcCredits(8));
-            // SAFETY: same exact synthetic adapter/requester/reset and owned
+            // SAFETY: same synthetic adapter/requester/reset and owned
             // positive allocation, with no independent firmware or link writer.
             let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
             control.poll(0).unwrap();
@@ -654,7 +654,7 @@ mod tests {
         let (_source, domain, model, mut channel) = channel();
         channel.start(0).unwrap();
         let (owner, dropped) = adapter_owner(Operation::NfcCredits(1));
-        // SAFETY: same exact synthetic requester/epoch and actual allocation.
+        // SAFETY: same synthetic requester/epoch and allocation.
         let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
         control.poll(0).unwrap();
         for index in 0..3 {
@@ -685,8 +685,8 @@ mod tests {
             let (_source, domain, model, mut channel) = channel();
             channel.start(0).unwrap();
             let (owner, dropped) = adapter_owner(Operation::NfcCredits(delta));
-            // SAFETY: same exact synthetic requester/epoch; invalid allocation
-            // is rejected against actual hardware capacity before any write.
+            // SAFETY: same synthetic requester/epoch; invalid allocation
+            // is rejected against hardware capacity before any write.
             let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
             control.poll(0).unwrap();
             let reply = adapter_response(&domain, &model, 0, 4, &[(10 << 20) | 7]);
@@ -722,7 +722,7 @@ mod tests {
         };
         let (_source, domain, model, mut channel) = channel();
         channel.start(0).unwrap();
-        // Fill eight actual TX descriptors; firmware replies while hardware's
+        // Fill eight TX descriptors; firmware replies while hardware's
         // TX consumer is stuck. The next read fills the last available slot.
         let address = Address {
             port: 1,
@@ -742,7 +742,7 @@ mod tests {
             ));
         }
         let (owner, dropped) = adapter_owner(Operation::NfcCredits(1));
-        // SAFETY: same exact synthetic requester/epoch and positive allocation;
+        // SAFETY: same synthetic requester/epoch and positive allocation;
         // channel is idle even though its completed TX DMA has not drained.
         let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
         control.poll(0).unwrap();
@@ -784,7 +784,7 @@ mod tests {
         let (_source, domain, model, mut channel) = self::channel();
         channel.start(0).unwrap();
         let (owner, dropped) = adapter_owner(Operation::NfcCredits(8));
-        // SAFETY: same exact synthetic requester/epoch and reserved allocation.
+        // SAFETY: same synthetic requester/epoch and reserved allocation.
         let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
         control.poll(0).unwrap();
         for index in 0..3 {

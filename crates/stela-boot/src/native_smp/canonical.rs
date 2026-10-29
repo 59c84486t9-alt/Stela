@@ -1,6 +1,6 @@
 //! Cold fixed-physical-core adapter over the boot's existing physical reservations.
 //! Final Apple topology/device/DMA/reset admission belongs to the mount. This
-//! constructs the actual checked Machine; it never certifies legacy raw V1.
+//! constructs the checked Machine; it never certifies legacy raw V1.
 use stela_boot_core::worker_bindings as bindings;
 
 use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
@@ -42,13 +42,13 @@ pub(crate) unsafe fn reserve(
     unsafe { reserve_with_limit(handoff, ranges, None) }
 }
 
-/// Production assignment adds a conservative ceiling from actual installed
-/// workers. Authored single-BSP diagnostics retain `reserve` without inventing
+/// Production assignment adds a conservative ceiling from installed
+/// workers. Authored single-BSP diagnostics keep `reserve` without inventing
 /// AP executors or treating copied firmware observations as owned workers.
 ///
 /// # Safety
 /// `reserve`'s complete reservation contract applies. `capture` is the validated
-/// assigned roster; the actual started executors remain parked and retained.
+/// assigned roster; the started executors remain parked and kept.
 pub(crate) unsafe fn reserve_for_workers(
     handoff: &'static Handoff,
     ranges: &[host::RamRange],
@@ -73,7 +73,7 @@ pub(crate) unsafe fn reserve_for_workers(
     };
     // SAFETY: current installed BSP with IF clear, before any guest entry.
     // The fresh observation is only a capability ceiling; registration below
-    // captures its own actual current-processor authority independently.
+    // captures its own current-processor permission independently.
     let bsp = unsafe { super::firmware::observe() }
         .map_err(|_| "canonical target BSP observation refused")?;
     if !bsp.matches(selected(0)?) {
@@ -153,8 +153,8 @@ unsafe fn reserve_with_limit(
         let bytes =
             usize::try_from(range.bytes).map_err(|_| "canonical guest RAM exceeds host size")?;
         let cpu = layout::physical(range.host);
-        // SAFETY: exact retained loader reservation; no root/control migration
-        // or native/host producer can race this pre-entry qualification.
+        // SAFETY: exact loader reservation; no root/control migration
+        // or native/host producer can race this pre-entry validation.
         unsafe { crate::native_memory::qualify_reserved_writeback(cpu, range.host, bytes) }
             .map_err(|_| "canonical guest RAM mapping/effective WB type is unqualified")?;
         registered.push(ReservedSystemRamRange {
@@ -169,7 +169,7 @@ unsafe fn reserve_with_limit(
         _handoff: handoff,
         _ranges: ranges.to_vec(),
     });
-    // SAFETY: same exclusively reserved bytes and qualified WB aliases; retained
+    // SAFETY: same exclusively reserved bytes and checked WB aliases; kept
     // owner survives frames, source fetch/walk, copyout and stopped settlement.
     unsafe {
         match limit {
@@ -228,11 +228,11 @@ pub(crate) unsafe fn prepare<'host, D: Devices>(
     preparation: Preparation<'host, '_, D>,
 ) -> Result<CanonicalMachine<'host, D>, &'static str> {
     // SAFETY: forwarded cold construction contract; diagnostic callers
-    // retain any already prepared CPU lock state.
+    // keep any already prepared CPU lock state.
     unsafe { prepare_with_locks(preparation, false, None) }
 }
 
-/// Cold construction with the actual iBoot core-lock handoff. Initial CTRR,
+/// Cold construction with the iBoot core-lock handoff. Initial CTRR,
 /// lock state and source translation controls settle before native owners or
 /// any frame loans are published. `None` preserves an already prepared Cpu.
 ///
@@ -285,7 +285,7 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
     let apic =
         u32::try_from(bsp.apic_id).map_err(|_| "canonical BSP APIC identity exceeds transport")?;
     owner.bind_worker(WorkerId(0), apic)?;
-    // SAFETY: actual registered owner, pristine GS-local dispatch; every later
+    // SAFETY: registered owner, pristine GS-local dispatch; every later
     // access goes through this same canonical RAM, never old raw V1 stores.
     unsafe { owner.register_system_ram(Arc::clone(&ram)) }?;
     let transport = FixedWorkers::new(
@@ -317,7 +317,7 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
     Ok(machine)
 }
 
-/// Execute actual checked native rounds and consuming canonical reads. The
+/// Execute checked native rounds and consuming canonical reads. The
 /// ordinary boot reporting loop can call this instead of raw Machine::run.
 /// Unsupported source/device families stop unexecuted, with no V1 fallback.
 ///
@@ -333,11 +333,11 @@ pub(crate) unsafe fn run_slice<D: Devices>(
     unsafe { run_slice_while(machine, limit, None, || true) }
 }
 
-/// Return to the outer host-service loop after `service_ticks` of the qualified
+/// Return to the outer host-service loop after `service_ticks` of the checked
 /// BSP counter, even when the block limit has not been reached. The caller
 /// chooses the wall-time service interval from its calibrated counter rate.
 /// One recovered round or synchronous device completion can exceed the interval;
-/// a live frame, retained device continuation or Host session is never preempted.
+/// a live frame, kept device continuation or Host session is never preempted.
 ///
 /// # Safety
 /// The complete closed producer/mount contract of `run_slice` remains valid.
@@ -362,7 +362,7 @@ pub(crate) unsafe fn run_slice_for<D: Devices>(
 
 /// Check the host-service deadline only at the same settled boundary as the
 /// block budget. In particular, finish the entire recovered device cohort first:
-/// its next access can retain the actual stopped workers and Host sessions.
+/// its next access can keep the stopped workers and Host sessions.
 unsafe fn run_slice_while<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
@@ -371,7 +371,7 @@ unsafe fn run_slice_while<D: Devices>(
 ) -> Stop {
     loop {
         if machine.pending_native_device_access().is_some() {
-            // SAFETY: same retained cohort, controller and closed producers.
+            // SAFETY: same cohort, controller and closed producers.
             match unsafe { machine.complete_native_device_access() } {
                 Ok(()) | Err(Stop::DeviceRead(_) | Stop::DeviceWrite(_)) => continue,
                 Err(stop) => return stop,

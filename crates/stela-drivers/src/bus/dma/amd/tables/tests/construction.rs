@@ -81,7 +81,7 @@ fn node_budget_endpoints() {
         let root = tree.root_for_publication().unwrap().value();
         let drops = Arc::new(AtomicUsize::new(0));
         // SAFETY: a one-page idle model needs only its root. The upper
-        // legal node cap does not reserve that many actual allocations.
+        // legal node cap does not reserve that many allocations.
         unsafe { tree.map(0, payload(0x300000, &drops), Direction::ToDevice) }.unwrap();
         assert_eq!(monitor.walk(root, 1, 0).unwrap().physical, 0x300000);
         assert_eq!(monitor.state.lock().unwrap().allocation_calls, 1);

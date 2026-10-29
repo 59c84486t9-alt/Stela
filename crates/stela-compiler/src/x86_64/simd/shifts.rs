@@ -186,7 +186,7 @@ fn saturating_narrow(
 
 /// Native packs clamp H/S sources. Reconstructing the result and comparing it
 /// with the shifted source derives QC without reimplementing the pack bounds.
-/// XMM6 retains the packed result and XMM4 receives the wide saturation mask.
+/// XMM6 keeps the packed result and XMM4 receives the wide saturation mask.
 fn saturating_narrow_pack(
     code: &mut Code,
     lane: u8,
@@ -408,7 +408,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     }
     if matches!(kind, Kind::Right { insert: true, .. }) && amount == lane_bytes * 8 {
         // SRI by the complete element width preserves every active old bit.
-        // Retain a real load/store interval for precise source-map entries.
+        // Keep a real load/store interval for precise source-map entries.
         read_vector(code, destination, 0);
         if bytes == 8 {
             packed(code, Host::MoveQword, 0, 0);

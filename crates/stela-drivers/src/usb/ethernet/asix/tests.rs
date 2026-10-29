@@ -497,8 +497,8 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
                     assert_eq!(link.receive().unwrap(), Some(vec![0x73; 1514]));
                     assert_eq!(link.receive().unwrap(), None);
                     if scenario == 0 {
-                        // Three distinct actual bulk-IN DMA completions: a
-                        // retained low header half must survive a second
+                        // Three distinct bulk-IN DMA completions: a
+                        // low header half must survive a second
                         // two-byte transfer before the payload arrives.
                         let header = (60u32 | (0xffc3 << 16)).to_le_bytes();
                         for chunk in [&header[..2], &header[2..], &[0x53; 60][..]] {
@@ -561,7 +561,7 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
                                 )
                             };
                             drop(hw);
-                            // SAFETY: model performs no DMA; failed cancellation retains ownership.
+                            // SAFETY: model performs no DMA; failed cancellation keeps ownership.
                             let before = unsafe {
                                 core::slice::from_raw_parts(buffer as *const u8, n).to_vec()
                             };

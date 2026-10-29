@@ -32,7 +32,7 @@ use rows::SOCS;
 /// ([`board_dram_base`]).
 /// `pmgr` is the `compatible` of the SoC's `/arm-io/pmgr` in its boards'
 /// 26A434 DeviceTrees. Power-state
-/// ownership and optional register-family qualification are independent.
+/// ownership and optional register-family validation are independent.
 /// `lockdown` is
 /// the CONTROL offset of the lockdown registers in each PE's `cpu-impl-reg`
 /// and each cluster's `cpm-impl-reg` (`platform::apple::lockdown`), on the
@@ -92,7 +92,7 @@ pub struct CoreType {
 impl CoreType {
     /// Compose the established MPIDR identity independently of the MIDR,
     /// caches and clocks that a complete PE profile also requires. `reg`
-    /// retains the physical cluster/core coordinates; core type never
+    /// keeps the physical cluster/core coordinates; core type never
     /// creates another physical cluster. Returns `None` for an unknown
     /// mapping, out-of-field core type or undeclared `reg` bits.
     pub fn mpidr(&self, reg: u32) -> Option<u64> {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! Actual ordinary DP tunneling over an owned adjacent USB4v1 Gen2/3 link.
+//! Ordinary DP tunneling over an owned adjacent USB4v1 Gen2/3 link.
 //!
 //! Source CM/capability exchange, video NFC and both AUX paths, endpoint enable,
 //! DPRX completion and normal stop. Native GPU/connector association, bandwidth,
@@ -42,9 +42,9 @@ pub fn quarantined_reservations() -> u64 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Credits {
-    /// Source bonded legacy policy: AUX=1, video=min(actual total-2,12).
+    /// Source bonded legacy policy: AUX=1, video=min(total-2,12).
     LegacyBonded,
-    /// Actual source VSEC/shared-allocation reservations, not caller estimates.
+    /// Source VSEC/shared-allocation reservations, not caller estimates.
     RouterAllocated { video: u16, aux: [u8; 2] },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct Grant {
     /// Video downstream, AUX downstream, AUX upstream; source/destination pairs.
     pub hops: [[(u16, u16); 2]; 3],
     pub credits: Credits,
-    /// Real reserved downstream Mb/s. Zero requires an actual exclusive native
+    /// Real reserved downstream Mb/s. Zero requires an exclusive native
     /// bandwidth right covering the full observed endpoint capabilities.
     pub max_mbps: u32,
     pub permission: Decision,
@@ -65,16 +65,16 @@ pub struct Grant {
 /// Native DP association, domain accounting and exact exclusive CM reservation.
 ///
 /// # Safety
-/// This retains actual GPU/connector-to-DP-IN/OUT mapping, powered router/link,
-/// all input/output HopIDs, actual source-selected video NFC/AUX credits and
+/// This keeps GPU/connector-to-DP-IN/OUT mapping, powered router/link,
+/// all input/output HopIDs, source-selected video NFC/AUX credits and
 /// shared domain bandwidth rights in this exact NHI/reset/topology epoch. It
 /// excludes firmware/other CM mutations and resource reuse, including after
-/// failure/quarantine. Permission is the actual native DP/_OSC decision. The
+/// failure/quarantine. Permission is the native DP/_OSC decision. The
 /// native GPU/connector/D0 and source VSEC accounting must not be inferred from
 /// IDs, route/port numbers or requested rates. `is_current` reads real admission
-/// state and retains the in-flight physical lifetime against reassignment.
+/// state and keeps the in-flight physical lifetime against reassignment.
 /// Independent GPU payload, endpoint DMA, IRQ/IOMMU and host display submission
-/// lifetimes stay retained; local tunnel/HPD/NFC completion cannot release them.
+/// lifetimes stay held; local tunnel/HPD/NFC completion cannot release them.
 /// No production provider or permissive default is supplied by this trait.
 pub unsafe trait Reservation: Send + Sync {
     fn grant(&self) -> Grant;
@@ -91,8 +91,8 @@ struct PathOwner {
     grant: Grant,
     allocation: path::Allocation,
 }
-// SAFETY: the adapter retains the original actual native grant and its real
-// current guard; no path authority is created from the stored numeric metadata.
+// SAFETY: the adapter keeps the original native grant and its real
+// current guard; no path permission is created from the stored numeric metadata.
 unsafe impl path::Reservation for PathOwner {
     fn allocation(&self) -> path::Allocation {
         self.allocation
@@ -176,7 +176,7 @@ fn limited_cap(input: u32, output: u32, max_mbps: u32) -> Result<u32, Error> {
     if max_mbps == 0 || output_rate * output_lanes * 8 / 10 <= max_mbps {
         return Ok(output);
     }
-    // Exact source preference order, including equal-bandwidth combinations.
+    // Source preference order, including equal-bandwidth combinations.
     for (new_rate, new_lanes) in [
         (8100, 4),
         (5400, 4),
@@ -216,10 +216,10 @@ fn limited_cap(input: u32, output: u32, max_mbps: u32) -> Result<u32, Error> {
     Err(Error::Capability)
 }
 fn titan(header: &RouterHeader) -> bool {
-    // Exact original nhi.h hardware aliases, not an application/OEM exception.
+    // Original nhi.h hardware aliases, not an application/OEM exception.
     header.vendor() == 0x8086 && matches!(header.device(), 0x15e7 | 0x15ea | 0x15ef)
 }
-/// Completed actual CM exchange, all three paths, endpoint enables and DPRX.
+/// Completed CM exchange, all three paths, endpoint enables and DPRX.
 /// This owns tunnel resources; it does not prove GPU scanout or physical display.
 pub struct Active {
     pub endpoints: [[u32; 2]; 2],
@@ -241,7 +241,7 @@ impl Active {
             .is_some_and(|o| o.is_current() && o.grant() == self.grant)
     }
     /// # Safety
-    /// Actual full restoration/reset or independent native CM transfer includes
+    /// Full restoration/reset or independent native CM transfer includes
     /// both routers, video NFC, all three paths, GPU/connector power and every
     /// independent endpoint payload/DMA/IRQ/IOMMU lifetime.
     /// ```compile_fail
@@ -250,8 +250,8 @@ impl Active {
     /// ```
     pub unsafe fn retire(mut self) {
         if let Some(path) = self.path.take() {
-            // SAFETY: caller proves complete restoration/retained transfer of
-            // the actual three-path/link chain and independent payload owners.
+            // SAFETY: caller proves complete restoration/kept transfer of
+            // the three-path/link chain and independent payload owners.
             unsafe { path.retire() };
         }
         if let Some(path) = self.previous.take() {
@@ -259,7 +259,7 @@ impl Active {
             unsafe { path.retire() };
         }
         if let Some(link) = self.link.take() {
-            // SAFETY: caller proof retains/restores the original active routers
+            // SAFETY: caller proof keeps/restores the original active routers
             // even if CM/capability exchange failed before any path publication.
             unsafe { link.retire() };
         }

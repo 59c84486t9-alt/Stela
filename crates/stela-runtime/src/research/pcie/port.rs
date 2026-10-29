@@ -1,6 +1,6 @@
 //! Apple port control, interrupts, MSI decoding and requester-to-stream maps.
 //! Register facts: Linux v6.17 `drivers/pci/controller/pcie-apple.c`.
-//! Link readiness is derived from actual modeled supplies and a backed peer.
+//! Link readiness is derived from modeled supplies and a backed peer.
 //! Analog training, ASPM, tunnel-reset handshakes and AER recovery refuse.
 use alloc::vec::Vec;
 use {
@@ -74,7 +74,7 @@ pub struct Inputs {
     pub reference_clock: bool,
     pub external_reset_released: bool,
     pub peer: bool,
-    /// Established training result supplied by the actual PHY/link owner.
+    /// Established training result supplied by the PHY/link owner.
     /// A populated function and LTSSM start alone cannot train a link.
     pub link_trained: bool,
 }
@@ -226,7 +226,7 @@ impl Port {
         Ok(())
     }
     /// Missing/ambiguous routing refuses without inventing a hardware TLP
-    /// error: error-capture cause and retirement remain unqualified.
+    /// error: error-capture cause and retirement remain unchecked.
     pub fn stream(
         &mut self,
         requester: u16,
@@ -253,7 +253,7 @@ impl Port {
     /// MSI interception precedes DART translation. Only an enabled decoder
     /// at its programmed address decodes a 32-bit payload. Delivery still
     /// refuses: parent interrupt capture/mask/retirement semantics are not yet
-    /// qualified. Neither a synthetic PCIe latch nor a transient AIC level
+    /// checked. Neither a synthetic PCIe latch nor a transient AIC level
     /// substitutes for that boundary.
     pub fn msi(
         &mut self,
@@ -413,7 +413,7 @@ impl Port {
 }
 
 // Only a private cloned preview uses this sink. A successful real commit
-// publishes the resulting IRQ level after every actual endpoint is checked.
+// publishes the resulting IRQ level after every endpoint is checked.
 struct Silent;
 impl stela_contracts::interrupt::InterruptSink for Silent {
     fn set_level(&mut self, _: Wire, _: bool) {}

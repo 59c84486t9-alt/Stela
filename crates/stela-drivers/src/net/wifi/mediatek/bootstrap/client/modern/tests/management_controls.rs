@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-// Actual source-modeled native peers. These providers authorize only the retained
+// Source-modeled native peers. These providers authorize only the kept
 // simulated requester, never a physical device or a real OS management service.
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::client::management::{Received, Session, Transmit};
@@ -12,11 +12,11 @@ fn fixture() -> (Native, Model, Owner, Rc<AuthorityState>) {
     let (mut driver, model, _) = awaiting();
     let (mut owner, state) = authority(&driver, &model);
     let permit = admit(&mut owner, &driver, AssociationUse::Configure);
-    // SAFETY: only this exact modeled requester and its actually retained guards.
+    // SAFETY: only this modeled requester and its guards.
     unsafe { driver.configure_modern(&mut owner, permit, 105) }.unwrap();
     for (pairwise, index, material) in [(true, 0, 1), (false, 2, 0x44)] {
         let permit = admit(&mut owner, &driver, AssociationUse::Management);
-        // SAFETY: same actual modeled requester, source policy and key exchange.
+        // SAFETY: same modeled requester, source policy and key exchange.
         unsafe {
             driver.install_key_modern(
                 &mut owner,
@@ -34,7 +34,7 @@ fn fixture() -> (Native, Model, Owner, Rc<AuthorityState>) {
 fn attach(driver: &mut Native, owner: &mut Owner) -> Arc<Session> {
     let permit = admit(owner, driver, AssociationUse::Management);
     let epoch = driver.station().association_epoch().unwrap();
-    // SAFETY: modeled native queues, BA owners, actual RX/IRQ and external users
+    // SAFETY: modeled native queues, BA owners, RX/IRQ and external users
     // are drained; these bytes represent this model OS's authenticated exchange.
     unsafe {
         driver.install_management_key_modern(
@@ -61,13 +61,13 @@ fn stop(driver: &mut Native, model: &Model) {
     if driver.phase() == ClientPhase::Associated {
         driver.disconnect().unwrap();
     }
-    // SAFETY: actual model removal ACK and independent old RX/IRQ/work drain;
-    // retained observations are inert and every consuming use revalidates them.
+    // SAFETY: model removal ACK and independent old RX/IRQ/work drain;
+    // observations are inert and every consuming use revalidates them.
     unsafe { driver.retire_peer_after_drain() }.unwrap();
     driver.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
     model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
-    // SAFETY: whole actual modeled controller/DMA/IRQ quiesced independently.
+    // SAFETY: whole modeled controller/DMA/IRQ quiesced independently.
     unsafe { driver.stop_after_quiesce() }.unwrap();
 }
 

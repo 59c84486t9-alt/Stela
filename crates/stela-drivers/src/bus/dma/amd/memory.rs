@@ -1,4 +1,4 @@
-//! Actual retained WB memory for one AMD 4 KiB page table. This component
+//! WB memory for one AMD 4 KiB page table. This component
 //! grants no remapper access and performs no implicit IOTLB acknowledgement.
 use super::format::{FormatError, PageEntry, PhysicalAddress};
 use crate::bus::dma::memory::{CacheAttribute, CpuMapping, MemoryError, PageSource};
@@ -18,24 +18,24 @@ pub enum TableError {
 /// Real cache/order publication for the current platform and remapping unit.
 ///
 /// # Safety
-/// An implementation must qualify actual IOMMU table-walk coherency and the
+/// An implementation must check IOMMU table-walk coherency and the
 /// CPU/root/cache context, then perform the required coherent ordering or
-/// qualified cache maintenance for the entire WB CPU span. Success means
+/// checked cache maintenance for the entire WB CPU span. Success means
 /// hardware can observe every preceding table store. No compiler-only fence,
 /// CPU-pointer-as-PA inference or unsupported-success path satisfies this.
-/// It cannot retain the borrowed pointer, modify entries, reenter their owner
+/// It cannot keep the borrowed pointer, modify entries, reenter their owner
 /// or use this callback as an IOTLB invalidation/completion witness.
 pub unsafe trait TableVisibility {
     /// # Safety
-    /// `cpu..cpu+bytes` is retained, aligned WB CPU RAM for this call. All
+    /// `cpu..cpu+bytes` is held, aligned WB CPU RAM for this call. All
     /// software table writers are excluded; no access escapes this borrowing.
     unsafe fn publish(&self, cpu: NonNull<u8>, bytes: usize) -> Result<(), MemoryError>;
 }
 
-/// The CPU view retains the complete original platform pin, even when only
+/// The CPU view keeps the complete original platform pin, even when only
 /// the first 4 KiB of a larger native allocation is used by the table walker.
 ///
-/// A consumer publishing this physical address must retain the table through
+/// A consumer publishing this physical address must keep the table through
 /// all hardware walks and acknowledged invalidation/reset. A live unit's Drop
 /// must quarantine uncertain owners rather than release them. This memory
 /// object does not know whether a caller programmed hardware with its address.
@@ -52,7 +52,7 @@ impl TablePage {
     /// storage exclusively for this table's mutation until Drop. No cloned pin,
     /// other table, hardware writer or raw CPU writer may alias it. PageSource
     /// is a shared safe allocator interface and cannot itself attest this grant.
-    /// The consumer separately retains tables through live hardware ownership.
+    /// The consumer separately keeps tables through live hardware ownership.
     pub unsafe fn allocate(source: &dyn PageSource, physical_bits: u8) -> Result<Self, TableError> {
         // Validate the device's width before any provider allocation.
         PhysicalAddress::new(0, physical_bits).map_err(TableError::Format)?;
@@ -105,7 +105,7 @@ impl TablePage {
         self.native_shift
     }
 
-    /// Complete native pin, including every unused allocation tail retained by
+    /// Complete native pin, including every unused allocation tail kept by
     /// the CPU view. This is distinct from the 4 KiB hardware table extent.
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
@@ -122,7 +122,7 @@ impl TablePage {
     }
 
     pub fn read(&self, index: usize) -> Result<u64, TableError> {
-        // SAFETY: bounded aligned retained WB table word, no Rust data slice
+        // SAFETY: bounded aligned kept WB table word, no Rust data slice
         // aliases the hardware table. The consumer excludes software writers.
         Ok(u64::from_le(unsafe {
             self.pointer(index)?.as_ptr().read_volatile()
@@ -140,10 +140,10 @@ impl TablePage {
         Ok(())
     }
 
-    /// Clear every actual entry. This does not establish hardware retirement.
+    /// Clear every entry. This does not establish hardware retirement.
     pub fn clear(&mut self) {
         for index in 0..TABLE_ENTRIES {
-            // Every index is inside the fixed retained page; no allocation or
+            // Every index is inside the fixed page; no allocation or
             // platform callback can fail while zeroing an established table.
             self.write(index, PageEntry::EMPTY)
                 .expect("bounded table clear");
@@ -155,7 +155,7 @@ impl TablePage {
             .cpu
             .address(0, TABLE_BYTES)
             .map_err(TableError::Memory)?;
-        // SAFETY: the exact retained, aligned WB table span; &self excludes
+        // SAFETY: the kept, aligned WB table span; &self excludes
         // safe software mutation until the real visibility operation returns.
         unsafe { visibility.publish(cpu, TABLE_BYTES) }.map_err(TableError::Memory)
     }
@@ -196,8 +196,8 @@ mod tests {
     // SAFETY: shared access exposes metadata/raw pointers only; test CPU writes
     // are serialized and never overlap software table mutation/publication.
     unsafe impl Sync for Backing {}
-    // SAFETY: actual retained CPU RAM models the named immutable physical pages.
-    // The labels are deliberately not CPU addresses and never reach hardware.
+    // SAFETY: CPU RAM models the named immutable physical pages.
+    // The labels are not CPU addresses and never reach hardware.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
             self.cpu
@@ -252,8 +252,8 @@ mod tests {
             }
         }
 
-        /// Unowned observation only while the table retains this source's one
-        /// actual backing; never a replacement pin, mapping or safe RAM view.
+        /// Unowned observation only while the table keeps this source's one
+        /// backing; never a replacement pin, mapping or safe RAM view.
         fn live_cpu(&self) -> NonNull<u8> {
             assert_eq!(self.allocations.get(), 1);
             assert_eq!(self.drops.load(Ordering::Relaxed), 0);
@@ -279,7 +279,7 @@ mod tests {
             }
             let granule = 1usize << self.shift;
             let layout = Layout::from_size_align(self.bytes, granule).unwrap();
-            // SAFETY: actual unique zeroed CPU storage, released by Backing.
+            // SAFETY: unique zeroed CPU storage, released by Backing.
             let cpu =
                 NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
             self.cpu.set(Some(cpu));
@@ -302,7 +302,7 @@ mod tests {
 
     fn allocate(source: &Source, physical_bits: u8) -> Result<TablePage, TableError> {
         // SAFETY: this concrete fixture source always allocates fresh, uniquely
-        // owned, currently zeroed CPU RAM. It retains no pin or writer alias;
+        // owned, currently zeroed CPU RAM. It keeps no pin or writer alias;
         // raw observations occur only synchronously while the table is live.
         unsafe { TablePage::allocate(source, physical_bits) }
     }
@@ -336,7 +336,7 @@ mod tests {
                 assert_eq!(table.read(index), Ok(0));
             }
             if source.bytes > TABLE_BYTES {
-                // SAFETY: the complete actual backing is retained by table.
+                // SAFETY: the complete backing is held by table.
                 // Its unused tail has no table words or asynchronous users.
                 unsafe {
                     source
@@ -399,7 +399,7 @@ mod tests {
         }
         for offset in 0..TABLE_BYTES {
             assert_eq!(
-                // SAFETY: bounded actual live CPU storage, with no concurrent writer.
+                // SAFETY: bounded live CPU storage, with no concurrent writer.
                 unsafe { source.live_cpu().as_ptr().add(offset).read_volatile() },
                 0
             );
@@ -438,8 +438,8 @@ mod tests {
             }
         }
         let unknown = Unknown(Cell::new(0));
-        // The actual default PageSource profile is unavailable, never an
-        // inferred 4K allocation profile merely because allocation exists.
+        // The default PageSource profile is unavailable, never an
+        // inferred 4K allocation profile because allocation exists.
         // SAFETY: Unknown never supplies an allocation or a table alias.
         assert!(matches!(
             // SAFETY: the model device, its pages and its domain belong to this test alone; no
@@ -508,9 +508,9 @@ mod tests {
         calls: Cell<usize>,
         fail: Cell<bool>,
     }
-    // SAFETY: synchronous software observation of a borrowed actual CPU span,
+    // SAFETY: synchronous software observation of a borrowed CPU span,
     // modeling the callback boundary only. No native cache/coherency/IOMMU
-    // context is claimed, no pointer is retained from the call or used later,
+    // context is claimed, no pointer is held from the call or used later,
     // and no mutation/reentry or invalidation/completion is invented.
     unsafe impl TableVisibility for Observe {
         unsafe fn publish(&self, cpu: NonNull<u8>, bytes: usize) -> Result<(), MemoryError> {

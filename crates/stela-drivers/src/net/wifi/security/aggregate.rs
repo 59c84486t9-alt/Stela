@@ -3,7 +3,7 @@
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name> (BSD-3-Clause-Clear).
 // Common protected-data replay uses the GPL2 Linux-derived implementation in
 // security.rs; its original copyright notices remain there and in THIRD_PARTY.
-//! One post-order replay decision for an actually retained complete MPDU.
+//! One post-order replay decision for a complete MPDU.
 //! Source ownership, grouping and BA/reorder execution remain with the backend.
 
 use super::{Error as SecurityError, KeyIdentity, KeySlot, PacketNumber};
@@ -15,7 +15,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 /// An original whole A-MSDU can arrive in one record, including a real single
 /// subframe. A hardware split parent has multiple raw 802.11 records. Neither
-/// shape is already Ethernet, or authority inferred from a first/last flag.
+/// shape is already Ethernet, or permission inferred from a first/last flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     WholeMpdu,
@@ -39,7 +39,7 @@ impl From<station::Error> for Error {
     }
 }
 
-/// Actual complete, post-reorder source ownership. `C` retains the genuine
+/// Complete, post-reorder source ownership. `C` keeps the
 /// queue/peer/device resources, not a number or newly looked-up current epoch.
 /// Authentication borrows this owner; failure cannot silently drop resources.
 #[derive(Debug)]
@@ -51,20 +51,20 @@ pub struct OrderedGroup<C> {
 }
 impl<C> OrderedGroup<C> {
     /// # Safety
-    /// All members must come from one genuine complete hardware parent in
-    /// original source queue order, bound to this exact retained association,
+    /// All members must come from one complete hardware parent in
+    /// original source queue order, bound to this exact association,
     /// peer/WCID, physical key generation, device/firmware/reset and RX queue.
-    /// Retain those actual resources in `source_owner` through all users.
-    /// The backend must qualify real split completion or a genuinely whole
+    /// Keep those resources in `source_owner` through all users.
+    /// The backend must check real split completion or a whole
     /// one-record parent. Do not promote a partial flush, gap/loss, raw AMPDU
     /// or first/last flag, or caller-copied epoch into complete ownership.
-    /// Actual current BA namespace/reorder release, if applicable, must precede
+    /// Current BA namespace/reorder release, if applicable, must precede
     /// this call; a raw BAID or transport ACK cannot establish that proof.
     /// For protected traffic, per-member integrity/key observations must derive
-    /// from the actual native installation and negotiated receive layout.
+    /// from the native installation and negotiated receive layout.
     /// Missing optional member PN observations stay absent, never copied.
     /// Reset/removal must invalidate the current association before further
-    /// authorization, while retaining old queue/key resources through actual
+    /// authorization, while keeping old queue/key resources through
     /// drain and deferred users. Group creation does not authorize delivery or
     /// replace current station/key/controlled-port checks at that boundary.
     pub unsafe fn new(
@@ -152,7 +152,7 @@ pub enum GroupSecurity {
     Protected { key: KeyIdentity, pn: PacketNumber },
 }
 
-/// Validated plaintext, still requiring actual current port/key/association
+/// Validated plaintext, still requiring current port/key/association
 /// checks and the shared raw A-MSDU deaggregator before Ethernet delivery.
 #[derive(Debug)]
 pub struct ReceivedGroup<'a, C> {
@@ -252,7 +252,7 @@ impl<'a, C> Candidate<'a, C> {
         let mut spans = self.spans()?;
         spans.push((first.start, first.end));
         for member in self.group.members.iter().skip(1) {
-            // Optional non-head group1 stays absent. The genuinely complete
+            // Optional non-head group1 stays absent. The complete
             // source owner, not a same-PN flag, binds that member to its parent.
             let checked = slot.checked_mpdu(member, true, Some(first.pn))?;
             if checked.key != first.key || checked.pn != first.pn {
@@ -293,7 +293,7 @@ mod tests {
         // Counter-primitive model only: no installed physical key, DMA or RX users.
         // Full unchanged C helper/flags are emitted by wifi_group_replay_oracle.py.
         // The complete unchanged helper ASan/UBSan trace covers 1,048,576 cases.
-        // This does not establish grouping, BA, integrity or hardware authority.
+        // This does not establish grouping, BA, integrity or hardware permission.
         // SAFETY: this test owns the key slot number alone.
         let mut slot = unsafe { KeySlot::new(8).unwrap() };
         let mut digest = Sha256::new();

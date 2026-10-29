@@ -53,18 +53,18 @@ impl<I: Io> Drop for Attempt<'_, I> {
     }
 }
 
-/// Actual source reset/base/index/tag sequence using all retained native
+/// Source reset/base/index/tag sequence using all kept native
 /// rings after MAC power and again after firmware download, before any raw
 /// RX poll or firmware command has been admitted.
 ///
 /// # Safety
 /// All queues/domain/claims/BARs belong to `io`'s exact selected requester.
-/// Independent actual requester stop/drain, with every IRQ/reset/submission
+/// Independent requester stop/drain, with every IRQ/reset/submission
 /// worker stopped throughout the operation. Source CTRL/index/reset stores
-/// below do not establish that prerequisite. RAM is actual coherent WB with
+/// below do not establish that prerequisite. RAM is coherent WB with
 /// NoSnoop/ATS disabled. This is initial attachment, not recovery of a live
 /// station, outstanding command or security generation. Firmware download has
-/// consumed its final beacon payload using actual fresh BCN_VALID if used.
+/// consumed its final beacon payload using fresh BCN_VALID if used.
 pub unsafe fn setup<B: beacon::Registers, R: receive::Registers, T: transmit::Registers>(
     io: &mut NativeIo<Beacon<B>>,
     rx: &mut receive::Ring<R>,
@@ -82,8 +82,8 @@ pub unsafe fn setup<B: beacon::Registers, R: receive::Registers, T: transmit::Re
     if actual != profile.observed().sys_cfg1 {
         return Err(Error::IdentityChanged);
     }
-    // SAFETY: Actual independent stop owns descriptor CPU visibility. Each component
-    // becomes poisoned before its own mutation; uncertainty retains its I/O
+    // SAFETY: Independent stop owns descriptor CPU visibility. Each component
+    // becomes poisoned before its own mutation; uncertainty keeps its I/O
     // owner and pins even if another component's preparation later fails.
     let beacon = unsafe { a.io.beacon_queue()?.begin_hci_rebind()? };
     // SAFETY: covered by this function's own safety contract.
@@ -116,8 +116,8 @@ fn base<I: Io>(io: &mut I, count: u32, n: u16, reg: u32, address: u32) -> Result
     }
     Ok(())
 }
-/// Binding addresses are private observations of retained native allocations,
-/// never public fabricated IOVAs. This function's caller owns all live pins.
+/// Binding addresses are private observations of kept native allocations,
+/// never public invented IOVAs. This function's caller owns all live pins.
 fn rebind<I: Io>(io: &mut I, beacon: u32, receive: u32, tx: [u32; 7]) -> Result<(), Error> {
     let value = io.read8(RTK_PCI_CTRL + 3)?;
     if value == u8::MAX {
@@ -128,7 +128,7 @@ fn rebind<I: Io>(io: &mut I, beacon: u32, receive: u32, tx: [u32; 7]) -> Result<
     if io.read32(RTK_PCI_TXBD_DESA_BCNQ)? != beacon {
         return Err(Error::Readback);
     }
-    // Actual pinned source order: H2C,BK,BE,VO,VI,management,high,RX.
+    // Pinned source order: H2C,BK,BE,VO,VI,management,high,RX.
     base(
         io,
         RTK_PCI_TXBD_NUM_H2CQ,
@@ -268,8 +268,8 @@ mod tests {
         let original: Vec<_> = regs.iter().map(|r| bar.get(*r)).collect();
         assert!(original.iter().all(|v| *v != 0));
         assert_eq!(memory.lock().unwrap().mappings.len(), 522);
-        // Model loss of actual queue bases/counts through MAC power. Software
-        // configured flags survive, but have no authority to prove retention.
+        // Model loss of queue bases/counts through MAC power. Software
+        // configured flags survive, but have no permission to prove retention.
         for reg in regs {
             bar.set(reg, 0);
         }
@@ -397,7 +397,7 @@ mod tests {
             };
             // Native independent queue-base readbacks are stricter additional
             // guards. Compare every source operation/access width/value, while
-            // retaining the three source RMW reads in the exact original order.
+            // keeping the three source RMW reads in the original order.
             if value.is_some() || matches!(reg, 0x303 | 0x1330 | 0x300) {
                 self.events
                     .push([u32::from(value.is_some()), reg, width as u32, result]);
@@ -405,7 +405,7 @@ mod tests {
             Ok(result)
         }
     }
-    // SAFETY: bounded serialized native register model; no actual DMA/radio.
+    // SAFETY: bounded serialized native register model; no DMA/radio.
     unsafe impl Io for Registers {
         fn profile(&self) -> Profile {
             profile()
@@ -485,7 +485,7 @@ mod tests {
         }
         for reg in [0x3b4, 0x132c] {
             let (mut io, mut rx, mut tx, bar, memory) = native();
-            // Model a reset store that never produces actual zero indices.
+            // Model a reset store that never produces zero indices.
             bar.set(reg, 1 << 16);
             // SAFETY: the model device, its pages and its domain belong to this test alone; no
             // other driver, worker or DMA touches them.

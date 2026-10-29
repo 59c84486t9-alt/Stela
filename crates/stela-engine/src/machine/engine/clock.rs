@@ -20,7 +20,7 @@
 //! While every PE waits nothing has to progress, and the counter follows
 //! the host's. When the host is fast enough, no slice exceeds its bound and
 //! the counter is the host's minus the lag of earlier slow stretches.
-//! The monotonic clamp can retain a slice's already observed overshoot, but
+//! The monotonic clamp can keep a slice's already observed overshoot, but
 //! cannot cancel the lag charged for a later slice: lag measures elapsed
 //! host time, independently of how long an earlier count remains held.
 //!
@@ -34,7 +34,7 @@
 //! with wall time; time of day drifts behind by the accumulated lag, as on
 //! a machine whose counter was paused, and ahead by any idle leaps.
 //!
-//! PEs with a retained shared counter follow that counter directly instead
+//! PEs with a shared counter follow that counter directly instead
 //! ([`Clock::follow_host`]); per-PE slice lag cannot independently reorder the
 //! reads of concurrently running native PEs.
 
@@ -74,7 +74,7 @@ struct Slice {
 }
 
 impl Clock {
-    /// Follow the retained shared counter without adding per-PE slice lag.
+    /// Follow the shared counter without adding per-PE slice lag.
     /// Concurrent native PEs must observe one monotonic clock.
     pub(super) fn follow_host(&mut self) {
         self.follows_host = true;

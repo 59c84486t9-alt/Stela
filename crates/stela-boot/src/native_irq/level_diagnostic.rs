@@ -1,4 +1,4 @@
-//! Actual QEMU-only shared level INTx proof after acknowledged MSI retirement.
+//! QEMU-only shared level INTx proof after acknowledged MSI retirement.
 //! The route is bound to the complete real DSDT evaluated independently with
 //! pinned ACPICA (_PIC(1), PCI0._PRT and GSIG._CRS). This fixture grant never
 //! supplies a production AML/PIRQ resolver or SCI deferred-work provider.
@@ -38,7 +38,7 @@ const INTEL_DSDT_HASH: [u8; 32] = [
     0xdf, 0xe8, 0xaf, 0xc1, 0x3a, 0x17, 0x52, 0x62, 0xe7, 0xbf, 0x69, 0x71, 0x0b, 0xf7, 0x73, 0x8c,
     0x11, 0xd2, 0x20, 0x51, 0x99, 0x8d, 0x20, 0xd8, 0x20, 0x68, 0x5f, 0x37, 0x3e, 0x31, 0xcf, 0x80,
 ];
-// Independently captured/evaluated 2GiB input for the actual retained-root
+// Independently captured/evaluated 2GiB input for the root
 // configuration fixture. Exact provenance is in the non-normative research
 // receipt; this table binding supplies no production root/controller grant.
 const OWNED_CONFIG_DSDT_HASH: [u8; 32] = [
@@ -59,16 +59,16 @@ pub(crate) struct Prepared {
     sci: LineRoute,
     madt_hash: [u8; 32],
     fadt_hash: [u8; 32],
-    // Actual immutable ACPI reclaim pages remain reserved and identity-mapped
+    // Immutable ACPI reclaim pages remain reserved and identity-mapped
     // in the host-check root; no heap/guest allocator can reclaim this table.
     dsdt: &'static [u8],
     dsdt_hash: [u8; 32],
 }
 impl Prepared {
-    /// Enclosed by the source-bound TCG/Q35/SMM-off fixture qualification,
+    /// Enclosed by the source-bound TCG/Q35/SMM-off fixture validation,
     /// before EBS. Only ACPI/PCI reads; no interrupt takeover occurs here.
     pub(crate) fn prepare(rsdp: u64, fadt: &[u8]) -> Result<Self, String> {
-        // SAFETY: actual firmware RSDP/tables remain mapped before EBS.
+        // SAFETY: firmware RSDP/tables remain mapped before EBS.
         let madt =
             unsafe { acpi::find(rsdp, b"APIC") }.map_err(|e| format!("fixture MADT: {e:?}"))?;
         if core::arch::x86_64::__cpuid(0x8000_0000).eax < 0x8000_0008 {
@@ -140,7 +140,7 @@ impl Prepared {
         base: u64,
         clock: Clock,
     ) -> Result<String, String> {
-        // Recheck the actual mapped table after EBS, immediately before line
+        // Recheck the mapped table after EBS, immediately before line
         // ownership. The capture/receipt cannot authorize a changed live input.
         if Sha256::digest(self.dsdt).as_slice() != self.dsdt_hash {
             return Err(String::from("fixture DSDT changed before INTx ownership"));
@@ -157,8 +157,8 @@ impl Prepared {
         // diagnostic.
         let registers = unsafe { ioapic::Mmio::new(self.unit.base as usize) }
             .map_err(|e| format!("IOAPIC mapping: {e:?}"))?;
-        // SAFETY: exact previously qualified Q35 single-BSP fixture, retained
-        // actual UC IOAPIC page, EOI broadcast on, no firmware/SMM/other owner.
+        // SAFETY: exact previously checked Q35 single-BSP fixture, kept
+        // UC IOAPIC page, EOI broadcast on, no firmware/SMM/other owner.
         let unit =
             unsafe { ioapic::Unit::attach(registers, platform, self.unit.id, self.unit.gsi_base) }
                 .map_err(|e| format!("IOAPIC attach: {e:?}"))?;
@@ -198,7 +198,7 @@ impl Prepared {
             SharedHandlers::new(alloc::vec![first, second])
                 .map_err(|e| format!("shared group: {e:?}"))?,
         );
-        // SAFETY: actual full DSDT hash proves the independent ACPICA routing
+        // SAFETY: full DSDT hash proves the independent ACPICA routing
         // input, live direct EDU INTA agrees, boot virtio is reset/stopped and
         // all other exact fixture endpoints are quiescent; no hidden sharer.
         let pin = unsafe {
@@ -332,8 +332,8 @@ impl Handler for Member {
         }
         if self.1 == 1 {
             let n = self.0.first.load(Ordering::Relaxed);
-            // First IRQ deliberately leaves a real asserted device level;
-            // actual APIC EOI must clear RemoteIRR and deliver it again.
+            // First IRQ leaves a real asserted device level;
+            // APIC EOI must clear RemoteIRR and deliver it again.
             if n != 0 {
                 self.0.write(0x64, 1);
             }
@@ -351,8 +351,8 @@ struct Contributors {
 }
 impl Drop for Contributors {
     fn drop(&mut self) {
-        // Pin releases contributors ONLY after its actual registry/IOAPIC/
-        // callback drain; uncertain Pin drop retains the ManuallyDrop owner.
+        // Pin releases contributors ONLY after its registry/IOAPIC/
+        // callback drain; uncertain Pin drop keeps the ManuallyDrop owner.
         if let Some(function) = self.function.take()
             && let Err(error) = crate::native_dma::diagnostic::retire_function(function)
         {
@@ -448,5 +448,5 @@ unsafe impl Devices for Contributors {
     }
 }
 
-// Actual retained native configuration owner, never a CPU-bound raw transport.
+// Native configuration owner, never a CPU-bound raw transport.
 type Function = PciFunction<OwnedConfig>;

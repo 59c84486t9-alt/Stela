@@ -2,8 +2,8 @@
 // Copyright (C) 2012-2014, 2018-2025 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
-//! Actual completed-RB to immutable raw-MPDU receipt composition. A receipt
-//! records one real queue epoch; it is not association/key/replay authority or
+//! Completed-RB to immutable raw-MPDU receipt composition. A receipt
+//! records one real queue epoch; it is not association/key/replay permission or
 //! a normalized OS frame. The missing platform/radio phase remains explicit.
 use super::super::receive::mpdu::{self, Metadata};
 use super::hcmd::{CapturedNotification, NotificationPoll};
@@ -26,8 +26,8 @@ pub struct ObservedMpdu {
     descriptor_bytes: usize,
     mpdu_bytes: usize,
 }
-/// Historical normalized bytes retain the actual receive epoch. They are not
-/// rebound to a new association merely because a later caller has one.
+/// Historical normalized bytes keep the receive epoch. They are not
+/// rebound to a new association because a later caller has one.
 pub struct NormalizedMpdu {
     _epoch: Arc<()>,
     normalized: mpdu::normalize::Normalized,
@@ -44,8 +44,8 @@ impl NormalizedMpdu {
     }
 }
 impl ObservedMpdu {
-    /// Normalize the immutable actual completed RX bytes using the retained
-    /// firmware rate-layout decision. Key/integrity remain unqualified.
+    /// Normalize the immutable completed RX bytes using the kept
+    /// firmware rate-layout decision. Key/integrity remain unchecked.
     pub fn normalize(&self) -> Result<NormalizedMpdu, mpdu::normalize::Error> {
         let normalized = mpdu::normalize::normalize(
             self.metadata,
@@ -123,7 +123,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
     }
 }
 impl<Q: BootIo> ColdRadio<'_, Q> {
-    /// Poll raw observations from the actual owned initial queue 0. This can
+    /// Poll raw observations from the owned initial queue 0. This can
     /// diagnose firmware traffic while PlatformConfigurationRequired remains
     /// unresolved; it does not advance that phase or authorize OS delivery.
     /// Completed bytes are captured before explicit pool rearm, so returned

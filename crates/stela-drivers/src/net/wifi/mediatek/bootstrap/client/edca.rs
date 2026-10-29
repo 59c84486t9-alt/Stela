@@ -8,7 +8,7 @@ use station::phy::{AccessCategory, Role, Wmm};
 
 const OBSERVATION_LIFETIME_US: u64 = 30_000_000;
 
-/// Last complete actual EDCA ACK plus descriptor/mapping retirement. This is
+/// Last complete EDCA ACK plus descriptor/mapping retirement. This is
 /// local queue configuration, not new association or authentication evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppliedEdca {
@@ -27,7 +27,7 @@ pub(super) struct Observed<C: 'static> {
     seen: u64,
     count: u8,
     parameters: [AccessCategory; 4],
-    // Retain the actual normalized completed DMA observation, never caller bytes.
+    // Keep the normalized completed DMA observation, never caller bytes.
     _frame: Mpdu,
 }
 
@@ -430,19 +430,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
-    /// Install the latest genuine completed current-peer WMM observation.
+    /// Install the latest completed current-peer WMM observation.
     /// `limit` is the current immutable control-channel regulatory WMM rule;
-    /// clamping and request encoding happen inside actual publication guards.
+    /// clamping and request encoding happen inside publication guards.
     ///
     /// # Safety
-    /// The exact-controller, applied-policy, revocation and retained autonomous
+    /// The exact-controller, applied-policy, revocation and kept autonomous
     /// user contracts of `configure_modern` apply. `limit` must belong to that
     /// same current OS country/control-channel rule, not an invented relaxation.
     /// As Linux `mt7925_mcu_set_tx` does, the command goes beside live
     /// traffic and block-ack sessions; only received events queued ahead of
     /// its reply must drain first. External publication/reset/IRQ
-    /// paths serialize through this owner and authority; no raw user may publish new work during the checked drain and
-    /// actual command. This function preserves keys/context and grants no new
+    /// paths serialize through this owner and permission; no raw user may publish new work during the checked drain and
+    /// command. This function preserves keys/context and grants no new
     /// PHY, ACM, U-APSD, PMF or 6 GHz admission.
     pub unsafe fn update_edca_modern<
         H: wifi::regulatory::HardwarePolicy,

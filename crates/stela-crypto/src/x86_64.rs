@@ -74,7 +74,7 @@ const SHA_CONSTANTS: [u32; 68] = [
 ];
 
 pub(super) unsafe fn sha256(state: *mut u32, blocks: *const u8, count: usize) {
-    // SAFETY: the caller qualifies SHA/SSE controls and the complete extents.
+    // SAFETY: the caller checks SHA/SSE controls and the complete extents.
     unsafe { sha256_kernel(state, blocks, count, SHA_CONSTANTS.as_ptr()) };
 }
 
@@ -584,7 +584,7 @@ pub(super) unsafe extern "sysv64" fn aes_decrypt(
 // (MIT OR Apache-2.0); integer pointers keep the UEFI soft-float ABI unchanged.
 const SHA1_REVERSE: [u8; 16] = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 pub(super) unsafe fn sha1(state: *mut u32, blocks: *const u8, count: usize) {
-    // SAFETY: the caller qualified SHA/SSE and supplied complete state/blocks.
+    // SAFETY: the caller checked SHA/SSE and supplied complete state/blocks.
     unsafe { sha1_kernel(state, blocks, count, SHA1_REVERSE.as_ptr()) };
 }
 #[unsafe(naked)]

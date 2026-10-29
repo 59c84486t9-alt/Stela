@@ -32,7 +32,7 @@ pub struct Wake {
     pub usb3: bool,
     pub pcie: bool,
     pub displayport: bool,
-    /// Actual runtime-PM policy; system-sleep port policy comes from Owner.
+    /// Runtime-PM policy; system-sleep port policy comes from Owner.
     pub runtime: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,16 +40,16 @@ pub enum Operation {
     Wake(Wake),
     Sleep,
 }
-/// Actual exclusive CM/router power reservation, including every live tunnel.
+/// Exclusive CM/router power reservation, including every live tunnel.
 ///
 /// # Safety
-/// Inventory and per-port wake policy come from this physical router's actual
-/// native platform, in one retained NHI/reset/topology lifetime. The owner
-/// excludes firmware and competing CM configuration and retains all router,
+/// Inventory and per-port wake policy come from this physical router's
+/// native platform, in one NHI/reset/topology lifetime. The owner
+/// excludes firmware and competing CM configuration and keeps all router,
 /// link, tunnel and wake resources through completion, failure and quarantine.
-/// Sleep requires actual dependent tunnel/endpoint quiescence and the native
+/// Sleep requires dependent tunnel/endpoint quiescence and the native
 /// PM ordering grant before construction. No numeric metadata supplies those
-/// rights. `is_current` checks the real retained admission state; an affirmative
+/// rights. `is_current` checks the real admission state; an affirmative
 /// snapshot must also pin the in-flight physical lifetime against reassignment.
 /// This local operation never releases endpoint DMA/IRQ/IOMMU or NHI resources.
 pub unsafe trait Owner: Send + Sync {
@@ -89,7 +89,7 @@ pub struct AppliedWord {
     pub before: u32,
     pub after: u32,
 }
-/// Retains actual active wake/sleep ownership. Sleep-ready is a router-local
+/// Keeps active wake/sleep ownership. Sleep-ready is a router-local
 /// result, never a platform suspend, endpoint drain, or resource-release receipt.
 pub struct Applied {
     pub operation: Operation,
@@ -100,7 +100,7 @@ pub struct Applied {
 }
 impl Applied {
     /// # Safety
-    /// Actual state restoration/reset or an independent retained native PM/CM
+    /// State restoration/reset or an independent native PM/CM
     /// transfer has satisfied every router, tunnel, wake and DMA/IRQ lifetime.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::power::Applied;
@@ -278,9 +278,9 @@ pub struct Control<R: Registers> {
 }
 impl<R: Registers> Control<R> {
     /// # Safety
-    /// The exclusively idle Channel and Owner belong to the exact same live
+    /// The exclusively idle Channel and Owner belong to the same live
     /// physical NHI/requester/reset/topology lifetime. All Owner preconditions
-    /// and independent endpoint/PM resources remain retained through final drain.
+    /// and independent endpoint/PM resources remain held through final drain.
     pub unsafe fn new(channel: Channel<R>, owner: Arc<dyn Owner>, now: u64) -> Result<Self, Error> {
         if !owner.is_current() {
             return Err(Error::Revoked);

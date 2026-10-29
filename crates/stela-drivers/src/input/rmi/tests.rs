@@ -745,7 +745,7 @@ fn smbus_waits_for_firmware_after_each_actual_companion_reset_before_mode_read()
         100_000
     );
 
-    // A genuinely inadequate platform interval receives the peripheral's real
+    // An inadequate platform interval receives the peripheral's real
     // NACK and faults. The mode read is never retried to conceal this failure.
     let h = hardware();
     let mut bus = Smbus::new(

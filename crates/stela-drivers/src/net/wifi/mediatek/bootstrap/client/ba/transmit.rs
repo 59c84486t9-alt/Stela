@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2023 MediaTek Inc.
 //! Native source TX_START/TX_OPERATIONAL/TX_STOP owners. Canonical Station owns
-//! the management exchange/counters; firmware owns actual air sequence/PN.
+//! the management exchange/counters; firmware owns air sequence/PN.
 use super::*;
 use station::ba::tx::{Action, Agreement, Session};
 #[cfg(test)]
@@ -25,8 +25,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .is_some_and(|native| native.blocked)
     }
 
-    /// Request the same actual source TID's aggregation exchange. New borrowed
-    /// Ethernet submissions return Busy while blocked; their caller retains
+    /// Request the same source TID's aggregation exchange. New borrowed
+    /// Ethernet submissions return Busy while blocked; their caller keeps
     /// those bytes. Already-published packets stay in the original DataRing.
     pub fn begin_tx_block_ack(&mut self, tid: u8, timeout_tu: u16, now: u64) -> Result<(), Error> {
         let s = self.state_mut();
@@ -85,9 +85,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     return Err(Error::WrongPhase);
                 }
                 if Self::tx_ba_pending(s, &session) {
-                    // A local DELBA was actually published; canonical state is
+                    // A local DELBA was published; canonical state is
                     // retired, but its real packet still owns this native TID.
-                    // Preserve the successor until actual TX-free and unmap.
+                    // Preserve the successor until TX-free and unmap.
                     s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
                     s.ba_actions
                         .push_front(BaAction::Tx(Action::ResumeLegacy { session }));
@@ -159,8 +159,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if Self::tx_ba_pending(s, session) {
                 return Err(Error::NeedsDrain);
             }
-            // The original canonical record already retired at actual DELBA
-            // publication. Only this private retained native successor and the
+            // The original canonical record already retired at DELBA
+            // publication. Only this private native successor and the
             // real completed packet lifecycle authorize releasing its TID.
             let index = usize::from(session.tid());
             s.transmit_ba[index] = None;
@@ -254,7 +254,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 {
                     return Err(Error::NeedsDrain);
                 }
-                // Serialized TID block plus actual descriptor/TX-free/unmap
+                // Serialized TID block plus descriptor/TX-free/unmap
                 // retirement precede this real canonical software snapshot.
                 // It is never a hardware observation or an invented zero.
                 let next = s
@@ -433,7 +433,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         )
         .map_err(Error::Codec)?;
         if let Err(error) = Self::command(s, Command::StationRecord, &body) {
-            // SAFETY: an uncertain publication retains every owner, as the contract requires.
+            // SAFETY: an uncertain publication keeps every owner, as the contract requires.
             let _ = unsafe {
                 s.station
                     .complete_tx_block_ack_program(ticket, Completion::Uncertain)

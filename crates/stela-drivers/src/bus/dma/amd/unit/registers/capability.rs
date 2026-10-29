@@ -2,7 +2,7 @@
 // PCI capability encodings follow Linux include/uapi/linux/pci_regs.h at
 // cc9de5d4b5ab6459f5774946aa3195ad51236fa8, Copyright 1994 Drew Eckhardt
 // and 1997–1999 Martin Mares. AMD register layouts follow AMD 48882 rev 3.11.
-//! Complete conventional capability framing for one retained remapper function.
+//! Complete conventional capability framing for one remapper function.
 use super::*;
 use crate::bus::pci::{Capability, CapabilityError, capability};
 

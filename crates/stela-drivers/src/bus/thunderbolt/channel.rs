@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2018 Intel Corporation
-//! Serialized configuration requests on the actual hop-zero NHI rings.
+//! Serialized configuration requests on the hop-zero NHI rings.
 //!
 //! Linux ctl.c serializes control work and dispatches asynchronous events apart
 //! from replies. This bounded engine owns one request for the whole channel,
@@ -79,14 +79,14 @@ pub struct Channel<R: ring::Registers> {
     rx_released: bool,
 }
 impl<R: ring::Registers> Channel<R> {
-    /// Allocate the actual raw TX/RX hop-zero rings without publishing DMA.
+    /// Allocate the raw TX/RX hop-zero rings without publishing DMA.
     ///
     /// # Safety
     /// All physical NHI ownership/power/coherence/IOMMU/interrupt prerequisites
     /// of `Ring::new` hold for both exclusive hop-zero rings. The native
     /// platform has positively granted software configuration-channel ownership
-    /// (there is no firmware ICM owner using these rings). The same retained
-    /// mapping/domain describes this exact live requester for both directions.
+    /// (there is no firmware ICM owner using these rings). The same kept
+    /// mapping/domain describes this live requester for both directions.
     pub unsafe fn new(
         registers: Arc<R>,
         source: &dyn PageSource,
@@ -224,7 +224,7 @@ impl<R: ring::Registers> Channel<R> {
         self.issue(config::Request::reset(route), now, deadline)
     }
     /// Cancellation has no protocol receipt. Keep published leases and refuse
-    /// later requests; only an actual containing drain/reset can end ambiguity.
+    /// later requests; only a containing drain/reset can end ambiguity.
     pub fn cancel(&mut self) -> Result<Option<u64>, Error> {
         self.running()?;
         let id = self.active.take().map(|a| a.id);
@@ -243,7 +243,7 @@ impl<R: ring::Registers> Channel<R> {
     }
     /// Progress completions and at most one receive packet. Hotplug/notification
     /// events are returned only after their real ACK has been published. A full
-    /// TX ring retains that exact event and defers further RX consumption.
+    /// TX ring keeps that exact event and defers further RX consumption.
     pub fn poll(&mut self, now: u64) -> Result<Option<Event>, Error> {
         self.observe(now)?;
         for _ in 0..RING_ENTRIES {
@@ -324,7 +324,7 @@ impl<R: ring::Registers> Channel<R> {
         }
     }
     /// # Safety
-    /// Both rings have actual acknowledged final posted-DMA/IRQ/worker drain,
+    /// Both rings have acknowledged final posted-DMA/IRQ/worker drain,
     /// exactly as required by `Ring::release`. Execute in process/deferred
     /// context. A failed invalidation keeps its leases and supports retry.
     pub unsafe fn release(&mut self) -> Result<(), Error> {

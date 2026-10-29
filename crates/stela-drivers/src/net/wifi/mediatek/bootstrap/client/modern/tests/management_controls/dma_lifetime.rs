@@ -8,9 +8,9 @@ fn management_tx_retains_packet_owner() {
     let session = attach(&mut driver, &mut owner);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     let receipt =
-    // SAFETY: The current session, native context and key owners remain retained.
+    // SAFETY: The current session, native context and key owners remain held.
     // Hardware/OS leases cover source allocation and queue publication, and the
-    // submitted packet retains its descriptor and payload ownership.
+    // submitted packet keeps its descriptor and payload ownership.
     unsafe {
         driver.transmit_management_modern(
             &mut owner,
@@ -78,7 +78,7 @@ fn key_and_unmap_failures_retain_owners() {
             let epoch = driver.station().association_epoch().unwrap();
             model.response.lock().unwrap().status = 9;
             assert!(
-                // SAFETY: The fixture has no prior management-key users and retains
+                // SAFETY: The fixture has no prior management-key users and keeps
                 // its original native backing. A failed synchronous key
                 // acknowledgement must quarantine ownership rather than release
                 // uncertain DMA.
@@ -102,7 +102,7 @@ fn key_and_unmap_failures_retain_owners() {
             let permit = admit(&mut owner, &driver, AssociationUse::Management);
             // SAFETY: This current session and requester own the queued management
             // packet. Fresh leases cover publication; all descriptor, payload and key
-            // owners remain retained through the later unmap-failure injection.
+            // owners remain held through the later unmap-failure injection.
             unsafe {
                 driver.transmit_management_modern(
                     &mut owner,
@@ -121,7 +121,7 @@ fn key_and_unmap_failures_retain_owners() {
             assert!(
                 // SAFETY: The RX envelope remains owned, but the original DMA owner
                 // is now poisoned by failed unmap. Validation must reject consumption
-                // before invoking the callback or releasing retained resources.
+                // before invoking the callback or releasing kept resources.
                 unsafe {
                     driver.with_management_modern::<_, _, ()>(
                         &mut owner,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Unowned topology controls cannot disturb any actual current root transfer.
+//! Unowned topology controls cannot disturb any current root transfer.
 use super::*;
 
 #[test]

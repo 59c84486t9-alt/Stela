@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Firmware admission and volatile download adapted from Linux
 // xhci-pci-renesas.c. Copyright (C) 2019-2020 Linaro Limited.
-//! uPD720201/202 firmware bring-up through the actual PCI owner. External ROM
+//! uPD720201/202 firmware bring-up through the PCI owner. External ROM
 //! is only read here; firmware upload targets volatile controller SRAM.
 use super::*;
 use crate::{bus::pci::ConfigSpace, firmware};
@@ -152,8 +152,8 @@ fn upload<C: ConfigSpace>(config: &mut C, clock: Clock, bytes: &[u8]) -> Result<
 
 /// Exact firmware preparation before BAR access/reset. The detailed error keeps
 /// the provider's original requirement/manifest error available to callers.
-/// Actual ROM success or firmware-status success is required, never ROM presence.
-/// A failed download leaves its actual busy/enable state intact; no retry can
+/// ROM success or firmware-status success is required, never ROM presence.
+/// A failed download leaves its busy/enable state intact; no retry can
 /// silently resume a partial firmware generation.
 pub fn prepare<C: ConfigSpace>(
     function: &mut Function<C>,
@@ -191,7 +191,7 @@ pub fn prepare<C: ConfigSpace>(
             })
             .map_err(Error::Firmware)?;
         let embedded_version = validate(image.bytes())?;
-        // Retain metadata before any hardware download mutation.
+        // Keep metadata before any hardware download mutation.
         let p = image.provenance();
         let source = Box::new(Source::VolatileUpload {
             name: image.name().into(),

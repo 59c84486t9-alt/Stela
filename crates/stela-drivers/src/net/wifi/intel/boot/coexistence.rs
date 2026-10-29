@@ -37,8 +37,8 @@ impl Coexistence {
     pub(super) fn initialized(&mut self) {
         self.initialized = true;
     }
-    // Called only after completed-RB CPU ownership and actual packet dispatch.
-    // Preserve the first malformed actual profile; a later good packet cannot
+    // Called only after completed-RB CPU ownership and packet dispatch.
+    // Preserve the first malformed profile; a later good packet cannot
     // erase the refusal. Raw diagnostics remain independently available.
     pub(super) fn observe(&mut self, command: u8, group: u8, raw: &[u8]) {
         if command != 0xce || group != 0 {
@@ -81,7 +81,7 @@ impl Coexistence {
             return Err(CoexistenceError::Antennas);
         }
         // Original HR2 rf_hr::non_shared_ant=ANT_B. No caller antenna or
-        // USB-HCI state stands in for this actual Wi-Fi firmware profile.
+        // USB-HCI state stands in for this Wi-Fi firmware profile.
         let antenna = if band == crate::net::wifi::Band::Ghz2 && self.activity()? >= 3 {
             2
         } else {

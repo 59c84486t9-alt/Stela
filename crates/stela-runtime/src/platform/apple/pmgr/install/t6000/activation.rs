@@ -4,15 +4,15 @@
 //! `3d7d4` has one indirect format2 row, mask/value1 and no callback: it is a
 //! real RMW of physical292000204, not the adjacent coefficient tables. These
 //! are ordered controller inputs only. No native PC, request response, PS value
-//! or retirement follows merely because this transaction was published.
+//! or retirement follows because this transaction was published.
 use super::super::{Error, History, Installation, Step, write};
 use alloc::{rc::Rc, vec::Vec};
 use stela_contracts::bus::Width;
 
 use stela_soc_data::pmgr::t6000::PRE_ACTIVATION_BASE;
 
-/// T6000 first-die effects only. The caller supplies actual stage/kind inputs
-/// and exclusively owns the controller across this retained transaction.
+/// T6000 first-die effects only. The caller supplies stage/kind inputs
+/// and exclusively owns the controller across this transaction.
 /// `None` is the source's no-access branch, not controller readiness.
 pub fn sequence(stage: u32, kind: u32) -> Result<Option<Installation>, Error> {
     if kind > 2 {
@@ -198,7 +198,7 @@ mod tests {
                 owner.native_observations().unwrap().activation_inputs.len(),
                 if stage == 3 { 8 } else { 4 }
             );
-            // The actual AP activation prefix cannot be erased by another
+            // The AP activation prefix cannot be erased by another
             // register input or used to authorize replacing installed code.
             assert!(
                 sram.write_checked(super::super::CODE_BASE, &[0; 4])
@@ -332,7 +332,7 @@ mod tests {
         }
         let quad = |offset: usize| u64::from_le_bytes(llb[offset..offset + 8].try_into().unwrap());
         let word = |offset: usize| u32::from_le_bytes(llb[offset..offset + 4].try_into().unwrap());
-        // Decode the actual MOVZ/MOVK address producer. Window hashes alone
+        // Decode the MOVZ/MOVK address producer. Window hashes alone
         // must not let a model/test pair repeat the same transcription error.
         let mut address = 0;
         for (offset, opcode, shift) in [
@@ -350,10 +350,10 @@ mod tests {
         assert_eq!(quad(0x17cea0), 0); // complete pointer-list terminator
         assert_eq!(word(0x17cde4), 0x40000204); // width4, offset204
         assert_eq!(quad(0x17cde8), LINKED + 0x1af850);
-        assert_eq!(word(0x1af850), 1); // actual mask
-        assert_eq!(word(0x1af854), 1); // actual value
+        assert_eq!(word(0x1af850), 1); // mask
+        assert_eq!(word(0x1af854), 1); // value
         assert_eq!(quad(0x1af858), 0); // no dynamic callback
-        assert_eq!(quad(0x233fd0), 0x292000000); // actual native controller descriptor
+        assert_eq!(quad(0x233fd0), 0x292000000); // native controller descriptor
         assert!(llb[0x233fd8..0x234000].iter().all(|byte| *byte == 0));
     }
 }

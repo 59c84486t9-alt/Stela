@@ -1,4 +1,4 @@
-//! Distinct T8112 cache/lock and DCS/PTD owners over one actual RAM allocation.
+//! Distinct T8112 cache/lock and DCS/PTD owners over one RAM allocation.
 pub mod cold;
 
 use super::{AppleDevices, memory_resources::t8112};
@@ -6,7 +6,7 @@ use alloc::{boxed::Box, format, string::String, sync::Arc};
 use stela_contracts::bus::Width;
 
 impl AppleDevices {
-    /// Install the actual component owners together, retaining separate device
+    /// Install the component owners together, keeping separate device
     /// identities for memory locks and DCS/PTD publication. This supplies no
     /// original zero-mode input, PMGR, PMP, IRQ or whole-platform admission.
     pub fn add_t8112_empty_memory_resources(
@@ -42,7 +42,7 @@ impl AppleDevices {
             .map_err(|error| format!("T8112 memory placement: {error:?}"))?;
         self.memory_publication = Some(publication);
         self.memory_controller = Some(controller);
-        // These are distinct actual lifecycle sinks of the same source MCC
+        // These are distinct lifecycle sinks of the same source MCC
         // resource. Both follow its domains; DCS/PTD must not stay active when
         // its cache/lock owner is paused. The hooks still refuse unsupported
         // reset/loss transitions rather than grant completion here.
@@ -51,7 +51,7 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// Bounded observations from this installed owner, not completion authority
+    /// Bounded observations from this installed owner, not completion permission
     /// or a receipt for an operation belonging to another RAM generation.
     pub fn t8112_cache_progress(&self) -> Option<t8112::cache::Progress> {
         self.bus

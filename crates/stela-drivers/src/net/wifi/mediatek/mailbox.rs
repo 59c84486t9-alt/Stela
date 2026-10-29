@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 // Copyright (C) 2019 Lorenzo Bianconi <lorenzo.bianconi83@gmail.com>
-//! Serialized polling boot/runtime mailbox over actual WFDMA TX/RX queues. Firmware
+//! Serialized polling boot/runtime mailbox over WFDMA TX/RX queues. Firmware
 //! scatter needs real TX-DMA completion; acknowledged commands need both DMA
-//! completion and an actual correctly sequenced MCU event. Timeout poisons the
-//! complete mailbox epoch and retains owned queues/pins until controller reset.
+//! completion and a correctly sequenced MCU event. Timeout poisons the
+//! complete mailbox epoch and keeps owned queues/pins until controller reset.
 use super::{
     download::{FailureKind, PortState, Transport, TransportFailure},
     firmware::{Prepared, Requests},
@@ -26,7 +26,7 @@ pub mod key;
 
 static NEXT_OWNER: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
 
-// Actual PCI send callbacks override the generic fill helper's 20*HZ with
+// PCI send callbacks override the generic fill helper's 20*HZ with
 // 3*HZ before the common MCU owner computes its response expiry.
 const PCI_TIMEOUT_US: u64 = 3_000_000;
 const MAX_EVENTS: usize = 64;
@@ -71,7 +71,7 @@ pub struct Reply {
     pub dma_released: bool,
     pub frame: Frame,
 }
-/// Actual UNI result plus real TX DMA completion. A nonzero status is an
+/// UNI result plus real TX DMA completion. A nonzero status is an
 /// explicit firmware rejection; it must never install a caller's context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnifiedReply {
@@ -81,14 +81,14 @@ pub struct UnifiedReply {
     pub dma_released: bool,
     pub frame: Frame,
 }
-/// Actual matched NIC-capability response, not a station-style status ACK.
+/// Matched NIC-capability response, not a station-style status ACK.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityReply {
     pub sequence: u8,
     pub dma_released: bool,
     pub frame: Frame,
 }
-/// Owned actual observations bound to the exact native command owner. This
+/// Owned observations bound to the native command owner. This
 /// receipt does not advertise radio modes or satisfy board/regulatory setup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityReport {
@@ -107,7 +107,7 @@ impl CapabilityReport {
     pub fn observed(&self) -> &mcu::capabilities::Capabilities {
         &self.observed
     }
-    /// Historical native owner binding only. The actual controller still
+    /// Historical native owner binding only. The controller still
     /// validates live power/firmware/reset/port state and policy before use.
     pub fn belongs_to<W: QueueIo, F: QueueIo, R: QueueIo>(
         &self,
@@ -119,7 +119,7 @@ impl CapabilityReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CapabilityQueryFailure {
     Transport(TransportFailure),
-    /// Command/response and real TX DMA completed. Preserve the actual owned
+    /// Command/response and real TX DMA completed. Preserve the owned
     /// raw response even though its capability body cannot be accepted.
     Malformed {
         error: mcu::capabilities::Error,
@@ -259,12 +259,12 @@ pub struct Mailbox<W: QueueIo, F: QueueIo, R: QueueIo> {
 }
 impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     /// # Safety
-    /// All three actual queues must belong exclusively to this one actually
+    /// All three queues must belong exclusively to this one
     /// observed identity/requester and the same coherent native DMA attachment.
     /// They must be the chip's WM/FWDL TX and WM event RX queues, configured by
     /// the owning controller with engines enabled, device IRQ sources masked,
-    /// no competing command/NAPI/reset owners, and the actual calibrated Clock.
-    /// Successful construction also requires an actual reset/fresh firmware
+    /// no competing command/NAPI/reset owners, and the calibrated Clock.
+    /// Successful construction also requires a reset/fresh firmware
     /// command-sequencing epoch: every old command-processing path, old RX
     /// response, IRQ and deferred worker has drained, and no late response from
     /// a previous epoch can arrive. Empty TX queues alone cannot prove this.
@@ -313,11 +313,11 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     }
     /// # Safety
     /// All `from_rings` real requester/coherence/fresh sequencing conditions
-    /// apply to every queue. `runtime_rx` is the same actual C2 requester's
+    /// apply to every queue. `runtime_rx` is the same C2 requester's
     /// source post-download MCU/WA queue (WFDMA0+0x540), independently owned
     /// and posted before firmware can select it. No other consumer may poll,
     /// reset, release or assemble either event stream. This does not create a
-    /// firmware epoch, install missing data queues or qualify a PCI claim.
+    /// firmware epoch, install missing data queues or check a PCI claim.
     pub(super) unsafe fn from_rings_with_runtime_rx(
         identity: Identity,
         wm: TxRing<W>,
@@ -340,21 +340,21 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     pub fn last_failure(&self) -> Option<Failure> {
         self.last_failure
     }
-    /// Unexpected/unsolicited frames are retained under explicit resource bounds.
+    /// Unexpected/unsolicited frames are held under explicit resource bounds.
     /// The caller dispatches them before radio/MLME continuation; none is silently
     /// consumed as an acknowledgement or dropped from a successful boot result.
     pub fn events(&self) -> &[Frame] {
         &self.events
     }
-    /// Transfer retained actual asynchronous/unmatched frames to the owning
+    /// Transfer kept asynchronous/unmatched frames to the owning
     /// controller for bounded dispatch. Their descriptor/drop evidence remains
     /// attached; removing them does not repair or reopen a poisoned epoch.
     pub fn take_events(&mut self) -> Vec<Frame> {
         self.event_bytes = 0;
         core::mem::take(&mut self.events)
     }
-    /// Vendor lifecycle polling while no command is active. Complete actual
-    /// frames retain per-stream assembly and bounded asynchronous ownership;
+    /// Vendor lifecycle polling while no command is active. Complete
+    /// frames keep per-stream assembly and bounded asynchronous ownership;
     /// they are not automatically classified as command ACKs or data packets.
     pub(in crate::net::wifi::mediatek) fn poll_events(&mut self) -> Result<Vec<Frame>, Cause> {
         if self.poisoned {
@@ -385,7 +385,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     pub fn replies(&self) -> &[Reply] {
         &self.replies
     }
-    /// If an actual UNI ACK arrived before a later uncertain DMA/error, retain
+    /// If a UNI ACK arrived before a later uncertain DMA/error, keep
     /// it for diagnosis. It does not authorize retry or context installation.
     pub fn interrupted_unified_reply(&self) -> Option<&UnifiedReply> {
         self.interrupted_unified_reply.as_ref()
@@ -393,7 +393,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     pub fn interrupted_capability_reply(&self) -> Option<&CapabilityReply> {
         self.interrupted_capability_reply.as_ref()
     }
-    /// Actual capability response plus real TX completion, with owned complete
+    /// Capability response plus real TX completion, with owned complete
     /// observations. This is not a usable radio/board/regulatory receipt.
     pub fn query_capabilities(&mut self) -> Result<CapabilityReport, CapabilityQueryFailure> {
         self.query_capabilities_timed(PCI_TIMEOUT_US)
@@ -417,7 +417,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
             .interrupted_capability_reply
             .take()
             .expect("actual completed capability reply");
-        // execute matched this exact chip/sequence event and retained its real
+        // execute matched this exact chip/sequence event and kept its real
         // frame; parsing creates owned facts before this temporary view ends.
         let event =
             Event::parse(self.identity.chip, &reply.frame.bytes).expect("matched capability event");
@@ -476,7 +476,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         if let Some(runtime) = self.runtime_rx.as_mut() {
             // Never concatenate fragments from two hardware queues. Alternate
             // complete-stream polls so a busy runtime queue cannot starve ROM
-            // responses or vice versa across the actual firmware transition.
+            // responses or vice versa across the firmware transition.
             for _ in 0..2 {
                 let use_runtime = self.runtime_next;
                 self.runtime_next = !self.runtime_next;
@@ -507,7 +507,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         payload: &[u8],
         timeout_us: u64,
     ) -> Result<u32, TransportFailure> {
-        // A raw boot/download command may replace the actual firmware input.
+        // A raw boot/download command may replace the firmware input.
         // Only the complete native wrapper may establish a new binding.
         self.download_binding = None;
         if self.poisoned {
@@ -522,11 +522,11 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
             })?;
         self.execute(&Packet::Boot(packet), timeout_us)
     }
-    /// Execute an actual device/BSS/station UNI command using this existing
+    /// Execute a device/BSS/station UNI command using this existing
     /// owned WM/RX mailbox and sequence epoch. The body must be source-correct
-    /// for the actual chip and retained caller generation. This does not infer
+    /// for the chip and kept caller generation. This does not infer
     /// a running radio, create a station or install a key from enqueue alone.
-    /// Only a returned zero-status reply after actual RX and TX DMA completion
+    /// Only a returned zero-status reply after RX and TX DMA completion
     /// can satisfy the command's firmware-acknowledgement dependency.
     pub fn unified(
         &mut self,
@@ -754,7 +754,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         }
     }
     /// # Safety
-    /// The actual controller has acknowledged WFDMA idle/reset and drained every
+    /// The controller has acknowledged WFDMA idle/reset and drained every
     /// submission/IRQ/worker, including timed-out command processing, before any
     /// queue mapping is removed. A software timeout is never this proof.
     pub unsafe fn release_after_quiesce(&mut self) -> Result<(), ring::Error> {
@@ -935,8 +935,8 @@ pub(crate) mod tests {
         pub(crate) fwdl: bool,
         pub(crate) response: Arc<Mutex<Response>>,
     }
-    // SAFETY: one serialized model requester; actual model IOVA memory is read
-    // before TX-index completion and actual RX IOVA bytes written before DDONE.
+    // SAFETY: one serialized model requester; model IOVA memory is read
+    // before TX-index completion and RX IOVA bytes written before DDONE.
     unsafe impl QueueIo for DeviceIo {
         fn configure(&mut self, address: u32, count: u16) -> Result<(), ring::Error> {
             self.io.configure(address, count)
@@ -1062,8 +1062,8 @@ pub(crate) mod tests {
                 {
                     let mut model = self.response.lock().unwrap();
                     assert!(model.firmware_started && model.clc_guard);
-                    // Firmware consumes the actual DMA-read bytes and may
-                    // retain real policy/radio users before host publication
+                    // Firmware consumes the DMA-read bytes and may
+                    // keep real policy/radio users before host publication
                     // reports success or any reply becomes observable.
                     model.clc_processing = true;
                     model.clc_commands.push(packet.clone());
@@ -1292,7 +1292,7 @@ pub(crate) mod tests {
                         && command == 3
                         && (!model.client_execution || packet.get(56) == Some(&0x27))
                     {
-                        // Execute the actual DMA-read key body before ACK. A
+                        // Execute the DMA-read key body before ACK. A
                         // negative/absent ACK may still leave programmed state;
                         // tests must not infer atomic rejection from status.
                         let body = &packet[48..];
@@ -1347,7 +1347,7 @@ pub(crate) mod tests {
                                         model.transmit_ba.insert((slot, tid), body.to_vec());
                                     }
                                 } else {
-                                    assert_eq!(body[13], 2); // actual recipient direction
+                                    assert_eq!(body[13], 2); // recipient direction
                                     assert_eq!(body[14], 0); // source RX_START params.amsdu
                                     if body[15] == 0 {
                                         model.receive_ba.remove(&(slot, tid));
@@ -1546,7 +1546,7 @@ pub(crate) mod tests {
             assert_eq!(engine.transport().replies().len(), 6);
             if chip == Chip::Mt7922 {
                 let mut mailbox = engine.into_transport();
-                // SAFETY: actual modeled controller is stopped before teardown.
+                // SAFETY: modeled controller is stopped before teardown.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
                 drop(mailbox);
                 assert!(
@@ -1651,7 +1651,7 @@ pub(crate) mod tests {
                 assert_eq!(mailbox.wm.pending(), 0);
                 assert!(mailbox.interrupted_unified_reply().is_none());
             }
-            // SAFETY: actual modeled requester/firmware/all deferred users stopped.
+            // SAFETY: modeled requester/firmware/all deferred users stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
         }
     }
@@ -1678,7 +1678,7 @@ pub(crate) mod tests {
                     _ => Uni::StationRecord,
                 };
                 // Opaque command payload semantics remain outside this transport
-                // model. It actually reads/publishes the canonical DMA bytes.
+                // model. It reads/publishes the canonical DMA bytes.
                 let reply = mailbox.unified(command, &[n as u8; 8]).unwrap();
                 sequence = sequence % 15 + 1;
                 assert_eq!(reply.sequence, sequence);
@@ -1689,7 +1689,7 @@ pub(crate) mod tests {
                 assert!(mailbox.interrupted_unified_reply().is_none());
                 assert_eq!(mailbox.replies().len(), 6);
                 assert_eq!(mailbox.wm.pending(), 0);
-                assert!(!mailbox.is_poisoned()); // actual known firmware rejection is usable
+                assert!(!mailbox.is_poisoned()); // known firmware rejection is usable
                 let packet = wm.lock().unwrap().completed.last().unwrap().clone();
                 assert_eq!(packet[39], sequence);
                 assert_eq!(packet[34], command as u8);
@@ -1800,7 +1800,7 @@ pub(crate) mod tests {
         assert!(mailbox.is_poisoned());
         assert_eq!(mailbox.wm.pending(), 1);
         assert_eq!(wm.lock().unwrap().completed.len(), 1);
-        // SAFETY: actual modeled function reset has stopped uncertain publication.
+        // SAFETY: modeled function reset has stopped uncertain publication.
         unsafe { mailbox.release_after_quiesce() }.unwrap();
     }
     #[test]
@@ -1851,7 +1851,7 @@ pub(crate) mod tests {
                 assert_eq!(m.replies().len(), 1);
                 assert!(!m.replies()[0].dma_released);
             }
-            // A late actual DMA-index completion never opens a poisoned mailbox epoch.
+            // A late DMA-index completion never opens a poisoned mailbox epoch.
             wm.lock().unwrap().index = 1;
             assert!(m.command(0x10, &[0; 4]).is_err());
             assert_eq!(m.last_failure(), Some(original));
@@ -2090,7 +2090,7 @@ pub(crate) mod tests {
                 let (mut mailbox, wm, _, _) =
                     setup_controlled(chip, true, false, 4, response.clone());
                 let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
-                // SAFETY: owned empty modeled WCID/actual BSS, with no old users.
+                // SAFETY: owned empty modeled WCID/BSS, with no old users.
                 let mut key = unsafe {
                     HardwareKey::claim(
                         &mailbox,
@@ -2159,13 +2159,13 @@ pub(crate) mod tests {
                         Err(KeyError::NeedsDrain)
                     );
                     assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 0);
-                    // SAFETY: model key table is actually empty and old modeled
+                    // SAFETY: model key table is empty and old modeled
                     // RX/TX/deferred users for this key have been drained.
                     unsafe { key.retire_after_drain(receipt) }.unwrap();
                 }
                 drop(key);
                 assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 1);
-                // SAFETY: actual modeled requester/firmware and all queues stopped.
+                // SAFETY: modeled requester/firmware and all queues stopped.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -2233,7 +2233,7 @@ pub(crate) mod tests {
                 if case == 0 {
                     response.lock().unwrap().status = 0;
                     let receipt = key.remove(&mut mailbox).unwrap();
-                    // SAFETY: actual modeled key removal and all old users drained.
+                    // SAFETY: modeled key removal and all old users drained.
                     unsafe { key.retire_after_drain(receipt) }.unwrap();
                     // As in Linux, the removed slot accepts the key again.
                     assert!(
@@ -2243,7 +2243,7 @@ pub(crate) mod tests {
                 }
                 drop(key);
                 assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 0);
-                // SAFETY: actual modeled requester reset drains all late DMA/ACK.
+                // SAFETY: modeled requester reset drains all late DMA/ACK.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -2276,18 +2276,18 @@ pub(crate) mod tests {
         let one = first.remove(&mut a).unwrap();
         let two = second.remove(&mut a).unwrap();
         assert_eq!(
-            // SAFETY: old modeled users drained, but deliberately wrong receipt must still be
+            // SAFETY: old modeled users drained, but wrong receipt must still be
             // rejected rather than allowing another key to retire.
             unsafe { first.retire_after_drain(two) },
             Err(KeyError::WrongRemoval)
         );
         assert!(first.needs_drain());
-        // SAFETY: correct actual modeled receipt and old users are drained.
+        // SAFETY: correct modeled receipt and old users are drained.
         unsafe { first.retire_after_drain(one) }.unwrap();
         assert_eq!(awm.lock().unwrap().completed.len(), 4);
-        // Deliberately leave second Removed: Drop must retain its actual owner
+        // Leave second Removed: Drop must keep its owner
         // until its own old-user drain proof, never infer drain from the ACK.
-        // SAFETY: both independent modeled requester queues actually stopped.
+        // SAFETY: both independent modeled requester queues stopped.
         unsafe { a.release_after_quiesce() }.unwrap();
         // SAFETY: the model device is stopped and drained, so nothing still uses what this
         // releases.
@@ -2329,7 +2329,7 @@ pub(crate) mod tests {
                 if case == 3 {
                     assert!(result.is_ok());
                     assert!(key.needs_drain());
-                    // Deliberately withhold actual old-user drain/receipt use.
+                    // Withhold old-user drain/receipt use.
                 } else {
                     assert!(result.is_err());
                     assert!(key.is_quarantined());
@@ -2338,7 +2338,7 @@ pub(crate) mod tests {
                 assert!(key.slot().installed().is_none());
                 drop(key);
                 assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 0);
-                // SAFETY: actual modeled hardware reset stops all old key users.
+                // SAFETY: modeled hardware reset stops all old key users.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -2369,7 +2369,7 @@ pub(crate) mod tests {
             let (mut mailbox, wm, _, _) = setup_controlled(chip, true, false, 4, response.clone());
             let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
             let context = initial_context(chip, 0);
-            // SAFETY: actual modeled source-correct exclusive interface/context
+            // SAFETY: modeled source-correct exclusive interface/context
             // resources, unregistered with all previous users drained.
             let mut interface =
                 unsafe { Interface::claim(&mailbox, context, KeyResource(drops.clone())) }.unwrap();
@@ -2421,12 +2421,12 @@ pub(crate) mod tests {
                 vec![1, 2, 2, 1]
             );
             assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 0);
-            // SAFETY: both actual modeled contexts inactive and all old firmware,
+            // SAFETY: both modeled contexts inactive and all old firmware,
             // key, DMA, IRQ and deferred consumers now drained.
             unsafe { interface.retire_after_drain(receipt) }.unwrap();
             drop(interface);
             assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 1);
-            // SAFETY: actual modeled requester/firmware and queues stopped.
+            // SAFETY: modeled requester/firmware and queues stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
         }
     }
@@ -2484,7 +2484,7 @@ pub(crate) mod tests {
                         interface.replies().last().unwrap().disposition,
                         Disposition::Rejected
                     );
-                    // The usable real command port may perform one actual
+                    // The usable real command port may perform one
                     // reverse-order cleanup, but it still cannot prove drain.
                     response.lock().unwrap().device_status = 0;
                     response.lock().unwrap().bss_status = 0;
@@ -2497,7 +2497,7 @@ pub(crate) mod tests {
                 }
                 drop(interface);
                 assert_eq!(drops.load(core::sync::atomic::Ordering::Relaxed), 0);
-                // SAFETY: explicit actual modeled reset drains all late users.
+                // SAFETY: explicit modeled reset drains all late users.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -2543,7 +2543,7 @@ pub(crate) mod tests {
                     assert_eq!(reply.disposition, Disposition::AlreadyInactive);
                     assert_eq!(reply.raw.status, 0xc0000001); // never rewritten as0
                     assert_eq!(interface.replies().len(), 4);
-                    // SAFETY: actual modeled contexts inactive, all users drained.
+                    // SAFETY: modeled contexts inactive, all users drained.
                     unsafe { interface.retire_after_drain(receipt) }.unwrap();
                 } else {
                     assert!(matches!(
@@ -2567,7 +2567,7 @@ pub(crate) mod tests {
                     4
                 }
             );
-            // SAFETY: actual modeled requester and late firmware users stopped.
+            // SAFETY: modeled requester and late firmware users stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
         }
     }
@@ -2578,7 +2578,7 @@ pub(crate) mod tests {
         let (mut b, bwm, _, _) = setup(Chip::Mt7921, true, false, 0);
         let adrops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         let bdrops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
-        // SAFETY: independent actual modeled requesters and exclusive resources.
+        // SAFETY: independent modeled requesters and exclusive resources.
         let mut first = unsafe {
             Interface::claim(
                 &a,
@@ -2605,19 +2605,19 @@ pub(crate) mod tests {
         let own = first.deactivate(&mut a).unwrap();
         let other = second.deactivate(&mut b).unwrap();
         assert_eq!(
-            // SAFETY: actual modeled old users drained, but wrong requester receipt must still be
-            // rejected rather than retiring a different actual owner.
+            // SAFETY: modeled old users drained, but wrong requester receipt must still be
+            // rejected rather than retiring a different owner.
             unsafe { first.retire_after_drain(other) },
             Err(Dev::WrongReceipt)
         );
         assert!(first.needs_drain());
-        // SAFETY: exact correct receipt and actual modeled old-user drain.
+        // SAFETY: exact correct receipt and modeled old-user drain.
         unsafe { first.retire_after_drain(own) }.unwrap();
         drop(first);
-        drop(second); // deliberately no valid retirement proof for second
+        drop(second); // no valid retirement proof for second
         assert_eq!(adrops.load(core::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(bdrops.load(core::sync::atomic::Ordering::Relaxed), 0);
-        // SAFETY: actual modeled requesters/firmware/queues now stopped.
+        // SAFETY: modeled requesters/firmware/queues now stopped.
         unsafe { a.release_after_quiesce() }.unwrap();
         // SAFETY: the model device is stopped and drained, so nothing still uses what this
         // releases.
@@ -2680,7 +2680,7 @@ pub(crate) mod tests {
                 assert_eq!(reply.sequence, sequence);
                 assert_eq!(wm.lock().unwrap().completed.len(), (2 * (n + 1)) as usize);
             }
-            // SAFETY: both actual modeled requesters and queues now stopped.
+            // SAFETY: both modeled requesters and queues now stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
             // SAFETY: the model device is stopped and drained, so nothing still uses what this
             // releases.
@@ -2709,7 +2709,7 @@ pub(crate) mod tests {
                 assert!(mailbox.last_failure().is_none());
                 response.lock().unwrap().capability_payload = Some(capability_bytes(chip, 1));
                 assert!(mailbox.query_capabilities().is_ok());
-                // SAFETY: actual modeled requester/firmware and queues stopped.
+                // SAFETY: modeled requester/firmware and queues stopped.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -2760,7 +2760,7 @@ pub(crate) mod tests {
                         .is_err()
                 );
                 assert_eq!(wm.lock().unwrap().completed.len(), count);
-                // SAFETY: actual modeled reset drains all late command/DMA users.
+                // SAFETY: modeled reset drains all late command/DMA users.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -2830,7 +2830,7 @@ pub(crate) mod tests {
             }
             assert_eq!(cursor, trace.len());
             assert_eq!(wm.lock().unwrap().completed.len(), count + 1024);
-            // SAFETY: actual modeled requester/firmware/all queues now stopped.
+            // SAFETY: modeled requester/firmware/all queues now stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
         }
     }
@@ -2938,7 +2938,7 @@ pub(crate) mod tests {
                 assert_eq!(uni.sequence, sequence);
             }
             assert_eq!(wm.lock().unwrap().completed.len(), 768);
-            // SAFETY: actual modeled controllers/firmware/all queue users stopped.
+            // SAFETY: modeled controllers/firmware/all queue users stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
             // SAFETY: the model device is stopped and drained, so nothing still uses what this
             // releases.
@@ -2974,7 +2974,7 @@ pub(crate) mod tests {
                     mailbox.query_encapsulation().unwrap().observed().byte(),
                     0xff
                 );
-                // SAFETY: actual modeled requester/firmware/all users stopped.
+                // SAFETY: modeled requester/firmware/all users stopped.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -3020,7 +3020,7 @@ pub(crate) mod tests {
                 assert!(mailbox.query_encapsulation().is_err());
                 assert_eq!(mailbox.last_failure(), first);
                 assert_eq!(wm.lock().unwrap().completed.len(), published);
-                // SAFETY: actual modeled hardware/firmware/all queue users stopped.
+                // SAFETY: modeled hardware/firmware/all queue users stopped.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
             }
         }
@@ -3087,7 +3087,7 @@ pub(crate) mod tests {
                 assert!(!auxiliary.release_information().is_empty());
             }
             assert_eq!(at, trace.len());
-            // SAFETY: actual modeled firmware/requester/all queue users stopped.
+            // SAFETY: modeled firmware/requester/all queue users stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
         }
     }
@@ -3156,7 +3156,7 @@ pub(crate) mod tests {
                 let other_aux = requests.load(&other_provider).unwrap().retain_auxiliary();
                 assert_eq!(other_aux.requests(), auxiliary.requests());
                 assert!(!binding.matches_auxiliary(&other_aux));
-                // SAFETY: actual modeled requester/firmware/all users stopped.
+                // SAFETY: modeled requester/firmware/all users stopped.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
                 assert!(mailbox.download_binding().is_none());
             }
@@ -3213,7 +3213,7 @@ pub(crate) mod tests {
         assert!(fwdl.lock().unwrap().completed.is_empty());
         assert!(wrong.download_binding().is_none());
         assert!(wrong.is_poisoned());
-        // SAFETY: actual modeled requester stopped despite no submitted command.
+        // SAFETY: modeled requester stopped despite no submitted command.
         unsafe { wrong.release_after_quiesce() }.unwrap();
         let (mut mailbox, _, _, _) = setup(chip, true, false, 0);
         mailbox.download_with_binding(&prepared).unwrap();
@@ -3227,7 +3227,7 @@ pub(crate) mod tests {
             firmware::Error::NotFresh
         );
         assert!(mailbox.download_binding().is_none());
-        // SAFETY: actual modeled requester/firmware/all users stopped.
+        // SAFETY: modeled requester/firmware/all users stopped.
         unsafe { mailbox.release_after_quiesce() }.unwrap();
     }
     #[test]
@@ -3254,7 +3254,7 @@ pub(crate) mod tests {
             assert_eq!(binding.ram_input().sha256(), auxiliary.sha256());
             assert!(!auxiliary.release_information().is_empty());
             assert!(auxiliary.select_clc(0).unwrap().region().is_some());
-            // SAFETY: actual modeled requester/firmware/all users stopped.
+            // SAFETY: modeled requester/firmware/all users stopped.
             unsafe { mailbox.release_after_quiesce() }.unwrap();
         }
     }

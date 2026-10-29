@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Source initial STATE_NONE peer/BSS and ROC20 codecs. This deliberately has
+//! Source initial STATE_NONE peer/BSS and ROC20 codecs. This has
 //! no associated Configuration and cannot encode association/key/port success.
 use super::{Error, Profile};
 use crate::net::wifi::{
@@ -72,7 +72,7 @@ impl Preauthentication {
         {
             return Err(Error::InvalidNegotiation);
         }
-        // Actual TIM is required by this finite initial peer profile. Neither
+        // TIM is required by this finite initial peer profile. Neither
         // caller timing nor an invented DTIM default substitutes for it.
         let mut rest = bss.elements.as_slice();
         let mut dtim = None;

@@ -88,7 +88,7 @@ impl Maximum {
 pub struct StepTiming {
     pub phases: [u64; Phase::COUNT],
     /// Lifetime maxima since timing was enabled or reset. A zero interval
-    /// has no witness. These are retained, not subtracted, by [`Self::since`].
+    /// has no witness. These are held, not subtracted, by [`Self::since`].
     pub lifetime_maxima: [Maximum; Phase::COUNT],
     /// Exits handled and the ticks handling them, by `ExitKind` value, with
     /// faults in [`FAULT_SLOT`].
@@ -96,7 +96,7 @@ pub struct StepTiming {
 }
 
 impl StepTiming {
-    /// Cumulative phase/exit totals spent since `earlier`, retaining the
+    /// Cumulative phase/exit totals spent since `earlier`, keeping the
     /// current lifetime maximum snapshots. An interval maximum cannot be
     /// derived by subtracting maxima.
     pub fn since(&self, earlier: &Self) -> Self {

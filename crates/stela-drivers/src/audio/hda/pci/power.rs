@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Retained PCI D3hot transitions adapted from Linux controllers/intel.c's
+//! PCI D3hot transitions adapted from Linux controllers/intel.c's
 //! azx_shutdown_chip / __azx_runtime_resume and drivers/pci/pci.c's PCI PM
 //! sequencing at a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright(c) 2004 Intel Corporation
@@ -23,7 +23,7 @@ use crate::{
     bus::{i2c::Timer, pci::ConfigSpace},
 };
 
-/// Failure retains the original controller, DMA RAM and PCI/MMIO owners. After
+/// Failure keeps the original controller, DMA RAM and PCI/MMIO owners. After
 /// a transition starts, only explicit resume may make the controller usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowerError {
@@ -51,13 +51,13 @@ pub(super) struct Snapshot {
 }
 
 impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, T> {
-    /// Stop the actual PCM/command engines, retire codec/GPU effects, assert
+    /// Stop the PCM/command engines, retire codec/GPU effects, assert
     /// link reset, disable PCI decode/mastering and enter D3hot. All DMA RAM,
-    /// reservations and exact PCI/MMIO owners remain retained across suspend.
+    /// reservations and exact PCI/MMIO owners remain held across suspend.
     /// A failed stop prevents any PCI power write; a later power failure keeps
     /// MMIO inaccessible until explicit resume has restored and reset hardware.
     ///
-    /// This is an explicit retained-resource transition. The platform must keep
+    /// This is an explicit resource transition. The platform must keep
     /// main power, ECAM, BAR reservations, requester/IOMMU mappings and exclusive
     /// firmware/DSP ownership from the original unsafe claim. It must not use
     /// D3cold, hot removal, board-rail changes or wake routing during this epoch.
@@ -91,8 +91,8 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
             command,
         };
         self.shutdown()?;
-        // The actual GPU/HDA power grant must cover the final link-reset
-        // accesses as well as stream/command stop. A failed reset retains it.
+        // The GPU/HDA power grant must cover the final link-reset
+        // accesses as well as stream/command stop. A failed reset keeps it.
         let reset = (|| {
             let gctl = self.registers.read32(GCTL);
             if gctl == u32::MAX {
@@ -143,11 +143,11 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         Ok(())
     }
 
-    /// Restore the same retained PCI function to D0 and perform a real full
+    /// Restore the same PCI function to D0 and perform a real full
     /// controller reset before any command DMA can resume. Old stream/route/
     /// graph handles are invalidated by `reinitialize`; PCM is not replayed.
-    /// Discover codecs and bind new actual codec/GPU routes after success.
-    /// Failure retains the snapshot and every original DMA/resource owner.
+    /// Discover codecs and bind new codec/GPU routes after success.
+    /// Failure keeps the snapshot and every original DMA/resource owner.
     pub fn resume_pci_d0(&mut self) -> Result<(), PowerError> {
         let snapshot = self.registers.suspended.ok_or(PowerError::NotSuspended)?;
         let r = &mut self.registers;
@@ -194,7 +194,7 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         if observed == u16::MAX || observed & (PM_STATE | PM_PME_ENABLE) != 0 {
             return Err(AttachError::PowerTransition.into());
         }
-        // A D3hot exit may reset BARs. Restore the exact retained values only
+        // A D3hot exit may reset BARs. Restore the exact values only
         // after D0 acknowledgement, before decoding/mastering can be enabled.
         // Also recover a prior partial restore even if PMCSR now reports D0.
         if value & PM_NO_SOFT_RESET == 0
@@ -242,11 +242,11 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
             return Err(AttachError::ConfigurationRejected.into());
         }
         r.suspended = None;
-        // `reinitialize` performs fresh RUN-off acknowledgements and actual reset
+        // `reinitialize` performs fresh RUN-off acknowledgements and reset
         // before retiring the software generation or starting command engines.
         if let Err(error) = self.reinitialize() {
             // D0 is confirmed but reset/stop may be uncertain. Suppress ordinary
-            // MMIO and retain the snapshot for another explicit recovery attempt.
+            // MMIO and keep the snapshot for another explicit recovery attempt.
             self.registers.suspended = Some(snapshot);
             return Err(error.into());
         }

@@ -718,7 +718,7 @@ fn load(
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
     crate::status::done("");
-    // SAFETY: the fresh immutable MP observation is retained LOADER_DATA. Identity
+    // SAFETY: the fresh immutable MP observation is held LOADER_DATA. Identity
     // mappings and the calibrated local APIC remain valid across EBS.
     let capture = unsafe {
         crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)

@@ -35,7 +35,7 @@ pub use policy::{Failure as SharedMemoryFailure, Refusal as SharedMemoryRefusal}
 use stela_compiler::context::memory::MemoryStatus;
 
 /// One PE's persistent global reservation and effective source-memory service.
-/// Machine refreshes controls while it still owns that actual PE; no caller can
+/// Machine refreshes controls while it still owns that PE; no caller can
 /// substitute raw registers, a physical-address identity map or a ready bit.
 pub struct SharedMemory {
     memory: MemoryThread<Policy>,
@@ -63,7 +63,7 @@ impl SharedMemory {
     ) -> Result<crate::memory::domain::PreparedLocalClear<'_>, MemoryStatus> {
         self.memory.prepare_clear_reservation()
     }
-    /// Tighten the per-PE retained compiler-artifact limit. This cannot raise
+    /// Tighten the per-PE kept compiler-artifact limit. This cannot raise
     /// the named default or a previously tightened bound; zero disables reuse.
     pub fn tighten_artifact_cache_budget(&mut self, bytes: usize) {
         self.artifacts.tighten(bytes);
@@ -235,14 +235,14 @@ impl SharedMemory {
         {
             return Err(MemoryStatus::Unsupported);
         }
-        // SAFETY: private source staging, disjoint from actual RAM/frames. Code
+        // SAFETY: private source staging, disjoint from RAM/frames. Code
         // publication is held stopped by the outer scheduler through preparation.
         unsafe { self.ram.read_physical(mapped.physical, output) }
     }
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// Execute-source observations for the current actual PE. This includes
+    /// Execute-source observations for the current PE. This includes
     /// entry checks and artifact byte validation; data counters are separate.
     #[cfg(feature = "native-profile")]
     pub fn native_source_statistics(&self) -> Option<NativeSourceStatistics> {
@@ -252,7 +252,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .map(|memory| memory.source.statistics())
     }
 
-    /// Cumulative actual epoch entries for the current canonical PE.
+    /// Cumulative epoch entries for the current canonical PE.
     #[cfg(feature = "native-profile")]
     pub fn native_epoch_statistics(&self) -> Option<NativeEpochStatistics> {
         self.cpu
@@ -261,7 +261,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .map(|memory| memory.epochs)
     }
 
-    /// Cumulative observations for this actual current PE, not the full cohort.
+    /// Cumulative observations for this current PE, not the full cohort.
     #[cfg(feature = "native-profile")]
     pub fn native_data_tlb_statistics(&mut self) -> Option<NativeDataTlbStatistics> {
         Some(
@@ -311,7 +311,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
-    /// Move every active PE's monitor/event authority into its actual Cpu.
+    /// Move every active PE's monitor/event permission into its Cpu.
     /// Before worker binding, exclusive Machine ownership excludes native loans;
     /// afterwards the complete roster must be recovered/invalidated and held in
     /// one stop generation. No prior monitor is reconstructed from copied bytes.
@@ -324,7 +324,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Convert exactly the instantiated Running/Parked Cpu owners. Peer::Off
-    /// has no Cpu/frame authority and remains unbound; starts/reset/rebind must
+    /// has no Cpu/frame permission and remains unbound; starts/reset/rebind must
     /// refuse until a real canonical owner and physical worker can be joined.
     pub fn install_shared_memory_for_active_processors(
         &mut self,
@@ -449,7 +449,7 @@ mod tests {
         machine.profile_missing = missing;
         (machine, ram, EventDomain::new())
     }
-    /// Actual POSIX byte/native-scalar service fixture. Its prepared legacy
+    /// POSIX byte/native-scalar service fixture. Its prepared legacy
     /// entry is not a production CPL0 proof and cannot enter NativeRun.
     fn transfer(cpu: &mut crate::machine::Cpu, operation: ExclusiveOperation) -> ExclusiveData {
         let memory = cpu.canonical_memory.as_mut().unwrap();
@@ -480,8 +480,8 @@ mod tests {
             .memory
             .prepare(MemoryRequirements::default())
             .unwrap();
-        // SAFETY: the actual admitted POSIX fixture owns initialized private
-        // typed staging and retains its source policy/native byte owner.
+        // SAFETY: the admitted POSIX fixture owns initialized private
+        // typed staging and keeps its source policy/native byte owner.
         let result = unsafe { entry.with_checked_view(|view| (view.callback)(view, &request)) };
         assert_eq!(result, Ok(MemoryStatus::Success as u32));
         payload
@@ -525,7 +525,7 @@ mod tests {
         machine.cpu.signal_event();
         assert!(machine.cpu.consume_event());
         assert!(!machine.cpu.consume_event());
-        // A producer cannot keep the actual PE endpoint alive after its owner.
+        // A producer cannot keep the PE endpoint alive after its owner.
         drop(machine);
         assert!(!producer.signal_local());
     }
@@ -685,7 +685,7 @@ mod tests {
         }];
         let held = machine.processor_write().apply(&request).unwrap();
         assert_eq!(held.paused(0), Some(true));
-        drop(held); // the controller ACK is inside the retained actual-owner lease
+        drop(held); // the controller ACK is inside the owner lease
         assert_eq!(machine.cpu.state, state);
         let resumed = machine
             .processor_write()

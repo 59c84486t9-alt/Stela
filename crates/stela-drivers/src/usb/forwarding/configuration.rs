@@ -55,7 +55,7 @@ impl Device {
         Ok(())
     }
 
-    /// A repeated SET_CONFIGURATION is deliberately sent again: USB resets all
+    /// A repeated SET_CONFIGURATION is sent again: USB resets all
     /// interfaces/toggles even when bConfigurationValue has not changed.
     pub fn configure(&mut self, value: u8, dma: &mut dyn DmaAllocator) -> Result<(), BlockError> {
         self.ready()?;
@@ -157,7 +157,7 @@ impl Device {
             );
         // USB 9.4.10 permits STALL when only one setting exists. Follow
         // usb_set_interface's manual fallback: that same setting remains active,
-        // then reset each non-ISO endpoint through actual CLEAR_FEATURE ACKs.
+        // then reset each non-ISO endpoint through CLEAR_FEATURE ACKs.
         let manual = matches!(
             result,
             Err(BlockError::Device {
@@ -188,7 +188,7 @@ impl Device {
         Ok(())
     }
 
-    /// Allocate checked primary streams on actual advertised bulk endpoints.
+    /// Allocate checked primary streams on advertised bulk endpoints.
     /// Stream count is the native controller's acknowledged usable count.
     pub fn enable_streams(
         &mut self,

@@ -1,5 +1,5 @@
-//! Independent nonidentity IOMMU/cache peer over retained actual CPU storage.
-//! Symbolic physical/IOVA labels grant no native hardware qualification.
+//! Independent nonidentity IOMMU/cache peer over kept CPU storage.
+//! Symbolic physical/IOVA labels grant no native hardware validation.
 use super::*;
 use crate::bus::dma::{
     mapping::{DomainMapping, quarantine_status},
@@ -33,7 +33,7 @@ struct Backing {
     attribute: CacheAttribute,
     counts: Arc<Counts>,
 }
-// SAFETY: fixture RAM has stable actual storage/immutable page metadata; tests
+// SAFETY: fixture RAM has stable storage/immutable page metadata; tests
 // serialize all raw CPU/device effects. No safe references to payload escape.
 unsafe impl Send for Backing {}
 // SAFETY: same serialized independent peer, no asynchronous or shared writers.
@@ -118,7 +118,7 @@ impl PageSource for Source {
         let layout = Layout::from_size_align(capacity, alignment.max(granule)).unwrap();
         // SAFETY: valid bounded fixture layout; null checked before use.
         let pointer = NonNull::new(unsafe { alloc(layout) }).ok_or(MemoryError::OutOfMemory)?;
-        // SAFETY: unique unpublished allocation; deliberately nonzero payload
+        // SAFETY: unique unpublished allocation; nonzero payload
         // proves the region does not invent a zeroed-allocation guarantee.
         unsafe {
             pointer.as_ptr().write_bytes(0x5a, capacity);
@@ -161,9 +161,9 @@ fn cpu(binding: &Binding, range: Range<usize>) -> NonNull<u8> {
         .address(range.start, range.len())
         .unwrap()
 }
-// SAFETY: exact private token, retained original pin/direction, unique IOVA
-// reservations and acknowledged model removal; failures retain bindings. This
-// independent peer executes actual CPU payload changes, not hardware IOTLBs.
+// SAFETY: exact private token, kept original pin/direction, unique IOVA
+// reservations and acknowledged model removal; failures keep bindings. This
+// independent peer executes CPU payload changes, not hardware IOTLBs.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -246,7 +246,7 @@ unsafe impl DmaDomain for Domain {
             return Err(DmaError::MappingFailed);
         }
         let pointer = cpu(b, offset..offset + 4);
-        // SAFETY: bounded aligned word from this exact retained token; fixture
+        // SAFETY: bounded aligned word from this exact token; fixture
         // coherence is independently enabled and all writers are serialized.
         Ok(u32::from_le(unsafe {
             pointer.as_ptr().cast::<u32>().read_volatile()
@@ -273,7 +273,7 @@ impl Domain {
         }
         let pointer = cpu(b, range.clone());
         // SAFETY: independent explicit cache peer copies only this token's
-        // exact bounded range. Tests provide actual completed CPU/device turns.
+        // exact bounded range. Tests provide completed CPU/device turns.
         unsafe {
             if for_cpu {
                 core::ptr::copy_nonoverlapping(
@@ -313,7 +313,7 @@ impl Domain {
         let offset = (address - b.token.address) as usize;
         b.visible[offset..offset + bytes.len()].copy_from_slice(bytes);
         if coherent {
-            // SAFETY: peer translation resolves the actual original pin;
+            // SAFETY: peer translation resolves the original pin;
             // never dereference the numeric IOVA as a CPU pointer.
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -624,7 +624,7 @@ fn whole_token_failed_unmap_retries_without_reuse_or_early_pin_release() {
     let mut r = p.allocate(8192, 8192).unwrap();
     p.state.lock().unwrap().fail_unmap = true;
     assert_eq!(
-        // SAFETY: peer engines/IRQ/work stopped; inject actual invalidation failure.
+        // SAFETY: peer engines/IRQ/work stopped; inject invalidation failure.
         unsafe { r.unmap() },
         Err(Error::Dma(DmaError::InvalidationFailed))
     );
@@ -648,14 +648,14 @@ fn sync_failures_before_or_after_real_cache_effects_keep_exact_region_owned() {
             let p = Peer::new(0x1000);
             let mut r = p.allocate(8192, 8192).unwrap();
             let pointer = r.cpu_address(0, 4).unwrap();
-            // SAFETY: fresh unpublished CPU-owned word in retained fixture storage.
+            // SAFETY: fresh unpublished CPU-owned word in kept fixture storage.
             unsafe {
                 pointer.as_ptr().cast::<u32>().write(0x1234_5678u32.to_le());
             }
             p.domain.device_write(0x2000, &0x8765_4321u32.to_le_bytes());
             p.state.lock().unwrap().fail_sync = Some((for_cpu, after));
             let result = if for_cpu {
-                // SAFETY: peer completed the actual modeled device write.
+                // SAFETY: peer completed the modeled device write.
                 unsafe { r.sync_for_cpu(0..4) }
             } else {
                 r.sync_for_device(0..4)

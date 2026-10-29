@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2018-2026 Intel Corporation
 //! Native PNVM/reduced-power payload mappings from pcie/ctxt-info-v2.c.
-//! These are prepared bytes, not an actual ALIVE-selected source receipt or
+//! These are prepared bytes, not an ALIVE-selected source receipt or
 //! a firmware PNVM completion. The owning ROM epoch must bind source/SKU,
-//! retain the actual requester/BAR, publish scratch then ring the doorbell.
+//! keep the requester/BAR, publish scratch then ring the doorbell.
 //! Every payload/descriptor mapping survives PNVM notification until stop.
 use super::{
     context::Region,
@@ -29,7 +29,7 @@ impl From<dma::Error> for Error {
     }
 }
 
-/// Serialization data only; no DMA ownership, completion or source authority.
+/// Serialization data only; no DMA ownership, completion or source permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Configuration {
     pub address: u64,
@@ -53,7 +53,7 @@ impl MappedTable {
     /// This allocator profile bounds each allocation to 32 KiB and 64 payloads.
     /// # Safety
     /// Source allocations are fresh exclusive real native RAM with no aliases.
-    /// The domain is the actual isolated requester domain, not identity DMA.
+    /// The domain is the isolated requester domain, not identity DMA.
     /// Until publication all returned bytes remain exclusively CPU-owned.
     pub unsafe fn prepare(
         chunks: &[pnvm::Chunk<'_>],
@@ -115,7 +115,7 @@ impl MappedTable {
         })
     }
     /// Conservative lifetime transition before the first possible scratch
-    /// pointer store. The actual owner must retain this table and its real PCI
+    /// pointer store. The owner must keep this table and its real PCI
     /// claim through uncertain publication. Calling this does not publish DMA.
     pub fn expose_for_scratch(&mut self) -> Result<Configuration, Error> {
         if self.state != State::Prepared {
@@ -131,7 +131,7 @@ impl MappedTable {
         Ok(self.configuration)
     }
     /// # Safety
-    /// Actual requester master-disable/reset or a stronger device fence proves
+    /// Requester master-disable/reset or a stronger device fence proves
     /// no further table reads/writes; all submission/IRQ work has drained.
     /// PNVM notification/ALIVE/timeouts alone do not satisfy this contract.
     pub unsafe fn release_after_stop(&mut self) -> Result<(), Error> {

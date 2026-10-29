@@ -1,4 +1,4 @@
-//! Actual compatible reservations, bounded setup and fail-closed ownership tests.
+//! Compatible reservations, bounded setup and fail-closed ownership tests.
 use super::*;
 use core::cell::Cell;
 use std::{println, process::Command, string::String};
@@ -24,7 +24,7 @@ struct HarnessCpu {
     dropped: Arc<AtomicUsize>,
     mode: Mode,
 }
-// SAFETY: delegates the same actual hosted-thread/flag model, with no native
+// SAFETY: delegates the same hosted-thread/flag model, with no native
 // CPU/root grant. Negative fixtures stop the subprocess at the mandatory fatal
 // boundary while asserting no real mapping owner was reclaimed.
 unsafe impl Cpu for HarnessCpu {
@@ -38,7 +38,7 @@ unsafe impl Cpu for HarnessCpu {
         self.model.save_disable()
     }
     unsafe fn restore(&self, flags: u64) {
-        // SAFETY: caller supplies this exact model's enclosing save_disable flags.
+        // SAFETY: caller supplies this model's enclosing save_disable flags.
         unsafe { self.model.restore(flags) }
     }
     fn ticks(&self) -> u64 {
@@ -68,7 +68,7 @@ struct Authority {
     cpu: Arc<HarnessCpu>,
     active: Cell<bool>,
 }
-// SAFETY: explicit hosted model only. It borrows this actual callback's model
+// SAFETY: explicit hosted model only. It borrows this callback's model
 // scope, checks its constructing OS thread and active state without allocation,
 // waits or callbacks, including IF0. Production must use real DriverExecution.
 unsafe impl EnteredProcess for Authority {
@@ -95,14 +95,14 @@ struct Scene {
 impl Scene {
     fn runtime(&self) -> Pin<&Runtime<64>> {
         // SAFETY: constructor publishes this exact pinned allocation before
-        // admission; queue retains Scene through join or full quarantine.
+        // admission; queue keeps Scene through join or full quarantine.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<64>))
         }
     }
 }
 unsafe extern "C" fn child(pointer: *mut c_void) {
-    // SAFETY: Scene and code remain retained by this queue until real completion.
+    // SAFETY: Scene and code remain held by this queue until real completion.
     let f = unsafe { &*pointer.cast::<Scene>() };
     let r = f.runtime();
     let view = r.current_context().unwrap();
@@ -113,7 +113,7 @@ unsafe extern "C" fn child(pointer: *mut c_void) {
     f.child.fetch_add(1, Ordering::Relaxed);
 }
 unsafe extern "C" fn bind_retained_worker(pointer: *mut c_void) {
-    // SAFETY: queue retains Scene until the actual binding is joined/detached.
+    // SAFETY: queue keeps Scene until the binding is joined/detached.
     let f = unsafe { &*pointer.cast::<Scene>() };
     let r = f.runtime();
     let binding = Arc::new(Binding {
@@ -124,7 +124,7 @@ unsafe extern "C" fn bind_retained_worker(pointer: *mut c_void) {
     *f.occupied.lock().unwrap() = Some((binding, wake));
 }
 unsafe extern "C" fn ordinary_marker(pointer: *mut c_void) {
-    // SAFETY: the same queue retains Scene through each ordinary marker completion.
+    // SAFETY: the same queue keeps Scene through each ordinary marker completion.
     let f = unsafe { &*pointer.cast::<Scene>() };
     assert!(
         f.runtime().current_context().unwrap().stack_end
@@ -135,7 +135,7 @@ unsafe extern "C" fn ordinary_marker(pointer: *mut c_void) {
 }
 fn failed_metadata(r: Pin<&Runtime<64>>, authority: &dyn EnteredProcess) -> Result<(), WorkError> {
     let _permit = r.reserve_general(authority, kernel())?;
-    // Actual fallible capacity rejection exercises caller-setup error rollback.
+    // Fallible capacity rejection exercises caller-setup error rollback.
     // This does not claim physical allocator exhaustion or a Linux OOM service.
     let mut metadata = Vec::<u8>::new();
     metadata
@@ -144,7 +144,7 @@ fn failed_metadata(r: Pin<&Runtime<64>>, authority: &dyn EnteredProcess) -> Resu
     unreachable!()
 }
 unsafe extern "C" fn creator(pointer: *mut c_void) {
-    // SAFETY: accepted Foreground owns Scene and its live actual runtime view.
+    // SAFETY: accepted Foreground owns Scene and its live runtime view.
     let f = unsafe { &*pointer.cast::<Scene>() };
     let r = f.runtime();
     let authority = Authority {
@@ -183,7 +183,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             let permit = r.reserve_general(&authority, kernel()).unwrap();
             r.queue.lock().unwrap().state().next = u64::MAX;
             assert_eq!(
-                // SAFETY: provider-owned Scene stays retained; counter exhaustion must transfer nothing.
+                // SAFETY: provider-owned Scene stays held; counter exhaustion must transfer nothing.
                 unsafe { permit.commit(child, pointer) },
                 Err(WorkError::Exhausted)
             );
@@ -203,8 +203,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         Mode::MetadataFailure => assert_eq!(failed_metadata(r, &authority), Err(WorkError::Full)),
         Mode::Commit => {
             let permit = r.reserve_general(&authority, kernel()).unwrap();
-            // SAFETY: queue-retained Scene/code fit exact actual kernel geometry;
-            // no borrowed authority is stored in the child callback/context.
+            // SAFETY: queue-kept Scene/code fit exact kernel geometry;
+            // no borrowed permission is stored in the child callback/context.
             let assigned = unsafe { permit.commit(child, pointer) }.unwrap();
             assert_eq!(f.child.load(Ordering::Relaxed), 0);
             assert_eq!(r.queue.completed(assigned.ticket()), Ok(false));
@@ -247,7 +247,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             let permit = r.reserve_general(&authority, kernel()).unwrap();
             r.queue.close().unwrap();
             assert_eq!(
-                // SAFETY: error retains provider-owned Scene and admits no callback.
+                // SAFETY: error keeps provider-owned Scene and admits no callback.
                 unsafe { permit.commit(child, pointer) },
                 Err(WorkError::Closed)
             );
@@ -256,7 +256,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         Mode::Pressure => {
             let permit = r.reserve_general(&authority, kernel()).unwrap();
             for _ in 0..54 {
-                // SAFETY: all retained ordinary markers fit actual128KiB workers.
+                // SAFETY: all kept ordinary markers fit actual128KiB workers.
                 unsafe { r.queue.execute(Kind::General, ordinary_marker, pointer) }.unwrap();
             }
             assert_eq!(
@@ -288,8 +288,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         Mode::StaleCurrent => {
             let permit = r.reserve_general(&authority, kernel()).unwrap();
             let flags = f.cpu.save_disable().unwrap();
-            // SAFETY: deliberate isolated corruption of this actual current test
-            // job's sequence, with IF0 and no foreign task. Fatal must retain it.
+            // SAFETY: deliberate isolated corruption of this current test
+            // job's sequence, with IF0 and no foreign task. Fatal must keep it.
             unsafe {
                 (*r.task(r.current.get())).job.as_mut().unwrap().1.sequence += 1;
             }
@@ -348,7 +348,7 @@ fn run(mode: Mode) {
         actual: Mutex::new(None),
         occupied: Mutex::new(None),
     });
-    // SAFETY: same-thread hosted CPU and retained exact Scene; no native grant.
+    // SAFETY: same-thread hosted CPU and kept exact Scene; no native grant.
     let q = unsafe { Queue::<64>::new(cpu.clone(), f.clone()) }.unwrap();
     let executor = if mode == Mode::NoProfile {
         Executor::new_hosted_for_test(q, test_support::stacks(&dropped)).unwrap()
@@ -360,7 +360,7 @@ fn run(mode: Mode) {
     f.runtime
         .store(r.get_ref() as *const Runtime<64> as u64, Ordering::Release);
     if mode == Mode::BoundWorker {
-        // SAFETY: queue-retained Scene binds an actual compatible worker; its real binding intentionally remains attached.
+        // SAFETY: queue-kept Scene binds a compatible worker; its real binding remains attached.
         unsafe {
             r.queue.execute_general_with_requirement(
                 kernel(),
@@ -372,7 +372,7 @@ fn run(mode: Mode) {
         r.drain(cpu.ticks() + 1_000_000_000).unwrap();
         assert!(f.occupied.lock().unwrap().is_some());
     }
-    // SAFETY: actual Foreground stack and Scene remain retained through genuine join or fatal.
+    // SAFETY: Foreground stack and Scene remain held through join or fatal.
     unsafe {
         r.call_foreground(
             creator,
@@ -398,7 +398,7 @@ fn run(mode: Mode) {
         if mode == Mode::Pressure { 55 } else { 0 }
     );
     if let Some((binding, wake)) = f.occupied.lock().unwrap().take() {
-        // SAFETY: actual bound callback returned; fixture stopped every producer before detaching this idle owner.
+        // SAFETY: bound callback returned; fixture stopped every producer before detaching this idle owner.
         drop(unsafe { r.detach_binding(wake.context_id()) }.unwrap());
         drop(binding);
         drop(wake);

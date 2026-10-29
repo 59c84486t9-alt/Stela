@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! An owning Ethernet link over the already constructed native policy client.
-//! Discovery uses the retained policy client's programmed bands, including
+//! Discovery uses the policy client's programmed bands, including
 //! active/passive 6GHz scans. The data profile remains ordinary single-link
 //! 2.4/5GHz WPA2 with CCMP or GCMP, with or without protected management
 //! frames. This creates no PCI/requester/coherency, supplicant,
 //! regulatory or physical-radio grant.
-//! The actual platform still supplies the controller and independent drain fences.
+//! The platform still supplies the controller and independent drain fences.
 
 use super::*;
 use crate::net::{Link, LinkError, Mac};
@@ -44,7 +44,7 @@ impl core::fmt::Display for LinkControlError {
 }
 impl core::error::Error for LinkControlError {}
 
-/// Construction failure returns both actual owners without changing hardware.
+/// Construction failure returns both owners without changing hardware.
 pub struct LinkAttachError<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     pub error: LinkControlError,
     pub client: ManagedClient<I, Q, C>,
@@ -113,13 +113,13 @@ struct ServiceOutcome {
 /// Owns the exact existing native client and allocation provider. It has no raw
 /// mutable-client escape: controls, timers, packets and revocation serialize on
 /// this owner. Call service regularly even while there is no Ethernet traffic.
-/// Live/uncertain Drop retains this whole object, including pending frontend
-/// events and provider, until actual platform quiescence can be established.
+/// Live/uncertain Drop keeps this whole object, including pending frontend
+/// events and provider, until platform quiescence can be established.
 pub struct ManagedLink<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     owned: Option<Box<State<I, Q, C, S>>>,
 }
 impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
-    // Returning the actual owner/provider also on allocation failure avoids a
+    // Returning the owner/provider also on allocation failure avoids a
     // second allocation solely to report failure while preserving ownership.
     #[allow(
         clippy::result_large_err,
@@ -250,7 +250,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             let event = pending.events.next().unwrap();
             if let Event::Ingress(Ingress::Data(bytes)) = event {
                 // Linux Link semantics discard held data after carrier loss.
-                // Control-port/controller events always retain their own bytes.
+                // Control-port/controller events always keep their own bytes.
                 if Self::up(s)
                     && epoch == s.client.station().association_epoch()
                     && let Some(association) = epoch
@@ -313,7 +313,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn applied_edca(&self) -> Option<&AppliedEdca> {
         self.state().client.applied_edca()
     }
-    /// Apply only a retained native observation. Frontend notice batches remain
+    /// Apply only a native observation. Frontend notice batches remain
     /// owned and normal service backpressure is unchanged.
     pub fn update_edca(&mut self) -> Result<(), LinkControlError> {
         let s = self.state_mut();
@@ -360,8 +360,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::progress(self.state())
     }
     /// Process one native RX batch, real TX retirement and station timers. Full
-    /// frontend queues retain their batch and apply backpressure without making
-    /// a fabricated completion or discarding control-port/event bytes.
+    /// frontend queues keep their batch and apply backpressure without making
+    /// an invented completion or discarding control-port/event bytes.
     pub fn service(&mut self) -> Result<LinkProgress, LinkControlError> {
         self.service_inner().result
     }
@@ -416,7 +416,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
-        // A rejected receive frame must not starve timeouts or actual completed
+        // A rejected receive frame must not starve timeouts or completed
         // packet retirement. Preserve the first error; any native stop/failure
         // still updates its original owner before carrier/queues are rechecked.
         let timer_now = s
@@ -674,7 +674,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Ok(self.state_mut().client.cancel_scan()?)
     }
     /// # Safety
-    /// Actual radio restoration and all DMA/IRQ/late users satisfy the original
+    /// Radio restoration and all DMA/IRQ/late users satisfy the original
     /// native client's independent scan drain contract.
     pub unsafe fn retire_scan_after_drain(&mut self) -> Result<scan::Outcome, LinkControlError> {
         // SAFETY: inherited unchanged real native scan drain contract.
@@ -718,7 +718,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
-    /// The OS supplies this only after its actual authenticated handshake.
+    /// The OS supplies this only after its authenticated handshake.
     pub fn authorize_port(&mut self, epoch: u64) -> Result<(), LinkControlError> {
         Ok(self.state_mut().client.authorize_port(epoch)?)
     }
@@ -730,7 +730,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         let failure = self.service_for_io()?;
         let s = self.state_mut();
         // EAPOL may precede controlled-port/data carrier, but it still needs
-        // the actual current association and a live native controller.
+        // the current association and a live native controller.
         if !Self::active(s) {
             return Err(failure.unwrap_or(LinkControlError::WrongPhase));
         }
@@ -772,7 +772,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Ok(result?)
     }
     /// # Safety
-    /// Exact native peer/key removal and all old radio/DMA/IRQ/work users meet
+    /// Native peer/key removal and all old radio/DMA/IRQ/work users meet
     /// the original independent peer fence; local queue emptiness is no fence.
     pub unsafe fn retire_peer_after_drain(&mut self) -> Result<(), LinkControlError> {
         let s = self.state_mut();
@@ -791,7 +791,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     /// Exact whole-controller/radio/DMA/IOTLB/IRQ/work quiescence meets the
     /// original native platform fence, independently of stop/idle observations.
     pub unsafe fn stop_after_quiesce(&mut self) -> Result<(), LinkControlError> {
-        // SAFETY: inherited unchanged actual native controller fence.
+        // SAFETY: inherited unchanged native controller fence.
         Ok(unsafe { self.state_mut().client.stop_after_quiesce() }?)
     }
 }
@@ -963,7 +963,7 @@ mod tests {
         assert_eq!(planned.channels(), &[six]);
         done(model);
         link.service().unwrap();
-        // SAFETY: complete source-model terminal scan and actual old-user drain.
+        // SAFETY: complete source-model terminal scan and old-user drain.
         unsafe { link.retire_scan_after_drain() }.unwrap();
         link.join(handle, join, profile()).unwrap();
         bss
@@ -1031,7 +1031,7 @@ mod tests {
     fn retire(link: &mut TestLink, model: &Model) {
         assert!(!link.carrier());
         assert_eq!(link.phase(), Phase::NeedsDrain);
-        // SAFETY: actual source-model peer/key removal and no remaining native old users.
+        // SAFETY: source-model peer/key removal and no remaining native old users.
         unsafe { link.retire_peer_after_drain() }.unwrap();
         link.stop().unwrap();
         assert_eq!(link.phase(), Phase::ControllerDrain);
@@ -1054,7 +1054,7 @@ mod tests {
             bytes[1] &= !0x40;
         }
         let mut raw = incoming_bytes(&bytes, pn.map(|n| (1, 0, n)), false);
-        raw[4] = 1; // actual source WCID remains required for plaintext data too
+        raw[4] = 1; // source WCID remains required for plaintext data too
         device_receive(&model.queues[&0xd4520], &raw, true, 0);
     }
     #[test]
@@ -1090,7 +1090,7 @@ mod tests {
         link.service().unwrap();
         assert!(drain_notices(&mut link).into_iter().any(|n|matches!(n.event,LinkEvent::Released(r) if r.receipt==protected&&r.context.key()==Some(ptk))));
         assert!(link.transmit(&eth(0x800)).is_ok());
-        // Original DMA packet has no release until both actual consumption and TX-free.
+        // Original DMA packet has no release until both consumption and TX-free.
         assert!(
             !drain_notices(&mut link)
                 .iter()
@@ -1520,7 +1520,7 @@ mod tests {
         }
         link.service().unwrap();
         assert_eq!(link.queues(), LinkProgress::default());
-        // Carrier loss discards held data, retaining control notices separately.
+        // Carrier loss discards held data, keeping control notices separately.
         incoming(&model, &data(false), Some((1, 0, 131)), false);
         link.service().unwrap();
         assert_eq!(link.queues().data_frames, 1);
@@ -1546,7 +1546,7 @@ mod tests {
         assert_eq!(link.phase(), Phase::NeedsDrain);
         assert!(!model.response.lock().unwrap().peers.contains_key(&1));
         assert!(link.queues().notices > 0);
-        // SAFETY: exact removal ACKs and all actual old model users have ended.
+        // SAFETY: exact removal ACKs and all old model users have ended.
         unsafe { link.retire_peer_after_drain() }.unwrap();
         model.response.lock().unwrap().bss_status = 0xdead;
         assert!(link.stop().is_err());
@@ -1626,7 +1626,7 @@ mod tests {
         while at < actual.elements().len() {
             let n = usize::from(actual.elements()[at + 1]);
             let ie = &actual.elements()[at..at + 2 + n];
-            // A real frontend can select the retained HE subset. Preserve its
+            // A real frontend can select the HE subset. Preserve its
             // original source maps after parsing exactly the advertised bytes.
             if ie[0] != 255 || ie[2] != 108 {
                 local.extend_from_slice(ie);
@@ -1703,7 +1703,7 @@ mod tests {
         let handle = link.bss().next().unwrap().0;
         done(&model);
         link.service().unwrap();
-        // SAFETY: actual completed model scan/radio/RX work independently drained.
+        // SAFETY: completed model scan/radio/RX work independently drained.
         unsafe { link.retire_scan_after_drain() }.unwrap();
         let mut profile = profile();
         profile.channel = channel;
@@ -1794,8 +1794,8 @@ mod tests {
             link.state().client.client.state().controller.phase(),
             ControllerPhase::Quarantined
         );
-        // The historical Station association is still retained for teardown;
-        // actual controller failure independently closes carrier and held data.
+        // The historical Station association is still held for teardown;
+        // controller failure independently closes carrier and held data.
         assert_eq!(link.station().phase(), station::Phase::Associated);
         assert!(!link.carrier());
         assert_eq!(link.queues().data_frames, 0);
@@ -1925,7 +1925,7 @@ mod tests {
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, tx);
         assert_eq!(model.queues[&0xd4520].lock().unwrap().head, rx);
         assert!(link.state().deferred_error.is_none());
-        // The still-pending bad RX cannot starve genuine control publication.
+        // The still-pending bad RX cannot starve control publication.
         let receipt = link.send_control(&control(), Some(ptk)).unwrap();
         let deferred = deferred_message(&link);
         assert!(deferred.contains("ProtocolVersion"));
@@ -2104,7 +2104,7 @@ mod tests {
             }
             assert!(!link.carrier());
             assert_eq!(link.queues().data_frames, 0);
-            // SAFETY: actual model peer/key removal and all old users drained.
+            // SAFETY: model peer/key removal and all old users drained.
             unsafe { link.retire_peer_after_drain() }.unwrap();
             if revoke {
                 assert_eq!(

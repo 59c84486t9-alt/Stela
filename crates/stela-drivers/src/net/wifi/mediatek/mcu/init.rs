@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Exact initial source command bodies and effective response semantics.
-//! Generic completion has no fabricated status. C2 raw-peer updates use the
-//! actual station-result decoder; C3 WMWA updates retain generic facts and
+//! Generic completion has no invented status. C2 raw-peer updates use the
+//! station-result decoder; C3 WMWA updates keep generic facts and
 //! cannot validate per-peer header format or imply association.
 use super::{Encoder, Event, runtime};
 use crate::net::wifi::{
@@ -148,7 +148,7 @@ impl Request {
         if chip == Chip::Mt7925 {
             return Err(Error::WrongChip);
         }
-        // The pinned helper's hdr_trans argument is UNUSED. Actual global
+        // The pinned helper's hdr_trans argument is UNUSED. Global
         // and per-WCID disables are independent real operations, not inferred.
         Ok(Self::new(
             chip,
@@ -212,7 +212,7 @@ impl Request {
         ))
     }
     /// Initial source SET_RX_PATH profile: one non-MLO20MHz channel and the
-    /// actually reported primary PHY antenna mask, with no monitor/scan/DFS
+    /// reported primary PHY antenna mask, with no monitor/scan/DFS
     /// branch substituted. This is wire data, not channel/power permission.
     pub fn rx_path(
         chip: Chip,

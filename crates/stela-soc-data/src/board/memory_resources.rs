@@ -1,4 +1,4 @@
-//! Direct T6000 MCC placement, qualified independently of T8112's PMP service.
+//! Direct T6000 MCC placement, checked independently of T8112's PMP service.
 //! Descriptor parsing does not admit a native-memory completion capability.
 use super::{MemoryController, PTD_RANGE, PtdBank};
 use crate::mcc;
@@ -12,7 +12,7 @@ pub(super) const COMPATIBLE: &str = "mcc,t6000";
 // selector8 is DT reg41. PMP's update alias independently cross-checks it.
 const PTD_PMGR_REG: usize = 41;
 
-/// Original descriptor inputs, not reset measurements or fabricated DRAM/cache
+/// Original descriptor inputs, not reset measurements or invented DRAM/cache
 /// configuration. One owner must join these overlapping MCC/AMCC apertures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectMemoryCache {
@@ -25,7 +25,7 @@ pub struct DirectMemoryCache {
 }
 
 impl DirectMemoryCache {
-    /// Recheck public descriptor values before allocating actual owners. This
+    /// Recheck public descriptor values before allocating owners. This
     /// also protects callers constructing a descriptor without the ADT parser.
     pub fn validate(&self, locks: &MemoryController) -> Result<(), &'static str> {
         if self.apertures.is_empty()
@@ -134,7 +134,7 @@ fn ranges(
         .collect()
 }
 
-/// Retain all four header words; the interrupt resource is not an AIC number.
+/// Keep all four header words; the interrupt resource is not an AIC number.
 /// Reject overlaps and malformed strings instead of silently truncating records.
 pub(super) fn publication_ranges(
     records: &[u8],
@@ -230,7 +230,7 @@ pub(super) fn direct_memory_cache(
         .child("pmgr")
         .ok_or("T6000 PMP PTD has no PMGR selector8 owner")?;
     // PMGR reg3/reg6 are original zero-length sentinels. Validate the
-    // selected actual owner, not unrelated slots that are never mounted here.
+    // selected owner, not unrelated slots that are never mounted here.
     let bank = range_at(&pmgr, translate, PTD_PMGR_REG)?;
     if bank.1 != crate::ptd::PTD_BYTES {
         return Err("T6000 PTD selector8 is not one complete bank".into());

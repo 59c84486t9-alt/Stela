@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Actual scan/ROC command ownership, source grants and explicit native drain.
+//! Scan/ROC command ownership, source grants and explicit native drain.
 use super::*;
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
@@ -81,7 +81,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.scan_ticket = Some(ticket);
         s.pmf_observations.clear();
         // From request ownership through transport, any unexpected failure
-        // retains an explicit non-Idle owner. A policy refusal before handoff
+        // keeps an explicit non-Idle owner. A policy refusal before handoff
         // can withdraw only the never-submitted Starting generation.
         s.phase = Phase::Quarantined;
         if let Err(error) = s.scanner.validate_submission(ticket, now, policy) {
@@ -106,8 +106,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.phase = Phase::Scanning;
         Ok(ticket)
     }
-    /// The source cancel's generic completion is retained, never treated as
-    /// abort completion/drain. A terminal actual event or independent reset is
+    /// The source cancel's generic completion is held, never treated as
+    /// abort completion/drain. A terminal event or independent reset is
     /// still required before scan resource retirement.
     pub fn cancel_scan(&mut self) -> Result<(), Error> {
         let s = self.state_mut();
@@ -131,9 +131,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
     /// # Safety
-    /// This completed scan's actual radio/channel restoration, DMA/IRQ/work and
+    /// This completed scan's radio/channel restoration, DMA/IRQ/work and
     /// all delayed scan notifications are drained. The source basic event has
-    /// no host generation cookie; an event alone cannot qualify reuse.
+    /// no host generation cookie; an event alone cannot check reuse.
     pub unsafe fn retire_scan_after_drain(&mut self) -> Result<scan::Outcome, Error> {
         let s = self.state_mut();
         if s.phase != Phase::ScanCompleted {
@@ -292,7 +292,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 return Ok(());
             }
             if deadline.passed() {
-                // Source set_roc's timeout sends the actual matching abort.
+                // Source set_roc's timeout sends the matching abort.
                 // Generic abort completion still cannot retire uncertain radio
                 // users or establish a new peer/notification epoch.
                 s.transport_facts
@@ -426,13 +426,13 @@ mod tests {
         device_receive(&model.queues[&0xd4500], &done, true, 0);
         driver.poll(2, &Source, &mut Policy(true)).unwrap();
         assert_eq!(driver.phase(), Phase::ScanCompleted);
-        // SAFETY: the fixture consumed all actual scan RX/notifications; no
+        // SAFETY: the fixture consumed all scan RX/notifications; no
         // external hardware or delayed descriptor users exist in this model.
         unsafe { driver.retire_scan_after_drain() }.unwrap();
         driver.stop().unwrap();
         model.response.lock().unwrap().clc_processing = false;
         model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
-        // SAFETY: actual model stop/reset has drained every retained DMA user.
+        // SAFETY: model stop/reset has drained every DMA user.
         unsafe { driver.stop_after_quiesce() }.unwrap();
         drop(driver);
         assert_eq!(model.drops.load(core::sync::atomic::Ordering::Relaxed), 1);
@@ -449,7 +449,7 @@ mod tests {
         // SAFETY: this fixture owns the real modeled controller, programmed
         // policy and firmware. No unrelated/caller-copied receipt enables it.
         unsafe { f.controller.initialize_mac() }.unwrap();
-        // SAFETY: source-qualified modeled 5GHz initial radio ownership; the
+        // SAFETY: source-checked modeled 5GHz initial radio ownership; the
         // hardware scan command will select the independently programmed 6GHz.
         unsafe { f.controller.start(Band::Ghz5, 36, 5180) }.unwrap();
         // SAFETY: exact fixture-owned interface and controller resource.
@@ -487,7 +487,7 @@ mod tests {
             .unwrap();
         let commands = model.response.lock().unwrap().client_commands.clone();
         let scan_body = &commands.last().unwrap()[48..];
-        // No probe generation, and the actual channel list uses band code 3.
+        // No probe generation, and the channel list uses band code 3.
         assert_eq!(scan_body[8..10], [0, 0]);
         let mut rest = &scan_body[4..];
         let mut channels = None;
@@ -521,7 +521,7 @@ mod tests {
             .unwrap();
         assert!(matches!(events.as_slice(), [Event::Bss(bss)]
             if bss.channel == SIX && bss.observed.band == Band::Ghz6));
-        // The native poll intentionally consumes one data-ring frame per call.
+        // The native poll consumes one data-ring frame per call.
         let events = driver
             .poll(2, &Source, &mut PassivePolicy { receive: true })
             .unwrap();
@@ -538,7 +538,7 @@ mod tests {
             .poll(3, &Source, &mut PassivePolicy { receive: true })
             .unwrap();
         assert_eq!(driver.phase(), Phase::ScanCompleted);
-        // SAFETY: all actual modeled scan receive descriptors/notifications
+        // SAFETY: all modeled scan receive descriptors/notifications
         // were consumed; no real external DMA/IRQ user exists in this fixture.
         unsafe { driver.retire_scan_after_drain() }.unwrap();
         assert_eq!(driver.phase(), Phase::Idle);

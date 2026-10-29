@@ -42,7 +42,7 @@ impl Family {
         }
     }
 }
-/// A genuine target-machine SMBIOS/DMI string observation. An observed missing
+/// A target-machine SMBIOS/DMI string observation. An observed missing
 /// field is distinct from an unread/unavailable/invalid table or field.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Observation<'a> {
@@ -53,9 +53,9 @@ pub enum Observation<'a> {
     /// No UTF-8 conversion, case folding or vendor normalization is performed.
     Value(&'a [u8]),
 }
-/// The three actual physical system fields used by the pinned donor quirks.
-/// Native admission must supply genuine validated table observations; this
-/// type neither discovers firmware nor gives an address-mapping authority.
+/// The three physical system fields used by the pinned donor quirks.
+/// Native admission must supply validated table observations; this
+/// type neither discovers firmware nor gives an address-mapping permission.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HostIdentity<'a> {
     pub system_vendor: Observation<'a>,
@@ -116,16 +116,16 @@ impl HostIdentity<'_> {
     }
 }
 impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
-    /// Construct only the exact source-selected fourteen MTP/PTP-family IDs.
+    /// Construct only the source-selected fourteen MTP/PTP-family IDs.
     ///
     /// # Safety
-    /// All `Controller::new_spt` actual powered same-Function/config/MMIO/flash/
-    /// PHY/reset-epoch/exclusion/delay requirements hold. `device` is the actual
-    /// vendor8086/class020000 config identity. `host` contains genuine physical
+    /// All `Controller::new_spt` powered same-Function/config/MMIO/flash/
+    /// PHY/reset-epoch/exclusion/delay requirements hold. `device` is the
+    /// vendor8086/class020000 config identity. `host` contains physical
     /// SMBIOS/DMI observations from this host and epoch, with validated field
     /// extents/absence, never inferred strings or a development/guest identity.
     /// Unknown required observations refuse before any config/MMIO access.
-    /// The evaluated quirk is retained privately with this consumed actual owner.
+    /// The evaluated quirk is held privately with this consumed owner.
     /// Initially inaccessible PHY/deep recovery and managed firmware refuse.
     pub unsafe fn new_mtp(
         device: u16,
@@ -133,7 +133,7 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
         delay: D,
         host: HostIdentity<'_>,
     ) -> Result<Self, Error> {
-        // SAFETY: actual same-host identity and physical ownership grant above.
+        // SAFETY: same-host identity and physical ownership grant above.
         let mut this = unsafe { Self::claim_mtp(device, io, delay, host) }?;
         if let Err(error) = this.initialize_i219() {
             this.poisoned = true;
@@ -154,7 +154,7 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
             Decision::NoMatch => false,
             Decision::Match => true,
         };
-        // SAFETY: exact source-selected actual family and same physical host grant.
+        // SAFETY: source-selected family and same physical host grant.
         let mut this = unsafe {
             Self::claim_integrated(io, delay, |limits| Profile::Mtp(limits, family, disable_k1))
         }?;
@@ -318,7 +318,7 @@ pub(super) mod tests {
             ] {
                 let (state, released, io, timer) = spt::tests::fixture_spt();
                 assert!(matches!(
-                    // SAFETY: actual modeled identity observation, deliberately incomplete.
+                    // SAFETY: modeled identity observation, incomplete.
                     unsafe { Controller::new_mtp(id, io, timer, h) },
                     Err(Error::HostIdentityNotObserved)
                 ));
@@ -458,7 +458,7 @@ pub(super) mod tests {
             assert_eq!(rows.len(), 54);
             for ([fext, disable, kmrn, timeouts], expected) in rows {
                 let (state, _, io, timer) = spt::tests::fixture_spt();
-                // SAFETY: one actual model and complete board observation.
+                // SAFETY: one model and complete board observation.
                 let mut c =
                     unsafe { Controller::claim_mtp(id, io, timer, host(disable != 0)) }.unwrap();
                 {
@@ -491,7 +491,7 @@ pub(super) mod tests {
                     .filter(|o| o[0] <= 1 && o[1] == 0x18)
                     .collect();
                 let (state, _, io, timer) = spt::tests::fixture_spt();
-                // SAFETY: actual same-host cold model; no reset wrapped in PHY transaction.
+                // SAFETY: same-host cold model; no reset wrapped in PHY transaction.
                 let mut c = unsafe { Controller::claim_mtp(id, io, timer, host(false)) }.unwrap();
                 state.borrow_mut().mac.insert(0x18, ext);
                 state.borrow_mut().operations.clear();
@@ -509,7 +509,7 @@ pub(super) mod tests {
         for fault in [Fault::Access, Fault::Removed, Fault::OutsideBar] {
             for write in [false, true] {
                 let (state, released, io, timer) = spt::tests::fixture_spt();
-                // SAFETY: actual same-host model with exact retry-enabled family.
+                // SAFETY: same-host model with exact retry-enabled family.
                 let mut c =
                     unsafe { Controller::claim_mtp(0x550a, io, timer, host(false)) }.unwrap();
                 let before = state.borrow().accesses;
@@ -653,7 +653,7 @@ pub(super) mod tests {
             assert_eq!(rows.len(), 48);
             for ([write, enabled, failures, kind], expected) in rows {
                 let (state, _, io, timer) = spt::tests::fixture_spt();
-                // SAFETY: isolated actual source-selected model owner.
+                // SAFETY: isolated source-selected model owner.
                 let mut c = unsafe { Controller::claim_mtp(id, io, timer, host(false)) }.unwrap();
                 c.phy.retry_enabled = enabled != 0;
                 {

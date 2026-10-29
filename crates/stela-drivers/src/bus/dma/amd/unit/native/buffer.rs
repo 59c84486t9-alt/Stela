@@ -71,14 +71,14 @@ impl Buffer {
         Ok(())
     }
     pub(super) fn sequence(&self) -> Result<u64, Error> {
-        // SAFETY: aligned coherent completion RAM retained for this exact unit;
+        // SAFETY: aligned coherent completion RAM kept for this exact unit;
         // hardware is sole writer after publication. No Rust reference aliases.
         Ok(u64::from_le(unsafe {
             self.pointer(0, 8)?.cast::<u64>().as_ptr().read_volatile()
         }))
     }
     pub(super) fn publish(&self, platform: &impl ColdPlatform) -> Result<(), Error> {
-        // SAFETY: entire retained WB span, with serialized CPU producer.
+        // SAFETY: entire kept WB span, with serialized CPU producer.
         unsafe { platform.publish(self.pointer(0, self.bytes)?, self.bytes) }.map_err(Error::Memory)
     }
 }

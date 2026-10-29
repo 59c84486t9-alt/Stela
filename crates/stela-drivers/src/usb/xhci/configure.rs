@@ -303,7 +303,7 @@ impl Controller {
             0,
             CONFIGURE_ENDPOINT << 10 | u32::from(slot) << 24,
         );
-        // Retain rings on any error: a lost command completion may still leave
+        // Keep rings on any error: a lost command completion may still leave
         // them reachable by the controller. Never expose an unacknowledged ring.
         for endpoint in endpoints {
             let transfer = self.slot(slot)?.endpoints[usize::from(endpoint.dci())]
@@ -389,7 +389,7 @@ mod tests {
         for missing_completion in [false, true] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing is live/exclusive through every retained DMA ring.
+            // SAFETY: backing is live/exclusive through every DMA ring.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
                 &mut dma,

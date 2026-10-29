@@ -44,23 +44,23 @@ pub struct Policy {
     pub usb3: Decision,
     pub pcie: Decision,
 }
-/// Actual native authority and exclusive active router/link reservation.
+/// Native permission and exclusive active router/link reservation.
 ///
 /// # Safety
 /// Identity, target/parent observations and policy belong to one live physical
 /// NHI requester and unchanged ownership/reset epoch. Native platform services
-/// positively granted software-CM ownership, actual attached DMA protection,
+/// positively granted software-CM ownership, attached DMA protection,
 /// IMR/protected firmware DMA, power and configuration resources. Firmware ICM
 /// and other actors cannot configure these routers. Allowed decisions represent
-/// real stable native _OSC/security/authorization policy, including actual PCIe
+/// real stable native _OSC/security/authorization policy, including PCIe
 /// DMA protection; no invented bool or Type-C event may supply these decisions.
-/// The parent is already configured and the actual physical relationship and
+/// The parent is already configured and the physical relationship and
 /// capabilities remain current, protected against competing topology/link work.
-/// The caller retains Channel/Ring native NHI power and DMA-attachment grants
+/// The caller keeps Channel/Ring native NHI power and DMA-attachment grants
 /// independently until their real final drain; this local Owner may never
 /// detach their domain or release live ring resources. All independent endpoint
-/// DMA/IRQ/IOMMU lifetimes remain retained. Owner can end only before mutation, after real restoration/reset, or after completed
-/// transfer into independent native CM ownership. Quarantine must retain it.
+/// DMA/IRQ/IOMMU lifetimes remain held. Owner can end only before mutation, after real restoration/reset, or after completed
+/// transfer into independent native CM ownership. Quarantine must keep it.
 pub unsafe trait Owner: Send + Sync {
     fn identity(&self) -> Identity;
     fn target(&self) -> &Inventory;
@@ -106,7 +106,7 @@ pub struct HotplugWord {
     pub before: u32,
     pub after: u32,
 }
-/// Completed actual register sequence, retaining the configured router's lease.
+/// Completed register sequence, keeping the configured router's lease.
 /// It establishes neither tunnels nor bonding nor endpoint/IOMMU drain.
 pub struct Configured {
     pub identity: Identity,
@@ -120,14 +120,14 @@ pub struct Configured {
     owner: Option<Arc<dyn Owner>>,
 }
 impl Configured {
-    /// Read-only seam for another retained native CM operation in this module.
+    /// Read-only seam for another kept native CM operation in this module.
     pub(super) fn retained_owner(&self) -> &dyn Owner {
         &**self.owner.as_ref().expect("live configured reservation")
     }
     /// # Safety
     /// Real hardware restoration/reset has satisfied all dependent topology,
     /// path, power and DMA/IRQ requirements, or the exact configured reservation
-    /// is already held by independent retained native CM ownership. This local
+    /// is already held by independent kept native CM ownership. This local
     /// setup receipt cannot certify endpoint/IOMMU teardown.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::router::Configured;
@@ -366,10 +366,10 @@ enum Stage {
     Done,
     Fault,
 }
-/// A bounded real software-CM configuration sequence. Every stage retains one
-/// deadline across publication retries; readiness loops retain a fixed500ms
+/// A bounded real software-CM configuration sequence. Every stage keeps one
+/// deadline across publication retries; readiness loops keep a fixed500ms
 /// window and the entire caller-driven job is bounded to60s. No sleeping here.
-/// Every `now` is actual monotonic milliseconds from the same clock as Channel.
+/// Every `now` is monotonic milliseconds from the same clock as Channel.
 pub struct Setup<R: Registers> {
     channel: Option<Channel<R>>,
     owner: Option<Arc<dyn Owner>>,
@@ -392,10 +392,10 @@ pub struct Setup<R: Registers> {
 }
 impl<R: Registers> Setup<R> {
     /// # Safety
-    /// Owner and Channel describe the exact same physical requester and native
-    /// ownership/reset epoch; all Owner authority/DMA/IMR/power/policy grants
+    /// Owner and Channel describe the same physical requester and native
+    /// ownership/reset epoch; all Owner permission/DMA/IMR/power/policy grants
     /// are real and stable. The channel is exclusively idle. Inventory is the
-    /// actual protected current topology, never merely matching numeric routes.
+    /// protected current topology, never matching numeric routes.
     /// ```compile_fail
     /// use std::sync::Arc;
     /// use stela_drivers::bus::thunderbolt::{router::{Owner,Setup},channel::Channel,ring::Registers};
@@ -442,7 +442,7 @@ impl<R: Registers> Setup<R> {
             _ => self.fail(Error::Cancelled),
         }
     }
-    /// Uncertain state remains poisoned and its changed reservation retained.
+    /// Uncertain state remains poisoned and its changed reservation kept.
     pub fn into_channel(mut self) -> Channel<R> {
         self.channel.take().expect("owned channel")
     }
@@ -866,8 +866,8 @@ mod tests {
                 let owner = Arc::new(router_owner(route, 2, mask));
                 let dropped = owner.dropped.clone();
                 let mut peer = RouterPeer::new(owner.clone(), mask);
-                // SAFETY: this exact model requester/domain/IMR/reset epoch owns
-                // actual unchanged inventories and resolved native model policy.
+                // SAFETY: this model requester/domain/IMR/reset epoch owns
+                // unchanged inventories and resolved native model policy.
                 let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
                 let configured = drive_router(&mut peer, &domain, &model, &mut setup);
                 assert_eq!(configured.header.reported_route(), route);
@@ -891,8 +891,8 @@ mod tests {
                 drop(peer);
                 drop(owner);
                 assert_eq!(dropped.load(Ordering::Relaxed), 0);
-                // SAFETY: actual synthetic configured state is transferred into an
-                // independently retained model CM lifetime through final drain.
+                // SAFETY: synthetic configured state is transferred into an
+                // independently kept model CM lifetime through final drain.
                 unsafe { configured.retire() };
                 assert_eq!(dropped.load(Ordering::Relaxed), 1);
                 channel_release(&mut channel);
@@ -928,7 +928,7 @@ mod tests {
             assert_eq!(peer.regs[5], n(9) as u32);
             assert_eq!(peer.regs[6], n(10) as u32);
             assert_eq!(peer.hotplug, [n(11) as u32, n(12) as u32]);
-            // SAFETY: exact isolated model requester/epoch with actual retained
+            // SAFETY: exact isolated model requester/epoch with kept
             // parent relationship and source-case resolved native model policy.
             let mut setup = unsafe { Setup::new(channel, owner, 0) }.unwrap();
             let configured = drive_router(&mut peer, &domain, &model, &mut setup);
@@ -958,8 +958,8 @@ mod tests {
                 "source route={route:x} version={version} mask={mask}"
             );
             let mut channel = setup.into_channel();
-            // SAFETY: independent model CM retains this actual configured lease
-            // through complete synthetic teardown; no hardware provider claim.
+            // SAFETY: independent model CM keeps this configured lease
+            // through complete synthetic teardown.
             unsafe { configured.retire() };
             channel_release(&mut channel);
             cases += 1;
@@ -1011,8 +1011,8 @@ mod tests {
             }
             let dropped = owner.dropped.clone();
             assert!(
-                // SAFETY: this exact synthetic requester/epoch represents negative
-                // metadata/prerequisites. No actual authority or write is fabricated.
+                // SAFETY: this synthetic requester/epoch represents negative
+                // metadata/prerequisites. No permission or write is invented.
                 unsafe {
                     Setup::new(
                         channel,
@@ -1050,7 +1050,7 @@ mod tests {
             if upstream {
                 peer.override_upstream = Some(0);
             }
-            // SAFETY: exact same negative synthetic ownership/inventory epoch.
+            // SAFETY: same negative synthetic ownership/inventory epoch.
             let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
             setup.poll(0).unwrap();
             let mut failed = false;
@@ -1095,7 +1095,7 @@ mod tests {
             let mut peer = RouterPeer::new(owner.clone(), 79);
             peer.hold_ready = !configured_wait;
             peer.hold_configured = configured_wait;
-            // SAFETY: exact same isolated synthetic native reservation.
+            // SAFETY: same isolated synthetic native reservation.
             let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
             setup.poll(0).unwrap();
             let mut ack = None;
@@ -1146,7 +1146,7 @@ mod tests {
             let dropped = owner.dropped.clone();
             let mut peer = RouterPeer::new(owner.clone(), 79);
             peer.reject_header = mode == 1;
-            // SAFETY: exact same synthetic requester/epoch; published mutations
+            // SAFETY: same synthetic requester/epoch; published mutations
             // remain owned through ACK loss, rejected readback or receipt drop.
             let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
             if mode == 2 {
@@ -1216,7 +1216,7 @@ mod tests {
             assert!(matches!(channel.poll(0), Ok(Some(Event::Completed { .. }))));
         }
         let owner = Arc::new(router_owner(0, 1, 0));
-        // SAFETY: exact same synthetic owner, idle request engine; old completed
+        // SAFETY: same synthetic owner, idle request engine; old completed
         // TX DMA is stalled and the real publication ring is physically full.
         let mut setup = unsafe { Setup::new(channel, owner, 0) }.unwrap();
         let writes = model.state.lock().unwrap().writes.len();
@@ -1230,7 +1230,7 @@ mod tests {
         let (_source, _domain, model, mut channel) = self::channel();
         channel.start(0).unwrap();
         let owner = Arc::new(router_owner(0, 1, 0));
-        // SAFETY: exact same idle synthetic requester/reset/native reservation.
+        // SAFETY: same idle synthetic requester/reset/native reservation.
         let mut setup = unsafe { Setup::new(channel, owner, 100) }.unwrap();
         let writes = model.state.lock().unwrap().writes.len();
         assert!(matches!(setup.poll(99), Err(Error::ClockRegressed)));
@@ -1243,7 +1243,7 @@ mod tests {
             let owner = Arc::new(router_owner(0, 1, 0));
             let dropped = owner.dropped.clone();
             let mut peer = RouterPeer::new(owner.clone(), 0);
-            // SAFETY: same exact synthetic requester/epoch and native policy.
+            // SAFETY: same synthetic requester/epoch and native policy.
             let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
             setup.poll(0).unwrap();
             let reply = peer.respond(&domain, &model, 0);
@@ -1273,7 +1273,7 @@ mod tests {
         let owner = Arc::new(router_owner(1, 2, 79));
         let dropped = owner.dropped.clone();
         let mut peer = RouterPeer::new(owner.clone(), 79);
-        // SAFETY: same actual synthetic requester/epoch and reviewed parent
+        // SAFETY: same synthetic requester/epoch and reviewed parent
         // capability; failed hardware access cannot invent fallback ownership.
         let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
         setup.poll(0).unwrap();

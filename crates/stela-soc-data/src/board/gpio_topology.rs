@@ -10,9 +10,9 @@ use super::format;
 use super::single_range;
 use super::spmi_topology::cells_of;
 
-/// Compatible identifies register semantics, while role bounds the qualified
+/// Compatible identifies register semantics, while role bounds the checked
 /// board owner. Only the AP S5L bank is admitted: auxiliary restoration,
-/// wake groups and nets remain explicit unqualified board dependencies.
+/// wake groups and nets remain explicit unchecked board dependencies.
 pub(super) fn gpio_profile<'a>(
     property: impl Fn(&str) -> Option<&'a [u8]>,
 ) -> Option<crate::gpio::Profile> {

@@ -174,7 +174,7 @@ impl Drop for Model {
     }
 }
 // SAFETY: isolated independent configuration storage. Child writes are posted
-// until an actual equal-width model read flushes them; no production authority.
+// until an equal-width model read flushes them; no production permission.
 unsafe impl Registers for Model {
     fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error> {
         let state = self.state.lock().unwrap();
@@ -253,7 +253,7 @@ unsafe impl Registers for Model {
             state.pending = Some((offset, width, value));
             state.events.push(Event::Posted(offset, width, value));
         }
-        // The native Registers contract requires this actual posted-write
+        // The native Registers contract requires this posted-write
         // readback, independently of lifecycle's subsequent equality check.
         let _ = self.child_read(offset, width)?;
         Ok(())
@@ -323,8 +323,8 @@ struct Domain {
     state: Arc<Mutex<State>>,
     epoch: u64,
 }
-// SAFETY: isolated model tracks its actual retained page pins/IOVA epochs and
-// raw config storage. It cannot acknowledge drain while any actual BM is set.
+// SAFETY: isolated model tracks its page pins/IOVA epochs and
+// raw config storage. It cannot acknowledge drain while any BM is set.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -444,20 +444,20 @@ fn real_bridge_path_and_posted_command_order_precede_payload_drain_and_unmap() {
     life.enable_dma().unwrap();
     assert_eq!(
         // SAFETY: intentional negative probe against the isolated provider; it refuses because the
-        // actual configuration still permits new requests.
+        // configuration still permits new requests.
         unsafe { domain.drain_posted_writes() },
         Err(DmaError::DrainUnavailable)
     );
     life.disable_dma().unwrap();
     assert_eq!(
-        // SAFETY: the model intentionally verifies missing-domain-drain refusal.
+        // SAFETY: the model verifies missing-domain-drain refusal.
         unsafe { mapping.unmap() },
         Err(DmaError::InvalidationFailed)
     );
-    // SAFETY: all actual model BM bits have now acknowledged clear.
+    // SAFETY: all model BM bits have now acknowledged clear.
     unsafe { domain.drain_posted_writes() }.unwrap();
     // SAFETY: this test issues no asynchronous payload accesses; original
-    // provider drain completed, while the original host is still retained.
+    // provider drain completed, while the original host is still held.
     unsafe { mapping.unmap() }.unwrap();
     assert_eq!(page_drops.load(Ordering::Relaxed), 1);
     assert!(!returned.is_ready());
@@ -512,7 +512,7 @@ fn abandoned_retired_handle_preserves_the_whole_original_hierarchy() {
     let returned = RetiredHierarchy(Rc::clone(&life.returned));
     life.prepare().unwrap();
     life.disable_dma().unwrap();
-    // SAFETY: no model engine started; actual hierarchy BM-clear acknowledged.
+    // SAFETY: no model engine started; hierarchy BM-clear acknowledged.
     unsafe { domain.drain_posted_writes() }.unwrap();
     life.release().unwrap();
     assert!(returned.is_ready());
@@ -578,13 +578,13 @@ fn failed_posted_bus_master_ack_retains_original_hierarchy_and_domain() {
     state.lock().unwrap().ack_failure = Some(BRIDGE + 4);
     assert!(life.enable_dma().is_err());
     assert_eq!(life.phase, Phase::Quarantined);
-    // The actual posted write occurred despite the failed equality readback.
+    // The posted write occurred despite the failed equality readback.
     assert_ne!(
         state.lock().unwrap().child(BRIDGE + 4, 2) & u32::from(BUS_MASTER),
         0
     );
     assert_eq!(
-        // SAFETY: negative model probe; original domain observes actual BM state.
+        // SAFETY: negative model probe; original domain observes BM state.
         unsafe { domain.drain_posted_writes() },
         Err(DmaError::DrainUnavailable)
     );
@@ -647,7 +647,7 @@ fn exact_pm_wait_requests_follow_actual_word_effect_and_propagate_failure() {
         state: Arc<Mutex<State>>,
         fail: bool,
     }
-    // SAFETY: explicit same-peer symbolic time. Actual posted config effects
+    // SAFETY: explicit same-peer symbolic time. Posted config effects
     // must precede the requested interval; no physical timer is represented.
     unsafe impl crate::bus::pci::power::Timer for CapturedTime {
         fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
@@ -744,7 +744,7 @@ fn provider_epoch_refusal_and_release_failure_keep_original_resources_pinned() {
     let drops = model.drops.clone();
     let state = model.state.clone();
     let (mut life, domain) = lifecycle(model);
-    // This is an actual model provider refusing its own changed root epoch;
+    // This is a model provider refusing its own changed root epoch;
     // it does not claim the shared DmaDomain API can identify a wrong domain.
     state.lock().unwrap().epoch = 2;
     let page_drops = Arc::new(AtomicUsize::new(0));
@@ -761,7 +761,7 @@ fn provider_epoch_refusal_and_release_failure_keep_original_resources_pinned() {
     state.lock().unwrap().epoch = 1;
     life.prepare().unwrap();
     life.disable_dma().unwrap();
-    // SAFETY: no engine or payload was started, actual BM clears acknowledged.
+    // SAFETY: no engine or payload was started, BM clears acknowledged.
     unsafe { domain.drain_posted_writes() }.unwrap();
     state.lock().unwrap().release_failure = true;
     assert!(life.release().is_err());
@@ -819,7 +819,7 @@ struct Platform {
 unsafe impl Send for Platform {}
 // SAFETY: same fixture exclusion; metadata is immutable, atomic or locked.
 unsafe impl Sync for Platform {}
-// SAFETY: model allocates its actual aligned CPU storage and validates original
+// SAFETY: model allocates its aligned CPU storage and validates original
 // reservation identity and current provider epoch, not just physical numbers.
 unsafe impl MappingPlatform for Platform {
     fn check_context(&self, _: AddressSpace) -> Result<(), crate::bus::mmio::owned::Error> {
@@ -851,7 +851,7 @@ unsafe impl MappingPlatform for Platform {
             return Err(MapFailure::Unchanged(MappingError::OutsideResource));
         }
         // SAFETY: provider owns this exact bounded model allocation; symbolic
-        // physical pages are deliberately unrelated to its actual CPU address.
+        // physical pages are unrelated to its CPU address.
         let cpu_base = unsafe {
             NonNull::new_unchecked(self.memory.0.get().cast::<u8>().add(offset as usize))
         };
@@ -888,7 +888,7 @@ fn mapping_platform(owner: Arc<()>) -> (Authority, Arc<Platform>) {
         unmaps: Mutex::new(Vec::new()),
     });
     // SAFETY: separate isolated backing and roots; no production latch or
-    // aliases are modified, and all mappings retain this actual model owner.
+    // aliases are modified, and all mappings keep this model owner.
     let authority = unsafe {
         Authority::isolated_model(
             platform.clone(),
@@ -941,7 +941,7 @@ fn original_resource_identity_and_epoch_gate_real_registry_maps_and_platform_ret
     // SAFETY: exact isolated tokens with no consumers, callbacks or writes.
     unsafe { first.retire() }.unwrap();
     assert_eq!(
-        // SAFETY: same actual model-owner exclusion; failure preserves its token.
+        // SAFETY: same model-owner exclusion; failure preserves its token.
         unsafe { second.retire() },
         Err(crate::bus::mmio::owned::Error::UnmapFailed)
     );

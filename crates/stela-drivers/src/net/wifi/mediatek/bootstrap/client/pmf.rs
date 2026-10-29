@@ -11,18 +11,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub fn pmf_bss_observations(&self) -> impl Iterator<Item = &Arc<PmfBssObservation>> {
         self.state().pmf_observations.iter()
     }
-    /// Explicit PMF association using an actual observation and real OS-selected
+    /// Explicit PMF association using an observation and real OS-selected
     /// pre-association policy, before any peer/ROC/auth/assoc native publication.
     /// Canonical preparation is CPU-only; initial refusal withdraws only that
     /// exact never-submitted request. Partial native work stays quarantined.
     ///
     /// # Safety
-    /// Both providers belong to this exact real retained controller/requester.
-    /// Their held leases qualify the full pre-association native envelope and
-    /// genuinely serialize revocation through peer/ROC/DMA/TX/deferred users.
-    /// C must retain those actual policy/board/radio resources through partial
+    /// Both providers belong to this real kept controller/requester.
+    /// Their held leases check the full pre-association native envelope and
+    /// serialize revocation through peer/ROC/DMA/TX/deferred users.
+    /// C must keep those policy/board/radio resources through partial
     /// programming, uncertain commands and every pending/deferred native user.
-    /// The actual OS selects these exact RSNE/BSS bytes; no parser/scan result
+    /// The OS selects these exact RSNE/BSS bytes; no parser/scan result
     /// authenticates the peer or substitutes for that OS selection service.
     pub unsafe fn join_modern_pmf<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -53,7 +53,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         pmf.validate_peer(&observed.bss().elements, &[])
             .map_err(|e| Error::Station(station::Error::Wire(e)))?;
         let observed = observed.clone();
-        // SAFETY: exact same exclusive owner and actual retained provider leases.
+        // SAFETY: same exclusive owner and kept provider leases.
         unsafe {
             authority.with_pmf_authentication(self, |client, guard| {
                 let beacon = observed.bss.clone();
@@ -73,13 +73,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         .map_err(Error::Regulatory)?
     }
-    /// Service the same actual pending auth/assoc Ticket under freshly acquired
+    /// Service the same pending auth/assoc Ticket under freshly acquired
     /// original policy/native/revision guards. Each retry and association TX
-    /// requalifies its newly generated actual Ticket and exact canonical bytes.
+    /// requalifies its newly generated Ticket and exact canonical bytes.
     /// A revoked binding never silently inherits a later policy revision.
     ///
     /// # Safety
-    /// The exact same requester/selection, retention and real revocation/drain
+    /// The same requester/selection, retention and real revocation/drain
     /// contract as join_modern_pmf remains in force through every native user.
     pub unsafe fn poll_pmf_authentication<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -91,7 +91,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if self.phase() != Phase::Joining || !self.station().requires_protected_management() {
             return Err(Error::WrongPhase);
         }
-        // SAFETY: exclusive same native owner; guard borrows both actual leases.
+        // SAFETY: exclusive same native owner; guard borrows both leases.
         unsafe {
             authority.with_pmf_authentication(self, |client, guard| {
                 Self::qualify_pmf_authentication(client.state_mut(), guard, None)?;
@@ -151,7 +151,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         pmf.validate_peer(&observed.bss().elements, &[])
             .map_err(|e| Error::Station(station::Error::Wire(e)))?;
         let observed = observed.clone();
-        // SAFETY: exact same exclusive owner and actual retained provider leases.
+        // SAFETY: same exclusive owner and kept provider leases.
         unsafe {
             authority.with_pmf_authentication(self, |client, guard| {
                 let s = client.state_mut();

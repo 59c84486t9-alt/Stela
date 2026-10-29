@@ -1,9 +1,9 @@
 //! UEFI PCI_IO resource observations. Decoding yields DATA, never native
-//! mapping, configuration, reset or controller authority.
+//! mapping, configuration, reset or controller permission.
 //! UEFI2.11 tables14.10/14.11 use this QWORD layout and HOST-to-PCI offset.
 //! EDK2 reference: tianocore/edk2@4dfdca63a93497203f197ec98ba20e2327e4afe4,
-//! MdeModulePkg/Bus/Pci/PciBusDxe/PciIo.c::PciIoGetBarAttributes. Actual range
-//! observation is checked Start+Length; raw maximum is retained separately.
+//! MdeModulePkg/Bus/Pci/PciBusDxe/PciIo.c::PciIoGetBarAttributes. Range
+//! observation is checked Start+Length; raw maximum is held separately.
 use core::ops::Range;
 pub const QWORD_BYTES: usize = 46;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,7 +24,7 @@ pub struct BarRegion {
     pub granularity: u64,
     /// Raw maximum observation. UEFI table14.10 calls this the ending
     /// address; EDK2 PciIoGetBarAttributes exports BAR.Alignment here instead.
-    /// Preserve it without turning either interpretation into native authority.
+    /// Preserve it without turning either interpretation into native permission.
     pub observed_maximum: u64,
     pub host: Range<u64>,
     pub translation: u64,

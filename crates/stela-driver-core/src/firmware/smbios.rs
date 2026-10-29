@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Physical-host SMBIOS observations, distinct from translated guest identity.
-//! Layouts: DMTF DSP0134 3.8.0 §§5.2,6.1,7.2. No source mapping authority is
-//! granted by this pure parser; boot must copy genuinely readable pre-EBS data.
+//! Layouts: DMTF DSP0134 3.8.0 §§5.2,6.1,7.2. No source mapping permission is
+//! granted by this pure parser; boot must copy readable pre-EBS data.
 use super::{Image, Provenance, Provider, Requirement, Resource, Target};
 use crate::bytes::{le16, le32};
 use alloc::{format, string::String};
@@ -81,7 +81,7 @@ pub enum Observation<'a> {
 }
 /// Raw parsed observations only, not a physical-host/policy credential. An
 /// arbitrary Provider can replay identical bytes and provenance. Native unsafe
-/// admission must bind this boot's genuine capture owner and actual Function.
+/// admission must bind this boot's capture owner and Function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemIdentity<'a> {
     pub system_vendor: Observation<'a>,
@@ -222,7 +222,7 @@ fn field<'a>(index: u8, strings: &'a [u8]) -> Result<Observation<'a>, Error> {
     Err(Error::InvalidStringIndex)
 }
 /// Walk the complete declared table. Every string-set has a bounded double NUL;
-/// only an actual zero string index establishes verified field absence.
+/// only a zero string index establishes verified field absence.
 pub fn identity(entry: Entry, table: &[u8]) -> Result<SystemIdentity<'_>, Error> {
     if table.len() > MAX_TABLE_BYTES || table.len() != entry.table_bytes {
         return Err(Error::TableLength);
@@ -334,7 +334,7 @@ fn revision(entry: &[u8], table: &[u8]) -> String {
     };
     format!("entry-sha256:{};table-sha256:{}", hex(entry), hex(table))
 }
-/// Retained byte ownership is supplied by boot's permanent-page allocation.
+/// Byte ownership is supplied by boot's permanent-page allocation.
 pub struct Captured<B> {
     bytes: Option<B>,
     entry: Entry,

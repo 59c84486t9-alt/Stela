@@ -5,12 +5,12 @@
 //! 1006094..60a8 initializes TRCE=1;101f494..f7c4 owns ring selection,
 //! overflow/filter/32-byte records;102d110..d7dc owns endpoint3 and lifecycle.
 //! Source audit: pmgr/metrics-backend-destinations-r1. Source addresses are
-//! provenance only. No firmware executes. Actual mappings, native thread/clock,
+//! provenance only. No firmware executes. Mappings, native thread/clock,
 //! queue/wait and mailbox effects are mandatory moved-in resources.
 //!
 //! Default AP-buffer initialization is admitted. Alternate native-heap and
-//! secondary-ring construction are explicitly unqualified, rather than fake
-//! allocations. An actual no-buffer/disabled/filtered return is an Emitted
+//! secondary-ring construction are explicitly unchecked, rather than fake
+//! allocations. A no-buffer/disabled/filtered return is an Emitted
 //! outcome with its source code; it does not claim any record was published.
 use super::platform::owner::Completion;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
@@ -33,8 +33,8 @@ pub enum Error {
     Contract(&'static str),
     Backend(&'static str),
 }
-/// Source configuration DATA, not allocation, arrival or readiness authority.
-/// The parent must retain its actual native configuration producer. The source
+/// Source configuration DATA, not allocation, arrival or readiness permission.
+/// The parent must keep its native configuration producer. The source
 /// startup reads n then initializes n+1 slots and replaces threshold n/10 with
 /// n/2 at10061d4..dc. No Apple SKU count is inferred here.
 #[derive(Clone, Copy, Debug)]
@@ -107,10 +107,10 @@ pub enum Synchronization {
     /// Actual102b67c completion before producer-index flush publication.
     Complete,
 }
-/// A live canonical RAM/DMA mapping, moved into this owner after the actual
+/// A live canonical RAM/DMA mapping, moved into this owner after the
 /// endpoint3 reply is consumed. No copied Vec, numeric address or host pointer
-/// alone grants buffer ownership. Each write/read retains its actual prefix
-/// under Request across Busy/refusal; Retired never means merely enqueued.
+/// alone grants buffer ownership. Each write/read keeps its prefix
+/// under Request across Busy/refusal; Retired never means enqueued.
 pub trait Mapping {
     fn geometry(&self) -> Geometry;
     fn read(
@@ -141,7 +141,7 @@ pub enum Ordering {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
-    ///102d354..398: work enabled1,pending0,priority15,actual global queue.
+    ///102d354..398: work enabled1,pending0,priority15,global queue.
     RegisterWork {
         priority: u8,
     },
@@ -157,15 +157,15 @@ pub enum Effect {
         message: u64,
     },
     Ordering(Ordering),
-    /// Actual waiter keyed by this owner's flush-busy cell; releases/reacquires
+    /// Waiter keyed by this owner's flush-busy cell; releases/reacquires
     /// queue lock. A real consumed-index callback can execute while it waits.
     DrainWait,
     NotifyWaiters,
 }
-/// Actual native execution-context observations corresponding to101fb40,
+/// Native execution-context observations corresponding to101fb40,
 ///102d1d0..dc and1023ad4. These are data from the cooperative scheduler owner,
 /// not a public ready flag or an invented host-pointer thread identity.
-/// The backend retains the real scheduler critical-section read/mask/restore
+/// The backend keeps the real scheduler critical-section read/mask/restore
 /// prefix corresponding to1023ad4; source EL0/assert contexts must refuse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlushContext {
@@ -179,10 +179,10 @@ impl FlushContext {
     }
 }
 /// Fixed real owners. No default implementation or successful absent sink.
-/// Receive returns an actually consumed endpoint3 message, not caller-supplied
+/// Receive returns a consumed endpoint3 message, not caller-supplied
 /// synthetic commands. Clock reads the bound source/native clock; thread_id is
-/// assigned by the actual cooperative native owner (never a host pointer cast
-/// or an ad hoc zero). Mapping/sync/ordering/send effects retire actual work.
+/// assigned by the cooperative native owner (never a host pointer cast
+/// or an ad hoc zero). Mapping/sync/ordering/send effects retire work.
 pub trait Backend {
     type Mapping: Mapping;
     fn effect(
@@ -215,7 +215,7 @@ pub enum RecordKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Emission {
     pub source_return: u32,
-    /// Data describing an actual timestamp-last write, not completion authority
+    /// Data describing a timestamp-last write, not completion permission
     /// for MC, PTD or any unrelated device.
     pub record: Option<RecordKind>,
 }
@@ -236,7 +236,7 @@ impl Emission {
 pub enum Progress {
     Initialized,
     Emitted(Emission),
-    /// Source worker handles one actual input then returns1; no input returns0.
+    /// Source worker handles one input then returns1; no input returns0.
     Dispatched {
         consumed: bool,
         kind: Option<u8>,
@@ -358,8 +358,8 @@ macro_rules! retired {
 /// Concrete ring/filter/command owner. Pure source-initialized cells are
 /// explicitly software state, never observed hardware. No set-ready/enabled,
 /// buffer injection, mark-published, replacement backend or cancellation API.
-/// Protocol processing remains independent of a retained lifecycle DrainWait,
-/// so the actual consumed-index callback can clear busy and wake that waiter.
+/// Protocol processing remains independent of a lifecycle DrainWait,
+/// so the consumed-index callback can clear busy and wake that waiter.
 /// Other foreground/protocol overlap is refused before consuming input; full
 /// multithreaded producer interleavings are not claimed by this serialized
 /// cooperative owner. Rust ownership provides exclusive index reservation.
@@ -669,7 +669,7 @@ impl<B: Backend> Owner<B> {
                     return Ok(Flow::Expand(vec![Op::NotifyContext, Op::NotifyApply]));
                 }
                 // Exclusive owner reservation implements source LDXR/STXR; the
-                // actual DSB is a separate mandatory retained effect below.
+                // DSB is a separate mandatory kept effect below.
                 self.write = next;
                 job.slot = old;
                 return Ok(Flow::Expand(vec![
@@ -929,7 +929,7 @@ impl<B: Backend> Owner<B> {
                     job.wait_reached = true;
                     retired!(job, self.backend.effect(request, Effect::DrainWait, access));
                     job.wait_reached = false;
-                    // Source while-loop rechecks its actual busy cell. Each
+                    // Source while-loop rechecks its busy cell. Each
                     // retired wait is distinct; Busy retries preserve identity.
                     return Ok(Flow::Expand(vec![Op::PauseWait]));
                 }
@@ -1364,7 +1364,7 @@ mod tests {
                 record: Some(RecordKind::Requested),
             }),
         );
-        // Actual AP flush request is read; next dispatch performs real flush.
+        // AP flush request is read; next dispatch performs real flush.
         command(&mut o, 7u64 << 48);
         o.begin_dispatch().unwrap();
         until(
@@ -1384,7 +1384,7 @@ mod tests {
         );
         command(&mut o, (3u64 << 48) | 1);
         assert!(!o.flush_busy());
-        // Actual notification now allows the already-entered wait to retire.
+        // Notification now allows the already-entered wait to retire.
         until(&mut o, Progress::Paused);
         assert_eq!(o.indices(), (1, 1));
         assert_eq!(&o.backend.views[0].data.borrow()[..8], &[0; 8]);
@@ -1495,7 +1495,7 @@ mod original_tests {
         assert_eq!(word(&b, 0x104bf44), 1);
         assert_eq!(word(&b, 0x1032e48), 0x911a816b); // ADD X11,X11,#6a0
         assert_eq!(word(&b, 0x1032e64), 0xa90226cb); // STR pair into config+20
-        assert_eq!(word(&b, 0x10061d8), 0x53017d00); // actual n>>1
+        assert_eq!(word(&b, 0x10061d8), 0x53017d00); // n>>1
         assert_eq!(super::Configuration::t8112().slots(), 0x8001);
         assert_eq!(super::Configuration::t8112().threshold(), 0x4000);
     }

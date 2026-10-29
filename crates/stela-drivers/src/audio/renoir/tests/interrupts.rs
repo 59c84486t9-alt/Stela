@@ -13,8 +13,8 @@ fn renoir_error_gate_order_unrelated_interrupts_and_pending_faults_are_real() {
     controller.initialize().unwrap();
     {
         let model = device.lock().unwrap();
-        // Adversarial reset retains unrelated CNTL/status; init preserves
-        // both, and the actual gate precedes source error enable.
+        // Adversarial reset keeps unrelated CNTL/status; init preserves
+        // both, and the gate precedes source error enable.
         assert_eq!(model.words[0x1808 / 4], 1 << 9);
         let gate = model
             .writes
@@ -42,7 +42,7 @@ fn renoir_error_gate_order_unrelated_interrupts_and_pending_faults_are_real() {
         device.lock().unwrap().words[0x1804 / 4],
         (1 << 29) | (1 << 7)
     );
-    // A latched actual error before restart prevents any new DMA request.
+    // A latched error before restart prevents any new DMA request.
     device.lock().unwrap().words[0x1808 / 4] |= 1 << 29;
     let before = device.lock().unwrap().writes.len();
     assert_eq!(

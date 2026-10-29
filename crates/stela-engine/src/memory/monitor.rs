@@ -66,7 +66,7 @@ pub enum Invalidation {
     BeforeAttempt,
 }
 
-/// Immutable view identity retains the real mapping payload for reservations.
+/// Immutable view identity keeps the real mapping payload for reservations.
 /// Protection/backing/attribute changes revoke this identity and create another.
 /// Root must also hold stable memory pins while invoking an access callback.
 pub struct Mapping<M, A> {
@@ -134,7 +134,7 @@ impl<B, M, A> Access<B, M, A> {
     }
 }
 
-/// One actually reached writer event, not an entire speculative store footprint.
+/// One reached writer event, not an entire speculative store footprint.
 pub struct WriteRange<B> {
     backing: Arc<B>,
     offset: u64,
@@ -169,7 +169,7 @@ impl Key {
     }
 }
 
-/// No integer version or epoch counter exists. A live reservation retains this
+/// No integer version or epoch counter exists. A live reservation keeps this
 /// allocation and its backing; allocator address reuse cannot revive that mark.
 struct Epoch<B> {
     backing: Arc<B>,
@@ -186,7 +186,7 @@ pub enum ReservationScope {
 
 struct EventState<B> {
     epoch: Weak<Epoch<B>>,
-    // Active GlobalMark retains this Mapping allocation; no address reuse.
+    // Active GlobalMark keeps this Mapping allocation; no address reuse.
     mapping: usize,
 }
 
@@ -240,7 +240,7 @@ pub struct ThreadMonitor<B, M, A> {
     event: Option<Arc<EventCell<B>>>,
 }
 
-/// A retained exclusive borrow of the real local monitor. Dropping this
+/// A kept exclusive borrow of the real local monitor. Dropping this
 /// preparation changes nothing; commit cannot substitute another reservation.
 pub(crate) struct PreparedClear<'a, B, M, A> {
     domain: &'a MonitorDomain<B, M, A>,
@@ -276,7 +276,7 @@ impl<B, M, A> Drop for GlobalRetirement<'_, B, M, A> {
     }
 }
 
-/// Retains every physical writer gate without changing bytes or reservations.
+/// Keeps every physical writer gate without changing bytes or reservations.
 /// Only the canonical memory owner uses this while native frames are recovered.
 /// No monitor operation may reenter while the guard is held.
 pub(in crate::memory) struct FrozenWriters<'a, B, M, A> {
@@ -350,7 +350,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         Ok(())
     }
 
-    /// Verify retained real endpoint identity; never rebind or mutate a mark.
+    /// Verify kept real endpoint identity; never rebind or mutate a mark.
     /// The higher owner borrows the live EventEndpoint for the complete entry.
     pub fn check_event_endpoint(
         &self,
@@ -458,7 +458,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
             if open {
                 self.open_cell(cell, &mark.epoch, Some(Arc::as_ptr(&mark.mapping) as usize));
             }
-            // Same-Epoch retarget is still current: retain its reused subscriber.
+            // Same-Epoch retarget is still current: keep its reused subscriber.
             let still_current = Self::current_is(&self.event_lock(&cell.current), &mark.epoch);
             if !still_current {
                 subscribers.retain(|subscriber| {

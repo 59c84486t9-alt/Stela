@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Actual descriptor-qualified native EP0 and interrupt DMA observations.
+//! Descriptor-checked native EP0 and interrupt DMA observations.
 use super::*;
 use crate::{
     block::BlockError,
@@ -77,7 +77,7 @@ fn actual_native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = peer(&mut dma, 1);
-    // PCM must consume genuine device validity, RANGE, current-frequency and
+    // PCM must consume device validity, RANGE, current-frequency and
     // validity replies before the native isochronous queue can be owned. The
     // connector peer has no implicit clock responses or synthetic startup.
     model.borrow_mut().control_replies.extend([
@@ -158,7 +158,7 @@ fn actual_short_or_stalled_connector_query_never_fabricates_connected_state() {
                 audio.connector_status(3),
                 Err(Error::Transport(BlockError::Device { status: 6 }))
             );
-            // The first failed request actually halted EP0 and the engine
+            // The first failed request halted EP0 and the engine
             // acknowledged Reset Endpoint + Set Dequeue before returning it.
             assert!(model.borrow().seen.contains(&14));
             assert!(model.borrow().seen.contains(&16));
@@ -170,8 +170,8 @@ fn actual_short_or_stalled_connector_query_never_fabricates_connected_state() {
                 .push_back((xhci::setup(0xa1, 1, 0x0200, 0x0300, 6), vec![2, 3, 0, 0, 0]));
             assert_eq!(audio.connector_status(3), Err(Error::ControlLength));
         }
-        // A later actual complete observation can succeed after the native
-        // EP0 engine's genuine acknowledged recovery; the failed read cached
+        // A later complete observation can succeed after the native
+        // EP0 engine's acknowledged recovery; the failed read cached
         // no connected/disconnected replacement and changed no terminal state.
         model
             .borrow_mut()

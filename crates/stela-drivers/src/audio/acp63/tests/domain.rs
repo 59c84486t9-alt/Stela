@@ -3,7 +3,7 @@
 use super::*;
 
 // SAFETY: isolated synchronous model, real owned CPU RAM and symbolic
-// physical/IOVA labels. Device accesses walk actual programmed ACP PTEs
+// physical/IOVA labels. Device accesses walk programmed ACP PTEs
 // through this domain; no identity DMA or production hardware is claimed.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
@@ -130,7 +130,7 @@ unsafe impl DmaDomain for Domain {
             .cpu
             .address(offset, 4)
             .unwrap();
-        // SAFETY: actual model-owned retained mapping, per-word coherent
+        // SAFETY: model-owned kept mapping, per-word coherent
         // observation; no CPU writers or ownership transfer are invented.
         let observed = unsafe { pointer.as_ptr().cast::<u32>().read_volatile() };
         device.coherent_reads += 1;
@@ -161,7 +161,7 @@ unsafe impl DmaDomain for Domain {
             let translation = device.translation.as_ref().unwrap();
             let pointer = translation.cpu.address(offset, 4).unwrap();
             // SAFETY: this independent fabric completion finishes its
-            // queued writes into the exact retained domain mapping.
+            // queued writes into the exact domain mapping.
             unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
         }
         Ok(())

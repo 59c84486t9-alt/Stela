@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Held authority for an actual PMF authentication/association exchange.
-//! This never fabricates a successful AssociationContext or authenticates RSN.
+//! Held permission for a PMF authentication/association exchange.
+//! This never invents a successful AssociationContext or authenticates RSN.
 use super::{
     AssociationOwner, Error, HardwareLease, HardwarePolicy, NativeContext, OsLease, OsPolicy, Owner,
 };
@@ -10,9 +10,9 @@ use crate::net::wifi::{
 };
 use alloc::sync::Arc;
 
-/// Original selected request and actual completed native BSS observation. The
+/// Original selected request and completed native BSS observation. The
 /// pending Ticket is created by canonical Station, not supplied by a frontend.
-/// Providers must qualify the entire enabled pre-association native envelope,
+/// Providers must check the entire enabled pre-association native envelope,
 /// including peer configuration, baseline rates, ROC, retries and native RX/TX.
 #[derive(Debug)]
 pub struct PmfAuthenticationOperation<'a> {
@@ -34,15 +34,15 @@ impl PmfAuthenticationOperation<'_> {
     pub fn beacon(&self) -> &Bss {
         self.observation.bss()
     }
-    /// Actual canonical bytes about to be published; None qualifies receive/
+    /// Canonical bytes about to be published; None checks receive/
     /// timeout servicing only. Providers must never infer TX from None.
     pub const fn transmit(&self) -> Option<&[u8]> {
         self.transmit
     }
 }
 
-/// Inert identity fence. Only another actually held guard can use it. The
-/// original private native observation remains retained by its exact Arc.
+/// Inert identity fence. Only another held guard can use it. The
+/// original private native observation remains held by its exact Arc.
 #[derive(Clone)]
 pub(crate) struct PmfAuthenticationBinding {
     owner: u64,
@@ -51,7 +51,7 @@ pub(crate) struct PmfAuthenticationBinding {
     epoch: u64,
     observation: Arc<NativeBssObservation>,
 }
-/// Private lifetime-bound borrow of both actual provider leases. It cannot be
+/// Private lifetime-bound borrow of both provider leases. It cannot be
 /// constructed externally, copied, stored in a native packet or outlive either.
 pub(crate) struct PmfAuthenticationGuard<'a> {
     owner: u64,
@@ -109,13 +109,13 @@ impl PmfAuthenticationGuard<'_> {
 }
 impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     /// Acquire the real providers before pure native preparation. The callback
-    /// must qualify the actual newly generated Ticket before any native effect.
+    /// must check the newly generated Ticket before any native effect.
     /// No Station borrow survives the exclusive native callback.
     ///
     /// # Safety
-    /// Same actual requester, retained policy/board/radio resources and real
+    /// Same requester, kept policy/board/radio resources and real
     /// revocation/stop/drain contract as publish_association. An observation or
-    /// matching copied numbers alone never proves actual hardware ownership.
+    /// matching copied numbers alone never proves hardware ownership.
     pub(crate) unsafe fn with_pmf_authentication<N: AssociationOwner, T>(
         &mut self,
         native_owner: &mut N,

@@ -83,7 +83,7 @@ impl DmaBuffer {
     }
 
     pub fn bytes(&self) -> &[u8] {
-        // SAFETY: the allocator retains this exclusive CPU mapping for this buffer.
+        // SAFETY: the allocator keeps this exclusive CPU mapping for this buffer.
         unsafe { core::slice::from_raw_parts(self.as_ptr(), self.bytes) }
     }
 
@@ -108,7 +108,7 @@ impl DmaBuffer {
     }
 
     /// Volatile access for structures the device updates while the CPU polls.
-    /// This checks both the complete word's bounds and its actual alignment.
+    /// This checks both the complete word's bounds and its alignment.
     ///
     /// ```compile_fail
     /// use stela_drivers::bus::dma::DmaBuffer;

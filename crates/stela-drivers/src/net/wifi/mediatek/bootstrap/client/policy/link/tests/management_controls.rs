@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-// Sole-owning frontend over actual modeled scan/association/key/DMA commands.
+// Sole-owning frontend over modeled scan/association/key/DMA commands.
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::client::management::{Received, Session, Transmit};
 
@@ -11,7 +11,7 @@ fn prepared() -> (TestLink, Model, Arc<Session>, Arc<AtomicUsize>) {
     link.install_key(false, 2, &[0x44; 16], ReplaySeed::ZERO)
         .unwrap();
     let epoch = link.station().association_epoch().unwrap();
-    // Association/scan/release notices are actual retained old-key users, so the
+    // Association/scan/release notices are held old-key users, so the
     // owning frontend must refuse initial installation until they are consumed.
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(matches!(
@@ -24,7 +24,7 @@ fn prepared() -> (TestLink, Model, Arc<Session>, Arc<AtomicUsize>) {
     ));
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
     drop(drain_notices(&mut link));
-    // SAFETY: actual modeled queues/notices and independent old RX/IRQ/users
+    // SAFETY: modeled queues/notices and independent old RX/IRQ/users
     // are drained. The model OS provided this association's authentic IGTK.
     let session = unsafe {
         link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap())
@@ -53,7 +53,7 @@ fn pending_descriptor(model: &Model) -> (u16, u16, Vec<u8>) {
     let memory = model.memory.lock().unwrap();
     let offset = usize::from((queue.index + queue.count - 1) % queue.count) * 16;
     let pointer = (memory.mappings[&queue.base].1 + offset) as *const u8;
-    // SAFETY: the actual completed model descriptor remains mapped and owned.
+    // SAFETY: the completed model descriptor remains mapped and owned.
     let bytes = unsafe { core::slice::from_raw_parts(pointer, 16) }.to_vec();
     assert_ne!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()) & (1 << 31),
@@ -107,9 +107,9 @@ fn owning_management_notices_preserve_the_65th_actual_ddone_and_consume_original
         link.with_management(deferred, |_, _, _| panic!("revoked original OS envelope")),
         Err(LinkControlError::Policy(PolicyError::Revoked))
     ));
-    // SAFETY: all actual modeled descriptors/notifications and old users drained.
+    // SAFETY: all modeled descriptors/notifications and old users drained.
     unsafe { link.retire_peer_after_drain() }.unwrap();
-    // Revoked policy retirement already sent the actual interface/DMA stop.
+    // Revoked policy retirement already sent the interface/DMA stop.
     // A second stop is refused rather than republishing native commands; this
     // state still requires the independent whole-controller quiescence below.
     assert_eq!(link.phase(), Phase::ControllerDrain);
@@ -184,7 +184,7 @@ fn owning_management_tx_releases_original_keys_and_rejects_deferred_envelope_aft
             .is_err()
     );
     assert_eq!(model.bar.0.lock().unwrap().log.len(), log);
-    // SAFETY: actual removal ACK and independent model old-user drain.
+    // SAFETY: removal ACK and independent model old-user drain.
     unsafe { link.retire_peer_after_drain() }.unwrap();
     link.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;

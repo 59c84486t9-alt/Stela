@@ -4,9 +4,9 @@
 //! physical SRAM iBoot's native-program installation writes. No request, installed pointer,
 //! zero instruction or observed control value alone establishes a hardware
 //! trigger or retirement. The optional Stela-native CIO engine owns accepted
-//! requests, actual packet effects and exact finalized ends. It does not claim
+//! requests, packet effects and exact finalized ends. It does not claim
 //! captured Apple microstate. Every view shares the parent controller's lifecycle,
-//! request prefix and actual byte storage; there is no parallel SRAM image.
+//! request prefix and byte storage; there is no parallel SRAM image.
 use super::{Controller, RequestKind};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use {
@@ -99,9 +99,9 @@ pub struct Control {
     pub fields: u32,
 }
 /// Complete original `47090`/`471b8` first-die configuration interface and
-/// `4b030`/`3d7d4` activation stores. The latter retain actual control inputs;
-/// they do not qualify request-to-PC selection or hardware retirement.
-/// Field masks qualify software inputs, never completion/status bits.
+/// `4b030`/`3d7d4` activation stores. The latter keep control inputs;
+/// they do not check request-to-PC selection or hardware retirement.
+/// Field masks check software inputs, never completion/status bits.
 pub fn controls() -> Vec<Control> {
     let mut rows = vec![
         Control {
@@ -162,7 +162,7 @@ pub struct Fragment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SramInitialization {
     Unknown,
-    /// An actual whole-owned-resource zero operation, before any image stores.
+    /// A whole-owned-resource zero operation, before any image stores.
     /// This is a declared Stela entry policy, never an Apple reset observation.
     Zeroed,
 }
@@ -245,7 +245,7 @@ impl State {
         match handoff {
             Handoff::Unknown => {}
             Handoff::StelaEmpty { sram } => {
-                // Actual initialization of this newly owned virtual resource,
+                // Initialization of this newly owned virtual resource,
                 // with explicit provenance. No other device state is touched.
                 for word in state.words.values_mut() {
                     word.known = u32::MAX;
@@ -336,7 +336,7 @@ impl State {
     fn activation_word(address: u64) -> bool {
         ACTIVATION_WORDS.iter().any(|(word, _)| *word == address)
     }
-    /// This is an ownership qualification, not an assertion of physical idle.
+    /// This is an ownership validation, not an assertion of physical idle.
     /// Unknown/nonzero activation inputs or any committed activation prefix
     /// cannot authorize replacing configuration/code. Later disable stores do
     /// not erase earlier work that may already have started.
@@ -470,7 +470,7 @@ impl State {
         if !pc.is_multiple_of(32) || !(CODE_BASE..SRAM_LIMIT).contains(&pc) {
             return Err(Error::Pointer);
         }
-        // This confirms actual bytes exist, not that their native tag retires.
+        // This confirms bytes exist, not that their native tag retires.
         self.read_sram(pc - SRAM_BASE, Width::Word)?;
         Ok(Entry {
             group,
@@ -508,7 +508,7 @@ impl Controller {
             .ok_or(Error::Unmounted)?
             .observe())
     }
-    /// Resolve actual published input bytes only. No caller can turn this
+    /// Resolve published input bytes only. No caller can turn this
     /// metadata query into a trigger, active PC, ready flag or completion.
     pub fn native_entry(&self, group: u8, slot: u8) -> Result<Entry, Error> {
         self.0
@@ -790,7 +790,7 @@ mod tests {
         assert!(!memory.read(CODE_BASE + 8, &mut unknown));
         assert_eq!(unknown, [0xa5; 8]);
         assert_eq!(owner.native_entry(2, 6), Err(Error::UnknownSram));
-        // Both APIs address the same actual bytes and knownness plane.
+        // Both APIs address the same bytes and knownness plane.
         assert!(memory.write(CODE_BASE + 1, &[0x12, 0x34]));
         assert_eq!(
             bus.read(CODE_BASE, Width::Word, &mut access),
@@ -817,7 +817,7 @@ mod tests {
             .unwrap()
             .set_lifecycle(paused, &mut access);
         assert_eq!(owner.lifecycle(), paused);
-        // Quiesce suspends execution, while the supplied configuration bus is retained.
+        // Quiesce suspends execution, while the supplied configuration bus is held.
         assert_eq!(
             bus.read(CODE_BASE, Width::Word, &mut access),
             Ok(0x12345678)
@@ -987,8 +987,8 @@ mod tests {
         let mut sink = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut sink);
         // Explicit supplied emitter-format test program: disable CPM, poll its
-        // actual input bit clear, then submit a real GPCE target. End remains
-        // unqualified; none of these effects acknowledges native completion.
+        // input bit clear, then submit a real GPCE target. End remains
+        // unchecked; none of these effects acknowledges native completion.
         let words = [
             0x28e09c01, 0, 0x30, 0, 0x28e09c02, 0, 0x30, 0x80000000, 0, 0x28e09801, 0, 0, 15, 0,
         ];
@@ -1097,14 +1097,14 @@ mod tests {
             effects.begin_read().unwrap_err(),
             sequencer::Error::UnqualifiedRetirement
         );
-        assert_eq!(owner.requests().len(), 2); // disable input and actual GPCE target
+        assert_eq!(owner.requests().len(), 2); // disable input and GPCE target
         let gpce = owner
             .observations()
             .into_iter()
             .find(|word| word.offset == 0x18000)
             .unwrap();
         assert_eq!(gpce.value & 15, 15);
-        assert_eq!(gpce.known & 0x70, 0); // no readiness fabricated by a matched poll
+        assert_eq!(gpce.known & 0x70, 0); // no readiness invented by a matched poll
         let mut retained = vec![0; bytes.len()];
         memory.read_checked(entry.pc, &mut retained).unwrap();
         assert_eq!(retained, bytes);
@@ -1126,7 +1126,7 @@ mod tests {
             let (mut bus, controls, _) = mount(&owner);
             let mut pins = InterruptLatch::new();
             let mut access = Access::new(0, 0, &mut pins);
-            // Source-format supplied test program: actual GPCE request, wait
+            // Source-format supplied test program: GPCE request, wait
             // three native cycles, then end. No request or end ACK follows.
             let words = [0x28e09801, 0, 0, 15, 4 | (3 << 6), 0];
             let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();

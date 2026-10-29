@@ -3,7 +3,7 @@
 // net/mac80211/{util.c,mlme.c}; source notices in THIRD_PARTY.md.
 //! Single-link open-system, shared-key, static WEP and RSN wire forms. Legacy
 //! constructors refuse PMF; the explicit modern PMF profile requires separate
-//! retained OS authority.
+//! OS permission.
 
 use super::{PortPolicy, phy};
 use crate::net::{
@@ -65,7 +65,7 @@ impl Wep {
 }
 
 /// Exact local association advertisement and explicit OS-selected PHY profile.
-/// Vendor admission must bind it to the actual retained hardware capabilities.
+/// Vendor admission must bind it to the hardware capabilities.
 #[derive(Clone, Debug)]
 pub struct ModernSelection {
     pub(crate) capabilities: phy::Capabilities,
@@ -230,7 +230,7 @@ impl AssociationRequest {
 
     /// Explicit modern advertisement, not authorization to use these modes.
     /// The current station modern entry still refuses 6GHz until SAE/PMF and
-    /// the genuine OS authentication boundary are implemented.
+    /// the OS authentication boundary are implemented.
     pub fn new_modern(
         capabilities: u16,
         listen_interval: u16,
@@ -249,7 +249,7 @@ impl AssociationRequest {
     }
 
     /// Preserve complete local source-capability observations alongside the
-    /// exact transmitted advertisement. Actual native-owner binding remains
+    /// exact transmitted advertisement. Native-owner binding remains
     /// mandatory; caller-provided source words are not hardware proof.
     pub fn new_modern_with_local(
         capabilities: u16,
@@ -281,7 +281,7 @@ impl AssociationRequest {
 
     /// Explicit single-link CCMP128/BIP-CMAC128 advertisement selected by the
     /// real OS. Parsing is not authentication or permission to configure native
-    /// resources: both current providers must separately qualify this selection.
+    /// resources: both current providers must separately check this selection.
     pub fn new_modern_with_local_pmf(
         capabilities: u16,
         listen_interval: u16,
@@ -438,7 +438,7 @@ impl AssociationRequest {
                     legacy_wpa = true;
                 }
                 // Do not advertise modes the current native state machine and
-                // actual driver association context cannot configure yet.
+                // driver association context cannot configure yet.
                 61 | 192 => {
                     return Err(Error::Unsupported("AP operation in station request"));
                 }

@@ -99,8 +99,8 @@ impl Binding {
     }
 }
 // SAFETY: hosted single-thread hooks use atomics and bounded try_lock,
-// retain all model roots, never switch/allocate/drop final owners.
-// They validate genuine Runtime stack/ticket metadata on every hook.
+// keep all model roots, never switch/allocate/drop final owners.
+// They validate Runtime stack/ticket metadata on every hook.
 unsafe impl SwitchBinding for Binding {
     unsafe fn attach(&self, context: &TaskContext) -> Result<(), WorkError> {
         self.stack(context, true);
@@ -231,12 +231,12 @@ struct BoundFixture {
 impl BoundFixture {
     /// # Safety
     /// setup must have published the live pinned Executor runtime, and that
-    /// Executor must remain retained while this reference is used.
+    /// Executor must remain held while this reference is used.
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
-        // SAFETY: test Queue retains this fixture; actual executor
+        // SAFETY: test Queue keeps this fixture; executor
         // allocation stays pinned/owned through completion/quarantine.
         // SAFETY: setup wrote this pointer from the already pinned Runtime before
-        // callback admission. The Executor retains that allocation through every use here.
+        // callback admission. The Executor keeps that allocation through every use here.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>))
         }
@@ -270,7 +270,7 @@ impl BoundFixture {
             if id == 0 {
                 continue;
             }
-            // SAFETY: Binding storage is retained by the fixture on the dispatcher thread.
+            // SAFETY: Binding storage is held by the fixture on the dispatcher thread.
             // The runtime checks completed/pending state before returning or releasing that owner.
             let retained = unsafe { self.runtime().detach_binding(ContextId(id)) }.unwrap();
             assert_eq!(self.cpu.flags.load(Ordering::Acquire), 0x202);
@@ -301,7 +301,7 @@ fn bound_setup() -> (Executor<16>, Arc<BoundFixture>, Arc<AtomicU64>) {
         data: AtomicU64::new(0),
         events: Mutex::new(Vec::new()),
     });
-    // SAFETY: The queue retains the fixture Arc and same-thread CpuModel. setup stores
+    // SAFETY: The queue keeps the fixture Arc and same-thread CpuModel. setup stores
     // the pinned runtime pointer before admitting any callback that can read it.
     let queue = unsafe { Queue::<16>::new(cpu, f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
@@ -313,16 +313,16 @@ fn bound_setup() -> (Executor<16>, Arc<BoundFixture>, Arc<AtomicU64>) {
     (executor, f, dropped)
 }
 /// # Safety
-/// p must be the queue-retained Arc pointer for BoundFixture; the returned borrow
+/// p must be the queue-kept Arc pointer for BoundFixture; the returned borrow
 /// must end before that owner can be released.
 unsafe fn bound<'a>(p: *mut c_void) -> &'a BoundFixture {
     // SAFETY: The caller supplies the aligned Arc::as_ptr allocation of this fixture
-    // type. Its queue retains the Arc while callbacks use this shared reference.
+    // type. Its queue keeps the Arc while callbacks use this shared reference.
     unsafe { &*p.cast::<BoundFixture>() }
 }
 unsafe extern "C" fn park_until_cancelled(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { bound(p) };
     f.bind(0);
     let binding = &f.bindings[0];
@@ -350,7 +350,7 @@ fn blocked_task_cancel_and_retirement() {
     assert_eq!(r.current_context(), Err(WorkError::Unavailable));
     assert_eq!(r.park_if_blocked(), Err(WorkError::Unavailable));
     assert_eq!(
-        // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+        // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
         // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
         unsafe { r.call_foreground(park_until_cancelled, p, 10000) },
         Err(WorkError::Pending)
@@ -368,7 +368,7 @@ fn blocked_task_cancel_and_retirement() {
         .unwrap()
         .clone();
     assert_eq!(
-        // SAFETY: Binding storage is retained by the fixture on the dispatcher thread.
+        // SAFETY: Binding storage is held by the fixture on the dispatcher thread.
         // The runtime checks completed/pending state before returning or releasing that owner.
         unsafe { r.detach_binding(handle.context_id()) }.err(),
         Some(WorkError::Pending)
@@ -402,7 +402,7 @@ fn blocked_task_cancel_and_retirement() {
     assert_eq!(handle.wake(), Err(WorkError::Closed));
     f.bindings[0].refs.store(2, Ordering::Release);
     assert_eq!(
-        // SAFETY: Binding storage is retained by the fixture on the dispatcher thread.
+        // SAFETY: Binding storage is held by the fixture on the dispatcher thread.
         // The runtime checks completed/pending state before returning or releasing that owner.
         unsafe { r.detach_binding(handle.context_id()) }.err(),
         Some(WorkError::Pending)
@@ -422,7 +422,7 @@ fn blocked_task_cancel_and_retirement() {
 }
 unsafe extern "C" fn peer_waiter(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { bound(p) };
     f.bind(1);
     let binding = &f.bindings[1];
@@ -441,15 +441,15 @@ unsafe extern "C" fn peer_waiter(p: *mut c_void) {
 }
 unsafe extern "C" fn peer_waker(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { bound(p) };
     f.bind(0);
     let binding = &f.bindings[0];
     binding.enter(3, 0);
     f.event(10);
-    // SAFETY: the retained fixture owns p and its guarded-stack
+    // SAFETY: the fixture owns p and its guarded-stack
     // Runtime until this queued peer completes on the same CPU.
-    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // SAFETY: The callback and context identify this queue's fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     unsafe { f.runtime().queue.execute(Kind::General, peer_waiter, p) }.unwrap();
     binding.prepared.store(true, Ordering::Release);
@@ -479,7 +479,7 @@ unsafe extern "C" fn peer_waker(p: *mut c_void) {
 fn binding_state_survives_switch() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
-    // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+    // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
     // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
     unsafe { r.call_foreground(peer_waker, Arc::as_ptr(&f) as *mut c_void, 10000) }.unwrap();
     let events = f.events.lock().unwrap();
@@ -499,7 +499,7 @@ fn binding_state_survives_switch() {
 }
 unsafe extern "C" fn races_and_refusals(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { bound(p) };
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
     // The fixture is used while its Executor is live, including all suspended callbacks.
@@ -531,14 +531,14 @@ unsafe extern "C" fn races_and_refusals(p: *mut c_void) {
     assert_eq!(r.park_if_blocked(), Ok(ParkOutcome::Resumed));
     assert_eq!(binding.arrives.load(Ordering::Acquire), 1);
     // Spurious wake resumes only the continuation; it did not
-    // satisfy the model condition or fabricate lock ownership.
+    // satisfy the model condition or invent lock ownership.
     assert!(binding.blocked.load(Ordering::Acquire));
     binding.exit();
     f.event(30);
 }
 unsafe extern "C" fn reused_worker(p: *mut c_void) {
     // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
-    // The queue retains that owner across every suspension and callback return.
+    // The queue keeps that owner across every suspension and callback return.
     let f = unsafe { bound(p) };
     let binding = &f.bindings[0];
     // SAFETY: setup published this pinned Runtime pointer before callback admission.
@@ -563,7 +563,7 @@ fn wake_races_and_worker_reuse() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
-    // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+    // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
     // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
     unsafe { r.call_foreground(races_and_refusals, p, 10000) }.unwrap();
     let old = f.bindings[0]
@@ -575,7 +575,7 @@ fn wake_races_and_worker_reuse() {
         .clone();
     assert_eq!(old.wake(), Err(WorkError::Closed));
     assert_eq!(old.renew_current().err(), Some(WorkError::Unavailable));
-    // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+    // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
     // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
     unsafe { r.call_foreground(reused_worker, p, 10000) }.unwrap();
     assert_eq!(old.wake(), Err(WorkError::Closed));
@@ -604,7 +604,7 @@ fn blocked_executor_quarantine() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
     assert_eq!(
-        // SAFETY: The context is the queue-retained fixture Arc pointer for this callback.
+        // SAFETY: The context is the queue-kept fixture Arc pointer for this callback.
         // The Executor keeps its pinned runtime and guarded stacks through join or quarantine.
         unsafe { r.call_foreground(park_until_cancelled, Arc::as_ptr(&f) as *mut c_void, 10000,) },
         Err(WorkError::Pending)
@@ -624,6 +624,6 @@ fn blocked_executor_quarantine() {
     assert_eq!(handle.wake(), Err(WorkError::Closed));
     drop(handle);
 }
-// Saturated-lane drain regressions use genuine retained stacks,
+// Saturated-lane drain regressions use kept stacks,
 // the existing binding model and admitted immutable wake handles.
 mod saturated_drain;

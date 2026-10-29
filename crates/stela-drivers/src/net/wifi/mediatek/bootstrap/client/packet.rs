@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Actual packet publication, RX interpretation and canonical key-state binding.
+//! Packet publication, RX interpretation and canonical key-state binding.
 use super::*;
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
@@ -15,7 +15,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let prepared = Self::prepare_submission(s, bytes, key, management, minimum_rate)?;
         let result = Self::publish_submission(&mut s.controller, source, bytes, prepared);
         if matches!(result, Err(Error::GrantTimeout)) {
-            // The actual peer and grant were already programmed. Retain the
+            // The peer and grant were already programmed. Keep the
             // complete owner even though this packet was never published.
             s.phase = Phase::Quarantined;
         }
@@ -209,14 +209,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             source,
         )
     }
-    /// Native modern single-MSDU publication. Optional QoS TID uses the actual
+    /// Native modern single-MSDU publication. Optional QoS TID uses the
     /// current WMM context and source queue mapping; firmware owns sequence,
-    /// IV/PN/cipher and its qualified rate set. Receipt is not an air ACK.
+    /// IV/PN/cipher and its checked rate set. Receipt is not an air ACK.
     ///
     /// # Safety
-    /// The exact same-controller/authority retention and revocation contract of
+    /// The same-controller/permission retention and revocation contract of
     /// `configure_modern` applies. Both real canonical guards stay held through
-    /// actual DMA preparation and producer publication; the original key,
+    /// DMA preparation and producer publication; the original key,
     /// context and radio-policy owners survive all hardware/deferred users.
     pub unsafe fn transmit_modern<
         H: wifi::regulatory::HardwarePolicy,
@@ -310,7 +310,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         outcome
     }
-    /// Observe actual source queue progress and free packets only after both
+    /// Observe source queue progress and free packets only after both
     /// descriptor consumption and matching exact-once hardware TX-free. The
     /// returned records do not synthesize an air ACK from DMA release.
     pub fn poll_released(&mut self) -> Result<Vec<Released<PacketOwner<C>>>, Error> {
@@ -340,7 +340,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             rx::Band::Ghz2 => wifi::Band::Ghz2,
             rx::Band::Ghz5 => wifi::Band::Ghz5,
             // Outside a scan, only the bound 6 GHz transport receives there;
-            // its poll qualifies each frame under both held providers.
+            // its poll checks each frame under both held providers.
             rx::Band::Ghz6 if s.phase == Phase::Scanning || s.six_ghz.is_some() => wifi::Band::Ghz6,
             rx::Band::Ghz6 => return Err(Error::Unsupported),
         };
@@ -356,7 +356,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         if header.data_present() {
             let p = s.profile.ok_or(Error::WrongProfile)?;
-            // mt792x_rx_get_wcid first resolves actual raw peer WCID, then
+            // mt792x_rx_get_wcid first resolves raw peer WCID, then
             // maps a non-U2M frame through that peer's VIF to its BCMC slot.
             // A copied raw BCMC number is not a validated peer lookup.
             if d.wcid != p.wcid
@@ -384,7 +384,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             .ok_or(Error::NoKey)?;
             let key = owner.slot().installed().ok_or(Error::NoKey)?;
-            // Trust comes from actual completed DMA + exact retained WCID/key
+            // Trust comes from completed DMA + exact WCID/key
             // context. Raw security bits alone cannot manufacture generation.
             let effective_wcid = p
                 .receive_slot(d.wcid, d.unicast_to_me)

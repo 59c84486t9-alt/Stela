@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Shared SD/MMC register encodings and card metadata; hardware transports
-//! retain their own native command, completion and physical operating state.
+//! keep their own native command, completion and physical operating state.
 use crate::block::BlockError;
 use alloc::vec::Vec;
 pub(super) mod protocol;
@@ -19,7 +19,7 @@ pub struct Failure {
     pub retirement: Option<BlockError>,
     pub quarantined: bool,
 }
-/// Actual signaling voltage; this is distinct from the card's VCC supply OCR.
+/// Signaling voltage; this is distinct from the card's VCC supply OCR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalVoltage {
     V3_3,
@@ -37,7 +37,7 @@ pub enum Timing {
     MmcHs400,
     MmcDdr52,
 }
-/// Only source-qualified host modes may request S18R during OCR negotiation.
+/// Only source-checked host modes may request S18R during OCR negotiation.
 #[derive(Clone, Copy, Default)]
 pub(in crate::storage) struct SdUhsModes {
     pub sdr12: bool,
@@ -62,7 +62,7 @@ impl SdUhsModes {
         })
     }
 }
-/// Actual card registers and the acknowledged physical operating mode.
+/// Card registers and the acknowledged physical operating mode.
 #[derive(Clone, Debug)]
 pub struct CardInfo {
     pub kind: Kind,
@@ -75,7 +75,7 @@ pub struct CardInfo {
     pub signal_voltage: SignalVoltage,
     pub timing: Timing,
 }
-/// Register bits use the card's127..0 numbering, after actual R2 reconstruction.
+/// Register bits use the card's127..0 numbering, after R2 reconstruction.
 pub(super) fn bits(words: [u32; 4], start: u32, count: u32) -> u32 {
     let word = (3 - start / 32) as usize;
     let shift = start % 32;

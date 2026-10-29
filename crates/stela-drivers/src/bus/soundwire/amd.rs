@@ -51,11 +51,11 @@ pub struct IoError;
 /// Ordered ACP registers and the original exclusive initialized sublink owner.
 ///
 /// # Safety
-/// The provider retains the actual ACP parent, this manager's powered and
+/// The provider keeps the ACP parent, this manager's powered and
 /// initialized link/frame clocks, pins/reset and firmware/IRQ/work exclusion.
 /// The same mapping/manager observation supplies `manager`; no sibling stream,
 /// wake, IRQ or deferred user may reset or access this command epoch. Errors
-/// may follow effects, and retaining the provider must retain all real grants.
+/// may follow effects, and keeping the provider must keep all real grants.
 pub unsafe trait Registers: 'static {
     fn manager(&self) -> Manager;
     fn bytes(&self) -> usize;
@@ -82,7 +82,7 @@ pub struct Controller<R: Registers, T: Timer> {
     started: u64,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// Invalid timing returns the exact owners before even geometry callbacks.
+    /// Invalid timing returns the owners before even geometry callbacks.
     pub fn new(registers: R, timer: T, timeout_us: u64) -> Result<Self, (ErrorKind, R, T)> {
         if timeout_us == 0
             || timer.check_duration(timeout_us).is_err()

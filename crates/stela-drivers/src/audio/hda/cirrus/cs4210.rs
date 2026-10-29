@@ -101,7 +101,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(alloc::vec![device, adc, dac])
     }
     /// Change the CS4210 speaker amplifier through its source-defined four
-    /// gain codes (9/12/15/18dB). Requires an owned actual speaker DAC route;
+    /// gain codes (9/12/15/18dB). Requires an owned speaker DAC route;
     /// PCM may continue while the two low coefficient bits are updated.
     pub fn set_cirrus_cs4210_speaker_boost(
         &mut self,

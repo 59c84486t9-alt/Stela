@@ -76,7 +76,7 @@ const ABRT_ARBITRATION_LOST: u32 = 1 << 12;
 
 /// Exclusive access to a conventional DesignWare register block. An
 /// implementation must preserve ordered, volatile 32-bit register semantics.
-/// The trait is public so independent models can exercise the actual driver.
+/// The trait is public so independent models can exercise the driver.
 pub trait Registers {
     fn read32(&mut self, offset: usize) -> u32;
     fn write32(&mut self, offset: usize, value: u32);
@@ -683,7 +683,7 @@ mod tests {
             }
         }
 
-        // Advance time only after the actual register result/effect. This
+        // Advance time only after the register result/effect. This
         // models a completed slow access, independently of polling relax().
         fn complete_access(&mut self, write: bool, offset: usize, value: u32) {
             self.accesses.push((write, offset, value));
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn completed_access_deadlines_never_report_success_or_publish_later_wire_commands() {
         // First observe a real successful combined transfer, including its
-        // disable/cleanup accesses. Then delay each actual access in turn.
+        // disable/cleanup accesses. Then delay each access in turn.
         // The existing peer/FIFO model still executes every original effect.
         let (mut baseline, state) = controller(2, 2);
         state.borrow_mut().accesses.clear();
@@ -936,7 +936,7 @@ mod tests {
                 let mut h = state.borrow_mut();
                 h.raw = INTR_TX_ABRT;
                 h.abort_source = source;
-                // Test the actual common fault reader, whose clear destroys
+                // Test the common fault reader, whose clear destroys
                 // the hardware source. A late observation cannot turn it into
                 // an unrelated timeout or silently retry a wire operation.
                 h.accesses.clear();

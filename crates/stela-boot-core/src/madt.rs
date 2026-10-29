@@ -236,7 +236,7 @@ impl Routing {
         })
     }
 
-    /// Bind actual IOAPIC version-reported pin counts, never a guessed 24-pin
+    /// Bind IOAPIC version-reported pin counts, never a guessed 24-pin
     /// span. Every MADT unit must be present exactly once, with disjoint GSIs.
     pub fn owner(&self, line: LineRoute, actual: &[(Unit, u16)]) -> Result<Unit, RouteError> {
         if actual.len() != self.units.len() {

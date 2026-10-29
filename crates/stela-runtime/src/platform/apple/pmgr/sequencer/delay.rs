@@ -1,7 +1,7 @@
 //! Native tag4 cycle delays, independent of trigger or end retirement.
 //!
 //! Matching LLB10cd8 emits4|(count<<6), with count bounded to26bits.
-//! Only the retained controller's qualified native-cycle owner may supply
+//! Only the controller's checked native-cycle owner may supply
 //! progress. The host/system counter itself is not this packet's timebase.
 use super::{Error, PacketCursor};
 
@@ -40,7 +40,7 @@ impl PacketCursor {
         })
     }
     // Crate-private: external callers cannot manufacture an absolute native
-    // clock. The actual shared power::t6000 controller owns that counter.
+    // clock. The shared power::t6000 controller owns that counter.
     pub(crate) fn advance_delay(&mut self, cycles: u128) -> Result<Progress, Error> {
         if self.quarantined() {
             return Err(Error::UncertainEffects);

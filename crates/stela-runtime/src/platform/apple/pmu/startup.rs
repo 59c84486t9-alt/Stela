@@ -3,7 +3,7 @@
 //! This is an explicitly created Stela loader, not a reconstruction of Apple
 //! reset state. The original J314s LLB's 15940..15fc8, 18288..18514 and
 //! 18d18..18e00 supply the AP sequence, key extents and image descriptor.
-//! A successful transfer changes actual protection, staged configuration and
+//! A successful transfer changes protection, staged configuration and
 //! SRAM ownership. Starting requires a further native service/resource owner;
 //! no upload, descriptor, key or status read manufactures that owner.
 use super::{FirmwareStartup, firmware::FirmwareMemory};
@@ -86,7 +86,7 @@ impl Image {
     }
 }
 
-/// Every prepared mutation remains private to its actual loader transaction.
+/// Every prepared mutation remains private to its loader transaction.
 /// This is neither a completion token nor an externally supplied effect receipt.
 pub(super) enum Write {
     Stop,
@@ -189,7 +189,7 @@ impl Loader {
             {
                 Some(0)
             }
-            // The native owner is actually stopped, with no active service or
+            // The native owner is stopped, with no active service or
             // pending boot result. This is never Apple reset-state evidence.
             (0x13, 1)
                 if self.profile == FirmwareStartup::Maverick
@@ -512,7 +512,7 @@ mod tests {
                 assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);
                 let mut status = [0xff];
                 owner.read(base + 0x13, &mut status, 0).unwrap();
-                assert_eq!(status, [0]); // actual native loader remains stopped
+                assert_eq!(status, [0]); // native loader remains stopped
                 assert!(owner.write(ports(profile).data, &[0; 8], 100).is_err());
             } else {
                 let mut mode = [0x97];
@@ -679,7 +679,7 @@ mod tests {
         );
         master.check_lifecycle(live).unwrap();
         master.set_lifecycle(live, &mut access);
-        // Complete source one-byte protection restoration through the actual
+        // Complete source one-byte protection restoration through the
         // command FIFO; its effect precedes the master's completion response.
         let command = |address: u16| u64::from(u32::from(address) << 16 | 15 << 8 | 0x30);
         master

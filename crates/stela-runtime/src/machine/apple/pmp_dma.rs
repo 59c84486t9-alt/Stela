@@ -1,5 +1,5 @@
 //! Canonical native PMP AP-buffer service. The source IOMapper supplies IOVAs;
-//! every transfer rewalks the actual mounted DART into the same registered RAM.
+//! every transfer rewalks the mounted DART into the same registered RAM.
 //! No native PMP private ARM cache exists in this implementation. Ordering is
 //! coherent Normal-WB CPU visibility, never an MCC/DCS/PTD/MC completion.
 use super::Access;
@@ -19,7 +19,7 @@ use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::board;
 
 /// Exact static source inputs, not runtime IORegistry observations. Native
-/// startup admits no later mapper-index or asc-dram-mask overlay. Hashes retain
+/// startup admits no later mapper-index or asc-dram-mask overlay. Hashes keep
 /// provenance only; no behavior is selected by a digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceProvenance {
@@ -59,8 +59,8 @@ impl SourceProvenance {
     }
 }
 
-/// Actual host observation supplied from the admitted native processor's
-/// retained CPUID leaf1 snapshot. CLFLUSH's size field is in eight-byte units;
+/// Host observation supplied from the admitted native processor's
+/// CPUID leaf1 snapshot. CLFLUSH's size field is in eight-byte units;
 /// eight is an encoding unit, not an assumed cache line or ARM cache geometry.
 #[derive(Clone, Debug)]
 pub struct ExplicitRuntimeConfiguration {
@@ -99,7 +99,7 @@ impl ExplicitRuntimeConfiguration {
     }
 }
 
-/// Retains the actual bus devices, canonical RAM and native descriptor session.
+/// Keeps the bus devices, canonical RAM and native descriptor session.
 /// Neither an AP allocation nor its DART page tables are owned by this object.
 pub(super) struct PmpDma {
     asc: DeviceId,
@@ -134,17 +134,17 @@ impl PmpDma {
 
 impl AppleDevices {
     /// Bind once, before advertising reporting/trace resources. This does not
-    /// enable a stream, allocate AP RAM or bypass an actual DART fault.
+    /// enable a stream, allocate AP RAM or bypass a DART fault.
     ///
     /// # Safety
-    /// `ram` is the SAME Arc used by every actual canonical Host/table walker
+    /// `ram` is the SAME Arc used by every canonical Host/table walker
     /// passed to this device set. At cold binding, no guest frame/native loan
-    /// has ever been published, actual AP executors are parked and every raw
+    /// has ever been published, AP executors are parked and every raw
     /// input copy is finished. Otherwise all physical native workers are held,
     /// frames recovered and real worker/copyout memory fences completed. Every
     /// synchronous producer is closed. All future service calls must
     /// preserve this contract. No legacy/raw transfer may call this binding.
-    /// CPUID words come from the admitted host processor's actual snapshot;
+    /// CPUID words come from the admitted host processor's snapshot;
     /// static source properties have no runtime IORegistry/startup overrides.
     pub unsafe fn bind_native_pmp_dma(
         &mut self,
@@ -259,11 +259,11 @@ impl AppleDevices {
         Ok(broker)
     }
 
-    /// One finite actual Port dispatch, with no borrowed Port retained.
+    /// One finite Port dispatch, with no borrowed Port kept.
     ///
     /// # Safety
     /// Called ONLY by the canonical all-workers-held DeviceTransfer path after
-    /// its real remote-worker/copyout fences, with this binding's same actual
+    /// its real remote-worker/copyout fences, with this binding's same
     /// canonical Host/RAM and closed synchronous producers. This persistent
     /// ownership premise cannot be inferred from a BSP fence or numeric ranges.
     pub unsafe fn service_native_pmp_dma(
@@ -350,7 +350,7 @@ struct WriteBackCoherence {
     terminal: bool,
 }
 impl WriteBackCoherence {
-    // Actual guard acquisition before EVERY operation, including reads/writes.
+    // Guard acquisition before EVERY operation, including reads/writes.
     // Drop before Port entry: no writer gate is held into a canonical transfer.
     fn ready(&mut self) -> Completion<()> {
         if self.terminal {
@@ -432,7 +432,7 @@ impl dma::Coherence for WriteBackCoherence {
         }
         // No Port operation while all writer gates are frozen: its canonical
         // physical writer would need the same gates. Map checked read+write
-        // under the actual Port first; preceding writes have already retired.
+        // under the Port first; preceding writes have already retired.
         let guard = match self.ram.try_service() {
             Ok(Some(guard)) => guard,
             Ok(None) => return Completion::Busy { deadline: None },
@@ -449,7 +449,7 @@ impl dma::Coherence for WriteBackCoherence {
             self.terminal = true;
             return Completion::Refused("PMP native DMA canonical RAM service generation differs");
         }
-        // Actual x86 coherent Normal-WB ordering of the Port's canonical stores.
+        // X86 coherent Normal-WB ordering of the Port's canonical stores.
         // Remote worker fences occurred in the held engine before this call.
         // This supplies no ARM cache-line eviction or controller acknowledgement.
         fence(Ordering::SeqCst);
@@ -582,14 +582,14 @@ mod tests {
     }
     struct Storage(UnsafeCell<Box<[u128; 256]>>);
     // SAFETY: this authored ownership test has no native executor or racing
-    // direct writer. All RAM accesses belong to the actual registered domain.
+    // direct writer. All RAM accesses belong to the registered domain.
     unsafe impl Send for Storage {}
     // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
     fn coherence() -> WriteBackCoherence {
         let storage = Arc::new(Storage(UnsafeCell::new(Box::new([0; 256]))));
         let pointer =
-            // SAFETY: stable retained aligned allocation; no references to its bytes survive
+            // SAFETY: stable aligned allocation; no references to its bytes survive
             // registration and the fixture starts no native worker.
             unsafe { NonNull::new_unchecked((*storage.0.get()).as_mut_ptr().cast::<u8>()) };
         // SAFETY: `storage` keeps these 256 bytes alive with the registration, and nothing else

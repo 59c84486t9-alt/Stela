@@ -46,7 +46,7 @@ fn guard_enables(
     asm.test(Size::Dword, Rax, Rax);
     let inactive = asm.jcc(Cond::E);
     // Unlike precision conversion, BF AH1 suppresses numerical exceptions and
-    // retained enables. Reuse the mature BF policy after the active-lane test.
+    // enables. Reuse the mature BF policy after the active-lane test.
     guard_conversion_enables(code, failures);
     code.asm().bind(inactive);
 }

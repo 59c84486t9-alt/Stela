@@ -1,4 +1,4 @@
-//! Coherent legacy-driver allocations through a retained requester domain.
+//! Coherent legacy-driver allocations through a requester domain.
 use super::{
     BufferMemory, DmaAllocator, DmaBuffer,
     mapping::{Direction, DmaDomain, DomainKind},
@@ -65,9 +65,9 @@ impl PageSource for Below<'_> {
     }
 }
 
-/// Retains all mappings allocated for one requester. Dropping the allocator
+/// Keeps all mappings allocated for one requester. Dropping the allocator
 /// does not certify a device stop: outstanding mappings quarantine their pins.
-/// Live buffers independently retain their CPU mapping and domain lease.
+/// Live buffers independently keep their CPU mapping and domain lease.
 pub struct DomainAllocator<'a> {
     pages: &'a dyn PageSource,
     domain: Domain<dyn DmaDomain>,
@@ -77,20 +77,20 @@ pub struct DomainAllocator<'a> {
 
 impl<'a> DomainAllocator<'a> {
     /// Adapt a real coherent requester to the legacy drivers' ordinary CPU
-    /// load/store interface. A WB CPU mapping alone cannot qualify coherence.
+    /// load/store interface. A WB CPU mapping alone cannot check coherence.
     ///
     /// # Safety
     /// `domain` must be attached to the exclusively owned requester, whose
     /// previous DMA/IRQ/work was stopped and drained before this attachment.
-    /// Its payload DMA must snoop the actual PageSource's WB CPU mappings,
+    /// Its payload DMA must snoop the PageSource's WB CPU mappings,
     /// including writes observed while polling. NoSnoop/ATS/other bypass and
     /// incompatible cache aliases must be excluded by their real owners. The
     /// driver's descriptor publication and UC register operations must provide
     /// the platform's required coherent DMA ordering. The address limit comes
-    /// from the actual controller's DMA capability, not its BAR width.
-    /// Retain those owners and enter their required CPU/root/exclusion context
+    /// from the controller's DMA capability, not its BAR width.
+    /// Keep those owners and enter their required CPU/root/exclusion context
     /// for every allocation, buffer access and eventual retirement. PageSource
-    /// must retain its real mapping in every such CPU context. No CPU pointer
+    /// must keep its real mapping in every such CPU context. No CPU pointer
     /// or copied page inventory can establish any of these requirements.
     pub unsafe fn new(
         pages: &'a dyn PageSource,
@@ -171,7 +171,7 @@ impl<'a> DomainAllocator<'a> {
     ///
     /// # Safety
     /// All DMA to these buffers has completed; submissions, IRQ/work callbacks,
-    /// posted writes and CPU users are drained and cannot restart. The retained
+    /// posted writes and CPU users are drained and cannot restart. The kept
     /// domain/controller/root owners and their process context remain valid.
     pub unsafe fn retire(&mut self) -> Result<(), AllocationError> {
         if self
@@ -184,7 +184,7 @@ impl<'a> DomainAllocator<'a> {
         for allocation in &mut self.allocations {
             let allocation = Arc::get_mut(allocation).expect("checked unique buffer retention");
             if let Some(region) = &mut allocation.region {
-                // SAFETY: caller proved quiescence; no buffer can retain this
+                // SAFETY: caller proved quiescence; no buffer can keep this
                 // mapping and its own domain keeps the translation owner live.
                 unsafe { region.unmap() }.map_err(AllocationError::Region)?;
                 allocation.region = None;

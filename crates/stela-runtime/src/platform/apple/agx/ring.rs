@@ -45,7 +45,7 @@ pub const DESCRIPTOR_BYTES: usize = 0x20;
 /// The firmware's view of shared memory: firmware virtual addresses reached
 /// through the UAT. [`Port`] is the machine's; tests use flat memory.
 /// Writes reach RAM only, never MMIO. A multi-page error may leave earlier
-/// pages committed. Retained publications may replay the identical bytes in
+/// pages committed. Publications may replay the identical bytes in
 /// an unpublished, firmware-owned body; scalar publications must fit one UAT
 /// page (whose Memory::write failure transfers nothing).
 pub trait Shared {
@@ -72,7 +72,7 @@ pub trait Shared {
     fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError>;
 }
 
-/// Qualify a retained scalar store's indivisible RAM transfer. Cross-page
+/// Check a scalar store's indivisible RAM transfer. Cross-page
 /// scalars require an explicit partial-store protocol, which is not modeled.
 pub(crate) fn scalar_range(address: u64, bytes: u64) -> Result<(), &'static str> {
     let last = address
@@ -291,7 +291,7 @@ pub(crate) mod tests {
                     Err(DmaError::Unsupported("UAT context outside the TTBAT"))
                 );
             }
-            // The same address is genuinely mapped for context 0. Invalid
+            // The same address is mapped for context 0. Invalid
             // IDs must be rejected before inserting/removing the agent bit.
             let mut output = [0; 8];
             Shared::gpu_read(&mut port, 0, 0, &mut output).unwrap();

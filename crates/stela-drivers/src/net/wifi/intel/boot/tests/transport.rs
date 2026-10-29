@@ -57,7 +57,7 @@ pub(super) fn device_read(domain: &Domain, address: u64, offset: usize, n: usize
         .unwrap();
     let mut bytes = vec![0; n];
     // SAFETY: address() checked this initialized live mapping; the domain lock
-    // retains its backing and serializes every modeled device access. The fresh
+    // keeps its backing and serializes every modeled device access. The fresh
     // output Vec is disjoint, and no real DMA user exists in this fixture.
     unsafe {
         core::ptr::copy_nonoverlapping(pointer.as_ptr(), bytes.as_mut_ptr(), n);
@@ -106,7 +106,7 @@ pub(super) fn complete_from_free_slot(
     } else {
         8
     };
-    // Actual model requester consumed this emitted free descriptor before
+    // Model requester consumed this emitted free descriptor before
     // completing its receive payload; this grants only that exact range.
     let mut r = domain.records.lock().unwrap();
     r.completed_ranges.insert((

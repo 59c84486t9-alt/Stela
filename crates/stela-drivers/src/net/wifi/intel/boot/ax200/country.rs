@@ -2,8 +2,8 @@
 // Copyright (C) 2005-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Genuine OS/setup country input and actual same-epoch MCC application.
-//! This retains the pinned database; it issues no channel/TX/association grant.
+//! OS/setup country input and same-epoch MCC application.
+//! This keeps the pinned database; it issues no channel/TX/association grant.
 use super::*;
 use crate::net::wifi::{
     intel::mcc::{
@@ -21,22 +21,22 @@ pub enum CountryIoError {
     Failed(u64),
 }
 /// Explicit country and content-pinned database from the normal OS/setup source.
-/// The revision is provider provenance, never device or radio authority.
+/// The revision is provider provenance, never device or radio permission.
 pub struct SelectedCountry {
     pub country: Country,
     pub revision: u64,
 }
-/// Retained native OS/setup policy service, independent of copied MCC/BIOS data.
+/// Native OS/setup policy service, independent of copied MCC/BIOS data.
 /// # Safety
-/// Implementors read the actual current authorized OS/setup selection applicable
-/// to this physical function/platform, retaining its service/resources. `country`
-/// returns that explicitly selected country's genuine pinned database, never a
-/// BIOS/default/MCC-observed guess. `current` genuinely observes whether that
+/// Implementors read the current authorized OS/setup selection applicable
+/// to this physical function/platform, keeping its service/resources. `country`
+/// returns that explicitly selected country's pinned database, never a
+/// BIOS/default/MCC-observed guess. `current` observes whether that
 /// original selection remains current, including revocation/location/database
 /// changes. Revisions must not repeat after any relevant change. Missing service
 /// support must return Unavailable, never a constructed fallback selection.
 /// This configuration service grants no emission or association permission: the
-/// actual shared regulatory HardwarePolicy/OsPolicy guards remain mandatory at
+/// shared regulatory HardwarePolicy/OsPolicy guards remain mandatory at
 /// later native radio publication, with their revocation/drain contracts.
 pub unsafe trait CountryIo: 'static {
     fn country(&mut self) -> Result<SelectedCountry, CountryIoError>;
@@ -100,9 +100,9 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'a, Q, B, O> {
     }
 }
 impl<'a, Q: BootIo, B: BiosIo> Ax200BoardPolicy<'a, Q, B> {
-    /// Consume the completed native board owner and retain its genuine OS source.
+    /// Consume the completed native board owner and keep its OS source.
     /// # Safety
-    /// `os` belongs to the exact physical function/platform already retained by
+    /// `os` belongs to the exact physical function/platform already kept by
     /// this original owner. A diagnostic/other-device provider cannot satisfy it.
     pub unsafe fn begin_country<O: CountryIo>(
         self,
@@ -136,7 +136,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Drop for Ax200Country<'_, Q, B, O> {
             // provider has not been moved or dropped, including prior failures.
             unsafe { ManuallyDrop::drop(&mut self.os) };
         }
-        // An uncertain native epoch also retains the original OS service. The
+        // An uncertain native epoch also keeps the original OS service. The
         // nested native/BIOs owners independently enforce their quarantine.
     }
 }
@@ -205,9 +205,9 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'_, Q, B, O> {
         }
         Ok(())
     }
-    /// Configure the actual firmware using the explicit retained OS selection.
+    /// Configure the firmware using the explicit OS selection.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the retained native
+    /// `source` supplies fresh exclusive coherent pages for the native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -265,7 +265,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'_, Q, B, O> {
                 .bytes()
                 .map_err(Ax200CountryError::Schema)?;
             // SAFETY: source MCC_UPDATE explicitly permits RF-kill; the chosen
-            // country is genuine OS input, never BIOS/firmware-derived authority.
+            // country is OS input, never BIOS/firmware-derived permission.
             self.ticket = Some(
                 unsafe {
                     self.board

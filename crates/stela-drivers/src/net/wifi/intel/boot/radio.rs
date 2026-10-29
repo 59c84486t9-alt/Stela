@@ -15,7 +15,7 @@ pub enum ColdRadioPhase {
     PlatformConfigurationRequired,
     Failed,
 }
-/// Retains actual requester/BAR, DMA and the private initialized-NVM owner.
+/// Keeps requester/BAR, DMA and the private initialized-NVM owner.
 /// Caller-supplied/copied NVM, firmware or command plans cannot construct this.
 pub struct ColdRadio<'a, Q: BootIo> {
     pub(super) initialized: UnifiedNvm<'a, Q>,
@@ -26,7 +26,7 @@ pub struct ColdRadio<'a, Q: BootIo> {
     responses: Vec<CommandResponse>,
 }
 impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
-    /// Only actual source initialization completion can enter this owner.
+    /// Only source initialization completion can enter this owner.
     /// Rejection returns the unchanged owner to permit further NVM progress.
     pub fn begin_radio(self) -> Result<ColdRadio<'a, Q>, Box<Self>> {
         if self.phase() != InitializationPhase::Observed {
@@ -51,8 +51,8 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
             .receipt()
             .expect("private actual initialized owner")
     }
-    /// Raw actual command completions, never fabricated radio/key/calibration
-    /// status. These borrowed diagnostics grant no reset/policy authority.
+    /// Raw command completions, never invented radio/key/calibration
+    /// status. These borrowed diagnostics grant no reset/policy permission.
     pub fn prefix_responses(&self) -> &[CommandResponse] {
         &self.responses
     }
@@ -65,10 +65,10 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
     pub fn stop(&mut self) -> Result<(), Error> {
         self.initialized.stop()
     }
-    /// Advance only after actual RX completion and canonical descriptor/TB0
+    /// Advance only after RX completion and canonical descriptor/TB0
     /// CPU handoff. RF-kill is not ignored for these radio setup commands.
     /// # Safety
-    /// Source returns fresh exclusive native pages for the retained actual
+    /// Source returns fresh exclusive native pages for the
     /// requester/domain under its coherent publication/ownership contract.
     pub unsafe fn advance(&mut self, source: &dyn PageSource) -> Result<ColdRadioPhase, Error> {
         // SAFETY: covered by this function's own safety contract.
@@ -124,7 +124,7 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
         }
         let command = &plan.commands()[self.next];
         if command.stage() == Stage::BluetoothCoexistence {
-            // Match the original reset before genuine BT_CONFIG publication;
+            // Match the original reset before BT_CONFIG publication;
             // a send/ACK/reclaim failure cannot establish initialized state.
             self.initialized.boot.coexistence.begin_initialization();
         }

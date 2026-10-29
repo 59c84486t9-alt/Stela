@@ -25,7 +25,7 @@ impl Buffer {
     fn write(&self, offset: usize, bytes: &[u8]) -> Result<()> {
         let p = self.cpu.address(offset, bytes.len())?;
         for (i, b) in bytes.iter().enumerate() {
-            // SAFETY: address checked the complete retained CPU-mapped span;
+            // SAFETY: address checked the complete CPU-mapped span;
             // i is within bytes, and the serialized queue owns this exact
             // unpublished/completed range. Byte stores preserve its neighbors.
             unsafe { p.as_ptr().add(i).write_volatile(*b) }
@@ -72,7 +72,7 @@ impl Memory {
             self.offer(index)?;
         }
         self.tx.mapping.sync_for_device(0..COUNT * DESCRIPTOR)?;
-        // Independently qualified coherent descriptor observation is mandatory;
+        // Independently checked coherent descriptor observation is mandatory;
         // a legacy domain cannot silently degrade to a CPU fence.
         self.rx.mapping.read_coherent_u32(8)?;
         Ok(())
@@ -119,7 +119,7 @@ impl Memory {
     pub fn complete_tx(&self, head: usize, count: usize) -> Result<()> {
         for n in 0..count {
             let i = (head + n) % COUNT;
-            // SAFETY: actual hardware TX head passed these exact submitted
+            // SAFETY: hardware TX head passed these exact submitted
             // descriptors; it will not read them again before a new tail.
             unsafe {
                 self.tx_data
@@ -141,7 +141,7 @@ impl Memory {
     }
     pub fn receive_bytes(&self, index: usize, length: usize) -> Result<Vec<u8>> {
         let start = index * BUFFER;
-        // SAFETY: receive_status observed actual DD for this descriptor. The
+        // SAFETY: receive_status observed DD for this descriptor. The
         // device cannot access this page again before offer() and RX tail.
         unsafe { self.rx_data.mapping.sync_for_cpu(start..start + BUFFER) }?;
         let p = self.rx_data.cpu.address(start, length)?;
@@ -150,13 +150,13 @@ impl Memory {
             .try_reserve_exact(length)
             .map_err(|_| Error::Memory(crate::bus::dma::memory::MemoryError::OutOfMemory))?;
         for i in 0..length {
-            // SAFETY: completed, checked retained packet range, no live DMA.
+            // SAFETY: completed, checked packet range, no live DMA.
             frame.push(unsafe { p.as_ptr().add(i).read_volatile() });
         }
         Ok(frame)
     }
     pub fn retire(&mut self) -> Result<()> {
-        // Revoke rebuild before any actual invalidation. A failed unmap may
+        // Revoke rebuild before any invalidation. A failed unmap may
         // already have retired a prefix; retry may only finish this retirement.
         self.retiring = true;
         for buffer in [
@@ -166,9 +166,9 @@ impl Memory {
             &mut self.rx_data,
         ] {
             if buffer.mapping.address().is_ok() {
-                // SAFETY: Aqtion::retire completed stop's actual engine/BME
+                // SAFETY: Aqtion::retire completed stop's engine/BME
                 // containment and original-domain write drain before entry.
-                // This retained mapping is still live; calls are serialized
+                // This kept mapping is still live; calls are serialized
                 // and there are no registered IRQ workers or new submissions.
                 unsafe { buffer.mapping.unmap() }?;
             }

@@ -2,9 +2,9 @@
 // Copyright(c) 1999 - 2018 Intel Corporation.
 // Copyright (c) 2026 Stela contributors
 //! Exact PCI-table-selected I219 SPT/CNP/TGP/ADP cohorts. Family selection is
-//! pinned to the donor's actual PCI table, not the product suffix or PHY ID.
+//! pinned to the donor's PCI table, not the product suffix or PHY ID.
 //! In particular CMP12 selects SPT; CMP10/11 select CNP. MTP and later MACs
-//! require additional PHY/K1/retry and real platform-quirk authority and refuse.
+//! require additional PHY/K1/retry and real platform-quirk permission and refuse.
 use super::{Controller, Delay, Error, lpt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,16 +37,16 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
     /// Construct the exact reviewed I219 SPT/CNP/TGP/ADP PCI cohorts.
     ///
     /// # Safety
-    /// The same actual powered PCI Function/reset epoch, aligned live config,
+    /// The same powered PCI Function/reset epoch, aligned live config,
     /// MAC/integrated flash/PHY, exclusion, elapsed delays and initially
     /// accessible PHY requirements of `Controller::new_spt` apply. `device`
-    /// comes from actual vendor8086/class020000 config identity and must be
-    /// one of the exact source-table IDs. It is never inferred from PHY ID or
-    /// board naming. The source's actual family chooses NVM validation and
+    /// comes from vendor8086/class020000 config identity and must be
+    /// one of the source-table IDs. It is never inferred from PHY ID or
+    /// board naming. The source's family chooses NVM validation and
     /// register policy. No native provider/probe or firmware/power transition
-    /// authority is manufactured by this constructor.
+    /// permission is manufactured by this constructor.
     pub unsafe fn new_i219(device: u16, io: R, delay: D) -> Result<Self, Error> {
-        // SAFETY: caller retains the actual same-function cold ownership epoch.
+        // SAFETY: caller keeps the same-function cold ownership epoch.
         let mut this = unsafe { Self::claim_i219(device, io, delay) }?;
         if let Err(error) = this.initialize_i219() {
             this.poisoned = true;
@@ -106,7 +106,7 @@ pub(super) mod tests {
         io: Io,
         timer: Timer,
     ) -> Result<Controller<Io, Timer>, Error> {
-        // SAFETY: one actual isolated same-function cold/config/flash model.
+        // SAFETY: one isolated same-function cold/config/flash model.
         unsafe { Controller::new_i219(device, io, timer) }
     }
     #[test]
@@ -130,7 +130,7 @@ pub(super) mod tests {
                 "unexpected PCI admission{id:04x}"
             );
         }
-        // Suffix alone is not family authority: the source sends CMP12 to SPT.
+        // Suffix alone is not family permission: the source sends CMP12 to SPT.
         assert_eq!(Family::from_device(0x0d53), Some(Family::Spt));
         assert_eq!(Family::from_device(0x0d4e), Some(Family::Cnp));
     }
@@ -154,7 +154,7 @@ pub(super) mod tests {
                         m.words[63] = 0xffff;
                     }
                 }
-                // SAFETY: exact observed modeled PCI ID chooses actual NVM policy.
+                // SAFETY: exact observed modeled PCI ID chooses NVM policy.
                 let mut controller =
                     unsafe { Controller::claim_i219(sample_device(family), io, timer) }.unwrap();
                 let result = controller.validate_nvm();
@@ -261,7 +261,7 @@ pub(super) mod tests {
                 let sum = m.words[..63].iter().copied().fold(0u16, u16::wrapping_add);
                 m.words[63] = 0xbabau16.wrapping_sub(sum);
             }
-            // SAFETY: actual modeled same-function generation/flash grant.
+            // SAFETY: modeled same-function generation/flash grant.
             let mut controller =
                 unsafe { Controller::claim_i219(sample_device(family), io, timer) }.unwrap();
             let first = state.borrow().accesses;
@@ -276,7 +276,7 @@ pub(super) mod tests {
                     let sum = m.words[..63].iter().copied().fold(0u16, u16::wrapping_add);
                     m.words[63] = 0xbabau16.wrapping_sub(sum);
                 }
-                // SAFETY: fresh actual isolated model owner, not retrying failure.
+                // SAFETY: fresh isolated model owner, not retrying failure.
                 let mut controller =
                     unsafe { Controller::claim_i219(sample_device(family), io, timer) }.unwrap();
                 state.borrow_mut().fail_at = Some(at);

@@ -53,7 +53,7 @@ pub struct Identity {
     /// Unaltered source chip identity, including revision and metal stepping.
     pub chip_revision: u32,
     pub asic: Asic,
-    /// PCI BDF function observed from the retained config owner.
+    /// PCI BDF function observed from the config owner.
     pub bdf_function: u8,
     /// ASIC port: BCM5720 derives this from the signed CPMU SRAM word or
     /// live CPMU status, which need not equal the BDF function.
@@ -61,7 +61,7 @@ pub struct Identity {
     pub phy_address: u8,
 }
 
-/// One serialized hardware epoch. Drop retains its real registers/reservation;
+/// One serialized hardware epoch. Drop keeps its real registers/reservation;
 /// this transport alone cannot prove platform DMA drain and release ownership.
 pub struct Hardware<R: Registers, D: Delay> {
     registers: Option<R>,
@@ -71,7 +71,7 @@ pub struct Hardware<R: Registers, D: Delay> {
     cleanup_failure: Option<Error>,
     stopped: bool,
     core_reset_complete: bool,
-    // Source invariant captured once from this endpoint's actual initial
+    // Source invariant captured once from this endpoint's initial
     // Link Control. A later 10/100 workaround clear must not erase that fact.
     clkreq_bug: Option<bool>,
 }
@@ -79,7 +79,7 @@ impl<R: Registers, D: Delay> Drop for Hardware<R, D> {
     fn drop(&mut self) {
         if let Some(registers) = self.registers.take() {
             // Engine stop is not a posted-DMA drain, IOMMU unmap or IRQ drain.
-            // Preserve the actual owner until a composed backend owns those.
+            // Preserve the owner until a composed backend owns those.
             core::mem::forget(registers);
         }
     }
@@ -89,9 +89,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     ///
     /// # Safety
     /// `registers` satisfies its native ownership contract. `delay` is the
-    /// actual calibrated timer supplied by that producer, usable in this
-    /// device's retained power/CPU context for the whole epoch. A copied numeric
-    /// rate or unqualified clock is not native timing authority. Isolated test
+    /// calibrated timer supplied by that producer, usable in this
+    /// device's power/CPU context for the whole epoch. A copied numeric
+    /// rate or unchecked clock is not native timing permission. Isolated test
     /// models supply their explicit symbolic timer instead.
     pub unsafe fn new(registers: R, delay: D) -> Self {
         Self {
@@ -185,7 +185,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
     }
 
-    /// Observe actual config/ASIC and copper strap before taking PHY grants.
+    /// Observe config/ASIC and copper strap before taking PHY grants.
     /// This performs no reset, DMA publication or packet attachment.
     pub fn identify(&mut self) -> Result<Identity, Error> {
         if self.failure.is_some() {
@@ -278,8 +278,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             phy_address,
         };
         self.identity = Some(identity);
-        // tg3_ape_lock_init clears only this actual port's stale grant bits;
-        // it never fabricates an acquisition or clears a competitor's bit.
+        // tg3_ape_lock_init clears only this port's stale grant bits;
+        // it never invents an acquisition or clears a competitor's bit.
         let grant_base = if asic == Asic::Bcm5761 {
             APE_LOCK_GRANT
         } else {
@@ -501,7 +501,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let result = self.sram(at, Some(value)).map(|_| ());
         self.record(result)
     }
-    /// Write the actual bootcode mailbox before core reset; no reset is implied.
+    /// Write the bootcode mailbox before core reset; no reset is implied.
     pub fn arm_firmware_handshake(&mut self) -> Result<(), Error> {
         self.write_sram(FIRMWARE_MBOX, FIRMWARE_MAGIC)
     }
@@ -534,7 +534,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     }
     /// Stop ordinary packet engines in Linux tg3_abort_hw order. Does not
     /// certify PCI/remapper posted-write drain or release any DMA mapping.
-    /// A failure is sticky, retains the real owner, and never clears status RAM.
+    /// A failure is sticky, keeps the real owner, and never clears status RAM.
     pub fn stop_engines(&mut self) -> Result<(), Error> {
         self.check()?;
         let result = self.stop_engines_inner();
@@ -555,7 +555,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.flush(MAC_RX_MODE, mode & !ENABLE)?;
             self.wait(10)?;
             // All declared parts are 5705_PLUS: RCVLSC/DMAC/MBFREE/BUFMGR/
-            // MEMARB are not software-disableable and are intentionally absent.
+            // MEMARB are not software-disableable and are absent.
             for at in STOP_RX.into_iter().chain(STOP_TX) {
                 self.stop_block(at)?;
             }

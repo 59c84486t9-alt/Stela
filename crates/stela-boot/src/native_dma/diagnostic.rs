@@ -160,7 +160,7 @@ fn translation_features_stopped<C: ConfigSpace>(
 impl Prepared {
     /// Before EBS at application TPL: only scoped firmware protocol reads and
     /// owned copied DATA. No config accessor, callback or pool buffer crosses
-    /// EBS. Native BAR sizing occurs only after actual device quiescence.
+    /// EBS. Native BAR sizing occurs only after device quiescence.
     pub(crate) fn prepare(handoff: &Handoff, isolation: bool) -> Result<Self, String> {
         let hv = core::arch::x86_64::__cpuid(0x4000_0000);
         let signature = [
@@ -491,7 +491,7 @@ impl Prepared<Function> {
 
     /// Only after EBS on the prepared UC mappings, with interrupts off. Any
     /// error must stop the host check; normal probing cannot resume into an
-    /// uncertain translation state. Unit/lease Drop retains uncertain resources.
+    /// uncertain translation state. Unit/lease Drop keeps uncertain resources.
     pub(crate) fn run(mut self) -> Result<Report, String> {
         self.quiesce()?;
         if self.second.is_some() {
@@ -518,12 +518,12 @@ impl Prepared<Function> {
         // controller two's cascade. Its single-threaded device callbacks are
         // synchronous; the next run sees all masks before any channel handler.
         // Read-mask is controller offset one (0x09 and 0xd2), not write-all-mask.
-        // The exact Q35 host bridge has no DMA engine. This qualification is
+        // The exact Q35 host bridge has no DMA engine. This validation is
         // specific to the granted TCG fixture and never physical quiescence.
         for (write, read) in [(0x0fu16, 0x09u16), (0xde, 0xd2)] {
             let mask: u8;
             // SAFETY: exclusive known QEMU i8257 controllers after EBS; all
-            // channels are intentionally disabled for this bounded fixture.
+            // channels are disabled for this bounded fixture.
             unsafe {
                 core::arch::asm!("out dx, al", in("dx") write, in("al") 15u8, options(nostack, preserves_flags));
                 core::arch::asm!("in al, dx", in("dx") read, out("al") mask, options(nostack, preserves_flags));
@@ -545,7 +545,7 @@ impl Prepared<Function> {
                 }
             }
         }
-        // SAFETY: Reset the actual firmware boot virtio device and observe status zero
+        // SAFETY: Reset the firmware boot virtio device and observe status zero
         // before clearing bus mastering. Its reset acknowledgement, not the
         // command bit alone, proves virtio has stopped accessing its queues.
         unsafe { (self.virtio_status as *mut u8).write_volatile(0) };
@@ -589,7 +589,7 @@ impl Prepared<Function> {
             device.write32(0x64, u32::MAX);
         }
         // Device-specific reset/idle ACK above establishes real fixture
-        // quiescence. Only now size BARs through actual native config owners;
+        // quiescence. Only now size BARs through native config owners;
         // firmware descriptors were candidates, never native access grants.
         for (index, function) in self.functions.iter_mut().enumerate() {
             let selected = index == self.edu
@@ -617,8 +617,8 @@ impl Prepared<Function> {
             .ticks_per_microsecond
             .checked_mul(TIMEOUT_US)
             .ok_or_else(|| String::from("fixture timeout overflow"))?;
-        // SAFETY: strict fixture discovery supplies the actual UC unit window;
-        // root mappings retain it, clock advances on this one BSP.
+        // SAFETY: strict fixture discovery supplies the UC unit window;
+        // root mappings keep it, clock advances on this one BSP.
         let registers = unsafe {
             MmioRegisters::new(
                 NonNull::new(self.hardware.base as *mut u8)
@@ -642,7 +642,7 @@ impl Prepared<Function> {
             .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
             .collect();
         let function = self.functions.swap_remove(self.edu);
-        // SAFETY: same actual exclusive, idle fixture function and retained root.
+        // SAFETY: same exclusive, idle fixture function and kept root.
         let claim = unsafe { super::requester::RequesterClaim::from_stopped_pci(function) }
             .map_err(|error| format!("requester claim: {error:?}"))?;
         // SAFETY: the unit window is this fixture's matched DMAR unit and every listed requester
@@ -657,7 +657,7 @@ impl Prepared<Function> {
             )
         }
         .map_err(|error| format!("VT-d takeover: {error:?}; no normal probing permitted"))?;
-        // SAFETY: same actual retained stopped requester epoch and coherent grant.
+        // SAFETY: same stopped requester epoch and coherent grant.
         let domain = unsafe { unit.attach_requester(claim) }
             .map_err(|error| format!("requester domain: {error:?}"))?;
         if !unit
@@ -731,7 +731,7 @@ impl Prepared<Function> {
         unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
         device.transfer(send_iova, DEVICE_BUFFER, false)?;
         device.transfer(DEVICE_BUFFER, receive_iova, true)?;
-        // SAFETY: actual EDU RUN-clear completion; exclusive fixture has no
+        // SAFETY: EDU RUN-clear completion; exclusive fixture has no
         // queued submission, IRQ callback or worker that could reuse the BO.
         unsafe { receive_dma.sync_for_cpu(0..BYTES) }
             .map_err(|error| format!("CPU DMA visibility: {error:?}"))?;
@@ -753,8 +753,8 @@ impl Prepared<Function> {
         }
         // SAFETY: stopping bus mastering only revokes the requester's DMA.
         unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
-        // SAFETY: both actual transfers completed and submission is stopped;
-        // no ISR/worker exists. Unmap awaits actual IOTLB acknowledgement.
+        // SAFETY: both transfers completed and submission is stopped;
+        // no ISR/worker exists. Unmap awaits IOTLB acknowledgement.
         unsafe { send_dma.unmap() }.map_err(|error| format!("send unmap: {error:?}"))?;
         // SAFETY: the same completed transfers and stopped bus mastering cover this mapping.
         unsafe { receive_dma.unmap() }.map_err(|error| format!("receive unmap: {error:?}"))?;
@@ -840,7 +840,7 @@ impl Prepared<Function> {
     }
 }
 
-/// Affine actual fixture grant: no public numeric constructor. Created only
+/// Affine fixture grant: no public numeric constructor. Created only
 /// after Source rebind revalidated all real owned requester/config identities.
 pub(crate) struct RegisterSpan<'a> {
     source: &'a crate::paging::config::Source,
@@ -869,7 +869,7 @@ pub(crate) fn retire_registers(
 pub(crate) fn retire_function(function: Function) -> Result<(), String> {
     let mut mapping = function.into_config().into_mapping();
     // SAFETY: all callers are final acknowledged fixture teardown, not a
-    // vendor read or BM-disable guess. Busy/error retains the original lease.
+    // vendor read or BM-disable guess. Busy/error keeps the original lease.
     unsafe { mapping.retire() }.map_err(|error| format!("original config retirement: {error:?}"))
 }
 
@@ -886,12 +886,12 @@ pub(super) struct Device {
 impl Device {
     pub(super) fn read32(&self, offset: usize) -> u32 {
         assert!(offset + 4 <= (self.edu_registers.end - self.edu_registers.start) as usize);
-        // SAFETY: the fixture's real EDU BAR is retained and mapped UC.
+        // SAFETY: the fixture's real EDU BAR is held and mapped UC.
         unsafe { ((self.edu_registers.start + offset as u64) as *const u32).read_volatile() }
     }
     pub(super) fn write32(&self, offset: usize, value: u32) {
         assert!(offset + 4 <= (self.edu_registers.end - self.edu_registers.start) as usize);
-        // SAFETY: actual bounded, owned UC EDU register.
+        // SAFETY: bounded, owned UC EDU register.
         unsafe { ((self.edu_registers.start + offset as u64) as *mut u32).write_volatile(value) };
     }
     pub(super) fn read64(&self, offset: usize) -> u64 {

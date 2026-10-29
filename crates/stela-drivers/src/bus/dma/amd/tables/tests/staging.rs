@@ -37,7 +37,7 @@ fn unpublished_child_rollback() {
             state.fail_publish = None;
         }
         let retry = Arc::new(AtomicUsize::new(0));
-        // SAFETY: pre-mutation rollback left this exact model IOVA reusable.
+        // SAFETY: pre-mutation rollback left this model IOVA reusable.
         unsafe { tree.map(0, payload(0x500000, &retry), Direction::ToDevice) }.unwrap();
         // SAFETY: The retry mapping is exclusively owned by this synchronous software
         // model; all reads have returned and no hardware or deferred user can access

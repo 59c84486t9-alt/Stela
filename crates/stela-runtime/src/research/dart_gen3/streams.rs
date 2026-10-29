@@ -1,4 +1,4 @@
-//! Native per-SID enable commands and actual saved enable state.
+//! Native per-SID enable commands and saved enable state.
 //!
 //! mBoot file158e40..158ec0 selects c00/c20 for set/clear commands.
 //! SPTM d02c4..d030c saves c00 words, d037c..d03e8 clears translation
@@ -72,7 +72,7 @@ impl Command {
     }
 }
 
-/// Actual enabled bits saved before translation-stream shutdown. There is
+/// Enabled bits saved before translation-stream shutdown. There is
 /// no default or zero-filled constructor for unavailable observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -130,7 +130,7 @@ mod tests {
                 .configure_handoff(sid, (ROOT >> 12) as u32 | 1, handoff)
                 .unwrap();
         }
-        // Untranslated mode is still unqualified. Its enable bit remains
+        // Untranslated mode is still unchecked. Its enable bit remains
         // independent and is not silently disabled by translation shutdown.
         tables.configure(33, 0, 0).unwrap();
         for (word, bits) in [(0, 0x8000_0001), (1, 3), (7, 1 << 31)] {

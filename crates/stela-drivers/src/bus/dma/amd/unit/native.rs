@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Command/register sequencing adapted from Linux drivers/iommu/amd at
 // a804c5742bff224d4cb4d25dd383554d598be32b, AMD copyright 2007-2010.
-//! Cold, exclusive AMDv1 requester ownership. This is deliberately process
+//! Cold, exclusive AMDv1 requester ownership. This is process
 //! local: the original PCI/UC/root owner is not promoted to Send/Sync. Native
 //! provisioning and a cross-thread process-context adapter remain platform work.
 //!
@@ -10,9 +10,9 @@
 //! interrupt-table owners stay absent. A unit can give its covered
 //! requesters a window domain that maps given memory one to one
 //! ([`Unit::window`]), which a requester leaves when it attaches.
-//! Faults retain every original owner; they never disable translation into
+//! Faults keep every original owner; they never disable translation into
 //! bypass. Completion stores acknowledge invalidations, not device stop or an
-//! arbitrary posted-payload drain. No DmaDomain implementation is fabricated.
+//! arbitrary posted-payload drain. No DmaDomain implementation is invented.
 //! Healthy retirement releases internal RAM after engines stop and register
 //! pointers clear. Original PCI/UC mappings have no consuming handback yet;
 //! their registry quarantine remains boot-lifetime, not hotplug reclamation.
@@ -72,7 +72,7 @@ const RING_LENGTH: u64 = 9 << 56;
 const COMMAND_BYTES: usize = 16;
 static QUARANTINED_UNITS: AtomicU64 = AtomicU64::new(0);
 
-/// Exposed cold-unit owners retained on uncertain Drop. Not reset evidence.
+/// Exposed cold-unit owners kept on uncertain Drop. Not reset evidence.
 pub fn quarantined_units() -> u64 {
     QUARANTINED_UNITS.load(Ordering::Relaxed)
 }
@@ -96,28 +96,28 @@ pub enum Error {
     Dma(DmaError),
 }
 
-/// Actual retained native context/cache/RAM services, not numeric attestations.
+/// Native context/cache/RAM services, not numeric attestations.
 ///
 /// # Safety
 /// The implementor owns the original unit's root/bridge/reset/configuration,
 /// firmware and all covered requester/IRQ/deferred/prior-DMA epochs. The cold
-/// entry grant is independently established by actual reset and stopped/drained
+/// entry grant is independently established by reset and stopped/drained
 /// requesters, not by a zero control register. All software/firmware unit/table
-/// writers remain excluded until explicit final retirement. The retained
+/// writers remain excluded until explicit final retirement. The kept
 /// FunctionInspection is the original unit for this same epoch; native aligned
-/// UC read64/write64 and coherent WB command/completion/event DMA are qualified.
-/// Unencrypted RAM and host-only AMDv1 tables are qualified at physical_bits();
-/// SNP, actual ATS (including integrated alternate signaling), PASID/PRI,
+/// UC read64/write64 and coherent WB command/completion/event DMA are checked.
+/// Unencrypted RAM and host-only AMDv1 tables are checked at physical_bits();
+/// SNP, ATS (including integrated alternate signaling), PASID/PRI,
 /// hardware table updates, guest and IRQ-remapping owners are absent and cannot
-/// become enabled. Actual requesters cannot issue DMA while a new DTE is being
+/// become enabled. Requesters cannot issue DMA while a new DTE is being
 /// attached or detached. No driver may use this owner to reset another domain.
 /// Every allocation is fresh zeroed CPU-exclusive RAM with true physical pins.
-/// `enter` retains qualified process/root/current-CPU/CX16/cache context, prevents
+/// `enter` keeps checked process/root/current-CPU/CX16/cache context, prevents
 /// migration when required, and excludes external writers. Nested entry on the
 /// same process is supported, never waits on its own nonreentrant lock, permits
 /// completion progress, and no callback may reenter this backend. This backend
-/// is !Send/!Sync and serializes its own queue separately. `clock` is the actual
-/// qualified nonzero monotonic TSC clock for this context. Visibility and sync
+/// is !Send/!Sync and serializes its own queue separately. `clock` is the
+/// checked nonzero monotonic TSC clock for this context. Visibility and sync
 /// perform real hardware ordering/cache work; unsupported work returns failure.
 pub unsafe trait ColdPlatform: PageSource + TableVisibility {
     type Access<'a>
@@ -128,7 +128,7 @@ pub unsafe trait ColdPlatform: PageSource + TableVisibility {
     fn physical_bits(&self) -> u8;
     fn admit_payload(&self, pages: &DmaPages, direction: Direction) -> Result<bool, DmaError>;
     /// # Safety
-    /// Exact retained pages, bounded range and original mapping direction. CPU
+    /// Kept pages, bounded range and original mapping direction. CPU
     /// ownership for a CPU sync and stopped writers are established by caller.
     unsafe fn sync(
         &self,
@@ -137,7 +137,7 @@ pub unsafe trait ColdPlatform: PageSource + TableVisibility {
         direction: Direction,
         for_cpu: bool,
     ) -> Result<(), DmaError>;
-    /// Allow real hardware/IRQ progress. No completion authority is returned.
+    /// Allow real hardware/IRQ progress. No completion permission is returned.
     fn relax(&self) {
         crate::waiting();
         core::hint::spin_loop();
@@ -197,7 +197,7 @@ impl<P> Drop for Engine<P> {
 struct Hardware<P> {
     engine: Rc<Engine<P>>,
     domain: Option<DomainId>,
-    // A poisoned/exposed tree retains its original requester configuration
+    // A poisoned/exposed tree keeps its original requester configuration
     // together with the original unit/root and payload/table pins.
     requester: Option<Rc<requester::Owner>>,
 }
@@ -226,15 +226,15 @@ impl<P: ColdPlatform> PageSource for Hardware<P> {
             .allocate(bytes, alignment, attribute)
     }
 }
-// SAFETY: the original unsafe platform supplies actual table visibility; this
-// adapter preserves the exact retained bytes and original unit context.
+// SAFETY: the original unsafe platform supplies table visibility; this
+// adapter preserves the exact bytes and original unit context.
 unsafe impl<P: ColdPlatform> TableVisibility for Hardware<P> {
     unsafe fn publish(&self, cpu: NonNull<u8>, bytes: usize) -> Result<(), MemoryError> {
         // SAFETY: inherited exact WB span contract, forwarded without escape.
         unsafe { self.engine.resources.platform.publish(cpu, bytes) }
     }
 }
-// SAFETY: one closed, externally exclusive unit; enter retains its actual CX16
+// SAFETY: one closed, externally exclusive unit; enter keeps its CX16
 // execution context. Queue completion is a real exact-sequence coherent store.
 unsafe impl<P: ColdPlatform> DeviceTableHardware for Hardware<P> {
     type Access<'a>
@@ -258,7 +258,7 @@ unsafe impl<P: ColdPlatform> DeviceTableHardware for Hardware<P> {
 }
 // SAFETY: every tree is bound to its reserved domain and original requester;
 // full-domain invalidation includes PDE caches and exact completion. Payload
-// cache/encryption admission is supplied by the retained native platform.
+// cache/encryption admission is supplied by the native platform.
 unsafe impl<P: ColdPlatform> TableHardware for Hardware<P> {
     fn invalidate(&self, _: u64, _: usize) -> Result<(), DmaError> {
         let id = self.domain.ok_or(DmaError::IommuUnavailable)?;
@@ -282,7 +282,7 @@ struct Window<P: ColdPlatform> {
 }
 
 /// Original cold unit plus complete blocked DTE table and bounded RID policy.
-/// Requesters and their page trees retain this exact engine independently.
+/// Requesters and their page trees keep this exact engine independently.
 pub struct Unit<P: ColdPlatform> {
     engine: Rc<Engine<P>>,
     table: Rc<RefCell<DeviceTable<Hardware<P>>>>,
@@ -301,8 +301,8 @@ impl<P: ColdPlatform> Unit<P> {
     /// `platform` is the original cold/exclusive native owner described by
     /// ColdPlatform, for this exact inspection and complete original IVRS. No
     /// DMA or external writer can start before initialization finishes. This
-    /// does not derive cold/reset authority from register observations. Failure
-    /// after first publication deliberately quarantines original resources.
+    /// does not derive cold/reset permission from register observations. Failure
+    /// after first publication quarantines original resources.
     pub unsafe fn cold(
         inspection: FunctionInspection,
         ivrs: &Ivrs<'_>,
@@ -350,7 +350,7 @@ impl<P: ColdPlatform> Unit<P> {
             requester: None,
         };
         // SAFETY: complete effective plain policy and original cold ownership
-        // were checked before allocation; all actual context stays retained.
+        // were checked before allocation; all context stays held.
         let mut table = unsafe { DeviceTable::new(hardware, &admitted.policies, admitted.bits) }
             .map_err(Error::DeviceTable)?;
         let _guard = engine.resources.platform.enter().map_err(Error::Dma)?;
@@ -515,9 +515,9 @@ impl<P: ColdPlatform> Unit<P> {
 
     /// # Safety
     /// Every requester covered by the original cold grant is again stopped,
-    /// with actual payload/IRQ/work/prior-DMA drains complete. No requester may
+    /// with payload/IRQ/work/prior-DMA drains complete. No requester may
     /// resume after this operation: disabling translation would enable bypass.
-    /// All Requester owners must have completed detach, not merely been dropped.
+    /// All Requester owners must have completed detach, not been dropped.
     /// Success retires internal walker/command/event targets, not PCI mappings;
     /// their original native platform retirement obligations still apply.
     pub unsafe fn retire(&mut self) -> Result<(), Error> {
@@ -552,7 +552,7 @@ impl<P: ColdPlatform> Unit<P> {
             }
             self.engine.resources.platform.relax();
         }
-        // Both engines are actually stopped. Remove every stale RAM pointer
+        // Both engines are stopped. Remove every stale RAM pointer
         // before releasing its pin; a later cold owner cannot inherit pointers
         // into a previous allocator epoch. Never perform this on a fault path.
         for offset in [

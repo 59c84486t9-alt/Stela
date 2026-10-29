@@ -2,7 +2,7 @@
 //!
 //! Physical placement is separate from the image's linked IOP virtual map.
 //! Staging preserves encoded pointers. Relocation requires the coprocessor's
-//! actual PAC context; neither step authenticates an Apple image, executes it,
+//! PAC context; neither step authenticates an Apple image, executes it,
 //! establishes an IORVBAR lock, or supplies an implementation of its hardware.
 use crate::{boot_bundle::Source, im4p, kernel_collection::Segment, thread_state::Arm64UnixThread};
 use alloc::{string::String, vec, vec::Vec};
@@ -55,7 +55,7 @@ pub struct SegmentMap {
     pub file_sha256: String,
 }
 
-/// Immutable source-bound requirements, with original coordinates retained.
+/// Immutable source-bound requirements, with original coordinates kept.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub source: Source,
@@ -195,7 +195,7 @@ impl Prepared {
         &self.decoded
     }
 
-    /// Materialize one actual contiguous allocation. Linked IOP VAs remain
+    /// Materialize one contiguous allocation. Linked IOP VAs remain
     /// unchanged. This does not install a mapping in the IOP's MMU or DART.
     pub fn stage(self, physical_base: u64, backing_bytes: u64) -> Result<Staged> {
         let plan = &self.plan;
@@ -291,9 +291,9 @@ impl Staged {
     }
 
     /// Resolve all rebases transactionally under the *coprocessor's* keys and
-    /// translation regime. AP/process keys are not an authority for this image.
+    /// translation regime. AP/process keys are not a permission for this image.
     /// This family keeps MH_PRELOAD's linked virtual map; virtual code sliding
-    /// is unqualified, independent of relocatable physical backing. This takes
+    /// is unchecked, independent of relocatable physical backing. This takes
     /// an explicit TCR_EL1 and installs that regime on the supplied context.
     /// Do not use this output for a cold bootstrap that consumes encoded chains
     /// itself: original T6000 DCP does so at VA 0x115d4.
@@ -655,7 +655,7 @@ pub(super) mod tests {
         assert_eq!(sha256(staged.bytes()), cold_hash);
         let r = staged.relocate(0, context(), 16)?;
         assert_eq!(r.receipt().pointer_count, 26103);
-        // Qualify the original native header + SLID transaction without pretending
+        // Check the original native header + SLID transaction without pretending
         // synthetic entropy and preserving other fields form an authentic boot policy.
         let second = prepare_im4p(
             &container,

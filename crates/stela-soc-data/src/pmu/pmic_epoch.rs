@@ -1,5 +1,5 @@
 //! Explicit oscillator epoch configuration without a running clock owner.
-/// An explicitly created Stela PMIC oscillator at an actual system-counter
+/// An explicitly created Stela PMIC oscillator at a system-counter
 /// value. This is resource configuration, not an Apple reset observation or an
 /// execution/completion receipt. The rate has no implicit default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -117,7 +117,7 @@ impl Default for EventDomain {
     }
 }
 
-/// One authoritative execution handle, deliberately not Clone. Its event bit
+/// One authoritative execution handle, not Clone. Its event bit
 /// can be published concurrently; local timeout mutations require `&mut self`.
 #[derive(Debug)]
 pub struct EventEndpoint {
@@ -127,7 +127,7 @@ pub struct EventEndpoint {
 }
 
 impl EventEndpoint {
-    /// Retain the same registry when an assigned PE leaves reset later. The
+    /// Keep the same registry when an assigned PE leaves reset later. The
     /// endpoint owns its domain; dropping the boot's original handle does not
     /// create a second registry or lose the existing event recipients.
     pub(crate) fn domain(&self) -> EventDomain {

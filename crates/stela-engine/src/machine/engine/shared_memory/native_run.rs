@@ -1,4 +1,4 @@
-//! An actual borrowed architectural frame; no Cpu or Host crosses a core.
+//! A borrowed architectural frame; no Cpu or Host crosses a core.
 mod access;
 mod epoch;
 pub(super) use epoch::Limits;
@@ -42,15 +42,15 @@ pub struct Identity {
 }
 /// Per-PE compiler-artifact resource policy, independent of guest/application.
 /// No persistent cache or installed Host arena is charged to this separate
-/// in-memory artifact budget. Every actual PE has its own independent bound.
+/// in-memory artifact budget. Every PE has its own independent bound.
 const ARTIFACT_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactCacheStats {
     pub compiled: u64,
     pub reused: u64,
-    /// Retained Rust allocation capacities and metadata; allocator headers are
-    /// outside this accounting. Artifacts, actual slot capacity and one
+    /// Rust allocation capacities and metadata; allocator headers are
+    /// outside this accounting. Artifacts, slot capacity and one
     /// effective-control declaration share the same per-PE byte limit.
     pub retained_bytes: usize,
     pub entries: usize,
@@ -67,7 +67,7 @@ struct AdmissionPolicy {
     asimd: bool,
 }
 
-/// Source-independent identity, captured anew while the actual PE is owned.
+/// Source-independent identity, captured anew while the PE is owned.
 /// The cache itself lives in exactly that PE's canonical-memory owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArtifactKey {
@@ -231,7 +231,7 @@ impl ArtifactCache {
     fn remove(&mut self, index: usize) {
         self.retained_payload -= self.entries.remove(index).artifact.retained_bytes();
     }
-    /// Whether the actual retained allocation plus additional payload fits.
+    /// Whether the allocation plus additional payload fits.
     fn fits(&self, additional: usize) -> bool {
         self.retained_payload
             .checked_add(self.slot_bytes())
@@ -306,7 +306,7 @@ impl ArtifactCache {
             }
             self.evict_oldest();
         }
-        // fits() checked this addition as well as the full retained charge.
+        // fits() checked this addition as well as the full charge.
         self.retained_payload += bytes;
         let index = self
             .entries
@@ -360,9 +360,9 @@ impl Artifact {
     }
 }
 
-/// Created only from Machine's actual mutable frame and effective controls.
+/// Created only from Machine's mutable frame and effective controls.
 /// Native code, context and memory services are installed/borrowed on its fixed
-/// owner's Host. The original CPU borrow survives the actual returned payload.
+/// owner's Host. The original CPU borrow survives the returned payload.
 pub struct NativeRun<'a> {
     pub(super) memory: &'a mut SharedMemory,
     state: &'a mut GuestState,
@@ -389,7 +389,7 @@ pub struct ReturnedRun<'a> {
 #[derive(Debug)]
 pub struct Observation {
     /// Immutable provenance shared with the exact artifact that executed.
-    /// Cloning an observation's provenance retains its bytes without copying
+    /// Cloning an observation's provenance keeps its bytes without copying
     /// three digest allocations on every warm native return.
     pub identity: Arc<Identity>,
     pub artifact_cache: ArtifactCacheStats,
@@ -397,8 +397,8 @@ pub struct Observation {
     pub memory_fault: Option<crate::memory::domain::MemoryFault>,
     pub source_failure: Option<policy::Failure>,
     pub status: Result<(), MemoryStatus>,
-    /// Last qualified materialized boundary. A native Host fault leaves the
-    /// current frame unqualified; this field is then diagnostic history only.
+    /// Last checked materialized boundary. A native Host fault leaves the
+    /// current frame unchecked; this field is then diagnostic history only.
     pub settled_pc: u64,
     /// Retired source prefix in the final executed body (fault indexing).
     pub retired: u64,
@@ -408,7 +408,7 @@ pub struct Observation {
     pub physical_processor: Option<u32>,
     pub(super) settlement: Option<Settlement>,
 }
-/// Sealed authority from this exact recovered frame, separate from the public
+/// Sealed permission from this exact recovered frame, separate from the public
 /// diagnostic fields. It is consumed once by stopped source settlement.
 #[derive(Debug)]
 pub(super) struct Settlement {
@@ -512,7 +512,7 @@ impl NativeRun<'_> {
             Ok(code) => Ok(code),
             Err(crate::machine::InstallError::Full) => {
                 // This fixed owner has returned/recovered its preceding frame.
-                // Installed reuse pointers remain inside this actual Host;
+                // Installed reuse pointers remain inside this Host;
                 // discard invalidates its reuse metadata before the retry. The
                 // shared lane never uses legacy cached block addresses.
                 host.discard_code();
@@ -558,7 +558,7 @@ impl NativeRun<'_> {
         let mut malformed = false;
         #[cfg(feature = "native-profile")]
         let measured = host.native_timing_work_start(Work::CheckedBody);
-        // SAFETY: the source-bound artifact, exact real frame, effective policy, canonical RAM,
+        // SAFETY: the source-bound artifact, real frame, effective policy, canonical RAM,
         // current physical target and local installed arena all stay exclusively borrowed through
         // native return, fault and settlement.
         let entered = unsafe {
@@ -574,9 +574,9 @@ impl NativeRun<'_> {
                         fault,
                     });
                 }
-                // Authority/domain admission can fail before the callback, and
+                // Permission/domain admission can fail before the callback, and
                 // Host None explicitly refuses before native effects. Only an
-                // actual Some exit/fault replaces the preceding body's identity.
+                // Some exit/fault replaces the preceding body's identity.
                 if result.is_some() {
                     *artifact_slot = artifact;
                     observation.identity = Arc::clone(&artifact_slot.identity);
@@ -703,7 +703,7 @@ impl NativeRun<'_> {
             deferred_terminal: status == MemoryStatus::Success
                 && retired < self.artifact.source.len() as u64 / 4,
         });
-        // This happens while the actual owner-local Host/code arena, RAM and
+        // This happens while the owner-local Host/code arena, RAM and
         // current target proof are still borrowed, before Release publication.
         Ok(true)
     }
@@ -712,16 +712,16 @@ impl NativeRun<'_> {
 /// Machine-only frame creation and source fetch. The outer scheduler still
 /// owns interrupt/debug/PMU boundaries and the complete stopped-worker cohort.
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// Prepare this actual current PE, leaving the ordinary serial engine off
+    /// Prepare this current PE, leaving the ordinary serial engine off
     /// while its mutable GuestState/PC/retirement fields are lent.
     ///
     /// # Safety
-    /// `binding` names this PE's source-qualified, exclusively assigned physical
-    /// worker and matches the retained publication inventory. All code/MMU/control
+    /// `binding` names this PE's source-checked, exclusively assigned physical
+    /// worker and matches the publication inventory. All code/MMU/control
     /// publications and unjoined DMA/host writers are stopped; RAM registration
     /// and event ownership remain live. Interrupts, timers, debug, PMU and every
     /// BSP System/PAC/AMX service are settled before dispatch/after recovery by
-    /// the scheduler. The actual Cpu owns the persistent canonical memory/event
+    /// the scheduler. The Cpu owns the persistent canonical memory/event
     /// service; its inactive legacy fields cannot authorize serial fallback.
     /// Stopped services must use that same owner and held-generation protocol.
     /// Direct `SYSTEM_MODE` data writers remain excluded, including between calls.
@@ -761,7 +761,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 }
 
-/// A host observation is an exact source boundary, even when a longer immutable
+/// A host observation is a source boundary, even when a longer immutable
 /// artifact was compiled before the observation was installed. The two point
 /// lists are sorted by Machine's setters; unaligned PCs cannot be reached.
 fn source_window(pc: u64, breakpoints: &[u64], traces: &[u64]) -> usize {
@@ -896,8 +896,8 @@ fn prepare<'a>(
             .candidate(&key)
             .filter(|(_, artifact)| artifact.source.len() <= source_bytes);
         let artifact = if let Some((index, artifact)) = candidate {
-            // A hit is merely immutable compilation reuse. Rewalk executable source
-            // and read actual canonical bytes for its exact retained prefix every
+            // A hit is immutable compilation reuse. Rewalk executable source
+            // and read canonical bytes for its exact prefix every
             // time. A shorter compiled prefix remains a valid scheduling boundary;
             // words after it cannot grant or revoke its instruction effects.
             let bytes = artifact.source.len();
@@ -905,7 +905,7 @@ fn prepare<'a>(
                 return Err(at("cached source extent", MemoryStatus::Domain));
             }
             // The existing compiler block bound also bounds private revalidation
-            // staging. Every hit still walks source permissions and copies actual
+            // staging. Every hit still walks source permissions and copies
             // canonical bytes; only the per-round heap allocation disappears.
             let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
             let input = staging
@@ -916,9 +916,9 @@ fn prepare<'a>(
                 .map_err(|status| at("cached executable source fetch", status))?;
             // The immutable artifact was admitted in full before construction.
             // Exact bytes and the fresh key above bind every pure decoder input:
-            // both actual chips, withheld features and effective ASIMD permission.
+            // both chips, withheld features and effective ASIMD permission.
             // Reuse only that decoder result; the source walk, BTYPE entry check,
-            // current controls and physical execution authority remain separate.
+            // current controls and physical execution permission remain separate.
             (input == artifact.source.as_slice()).then_some((index, artifact))
         } else {
             None
@@ -1041,7 +1041,7 @@ fn prepare<'a>(
     })
 }
 
-/// Disjoint actual PE frames and the one owning Machine's publication state.
+/// Disjoint PE frames and the one owning Machine's publication state.
 /// The BSP may use its own Host while fixed APs execute the other frames.
 pub struct Cohort<'a, H: Host> {
     pub host: &'a mut H,
@@ -1050,7 +1050,7 @@ pub struct Cohort<'a, H: Host> {
 }
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Bind the intended fixed workers; each physical Host must still publish
-    /// its source-qualified actual identity before any frame dispatch.
+    /// its source-checked identity before any frame dispatch.
     pub fn bind_native_workers(
         &mut self,
         bindings: &[publication::WorkerBinding],
@@ -1071,7 +1071,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(owners)
     }
     /// Bind exactly all instantiated canonical Cpu owners; Off slots carry no
-    /// worker authority. The roster cannot grow through an unjoined CPU start.
+    /// worker permission. The roster cannot grow through an unjoined CPU start.
     pub fn bind_active_native_workers(
         &mut self,
         bindings: &[publication::WorkerBinding],
@@ -1125,11 +1125,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.native_publication.as_mut()
     }
 
-    /// Borrow every actual active PE and the publication inventory together.
+    /// Borrow every active PE and the publication inventory together.
     ///
     /// # Safety
     /// The shared_native_run scheduler/owner preconditions apply to every member.
-    /// No frame may be dropped or bypassed as a substitute for actual recovery.
+    /// No frame may be dropped or bypassed as a substitute for recovery.
     /// System/PAC/AMX/IRQ/PMU settlement requires all affected frames returned and
     /// the exact held stopped-cohort lease before changing controls or ACKing.
     pub unsafe fn shared_native_cohort<'a>(
@@ -1238,7 +1238,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 }
 
-/// Dispatch/recover consume the actual lifetime-bound frame payload, using the
+/// Dispatch/recover consume the lifetime-bound frame payload, using the
 /// same generation protocol as stopped-worker ProcessorWrite publication.
 pub fn dispatch<'a>(
     inventory: &mut publication::WorkerPublications,
@@ -1426,7 +1426,7 @@ mod artifact_tests {
         assert!(detail.contains("PE=0"));
         assert!(!detail.contains("first_word="));
 
-        // A genuine failed executable walk must retain the original MMU cause.
+        // A failed executable walk must keep the original MMU cause.
         // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
         // registered.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
@@ -1821,7 +1821,7 @@ mod artifact_tests {
             ));
             machine.set_breakpoints(&[]);
             machine.set_traces(&[]);
-            // Removing a point may retain the shorter, still valid boundary.
+            // Removing a point may keep the shorter, still valid boundary.
             assert!(Arc::ptr_eq(
                 &prefix,
                 &prepare_artifact(&mut machine, BINDING).unwrap()
@@ -2111,7 +2111,7 @@ mod artifact_tests {
             assert!(Arc::ptr_eq(entry, artifact));
         }
         assert!(Arc::ptr_eq(cache.recency_order().last().unwrap(), &changed));
-        // Equal-PC entries retain independent full keys. Revisit both variants
+        // Equal-PC entries keep independent full keys. Revisit both variants
         // and a missing variant after insertion, without refreshing recency.
         let tickets: Vec<_> = cache.entries.iter().map(|entry| entry.recency).collect();
         assert!(Arc::ptr_eq(
@@ -2317,7 +2317,7 @@ mod artifact_tests {
         assert!(cache.entries.capacity() >= artifacts.len());
         // Source/code capacities can make one artifact larger than the slot
         // allocation for this roster. Derive sufficient metadata pressure from
-        // its actual charge rather than assuming a particular compiled size.
+        // its charge rather than assuming a particular compiled size.
         let required = (artifacts[0].retained_bytes() + slots).div_ceil(slots);
         cache
             .reserve_slots(required.max(cache.entries.len()))
@@ -2385,8 +2385,8 @@ mod artifact_tests {
             #[cfg(feature = "native-profile")]
             let profile = {
                 let mut profile = artifact.profile.clone();
-                // Metadata is another retained Vec: cloning can shrink its
-                // spare capacity, so grow beyond its actual original charge too.
+                // Metadata is another kept Vec: cloning can shrink its
+                // spare capacity, so grow beyond its original charge too.
                 profile.register_spans.reserve_exact(
                     artifact.profile.register_spans.capacity() + index + 1
                         - profile.register_spans.len(),
@@ -2419,7 +2419,7 @@ mod artifact_tests {
         ));
         assert_accounting(&cache);
         cache.tighten(cache.stats().retained_bytes);
-        // The retained missing-register slice is charged at host-word
+        // The kept missing-register slice is charged at host-word
         // alignment. One additional register may fit within its old charge.
         machine.profile_missing.extend([
             Register::TTBR0_EL1,
@@ -2550,7 +2550,7 @@ mod artifact_tests {
         // registered.
         unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
         let descriptor = u64::from_le_bytes(descriptor);
-        // Guarded BR target requires a compatible actual landing instruction.
+        // Guarded BR target requires a compatible landing instruction.
         *run.btype = 3;
         // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
         // registered.

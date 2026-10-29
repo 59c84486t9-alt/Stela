@@ -17,7 +17,7 @@
 //! software-delay branch clears SHIFTCFG.OVERRIDE_CS (bit 24) and both delay
 //! enables by RMW. The boot stage leaves all three zero (Linux's own init
 //! state). Delays only change timing, which the eager shifter never
-//! guarantees, so their words are retained. Only OVERRIDE_CS may change in
+//! guarantees, so their words are held. Only OVERRIDE_CS may change in
 //! SHIFTCFG, and only while an external GPIO drives the chip select, since
 //! the internal CS output is then disconnected from the attached device.
 use alloc::{collections::VecDeque, vec::Vec};
@@ -262,12 +262,12 @@ impl Lifecycle for Spi {
             || !self.lifecycle.reset && proposed.reset
         {
             if !self.external_cs {
-                // Actual internal CS rising may commit an accepted NOR
+                // Internal CS rising may commit an accepted NOR
                 // program prefix. Its preflight ran before PMGR completion.
                 self.nor.select(false).expect("checked internal SPI CS");
             }
             // External GPIO CS and the flash die are separate hardware:
-            // retain their actual transaction, image, WEL and dirty sectors.
+            // keep their transaction, image, WEL and dirty sectors.
             self.control = 0;
             self.status = 0;
             self.tx_count = 0;

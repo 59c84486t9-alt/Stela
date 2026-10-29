@@ -1,11 +1,11 @@
 //! Source driver roles distinguish published gate indices from start-time
-//! dependencies. This grants no native PMGR resource or lifecycle authority.
+//! dependencies. This grants no native PMGR resource or lifecycle permission.
 use super::{DomainId, Node, name_of};
 use alloc::{string::String, vec::Vec};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ClockRole {
-    /// Ordinary consumers retain all collected ancestor and local gates.
+    /// Ordinary consumers keep all collected ancestor and local gates.
     #[default]
     Consumer,
     /// A bound PMGR function provider publishes its own gate-index metadata;
@@ -14,7 +14,7 @@ pub enum ClockRole {
 }
 
 /// Source-created provider identity, not an arbitrary gate exemption. Private
-/// fields retain the actual function binding and active ancestor requirements.
+/// fields keep the function binding and active ancestor requirements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmgrClockProvider {
     phandle: u32,
@@ -61,7 +61,7 @@ const PROVIDER_BINDINGS: [(&str, &str); 4] = [
     ("arm-io,t6020", "pmgr1,t6021"),
 ];
 
-/// The actual arm-io function-clock_gate must target the direct qualified
+/// The arm-io function-clock_gate must target the direct checked
 /// controller by phandle and selector clkG. A family match alone grants no
 /// role, and no passive index becomes a successful later gate operation.
 pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, String> {

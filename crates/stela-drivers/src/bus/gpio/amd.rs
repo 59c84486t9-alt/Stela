@@ -6,7 +6,7 @@
 //! The pinned Linux driver uses the same sparse KERNCZ pad table and register
 //! layout for these four ACPI IDs; it supplies no per-ID lock or GPIO mux value.
 //! Matching an ID does not establish ownership. The native adapter requires an
-//! actual firmware inspection and retained native MMIO reservation; raw protocol
+//! firmware inspection and kept native MMIO reservation; raw protocol
 //! constructors remain internal to that adapter and independent peers.
 //! No public unsafe assertion, numeric GSI or caller bitmap admits hardware.
 //!
@@ -14,13 +14,13 @@
 //! is not a hard-IRQ handler and must not be put behind an IRQ-unsafe lock.
 //! The optional native adapter serves ordinary installed ACPI GPIO OpRegions.
 //! Native shared-IRQ registration, _AEI delivery, wake and suspend remain open.
-//! Full checklist closure and physical operation remain unqualified.
+//! Full checklist closure and physical operation remain unchecked.
 mod engine;
 mod registers;
 pub use engine::{Controller, Interrupt, Pending, Pull, ServiceReport};
 pub use registers::{NativeRegisters, RegisterIo};
 
-/// Descriptive ACPI match, never a device or pin authority.
+/// Descriptive ACPI match, never a device or pin permission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Profile {
     Amd0030,

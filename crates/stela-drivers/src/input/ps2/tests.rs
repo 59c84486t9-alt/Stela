@@ -1012,7 +1012,7 @@ fn already_reporting_keyboard_cannot_alias_ctr_or_publish_old_scan_set_bytes() {
     assert_eq!(h.borrow().config, 4);
     assert!(c.poll().unwrap().is_empty());
     assert_eq!(c.discarded_before_start(), 5);
-    // The first actually owned set2 input still decodes with fresh framing.
+    // The first owned set2 input still decodes with fresh framing.
     emit(&h, Port::Keyboard, &[0x1c, 0xf0, 0x1c]);
     assert_eq!(
         c.poll().unwrap(),

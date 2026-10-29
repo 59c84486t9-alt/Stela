@@ -5,7 +5,7 @@
 //! to that connector, never to one controller's independent status constant.
 //! The native bus peer supplies physical cable transitions. HPM observes the
 //! same snapshots as DWC3; PHY readiness is a separate prerequisite for USB
-//! signaling and cannot fabricate attachment. No SuperSpeed/DP/USB4 link is
+//! signaling and cannot invent attachment. No SuperSpeed/DP/USB4 link is
 //! supported by this initial USB2 profile.
 use alloc::rc::Rc;
 use core::cell::Cell;
@@ -46,7 +46,7 @@ pub struct Snapshot {
 }
 
 /// Clones reference one authoritative connection generation. A snapshot is a
-/// copy for one bounded controller operation; retain its generation with queued
+/// copy for one bounded controller operation; keep its generation with queued
 /// USB work and cancel that work if the current generation differs. Detach,
 /// reattach, orientation, role, VBUS and speed changes each advance generation;
 /// observing or repeating a state does not. No generation is ever reused.
@@ -76,7 +76,7 @@ impl Port {
         self.0.get().snapshot
     }
     /// Attachment, status, power and data changes since one observer's last
-    /// generation. Per-category stamps retain intervening cable bounce even
+    /// generation. Per-category stamps keep intervening cable bounce even
     /// when the electrical state returns to its previous value.
     pub(crate) fn changes_since(&self, generation: u64) -> [bool; 4] {
         self.0.get().changed.map(|at| at > generation)

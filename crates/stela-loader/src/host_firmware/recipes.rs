@@ -233,7 +233,7 @@ fn select_intel_rsa(request: &Request) -> Option<&'static Recipe> {
         return None;
     }
     // These filenames are selected only by observed variant0x14/hw1/fw3.
-    // Retain every other exact boot-loader field verbatim in the manifest.
+    // Keep every other exact boot-loader field verbatim in the manifest.
     let fields: Vec<_> = request.target.revision.split(':').collect();
     if fields.len() != 11 || fields[..4] != ["37", "14", "01", "03"] {
         return None;

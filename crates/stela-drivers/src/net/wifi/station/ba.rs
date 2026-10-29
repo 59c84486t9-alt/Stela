@@ -5,12 +5,12 @@
 // 2015-2017 Intel Deutschland GmbH. See THIRD_PARTY.md.
 //! Current single-link receive Block Ack agreements for driver-owned reorder.
 //!
-//! Protocol plans do not establish firmware/radio authority. The native owner
-//! must serialize these actions with the same current association, qualify
-//! management/autonomous radio effects, and await actual queue/firmware ACKs.
+//! Protocol plans do not establish firmware/radio permission. The native owner
+//! must serialize these actions with the same current association, check
+//! management/autonomous radio effects, and await queue/firmware ACKs.
 //! A session plan becomes usable only through Station's active-session check.
-//! Removal invalidates that check immediately; actual uncertain owners remain
-//! retained until acknowledged stop or complete association removal/drain.
+//! Removal invalidates that check immediately; uncertain owners remain
+//! until acknowledged stop or complete association removal/drain.
 
 use super::{AssociationContext, Completion, Phase, Station, Ticket};
 use crate::net::wifi::frame::{
@@ -45,14 +45,14 @@ impl From<super::Error> for Error {
     }
 }
 
-/// Exact current native capability limits; observations, never a radio grant.
+/// Current native capability limits; observations, never a radio grant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Limits {
     window: u16,
     amsdu: bool,
 }
 
-/// Immutable protocol/firmware plan, retained by the actual native session.
+/// Immutable protocol/firmware plan, kept by the native session.
 /// A copy/Arc alone does not prove it is currently active.
 #[derive(Debug)]
 pub struct RxSession {
@@ -98,14 +98,14 @@ impl RxSession {
 
 #[derive(Debug)]
 pub enum Action {
-    /// Allocate/activate the exact native RX reorder owner and program its
-    /// actual firmware BA state. Stop must cancel/drain those actual users.
+    /// Allocate/activate the native RX reorder owner and program its
+    /// firmware BA state. Stop must cancel/drain those users.
     Program {
         ticket: Ticket,
         session: Arc<RxSession>,
         enable: bool,
     },
-    /// Actual wire bytes, not an air ACK. Some(session) identifies a newly
+    /// Wire bytes, not an air ACK. Some(session) identifies a newly
     /// acknowledged active agreement; no session is returned for a refusal.
     Transmit {
         ticket: Ticket,
@@ -113,7 +113,7 @@ pub enum Action {
         bytes: Vec<u8>,
         session: Option<Arc<RxSession>>,
     },
-    /// Apply this actual peer/TID's observed BAR SSN only to this active queue.
+    /// Apply this peer/TID's observed BAR SSN only to this active queue.
     Bar {
         session: Arc<RxSession>,
         start_sequence: u16,
@@ -176,7 +176,7 @@ impl Station {
         Ok(Arc::clone(context))
     }
 
-    /// Set the actual native RX window and A-MSDU-in-A-MPDU capability after
+    /// Set the native RX window and A-MSDU-in-A-MPDU capability after
     /// current association configuration. These values cannot enable a session;
     /// its real native program/ACK and independent radio admission remain needed.
     pub fn configure_rx_block_ack(
@@ -207,8 +207,8 @@ impl Station {
         Ok(())
     }
 
-    /// Identity/lifecycle preflight only; the native owner must also retain its
-    /// actual queue/peer/key context through every RX completion and release.
+    /// Identity/lifecycle preflight only; the native owner must also keep its
+    /// queue/peer/key context through every RX completion and release.
     pub fn validate_rx_block_ack(&self, session: &RxSession) -> Result<(), Error> {
         self.validate_association_context(&session.context)?;
         if self.phase != Phase::Associated {
@@ -234,8 +234,8 @@ impl Station {
         Some(&record.session)
     }
 
-    /// Recheck the private pending action immediately before its actual native
-    /// publication. This does not grant radio authority or establish an ACK.
+    /// Recheck the private pending action immediately before its native
+    /// publication. This does not grant radio permission or establish an ACK.
     /// Stopping remains possible after disconnect/revocation without TX grants.
     pub fn validate_rx_block_ack_program(
         &self,
@@ -375,7 +375,7 @@ impl Station {
         })
     }
 
-    /// `epoch` is retained from the actual source RX owner; do not retag old
+    /// `epoch` is held from the source RX owner; do not retag old
     /// deferred input with a fresh current epoch. The present non-PMF path only
     /// accepts ordinary unprotected management; protected-management ingress is
     /// separate and must authenticate before extending this path.
@@ -427,7 +427,7 @@ impl Station {
     }
 
     /// Internal native boundary, never an authentication constructor. The caller
-    /// must own the original authenticated plaintext and current retained key
+    /// must own the original authenticated plaintext and current kept key
     /// session, and hold both real OS/hardware guards while applying this action.
     /// The original protected header and body are kept separate and unchanged.
     pub(in crate::net::wifi) fn receive_authenticated_block_ack(
@@ -500,7 +500,7 @@ impl Station {
                     State::Stopping {
                         restart, notify, ..
                     } => {
-                        // Preserve the existing actual stop ticket/owner while
+                        // Preserve the existing stop ticket/owner while
                         // cancelling the queued replacement and local reply.
                         *restart = None;
                         *notify = None;
@@ -534,7 +534,7 @@ impl Station {
     }
 
     /// Invalidate before native stop. A local reason sends DELBA only after an
-    /// actual acknowledged stop/drain; peer/replacement teardown passes None.
+    /// acknowledged stop/drain; peer/replacement teardown passes None.
     pub fn stop_rx_block_ack(&mut self, tid: u8, reason: Option<u16>) -> Result<Action, Error> {
         if usize::from(tid) >= TIDS {
             return Err(Error::NoSession);
@@ -562,16 +562,16 @@ impl Station {
     /// # Safety
     /// The result belongs to this exact pending program ticket and physical
     /// peer/association. Accepted start means the real reorder owner is ready
-    /// and firmware BA install ACKed. Accepted stop means actual BA disable ACK,
+    /// and firmware BA install ACKed. Accepted stop means BA disable ACK,
     /// session reorder/timer cancellation and retirement of buffered/callback/
     /// already-owned old-session RX users. Controller DMA/requester/key owners
-    /// remain independently retained; this is not requester-wide DMA quiescence
+    /// remain independently kept; this is not requester-wide DMA quiescence
     /// or a claim that frames carry a wire BA generation. Preserve already
     /// classified/deferred batches' original context rather than retagging them.
     /// RejectedAndIdle for an install requires independently established idle/
-    /// retired resources; a rejected stop always retains its owner. Otherwise
-    /// report Uncertain and retain all actual owners. This is not a
-    /// way to qualify a command encoder or synthesize a firmware completion.
+    /// retired resources; a rejected stop always keeps its owner. Otherwise
+    /// report Uncertain and keep all owners. This is not a
+    /// way to check a command encoder or synthesize a firmware completion.
     pub unsafe fn complete_rx_block_ack(
         &mut self,
         ticket: Ticket,
@@ -606,7 +606,7 @@ impl Station {
             self.rx_ba.records[index].as_mut().unwrap().state = State::Quarantined;
             return Ok(Action::None);
         }
-        // A rejected stop is not proof of retirement; keep its actual owner.
+        // A rejected stop is not proof of retirement; keep its owner.
         if !installing && result != Completion::Accepted {
             self.rx_ba.records[index].as_mut().unwrap().state = State::Quarantined;
             return Ok(Action::None);
@@ -780,7 +780,7 @@ pub(crate) mod tests {
         assert!(session.amsdu_in_ampdu());
         assert!(!session.firmware_amsdu());
         s.validate_rx_block_ack_program(t, &session, true).unwrap();
-        // SAFETY: modeled exact native command/queue acknowledgement only.
+        // SAFETY: modeled native command/queue acknowledgement only.
         let a = unsafe { s.complete_rx_block_ack(t, Completion::Accepted) }.unwrap();
         let BaAction::Transmit {
             bytes,
@@ -881,7 +881,7 @@ pub(crate) mod tests {
         assert!(s.active_rx_block_ack(3).is_none());
         assert!(s.validate_rx_block_ack(&old).is_err());
         s.validate_rx_block_ack_program(stop, &old, false).unwrap();
-        // SAFETY: pure model supplies actual completed stop/drain.
+        // SAFETY: pure model supplies completed stop/drain.
         let (install, next) = program(
             unsafe { s.complete_rx_block_ack(stop, Completion::Accepted) }.unwrap(),
             true,
@@ -924,7 +924,7 @@ pub(crate) mod tests {
                 let (stop, held) = program(s.stop_rx_block_ack(0, None).unwrap(), false);
                 assert!(Arc::ptr_eq(&held, &old));
                 assert!(matches!(
-                    // SAFETY: only subsequent actual stop/drain can retire this owner.
+                    // SAFETY: only subsequent stop/drain can retire this owner.
                     unsafe { s.complete_rx_block_ack(stop, Completion::Accepted) }.unwrap(),
                     BaAction::None
                 ));
@@ -939,7 +939,7 @@ pub(crate) mod tests {
         let old = active(&mut s, 1, 0);
         let (ticket, _) = program(s.stop_rx_block_ack(0, Some(37)).unwrap(), false);
         assert!(matches!(
-            // SAFETY: a rejected disable is not actual retirement and stays quarantined.
+            // SAFETY: a rejected disable is not retirement and stays quarantined.
             unsafe { s.complete_rx_block_ack(ticket, Completion::RejectedAndIdle) }.unwrap(),
             BaAction::None
         ));
@@ -978,7 +978,7 @@ pub(crate) mod tests {
         let frame = response(0xd0, &[3, 2, 0, 0x38, 37, 0]);
         let (ticket, _) = program(receive(&mut s, &frame).unwrap(), false);
         assert!(matches!(
-            // SAFETY: actual native stop/drain completed in the fixture.
+            // SAFETY: native stop/drain completed in the fixture.
             unsafe { s.complete_rx_block_ack(ticket, Completion::Accepted) }.unwrap(),
             BaAction::None
         ));

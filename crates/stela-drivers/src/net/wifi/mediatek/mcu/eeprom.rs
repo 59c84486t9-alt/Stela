@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Exact PCI encapsulation EEPROM query and bounded raw observations. The
-//! donor ignores validity/version/size/magic fields; retain them without
-//! inventing their meaning or treating this observation as radio authority.
+//! donor ignores validity/version/size/magic fields; keep them without
+//! inventing their meaning or treating this observation as radio permission.
 use super::{Encoder, Error as EventError, Event};
 use crate::bytes::le32;
 use crate::net::wifi::mediatek::identity::Chip;
@@ -89,7 +89,7 @@ impl Event<'_> {
                 actual: self.sequence,
             }));
         }
-        // Both actual response parsers use the owned sequence and generic
+        // Both response parsers use the owned sequence and generic
         // header removal for these queries; no source-specific EID is invented.
         Ok(self.payload)
     }

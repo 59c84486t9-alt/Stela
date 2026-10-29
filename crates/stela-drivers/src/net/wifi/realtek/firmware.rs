@@ -163,7 +163,7 @@ pub struct Section<'a> {
     pub data: &'a [u8],
     pub range: Range<usize>,
     pub mssc: u32,
-    /// Opaque signatures retained without claiming authentication or a key choice.
+    /// Opaque signatures kept without claiming authentication or a key choice.
     pub signatures: &'a [u8],
 }
 
@@ -266,7 +266,7 @@ impl<'a> AxImage<'a> {
 #[derive(Debug)]
 pub struct Rtw89<'a> {
     pub container_header: Option<&'a [u8]>,
-    /// Includes unselected WOW/log/test records; unknown kinds are retained.
+    /// Includes unselected WOW/log/test records; unknown kinds are held.
     pub entries: Vec<Entry<'a>>,
     pub selected: usize,
     pub image: AxImage<'a>,

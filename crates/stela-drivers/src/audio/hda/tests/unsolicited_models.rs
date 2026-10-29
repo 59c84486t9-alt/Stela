@@ -31,7 +31,7 @@ fn jack_events_during_pcm() {
     let id = controller.enable_jack_notifications(&graph, 4).unwrap();
     assert_eq!(model.borrow().route_controls[&(4, 0xf08)], 0x81);
     assert_ne!(model.borrow().get(GCTL, 4) & GCTL_UNSOL, 0);
-    assert_eq!(model.borrow().get(INTCTL, 4), 0); // explicit polling, no fabricated IRQ registration
+    assert_eq!(model.borrow().get(INTCTL, 4), 0); // explicit polling, no invented IRQ registration
     let stream = controller
         .allocate_stream(
             Direction::Playback,
@@ -72,7 +72,7 @@ fn jack_events_during_pcm() {
         ),
         (0, 1, (1 << 26) | 1, RESPONSE_UNSOL, Some(id))
     );
-    model.borrow_mut().pin_senses.insert(4, 0); // raw event says changed; actual current sense is absent
+    model.borrow_mut().pin_senses.insert(4, 0); // raw event says changed; current sense is absent
     assert!(!controller.poll_pin_sense(&graph, 4).unwrap().present);
     advance(&model, 6);
     assert!(controller.status(stream).unwrap().running);
@@ -95,7 +95,7 @@ fn unsolicited_wrap_preserves_order() {
         model.borrow_mut().emit(raw, RESPONSE_UNSOL);
         assert_eq!(event(&mut controller).response, raw);
     }
-    // Drain the real RIRB on every command while deliberately withholding
+    // Drain the real RIRB on every command while withholding
     // consumer delivery. This fills software storage without overrunning DMA.
     for value in 0..70 {
         model.borrow_mut().emit((1 << 26) | value, RESPONSE_UNSOL);
@@ -118,8 +118,8 @@ fn unsolicited_wrap_preserves_order() {
         Ok(Some(UnsolicitedEvent::Overflow { at_least: 7 }))
     );
     assert_eq!(controller.next_unsolicited(), Ok(None));
-    // Foreign and unregistered tags are retained as raw observations; they
-    // never acquire an invented pin or codec authority.
+    // Foreign and unregistered tags are held as raw observations; they
+    // never acquire an invented pin or codec permission.
     model.borrow_mut().emit((63 << 26) | 3, RESPONSE_UNSOL | 14);
     let foreign = event(&mut controller);
     assert_eq!(
@@ -182,7 +182,7 @@ fn forged_graph_and_tags_rejected() {
                 } // preexisting enabled owner
             }
         }
-        // Caller-supplied favorable capabilities are no write authority.
+        // Caller-supplied favorable capabilities are no write permission.
         graph.groups[0]
             .widgets
             .iter_mut()
@@ -305,7 +305,7 @@ fn hda_unsolicited_matches_linux_admission_and_dispatch() {
                     panic!("original admission row")
                 };
                 if no_jack == 0 && poll == 0 {
-                    // This API is the actual notification path. Linux OEM
+                    // This API is the notification path. Linux OEM
                     // no-jack policy and polling fallback are separate inputs.
                     let mut case_fixture = Fixture::new();
                     let case_model = jack_model();

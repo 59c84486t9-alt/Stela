@@ -27,7 +27,7 @@ fn thread() -> (MemoryThread<Policy>, Arc<RegisteredSystemRam>) {
     (ram.domain().thread(policy), ram)
 }
 fn publish(ram: &RegisteredSystemRam, physical: u64, bytes: &[u8]) {
-    // SAFETY: the fixture retains actual canonical storage; no native entry
+    // SAFETY: the fixture keeps canonical storage; no native entry
     // is live between these callback invocations. Use its canonical writer.
     unsafe { ram.publish_physical(physical, bytes) }.unwrap();
 }

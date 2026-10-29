@@ -1,5 +1,5 @@
 //! Restored uses big-endian u32 length prefixes; reverse proxy uses little
-//! endian. Each poll attempts one bounded read/write and retains partial I/O.
+//! endian. Each poll attempts one bounded read/write and keeps partial I/O.
 use super::{
     Error, Result,
     plist::{self, Limits, Value},

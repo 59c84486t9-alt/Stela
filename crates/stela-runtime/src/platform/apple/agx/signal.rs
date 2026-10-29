@@ -100,7 +100,7 @@ impl Action {
     }
 }
 
-/// Accept the whole signal command without effects. The caller retains this
+/// Accept the whole signal command without effects. The caller keeps this
 /// action sequence and advances its cursor only after each action commits.
 /// Shared/CLPC events precede the firmware stamp, exactly as the original
 /// record handlers do; the driver's stamp and Flag follow at stream end.
@@ -169,7 +169,7 @@ pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>
     Ok(actions)
 }
 
-/// Synchronous component helper. The production firmware retains each
+/// Synchronous component helper. The production firmware keeps each
 /// prepared action and event publication across DMA faults instead.
 #[cfg(test)]
 pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {

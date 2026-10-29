@@ -44,7 +44,7 @@ fn pnvm_each_new_mapping_visibility_and_partial_stop_failure_preserves_epoch() {
             }
             state.lock().unwrap().ops.clear();
             // SAFETY: This same AX210 epoch owns the provider data and exclusive Source/Domain;
-            // serialized allocation/visibility failures retain any potentially exposed backing.
+            // serialized allocation/visibility failures keep any potentially exposed backing.
             let result = unsafe { boot.begin_pnvm(&provider, observations, &source) };
             assert!(
                 matches!(result, Err(Error::PnvmDma(_)) | Err(Error::Dma(_))),
@@ -84,7 +84,7 @@ fn pnvm_each_new_mapping_visibility_and_partial_stop_failure_preserves_epoch() {
             &state,
             &drops,
         );
-        // SAFETY: This sole AX210 model owner retains provider data and its Source/Domain;
+        // SAFETY: This sole AX210 model owner keeps provider data and its Source/Domain;
         // PNVM mappings stay owned through the later injected invalidation-failure retries.
         unsafe {
             boot.begin_pnvm(&provider, observations, &source).unwrap();

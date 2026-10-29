@@ -1,6 +1,6 @@
-//! Canonical RAM service join for the actual T8112 DCS channel owner.
+//! Canonical RAM service join for the T8112 DCS channel owner.
 //! This component is composed into the prepared memory resource; it does not
-//! create another AMCC/PTD owner or qualify missing PMP service producers.
+//! create another AMCC/PTD owner or check missing PMP service producers.
 use crate::platform::apple::dcs::native::CHANNELS;
 use crate::platform::apple::dcs::native::ChannelConfiguration;
 use crate::platform::apple::dcs::native::ChannelProgress;
@@ -15,8 +15,8 @@ use stela_contracts::bus::Width;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
 
-/// Exact channel backing and canonical guest RAM association. Clones retain
-/// the same controller, lifecycle, pending effects and actual memory identity.
+/// Exact channel backing and canonical guest RAM association. Clones keep
+/// the same controller, lifecycle, pending effects and memory identity.
 #[derive(Clone)]
 pub struct NativeDcs {
     controller: Controller,
@@ -53,15 +53,15 @@ impl NativeDcs {
             .map_err(|_| "native DCS drain lost actual RAM generation/writer exclusion")?;
         self.controller.drain_control(offset, width)
     }
-    /// Observe the empty synchronous frontend while its actual native workers,
+    /// Observe the empty synchronous frontend while its native workers,
     /// writer gates and exclusive synchronous device borrows remain held. No
     /// ordinary ready word is saved when this live service ends.
     ///
     /// # Safety
-    /// Every actual PE/native job is stopped. The same canonical RAM service
+    /// Every PE/native job is stopped. The same canonical RAM service
     /// and all synchronous device borrows remain held; no transfer can advance
     /// or reenter. No autonomous firmware, raw DMA or external publisher can
-    /// touch guest RAM. Pending I/O is permitted only while the actual borrows
+    /// touch guest RAM. Pending I/O is permitted only while the borrows
     /// exclude its progress. Free gates alone do not establish this contract.
     pub unsafe fn read_ram_drain(
         &self,
@@ -72,7 +72,7 @@ impl NativeDcs {
         let (_, high) = self.live_drain(offset, width, memory)?;
         Ok(u64::from(high) << 16)
     }
-    /// Consume the source full32 low16-clear under this exact live RAM owner.
+    /// Consume the source full32 low16-clear under this live RAM owner.
     /// The original guest's barriers and330us delay remain separate operations.
     ///
     /// # Safety
@@ -148,7 +148,7 @@ mod tests {
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 128]>);
     // SAFETY: after registration these stable fixture bytes have no ordinary
-    // references; reached accesses participate in the actual fixture memory.
+    // references; reached accesses participate in the fixture memory.
     unsafe impl Sync for Storage {}
     fn ram() -> Arc<RegisteredSystemRam> {
         let storage = Arc::new(Storage(UnsafeCell::new([0; 128])));
@@ -158,7 +158,7 @@ mod tests {
             host_base: NonNull::new(storage.0.get().cast()).unwrap(),
             bytes: 128,
         };
-        // SAFETY: the registered fixture retains these complete stable bytes.
+        // SAFETY: the registered fixture keeps these complete stable bytes.
         Arc::new(unsafe { fixture(&[range], storage) })
     }
     fn configuration() -> Vec<ChannelConfiguration> {

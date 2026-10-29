@@ -55,7 +55,7 @@ impl Drop for View {
 // view uniquely reserves its full range until Drop releases those exact pages.
 unsafe impl PageBacking for View {
     fn cpu_base(&self) -> NonNull<u8> {
-        // SAFETY: first is a checked page index in this retained aligned allocation.
+        // SAFETY: first is a checked page index in this aligned allocation.
         unsafe {
             NonNull::new_unchecked(
                 self.memory
@@ -83,9 +83,9 @@ impl Drop for Model {
         self.0.provider_drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: isolated same-process CPU model over actual aligned owned bytes.
+// SAFETY: isolated same-process CPU model over aligned owned bytes.
 // Allocation claims disjoint ranges and transfers real pins, with no Linux
-// reentry; it refuses atomic/unavailable requests and has no hardware authority.
+// reentry; it refuses atomic/unavailable requests and has no hardware permission.
 unsafe impl Provider for Model {
     fn validate(&self, request: PageRequest) -> Result<(), MemoryError> {
         if request.atomic {
@@ -135,10 +135,10 @@ fn catalog() -> (Catalog<Model>, Arc<Memory>) {
     });
     let cpu = NonNull::new(memory.bytes.0.get().cast::<u8>()).unwrap();
     // SAFETY: one isolated child process owns these exact aligned CPU bytes;
-    // Model retains the allocation and symbolic PA inventory through retirement.
+    // Model keeps the allocation and symbolic PA inventory through retirement.
     let reservation = unsafe { Reservation::new(PHYSICAL, cpu, PAGES) }.unwrap();
     // SAFETY: isolated child has no other C caller/IRQ/root writer. This is a CPU
-    // model, with actual backing lifetime and no native physical qualification.
+    // model, with backing lifetime and no native physical validation.
     let catalog = unsafe { Catalog::register(Model(memory.clone()), reservation) }.unwrap();
     (catalog, memory)
 }
@@ -146,7 +146,7 @@ struct EnteredModel {
     thread: thread::ThreadId,
     allowed: AtomicBool,
 }
-// SAFETY: explicit hosted authority model checks the real OS thread and live
+// SAFETY: explicit hosted permission model checks the real OS thread and live
 // test-owned entered flag. It never attests a CPL0 native DriverExecution guard.
 unsafe impl EnteredProcess for EnteredModel {
     fn check(&self) -> Result<(), WorkError> {
@@ -170,7 +170,7 @@ unsafe extern "C" {
     fn stela_linux_page_catalog_unregister(generation: u64) -> c_int;
 }
 unsafe extern "C" fn exhaust(context: *mut c_void, enabled: bool) {
-    // SAFETY: retained immutable Memory Arc is held by the fixture throughout the
+    // SAFETY: immutable Memory Arc is held by the fixture throughout the
     // synchronous C body. This modifies only the model allocation-refusal flag.
     unsafe { &*context.cast::<Memory>() }
         .exhausted
@@ -182,13 +182,13 @@ struct Fixture {
     memory: Arc<Memory>,
 }
 unsafe extern "C" fn body(context: *mut c_void) {
-    // SAFETY: the Queue retains this stable fixture through every callback.
+    // SAFETY: the Queue keeps this stable fixture through every callback.
     let f = unsafe { &*context.cast::<Fixture>() };
-    // SAFETY: actual pinned executor is retained by the test through retirement;
-    // no cross-thread dispatch or native execution authority is inferred.
+    // SAFETY: pinned executor is held by the test through retirement;
+    // no cross-thread dispatch or native execution permission is inferred.
     let runtime = unsafe { Pin::new_unchecked(&*f.runtime.load(Ordering::Acquire)) };
     // SAFETY: model's real same-thread process context before C entry; no binding
-    // or metadata is published until bind_current validates the actual stack.
+    // or metadata is published until bind_current validates the stack.
     let binding = unsafe { TaskBinding::new() }.unwrap();
     binding.bind_current(runtime).unwrap();
     *f.binding.lock().unwrap() = Some(binding.clone());
@@ -197,7 +197,7 @@ unsafe extern "C" fn body(context: *mut c_void) {
         exhaust,
         heap_bytes: PAGE * PAGES,
     };
-    // SAFETY: actual attached task/stack and scoped Control/Memory stay retained
+    // SAFETY: attached task/stack and scoped Control/Memory stay held
     // until the finite original-C fixture returns with no owner or refs escaped.
     unsafe {
         binding.run_scoped(
@@ -252,7 +252,7 @@ fn run(forget: bool) {
         let _owner = Entered::try_new().unwrap();
         let short = [99u32, 8];
         assert_eq!(
-            // SAFETY: C may read only this actual fixed8-byte header before
+            // SAFETY: C may read only this fixed8-byte header before
             // rejecting version/bytes; its generation tail is inaccessible.
             unsafe { stela_linux_resources_initialize(short.as_ptr().cast()) },
             -22
@@ -262,11 +262,11 @@ fn run(forget: bool) {
             bytes: 16,
             page_generation: generation - 1,
         };
-        // SAFETY: complete fixed ABI record, genuinely stale catalog generation.
+        // SAFETY: complete fixed ABI record, stale catalog generation.
         assert_eq!(unsafe { stela_linux_resources_initialize(&stale) }, -22);
     }
     // SAFETY: isolated process owns real model catalog and entered flag, with no
-    // C/IRQ/producer overlap. This qualifies no native task or hardware service.
+    // C/IRQ/producer overlap. This checks no native task or hardware service.
     unsafe { resources.initialize(&entered) }.unwrap();
     assert_eq!(memory.allocations.load(Ordering::Relaxed), 0);
     {
@@ -289,7 +289,7 @@ fn run(forget: bool) {
         binding: Mutex::new(None),
         memory: memory.clone(),
     });
-    // SAFETY: real same-thread model and retained fixture, before any producer.
+    // SAFETY: real same-thread model and kept fixture, before any producer.
     let queue = unsafe { Queue::<16>::new(cpu, f.clone()) }.unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
     let required = super::super::task::stack_requirement().unwrap();
@@ -301,20 +301,20 @@ fn run(forget: bool) {
     f.runtime
         .store(runtime.get_ref() as *const _ as *mut _, Ordering::Release);
     // SAFETY: finite callback/fixture/code and all real guarded stack owners remain
-    // retained through actual completion; no external/IRQ caller exists.
+    // through completion; no external/IRQ caller exists.
     unsafe { runtime.call_foreground(body, Arc::as_ptr(&f).cast_mut().cast(), u64::MAX - 1) }
         .unwrap();
     runtime.queue().close().unwrap();
     let binding = f.binding.lock().unwrap().take().unwrap();
     // SAFETY: callback and C scope returned, all test producers stopped. Exact
-    // attached binding remains retained through detachment and explicit release.
+    // attached binding remains held through detachment and explicit release.
     let retained = unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
     drop(retained);
-    // SAFETY: same actual model process and unique detached metadata owner, after
+    // SAFETY: same model process and unique detached metadata owner, after
     // the original resource fixture restored the bare task's exact quiet state.
     assert!(unsafe { binding.release_quiescent() }.is_ok());
     // SAFETY: all finite work returned and detached, no producer can enqueue/wake;
-    // live executor retains CPU/code/stack backing through proven retirement.
+    // live executor keeps CPU/code/stack backing through proven retirement.
     unsafe { runtime.retire() }.unwrap();
     drop(executor);
     assert_eq!(drops.load(Ordering::Relaxed), 4);
@@ -336,7 +336,7 @@ fn run(forget: bool) {
             bytes: 16,
             page_generation: generation,
         };
-        // SAFETY: retained actual C roots/catalog must refuse reinitialization and
+        // SAFETY: C roots/catalog must refuse reinitialization and
         // unregister independently of the lost/forgotten Rust owner handle.
         unsafe {
             assert_eq!(stela_linux_resources_initialize(&request), -16);

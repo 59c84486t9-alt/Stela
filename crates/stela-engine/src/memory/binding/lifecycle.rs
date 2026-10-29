@@ -271,7 +271,7 @@ mod tests {
             owner.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 78), &mut [])
         }
         .unwrap();
-        // SAFETY: independent storage, deliberately with the same ASID.
+        // SAFETY: independent storage, with the same ASID.
         let other_domain = unsafe {
             other.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 78), &mut [])
         }

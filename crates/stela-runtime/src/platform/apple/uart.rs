@@ -393,7 +393,7 @@ impl<C: ConsoleSink> Lifecycle for S5lUart<C> {
         {
             // The external console and already transmitted bytes survive.
             // Configuration values after physical reset are not inferred
-            // from the boot firmware's deliberately configured handoff.
+            // from the boot firmware's configured handoff.
             self.configuration = 0;
             self.ubrdiv = None;
             self.status = 0;

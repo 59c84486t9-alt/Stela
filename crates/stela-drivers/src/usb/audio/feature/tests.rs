@@ -413,7 +413,7 @@ fn native(
 }
 fn allocator(memory: &mut [u64]) -> RegionAllocator {
     let start = memory.as_mut_ptr() as u64;
-    // SAFETY: each test retains the original exclusive backing through owners.
+    // SAFETY: each test keeps the original exclusive backing through owners.
     unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) }
 }
 
@@ -494,8 +494,8 @@ fn actual_native_ep0_short_range_and_stalled_set_propagate_failures() {
                 result,
                 Err(Error::Transport(BlockError::Device { status: 6 }))
             ));
-            assert!(model.borrow().seen.contains(&14)); // actual Reset Endpoint
-            assert!(model.borrow().seen.contains(&16)); // actual Set Dequeue
+            assert!(model.borrow().seen.contains(&14)); // Reset Endpoint
+            assert!(model.borrow().seen.contains(&16)); // Set Dequeue
             assert!(model.borrow().setup.iter().any(|(r, payload)| *r
                 == xhci::setup(0x21, 1, 7 << 8 | 1, 0x0200, 1)
                 && *payload == [1]));

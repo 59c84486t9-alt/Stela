@@ -8,7 +8,7 @@ use stela_compiler::TargetCpu;
 
 const HOST_QUANTITY_BYTES: usize = 8;
 
-/// Failed host publication, including the prefix actually written.
+/// Failed host publication, including the prefix written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicationFault {
     pub status: MemoryStatus,

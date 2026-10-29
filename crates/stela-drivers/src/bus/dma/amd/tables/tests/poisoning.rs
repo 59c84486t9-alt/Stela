@@ -16,7 +16,7 @@ fn uncertain_publication_retains_pins() {
         }
         let drops = Arc::new(AtomicUsize::new(0));
         monitor.state.lock().unwrap().watch_payload = Some(drops.clone());
-        // SAFETY: no model requester is active; injected uncertainty is retained.
+        // SAFETY: no model requester is active; injected uncertainty is held.
         let result = unsafe { tree.map(0x8000, payload(0x600000, &drops), Direction::FromDevice) };
         let expected = if stage == 5 {
             TranslationError::Invalidation(DmaError::InvalidationFailed)
@@ -37,14 +37,14 @@ fn uncertain_publication_retains_pins() {
         assert_eq!(
             // SAFETY: The replacement payload has live backing but no requester. The
             // poisoned model owner must reject attempted IOVA reuse before replacing
-            // any retained original pin.
+            // any original pin.
             unsafe { tree.map(0x8000, payload(0x700000, &replacement), Direction::ToDevice) },
             Err(TranslationError::Poisoned)
         );
         assert_eq!(replacement.load(Ordering::Relaxed), 1);
         assert_eq!(
-            // SAFETY: There is no actual requester or asynchronous walker in the
-            // model. The poisoned owner must reject removal while retaining every
+            // SAFETY: There is no requester or asynchronous walker in the
+            // model. The poisoned owner must reject removal while keeping every
             // uncertain original mapping pin.
             unsafe { tree.unmap(0x8000) },
             Err(TranslationError::Poisoned)
@@ -75,7 +75,7 @@ fn unmap_failures_and_callback_unwinds() {
             }
         }
         if scenario < 2 {
-            // SAFETY: model is stopped; an unacknowledged removal retains pins.
+            // SAFETY: model is stopped; an unacknowledged removal keeps pins.
             assert!(unsafe { tree.unmap(0) }.is_err());
         } else {
             // SAFETY: same stopped model. The injected callback unwinds after
@@ -120,7 +120,7 @@ fn unmap_failures_and_callback_unwinds() {
             catch_unwind(AssertUnwindSafe(||
             // SAFETY: The fresh payload and table provider stay owned during this
             // synchronous callback. Injected publication or invalidation unwind
-            // cannot involve a device or outlive its retained pins.
+            // cannot involve a device or outlive its pins.
             unsafe {
                 tree.map(0, payload(0x300000, &drops), Direction::ToDevice)
             }))
@@ -163,8 +163,8 @@ fn exposed_tree_drop_quarantine() {
 
     let (mut tree, monitor) = new_tree(1, 12);
     tree.root_for_publication().unwrap();
-    // One deliberately leaked 4K fixture proves actual Drop quarantine. Do
-    // not reclaim its RAM behind the retained forgotten pin/context owners.
+    // One leaked 4K fixture proves Drop quarantine. Do
+    // not reclaim its RAM behind the forgotten pin/context owners.
     let before = quarantine_status();
     drop(tree);
     let after = quarantine_status();
@@ -179,12 +179,12 @@ fn exposed_tree_drop_quarantine() {
     tree.root_for_publication().unwrap();
     monitor.state.lock().unwrap().fail_invalidate = true;
     let drops = Arc::new(AtomicUsize::new(0));
-    // SAFETY: the isolated model has no actual requester; failed completion
+    // SAFETY: the isolated model has no requester; failed completion
     // conservatively models an exposed, uncertain payload mapping.
     assert_eq!(
         // SAFETY: The candidate payload has live CPU backing and no device or worker.
         // Injected invalidation failure models uncertainty while the table owner
-        // retains the exposed payload pin.
+        // keeps the exposed payload pin.
         unsafe { tree.map(0, payload(0x300000, &drops), Direction::Bidirectional) },
         Err(TranslationError::Invalidation(DmaError::InvalidationFailed))
     );

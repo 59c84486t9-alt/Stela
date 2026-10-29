@@ -36,12 +36,12 @@ struct Ram {
     layout: Layout,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: test-only uniquely retained stable allocations; physical labels are
+// SAFETY: test-only uniquely kept stable allocations; physical labels are
 // symbolic and never passed to native hardware or any real remapping provider.
 unsafe impl Send for Ram {}
 // SAFETY: only raw access, synchronized by the synchronous test model.
 unsafe impl Sync for Ram {}
-// SAFETY: zeroed page-aligned model storage, immutable labels and retained owner.
+// SAFETY: zeroed page-aligned model storage, immutable labels and kept owner.
 unsafe impl PageBacking for Ram {
     fn cpu_base(&self) -> NonNull<u8> {
         self.pointer
@@ -118,8 +118,8 @@ struct Domain {
 }
 impl Domain {
     fn require_bus_master_disabled(&self) {
-        // Retain the very same backing installed beneath OwnedConfig. This is
-        // a device-side observation of the actual native Command word, never a
+        // Keep the very same backing installed beneath OwnedConfig. This is
+        // a device-side observation of the native Command word, never a
         // caller-supplied quiescence flag or a second configuration writer.
         let config = self.config.lock().unwrap().as_ref().unwrap().clone();
         assert_eq!(
@@ -225,7 +225,7 @@ impl Domain {
     }
 }
 // SAFETY: explicit independent synchronous model, never native DMA. Each mapping
-// retains its exact pins, has a unique symbolic IOVA and checked cache accesses.
+// keeps its exact pins, has a unique symbolic IOVA and checked cache accesses.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -662,7 +662,7 @@ unsafe impl Registers for Rc<Peer> {
     }
 }
 // SAFETY: explicit isolated device-model clock. Successful symbolic waits
-// advance this same retained peer's time and acknowledge its pending hardware.
+// advance this same peer's time and acknowledge its pending hardware.
 unsafe impl Timer for Rc<Peer> {
     fn check(&self) -> core::result::Result<(), crate::bus::pci::power::Error> {
         if self.timing.get() {
@@ -909,7 +909,7 @@ fn ordinary_suspend_stops_dma_before_d3_and_retains_the_resumable_epoch() {
 
 // Native volatile storage shared with the device/DMA peer. The platform only
 // supplies RAM; ControlledConfig below models synchronous device responses at
-// the actual ConfigSpace boundary. Neither component grants physical authority.
+// the ConfigSpace boundary. Neither component grants physical permission.
 #[repr(align(4096))]
 struct ConfigPage([u8; 4096]);
 struct NativePm {
@@ -941,7 +941,7 @@ impl NativePm {
             .collect()
     }
     fn command(&self) -> u16 {
-        // SAFETY: stable aligned native configuration RAM retained by this
+        // SAFETY: stable aligned native configuration RAM kept by this
         // model owner; serialized observation, with no write or access callback.
         unsafe { self.pointer().as_ptr().add(4).cast::<u16>().read_volatile() }
     }
@@ -1037,8 +1037,8 @@ impl ConfigSpace for ControlledConfig {
                 (PmMode::RefuseD3, 3) => self.native.write16(offset, value & !3),
                 _ => {}
             }
-            // Synchronous device response through the same retained accessor.
-            // This internal read is deliberately absent from the caller trace.
+            // Synchronous device response through the same accessor.
+            // This internal read is absent from the caller trace.
             self.peer.actual_state.store(
                 usize::from(self.native.read16(offset) & 3),
                 Ordering::Relaxed,
@@ -1055,7 +1055,7 @@ impl ConfigSpace for ControlledConfig {
     }
 }
 struct ConfigResource(owned::PhysicalSpan);
-// SAFETY: symbolic test ECAM span, backed only by the retained fixture RAM.
+// SAFETY: symbolic test ECAM span, backed only by the fixture RAM.
 unsafe impl owned::ResourceBacking for ConfigResource {
     fn physical_span(&self) -> owned::PhysicalSpan {
         self.0
@@ -1237,7 +1237,7 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
         assert_eq!(peer.reads.borrow().len(), reads);
         if !retire {
             *pm.mode.lock().unwrap() = PmMode::Normal;
-            // The model answers config again; the retained native PMCSR is D3hot.
+            // The model answers config again; the native PMCSR is D3hot.
             net.resume_owned().unwrap();
             assert_eq!(net.power, PciPower::D0);
             assert_eq!(net.state(), State::Running);
@@ -1252,7 +1252,7 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
 fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
     let (mut net, peer, domain, dropped) = setup_with_memory(0x07b1, false);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
-    // Model attach before Memory allocation, using its actual power helper.
+    // Model attach before Memory allocation, using its power helper.
     net.state = State::Faulted;
     net.function.as_mut().unwrap().config().write16(0x44, 3);
     *pm.mode.lock().unwrap() = PmMode::RefuseD0;
@@ -1547,7 +1547,7 @@ fn model_rejects_dma_drain_before_native_bus_master_clear_and_retains_pending_wr
         assert_ne!(peer.native_pm.borrow().as_ref().unwrap().command() & 4, 0);
 
         // Wrong order: queue shutdown alone must not admit the drain. Catch
-        // rejection so this control also proves all DMA evidence is retained.
+        // rejection so this control also proves all DMA evidence is held.
         // SAFETY: the model device is stopped and drained, so nothing still uses what this
         // releases.
         assert_bus_master_rejection(|| unsafe { domain.drain_posted_writes().unwrap() });
@@ -1594,7 +1594,7 @@ fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
             let config = net.function.as_mut().unwrap().config();
             let command = config.read16(4);
             config.write16(4, command & !4);
-            // This device-side volatile sample is deliberately absent from the
+            // This device-side volatile sample is absent from the
             // caller trace: cleared RAM cannot substitute for driver readback.
             assert_eq!(peer.native_pm.borrow().as_ref().unwrap().command() & 4, 0);
             let rejection = catch_unwind(AssertUnwindSafe(|| {
@@ -1622,7 +1622,7 @@ fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
             assert_eq!(domain.maps.lock().unwrap().len(), 4);
             assert_eq!(dropped.load(Ordering::Relaxed), 0);
             assert!(net.memory.is_some());
-            // Re-enter production stop even if the control deliberately broke
+            // Re-enter production stop even if the control broke
             // an already stopped owner's readback assumption.
             net.state = State::Faulted;
             net.retire().unwrap();
@@ -1649,7 +1649,7 @@ fn model_rejects_unmap_after_native_bus_master_reenable_and_retains_dma() {
         config.write16(4, command | 4);
         assert_ne!(config.read16(4) & 4, 0);
 
-        // Deliberately violate the stopped owner's configuration invariant,
+        // Violate the stopped owner's configuration invariant,
         // then try to reclaim through the real Memory/DmaMapping unmap path.
         assert_bus_master_rejection(|| net.memory.as_mut().unwrap().retire().unwrap());
         assert!(net.memory.is_some());
@@ -1658,7 +1658,7 @@ fn model_rejects_unmap_after_native_bus_master_reenable_and_retains_dma() {
         assert_eq!(domain.drain_count.load(Ordering::Relaxed), 1);
 
         // Force production stop to establish its boundary again rather than
-        // relying on the Stopped state deliberately invalidated above.
+        // relying on the Stopped state invalidated above.
         net.state = State::Faulted;
         net.retire().unwrap();
         assert_eq!(domain.drain_count.load(Ordering::Relaxed), 2);
@@ -1674,7 +1674,7 @@ fn model_rejects_historical_drain_after_a_new_engine_epoch() {
     net.stop().unwrap();
     net.start().unwrap();
     net.hw().stop_queues().unwrap();
-    // Satisfy the independent PCI boundary, but deliberately omit this epoch's
+    // Satisfy the independent PCI boundary, but omit this epoch's
     // domain drain. The historical-drain control must reach that exact check.
     let config = net.function.as_mut().unwrap().config();
     let command = config.read16(4);
@@ -1798,7 +1798,7 @@ fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
 }
 
 // Authored unchanged-source comparison and parser checks: UNRUN. This peer is
-// deliberately independent of the firmware/DMA model above.
+// independent of the firmware/DMA model above.
 mod registers_oracle {
     use super::super::registers as f;
     use super::*;
@@ -1827,7 +1827,7 @@ mod registers_oracle {
         values: &'static [u32],
         access: Access,
     }
-    // Actual production constants only. Input domains are explicit donor-width
+    // Production constants only. Input domains are explicit donor-width
     // encodings, independent of Field addresses/masks/shifts. No expected result
     // or address is calculated from this table. The external comparison gets
     // them from original Linux; the verifier controls below use donor literals.
@@ -2149,7 +2149,7 @@ mod registers_oracle {
         writes: Cell<u32>,
     }
     // SAFETY: isolated synchronous scalar test state, no physical MMIO/DMA. Each
-    // callback checks the exact donor-observed address and retains the raw word.
+    // callback checks the exact donor-observed address and keeps the raw word.
     unsafe impl Registers for RegisterPeer {
         fn read(&self, offset: usize) -> Result<u32> {
             assert_eq!(offset, self.address, "donor read address");
@@ -2302,7 +2302,7 @@ mod registers_oracle {
     fn rejects_parseable_aqtion_register_comparison_corruptions() {
         let trace = control_trace();
         compare_trace(&trace); // A baseline failure cannot count as rejection.
-        // Every replacement retains a complete valid input inventory and passes
+        // Every replacement keeps a complete valid input inventory and passes
         // the parser. Only the real Hardware comparison can reject these rows.
         // Exercise addresses for every access class, words for both setter
         // classes, and in-range results for all three getters.

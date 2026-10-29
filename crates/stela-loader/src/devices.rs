@@ -19,7 +19,7 @@
 //! XNU starts an IODARTMapper per mapper; a DART no visible device reaches
 //! would only be programmed for clients the machine does not have.
 //! A modeled device whose `iommu-parent` names a mapper of a DART the
-//! machine does not model (including unqualified legacy filter, remap or
+//! machine does not model (including unchecked legacy filter, remap or
 //! routing variants) goes too, before its streams are counted: its DMA would
 //! have no translation to reach RAM through, so its driver must not bind.
 //!
@@ -65,14 +65,14 @@
 //! A final pass also retires audited service-advertising `device_type`
 //! values on hidden devices: raw DeviceTree display discovery does not
 //! honor `compatible` or `AAPL,ignore`. The existing admission ledger keeps
-//! the hidden paths; original inputs retain the removed identity bytes.
+//! the hidden paths; original inputs keep the removed identity bytes.
 //! Structural and unaudited type metadata remain.
 //!
 //! An SPMI controller with no admitted target or external platform-function
 //! or interrupt consumer also loses `compatible`. Board templates may carry
 //! alternative controllers over the same banks (26A434 J623/J624); iBoot
 //! selects those by hardware straps. An unused bus needs no selection. If
-//! both alternatives serve retained consumers, both remain and mounting
+//! both alternatives serve kept consumers, both remain and mounting
 //! explicitly refuses their overlapping ownership rather than choosing one.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
@@ -369,7 +369,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     hidden
 }
 
-/// Retain buses only for actual visible targets or externally used provider
+/// Keep buses only for visible targets or externally used provider
 /// identities. The latter includes name-matched clients with no compatible;
 /// the admission ledger and AAPL,ignore exclude unavailable consumers.
 fn hide_unused_spmi(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
@@ -495,7 +495,7 @@ fn hide_incomplete_external_outputs(tree: &mut DeviceTree, hidden: &mut Vec<Stri
 
 /// Retire a proven service-advertising class only after the admission pass
 /// has established that its physical device is unavailable. The path ledger
-/// stays unchanged; the original input and its source provenance retain the
+/// stays unchanged; the original input and its source provenance keep the
 /// identity bytes separately from this prepared tree. Names and phandles
 /// stay usable by metadata readers; structural and unaudited types stay intact.
 fn retire_hidden_service_identities(tree: &mut DeviceTree, hidden: &[String]) {

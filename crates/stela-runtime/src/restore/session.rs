@@ -457,7 +457,7 @@ impl Session {
         Ok(())
     }
     /// Host write completion, not a guest message. Reboot/disconnect is allowed
-    /// only after the final acknowledgement has actually left the stream.
+    /// only after the final acknowledgement has left the stream.
     pub fn final_ack_sent(&mut self) -> Result<()> {
         if self.phase != Phase::FinalAck {
             return Err(Error::Invalid("final acknowledgement phase"));

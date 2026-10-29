@@ -1,9 +1,9 @@
 //! Checked read effects for the matching T6000 tag2 poll emitter.
 //!
-//! LLB10804/487d0/47f60 qualify the full 32/64-bit packet layout. Only
+//! LLB10804/487d0/47f60 check the full 32/64-bit packet layout. Only
 //! condition0/timeout0 masked-equality polling is admitted here; no physical
 //! timeout scale, other condition, hardware trigger or end retirement is
-//! inferred. A nonmatching actual read retains the packet PC. Read effects can
+//! inferred. A nonmatching read keeps the packet PC. Read effects can
 //! be partial too: an uncertain route result quarantines all future claims.
 use super::{Error, FlightKind, InFlight, PacketCursor, Sram, control};
 use alloc::rc::Rc;
@@ -175,7 +175,7 @@ impl PacketCursor {
         Ok(())
     }
     /// True means this masked poll matched, not that the program/controller
-    /// retired. False retains the same packet PC and its actual last sample.
+    /// retired. False keeps the same packet PC and its last sample.
     pub fn finish_read<E>(
         &mut self,
         claim: &ReadClaim,
@@ -610,7 +610,7 @@ mod tests {
             (address, control, expected, mask),
             (0x28e502100, 0x40, 0x1000000, 0x1000000)
         );
-        // Source-derived emitter output from actual original operands, not a
+        // Source-derived emitter output from original operands, not a
         // native SRAM capture or proof that this source row was triggered.
         let words = [
             ((address >> 4) as u32 & 0xffffffc0) | 2,

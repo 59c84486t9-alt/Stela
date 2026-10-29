@@ -14,20 +14,20 @@
 //! below honor the controller's Num_HCI_Command_Packets credits.
 //! The explicit [`intel::initialize`] path adds identified Intel legacy-RSA
 //! bootloader bulk framing and returns a controller-specific firmware report.
-//! The explicit native [`Hci::initialize_with_provider`] consumer retains owned
+//! The explicit native [`Hci::initialize_with_provider`] consumer keeps owned
 //! device-specific evidence/errors after the provider is released. Raw attachment
 //! itself never initializes a controller. [`realtek::initialize`] adds exact
 //! RTL8761BU/RTL8822B stock-ROM identification and EPATCH v1 upload with owned
 //! observations. Other vendor/format variants remain explicit unsupported paths.
 //! [`broadcom::initialize`] adds source-selected Broadcom/Cypress USB PatchRAM
-//! identification, complete HCD replay, genuine completion/credit handling and
-//! retained post-download observations. Matching vendor-specific HCI interfaces
+//! identification, complete HCD replay, completion/credit handling and
+//! post-download observations. Matching vendor-specific HCI interfaces
 //! are admitted separately from the standard class; descriptor IDs never prove
 //! the runtime silicon or firmware. A Bluetooth host stack independently
 //! establishes radio services. [`qca::initialize`] adds source-listed Rome/WCN
-//! USB DFU with actual OTP/status and exact board-specific rampatch/NVM resources.
-//! WCN debug ACL retains its original bytes as [`Packet::Diagnostic`]; controller
-//! dump signatures fail the attachment and retain the first raw fault.
+//! USB DFU with OTP/status and exact board-specific rampatch/NVM resources.
+//! WCN debug ACL keeps its original bytes as [`Packet::Diagnostic`]; controller
+//! dump signatures fail the attachment and keep the first raw fault.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! The separate [`mediatek::media`] session adds this PC's initialized MT7925
 //! SCO/interrupt-ISO transport. [`realtek::media`] and [`qca::media`] add
@@ -37,8 +37,8 @@
 //!
 //! Receive requests remain posted while idle; polling never waits for radio
 //! traffic. Incomplete HCI frames have a bounded assembly deadline. Errors close
-//! the transport; failed hardware cancellation retains DMA ownership and prevents
-//! reuse. There is deliberately no generic method to mark firmware "ready".
+//! the transport; failed hardware cancellation keeps DMA ownership and prevents
+//! reuse. There is no generic method to mark firmware "ready".
 pub mod ath3k;
 mod binding;
 pub mod broadcom;
@@ -100,11 +100,11 @@ impl Pipe {
 /// Physical USB boundary, also implemented by stateful transport models.
 /// Implementations own their DMA buffers; `receive` returns only completed bytes.
 /// `close` must acknowledge cancellation before allowing buffer reuse. If it
-/// fails, it must retain/quarantine all possibly hardware-owned buffers forever
+/// fails, it must keep/quarantine all possibly hardware-owned buffers forever
 /// or until an independently proven controller reset. No method may wait for an
 /// unbounded interval. Idle receive polling returns `None` without canceling.
 pub trait Io {
-    /// Pure retained-owner admission: reject a retired device generation before
+    /// Pure kept-owner admission: reject a retired device generation before
     /// accessing MMIO, DMA, completions or changing transport-owned state.
     /// This validates ownership only; it does not attest firmware/radio readiness.
     fn validate(&self) -> Result<(), BlockError>;
@@ -121,8 +121,8 @@ pub trait Io {
     /// Raw bulk OUT; the HCI layer validates ACL or identified vendor commands.
     fn write_acl(&mut self, packet: &[u8]) -> Result<(), BlockError>;
     /// Identified vendor firmware body on the bound bulk OUT endpoint, with
-    /// an actual per-transfer deadline starting before publication. Cleanup has
-    /// its own bounded retirement interval; a timed-out transfer must retain its
+    /// a per-transfer deadline starting before publication. Cleanup has
+    /// its own bounded retirement interval; a timed-out transfer must keep its
     /// owner until acknowledged retirement or permanent quarantine. This is not
     /// an HCI ACL packet. A
     /// transport lacking bounded firmware I/O must refuse rather than silently
@@ -254,7 +254,7 @@ impl<B: Io> Hci<B> {
     pub fn binding(&self) -> &Binding {
         &self.binding
     }
-    /// Last observed lifecycle, not proof that the retained device is current.
+    /// Last observed lifecycle, not proof that the device is current.
     /// Active operations independently validate the physical owner generation.
     pub fn state(&self) -> State {
         self.state
@@ -722,7 +722,7 @@ mod tests {
     fn class_requests_use_device_context_not_sco_interface_count() {
         {
             let mut hci = Hci::from_io(binding(false), Model::default());
-            let packet = [3, 0x0c, 0]; // Reset, submitted without fabricating its response.
+            let packet = [3, 0x0c, 0]; // Reset, submitted without inventing its response.
             hci.submit_command(&packet).unwrap();
             assert_eq!(
                 hci.io.control,

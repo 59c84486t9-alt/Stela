@@ -39,7 +39,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
             }
         };
         // PDT/IRQ order is significant for related function reports. Each
-        // engine reads only if its actually enabled source bit was observed.
+        // engine reads only if its enabled source bit was observed.
         for function in &self.functions {
             let report = if let Some(engine) = self
                 .f11

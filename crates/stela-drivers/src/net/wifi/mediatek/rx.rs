@@ -32,7 +32,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Retained raw hardware security observations. Even `decrypted` plus no ICV
+/// Raw hardware security observations. Even `decrypted` plus no ICV
 /// error does not establish a current installed key or authenticated integrity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Security {
@@ -47,7 +47,7 @@ pub struct Security {
     pub iv_stripped: bool,
     pub mic_stripped: bool,
     /// Source status.iv order: most significant PN byte first. Only supplied
-    /// when the actual decrypted cipher uses PN and group 1 is present.
+    /// when the decrypted cipher uses PN and group 1 is present.
     pub packet_number_be: Option<[u8; 6]>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,7 +61,7 @@ pub struct Channel {
     pub encoded: u8,
     pub band: Band,
     /// Source encoding decoded without its u8 wrap. Regulatory/channel policy
-    /// must validate this actual observed channel before admitting a packet.
+    /// must validate this observed channel before admitting a packet.
     pub number: u16,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,7 +72,7 @@ pub struct Amsdu {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Signal {
-    /// Raw RCPI is retained even when source dBm conversion is nonnegative.
+    /// Raw RCPI is held even when source dBm conversion is nonnegative.
     pub rcpi: [u8; 4],
     pub dbm: [i8; 4],
 }
@@ -100,7 +100,7 @@ pub struct Decoded<'a> {
     pub only_monitor: bool,
     pub timestamp_low: Option<u32>,
     /// Raw NON_AMPDU observation; source aggregate details additionally require
-    /// the actual group-2 timestamp. No reorder/aggregate identifier is invented.
+    /// the group-2 timestamp. No reorder/aggregate identifier is invented.
     pub ampdu: bool,
     pub fragment: bool,
     pub amsdu: Option<Amsdu>,
@@ -112,7 +112,7 @@ pub struct Decoded<'a> {
     /// layout is `mt76_connac2_mac_fill_rx_rate`'s, which is not implemented.
     pub rate: Option<RxRate>,
     pub header_gap: usize,
-    /// Actual ordinary MPDU bytes after RXD groups and hardware header offset;
+    /// Ordinary MPDU bytes after RXD groups and hardware header offset;
     /// A-MSDU still contains the device's two-byte pad after its MAC header.
     pub payload: &'a [u8],
 }
@@ -130,9 +130,9 @@ fn group(at: &mut usize, bytes: usize, total: usize) -> Result<Range<usize>, Err
 }
 
 /// Decode only the source ordinary raw-802.11 profile. Header translation
-/// requires an actual reverse codec and is explicitly refused. Bounds are
+/// requires a reverse codec and is explicitly refused. Bounds are
 /// checked before every optional group read, including malformed combinations.
-/// Caller retains actual completed DMA/drop/association provenance separately.
+/// Caller keeps completed DMA/drop/association provenance separately.
 pub fn decode(chip: Chip, bytes: &[u8]) -> Result<Decoded<'_>, Error> {
     if bytes.len() > 16 * 1024 {
         return Err(Error::TooLarge);
@@ -258,7 +258,7 @@ pub fn decode(chip: Chip, bytes: &[u8]) -> Result<Decoded<'_>, Error> {
             };
             let raw = word(bytes, at)?;
             let rcpi = raw.to_le_bytes();
-            // Exact source unsigned FIELD_GET/subtract/divide then s8 narrowing:
+            // Source unsigned FIELD_GET/subtract/divide then s8 narrowing:
             // odd negative values round down, so signed (rcpi-220)/2 is incorrect.
             let dbm = rcpi.map(|value| (i16::from(value / 2) - 110) as i8);
             Ok(Signal { rcpi, dbm })
@@ -416,7 +416,7 @@ fn rate(rxv: &[u32; 4], band: Band) -> Result<RxRate, Error> {
     Ok(rate)
 }
 impl Decoded<'_> {
-    /// `header_bytes` must come from the shared actual 802.11 header parser
+    /// `header_bytes` must come from the shared 802.11 header parser
     /// over this payload, not RXD's translated-header hint. It is independently
     /// bounded here before removing exactly the source A-MSDU two-byte pad.
     /// This does not reorder A-MSDU/AMPDU, reinsert fragment crypto headers,

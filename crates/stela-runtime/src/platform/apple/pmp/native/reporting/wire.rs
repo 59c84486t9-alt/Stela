@@ -11,7 +11,7 @@ const ADDRESS_MASK: u64 = (1 << ADDRESS_BITS) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buffer {
-    /// Source SBFX, retaining the sign extension of bit43.
+    /// Source SBFX, keeping the sign extension of bit43.
     pub bus: u64,
     pub bytes: u64,
 }
@@ -47,7 +47,7 @@ pub fn buffer(payload: u64) -> Result<Buffer, &'static str> {
 }
 
 /// Source102e2b4..102e2fc rounds to pages below1MiB, MiB otherwise.
-/// The caller supplies the actual retained mapping's published bus address.
+/// The caller supplies the mapping's published bus address.
 pub fn advertisement(buffer: Buffer) -> Result<u64, &'static str> {
     let shift = if buffer.bytes < 1 << 20 { 12 } else { 20 };
     let granule = 1u64 << shift;

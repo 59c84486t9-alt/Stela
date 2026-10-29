@@ -139,7 +139,7 @@ mod idt95 {
         assert_eq!(access_counts(&model), before);
     }
     // Canonical dispatch and failed reset
-    // must retain the same IDT port/PCM authority, not just a vendor handle.
+    // must keep the same IDT port/PCM permission, not just a vendor handle.
     #[test]
     fn idt95_failed_reset_retains_port() {
         let mut fixture = Fixture::new();

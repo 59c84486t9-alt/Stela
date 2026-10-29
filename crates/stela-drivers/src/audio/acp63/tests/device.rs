@@ -86,7 +86,7 @@ impl Device {
                 if value == 0 && !self.reset_never {
                     self.resets += 1;
                     // Do not clear group1: retirement must explicitly
-                    // disable/read back the actual PAGE_BASE enable bit.
+                    // disable/read back the PAGE_BASE enable bit.
                     for register in [0x2c04, 0x2c08] {
                         self.words[register / 4] = 0;
                     }
@@ -166,7 +166,7 @@ impl Device {
                 assert!(iova >= translation.token.address);
                 let mapped = (iova - translation.token.address) as usize + offset % 4096;
                 assert!(mapped + 4 <= translation.token.bytes);
-                // These physical pages are deliberately not contiguous;
+                // These physical pages are not contiguous;
                 // only the attached domain constructs the contiguous IOVA.
                 assert_eq!(
                     translation.pages.physical_pages()[mapped / 4096],
@@ -180,7 +180,7 @@ impl Device {
                     self.posted.push((mapped, sample));
                 } else {
                     // SAFETY: this synchronous model owns DMA while active;
-                    // actual retained CPU RAM is reached through its domain.
+                    // CPU RAM is reached through its domain.
                     unsafe { pointer.as_ptr().cast::<i32>().write_volatile(sample) };
                 }
             }
@@ -189,7 +189,7 @@ impl Device {
             self.cursor = (self.cursor + 8) % ring;
             if self.cursor.is_multiple_of(period) && !self.defer_payload {
                 // The ordinary model supplies the pinned source completed-
-                // period event only after its actual coherent payload.
+                // period event only after its coherent payload.
                 // A deferred retirement fabric has not delivered that
                 // event; raw progress/stop acknowledgment alone cannot.
                 self.words[0x1a0c / 4] |= 1 << 16;

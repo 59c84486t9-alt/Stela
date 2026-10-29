@@ -124,7 +124,7 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), heap_bytes) };
-    // SAFETY: the registered heap is the exact reserved WB identity extent.
+    // SAFETY: the registered heap is the reserved WB identity extent.
     unsafe {
         native_memory::initialize(heap.as_ptr() as usize, heap.as_ptr() as u64, heap_bytes, 0)
     };

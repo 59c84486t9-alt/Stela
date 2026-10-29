@@ -70,7 +70,7 @@ impl Capabilities {
                     {
                         return Err(Error::Capability);
                     }
-                    // Retain coherent payload policy; do not silently admit
+                    // Keep coherent payload policy; do not silently admit
                     // NoSnoop, autonomous AtomicOp requests or ARI fanout.
                     if word(config, offset + 8)? & (1 << 11) != 0
                         || (version == 2 && word(config, offset + 0x28)? & 0x60 != 0)
@@ -163,14 +163,14 @@ impl Capabilities {
                         return Err(Error::ActiveChild);
                     }
                 }
-                (0x18, 1) => {} // Read-only admission of retained LTR values.
+                (0x18, 1) => {} // Read-only admission of kept LTR values.
                 (0x1b, 1) => {
                     if word(config, offset + 6)? & 1 != 0 {
                         return Err(Error::ActiveChild);
                     }
                 }
                 // SR-IOV, unknown traffic-producing controls and other
-                // unqualified capabilities are explicit profile refusals.
+                // unchecked capabilities are explicit profile refusals.
                 _ => return Err(Error::Capability),
             }
         }

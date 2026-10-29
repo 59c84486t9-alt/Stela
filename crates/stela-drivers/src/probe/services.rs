@@ -37,7 +37,7 @@ impl fmt::Display for ServiceError {
 
 /// The mount's native owners: configuration and BAR mappings from its native
 /// MMIO platform, requester DMA domains from its IOMMU or the passthrough
-/// domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)), retained DMA
+/// domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)), kept DMA
 /// pages and the ACPI namespace.
 ///
 /// # Safety
@@ -65,11 +65,11 @@ pub unsafe trait NativeServices {
     /// inside it, as Intel VMD does.
     fn bar_resource(&self, address: Address, bar: Bar) -> Result<owned::Resource, ServiceError>;
 
-    /// The mapping authority that issues [`Self::map_bar`]'s mappings.
+    /// The mapping permission that issues [`Self::map_bar`]'s mappings.
     fn authority(&self) -> Result<owned::Authority, ServiceError>;
 
     /// The DMA domain for the requester `binding` names. The domain keeps the
-    /// binding, and with it the configuration epoch it retains.
+    /// binding, and with it the configuration epoch it keeps.
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError>;
 
     /// Pages for driver DMA rings and buffers, for the rest of the boot.
@@ -86,7 +86,7 @@ pub unsafe trait NativeServices {
     fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
 
     /// The first EC installed and connected during boot's staged ACPI
-    /// initialization. Probe retains the receipt instead of installing a
+    /// initialization. Probe keeps the receipt instead of installing a
     /// second operation-region handler.
     #[cfg(feature = "native-acpi")]
     fn embedded_controller(

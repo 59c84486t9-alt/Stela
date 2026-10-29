@@ -60,7 +60,7 @@ impl Drop for Reg {
 }
 #[derive(Clone)]
 struct Timer(Rc<RefCell<Model>>);
-// SAFETY: isolated symbolic timer only; no production clock authority.
+// SAFETY: isolated symbolic timer only; no production clock permission.
 unsafe impl Delay for Timer {
     fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
         Ok(())
@@ -76,7 +76,7 @@ unsafe impl Delay for Timer {
         }
     }
 }
-// SAFETY: a symbolic isolated test device only; no production address/authority.
+// SAFETY: a symbolic isolated test device only; no production address/permission.
 unsafe impl Registers for Reg {
     fn function_number(&self) -> u8 {
         self.0.borrow().function
@@ -759,7 +759,7 @@ fn unavailable_native_clock_refuses_before_identification_access_and_keeps_origi
         for rate in [0, u64::MAX, u64::MAX / 60_000_000 + 1] {
             let (mut previous, model) = model(asic, 0);
             let registers = previous.release_registers();
-            // SAFETY: isolated original symbolic owner; deliberately invalid
+            // SAFETY: isolated original symbolic owner; invalid
             // timing must refuse before the first hardware observation.
             let mut hardware = unsafe {
                 Hardware::new(

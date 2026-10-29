@@ -2,7 +2,7 @@
 // Copyright(c) 2018-2019 Realtek Corporation
 // Copyright(c) 2019-2020 Realtek Corporation
 // Copyright(c) 2020-2022 Realtek Corporation
-//! Exact PCI candidates and actual SYS_CFG1 observations from pinned rtw88/89.
+//! Exact PCI candidates and SYS_CFG1 observations from pinned rtw88/89.
 use super::firmware::{Layout, ParseError};
 use crate::firmware::{self, Image, Provider, Requirement, Target};
 use alloc::{format, string::String};
@@ -20,7 +20,7 @@ pub struct Observed {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub pci_revision: u8,
-    /// Actual 32-bit SYS_CFG1 at 0xf0, with every bit retained.
+    /// 32-bit SYS_CFG1 at 0xf0, with every bit kept.
     pub sys_cfg1: u32,
 }
 

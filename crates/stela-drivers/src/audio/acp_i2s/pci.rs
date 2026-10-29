@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native ACP3x/5x serial-I2S PCI function and retained UC BAR0 ownership.
+//! Native ACP3x/5x serial-I2S PCI function and kept UC BAR0 ownership.
 //! Copyright (C) 2016, 2021, 2023 Advanced Micro Devices, Inc.
 use super::{Error, Generation, Identity, PORTS, Registers, registers::*};
 use crate::bus::{
@@ -18,7 +18,7 @@ pub struct AttachFailure {
     pub mapping: Mapping,
 }
 
-/// Owns actual ECAM/configuration and UC/RW BAR0 resource leases. No raw PA or
+/// Owns ECAM/configuration and UC/RW BAR0 resource leases. No raw PA or
 /// generic physical map is accepted, and no mutable function accessor escapes.
 pub struct NativeRegisters {
     generation: Generation,
@@ -34,14 +34,14 @@ impl NativeRegisters {
     /// Associate the original stopped owner and a real native BAR0 mapping.
     ///
     /// # Safety
-    /// `bar` is this exact function's fully sized/reserved BAR0 in the retained
+    /// `bar` is this exact function's fully sized/reserved BAR0 in the kept
     /// assignment epoch. The mapping's real ResourceBacking reserves that BAR
     /// for this function (numeric equality alone is insufficient). The original
     /// stopped producer's engine/IRQ/work/firmware exclusion remains in force.
-    /// The platform has selected direct serial-I2S ownership and qualified WB
+    /// The platform has selected direct serial-I2S ownership and checked WB
     /// DMA coherency; attachment does not infer board clocks/codecs from PCI.
     /// No cloned view/raw pointer or other owner accesses these mappings.
-    /// Keep the native owners retained until controller shutdown succeeds.
+    /// Keep the native owners kept until controller shutdown succeeds.
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         mapping: Mapping,
@@ -128,8 +128,8 @@ impl NativeRegisters {
         }
         Ok(identity)
     }
-    /// Return exact native owners only after the controller acknowledged its
-    /// shutdown and removed DMA. Failure retains this register provider intact.
+    /// Return native owners only after the controller acknowledged its
+    /// shutdown and removed DMA. Failure keeps this register provider intact.
     pub fn into_stopped_resources(mut self) -> Result<(Function<OwnedConfig>, Mapping), Self> {
         if self.associated().is_err()
             || self.master != Some(false)
@@ -268,7 +268,7 @@ mod tests {
     const BYTES: usize = 0x20000;
     struct ResourceOwner;
     // SAFETY: isolated model reservation; symbolic BAR labels are never physical
-    // pointers and its actual CPU storage is retained by the mapping platform.
+    // pointers and its CPU storage is held by the mapping platform.
     unsafe impl ResourceBacking for ResourceOwner {
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BYTES as u64).unwrap()
@@ -294,7 +294,7 @@ mod tests {
             unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
         }
     }
-    // SAFETY: independent model's real CPU storage backs exactly one retained
+    // SAFETY: independent model's real CPU storage backs exactly one kept
     // symbolic BAR; all publication/retirement is synchronous and serialized.
     unsafe impl MappingPlatform for Platform {
         fn check_context(&self, _: AddressSpace) -> Result<(), MapError> {
@@ -384,10 +384,10 @@ mod tests {
     }
     fn retire(function: Function<OwnedConfig>, mut mapping: Mapping) {
         let mut config_mapping = function.into_config().into_mapping();
-        // SAFETY: actual model owners have been consumed; no device/callback
+        // SAFETY: model owners have been consumed; no device/callback
         // or raw register accesses remain after the asserted stopped state.
         unsafe { mapping.retire() }.unwrap();
-        // SAFETY: same final config-owner drain, actual registry retirement.
+        // SAFETY: same final config-owner drain, registry retirement.
         unsafe { config_mapping.retire() }.unwrap();
     }
 
@@ -396,7 +396,7 @@ mod tests {
     fn actual_native_uc_function_and_all_serial_engines_gate_owner_return() {
         for revision in [0, 0x50] {
             let (mapping, unmaps) = mapping();
-            // SAFETY: actual isolated canonical function and reserved UC BAR fixture.
+            // SAFETY: isolated canonical function and reserved UC BAR fixture.
             let mut registers =
                 match unsafe { NativeRegisters::attach(stopped(revision), mapping, bar()) } {
                     Ok(owner) => owner,
@@ -466,8 +466,8 @@ mod tests {
             } else {
                 bar()
             };
-            // SAFETY: actual isolated native owners; malformed metadata/BAR
-            // associations are deliberately rejected before any hardware write.
+            // SAFETY: isolated native owners; malformed metadata/BAR
+            // associations are rejected before any hardware write.
             let mut registers =
                 match unsafe { NativeRegisters::attach(requester, mapping, candidate) } {
                     Err(failure) => {

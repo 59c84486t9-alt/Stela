@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Initial commands share the real serialized mailbox; only the actual owning
-//! lifecycle may publish them. Raw generic replies are not fabricated ACKs.
+//! Initial commands share the real serialized mailbox; only the owning
+//! lifecycle may publish them. Raw generic replies are not invented ACKs.
 use super::{Cause, Mailbox, Operation, PCI_TIMEOUT_US, Packet, QueueIo, TransportFailure};
 use crate::net::wifi::mediatek::{mcu::init as codec, ring::rx::Frame};
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,7 +26,7 @@ impl Fact {
     }
 }
 impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
-    /// Vendor-local: the caller is the retained lifecycle with the actual
+    /// Vendor-local: the caller is the lifecycle with the
     /// controller/firmware/policy/WCID resources, not an arbitrary integer.
     pub(in crate::net::wifi::mediatek) fn initial(
         &mut self,
@@ -65,7 +65,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         {
             let event = super::Event::parse(self.identity.chip, &reply.frame.bytes)
                 .expect("matched initial response");
-            // The exact source station status was matched by execute. Decode
+            // The source station status was matched by execute. Decode
             // against this same immutable request/sequence without advancing it.
             let payload = event.payload;
             let status =

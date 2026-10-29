@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Original station0/TLC and actual no-queue drain/flush/remove lifetime.
+//! Original station0/TLC and no-queue drain/flush/remove lifetime.
 use super::*;
 use crate::net::Mac;
 #[path = "ax200_mld_peer_tests.rs"]
@@ -82,7 +82,7 @@ fn completion(
     payload: &[u8],
 ) {
     let boot = boot(&peer.binding.power.phy.scan);
-    // Follow the actual emitted free descriptor, including recycled VIDs and
+    // Follow the emitted free descriptor, including recycled VIDs and
     // source ring wrap. Never invent credits or complete an unposted buffer.
     let slot = entry & (boot.entries - 1);
     assert_eq!(slot, boot.read);
@@ -130,7 +130,7 @@ fn emitted(
         if encoded.remainder().is_empty() { 1 } else { 2 }
     );
     if encoded.remainder().is_empty() {
-        // Actual short FLUSH/REMOVE fits entirely in TB0. The zero unused
+        // Short FLUSH/REMOVE fits entirely in TB0. The zero unused
         // descriptor is not a device address and must never be model-read.
         assert_eq!(&descriptor[12..22], &[0; 10]);
     } else {
@@ -211,8 +211,8 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
     let source = Source::default();
     let policy = Arc::new(PolicyState::default());
     let (binding, _, mut entry) = bound(&catalog, &empty, &source, &native, &policy, false);
-    // SAFETY: isolated same-owner model retains all twelve real legacy-rate
-    // grants through actual peer removal and original binding stop.
+    // SAFETY: isolated same-owner model keeps all twelve real legacy-rate
+    // grants through peer removal and original binding stop.
     let mut peer =
         unsafe { binding.begin_legacy_peer(parameters()) }.unwrap_or_else(|_| panic!("peer"));
     let at_sync = policy.clone();

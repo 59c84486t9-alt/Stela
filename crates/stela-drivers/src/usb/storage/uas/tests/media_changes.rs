@@ -173,7 +173,7 @@ fn first_lun_final_cache_no_media_never_publishes_previous_metadata() {
                     asc: (sense >> 8) as u8,
                     ascq: sense as u8
                 })));
-            // The reader remains retained. A later actual insertion is
+            // The reader remains held. A later insertion is
             // freshly probed and keeps the target's real cache policy.
             state.borrow_mut().target.as_mut().unwrap().media[0].empty = false;
             let mut fresh = scan_uas(owner, &mut failures).unwrap();

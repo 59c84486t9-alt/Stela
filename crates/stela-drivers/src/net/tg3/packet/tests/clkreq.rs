@@ -17,7 +17,7 @@ fn parts_clock(
     };
     {
         let mut peer = parts.3.lock().unwrap();
-        // Actual adjacent Link Status remains outside every narrow WORD store.
+        // Adjacent Link Status remains outside every narrow WORD store.
         peer.config.insert(0x50, 0xc3a5_0000 | u32::from(initial));
         peer.clkreq_bug = chip == 0x0576_1000 && initial & 0x100 != 0;
     }

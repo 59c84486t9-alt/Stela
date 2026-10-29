@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
-//! Source BIOS power-table selection from the same retained ACPI/EFI session.
+//! Source BIOS power-table selection from the same ACPI/EFI session.
 //! Normalized values never constitute firmware programming or RF admission.
 use super::*;
 use crate::net::wifi::intel::radio::bios::power_tables;
@@ -42,7 +42,7 @@ pub(crate) struct Tas {
     pub selection: u32,
     pub countries: Vec<u16>,
 }
-/// Source-selected tables. None means actual optional getter exhaustion, never
+/// Source-selected tables. None means optional getter exhaustion, never
 /// a missing native service. Raw successful/rejected reads stay in Session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Tables {
@@ -60,7 +60,7 @@ fn integer(object: &Object) -> Option<u64> {
         None
     }
 }
-// Exact source first matching Wi-Fi package for each candidate size. A size
+// Source first matching Wi-Fi package for each candidate size. A size
 // match with the wrong table revision is not silently skipped by that getter.
 fn wifi_package(object: &Object, minimum: usize, maximum: usize) -> Option<(u8, &[Object])> {
     let Object::Package(root) = object else {
@@ -292,7 +292,7 @@ fn acpi_ppag(object: &Object) -> Option<(u8, Ppag)> {
         let mut gains = [[0; SAR_SUBBANDS]; 2];
         for (chain, values) in gains.iter_mut().enumerate() {
             for (band, gain) in values.iter_mut().enumerate().take(bands) {
-                // Exact source assignment to s8, including integer truncation.
+                // Source assignment to s8, including integer truncation.
                 *gain = integer(&package[2 + chain * bands + band])? as i8;
             }
         }
@@ -558,7 +558,7 @@ mod tests {
         incomplete: bool,
         uefi_valid: bool,
     }
-    // SAFETY: a bounded raw namespace model, never physical platform authority.
+    // SAFETY: a bounded raw namespace model, never physical platform permission.
     unsafe impl BiosIo for Namespace {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             match request {

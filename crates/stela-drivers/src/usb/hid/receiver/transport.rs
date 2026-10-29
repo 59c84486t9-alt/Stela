@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Logitech/Google/Red Hat HID++ reference notices: receiver.rs and THIRD_PARTY.md.
-//! Private admission from actual native class owners, never a raw second owner.
+//! Private admission from native class owners, never a raw second owner.
 use super::*;
 
 fn application(descriptor: &Descriptor, mut collection: Option<usize>) -> Option<(usize, u32)> {
@@ -232,7 +232,7 @@ impl UsbInput {
             group.next(now)
         };
         let Some(output) = output else { return };
-        // Internal writes retain every existing set_report descriptor/length/EP0
+        // Internal writes keep every existing set_report descriptor/length/EP0
         // guard. Removing only this link prevents recursive self-invalidation.
         let original = self.receiver.take();
         let result = self.set_report(ReportType::Output, output.bytes[0], &output.bytes);
@@ -240,7 +240,7 @@ impl UsbInput {
         if let Err(error) = &result {
             self.error.get_or_insert_with(|| error.clone());
         }
-        // Recheck actual native ownership after the synchronous status stage.
+        // Recheck native ownership after the synchronous status stage.
         if self.admitted_receiver().is_err() {
             return;
         }

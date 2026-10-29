@@ -127,7 +127,7 @@ fn original_v2_board_graphs_preserve_all_parents_and_physical_locations() {
         assert!(coverage.iter().all(|domain| !domain.bindable()));
         // Account for every original resource, including repeated sibling
         // display names. This remains source accounting, not chip/device
-        // admission or a lifecycle sink qualification.
+        // admission or a lifecycle sink validation.
         let complete = decode_power_states(&root, &node, &|address, bytes| {
             io.translate_range(address, bytes)
         })
@@ -1041,7 +1041,7 @@ fn die_qualified_gates_reach_each_dies_strided_pmgr_records() {
 
 #[test]
 fn unplaced_dies_and_reserved_gate_bits_stay_explicit_requirements() {
-    // A die without a qualified stride has no placed PMGR instance.
+    // A die without a checked stride has no placed PMGR instance.
     let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", None)).unwrap_err();
     assert!(error.contains("without a qualified die-stride"), "{error}");
     // A one-die SoC places no die-1 records for a die-1 gate.

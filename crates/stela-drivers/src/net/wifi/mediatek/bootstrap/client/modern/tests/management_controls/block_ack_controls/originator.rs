@@ -97,7 +97,7 @@ fn timeout_disables_before_guarded_delba() {
     let head = model.queues[&0xd4300].lock().unwrap().head;
     state.allowed.set(false);
     assert!(
-        // SAFETY: The protected DELBA action and its session remain retained after
+        // SAFETY: The protected DELBA action and its session remain held after
         // firmware disable. Revoked current policy must deny its publication before
         // advancing the TX queue.
         unsafe {
@@ -181,7 +181,7 @@ fn timeout_disables_before_guarded_delba() {
     assert!(!Native::tx_ba_blocks_data(driver.state(), TID));
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     // SAFETY: The prior DELBA command and packet completed and were released before
-    // this call. The current session, key and native owners remain retained under
+    // this call. The current session, key and native owners remain held under
     // fresh data guards while the new payload is queued.
     unsafe {
         driver.transmit_modern(

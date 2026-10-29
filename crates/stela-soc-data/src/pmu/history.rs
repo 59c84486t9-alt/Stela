@@ -1,4 +1,4 @@
-//! Validated initial retained-history bytes; live read/acknowledgement state stays device-owned.
+//! Validated initial kept-history bytes; live read/acknowledgement state stays device-owned.
 use super::Window;
 use alloc::vec::Vec;
 #[derive(Debug, Clone)]

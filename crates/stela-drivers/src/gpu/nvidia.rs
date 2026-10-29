@@ -122,7 +122,7 @@ mod tests {
         fn os_pci_write_dword(handle: *mut c_void, offset: u32, value: u32) -> u32;
     }
 
-    /// PCI command followed by W1C status, with a log of actual bus transaction
+    /// PCI command followed by W1C status, with a log of bus transaction
     /// widths. An ordinary RAM fake cannot detect an accidental dword RMW here.
     struct Config {
         bytes: [u8; PCI_CONFIG_BYTES as usize],
@@ -347,7 +347,7 @@ mod tests {
             for offset in 0..16 {
                 for value in [0, 0x80, 0xff] {
                     let mut destination = [0xa5u8; 4096 + 32];
-                    // SAFETY: actual writable CPU array covers this complete span.
+                    // SAFETY: writable CPU array covers this complete span.
                     let pointer = unsafe { destination.as_mut_ptr().add(offset) };
                     assert_eq!(
                         // SAFETY: the arguments are live locals sized for the call, and the test
@@ -491,7 +491,7 @@ mod tests {
                 for value in [-1i32, 0, 0x80, 0x180, 0x1ff] {
                     for variant in 0..3 {
                         let mut destination = [0xa5u8; 4096 + 32];
-                        // SAFETY: actual CPU storage covers the complete span.
+                        // SAFETY: CPU storage covers the complete span.
                         let pointer = unsafe { destination.as_mut_ptr().add(offset) };
                         // SAFETY: `pointer` covers `size` bytes of the local array.
                         let returned = unsafe {
@@ -559,7 +559,7 @@ mod tests {
                 right[mismatch] = 0x7f;
                 left[size] = 0;
                 right[size] = 0xff;
-                // SAFETY: readable actual CPU arrays cover the exact requested spans.
+                // SAFETY: readable CPU arrays cover the exact requested spans.
                 unsafe {
                     assert_eq!(
                         nvkms_memcmp(left.as_ptr().cast(), right.as_ptr().cast(), size).signum(),
@@ -581,7 +581,7 @@ mod tests {
             for length in [0, 1, 7, 8, 15, 16, 31, 127, 128, 129, 4096] {
                 string.fill(0x80);
                 string[offset + length] = 0;
-                // SAFETY: actual readable CPU bytes include their terminating NUL.
+                // SAFETY: readable CPU bytes include their terminating NUL.
                 let pointer = unsafe { string.as_ptr().add(offset) };
                 // SAFETY: `pointer` addresses a NUL-terminated string inside the local array.
                 unsafe {

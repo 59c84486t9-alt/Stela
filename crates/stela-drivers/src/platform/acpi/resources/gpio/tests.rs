@@ -71,7 +71,7 @@ fn fixture_with_reg(hid: &[u8], resource: &[u8], reg: Option<&[u8]>) -> Vec<u8> 
         connection.extend(pin.to_le_bytes());
     }
     connection.extend(b"GPO0\0");
-    // The actual source string has 5 bytes; fix the descriptor body length.
+    // The source string has 5 bytes; fix the descriptor body length.
     let body_len = (connection.len() - 3) as u16;
     connection[1..3].copy_from_slice(&body_len.to_le_bytes());
     device.extend(name(b"CON0", &buffer(&connection)));
@@ -82,7 +82,7 @@ fn fixture_with_reg(hid: &[u8], resource: &[u8], reg: Option<&[u8]>) -> Vec<u8> 
     device.extend(method(b"RD00", 0, b"\xa4F000"));
     device.extend(method(b"RD01", 0, b"\xa4F001"));
     device.extend(method(b"WR01", 1, b"\x70\x68F001\xa4\x00"));
-    // Fresh Connection index zero, then a 65-bit field with an actual 9-byte
+    // Fresh Connection index zero, then a 65-bit field with a 9-byte
     // ACPICA Buffer result. PkgLength(65) = 0x41,0x04 (not a package size).
     device.extend(pkg(b"\x5b\x81", b"GPOR\x01\x02CON0WIDE\x41\x04"));
     device.extend(method(b"RD65", 0, b"\xa4WIDE"));
@@ -186,7 +186,7 @@ impl NativeController for Backend {
 fn actual_acpica_connection_nonzero_index_wide_reads_and_integer_only_writes() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture());
-    // SAFETY: actual authored OSL services and native singleton are serialized.
+    // SAFETY: authored OSL services and native singleton are serialized.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     assert!(matches!(
@@ -250,7 +250,7 @@ fn actual_acpica_connection_nonzero_index_wide_reads_and_integer_only_writes() {
 fn failed_first_request_is_not_replayed_and_claim_retires_after_handler_callbacks_end() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture());
-    // SAFETY: actual authored OSL provider under the native singleton test lock.
+    // SAFETY: authored OSL provider under the native singleton test lock.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     let model = Arc::new(Mutex::new(Model {
@@ -278,7 +278,7 @@ fn failed_first_request_is_not_replayed_and_claim_retires_after_handler_callback
 fn actual_aei_method_resolution_follows_edge_level_then_evt_with_native_arguments() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture());
-    // SAFETY: actual provider and native singleton test lock remain retained.
+    // SAFETY: provider and native singleton test lock remain held.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     let gpio = Gpio {
@@ -328,7 +328,7 @@ fn actual_aei_method_resolution_follows_edge_level_then_evt_with_native_argument
 fn identical_namespace_path_does_not_replace_original_backend_inspection() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture());
-    // SAFETY: actual authored provider and native singleton remain serialized.
+    // SAFETY: authored provider and native singleton remain serialized.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     let original = DeviceResources::inspect(handle).unwrap();
@@ -360,7 +360,7 @@ unsafe extern "C" fn signal_then_report_failure(
         .lock()
         .unwrap()
         .expect("retained original provider callback");
-    // SAFETY: forwards the unchanged actual provider context and semaphore.
+    // SAFETY: forwards the unchanged provider context and semaphore.
     let status = unsafe { original(context, semaphore, units) };
     if status == 0
         && semaphore as usize == NATIVE_SEMAPHORE.load(Ordering::Acquire)
@@ -378,7 +378,7 @@ fn native_write_failure_and_semaphore_release_failure_remain_separate() {
     let mut provider = reduced_hardware_fixture(&fixture());
     *ORIGINAL_SIGNAL.lock().unwrap() = Some(provider.signal_semaphore);
     provider.signal_semaphore = signal_then_report_failure;
-    // SAFETY: actual provider callback forwarding and native singleton are owned.
+    // SAFETY: provider callback forwarding and native singleton are owned.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     let device = DeviceResources::inspect(handle).unwrap();
@@ -527,7 +527,7 @@ fn actual_namespace_dependent_memory_cannot_construct_a_native_device() {
     resource.extend_from_slice(&0x400u32.to_le_bytes());
     resource.extend_from_slice(&[0x38, 0x79, 0]);
     let provider = reduced_hardware_fixture(&fixture_with_resources(b"AMD0030", &resource));
-    // SAFETY: the actual native OSL fixture and singleton are serialized.
+    // SAFETY: the native OSL fixture and singleton are serialized.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     assert_eq!(
@@ -535,7 +535,7 @@ fn actual_namespace_dependent_memory_cannot_construct_a_native_device() {
         Some(Value::Buffer(resource))
     );
     // No DeviceResources owner exists for the native factory/broker to consume;
-    // no native mapping authority or backend can be created by this template.
+    // no native mapping permission or backend can be created by this template.
     assert!(matches!(
         DeviceResources::inspect(handle),
         Err(Error::DependentFunctions)
@@ -570,8 +570,8 @@ unsafe impl crate::bus::mmio::owned::ResourceBacking for NativeRoot {
         crate::bus::mmio::owned::ResourceKind::Registers
     }
 }
-// SAFETY: one simulated native CPU, actual aligned owned RAM and unique mapping
-// token. The production mapping authority still performs all reservation/cache
+// SAFETY: one simulated native CPU, aligned owned RAM and unique mapping
+// token. The production mapping permission still performs all reservation/cache
 // checks; this model does not establish physical PAT/MTRR or hardware operation.
 unsafe impl crate::bus::mmio::owned::MappingPlatform for NativeMappingModel {
     fn check_context(
@@ -628,7 +628,7 @@ unsafe impl crate::bus::mmio::owned::MappingPlatform for NativeMappingModel {
         let page = state.page.as_ref().unwrap();
         assert_eq!(page.0.get().cast::<u8>(), mapping.cpu_base.as_ptr());
         // SAFETY: the production owner stopped/drained consumers before its
-        // actual mapping-retirement call; this original page is still retained.
+        // mapping-retirement call; this original page is still held.
         state.restored_control = unsafe {
             page.0
                 .get()
@@ -650,7 +650,7 @@ fn actual_native_amd_factory_opregion_retirement_and_fresh_rebind() {
     use crate::bus::mmio::owned::{AddressSpace, Authority, Resource as MmioResource};
     let _serial = TEST_SERIAL.lock().unwrap();
     let provider = reduced_hardware_fixture(&fixture_for(b"AMD0030", NATIVE_BASE as u32 + 0x100));
-    // SAFETY: actual native OSL fixture and singleton are serialized.
+    // SAFETY: native OSL fixture and singleton are serialized.
     let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
     let handle = session.handle("\\GPO0").unwrap();
     let model = Arc::new(NativeMappingModel {
@@ -659,10 +659,10 @@ fn actual_native_amd_factory_opregion_retirement_and_fresh_rebind() {
     });
     let root = MmioResource::new(Box::new(NativeRoot(model.clone())));
     // SAFETY: this is the only resource suballocator for the simulated native
-    // machine; it retains the original root and all actual page coverage.
+    // machine; it keeps the original root and all page coverage.
     let broker = unsafe { MemoryBroker::new(vec![root]) }.unwrap();
     // SAFETY: fresh process, exclusive simulated CPU/address space, no aliases;
-    // the original model implements actual owned page map/unmap effects.
+    // the original model implements owned page map/unmap effects.
     let authority = unsafe {
         Authority::activate(
             model.clone(),
@@ -693,7 +693,7 @@ fn actual_native_amd_factory_opregion_retirement_and_fresh_rebind() {
         {
             let state = model.state.lock().unwrap();
             let page = state.page.as_ref().unwrap();
-            // SAFETY: AML returned; the native semaphore ended actual access.
+            // SAFETY: AML returned; the native semaphore ended access.
             let control = unsafe {
                 page.0
                     .get()

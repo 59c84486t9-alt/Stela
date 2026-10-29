@@ -41,7 +41,7 @@ impl From<DmaError> for Error {
 }
 
 /// Source management-rate configuration for the reserved-page descriptor.
-/// This never tunes a radio; use the actual prior MAC configuration.
+/// This never tunes a radio; use the prior MAC configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirmwareBand {
     Ghz2,
@@ -51,10 +51,10 @@ pub enum FirmwareBand {
 /// A specialized single beacon queue has no general TX ring read index.
 ///
 /// # Safety
-/// Implementations own the actual selected RTL8822C claim and UC BAR; reads
-/// are actual volatile observations, writes ordered real MMIO. configure is
+/// Implementations own the selected RTL8822C claim and UC BAR; reads
+/// are volatile observations, writes ordered real MMIO. configure is
 /// called only with acknowledged stopped DMA and no competing worker; kick
-/// publishes actual BCN_WORK. Drop retains the real claim/BAR reservation for
+/// publishes BCN_WORK. Drop keeps the real claim/BAR reservation for
 /// its full lifetime. Never infer completion from configure/kick readback.
 pub unsafe trait Registers {
     fn configure(&mut self, iova: u32) -> Result<(), Error>;
@@ -131,15 +131,15 @@ impl Drop for Allocation {
     fn drop(&mut self) {
         if !self.published && !self.unmapped {
             // SAFETY: no hardware was given this allocation; uncertain unmap
-            // retains pins/domain in canonical DmaMapping's quarantine Drop.
+            // keeps pins/domain in canonical DmaMapping's quarantine Drop.
             let _ = unsafe { self.dma.unmap() };
         }
     }
 }
 
-/// Exact source reserved-page packet descriptor and two TXBD segments. The
+/// Source reserved-page packet descriptor and two TXBD segments. The
 /// final eight packet-descriptor bytes remain zero as in the donor's 48-byte
-/// memset; ordinary radio TX/crypto fields are deliberately not exposed here.
+/// memset; ordinary radio TX/crypto fields are not exposed here.
 pub fn descriptors(
     data: &[u8],
     address: u32,
@@ -195,7 +195,7 @@ pub struct Beacon<R: Registers> {
 impl<R: Registers> Beacon<R> {
     /// # Safety
     /// The real RTL8822C requester is stopped/drained, attached to `domain`,
-    /// and `io` retains that exact PCI/BAR claim. Source allocations are real
+    /// and `io` keeps that exact PCI/BAR claim. Source allocations are real
     /// coherent WB DMA RAM on this requester, with NoSnoop/ATS disabled; WB
     /// alone is not coherence proof. No other engine/IRQ/reset worker touches
     /// this queue until acknowledged stop. `band` is prior MAC configuration.
@@ -269,7 +269,7 @@ impl<R: Registers> Beacon<R> {
                 .dma
                 .sync_for_device(0..PACKET_DESCRIPTOR + data.len())?;
             // The configured descriptor page is device-visible coherent RAM.
-            // Retain payload before placing its IOVA there, including if the
+            // Keep payload before placing its IOVA there, including if the
             // subsequent descriptor visibility operation fails before kick.
             self.payload.published = true;
             self.descriptor.write(0, &buffer)?;
@@ -289,10 +289,10 @@ impl<R: Registers> Beacon<R> {
             }
         }
     }
-    /// Prepare a live idle slot for actual post-power HCI rebinding.
+    /// Prepare a live idle slot for post-power HCI rebinding.
     /// # Safety
     /// Independent real requester stop/drain and exclusive workers. A completed
-    /// payload is still retained; this does not authorize firmware retry/reset.
+    /// payload is still held; this does not authorize firmware retry/reset.
     pub(super) unsafe fn begin_hci_rebind(&mut self) -> Result<u32, Error> {
         if self.poisoned || self.pending || !self.configured {
             return Err(Error::Quarantined);
@@ -310,7 +310,7 @@ impl<R: Registers> Beacon<R> {
         self.poisoned = false;
     }
     /// # Safety
-    /// The actual requester is stopped and all DMA/IRQ/submission workers
+    /// The requester is stopped and all DMA/IRQ/submission workers
     /// drained, with no new access possible throughout both unmaps. BCN_VALID
     /// alone is only payload consumption and does not satisfy this contract.
     pub unsafe fn release_after_stop(&mut self) -> Result<(), Error> {
@@ -327,8 +327,8 @@ impl<R: Registers> Beacon<R> {
     }
 }
 // SAFETY: install binds real owned DMA pages/domain/registers; pending slot
-// cannot be overwritten before source's actual new BCN_VALID proof. No Drop
-// unmap exists for published buffers, and uncertain io ownership is retained.
+// cannot be overwritten before source's new BCN_VALID proof. No Drop
+// unmap exists for published buffers, and uncertain io ownership is held.
 unsafe impl<R: Registers> io::BeaconQueue for Beacon<R> {
     fn submit(&mut self, data: &[u8]) -> Result<(), io::Error> {
         self.enqueue(data).map_err(|_| io::Error::Queue)
@@ -387,12 +387,12 @@ pub(super) mod tests {
         layout: Layout,
         physical: Vec<u64>,
     }
-    // SAFETY: exclusively retained zeroed/aligned virtual RAM for a serialized
-    // hardware model, not privileged allocation or actual physical DMA proof.
+    // SAFETY: exclusively kept zeroed/aligned virtual RAM for a serialized
+    // hardware model, not privileged allocation or physical DMA proof.
     unsafe impl Send for Pages {}
     // SAFETY: no safe byte references or concurrent device access are exposed.
     unsafe impl Sync for Pages {}
-    // SAFETY: `cpu_base` and `physical` describe the one retained, aligned test allocation for its
+    // SAFETY: `cpu_base` and `physical` describe the one kept, aligned test allocation for its
     // whole life.
     unsafe impl PageBacking for Pages {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -466,7 +466,7 @@ pub(super) mod tests {
     pub(in crate::net::wifi::realtek) struct Domain(
         pub(in crate::net::wifi::realtek) Arc<Mutex<Model>>,
     );
-    // SAFETY: actual pinned allocations are retained, while IOVA translation
+    // SAFETY: pinned allocations are held, while IOVA translation
     // and cache visibility are serialized model events, never hardware claims.
     unsafe impl DmaDomain for Domain {
         unsafe fn map(
@@ -547,8 +547,8 @@ pub(super) mod tests {
         }
     }
     struct ModelRegisters(Arc<Mutex<Model>>);
-    // SAFETY: modeled registers publish the actual model's native-DMA IOVA,
-    // resolve its retained pin and record the device's descriptor/payload read.
+    // SAFETY: modeled registers publish the model's native-DMA IOVA,
+    // resolve its pin and record the device's descriptor/payload read.
     unsafe impl Registers for ModelRegisters {
         fn configure(&mut self, iova: u32) -> Result<(), Error> {
             let mut m = self.0.lock().unwrap();
@@ -564,7 +564,7 @@ pub(super) mod tests {
             let (_, base) = m.mappings.get(&u64::from(m.base)).unwrap();
             let base = *base;
             assert_eq!(m.directions[&u64::from(m.base)], Direction::Bidirectional);
-            // SAFETY: model DMA follows an actual retained mapping into the
+            // SAFETY: model DMA follows a mapping into the
             // live native allocation; serialized kick owns the device read.
             let bd = unsafe { core::slice::from_raw_parts(base as *const u8, 16) }.to_vec();
             let packet_iova = u32::from_le_bytes(bd[4..8].try_into().unwrap());
@@ -600,8 +600,8 @@ pub(super) mod tests {
         }
     }
     fn install(m: &Arc<Mutex<Model>>) -> Result<Beacon<ModelRegisters>, Error> {
-        // SAFETY: synchronous stopped model with retained pins and separate
-        // model IOVA addresses; no actual privileged DMA effects are claimed.
+        // SAFETY: synchronous stopped model with kept pins and separate
+        // model IOVA addresses; no privileged DMA effects are claimed.
         unsafe {
             Beacon::install(
                 ModelRegisters(m.clone()),
@@ -611,7 +611,7 @@ pub(super) mod tests {
             )
         }
     }
-    /// Cross-module integration fixture reuses this exact native queue, pin
+    /// Cross-module integration fixture reuses this native queue, pin
     /// allocator and domain model; no duplicate queue/descriptor substitute.
     pub(in crate::net::wifi::realtek) struct Harness {
         model: Arc<Mutex<Model>>,
@@ -639,7 +639,7 @@ pub(super) mod tests {
         }
     }
     // SAFETY: same synchronous model proof as this module's queue fixture;
-    // forwarding retains the actual native slot's ownership checks/lifetimes.
+    // forwarding keeps the native slot's ownership checks/lifetimes.
     unsafe impl BeaconQueue for Harness {
         fn submit(&mut self, data: &[u8]) -> Result<(), io::Error> {
             self.queue.submit(data)
@@ -668,7 +668,7 @@ pub(super) mod tests {
             assert_eq!(state.base, 0x1001_0000);
             assert_eq!(state.syncs, 3);
         }
-        // SAFETY: this model's kick read the complete actual mapped packet;
+        // SAFETY: this model's kick read the complete mapped packet;
         // stands for Download's newly observed real BCN_VALID, not submit ACK.
         unsafe { queue.consumed() }.unwrap();
         assert_eq!(m.lock().unwrap().cpu_syncs, 1);

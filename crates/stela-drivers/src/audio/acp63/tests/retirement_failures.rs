@@ -39,7 +39,7 @@ fn check_ps_retirement_failure<P: Profile>(
         match fault {
             0 => {
                 // A stale group can survive reset; an ignored write must
-                // fail even when entering from retained suspension.
+                // fail even when entering from kept suspension.
                 model.words[0xc04 / 4] = 0x8380_0000;
                 model.ignore_write = Some(0xc04);
                 Error::RegisterRejected(0xc04)

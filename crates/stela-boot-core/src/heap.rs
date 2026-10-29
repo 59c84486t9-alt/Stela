@@ -256,10 +256,10 @@ impl Heap {
     /// but is not promised to take constant time.
     ///
     /// # Safety
-    /// The caller preserves the initialized heap's actual RAM/mapping/owner
+    /// The caller preserves the initialized heap's RAM/mapping/owner
     /// lifetime and exclusively owns a successful payload until its one matching
     /// `GlobalAlloc::dealloc` on this same heap with this exact layout. NMI/fault
-    /// handlers do not reenter the heap. No physical/page/DMA authority follows.
+    /// handlers do not reenter the heap. No physical/page/DMA permission follows.
     #[cfg_attr(
         not(test),
         allow(
@@ -274,7 +274,7 @@ impl Heap {
         let Some(guard) = self.try_lock() else {
             return ptr::null_mut();
         };
-        // SAFETY: this actual guard exclusively protects the heap state. The
+        // SAFETY: this guard exclusively protects the heap state. The
         // shared body checks initialization before accessing backing storage.
         let block = unsafe { allocate_locked(&mut *self.state.get(), layout) };
         drop(guard);
@@ -295,7 +295,7 @@ impl Heap {
         )
     )]
     pub unsafe fn try_allocate_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller retains the same heap, mapping and exact layout.
+        // SAFETY: the caller keeps the same heap, mapping and exact layout.
         let block = unsafe { self.try_allocate(layout) };
         if !block.is_null() {
             // SAFETY: successful allocation gives this full payload exclusively.
@@ -312,7 +312,7 @@ impl Heap {
     ///
     /// # Safety
     /// The caller obeys the initialized heap's allocation/exclusion contract,
-    /// retains its actual RAM/mapping/root epoch, and owns the returned payload
+    /// keeps its RAM/mapping/root epoch, and owns the returned payload
     /// exclusively until exact-layout deallocation. `allowed` constrains payload
     /// bytes only; the canonical allocation header remains private heap metadata.
     pub unsafe fn alloc_pages_zeroed_in(&self, layout: Layout, allowed: Range<usize>) -> *mut u8 {
@@ -327,7 +327,7 @@ impl Heap {
             return ptr::null_mut();
         }
         let guard = self.lock();
-        // SAFETY: actual acquire/release exclusion, as for ordinary allocation.
+        // SAFETY: acquire/release exclusion, as for ordinary allocation.
         let state = unsafe { &mut *self.state.get() };
         if !state.ready {
             return ptr::null_mut();
@@ -418,7 +418,7 @@ impl Heap {
         let cache = unsafe { &mut *self.caches[cpu].get() };
         if cache.counts[class] == 0 {
             let _guard = self.lock();
-            // SAFETY: the actual guard excludes all free-list writers, while
+            // SAFETY: the guard excludes all free-list writers, while
             // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
             while cache.counts[class] < BATCH {
@@ -459,7 +459,7 @@ impl Heap {
         let cache = unsafe { &mut *self.caches[cpu].get() };
         if cache.counts[class] == CACHED {
             let _guard = self.lock();
-            // SAFETY: the actual guard excludes all free-list writers, while
+            // SAFETY: the guard excludes all free-list writers, while
             // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
             for _ in 0..BATCH {
@@ -508,13 +508,13 @@ impl Heap {
     /// The heap's usage, walking the free list for its largest extent.
     pub fn usage(&self) -> Usage {
         let _guard = self.lock();
-        // SAFETY: the retained guard excludes metadata writers throughout
+        // SAFETY: the guard excludes metadata writers throughout
         // this free-list walk; no state reference escapes the guard.
         let state = unsafe { &*self.state.get() };
         self.usage_locked(state)
     }
 
-    // The caller retains the actual metadata guard; CPU cache counters remain
+    // The caller keeps the metadata guard; CPU cache counters remain
     // relaxed estimates even while this free-list metadata is exclusively read.
     fn usage_locked(&self, state: &State) -> Usage {
         let mut largest = 0;
@@ -592,14 +592,14 @@ fn aligned(value: usize, alignment: usize) -> Option<usize> {
 /// Ordinary and attempted allocation share the original locked algorithm.
 ///
 /// # Safety
-/// The heap's actual guard exclusively owns `state`. Initialization is checked
-/// before backing access; successful allocations retain their original layout.
+/// The heap's guard exclusively owns `state`. Initialization is checked
+/// before backing access; successful allocations keep their original layout.
 unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
     if !state.ready {
         return ptr::null_mut();
     }
     let Some(class) = class(layout) else {
-        // SAFETY: this helper retains the actual initialized state guard and
+        // SAFETY: this helper keeps the initialized state guard and
         // GlobalAlloc's layout supplies the payload size and alignment.
         let block = unsafe { carve(state, layout.size(), layout.align()) };
         if !block.is_null() {
@@ -645,10 +645,10 @@ unsafe impl GlobalAlloc for Heap {
         }
         let block = {
             let _guard = self.lock();
-            // SAFETY: the actual guard excludes all free-list writers, while
+            // SAFETY: the guard excludes all free-list writers, while
             // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
-            // SAFETY: the actual guard owns this state for the entire operation.
+            // SAFETY: the guard owns this state for the entire operation.
             unsafe { allocate_locked(state, layout) }
         };
         if !block.is_null() {
@@ -688,7 +688,7 @@ unsafe impl GlobalAlloc for Heap {
             state.small[class] = block;
         } else {
             state.live -= layout.size();
-            // SAFETY: GlobalAlloc requires this exact live allocation and
+            // SAFETY: GlobalAlloc requires this live allocation and
             // layout; its last owner has ended all payload access, lock held.
             unsafe { release(state, pointer) };
         }
@@ -704,7 +704,7 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
     let alignment = alignment.max(WORD);
     let mut link = &mut state.first as *mut *mut Free;
     loop {
-        // SAFETY: link is State.first or a next field in its retained free
+        // SAFETY: link is State.first or a next field in its free
         // node, protected against mutation by the same heap guard.
         let node = unsafe { *link };
         if node.is_null() {
@@ -779,7 +779,7 @@ unsafe fn carve_within(
             continue;
         }
         // Page-sized/aligned requests already end on WORD alignment.
-        // SAFETY: complete payload/header fit, actual locked free-list owner.
+        // SAFETY: complete payload/header fit, locked free-list owner.
         return unsafe { publish_carve(state, link, node, end, user, used_end) };
     }
 }
@@ -788,7 +788,7 @@ unsafe fn carve_within(
 /// share exactly this header, split and accounting operation.
 ///
 /// # Safety
-/// Heap lock held. `link` names `node` in the actual free list; `end` is that
+/// Heap lock held. `link` names `node` in the free list; `end` is that
 /// node's end, and aligned `[user, used_end)` plus the preceding Header fit
 /// inside it. No pointer or state reference escapes the owning exclusion.
 #[inline(always)]
@@ -811,7 +811,7 @@ unsafe fn publish_carve(
     if end - used_end < minimum {
         used_end = end;
     }
-    // SAFETY: caller retains this actual free node and link under the guard;
+    // SAFETY: caller keeps this free node and link under the guard;
     // save the successor before splitting or overwriting the node.
     let next = unsafe { (*node).next };
     let suffix = if used_end < end {
@@ -829,7 +829,7 @@ unsafe fn publish_carve(
         next
     };
     if prefix >= minimum {
-        // SAFETY: the original aligned node owns this retained prefix, large
+        // SAFETY: the original aligned node owns this prefix, large
         // enough for Free, disjoint from header/payload and suffix.
         unsafe {
             node.write(Free {
@@ -948,7 +948,7 @@ mod tests {
             }
         }
         assert_eq!(usage_values(&heap), [0; 5]);
-        // SAFETY: exclusive test backing, retained through every exact free.
+        // SAFETY: exclusive test backing, kept through every exact free.
         unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
         let before = usage_values(&heap);
         let image = ram.0.to_vec();
@@ -962,7 +962,7 @@ mod tests {
         assert_eq!(usage_values(&heap), before);
         let guard = heap.lock();
         // A blocking or recursively acquired implementation cannot pass this.
-        // SAFETY: the existing guard retains exclusive metadata ownership;
+        // SAFETY: the existing guard keeps exclusive metadata ownership;
         // attempted allocation must fail without accessing that metadata.
         unsafe {
             for layout in layouts {
@@ -1015,7 +1015,7 @@ mod tests {
             heap.dealloc(b, layout);
         }
         assert_eq!(heap.usage().live, 0);
-        // The existing small-object cache still retains its own two blocks.
+        // The existing small-object cache still keeps its own two blocks.
         assert!(heap.usage().carved > 0);
     }
 
@@ -1023,7 +1023,7 @@ mod tests {
     fn attempted_general_alignment_zeroing_and_ordinary_free_coalesce() {
         let heap = Heap::new();
         let mut ram = backing();
-        // SAFETY: all disjoint payloads retain this exclusive backing/layout.
+        // SAFETY: all disjoint payloads keep this exclusive backing/layout.
         unsafe {
             heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
             for (bytes, align) in [(256, 128), (4097, 4096), (8193, 32768)] {
@@ -1066,7 +1066,7 @@ mod tests {
         let heap = Heap::new();
         let mut ram = backing();
         let layout = Layout::from_size_align(256, 128).unwrap();
-        // SAFETY: each raw allocation retains the same real backing and exact
+        // SAFETY: each raw allocation keeps the same real backing and exact
         // layout; no payload slice survives subsequent allocation/deallocation.
         unsafe {
             heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
@@ -1230,7 +1230,7 @@ mod tests {
         ] {
             let image = ram.0.to_vec();
             let before = heap.usage();
-            // SAFETY: valid layout, retained real heap, no other consumers.
+            // SAFETY: valid layout, kept real heap, no other consumers.
             let block = unsafe { heap.alloc_pages_zeroed_in(layout, allowed) };
             assert!(block.is_null());
             assert_eq!(ram.0.as_slice(), image.as_slice());
@@ -1269,7 +1269,7 @@ mod tests {
         let base = ram.0.as_mut_ptr() as usize;
         let page = Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).unwrap();
         let small = Layout::from_size_align(17, 16).unwrap();
-        // SAFETY: each raw payload is retained until its exact deallocation;
+        // SAFETY: each raw payload is held until its exact deallocation;
         // no slice or device alias exists while the heap mutates its metadata.
         unsafe {
             heap.initialize(base as *mut u8, ram.0.len());
@@ -1300,7 +1300,7 @@ mod tests {
             heap.dealloc(metadata, small);
             heap.dealloc(b, page);
         }
-        // The ordinary small-object cache retains its own block, as before.
+        // The ordinary small-object cache keeps its own block, as before.
         assert_eq!(heap.usage().live, 0);
         assert!(heap.usage().carved < 2 * PAGE_BYTES);
     }

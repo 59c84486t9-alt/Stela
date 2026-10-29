@@ -32,11 +32,11 @@ pub struct Bss {
     pub capabilities: u16,
     /// Corrected operating channel from DS/HT or 6GHz HE Operation IEs when permitted.
     pub channel: Channel,
-    /// Actual receive radio/vector facts; may be a neighboring channel.
+    /// Receive radio/vector facts; may be a neighboring channel.
     pub observed: RadioStatus,
     /// None when unavailable or operating channel differs from observed RX.
     pub signal_dbm: Option<i8>,
-    /// None means absent. Some(empty) is the actual hidden/empty SSID element.
+    /// None means absent. Some(empty) is the hidden/empty SSID element.
     pub ssid: Option<Vec<u8>>,
     /// Complete received TLVs, including unknown/advanced ones. Retention does
     /// not declare the native association/driver capable of those modes.

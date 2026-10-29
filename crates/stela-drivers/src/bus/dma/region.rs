@@ -1,5 +1,5 @@
 //! One real RAM reservation, its CPU view and its original device-domain lease.
-//! Device alignment is selected from the actual IOVA after mapping. The same
+//! Device alignment is selected from the IOVA after mapping. The same
 //! byte offset is applied to the CPU view; no identity address is inferred.
 use super::{
     mapping::{Direction, DmaDomain, DmaError, DmaMapping},
@@ -43,12 +43,12 @@ impl From<DmaError> for Error {
     }
 }
 
-/// A bounded logical subview of one complete actual mapping. The private CPU
+/// A bounded logical subview of one complete mapping. The private CPU
 /// and device leases are always derived from the same consumed pins. Padding
 /// remains owned/mapped until the original whole token is removed.
 ///
 /// CPU pointers grant no DMA completion or permission to race a device. No
-/// safe slices are exposed. Consumers retain their original requester, root,
+/// safe slices are exposed. Consumers keep their original requester, root,
 /// configuration, IRQ/work and execution-context owners independently.
 /// Dropping an active region quarantines its domain and backing through the
 /// canonical DmaMapping path; Drop never invents stop or drain completion.
@@ -130,10 +130,10 @@ impl DmaRegion {
         Self::map(pages, domain, bytes, alignment, direction, address_limit)
     }
 
-    /// Map these exact original pins and use their actual established CPU cache
+    /// Map these original pins and use their established CPU cache
     /// policy. The complete reserved pages are mapped, including padding.
     /// Callers supplying pins directly must provide sufficient leading space
-    /// unless the actual allocated IOVA already meets the requested alignment.
+    /// unless the allocated IOVA already meets the requested alignment.
     /// Nothing is published to a device until the caller programs that device.
     pub fn map(
         pages: PinnedPages,
@@ -174,7 +174,7 @@ impl DmaRegion {
     pub fn bytes(&self) -> usize {
         self.bytes
     }
-    /// Complete retained mapping capacity, including invisible leading/tail
+    /// Complete kept mapping capacity, including invisible leading/tail
     /// space and native page rounding. This is never a larger logical payload.
     pub fn reserved_bytes(&self) -> usize {
         self.dma.bytes()
@@ -183,7 +183,7 @@ impl DmaRegion {
         self.cpu.cache_attribute()
     }
 
-    /// Compare the actual original domain allocation, never a numeric device
+    /// Compare the original domain allocation, never a numeric device
     /// or IOVA. A retired region refuses membership. This proves no controller
     /// epoch, payload completion or caller-specific allocation ownership.
     pub fn belongs_to_domain(&self, domain: &Arc<dyn DmaDomain>) -> bool {
@@ -197,7 +197,7 @@ impl DmaRegion {
         Ok(self.offset + range.start..self.offset + range.end)
     }
 
-    /// An actual IOVA range from this live lease, never a CPU or physical
+    /// An IOVA range from this live lease, never a CPU or physical
     /// address. Unmapping permanently revokes device-address queries.
     pub fn device_address(&self, offset: usize, bytes: usize) -> Result<u64, Error> {
         let end = offset
@@ -210,7 +210,7 @@ impl DmaRegion {
             .ok_or(Error::Layout(LayoutError::AddressOverflow))
     }
 
-    /// The corresponding actual CPU range from the SAME original pin and
+    /// The corresponding CPU range from the SAME original pin and
     /// byte offset. Dereferencing it requires the caller's CPU/DMA ownership,
     /// device completion/cache visibility and original execution-context proof.
     pub fn cpu_address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
@@ -227,7 +227,7 @@ impl DmaRegion {
     }
 
     /// # Safety
-    /// Actual device completion and stopped access establish CPU ownership of
+    /// Device completion and stopped access establish CPU ownership of
     /// this exact range; do not invalidate live neighboring device buffers.
     pub unsafe fn sync_for_cpu(&self, range: Range<usize>) -> Result<(), Error> {
         // SAFETY: original token and translated subrange remain private; the
@@ -238,7 +238,7 @@ impl DmaRegion {
         Ok(())
     }
 
-    /// Actual domain-qualified coherent observation. WB pages or a CPU fence
+    /// Domain-checked coherent observation. WB pages or a CPU fence
     /// alone cannot enable it. No multiword snapshot/freshness is inferred.
     pub fn read_coherent_u32(&self, offset: usize) -> Result<u32, Error> {
         let end = offset
@@ -249,17 +249,17 @@ impl DmaRegion {
     }
 
     /// Retire the ORIGINAL complete mapping token, including every padding
-    /// page. Failure leaves this same region/IOVA/pins retained for retry.
+    /// page. Failure leaves this same region/IOVA/pins kept for retry.
     /// The CPU pin remains valid until this region is dropped.
     ///
     /// # Safety
-    /// Actual engines/submissions are stopped, all payload/posted DMA has
+    /// Engines/submissions are stopped, all payload/posted DMA has
     /// completed/drained and IRQ/work/callback users cannot resume access.
-    /// Retain the original requester/configuration/root/IRQ/context owners
+    /// Keep the original requester/configuration/root/IRQ/context owners
     /// throughout removal; BME-clear or a replacement domain proves none of it.
     pub unsafe fn unmap(&mut self) -> Result<(), Error> {
-        // SAFETY: caller supplies complete actual original-path quiescence;
-        // DmaMapping retains its private whole token through invalidation.
+        // SAFETY: caller supplies complete original-path quiescence;
+        // DmaMapping keeps its private whole token through invalidation.
         unsafe {
             self.dma.unmap()?;
         }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Shared owned direct-PDM PCM, deadline and DMA lifecycle. Hardware profiles
-//! retain their own source admission and actual register facts. Adapted from
+//! keep their own source admission and register facts. Adapted from
 //! AMD Linux yc (2021), renoir (2020) and ps (2022/2025), at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //! Copyright (C) 2020, 2021, 2022, 2023, 2025 Advanced Micro Devices, Inc.
@@ -56,7 +56,7 @@ pub trait Profile {
     }
     const ZSC_BEFORE_INTERRUPTS: bool = false;
     const PME_ENABLE: Option<usize> = None;
-    /// Extra actual engine exclusion checks, not inferred from a profile ID.
+    /// Extra engine exclusion checks, not inferred from a profile ID.
     fn exclusive<R: Registers>(_: &mut R) -> Result<(), Error> {
         Ok(())
     }
@@ -214,7 +214,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     pub fn state(&self) -> State {
         self.state
     }
-    /// The first actual hardware/lifecycle failure in this ownership epoch.
+    /// The first hardware/lifecycle failure in this ownership epoch.
     /// Cleanup failures, NeedsReset and successful recovery never overwrite
     /// this diagnostic. Invalid requests rejected before effects do not latch.
     pub fn first_error(&self) -> Option<Error> {
@@ -339,7 +339,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         let assert = self.deadline(Phase::ResetAssert, P::POWER_TIMEOUT_US);
         self.phase_write(RESET, 1, assert)?;
         // The source accepts either bit of 0x10001, not bit16 alone. Require
-        // its actual observed handshake and a bounded complete clear.
+        // its observed handshake and a bounded complete clear.
         self.wait(RESET, assert, |value| value & RESET_ACK != 0)?;
         let clear = self.deadline(Phase::ResetClear, P::POWER_TIMEOUT_US);
         self.phase_write(RESET, 0, clear)?;
@@ -347,7 +347,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.phase_expect(DMA_ENABLE, 0, clear)?;
         self.phase_expect(PDM_ENABLE, 0, clear)
     }
-    /// Initialize or recover a fault through an actual whole-function reset.
+    /// Initialize or recover a fault through a whole-function reset.
     /// Existing capture ownership survives any failed handshake. A successful
     /// reset invalidates the old ring and requires a fresh prepare.
     pub fn initialize(&mut self) -> Result<(), Error> {
@@ -381,7 +381,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         }
         self.write_checked(PAGE_BASE, 0)?;
         self.registers.set_bus_master(false)?;
-        // Admit the actual completion service while the reset-acknowledged
+        // Admit the completion service while the reset-acknowledged
         // engine is quiet, before exposing even the first capture mapping.
         self.drain_stopped_domain()?;
         if P::ZSC_BEFORE_INTERRUPTS {
@@ -394,7 +394,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         } else {
             // Both later sources enable the external gate before control.
             // Renoir preserves existing control bits; dedicated ACP63 writes
-            // the source's exact error mask. Pending status is retained.
+            // the source's exact error mask. Pending status is held.
             self.write_checked(P::IRQ_ENABLE, 1)?;
             let control = if P::PRESERVE_INITIAL_IRQ_CONTROL {
                 self.read(P::IRQ_CONTROL)?
@@ -417,7 +417,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         Ok(())
     }
     /// Four equal 4K..8K periods. No allocation is published before complete
-    /// format/range checks; once programming begins it is retained on faults.
+    /// format/range checks; once programming begins it is held on faults.
     pub fn prepare_capture(
         &mut self,
         source: &dyn PageSource,
@@ -448,7 +448,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         let allocation_bytes = bytes.next_multiple_of(PAGE_BYTES);
         if self.capture.is_some() {
             // PTE cache invalidation has no source completion handshake.
-            // Reset the actual function before replacing any published lease,
+            // Reset the function before replacing any published lease,
             // then reestablish generation-specific clocks/IRQs and exclusion.
             self.initialize_inner()?;
         } else {
@@ -500,12 +500,12 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             .sync_for_device(0..allocation_bytes)
             .map_err(Error::Dma)?;
         if P::PERIOD_DELIVERY {
-            // Qualify actual concurrent word observation before publishing an
+            // Check concurrent word observation before publishing an
             // IOVA. This discarded value grants no captured sample freshness.
             capture.dma.read_coherent_u32(0).map_err(Error::Dma)?;
         }
         self.capture = Some(capture);
-        // From this point even partial SRAM publication retains the lease.
+        // From this point even partial SRAM publication keeps the lease.
         self.capture.as_mut().unwrap().published = true;
         self.program_capture_ring()?;
         self.state = State::Prepared;
@@ -653,7 +653,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             return Err(Error::AuthorityChanged);
         }
         if P::PERIOD_DELIVERY && status & PERIOD_IRQ != 0 {
-            // Match Renoir's actual source ISR: acknowledge its period event
+            // Match Renoir's source ISR: acknowledge its period event
             // before ALSA-style hardware-pointer sampling. The period event,
             // not bare counter movement, grants completed-period progression.
             self.registers.write32(P::IRQ_STATUS, PERIOD_IRQ);
@@ -741,7 +741,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         }
         // A producer may keep advancing during the copy. Under the pinned
         // source completed-period/pointer contract, accept bytes only if a
-        // second actual pointer sample has not reached the copied period.
+        // second pointer sample has not reached the copied period.
         // A failed copy publishes no consumer progress.
         let after = self.position_inner()?;
         if after.bytes - consumed >= ring {
@@ -762,7 +762,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     /// the latest ring after wraps. A running cyclic producer never grants the
     /// canonical DMA domain's required CPU ownership; copying while running
     /// refuses before touching the destination. No CPU/physical/IOVA alias is
-    /// inferred. Every admitted profile completes the actual retained domain's
+    /// inferred. Every admitted profile completes the domain's
     /// translated payload write drain before CPU cache synchronization. On a
     /// mapping error the destination may be partly modified.
     pub fn copy_stopped_ring(
@@ -797,7 +797,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             }
             self.drain_stopped_domain()?;
             let capture = self.capture.as_ref().unwrap();
-            // SAFETY: actual stop acknowledgement, PDM disable and required
+            // SAFETY: stop acknowledgement, PDM disable and required
             // same-domain posted-payload completion were checked;
             // there are no asynchronous submissions or interrupt workers here.
             unsafe { capture.dma.sync_for_cpu(offset..offset + destination.len()) }
@@ -807,7 +807,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
                     .cpu
                     .address(offset + index, 1)
                     .map_err(Error::Memory)?;
-                // SAFETY: retained real CPU mapping, checked bounds, no DMA.
+                // SAFETY: real CPU mapping, checked bounds, no DMA.
                 *byte = unsafe { pointer.as_ptr().read_volatile() };
             }
             Ok(())
@@ -886,8 +886,8 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     }
     fn resume_inner(&mut self) -> Result<(), Error> {
         // The unsafe claim still owns the same PCI/firmware/board epoch. The
-        // native provider revalidates actual BDF/BAR/D0/delivery containment;
-        // actual domain completion below revalidates retained root authority.
+        // native provider revalidates BDF/BAR/D0/delivery containment;
+        // domain completion below revalidates kept root permission.
         self.pci_authority()?;
         self.initialize_inner()?;
         if let Some(capture) = self.capture.as_ref() {
@@ -896,7 +896,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
                 .sync_for_device(0..capture.dma.bytes())
                 .map_err(Error::Dma)?;
             if P::PERIOD_DELIVERY {
-                // Recheck the actual retained domain's coherent observation
+                // Recheck the domain's coherent observation
                 // capability, discarding old PCM before publishing its PTEs.
                 capture.dma.read_coherent_u32(0).map_err(Error::Dma)?;
             }
@@ -942,7 +942,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         Ok(())
     }
     /// Stop first, then contain interrupts and reset the function. Memory and
-    /// ownership remain retained on any failure; a subsequent explicit reset
+    /// ownership remain held on any failure; a subsequent explicit reset
     /// may recover them. No writes follow a lost PCI association.
     pub fn shutdown(&mut self) -> Result<(), Error> {
         if self.state == State::Shutdown {
@@ -969,11 +969,11 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         self.release_capture()?;
         self.quiet_block()
     }
-    /// Callers must first observe engine stop/PDM disable or actual reset,
+    /// Callers must first observe engine stop/PDM disable or reset,
     /// while preserving the requester, root, domain and every target mapping.
     fn drain_stopped_domain(&self) -> Result<(), Error> {
         if P::REQUIRE_DRAIN {
-            // SAFETY: each caller first acknowledged actual engine quiescence;
+            // SAFETY: each caller first acknowledged engine quiescence;
             // this exact attached domain and all backing remain owned. No IRQ,
             // work item or other submission can restart this exclusive device.
             unsafe { self.domain.drain_posted_writes() }.map_err(Error::Dma)?;
@@ -989,18 +989,18 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
             self.drain_stopped_domain()?;
         }
         if let Some(capture) = self.capture.as_mut() {
-            // SAFETY: callers first acknowledge actual whole-function reset,
+            // SAFETY: callers first acknowledge whole-function reset,
             // disabled address group1 and PCI BME, then same-domain payload
             // completion. No IRQ/work submissions exist. Cache-command readback
-            // supplies none of this proof. Failure retains this exact lease.
+            // supplies none of this proof. Failure keeps this exact lease.
             unsafe { capture.dma.unmap() }.map_err(Error::Dma)?;
         }
         self.capture = None;
         Ok(())
     }
-    /// Transfer the retained register provider only after acknowledged shutdown.
+    /// Transfer the register provider only after acknowledged shutdown.
     /// A non-shutdown owner is returned intact, including every DMA lease.
-    // Returning ownership must neither allocate nor drop a retained DMA lease.
+    // Returning ownership must neither allocate nor drop a DMA lease.
     #[allow(
         clippy::result_large_err,
         reason = "A controller that has not acknowledged shutdown must return its original register and clock owners intact"

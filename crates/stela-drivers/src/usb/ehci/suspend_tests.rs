@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Held-D0 physical root transitions through actual native registers/EP0/DMA.
+//! Held-D0 physical root transitions through native registers/EP0/DMA.
 use super::*;
 
 fn configured(interrupt: bool) -> (Controller, Arc<Mutex<Shared>>, DeviceId) {
@@ -42,7 +42,7 @@ fn actual_root_suspend_resume_preserves_address_configuration_toggle_and_dma_wit
             let ticket = read(&mut c, &id, interrupt);
             assert_eq!(c.poll(&ticket).unwrap().unwrap().data, [0, 1, 2]);
             let toggle = c.ports[0].as_ref().unwrap().endpoints[17].unwrap().toggle;
-            m.lock().unwrap().device_status[0] = 3; // Actual self-power + remote wake.
+            m.lock().unwrap().device_status[0] = 3; // Self-power + remote wake.
             let before = m.lock().unwrap().setup_trace.len();
             let asleep = c.suspend_port(&id).unwrap();
             {

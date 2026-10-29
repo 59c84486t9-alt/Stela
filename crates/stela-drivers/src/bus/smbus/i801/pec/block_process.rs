@@ -6,7 +6,7 @@
 use super::*;
 
 impl<R: Registers, T: Timer> I801<R, T> {
-    /// The retained controller checks capability, count and buffer-mode policy
+    /// The kept controller checks capability, count and buffer-mode policy
     /// before calling this; its final configuration guard still owns publication.
     pub(in crate::bus::smbus::i801) fn block_process_until(
         &mut self,

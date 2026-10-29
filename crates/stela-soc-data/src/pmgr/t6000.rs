@@ -1,12 +1,12 @@
-//! T6000 PMGR address routing, qualified by original 26A434 J314s sources.
+//! T6000 PMGR address routing, checked by original 26A434 J314s sources.
 //!
 //! `AppleT6000PMGR::initRegMaps` (kernel file 0x2ef4f44) binds forty-four
 //! RegMap selectors. `readACCReg` (0x2f087f4) selects E/P0/P1 mapping lists
 //! (0x76d088/0x76d0c0/0x76d108), then subtracts the selected logical base.
-//! Bridge IDs 0..=0xc0 select consecutive DT views beginning at the actual
+//! Bridge IDs 0..=0xc0 select consecutive DT views beginning at the
 //! `bridge-reg-index` (48 on J314s). These are routing rules, not register
 //! access permissions, reset values, tuning, power state or command completion.
-//! A caller must still use an actual device owner for every physical effect.
+//! A caller must still use a device owner for every physical effect.
 
 pub mod reconfiguration;
 pub mod tunables;
@@ -72,7 +72,7 @@ pub const BINDINGS: [(u8, usize); 44] = [
     (0x50, 47),
 ];
 
-/// One original ACC mapping row. Its span comes from the actual DT view,
+/// One original ACC mapping row. Its span comes from the DT view,
 /// just as the original driver queries the selected RegMap's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccRange {
@@ -206,8 +206,8 @@ impl<'a> Layout<'a> {
         self.view(*index)
     }
 
-    /// Route the first die's actual E/P0/P1 complex. Multi-die projection,
-    /// harvesting and additional PE ownership require their own actual plan.
+    /// Route the first die's E/P0/P1 complex. Multi-die projection,
+    /// harvesting and additional PE ownership require their own plan.
     pub fn acc(&self, complex: usize, logical: u32, bytes: u64) -> Result<u64, &'static str> {
         let rows = match complex {
             0 => &E_ACC[..],
@@ -403,7 +403,7 @@ mod original {
         .enumerate()
         {
             assert_eq!(word(&bytes, 0x76d3c8 + 4 * complex) as usize, rows.len());
-            // Chained-fixup payload supplies the actual list's file coordinate;
+            // Chained-fixup payload supplies the list's file coordinate;
             // its authenticated pointer metadata is not an executable PAC value.
             assert_eq!(
                 quad(&bytes, 0x1316360 + complex * 8) & 0xffffffff,

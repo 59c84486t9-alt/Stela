@@ -1,5 +1,5 @@
 //! Read-only physical cache/routing query over the captured installation image.
-//! A caller must separately prove actual WB PAT mappings, enabled caches and
+//! A caller must separately prove WB PAT mappings, enabled caches and
 //! exclusion of incompatible aliases; this image does not grant RAM ownership.
 use super::{Image, VARIABLE_BASE, amd};
 use core::ops::Range;

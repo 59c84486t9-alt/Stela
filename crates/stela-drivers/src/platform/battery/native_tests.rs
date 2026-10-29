@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Included by acpi::tests: actual native AML, never a synthetic Handle backend.
+// Included by acpi::tests: native AML, never a synthetic Handle backend.
 #[test]
 fn native_battery_linux_status_default_information_fallback_and_trip_failures() {
     use crate::platform::battery::{Battery, Error as BatteryError, Method};
@@ -76,7 +76,7 @@ fn native_battery_linux_status_default_information_fallback_and_trip_failures() 
         }
         if matches!(id, b"BBIX" | b"BFAL") {
             device.extend(method(b"_BIX", 0, b"\x75XCNT\xa4NOEX"));
-            // Actual alarm side effect followed by AE_NOT_FOUND during AML.
+            // Alarm side effect followed by AE_NOT_FOUND during AML.
             device.extend(method(b"_BTP", 1, b"\x70\x68ALRM\xa4NOEX"));
         }
         aml.extend(pkg(&[0x5b, 0x82], &device));

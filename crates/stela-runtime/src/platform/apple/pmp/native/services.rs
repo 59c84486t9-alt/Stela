@@ -1,8 +1,8 @@
-//! Actual cooperative native endpoint3/4 and MC destination composition.
+//! Cooperative native endpoint3/4 and MC destination composition.
 //!
 //! Source: original26A434 T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,
 //! pmgr/metrics-backend-destinations-r1 and native-scheduler-r1. No firmware
-//! executes. Mailboxes are actual paired RTKit slots; mappings retain the real
+//! executes. Mailboxes are paired RTKit slots; mappings keep the real
 //! DMA broker. Startup never supplies an AP allocation or echoes an AP message.
 use super::{dma, platform::owner::Completion, reporting, scheduler, trace};
 use alloc::{
@@ -75,14 +75,14 @@ pub struct Services {
     trace_input: scheduler::Immediate,
 }
 impl Services {
-    /// Bind source T8112 defaults to actual native resources.
+    /// Bind source T8112 defaults to native resources.
     ///
     /// # Safety
-    /// All calls/callbacks must execute on the same actual cooperative BSP,
+    /// All calls/callbacks must execute on the same cooperative BSP,
     /// under the root's stopped-worker/all-writer canonical transfer ownership.
-    /// Broker must name that same registered RAM, actual DART and AP allocator.
+    /// Broker must name that same registered RAM, DART and AP allocator.
     /// Source DMA synchronize must retire before local fences. The caller must
-    /// retain these ownership guarantees for the complete Services lifetime;
+    /// keep these ownership guarantees for the complete Services lifetime;
     /// fences here do not prove an MCC drain or acknowledge any hardware event.
     pub unsafe fn t8112(
         broker: dma::Broker,
@@ -171,7 +171,7 @@ impl Services {
         self.runtime.clone()
     }
     /// A real required callback. Production callers capture Weak MC service
-    /// ownership and call its dispatch_metrics(actual Invocation, actual Samples).
+    /// ownership and call its dispatch_metrics(Invocation, Samples).
     /// Missing/abandoned service ownership must return Refused, never Retired0.
     pub fn metrics_backend<C: scheduler::Callback + 'static>(&self, callback: C) -> MetricsBackend {
         MetricsBackend::new(
@@ -185,7 +185,7 @@ impl Services {
     pub fn reporting_ready(&self) -> bool {
         self.report_shared.ready.get()
     }
-    /// Actual initializer return, not its earlier source software-cell write.
+    /// Initializer return, not its earlier source software-cell write.
     pub fn trace_initialized(&self) -> bool {
         self.trace_shared.init_complete.get()
     }
@@ -204,7 +204,7 @@ impl Services {
         }
         self.runtime.next_deadline()
     }
-    /// Actual source lifecycle DATA request; the registered native callback
+    /// Source lifecycle DATA request; the registered native callback
     /// performs pause/flush/wait/resume under the real global queue lease.
     pub fn begin_trace_lifecycle(&mut self, prior: u32, next: u32) -> Result<(), &'static str> {
         if !self.trace_initialized() {
@@ -219,7 +219,7 @@ impl Services {
             .push_back((prior, next));
         Ok(())
     }
-    /// Bounded actual inbox/startup dispatch plus one actual queued-work step.
+    /// Bounded inbox/startup dispatch plus one queued-work step.
     /// Independent reporting ACK input can retire while registration waits.
     pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, &'static str> {
         if self.report_shared.started() {
@@ -255,7 +255,7 @@ impl Services {
         })
     }
     /// Memory-loss/replacement is not an implicit Drop reset. Reporting's real
-    /// exit and trace mapping ownership must be joined to an actual source
+    /// exit and trace mapping ownership must be joined to a source
     /// lifecycle invocation before RTKit reset is admitted.
     pub fn check_reset(&self) -> Result<(), &'static str> {
         Err("native reporting/trace memory-loss lifecycle is not joined to RTKit reset")
@@ -292,7 +292,7 @@ mod tests {
         )
         .unwrap();
         // This fixture exercises only transport/software/no-buffer branches;
-        // no DMA grant retires and no canonical memory/fence is fabricated.
+        // no DMA grant retires and no canonical memory/fence is invented.
         let (services, endpoints) =
             // SAFETY: the fixture's broker and clock are its own, and these branches retire no DMA
             // grant.
@@ -351,8 +351,8 @@ mod tests {
         assert!(services.trace.borrow().foreground_pending());
         assert!(!services.trace.borrow().dispatch_pending());
         assert_eq!(services.deadline(), Some(0));
-        // Continue the SAME actual initializer until its terminal source return;
-        // only then may the retained queued command begin protocol execution.
+        // Continue the SAME initializer until its terminal source return;
+        // only then may the queued command begin protocol execution.
         advance(&mut services);
         assert!(services.trace_initialized());
         assert!(!services.trace.borrow().foreground_pending());
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(output, alloc::vec![reporting::wire::BUFFER_REQUEST]);
         assert_eq!(services.deadline(), None);
         assert!(!services.reporting_ready());
-        // A real consumed AP reply wakes startup, but the unresolved actual DMA
+        // A real consumed AP reply wakes startup, but the unresolved DMA
         // map still cannot become READY or an AP buffer advertisement.
         report
             .receive((1 << 52) | (0x48 << 44) | 0x4000, &mut Vec::new())

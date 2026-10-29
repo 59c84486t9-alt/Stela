@@ -152,7 +152,7 @@ fn endpoint_translation_alone_cannot_hide_an_internal_aperture_hole() {
     )
     .unwrap();
     assert!(requirements.is_empty());
-    // A complete affine mapping cannot qualify an overlapping fragment
+    // A complete affine mapping cannot check an overlapping fragment
     // whose priority could change an interior byte's translation.
     inventory.ranges = vec![
         (binding.physical, binding.physical, binding.bytes),

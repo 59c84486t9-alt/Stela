@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2013-2014, 2018-2026 Intel Corporation
-//! Original coexistence vif-change callback on one retained cold MLD link.
-//! Real CI ACK/reclaim and actual RX profiles; no HCI or frame/RF grant.
+//! Original coexistence vif-change callback on one cold MLD link.
+//! Real CI ACK/reclaim and RX profiles; no HCI or frame/RF grant.
 use super::*;
 use crate::net::wifi::intel::boot::coexistence::{
     CoexistenceError, channel_inhibition, next_antenna,
@@ -39,7 +39,7 @@ pub struct Ax200Coexistence<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     first_error: Option<Ax200CoexistenceError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a, Q, B, O> {
-    /// Run the source coexistence vif-change callback for this actual sole
+    /// Run the source coexistence vif-change callback for this sole
     /// unassociated, non-HT station/link0/PHY0. Mandatory BT_CONFIG was already
     /// applied by ColdRadio; this continuation never sends a duplicate init.
     /// # Safety
@@ -78,7 +78,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
     pub fn responses(&self) -> &[CommandResponse] {
         &self.responses
     }
-    /// Actual cold management antenna choice from retained firmware/NVM and
+    /// Cold management antenna choice from kept firmware/NVM and
     /// captured Wi-Fi BT profile. This observation grants no frame/RF lease.
     /// No management frame has yet run, so the post-NVM source initial toggle
     /// from index0 remains the current index; later TX completion must own any
@@ -115,7 +115,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
         self.phase = Ax200CoexistencePhase::Failed;
     }
     /// Return only the original empty scheduler queue. The applied CI and
-    /// actual profile remain private to its same RomBoot epoch.
+    /// profile remain private to its same RomBoot epoch.
     pub fn into_queue(self) -> Result<Ax200ManagementQueue<'a, Q, B, O>, Box<Self>> {
         if self.phase != Ax200CoexistencePhase::ManagementFramesRequired
             || self.first_error.is_some()
@@ -238,7 +238,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
                 }
             }
         }
-        // Real packet dispatch retains the canonical profile even if an outer
+        // Real packet dispatch keeps the canonical profile even if an outer
         // caller consumes mutable diagnostics. This cold no-HT/unassociated
         // state forces SMPS_AUTOMATIC (already AUTO), reduced TXP remains false
         // and RSSI monitoring stays disabled; the original source issues no
@@ -291,7 +291,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
             .mcc
             .setup
             .options;
-        // SAFETY: same finite cold response/rate union, held through actual
+        // SAFETY: same finite cold response/rate union, held through
         // CI publication. No new rate, calibration state or frame is enabled.
         self.ticket = Some(
             unsafe {

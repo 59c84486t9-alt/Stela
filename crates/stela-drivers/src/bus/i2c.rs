@@ -3,7 +3,7 @@
 //! This is a polled, PIO implementation of the ordinary 32-bit little-endian
 //! DesignWare register interface. The controller engine adapts Linux's
 //! `i2c-designware-master.c` FIFO accounting and abort handling at commit
-//! `a804c5742bff224d4cb4d25dd383554d598be32b`; see its retained source notices
+//! `a804c5742bff224d4cb4d25dd383554d598be32b`; see its source notices
 //! in `i2c/designware.rs`. Register facts were also cross-checked against Intel's
 //! fourth generation Core mobile I/O datasheet, section 22. No FreeBSD code is
 //! incorporated.
@@ -80,7 +80,7 @@ impl<B: Bus + ?Sized> Bus for alloc::boxed::Box<B> {
 }
 
 /// A progressing timer. Interval users must preflight their maximum duration,
-/// retain `start`'s opaque marker and use `elapsed_us`, which permits subtraction
+/// keep `start`'s opaque marker and use `elapsed_us`, which permits subtraction
 /// before conversion across a native counter rollover. `now_us` is only the
 /// legacy absolute quotient. Defaults preserve full-width microsecond models;
 /// other counter units must override duration/start/elapsed consistently.
@@ -133,7 +133,7 @@ pub enum Phase {
     Stop,
 }
 
-/// The hardware's abort reason is retained alongside this coarse category.
+/// The hardware's abort reason is held alongside this coarse category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AbortKind {
     AddressNack,

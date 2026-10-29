@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Independent native-width CORB/RIRB DMA peer. Commands are consumed from the
-//! actual published coherent allocation, never by bypassing Controller::verb.
+//! published coherent allocation, never by bypassing Controller::verb.
 extern crate std;
 
 use super::*;
@@ -170,7 +170,7 @@ impl Peer {
             return;
         }
         let corb = u64::from(self.get(0x40, 4)) | (u64::from(self.get(0x44, 4)) << 32);
-        // SAFETY: corb names a controller-allocated ring in retained fixture RAM;
+        // SAFETY: corb names a controller-allocated ring in kept fixture RAM;
         // wp is its published in-range entry. Polling serializes peer and CPU use.
         let command =
             unsafe { core::ptr::read_volatile((corb as *const u32).add(usize::from(wp))) }.to_le();
@@ -184,7 +184,7 @@ impl Peer {
         let rirb = u64::from(self.get(0x50, 4)) | (u64::from(self.get(0x54, 4)) << 32);
         let next = (self.get(0x58, 2) + 1) % 256;
         let extra = if self.wrong_codec { 1 } else { command >> 28 };
-        // SAFETY: rirb names the retained 256-entry fixture ring. next is reduced
+        // SAFETY: rirb names the 256-entry fixture ring. next is reduced
         // modulo 256, and each entry has two aligned u32 words.
         unsafe {
             let destination = (rirb as *mut u32).add(next as usize * 2);
@@ -263,7 +263,7 @@ fn controller(ram: &mut Ram) -> (Controller<RegistersPeer, Clock>, Rc<RefCell<Pe
     let registers = RegistersPeer(peer.clone());
     let clock = Clock(Rc::new(Cell::new(0)));
     // SAFETY: the Rc peer is used synchronously by this controller, with no
-    // firmware or background DMA. ram retains its coherent allocation until
+    // firmware or background DMA. ram keeps its coherent allocation until
     // the controller is dropped.
     let controller = unsafe {
         Controller::new(
@@ -668,7 +668,7 @@ fn mst_shrink_quarantines_owner() {
         controller.poll_digital_pin(&mut pins[1]),
         Err(DigitalError::DeviceSelection)
     );
-    assert!(!controller.lifecycle_failed); // actual original selection restored
+    assert!(!controller.lifecycle_failed); // original selection restored
     {
         let mut peer = peer.borrow_mut();
         peer.reject_set = Some(0);
@@ -816,14 +816,14 @@ fn failed_device_count_rejected() {
     assert!(!controller.lifecycle_failed);
 }
 
-/// Retained display-side counterpart for the CORB/RIRB peer. Its attachment
-/// goes through the actual legacy ownership API; no controller field is forged.
+/// Display-side counterpart for the CORB/RIRB peer. Its attachment
+/// goes through the legacy ownership API; no controller field is forged.
 struct LegacyDisplayPeer {
     state: std::sync::Mutex<super::super::hdmi::DisplayAudioState>,
     observations: core::sync::atomic::AtomicUsize,
 }
 // SAFETY: this test exclusively owns the modeled HDA and display connector.
-// The attached Arc retains its link/power state until actual port detachment.
+// The attached Arc keeps its link/power state until port detachment.
 // No playback is requested; unexpected clock/link effects fail the model.
 unsafe impl super::super::hdmi::DisplayAudioPort for LegacyDisplayPeer {
     fn identity(&self) -> super::super::hdmi::DisplayAudioIdentity {
@@ -872,7 +872,7 @@ fn legacy_port_excludes_sessions() {
         peer.count = 2;
         peer.selected = 1;
         // The real graph enumeration admits the existing legacy profile and
-        // reads actual AFG/widget D0 capabilities from this command-ring peer.
+        // reads AFG/widget D0 capabilities from this command-ring peer.
         peer.parameters.insert((0, 0), 0x10de_0008);
         peer.parameters.insert((1, 0x0f), 1);
         peer.parameters.insert((4, 9), 0x0040_0700);
@@ -895,7 +895,7 @@ fn legacy_port_excludes_sessions() {
         observations: AtomicUsize::new(0),
     });
     let graph = controller.enumerate_codec(0).unwrap();
-    // SAFETY: retained display peer owns this actual modeled codec/pin; the
+    // SAFETY: display peer owns this modeled codec/pin; the
     // controller validates the token and freshly re-enumerates its real graph.
     let port = unsafe { controller.attach_hdmi_port(&graph, 4, 0, owner.clone()) }.unwrap();
     assert_eq!(owner.observations.load(Ordering::SeqCst), 1);
@@ -946,8 +946,8 @@ fn legacy_port_excludes_sessions() {
     assert!(!controller.routing_failed);
     assert!(!controller.lifecycle_failed);
     assert!(!controller.command_poisoned);
-    // Actual acknowledged owner release reopens observation of the same pin;
-    // refusal did not silently detach, replace, or poison the retained owner.
+    // Acknowledged owner release reopens observation of the same pin;
+    // refusal did not silently detach, replace, or poison the owner.
     controller.detach_hdmi_port(port).unwrap();
     assert_eq!(Arc::strong_count(&owner), 1);
     assert!(!controller.hdmi_owns_node(0, 4));

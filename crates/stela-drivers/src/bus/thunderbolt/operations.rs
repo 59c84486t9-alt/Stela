@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2019 Intel Corporation
-//! Actual USB4 router operations, independent of firmware ICM proxy commands.
+//! USB4 router operations, independent of firmware ICM proxy commands.
 //!
 //! Linux usb4_native_switch_op and DP resource/DROM helpers supply the register
 //! protocol. Native CM/router/D0 ownership and dependent resources remain real
@@ -62,11 +62,11 @@ impl Operation {
 /// Exclusive physical native CM reservation of the real router operation engine.
 ///
 /// # Safety
-/// Inventory and operation belong to the actual owned configured router and NHI
+/// Inventory and operation belong to the owned configured router and NHI
 /// requester/reset/topology epoch. Original configured router, D0/link, platform
-/// authority, mailbox serialization and all independent GPU/DMA/IRQ/IOMMU owners
-/// remain retained, including after errors. Firmware ICM/proxy and competing CM
-/// actors cannot access this operation engine. DP operations refer to an actual
+/// permission, mailbox serialization and all independent GPU/DMA/IRQ/IOMMU owners
+/// remain held, including after errors. Firmware ICM/proxy and competing CM
+/// actors cannot access this operation engine. DP operations refer to a
 /// GPU/connector-to-DP-IN association. Allocation owns shared accounting before
 /// submission; deallocation additionally proves the exact prior real allocation
 /// and stopped dependent tunnels. No port number or opcode supplies those rights.
@@ -110,9 +110,9 @@ fn retain(owner: &Arc<dyn Owner>) {
     });
     core::mem::forget(owner.clone());
 }
-/// Completed actual native router command, retaining original physical owners.
+/// Completed native router command, keeping original physical owners.
 /// Query status0 means available. Only status0 can produce allocation completion;
-/// DROM bytes are actual returned control-channel words, not interpreted identity.
+/// DROM bytes are returned control-channel words, not interpreted identity.
 pub struct Completed {
     pub operation: Operation,
     pub status: u8,
@@ -123,7 +123,7 @@ pub struct Completed {
 }
 impl Completed {
     /// # Safety
-    /// Actual containing native CM retains the original read owner throughout
+    /// Containing native CM keeps the original read owner throughout
     /// this transfer. Only a fully acknowledged read-only DROM job may use it.
     pub(super) unsafe fn take_read_data(mut self) -> Option<Vec<u32>> {
         let owner = self.owner.as_ref()?;
@@ -137,8 +137,8 @@ impl Completed {
         Some(core::mem::take(&mut self.data))
     }
     /// # Safety
-    /// Original physical owners and any actual allocated DP resource are restored
-    /// or independently retained by the real native CM. A DP deallocation command
+    /// Original physical owners and any allocated DP resource are restored
+    /// or independently kept by the real native CM. A DP deallocation command
     /// alone never certifies independent GPU/payload/DMA/IRQ/IOMMU retirement.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::operations::Completed;
@@ -198,7 +198,7 @@ pub struct Control<R: Registers> {
 }
 impl<R: Registers> Control<R> {
     /// # Safety
-    /// Idle Channel and actual Owner identify the same live physical controller,
+    /// Idle Channel and Owner identify the same live physical controller,
     /// configured router/reset/topology lifetime. Every Owner obligation holds.
     pub unsafe fn new(channel: Channel<R>, owner: Arc<dyn Owner>, now: u64) -> Result<Self, Error> {
         let mut control = Self::prepare(owner, now, Vec::new(), true)?;
@@ -263,7 +263,7 @@ impl<R: Registers> Control<R> {
         })
     }
     /// # Safety
-    /// All new() requirements hold. Original native CM retains this exact DROM
+    /// All new() requirements hold. Original native CM keeps this exact DROM
     /// owner across blocks. Only a final OV0/status/metadata/data acknowledged
     /// read-status error may reuse this still-running channel; no transport,
     /// timeout, ONS, malformed receipt or revocation can use this profile.
@@ -282,7 +282,7 @@ impl<R: Registers> Control<R> {
         Ok(control)
     }
     /// # Safety
-    /// Containing original native CM owner remains retained across this transfer.
+    /// Containing original native CM owner remains held across this transfer.
     pub(super) unsafe fn retry_read(&mut self) -> Option<(Channel<R>, Vec<u32>)> {
         if !self.read_only
             || !self.closed_read
@@ -481,7 +481,7 @@ impl<R: Registers> Control<R> {
                             && self.closed_read
                             && matches!(e, Error::ResourceStatus(_))
                         {
-                            // The actual read-only command is closed: OV0 and
+                            // The read-only command is closed: OV0 and
                             // final status/metadata/data ACKs precede finish().
                             // Keep public jobs terminal. Only the containing CM
                             // can take this private same-owner retry channel.

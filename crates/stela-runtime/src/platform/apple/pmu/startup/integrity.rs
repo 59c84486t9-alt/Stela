@@ -1,6 +1,6 @@
 //! Maverick native-service image ABI and the source's configuration-tag check.
 //!
-//! Original image1 518..5d2 hashes 1dfc..2268 from the four retained initial
+//! Original image1 518..5d2 hashes 1dfc..2268 from the four initial
 //! words at 1d68, then compares the eight bytes at 2268. Helpers 418..4ec
 //! implement two compression/four final SipHash rounds. This is the firmware's
 //! integrity check, not a certificate, silicon identity or execution receipt.

@@ -5,7 +5,7 @@
 //! observes an exact USB/HCI/ROM/security profile, stages exact Provider images
 //! and requires real download completions and post-upload version/address.
 //! This establishes observed protocol execution, never vendor authentication,
-//! radio qualification or guest services. Generic firmware status is unchanged.
+//! radio validation or guest services. Generic firmware status is unchanged.
 mod firmware;
 mod identity;
 mod initialize;
@@ -46,14 +46,14 @@ use super::{FirmwareReceipt, Hci, Io};
 use alloc::{boxed::Box, vec::Vec};
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Exact config image or a retained named Missing error permitted by this
+/// Exact config image or a named Missing error permitted by this
 /// profile. Malformed/integrity/target failures can never enter OptionalMissing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigurationEvidence {
     Supplied(FirmwareReceipt),
     OptionalMissing(crate::firmware::Error),
 }
-/// Genuine download return index retained without inventing an undocumented
+/// Download return index kept without inventing an undocumented
 /// echo rule. The pinned donor checks return shape, not index equality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DownloadResponse {
@@ -77,7 +77,7 @@ pub struct Attempt {
     pub download: Vec<DownloadResponse>,
     pub after: Option<LocalVersion>,
 }
-/// Container versions have different wire layouts. V2 retains all eight raw
+/// Container versions have different wire layouts. V2 keeps all eight raw
 /// bytes in their original order; no truncation or invented scalar endianness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerVersion {
@@ -213,7 +213,7 @@ mod tests {
             if self.fail_command == Some(self.trace.borrow().commands) {
                 return Err(BlockError::Device { status: 0x55 });
             }
-            // Exercise framing across two genuine transfer completions.
+            // Exercise framing across two transfer completions.
             if !step.response.is_empty() {
                 self.events.push_back(step.response[..1].to_vec());
                 self.events.push_back(step.response[1..].to_vec());
@@ -578,7 +578,7 @@ mod tests {
                 2 => step.response[3] = 0x21,
                 3 => step.response = cc(0xfc20, &[0]),
                 4 => step.response.clear(),
-                5 => step.response = vec![0x0f, 4, 0, 1, 0x20, 0xfc], // delivery/Status without actual CC
+                5 => step.response = vec![0x0f, 4, 0, 1, 0x20, 0xfc], // delivery/Status without CC
                 _ => {
                     step.response = vec![0x0f, 4, 0, 1, 0x20, 0xfc];
                     step.response.extend_from_slice(&cc(0xfc20, &[0, 0x42]));

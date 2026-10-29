@@ -3,7 +3,7 @@
 //! J873g mBoot file159834..1598d0 validates the configured first-level
 //! index before returning root-shadow slot0. The ordinary two-level form
 //! requires index16; its explicit three-level flag requires index0. The
-//! flag also publishes TCR bit3 at158568..158588. This qualifies the root
+//! flag also publishes TCR bit3 at158568..158588. This checks the root
 //! used by a table walk, not native security, filters or generated faults.
 use super::{
     context::{BoundsPolicy, Context, Geometry, PAGE_SHIFT, TableLevel},
@@ -35,7 +35,7 @@ impl Handoff {
     /// Bind the original native SPTM-interface root policy explicitly.
     /// mac18g92833e4..9283400 sources its low-root exception from presence
     /// of `noncompliant-dead-mappings`; 9282e18..9282e1c explicitly enables
-    /// root checking. This qualifies software root selection, not missing
+    /// root checking. This checks software root selection, not missing
     /// upper-TCR fields, native fill-region faults or out-of-context DMA.
     pub fn native_client(
         revision: u16,

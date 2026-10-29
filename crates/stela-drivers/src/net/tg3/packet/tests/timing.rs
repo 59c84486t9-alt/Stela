@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native clock refusal must precede actual config/MMIO and DMA allocation.
+//! Native clock refusal must precede config/MMIO and DMA allocation.
 use super::*;
 
 #[test]
@@ -17,7 +17,7 @@ fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_
             };
             let registers = previous.release_registers();
             // SAFETY: same original isolated peer; unavailable native timing is
-            // deliberately tested before any config/MMIO or DMA admission.
+            // tested before any config/MMIO or DMA admission.
             let hardware = unsafe {
                 Hardware::new(
                     registers,

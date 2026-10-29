@@ -1,4 +1,4 @@
-//! Image4 cryptographic evidence, deliberately separate from boot admission.
+//! Image4 cryptographic evidence, separate from boot admission.
 //!
 //! IM4M signs the exact DER SET containing MANB; DGST binds the complete
 //! IM4P encoding (the loader's `im4m` contract). The first certificate holds
@@ -229,7 +229,7 @@ fn certificate(encoded: &[u8]) -> Result<Certificate<'_>, SignatureError> {
     let key = Key::parse(bit_string(spki.take(3)?.value)?)?;
     spki.end()?;
     // Only the optional X.509 v3 extensions field is supported; never claim
-    // extension/role/time validation merely because a signature verified.
+    // extension/role/time validation because a signature verified.
     if !fields.0.is_empty() {
         let extensions = fields.next_element()?;
         if extensions.class != 2 || extensions.tag != 3 || !extensions.constructed {
@@ -328,7 +328,7 @@ fn digest_for(body: Element<'_>, payload_type: [u8; 4]) -> Result<&[u8], Signatu
 }
 
 /// Verify signatures and IM4P digest binding using the supplied certificates.
-/// The returned evidence deliberately has no `trusted`/`booted` flag.
+/// The returned evidence has no `trusted`/`booted` flag.
 pub fn inspect(payload: &[u8], manifest: &[u8]) -> Result<Evidence, SignatureError> {
     if manifest.len() > MAX_MANIFEST_BYTES {
         return Err(SignatureError::Violation(SignatureViolation::ManifestLimit));

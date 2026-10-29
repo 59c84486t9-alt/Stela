@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Held-D0 restart through the actual packet owner and independently modeled
-//! device-visible DMA. These tests do not supply PCI power or reset authority.
+//! Held-D0 restart through the packet owner and independently modeled
+//! device-visible DMA. These tests do not supply PCI power or reset permission.
 use super::*;
 
 fn attached(bcm5762: bool) -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {

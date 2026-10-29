@@ -129,7 +129,7 @@ fn selection(code: &mut Code, operation: MinMaxOperation, format: Format, lo: u8
     }
 }
 
-/// Reject every active zero, deliberately narrower than pairwise zero-tie guards.
+/// Reject every active zero, narrower than pairwise zero-tie guards.
 fn guard_nonzero(code: &mut Code, format: Format, failures: &mut Vec<usize>, target: TargetCpu) {
     let [magnitude, zero, other_half] = SCRATCH;
     Host::MoveAligned.register(code, magnitude, RESULT, target);

@@ -4,7 +4,7 @@
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Source scheduler queue wire preparation and unpublished canonical DMA.
 //! No method publishes addresses, installs a firmware station, grants queue
-//! ownership or treats a parsed firmware reply as actual HCMD completion.
+//! ownership or treats a parsed firmware reply as HCMD completion.
 use crate::{
     bus::dma::{
         mapping::{Direction, DmaDomain},
@@ -76,7 +76,7 @@ fn geometry(
     }
     Ok(())
 }
-/// Copied source inputs, never actual firmware-station or DMA ownership.
+/// Copied source inputs, never firmware-station or DMA ownership.
 #[derive(Clone, Copy, Debug)]
 pub struct Parameters {
     pub station_mask: u32,
@@ -85,7 +85,7 @@ pub struct Parameters {
     pub slots: u16,
     /// Source byte-count pool alignment256, with complete family table size.
     pub byte_counts: Region,
-    /// Initial native coherent ring profile retains source page alignment.
+    /// Initial native coherent ring profile keeps source page alignment.
     pub descriptors: Region,
 }
 pub struct Configuration {
@@ -158,7 +158,7 @@ impl Configuration {
         })
     }
 }
-/// Pure reply fields. The actual owner must first match the real HCMD ticket,
+/// Pure reply fields. The owner must first match the real HCMD ticket,
 /// native epoch and unique queue registry (including existing command queue0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reply {
@@ -168,15 +168,15 @@ pub struct Reply {
     pub reserved: u16,
 }
 
-/// Four retained native DMA allocations which have never been published.
-/// This type deliberately has no publish/doorbell API. A future real firmware
-/// station/queue owner must consume and retain it with the actual BAR/requester
-/// before exposing any address, then use actual completion/stop/CPU handoffs.
+/// Four kept native DMA allocations which have never been published.
+/// This type has no publish/doorbell API. A future real firmware
+/// station/queue owner must consume and keep it with the BAR/requester
+/// before exposing any address, then use completion/stop/CPU handoffs.
 /// Queue creation completion does not retire its persistent maps; removal or
 /// stopped-requester proof and relevant work drain must end their ownership.
-/// Bidirectional permissions/WB attributes alone do not qualify requester
-/// coherence, NoSnoop or ATS; the actual publisher must establish those too.
-/// Copying its diagnostic layout never grants that authority. Construction
+/// Bidirectional permissions/WB attributes alone do not check requester
+/// coherence, NoSnoop or ATS; the publisher must establish those too.
+/// Copying its diagnostic layout never grants that permission. Construction
 /// and final Drop run in process/deferred context, never a hard IRQ handler.
 pub struct UnpublishedQueue {
     family: Family,
@@ -193,7 +193,7 @@ pub struct Layout {
     pub invalid: Region,
 }
 impl UnpublishedQueue {
-    /// Actual initial non-QoS/management window: source16 entries, raised to
+    /// Initial non-QoS/management window: source16 entries, raised to
     /// the AX210 family minimum128 by mvm/sta.c::iwl_mvm_tvqm_enable_txq.
     pub fn slots(&self) -> u16 {
         initial_slots(self.family)
@@ -204,7 +204,7 @@ impl UnpublishedQueue {
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
-        negotiate(fw)?; // no native allocation when the actual ABI is absent
+        negotiate(fw)?; // no native allocation when the ABI is absent
         let allocate = |bytes: &[u8]| {
             Chunk::allocate(source, domain.clone(), bytes, Direction::Bidirectional)
                 .map_err(Error::Dma)
@@ -432,7 +432,7 @@ mod tests {
                     assert!(domain.records.lock().unwrap().live.is_empty());
                 }
             }
-            // Failed real unmap retains the map/domain/pin even though these
+            // Failed real unmap keeps the map/domain/pin even though these
             // allocations were never exposed. No identity fallback or pretend
             // invalidation releases the last lease.
             let source = Source::default();
@@ -517,7 +517,7 @@ mod tests {
                     ]
                     .concat();
                     let parsed = config.parse_reply(&raw);
-                    assert_eq!(f[6].parse::<i32>().unwrap() >= 0, queue < 512 && busy == 0); // Linux raw helper intentionally ignores failure flags
+                    assert_eq!(f[6].parse::<i32>().unwrap() >= 0, queue < 512 && busy == 0); // Linux raw helper ignores failure flags
                     if flags != 0 {
                         assert_eq!(parsed, Err(Error::Rejected(flags)));
                     } else if queue >= 512 {

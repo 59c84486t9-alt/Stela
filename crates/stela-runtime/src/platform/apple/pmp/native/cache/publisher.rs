@@ -1,4 +1,4 @@
-//! Actual quota programming and PTD publication in the native source order.
+//! Quota programming and PTD publication in the native source order.
 //! t8112pmp b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,
 //! VA1003cbc..1003ee8 interleaves each fourth group's response BEFORE that
 //! group's hardware store. This component supplies neither command consumption
@@ -13,7 +13,7 @@ use {
 
 type Error = &'static str;
 
-/// Exact backing identity, not execution/completion authority. The actual
+/// Exact backing identity, not execution/completion permission. The
 /// cache constructs it once; moving that cache preserves the same identity.
 #[derive(Clone)]
 pub struct Identity(Rc<()>);
@@ -26,7 +26,7 @@ impl Identity {
     }
 }
 
-/// One actual cache/PTD association. The T8112 resource constructor checks
+/// One cache/PTD association. The T8112 resource constructor checks
 /// their same registered RAM and physical join before issuing this once.
 /// Dropping this binding never reopens that cache's native publisher slot.
 pub struct Binding {
@@ -39,7 +39,7 @@ impl Binding {
     }
 }
 
-/// A live borrow of the actual quota owner, not a copied word array. Err must
+/// A live borrow of the quota owner, not a copied word array. Err must
 /// precede a write's effect; successful writes modify that same AP-facing bank.
 /// The production adapter borrows EmptyResource and checks its real lifecycle.
 pub trait Bank {
@@ -49,7 +49,7 @@ pub trait Bank {
     fn write_quota(&mut self, group: u8, value: u32, access: &mut Access<'_>) -> Result<(), Error>;
 }
 
-/// Actual selected range/counts and initialized native register/context mode.
+/// Selected range/counts and initialized native register/context mode.
 /// Original context initialization VA1032ef4 clears suppression; nonzero or
 /// unknown remains refused. This input is not an Apple handoff observation.
 #[derive(Clone, Copy)]
@@ -89,7 +89,7 @@ impl Cursor {
     }
 }
 
-/// Retained real effects. Failed stores/publications keep their exact cursor;
+/// Real effects. Failed stores/publications keep their exact cursor;
 /// completed prefixes cannot replay. Policy is private while a pass is live.
 pub struct Publisher {
     binding: Binding,
@@ -136,8 +136,8 @@ impl Publisher {
         {
             return Err("native quota response counts differ from the actual PTD range");
         }
-        // Parse/qualify rows before borrowing any real seed. Input seed numbers
-        // are replaced by reads from this exact actual bank, not trusted as RAM.
+        // Parse/check rows before borrowing any real seed. Input seed numbers
+        // are replaced by reads from this exact bank, not trusted as RAM.
         let parsed = Policy::new(rows, inputs)?;
         let active = parsed.active_groups();
         let covered = if configuration.response_words == 8 {
@@ -195,9 +195,9 @@ impl Publisher {
             Err("native quota callback borrowed another actual cache owner")
         }
     }
-    /// The sole MC service now retains the source restart/event, including
+    /// The sole MC service now keeps the source restart/event, including
     /// every existing dirty word. Defaults or commands may supersede startup's
-    /// allocation before final publication; no actual effect completes here.
+    /// allocation before final publication; no effect completes here.
     pub(super) fn begin_service_pass(&mut self) -> Result<(), Error> {
         if let Some(reason) = self.failed {
             return Err(reason);
@@ -220,7 +220,7 @@ impl Publisher {
         }
         Ok(())
     }
-    /// Only call after actual source new-data consumption. A lane supplies no
+    /// Only call after source new-data consumption. A lane supplies no
     /// command ID, hardware completion, capacity or independently owned effect.
     pub fn set_request(&mut self, group: u8, lane: u16) -> Result<bool, Error> {
         self.idle()?;
@@ -260,7 +260,7 @@ impl Publisher {
         Ok(())
     }
     /// Start the final event publisher AFTER its independently owned source
-    /// housekeeping. This component cannot qualify that other effect or ACK.
+    /// housekeeping. This component cannot check that other effect or ACK.
     pub fn publish_allocated(&mut self) -> Result<(), Error> {
         if let Some(reason) = self.failed {
             return Err(reason);
@@ -337,7 +337,7 @@ impl Publisher {
             {
                 // VA1003e04 checks the all-ones sentinel before comparing
                 // the unmasked target. A wrapped target can itself be MAX;
-                // that value must never acquire unchanged-store authority.
+                // that value must never acquire unchanged-store permission.
                 if self.old_targets[index] != Some(u32::MAX)
                     && self.old_targets[index] == Some(update.scaled_units())
                 {
@@ -346,7 +346,7 @@ impl Publisher {
                         return Err(reason);
                     }
                 } else {
-                    // Retain the pending store BEFORE changing the native
+                    // Keep the pending store BEFORE changing the native
                     // old-target cache, so a later read/store refusal cannot
                     // turn its retry into an unchanged-target skip.
                     let units = update.scaled_units();

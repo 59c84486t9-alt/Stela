@@ -99,7 +99,7 @@ pub struct Ax200Mac<'a, Q: BootIo, B: BiosIo, O: CountryIo> {
     first_error: Option<Ax200MacError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'a, Q, B, O> {
-    /// Allocate the first and only cold managed interface, with actual NVM MAC.
+    /// Allocate the first and only cold managed interface, with NVM MAC.
     /// No reset/import path can reconstruct this owner from public diagnostics.
     pub fn begin_mac_context(self) -> Result<Ax200Mac<'a, Q, B, O>, Box<Self>> {
         if self.phase() != Ax200CountryPhase::MacContextRequired
@@ -283,7 +283,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
         });
         Ok(())
     }
-    /// Remove the actual unbound MAC without a new country/RF admission. The
+    /// Remove the unbound MAC without a new country/RF admission. The
     /// original command owner still enforces source RF-kill policy; hardware
     /// stop remains available if revocation, RF-kill or faults prevent removal.
     pub fn begin_remove(&mut self) -> Result<(), Ax200MacError> {
@@ -314,9 +314,9 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
         self.removing = true;
         Ok(())
     }
-    /// Advance only from actual same-owner completed command DMA and CPU reclaim.
+    /// Advance only from same-owner completed command DMA and CPU reclaim.
     /// # Safety
-    /// `source` supplies fresh exclusive coherent pages for the retained native
+    /// `source` supplies fresh exclusive coherent pages for the native
     /// requester/domain under RomBoot's complete publication contract.
     pub unsafe fn advance(
         &mut self,
@@ -325,7 +325,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
         if let Some(error) = self.first_error.as_ref() {
             return Err(error.clone());
         }
-        // SAFETY: exact retained caller publication contract.
+        // SAFETY: exact caller publication contract.
         let result = unsafe { self.advance_inner(source) };
         if let Err(error) = &result
             && !matches!(error, Ax200MacError::Boot(Error::CommandReclaim(_)))

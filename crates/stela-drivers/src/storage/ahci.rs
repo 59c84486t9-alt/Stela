@@ -36,7 +36,7 @@ pub fn matches<C>(function: &Function<C>) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.class == CLASS || function.vendor == VENDOR_AMD && function.class == CLASS_RAID
 }
@@ -417,7 +417,7 @@ const DETACHED: BlockError = BlockError::Protocol("the SATA disk detached or cha
 const AGAIN: BlockError = BlockError::Protocol("the SATA link needs another reset");
 
 /// Command register side effects, allowing hardware-like W1C and completion
-/// tests against the actual table and DMA algorithm.
+/// tests against the table and DMA algorithm.
 trait CommandPort {
     fn read32(&self, offset: usize) -> u32;
     fn write32(&self, offset: usize, value: u32);

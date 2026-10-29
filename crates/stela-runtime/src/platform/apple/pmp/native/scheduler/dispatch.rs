@@ -1,4 +1,4 @@
-//! Actual callback execution and source queue scan ordering.
+//! Callback execution and source queue scan ordering.
 use super::*;
 
 impl State {
@@ -9,7 +9,7 @@ impl State {
             && waits::runnable(self, &frame.thread)
     }
     fn scan(&mut self, queue: usize) -> Option<usize> {
-        // At most the retained scan plus one coalesced wake/retry cycle. No
+        // At most the scan plus one coalesced wake/retry cycle. No
         // callback or absent-work completion is manufactured by an empty scan.
         for _ in 0..3 {
             let q = &mut self.queues[queue];
@@ -40,7 +40,7 @@ impl State {
     }
 }
 impl Runtime {
-    /// Actual retained runnable work only. Key/mutex-blocked threads have no
+    /// Runnable work only. Key/mutex-blocked threads have no
     /// deadline until their real owner wakes/unlocks them; zero means runnable.
     pub fn next_deadline(&self) -> Option<u64> {
         let s = self.state.borrow();
@@ -77,9 +77,9 @@ impl Runtime {
         }
         deadline
     }
-    /// One actual callback step. Queues use source thread priorities (larger
+    /// One callback step. Queues use source thread priorities (larger
     /// numeric priority first) and stable source work-list order. An unfinished
-    /// callback retains its queue thread; releasing a lock for a drain does not
+    /// callback keeps its queue thread; releasing a lock for a drain does not
     /// create a second worker on the same queue.
     pub fn step(&self, access: &mut Access<'_>) -> Result<Progress> {
         let kind = {
@@ -113,7 +113,7 @@ impl Runtime {
                     continue;
                 }
                 // Preflight serial before consuming wake credit, changing scan
-                // state, acquiring the lock or clearing the actual pending bit.
+                // state, acquiring the lock or clearing the pending bit.
                 let serial = s.next_serial()?;
                 let Some(work) = s.scan(queue) else {
                     continue;
@@ -147,8 +147,8 @@ impl Runtime {
         }
     }
     /// Invoke the mandatory registered immediate endpoint callback, including
-    ///while a DB work callback retains a key wait/recursive queue lock. Incoming
-    ///message ownership remains with the actual mailbox driver; this API does
+    ///while a DB work callback keeps a key wait/recursive queue lock. Incoming
+    ///message ownership remains with the mailbox driver; this API does
     ///not mint input or pretend a missing callback accepted it.
     pub fn invoke(&self, immediate: &Immediate, access: &mut Access<'_>) -> Result<Progress> {
         self.check_runtime(&immediate.runtime)?;
@@ -215,7 +215,7 @@ impl Runtime {
                 },
             )
         };
-        // No scheduler RefCell borrow is held across the actual callback.
+        // No scheduler RefCell borrow is held across the callback.
         // It may wake work, wait/unlock, or invoke a different immediate target.
         let result = callback.advance(&invocation, access);
         let mut s = self.state.borrow_mut();
@@ -261,7 +261,7 @@ impl Runtime {
             || frame.thread.wait.borrow().is_some()
             || frame.thread.mutex.get().is_some()
         {
-            // Preserve the already-retired result. Never rerun an actual callback
+            // Preserve the already-retired result. Never rerun a callback
             // just because its adapter failed to retire a lock/wait prefix.
             return Err(Error::Contract(
                 "native callback returned while retaining lock/wait ownership",

@@ -14,7 +14,7 @@
 //!
 //! Spec-defined behavior: USBCMD run/stop and reset complete at once (HCH
 //! and CNR settle before the next read); save and restore state (CSS/CRS)
-//! succeed with nothing lost, since this model retains its state; MFINDEX
+//! succeed with nothing lost, since this model keeps its state; MFINDEX
 //! counts 125 us microframes from the system counter while running, and
 //! with USBCMD.EWE each wrap from 3FFFh to 0 posts an MFINDEX Wrap Event on
 //! the primary interrupter (spec 4.14.2, 6.4.2.8). The
@@ -427,7 +427,7 @@ impl Xhci {
         }
     }
 
-    /// Pause the actual host counter without touching rings, slot state,
+    /// Pause the host counter without touching rings, slot state,
     /// pending events or committed memory. Only the containing DWC3 calls
     /// this on a clock edge; software run/stop remains independently held.
     pub(super) fn set_clock(&mut self, enabled: bool, now: u64) {

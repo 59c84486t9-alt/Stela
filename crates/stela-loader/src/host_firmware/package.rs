@@ -368,7 +368,7 @@ impl Package {
 
     /// Prepare immutable object names and publish only after all files are
     /// durable. An interrupted publication leaves the previous manifest valid;
-    /// unreferenced package objects are retained for recovery, never guessed away.
+    /// unreferenced package objects are held for recovery, never guessed away.
     pub fn publish(&self, directory: &Path) -> Result<(), Error> {
         self.publish_checkpointed(directory, |_| Ok(()))
     }

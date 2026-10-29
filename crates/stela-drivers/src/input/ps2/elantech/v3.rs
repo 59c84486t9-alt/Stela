@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are retained in ../elantech.rs and input/THIRD_PARTY.md.
+// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
 //! Elantech v3 touchpad packet decoding.
 use super::*;
 
@@ -62,7 +62,7 @@ impl Engine {
             }
             // Original semi-MT initializes its cached coordinates to zero.
             // Compatibility input follows that software default; the raw
-            // contact retains None and no head sequence until one is observed.
+            // contact keeps None and no head sequence until one is observed.
             if let Some((x, y)) = primary.or_else(|| (fingers == 2).then_some((0, 0))) {
                 let scale = |value: i32, high: u16| {
                     (value.clamp(0, i32::from(high)) as u32 * u32::from(crate::input::POINTER_MAX)

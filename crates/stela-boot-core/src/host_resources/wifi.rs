@@ -13,7 +13,7 @@ pub struct Capture {
     pub region: Region,
 }
 
-/// One GetVariable reply: the actual EFI status, DataSize and attributes.
+/// One GetVariable reply: the EFI status, DataSize and attributes.
 pub struct Read {
     pub status: u64,
     pub bytes: usize,
@@ -196,7 +196,7 @@ mod tests {
                     assert_eq!(buffer.len(), 8);
                     assert_eq!(buffer.as_ptr() as u64, pointer.get());
                     buffer[..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
-                    // Shrinkage is retained as the actual successful bytes, with
+                    // Shrinkage is held as the successful bytes, with
                     // the original query size attached and no retry.
                     reply(Status::SUCCESS, 6)
                 },

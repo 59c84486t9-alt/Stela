@@ -71,7 +71,7 @@ fn poisoned_output_refuses_to_rewrite_the_active_dma_buffer() {
             location: "poisoned model CDC".into(),
         };
         assert!(net.transmit(&[1, 2, 3]).is_err());
-        // The model deliberately leaves this TD hardware-owned but performs no
+        // The model leaves this TD hardware-owned but performs no
         // DMA while the test reads its sentinel; production never reads it here.
         assert!(net.send.bytes().iter().all(|byte| *byte == 0xa5));
     }
@@ -87,7 +87,7 @@ pub(super) fn cdc_device(controller: &Shared, ncm: Option<u8>) -> Device {
     while at < bytes.len() {
         let length = usize::from(bytes[at]);
         if bytes[at + 1] == ENDPOINT_DESCRIPTOR {
-            // Reuse the model's actual event/ACL receive queues as the
+            // Reuse the model's event/ACL receive queues as the
             // CDC notification and data endpoints, respectively.
             if bytes[at + 3] & 3 == 3 {
                 bytes[at + 2] = 0x81;
@@ -148,7 +148,7 @@ fn native_cdc_binding_requires_its_own_addressed_generation() {
         assert!(other_hardware.borrow().setup.is_empty());
         assert!(other_hardware.borrow().seen.is_empty());
     }
-    // Refusal did not consume the genuine native claim. The exact device
+    // Refusal did not consume the native claim. The exact device
     // still binds through the real EP0 and endpoint DMA submission path.
     let mut found = Found::default();
     bind(&first, device, &mut dma, &mut found);
@@ -255,8 +255,8 @@ fn padded_ncm_full_frames_use_capacity_sized_non_crossing_real_tds() {
         );
         assert_eq!(&block[datagram..], frame);
         let trb = model_ref.rings[4];
-        // SAFETY: the actual published OUT TRB remains in the live model
-        // ring; its referenced allocation is still retained by the link.
+        // SAFETY: the published OUT TRB remains in the live model
+        // ring; its referenced allocation is still held by the link.
         let (physical, length) = unsafe {
             (
                 (trb as *const u64).read_volatile(),
@@ -348,7 +348,7 @@ fn ncm_dma_failures_and_unrepresentable_full_frames_never_activate_data() {
                 .iter()
                 .any(|(request, _)| matches!(request[1], SET_INTERFACE | 0x43))
         );
-        // Every failure must reach the actual NCM response; an earlier
+        // Every failure must reach the NCM response; an earlier
         // binding refusal is not evidence for DMA or frame-size handling.
         assert!(model.borrow().control_replies.is_empty());
         assert!(

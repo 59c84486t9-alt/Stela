@@ -17,7 +17,7 @@ pub enum Error {
 
 /// Apply ieee80211_regulatory_limit_wmm_params to a station's four queues.
 /// The caller supplies the current control-channel rule, as the source does;
-/// it must actually install the resulting native EDCA command before use.
+/// it must install the resulting native EDCA command before use.
 pub fn station(
     parameters: &[AccessCategory; 4],
     limit: Option<&Wmm>,
@@ -48,7 +48,7 @@ pub fn station(
         ac.ecw_min = ac.ecw_min.max((u32::from(w.cw_min) + 1).ilog2() as u8);
         ac.ecw_max = ac.ecw_max.max((u32::from(w.cw_max) + 1).ilog2() as u8);
         ac.aifsn = ac.aifsn.max(w.aifsn);
-        // Exact source u16 COT assignment/truncation is already retained by db.
+        // Source u16 COT assignment/truncation is already kept by db.
         ac.txop_32us = ac.txop_32us.min(w.cot_us / 32);
     }
     Ok(result)

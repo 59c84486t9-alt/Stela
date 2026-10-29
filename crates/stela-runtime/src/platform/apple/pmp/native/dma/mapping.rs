@@ -187,7 +187,7 @@ impl Client {
                 }
                 if !whole && completed == 0 {
                     // No bytes committed. Keep the same source request but a
-                    // fresh actual transfer ticket on a caller-authorized retry.
+                    // fresh transfer ticket on a caller-authorized retry.
                     return Completion::Refused(
                         diagnostic.unwrap_or("native PMP DMA write has no retired prefix"),
                     );
@@ -317,8 +317,8 @@ impl TraceMapping {
     pub fn descriptor(&self) -> Descriptor {
         self.0.descriptor
     }
-    /// Root must join actual trace memory-loss lifecycle before dropping the
-    /// owner. Drop performs no fabricated remote unmap/release.
+    /// Root must join trace memory-loss lifecycle before dropping the
+    /// owner. Drop performs no invented remote unmap/release.
     pub fn unmap(&mut self, request: &trace::Request, _: &mut Access<'_>) -> Completion<()> {
         self.0.effect(Key::Trace(request.clone()), Effect::Unmap)
     }
@@ -460,7 +460,7 @@ mod tests {
             e: Effect,
             _: &mut Port<'_, '_>,
         ) -> Completion<()> {
-            // This accesses the shared broker inside the actual callback. A
+            // This accesses the shared broker inside the callback. A
             // held RefCell borrow in dispatch would panic rather than pass.
             assert_eq!(self.broker.route(), d.route);
             self.calls.set(self.calls.get() + 1);

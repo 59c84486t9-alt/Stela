@@ -2,15 +2,15 @@
 use super::{Lane, WorkError};
 use core::ops::Range;
 
-/// Bounded qualification layout, requiring sixteen genuine guarded stacks.
+/// Bounded validation layout, requiring sixteen guarded stacks.
 /// Two portal AML and two Notify continuations, one each GPE/control/Linux
-/// service/foreground, and eight General tasks. It does not qualify arbitrary
+/// service/foreground, and eight General tasks. It does not check arbitrary
 /// dependency chains, IRQ producers, thread IDs or an ACPICA provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReservationPolicy {
     NativeFirmware16,
     /// Bounded32-stack execution prototype: the same8 roles and24 General workers.
-    /// Requires actual mapped owners; no kernel thread or producer is admitted.
+    /// Requires mapped owners; no kernel thread or producer is admitted.
     NativeFirmware32Protected {
         gpe: GpeQueueBudget,
     },
@@ -26,7 +26,7 @@ pub struct GpeQueueBudget {
     pending: usize,
 }
 impl GpeQueueBudget {
-    /// Bounded qualification minimum: one active and one protected pending job.
+    /// Bounded validation minimum: one active and one protected pending job.
     pub const QUALIFICATION: Self = Self { pending: 1 };
 
     pub fn with_pending(pending: usize) -> Result<Self, WorkError> {
@@ -179,7 +179,7 @@ impl Layout {
             _ => None,
         }
     }
-    /// Portal/Notify slots match the actual immutable worker cardinality.
+    /// Portal/Notify slots match the immutable worker cardinality.
     /// Every accepted job therefore claims a distinct idle continuation before
     /// callback/context transfer. Completion releases the slot and marks its
     /// worker Idle in one IF0 return path, without an intervening producer.

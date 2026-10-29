@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Original Synaptics/libps2/psmouse notices: ../synaptics.rs and input/THIRD_PARTY.md.
-//! One actually negotiated standard/IntelliMouse/Explorer passthrough mouse.
-//! Input remains separate from the parent touchpad, under its retained i8042
+//! One negotiated standard/IntelliMouse/Explorer passthrough mouse.
+//! Input remains separate from the parent touchpad, under its i8042
 //! owner. Vendor child protocols and guest/frontend attachment are separate.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Observation {
     pub native_sequence: u64,
-    /// Microseconds from the retained native controller's clock origin.
+    /// Microseconds from the native controller's clock origin.
     pub received_us: u64,
     pub byte: u8,
 }
@@ -21,7 +21,7 @@ pub struct Command {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
-    /// False for the source's actual ID-without-ACK workaround.
+    /// False for the source's ID-without-ACK workaround.
     pub acknowledged: bool,
     pub observation: Observation,
 }
@@ -125,7 +125,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn synaptics_child_identities(&self) -> Option<&[Identity]> {
         Some(&self.synaptics.as_ref()?.child.as_ref()?.identities)
     }
-    /// Last accepted source scroll programming, separately from Ready authority.
+    /// Last accepted source scroll programming, separately from Ready permission.
     pub fn synaptics_child_scroll_mode(&self) -> Option<ScrollMode> {
         let child = self.synaptics.as_ref()?.child.as_ref()?;
         child.protocol?;
@@ -135,7 +135,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             ScrollMode::Ordinary
         })
     }
-    /// Actual horizontal detents are separate from the shared vertical-only
+    /// Horizontal detents are separate from the shared vertical-only
     /// compatibility Input ABI. A guest frontend must expose the matching axis.
     pub fn drain_synaptics_child_horizontal(&mut self) -> Vec<i8> {
         self.synaptics
@@ -144,7 +144,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .map_or_else(Vec::new, |c| core::mem::take(&mut c.horizontal))
     }
     /// Acknowledge the source Explorer4.0 magic 200/80/40 rate sequence and
-    /// restore the child's configured 100pps rate. Requires an actually
+    /// restore the child's configured 100pps rate. Requires a
     /// negotiated ID4 child. No hardware-generation identity is inferred.
     pub fn enable_synaptics_explorer_scroll(&mut self) -> Result<(), super::super::Error> {
         self.ready()?;
@@ -196,8 +196,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         result.map_err(|kind| self.fail(kind))
     }
-    /// Actual child input has a separate device destination from the parent.
-    /// This also retains already decoded input and explicit releases on error.
+    /// Child input has a separate device destination from the parent.
+    /// This also keeps already decoded input and explicit releases on error.
     pub fn drain_synaptics_child_inputs(&mut self) -> Vec<Input> {
         self.synaptics
             .as_mut()
@@ -223,7 +223,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 // Responses may already have arrived while the parent's outer
                 // command was acknowledging. Current time covers late reads;
                 // subtracting this later wait start from an earlier receipt
-                // would incorrectly reject genuine already queued responses.
+                // would incorrectly reject already queued responses.
                 if self.expired(start, timeout) {
                     return Err(ErrorKind::Timeout(Phase::Response));
                 }
@@ -252,7 +252,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     ) -> Result<Option<Observation>, ErrorKind> {
         let start = self.timer.start();
         for _ in 0..MAX_ATTEMPTS {
-            // Waiting is installed before the actual write: a genuine wrapped
+            // Waiting is installed before the write: a wrapped
             // child ACK can arrive before the parent's outer ACK.
             self.synaptics_sliced(byte)?;
             self.device_command(Port::Mouse, SET_RATE, &[0x28])?;
@@ -356,8 +356,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Probe exactly one ordinary PS/2 mouse behind an observed passthrough
     /// port. Reset/BAT/ID, defaults, resolution, wheel/Explorer negotiation and
-    /// activation require actual wrapped child replies. GET_ID alone permits
-    /// the source's actual ID-without-ACK case, retained as acknowledged=false.
+    /// activation require wrapped child replies. GET_ID alone permits
+    /// the source's ID-without-ACK case, kept as acknowledged=false.
     /// Vendor protocols are not inferred. Parent ownership survives failure.
     pub fn initialize_synaptics_mouse(&mut self) -> Result<MouseProtocol, super::super::Error> {
         self.require_synaptics_passthrough()?;

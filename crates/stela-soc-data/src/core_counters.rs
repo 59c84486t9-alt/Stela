@@ -1,4 +1,4 @@
-//! Source-qualified per-core sampler register-window geometry.
+//! Source-checked per-core sampler register-window geometry.
 //! Counter storage, selector effects and System-register decoding are owned
 //! by the architectural/device execution layers.
 /// The core performance counters' slots: eight 0x10 apart, then the
@@ -23,7 +23,7 @@ pub const STALL_SLOTS: usize = 8;
 pub const EXTRA_SLOTS: usize = 2;
 pub const MAX_AON: usize = AON_SLOTS + EXTRA_SLOTS;
 
-/// The source-qualified counter slots exposed by both views of a SoC's cores.
+/// The source-checked counter slots exposed by both views of a SoC's cores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     aon: u8,

@@ -15,11 +15,11 @@ pub struct DcpController {
     pub mapper: u32,
     pub surface_phandle: Option<u32>,
     /// Full original surface mapper list, primary first; additional PIODMA
-    /// ownership is retained without inventing execution for that producer.
+    /// ownership is held without inventing execution for that producer.
     pub surface_routes: Vec<DcpMapperRoute>,
     pub role: &'static str,
     pub identity: dcp::ExternalIdentity,
-    /// Explicit sole-TRAD selection, checked before this ordinal is retained.
+    /// Explicit sole-TRAD selection, checked before this ordinal is held.
     pub instance: usize,
     /// OS mapper context, distinct from the incoming `stream` before remap.
     pub mapper_context: u32,
@@ -56,7 +56,7 @@ pub struct DcpMapperRoute {
 
 /// One selected external coprocessor, its expert and pipe, with distinct
 /// incoming DMA stream and OS mapper context. Refuse incomplete graphs and
-/// ambiguous owners before retaining an instance ordinal.
+/// ambiguous owners before keeping an instance ordinal.
 pub(super) fn dcp_device(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
@@ -408,7 +408,7 @@ mod tests {
                 ("display-crossbar0", (0x2_3c00_0000, 0x4000)),
             ]
         );
-        // A native controller cannot be exposed without its actual pipe.
+        // A native controller cannot be exposed without its pipe.
         assert!(board(&build(DCPEXT_ROLE, false, false)).is_err());
         // DCPEXT and its pipe are admitted with a native nub; the PHY and
         // crossbar stay hidden, and a wrong role is not a DCP.

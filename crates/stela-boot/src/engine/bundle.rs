@@ -52,14 +52,14 @@ pub struct Entry {
     pub x0: u64,
     /// Verified selected PE in prepared/live ADT order, never source index.
     pub boot_processor: Option<usize>,
-    /// Retained original CLPC class paths with verified hidden admission.
+    /// Original CLPC class paths with verified hidden admission.
     pub hidden_clpc: Vec<String>,
     pub dram_base: u64,
     pub regions: usize,
     pub patches: usize,
     pub kept: Vec<String>,
     pub hidden_devices: Vec<String>,
-    /// Actual guest RAM after all fixed-offset runtime patches, not its input file.
+    /// Guest RAM after all fixed-offset runtime patches, not its input file.
     pub live_tree: live_tree::LiveTree,
     /// Verified immutable original input and exact selected manifest metadata.
     pub source: source::Intake,
@@ -271,7 +271,7 @@ pub fn with_inventory(
                     .map_err(|_| "FDR diagnostic needs its preallocated fdrstate.bin")?;
                     let partition = super::translations::partition(handle)
                         .ok_or("FDR storage volume needs a GPT partition identity")?;
-                    // SAFETY: both regions were just read into retained loader pages.
+                    // SAFETY: both regions were just read into kept loader pages.
                     let bytes = |region: Region| unsafe {
                         core::slice::from_raw_parts(
                             region.physical as *const u8,
@@ -471,7 +471,7 @@ fn upgrade_boot_args(console: &str) -> String {
     args.join(" ")
 }
 
-/// Fill from the boot's qualified, seeded cryptographic stream.
+/// Fill from the boot's checked, seeded cryptographic stream.
 pub(super) fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
     crate::random::fill(buffer).map_err(|_| "host cryptographic entropy is unavailable")
 }

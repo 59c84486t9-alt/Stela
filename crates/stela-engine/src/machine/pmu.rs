@@ -1,11 +1,11 @@
 //! Apple's per-PE CPMU fixed cycle and retired-instruction counters, with
-//! separately qualified M1–M6 layouts (`layout`). XNU xnu-12377.121.6 H13
+//! separately checked M1–M6 layouts (`layout`). XNU xnu-12377.121.6 H13
 //! supplies M1's 48-bit width, H14–H17 supply M2–M5's 64-bit width, and
 //! original 26A434 mac18g supplies M6's distinct 15-counter mapping.
-//! See `docs/research/core-pmu.md` for source hashes and qualification limits.
+//! See `docs/research/core-pmu.md` for source hashes and validation limits.
 //!
 //! - PMC0 counts cycles and PMC1 retired instructions. M1/M2 also count
-//!   source-qualified programmable events (`events`): NONE and active
+//!   source-checked programmable events (`events`): NONE and active
 //!   cycles on PMC2–9, retired instructions on PMC7. Other enabled pairs
 //!   refuse; raw counter writes are independent of event selection.
 //!   Counters wrap at their configured width, with bit47 (M1) or bit63
@@ -45,8 +45,8 @@
 //! instruction matching (OPMAT, OPMSK) and the PMCR2-4 controls are not
 //! modelled: a write that enables one stops. PMESR0 and PMESR1 store
 //! selectors within the layout's field masks. An enabled event/slot must
-//! have qualified semantics; unsupported reconfiguration refuses atomically. M6's new controls refuse every access until their effects
-//! are independently qualified.
+//! have checked semantics; unsupported reconfiguration refuses atomically. M6's new controls refuse every access until their effects
+//! are checked.
 use stela_contracts::Chip;
 
 mod events;
@@ -82,7 +82,7 @@ pub const PM_MEMFLT_CTL45: Encoding = monitor(1, 1, 4);
 /// saves it after PM_MEMFLT_CTL45 and its restore writes it back
 /// (kernelcache.release.mac17g 0xfffffe000be64104, 0xfffffe000beb56b0), a
 /// slot public XNU does not have. No public name; it configures nothing at
-/// 0 (inference, as for the others). The M6 layout leaves it unqualified.
+/// 0 (inference, as for the others). The M6 layout leaves it unchecked.
 pub const KPC_C5_1: Encoding = monitor(1, 5, 1);
 /// PMCR1's EL1&0 copy ([`Filter::Guest`]).
 pub const PMCR1_EL12: Encoding = monitor(1, 7, 2);
@@ -124,7 +124,7 @@ const INSTRUCTIONS: usize = 1;
 #[cfg(test)]
 const OVERFLOW: u64 = 1 << 63;
 
-/// Counter geometry, separately qualified from event selectors and clocks.
+/// Counter geometry, separately checked from event selectors and clocks.
 #[derive(Debug, Clone, Copy)]
 enum Width {
     Bits48,
@@ -238,7 +238,7 @@ impl Pmu {
         Self::with_layout(Layout::on(Chip::AppleM2), clock, frequency)
     }
 
-    /// Construct only a source-qualified core monitor, with a core clock
+    /// Construct only a source-checked core monitor, with a core clock
     /// supplied by its PE profile. A generation name supplies no clock or
     /// event layout. A zero clock or system frequency cannot construct a
     /// monitor.
@@ -276,7 +276,7 @@ impl Pmu {
         }
     }
 
-    /// All declared chips have a separately qualified fixed CPMU layout.
+    /// All declared chips have a separately checked fixed CPMU layout.
     /// This says nothing about events, extra controls or a board's clocks.
     pub fn on(chip: Chip) -> bool {
         let _ = Layout::on(chip);
@@ -288,7 +288,7 @@ impl Pmu {
         Self::owns_on(Chip::AppleM2, encoding)
     }
 
-    /// The selected chip's allocation, including explicitly unqualified
+    /// The selected chip's allocation, including explicitly unchecked
     /// controls whose effects must refuse, and its exact counter aliases.
     pub fn owns_on(chip: Chip, encoding: Encoding) -> bool {
         let layout = Layout::on(chip);
@@ -464,7 +464,7 @@ impl Pmu {
         }
         // A cached deadline identifies the first crossing, but the high
         // counter bit can clear again after a complete-width wrap. Do not
-        // turn that deadline into an unqualified sticky pending latch.
+        // turn that deadline into an unchecked sticky pending latch.
         (0..self.counter_count()).any(|n| {
             let armed = n < COUNTERS
                 && self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ
@@ -751,7 +751,7 @@ mod tests {
                 pmu.write(encoding, overflow - 1, 0, 0, KERNEL).unwrap();
             }
             assert_eq!(pmu.read(PMSR, 0, 0, KERNEL), Ok(0));
-            // Counter storage does not qualify event counting or EL0 access.
+            // Counter storage does not check event counting or EL0 access.
             for value in [1 << 2, 1 << 32, 1 << 30] {
                 assert!(pmu.write(PMCR0, value, 0, 0, KERNEL).is_err());
             }
@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     /// The M5 kpc saves and restores S3_1_C15_C5_1 with the other raw
-    /// configurations; the M6 leaves it unqualified, and no earlier chip
+    /// configurations; the M6 leaves it unchecked, and no earlier chip
     /// has it.
     #[test]
     fn the_m5_kpc_configuration_takes_only_0() {

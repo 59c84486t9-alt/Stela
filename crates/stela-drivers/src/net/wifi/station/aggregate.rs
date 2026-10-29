@@ -8,8 +8,8 @@ use crate::net::wifi::security::{
 };
 
 impl Station {
-    /// Validate a genuinely owned complete post-order parent. Open traffic
-    /// obtains no invented key/PN; protected traffic advances its actual key's
+    /// Validate an owned complete post-order parent. Open traffic
+    /// obtains no invented key/PN; protected traffic advances its key's
     /// replay floor once, after checking every constituent. This never opens a
     /// controlled port, parses Ethernet subframes or authorizes their delivery.
     /// That separate data boundary must recheck current association/key/port.
@@ -218,7 +218,7 @@ mod tests {
         shape: Shape,
     ) -> (OrderedGroup<SourceOwner>, Rc<Cell<bool>>) {
         let live = Rc::new(Cell::new(true));
-        // SAFETY: pure source model retains its exact current synthetic owner and
+        // SAFETY: pure source model keeps its current synthetic owner and
         // whole/group release. Adverse raw observations are checked by the gate.
         let g = unsafe {
             OrderedGroup::new(Arc::clone(c), members, shape, SourceOwner(Rc::clone(&live)))
@@ -455,7 +455,7 @@ mod tests {
             .unwrap();
         slot.complete_install(t, InstallOutcome::Accepted).unwrap();
         let next = slot.installed().unwrap();
-        let (s, c) = current(true); // New actual association context, sameAP.
+        let (s, c) = current(true); // New association context, sameAP.
         for queue in 0..17 {
             let tid = (queue < 16).then_some(queue as u8);
             // TID0 has advanced from its authenticated floor 36 to 37 before

@@ -10,9 +10,9 @@
 //! the identified secure boot engine. SFI command streams must be complete,
 //! aligned and contain explicit boot parameters. TLV 0x11–0x14 re-read the legacy
 //! version instead of guessing a legacy filename from TLV fields. DSBR-dependent
-//! uploads retain explicit captured/default platform input and real command
+//! uploads keep explicit captured/default platform input and real command
 //! acceptance. Variants 0x1e–0x22 boot IML then select the operational
-//! image from its actual FW_ID. Variants 0x20–0x22 additionally accept the source
+//! image from its FW_ID. Variants 0x20–0x22 additionally accept the source
 //! hybrid header and secure engines LMS or ECDSA+LMS. ROM patching and running-image
 //! upgrades remain unsupported. Each operational SFI/DDC pair must be present
 //! before its upload; initial IML has only its exact SFI requirement.
@@ -22,9 +22,9 @@
 //! Already-operational firmware is observed through identity/address checks and
 //! reported as RunningUnknown, with no invented image provenance/authentication.
 //! PCIe accepts source-listed TLV variants 1e–22 and the same bounded firmware
-//! formats as USB. Its wrapper retains
+//! formats as USB. Its wrapper keeps
 //! original RFH/completion/padding metadata and requires the real OP D0 handshake.
-//! Reports do not establish physical/radio/profile qualification.
+//! Reports do not establish physical/radio/profile validation.
 //!
 //! Reset is never given a synthetic Command Complete. A disconnect fails closed;
 //! controller re-enumeration/rebind requires future generic USB lifecycle work.
@@ -86,7 +86,7 @@ impl TransportIdentity {
 /// An exclusively owned, real HCI command/event transport or independent model.
 /// Submission acknowledges physical delivery only. Event polling must return
 /// original complete HCI event bytes; no method may inject command completion.
-/// Bus-specific wrappers retain any DMA/RFH metadata outside this command engine.
+/// Bus-specific wrappers keep any DMA/RFH metadata outside this command engine.
 pub trait CommandIo {
     fn identity(&self) -> Result<TransportIdentity>;
     fn now_us(&self) -> u64;
@@ -99,9 +99,9 @@ pub trait CommandIo {
     /// USB changes identified bulk framing after real endpoint cancellation;
     /// PCIe uses the same four-byte type/framing throughout the download.
     fn intel_mode(&mut self, bootloader: bool) -> Result<()>;
-    /// PCIe verifies the actual post-boot D0 handshake; USB has no such MMIO.
+    /// PCIe verifies the post-boot D0 handshake; USB has no such MMIO.
     fn finish_boot(&mut self) -> Result<()>;
-    /// Close or quarantine the actual owner and retain any cleanup failure.
+    /// Close or quarantine the owner and keep any cleanup failure.
     fn fail(&mut self, cause: Error) -> Error;
 }
 
@@ -131,15 +131,15 @@ pub enum Error {
         status: u8,
     },
     Timeout(&'static str),
-    /// A later stage failed after genuine completed boots. No ready report is
-    /// returned; retain completed observations and the latest parsed identity,
+    /// A later stage failed after completed boots. No ready report is
+    /// returned; keep completed observations and the latest parsed identity,
     /// including a rejected later boot rather than substituting the prior IML.
     Stages {
         cause: Box<Error>,
         completed: Vec<StageObservation>,
         pending: Box<ControllerIdentity>,
     },
-    /// A genuine boot produced this parsed identity, but validation rejected it.
+    /// A boot produced this parsed identity, but validation rejected it.
     /// This observation is never counted among successfully completed stages.
     RejectedBoot {
         cause: Box<Error>,
@@ -209,7 +209,7 @@ impl ControllerIdentity {
         }
     }
 }
-/// Uploaded evidence retains exact Catalog inputs and real secure-ROM/boot
+/// Uploaded evidence keeps exact Catalog inputs and real secure-ROM/boot
 /// observations. A version/address response from preexisting running firmware
 /// supplies no image hash, source provenance or authentication proof.
 #[derive(Debug)]
@@ -261,8 +261,8 @@ pub(crate) fn usb_identity(device: &crate::usb::xhci::Device) -> Result<Transpor
 }
 
 /// Initialize one exclusively owned raw controller. Any failure after physical
-/// identity selection closes/quarantines its actual transport. Success leaves
-/// ordinary command/event traffic open; retain this device-specific report.
+/// identity selection closes/quarantines its transport. Success leaves
+/// ordinary command/event traffic open; keep this device-specific report.
 pub fn initialize<'a, B: CommandIo>(hci: &mut B, provider: &'a dyn Provider) -> Result<Report<'a>> {
     initialize_with_platform(hci, provider, PlatformInputs::default())
 }
@@ -611,11 +611,11 @@ pub(crate) mod tests {
             params.extend_from_slice(bytes);
             add(SECURE_SEND, &params, true, Pipe::Acl, &[0]);
         }
-        // Coalesced final command completion + genuine secure result on bulk IN.
+        // Coalesced final command completion + secure result on bulk IN.
         steps.back_mut().unwrap().events[0]
             .1
             .extend_from_slice(&[0xff, 5, 6, 0, 9, 0xfc, 0]);
-        // Genuine boot event deliberately split across bulk USB completions.
+        // Boot event split across bulk USB completions.
         steps.push_back(Step {
             command: command_bytes(INTEL_RESET, &[0, 1, 0, 1, 0, 0, 0x20, 0]),
             bulk: false,
@@ -936,7 +936,7 @@ pub(crate) mod tests {
     pub(crate) fn hybrid_image() -> Vec<u8> {
         let legacy = image();
         let mut bytes = vec![0; 2116];
-        // Synthetic opaque CSS; only its actual source discriminator is known.
+        // Synthetic opaque CSS; only its source discriminator is known.
         // No vendor signature, complete hybrid CSS field schema or crypto proof.
         bytes[..128].copy_from_slice(&legacy[..128]);
         bytes[8..12].copy_from_slice(&0x0006_9700u32.to_le_bytes());
@@ -948,7 +948,7 @@ pub(crate) mod tests {
         bytes
     }
     pub(crate) fn hybrid_fragments(image: &[u8]) -> Vec<(u8, &[u8])> {
-        // Independent pinned source wire ranges, including all seven actual
+        // Independent pinned source wire ranges, including all seven
         // 252-byte-max LMS signature fragments. No production parser/constants.
         vec![
             (0, &image[..128]),
@@ -1464,7 +1464,7 @@ pub(crate) mod tests {
                 assert!(provider.calls.borrow().is_empty());
                 assert_eq!(hci.test_io().submitted, submitted);
                 assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
-                // The retained observation does not reopen a later closed HCI.
+                // The kept observation does not reopen a later closed HCI.
                 hci.close().unwrap();
                 assert!(hci.initialization().unwrap().is_ok());
                 assert!(

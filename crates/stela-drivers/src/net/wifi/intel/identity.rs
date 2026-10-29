@@ -24,7 +24,7 @@ pub struct Observed {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub pci_revision: u8,
-    /// Actual CSR_HW_REV and CSR_HW_RF_ID values, before normalization.
+    /// CSR_HW_REV and CSR_HW_RF_ID values, before normalization.
     pub hardware_revision: u32,
     pub radio_id: u32,
 }
@@ -53,7 +53,7 @@ impl Profile {
             return Err(IdentityError::FailedRead);
         }
         if observed.radio_id == 0 {
-            // Linux derives an RF ID from actual WFPM CRF/OTP observations
+            // Linux derives an RF ID from WFPM CRF/OTP observations
             // here. No synthetic default may replace that missing path.
             return Err(IdentityError::BlankRadioRequiresOtp);
         }
@@ -142,7 +142,7 @@ pub enum StageError {
 }
 
 /// Borrowed pre-ROM firmware only. Conditional PNVM/reduced-power resource
-/// acquisition must follow actual current-epoch ALIVE SKU/source policy.
+/// acquisition must follow current-epoch ALIVE SKU/source policy.
 /// The image and its parsed bytes cannot be independently replaced:
 /// ```compile_fail
 /// use stela_drivers::{firmware::Image,net::wifi::intel::{firmware::Firmware,identity::Staged}};

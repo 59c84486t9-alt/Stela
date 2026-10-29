@@ -66,7 +66,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// An encoded transfer, retained until actual TX-DMA completion by its owner.
+/// An encoded transfer, kept until TX-DMA completion by its owner.
 /// The four-bit sequence advances even for headerless firmware scatter.
 pub struct Packet {
     pub sequence: u8,
@@ -138,8 +138,8 @@ impl Encoder {
     }
 }
 
-/// Bounded event envelope retaining fields the donor event dispatcher uses.
-/// A ring owner must supply the complete actual RX-event packet; no ordinary
+/// Bounded event envelope keeping fields the donor event dispatcher uses.
+/// A ring owner must supply the complete RX-event packet; no ordinary
 /// data RX descriptor or command enqueue receipt is a command response.
 pub struct Event<'a> {
     pub sequence: u8,
@@ -189,8 +189,8 @@ impl<'a> Event<'a> {
             status: bytes[header - 4],
         })
     }
-    /// Caller dispatches unsolicited events separately and retains unmatched
-    /// sequences until its actual deadline; this function never turns one
+    /// Caller dispatches unsolicited events separately and keeps unmatched
+    /// sequences until its deadline; this function never turns one
     /// into a successful acknowledgement.
     pub fn boot_result(&self, packet: &Packet) -> Result<u32, Error> {
         if !packet.expects_response() {

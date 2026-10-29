@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Real vendor EP0/bulk peer, retaining the exact addressed generation.
+//! Real vendor EP0/bulk peer, keeping the exact addressed generation.
 use super::*;
 use crate::usb::xhci::{model, model::bind, *};
 
@@ -17,7 +17,7 @@ pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> UsbEtherne
     assert_eq!(device.vendor_ethernet_revision, Some(0x4c00));
     model::select(&mut device).unwrap();
     drop(host);
-    // Real class bind executes actual configuration/endpoint commands and
+    // Real class bind executes configuration/endpoint commands and
     // vendor control TDs against the independent RTL8152B register model.
     let mut found = Found::default();
     bind(&controller, device, dma, &mut found);

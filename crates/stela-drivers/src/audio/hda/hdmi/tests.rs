@@ -327,7 +327,7 @@ impl Hardware {
         if wp == rp {
             return;
         }
-        // SAFETY: the controller programmed this retained fixture CORB; wp is
+        // SAFETY: the controller programmed this fixture CORB; wp is
         // its in-range producer index. Polling serializes access to the ring.
         let command =
             unsafe { ((self.address(0x40) as *const u32).add(wp as usize)).read_volatile() }
@@ -341,7 +341,7 @@ impl Hardware {
         let next = (self.get(0x58, 2) + 1) % 256;
         let address = self.address(0x50);
         // SAFETY: address names the fixture RIRB. next is modulo 256 and each
-        // retained, aligned entry contains two u32 words.
+        // kept, aligned entry contains two u32 words.
         unsafe {
             ((address as *mut u32).add(next as usize * 2)).write_volatile(reply.to_le());
             ((address as *mut u32).add(next as usize * 2 + 1))
@@ -422,7 +422,7 @@ impl Hardware {
             let mut found = false;
             for entry in 0..entries {
                 let ptr = (bdl as *const u32).wrapping_add(entry * 4);
-                // SAFETY: bdl names the retained descriptor allocation; entry
+                // SAFETY: bdl names the descriptor allocation; entry
                 // is bounded by its programmed LVI. Each descriptor has four
                 // aligned u32 words, read here in device order.
                 let address = u64::from(unsafe { ptr.read_volatile() }.to_le())
@@ -431,13 +431,13 @@ impl Hardware {
                 let length = unsafe { ptr.add(2).read_volatile() }.to_le() as usize;
                 if pos < base + length {
                     // SAFETY: pos-base is within this descriptor's PCM extent;
-                    // the fixture retains that allocation and polling is synchronous.
+                    // the fixture keeps that allocation and polling is synchronous.
                     self.playback
                         .push(unsafe { ((address as *const u8).add(pos - base)).read_volatile() });
-                    // SAFETY: ptr still names the retained four-word descriptor;
+                    // SAFETY: ptr still names the four-word descriptor;
                     // word three contains its interrupt-on-completion bit.
                     if pos + 1 == base + length
-                        // SAFETY: ptr names this retained four-word BDL entry;
+                        // SAFETY: ptr names this four-word BDL entry;
                         // word three contains its completion-interrupt flag.
                         && unsafe { ptr.add(3).read_volatile() }.to_le() & 1 != 0
                     {
@@ -491,7 +491,7 @@ struct Owner {
     state: Mutex<OwnerState>,
 }
 // SAFETY: Fixture constructs this owner for its sole HDA/GPU pair, and
-// the controller retains the Hardware Arc. The mutex serializes sink generations
+// the controller keeps the Hardware Arc. The mutex serializes sink generations
 // and callback results; the shared clock supplies deadline failures. No background
 // agent can revoke register access, including when a callback returns an error.
 unsafe impl DisplayAudioPort for Owner {
@@ -583,7 +583,7 @@ impl Fixture {
     fn controller(&mut self) -> Controller<Regs, Clock> {
         assert!(!self.backing.is_empty());
         // SAFETY: this fixture exclusively owns its register and display peers
-        // and retains all coherent DMA backing through controller execution.
+        // and keeps all coherent DMA backing through controller execution.
         unsafe {
             Controller::new(
                 Regs(self.hardware.clone()),

@@ -62,7 +62,7 @@ fn replenish_prefix_for_receive(
     assert!(credits < needed);
     assert!(read + needed < boot(scan).entries);
     assert_eq!(boot(scan).hcmd.notification_count(), 0);
-    // Use the production handoff, free-descriptor writes and actual grouped
+    // Use the production handoff, free-descriptor writes and grouped
     // producer doorbell. Never mutate credits or device ownership in a peer.
     let replenished = scan.replenish_completed_receive().unwrap();
     assert_eq!(replenished.returned, read);
@@ -84,7 +84,7 @@ fn replenish_prefix_for_receive(
         allocations
     );
     // These scenarios do not wrap. Verify that each forthcoming peer event
-    // uses the original VID/address actually posted in its free descriptor,
+    // uses the original VID/address posted in its free descriptor,
     // including the initially staged descriptors beyond the old producer.
     for slot in read..read + needed {
         let descriptor = device_read(
@@ -182,7 +182,7 @@ fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completio
         histories.push(retired);
         assert_eq!(policy.acquired.load(Ordering::SeqCst), 3 * (turn + 1));
         // poll_result obtains a real policy pair too. No retirement radio/OS
-        // grant and no fabricated channel-restore command is issued.
+        // grant and no invented channel-restore command is issued.
         sequence += 1;
         entry += 3;
     }
@@ -215,7 +215,7 @@ fn every_scan_result_variant_pins_retirement_until_real_consumer_drop() {
         unsafe { scan.advance(&source) }.unwrap();
         let mut packet = beacon_packet();
         match case {
-            1 => packet[20] = 0, // actual CRC/overrun rejected at normalization
+            1 => packet[20] = 0, // CRC/overrun rejected at normalization
             2 => native.revoked.store(true, Ordering::SeqCst),
             3 => packet[8..10].copy_from_slice(&u16::MAX.to_le_bytes()),
             _ => (),

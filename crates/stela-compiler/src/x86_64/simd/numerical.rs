@@ -192,7 +192,7 @@ pub(in crate::x86_64) fn resolve(code: &mut Code, patch: usize, target: usize) {
     let distance = i32::try_from(target - next).expect("bounded numerical branch");
     code.patch(patch, distance.to_le_bytes());
 }
-/// Refuse retained numerical enables unless AH suppresses exceptions.
+/// Refuse kept numerical enables unless AH suppresses exceptions.
 pub(super) fn guard_ah0_exceptions(code: &mut Code, helper: &mut Vec<usize>) {
     use crate::aarch64::floating::{FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK};
     test_control(code, FPCR_AH);
@@ -566,7 +566,7 @@ pub(super) fn zero_scalar(code: &mut Code, format: Format, xmm: u8) {
     asm.alu(Alu::Add, size, Rax, Rax);
 }
 
-/// Return the failure branch for a finite S/D exponent range or an actual
+/// Return the failure branch for a finite S/D exponent range or a
 /// signed zero. Preserve ECX, which may hold the pending fresh host status.
 pub(super) fn scalar_range_or_zero(
     code: &mut Code,
@@ -843,7 +843,7 @@ fn vector_exponent_range_impl(
     vector_validity_mask(code, format, shape);
 }
 
-/// Accept only normal S/D values and actual signed zeros. The range constants
+/// Accept only normal S/D values and signed zeros. The range constants
 /// remain live in XMM4/5; XMM3 and `scratch` are classifier scratch. Unlike a zero
 /// fraction test, clearing just the sign rejects infinities and subnormals.
 pub(super) fn vector_normal_or_zero_range(

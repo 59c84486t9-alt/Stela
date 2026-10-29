@@ -32,7 +32,7 @@
 //! its reference count leaves 0 (0xfffffff0270d94c0) and panics unless the
 //! word still holds it when the count returns to 0 (0xfffffff0270d8c9c), so
 //! a lost write shows a power loss. Here the word is plain storage at
-//! [`CANARY`]; the SART refuses non-retained power loss.
+//! [`CANARY`]; the SART refuses non-kept power loss.
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,

@@ -1,4 +1,4 @@
-//! CPM power-register placement, independently of retained controller state.
+//! CPM power-register placement, independently of kept controller state.
 //! T8112 `enableThrottler` uses the four common full-width controls and a
 //! performance-cluster control. `restoreHW` uses the separate restore word.
 use alloc::vec::Vec;

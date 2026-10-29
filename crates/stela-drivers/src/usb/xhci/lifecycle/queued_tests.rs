@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! A class's queued reset serviced by the topology owner, on the actual
+//! A class's queued reset serviced by the topology owner, on the
 //! command/context/port model.
 use super::*;
 use crate::block::BlockDevice;

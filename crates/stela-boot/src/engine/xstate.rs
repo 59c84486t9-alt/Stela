@@ -1,15 +1,15 @@
 //! Destination-local extended-state geometry and descriptor lifetime.
 //!
 //! This unit enables no processor feature and admits no compiler target. The
-//! real entry stub must save the whole actual enabled state before Rust runs.
+//! real entry stub must save the whole enabled state before Rust runs.
 //! Standard XSAVE64/XRSTOR64 only; every entry owns a separate IST image.
 pub(crate) use stela_boot_core::xstate::*;
 
 // Shared scalar-only boundary routines. Their raw buffer arguments are not
-// authority: callers must retain the actual destination owner and real mapped
+// permission: callers must keep the destination owner and real mapped
 // private stack image through restoration or terminal abandonment. No Rust
 // runs before saving. The routines preserve SysV callee-saved GPRs; FP state
-// is deliberately handled by this explicit ABI, never by a Rust prologue.
+// is handled by this explicit ABI, never by a Rust prologue.
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     r#"
@@ -146,11 +146,11 @@ stela_xstate_boundary_halt:
 #[cfg(target_arch = "x86_64")]
 unsafe extern "sysv64" {
     /// # Safety
-    /// Current CPL0 pinned Local/owner, IF clear and actual mapped stack owns
-    /// image plus adjacent metadata; retain both until restore or abandonment.
+    /// Current CPL0 pinned Local/owner, IF clear and mapped stack owns
+    /// image plus adjacent metadata; keep both until restore or abandonment.
     pub(crate) fn stela_xstate_save_owned(image: *mut u8, metadata: *mut EntryMetadata);
     /// # Safety
-    /// Exactly that still-owned image/metadata and unchanged actual destination
+    /// Exactly that still-owned image/metadata and unchanged destination
     /// contract. Cannot be a copied pointer or caller-synthesized format/mask.
     pub(crate) fn stela_xstate_restore_owned(image: *const u8, metadata: *const EntryMetadata);
     pub(crate) fn stela_xstate_boundary_refuse() -> !;

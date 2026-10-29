@@ -48,8 +48,8 @@ struct Saved {
     ret: u64,
 }
 
-// This helper image is separate from the original host image retained by
-// stela_enter_block. Normal return restores the actual guest image; abandon
+// This helper image is separate from the original host image kept by
+// stela_enter_block. Normal return restores the guest image; abandon
 // restores the original host image through the one real recovery continuation.
 #[repr(C)]
 struct HelperFooter {

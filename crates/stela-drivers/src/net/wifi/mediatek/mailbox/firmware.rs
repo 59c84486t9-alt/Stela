@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Private same-input binding from an actual completed native download. Input
+//! Private same-input binding from a completed native download. Input
 //! digests/provenance are not firmware readback, authentication or radio policy.
 use super::{Mailbox, QueueIo};
 use crate::{
@@ -91,7 +91,7 @@ impl Outcome {
     }
 }
 /// Immutable diagnostics; native consumers check the current private binding
-/// on their actual mailbox, never a caller-constructed public Report. The
+/// on their mailbox, never a caller-constructed public Report. The
 /// supplied patch input is not physically identified when AlreadyApplied.
 #[derive(Debug)]
 pub struct Binding {
@@ -108,14 +108,14 @@ impl Binding {
         &self.patch
     }
     /// This includes host-only non-download CLC/release bytes from the same
-    /// actual RAM input. It does not claim those bytes were uploaded/read back.
+    /// RAM input. It does not claim those bytes were uploaded/read back.
     pub fn ram_input(&self) -> &Input {
         &self.ram
     }
     pub fn outcome(&self) -> Outcome {
         self.outcome
     }
-    /// Same selected input only. This diagnostic comparison never qualifies
+    /// Same selected input only. This diagnostic comparison never checks
     /// current hardware/reset/policy state or a caller-supplied public outcome.
     pub fn matches_auxiliary(&self, auxiliary: &Auxiliary) -> bool {
         let provenance = self.ram.provenance();
@@ -142,7 +142,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// The actual mailbox remains owned by the caller on every outcome. This
+/// The mailbox remains owned by the caller on every outcome. This
 /// local adapter delegates all ownership/DMA/error behavior unchanged.
 struct Borrowed<'a, W: QueueIo, F: QueueIo, R: QueueIo>(&'a mut Mailbox<W, F, R>);
 impl<W: QueueIo, F: QueueIo, R: QueueIo> Transport for Borrowed<'_, W, F, R> {
@@ -161,10 +161,10 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     pub fn download_binding(&self) -> Option<&Binding> {
         self.download_binding.as_ref()
     }
-    /// Execute one complete actual native download on a fresh unused mailbox.
+    /// Execute one complete native download on a fresh unused mailbox.
     /// Source AlreadyApplied patch remains distinct from uploaded patch bytes.
     /// On any failure the owned mailbox remains here, terminally poisoned with
-    /// no old input authority; actual independent quiescence is still required
+    /// no old input permission; independent quiescence is still required
     /// before its owned queues/context can be released. No reset is invented.
     pub fn download_with_binding(&mut self, prepared: &Prepared<'_>) -> Result<&Binding, Error> {
         self.download_binding = None;
@@ -174,7 +174,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         }
         self.download_bound_input(prepared)
     }
-    /// Only the actual private NIC_POWER_CTRL one-way completion on this
+    /// Only the private NIC_POWER_CTRL one-way completion on this
     /// otherwise unused owner permits source sequence continuation. This is
     /// no reset/fresh-epoch proof and is invalidated by any intervening command.
     pub(in crate::net::wifi::mediatek) fn download_after_source_restart(

@@ -38,7 +38,7 @@ fn setup() -> (
     )
 }
 fn attach(function: Function<OwnedConfig>, drops: Arc<AtomicUsize>) -> NativeFunction {
-    // SAFETY: sole actual fixture config writer/exclusion and no device/worker.
+    // SAFETY: sole fixture config writer/exclusion and no device/worker.
     match unsafe { NativeFunction::attach(function, Box::new(Exclusion(drops))) } {
         Ok(owner) => owner,
         Err((error, _)) => panic!("fixture attach: {error:?}"),
@@ -111,7 +111,7 @@ fn post_write_context_uncertainty_retains_effect_and_all_original_owners() {
     let (mut function, counters, drops) = setup();
     let pointer = fixture_pointer(function.config(), 0x40);
     let mut owner = attach(function, drops.clone());
-    // The actual model context fails only after seeing this real CPU store;
+    // The model context fails only after seeing this real CPU store;
     // it does not depend on an incidental count of preflight observations.
     counters
         .fail_after_value
@@ -180,7 +180,7 @@ struct BoundDomain {
     generation: core::sync::atomic::AtomicU64,
 }
 // SAFETY: this fixture exercises only canonical pairing; no map/sync operation
-// succeeds or publishes a fabricated translation/coherence capability.
+// succeeds or publishes an invented translation/coherence capability.
 unsafe impl DmaDomain for BoundDomain {
     unsafe fn map(
         &self,
@@ -210,7 +210,7 @@ unsafe impl DmaDomain for BoundDomain {
         Err(DmaError::Unmapped)
     }
 }
-// SAFETY: check consumes and compares the actual canonical fixture binding.
+// SAFETY: check consumes and compares the canonical fixture binding.
 unsafe impl PciDmaDomain for BoundDomain {
     fn check_configuration(&self, config: &OwnedConfig) -> Result<u64, DmaError> {
         self.binding
@@ -234,14 +234,14 @@ fn dma_root_requires_original_binding_and_preserves_epoch_not_numeric_identity()
     use crate::bus::pci::requester::{FunctionRole, StoppedRequester};
     let (mut function, _, drops) = setup();
     function.config().write16(4, 0x400);
-    // SAFETY: actual isolated fixture has no engines, aliases, IRQ or workers;
+    // SAFETY: isolated fixture has no engines, aliases, IRQ or workers;
     // no DMA/coherence operation is performed by this pairing-only model.
     let requester =
         match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
             Ok(value) => value,
             Err((error, _)) => panic!("stopped fixture: {error:?}"),
         };
-    // SAFETY: original stopped fixture and actual exclusion owner, no effects.
+    // SAFETY: original stopped fixture and exclusion owner, no effects.
     let (owner, binding) = match unsafe {
         NativeFunction::attach_stopped(requester, Box::new(Exclusion(drops.clone())))
     } {
@@ -316,13 +316,13 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
         function.config().write32(4, 0xa5c3_0400);
         let command = fixture_pointer(function.config(), 4);
         let policy = fixture_pointer(function.config(), 0x48);
-        // SAFETY: actual isolated stopped PF/config owner, no physical device.
+        // SAFETY: isolated stopped PF/config owner, no physical device.
         let requester =
             match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
                 Ok(requester) => requester,
                 Err((error, _)) => panic!("stopped fixture {error:?}"),
             };
-        // SAFETY: same original stopped grant and actual model exclusion.
+        // SAFETY: same original stopped grant and model exclusion.
         let (owner, binding) = match unsafe {
             NativeFunction::attach_stopped(requester, Box::new(Exclusion(drops.clone())))
         } {
@@ -345,7 +345,7 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
             ));
             owner.borrow_mut().write(4, 2, 0x406).unwrap();
             assert_eq!(
-                // SAFETY: observe exact actual model native-width store; Status is not
+                // SAFETY: observe model native-width store; Status is not
                 // widened/replayed by the production Command word write.
                 unsafe { command.cast::<u32>().as_ptr().read_volatile() },
                 0xa5c3_0406
@@ -377,7 +377,7 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
             (0x10, 4, u32::MAX), // BAR sizing/relocation
             (0x3e, 2, 0x40),     // bridge/reset-like control
             (0x123, 1, 0xff),    // unknown vendor effects cannot be guessed safe
-            (5, 1, 0),           // cannot unmask INTx without actual route authority
+            (5, 1, 0),           // cannot unmask INTx without route permission
             (4, 4, 0xffff_0407), // cannot widen/replay neighboring Status
         ] {
             assert_eq!(
@@ -397,7 +397,7 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
         );
         if let Some(root) = root {
             // An ignored unsupported transition cannot prevent original PCI
-            // cleanup from actually clearing bus mastering/decode. It cannot
+            // cleanup from clearing bus mastering/decode. It cannot
             // authorize enabling gates again or renew degraded readiness.
             owner.borrow_mut().write(4, 2, 0x400).unwrap();
             assert_eq!(

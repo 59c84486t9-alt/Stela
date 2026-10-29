@@ -97,7 +97,7 @@ fn source_same_vendor_pci_aliases_still_require_exact_implemented_revision_and_l
         assert!(!matches(&alias_function(device, true)));
         assert!(admit_revision(device, Some(0x50), revision(64)).is_err());
     }
-    // Historical primary PCI families retain their narrower source boundaries.
+    // Historical primary PCI families keep their narrower source boundaries.
     assert!(admit_revision(0x8125, Some(0x50), revision(70)).is_err());
     assert!(admit_revision(0x8169, Some(0x50), revision(64)).is_err());
     assert!(admit_revision(0x8168, Some(0x50), revision(6)).is_err());

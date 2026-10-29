@@ -548,7 +548,7 @@ impl AppleDevices {
         Self::for_boot_processor(0)
     }
 
-    /// The board's existing PE receiving the boot handoff. PE indices retain
+    /// The board's existing PE receiving the boot handoff. PE indices keep
     /// DeviceTree order; the selected index also owns CPU_STS and SoC wake.
     /// The mount validates it against the same roster passed to the engine.
     pub fn for_boot_processor(boot_processor: usize) -> Self {
@@ -874,7 +874,7 @@ impl AppleDevices {
                 bindings.push((start, lockdown::WORD_BYTES, offset));
             }
         }
-        // Publish the reset-vector owner only after every actual bank fits.
+        // Publish the reset-vector owner only after every bank fits.
         let device = self.bus.install(Box::new(model), &bindings)?;
         if let Some((pe, _)) = reset {
             if self.reset_vectors.len() <= pe {
@@ -1511,7 +1511,7 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// Place an explicitly visible I2C controller. Addressed but unqualified
+    /// Place an explicitly visible I2C controller. Addressed but unchecked
     /// targets refuse; hiding a target must not turn its protocol into success.
     /// `firmware` returns a board firmware image by its guest file name; an
     /// HPM die runs `USB-C_<personality>.bin` and drives its manager's
@@ -1612,7 +1612,7 @@ impl AppleDevices {
     }
 
     /// Independently programmed DT TRAD windows with a shared fault wire.
-    /// Returned IDs retain DT instance order. This does not choose a USB DMA
+    /// Returned IDs keep DT instance order. This does not choose a USB DMA
     /// stream or resolve a mapper to one instance.
     pub fn add_dart_group(
         &mut self,
@@ -1627,7 +1627,7 @@ impl AppleDevices {
         self.place_dart_group(Dart::group(streams, irq, ranges.len()), ranges, apf, irq)
     }
 
-    /// Select the actual DT register/table family before publishing windows.
+    /// Select the DT register/table family before publishing windows.
     /// Legacy filter and capture variants need their own native contracts.
     pub fn add_dart_group_for_profile(
         &mut self,
@@ -1825,7 +1825,7 @@ impl AppleDevices {
     }
 
     /// Place the core once, with reg[2]/reg[8] sharing reg[0]'s bytes.
-    /// Platform windows retain distinct refusing offsets; reg[3] and reg[4]
+    /// Platform windows keep distinct refusing offsets; reg[3] and reg[4]
     /// are the pipehandler and core event block, which the ATC PHY placement
     /// owns (`atc-phy-parent`). IRQ indices 0..3
     /// are from AppleUSBXDCI::goOnBus (KC 0x42f5338/5380/53c8/5d24),
@@ -2100,9 +2100,9 @@ impl AppleDevices {
         self.smc().ok()?.take_log()
     }
 
-    /// Pure preflight of actual boxed ownership and incoming-SID capacity.
+    /// Pure preflight of boxed ownership and incoming-SID capacity.
     /// Boot adapters validate every declared bank/mapper before publication;
-    /// this does not enable DMA or qualify a physical traffic classifier.
+    /// this does not enable DMA or check a physical traffic classifier.
     pub fn validate_native_dart(
         &self,
         name: &str,
@@ -2221,7 +2221,7 @@ impl AppleDevices {
 
     /// The PMGR power-state registers at `registers`, in `blocks` of guest
     /// PA. Each starts active under the existing boot assumption; this is
-    /// not a qualified transfer of the original firmware's control words.
+    /// not a checked transfer of the original firmware's control words.
     pub fn add_power_states(&mut self, blocks: &[Range], registers: &[u64]) -> Result<(), String> {
         if self.pmgr.is_some() {
             return Err("PMGR lifecycle owner is already bound".into());
@@ -2231,7 +2231,7 @@ impl AppleDevices {
             initial: ACTIVE,
         });
         let model = Pmgr::new(states).map_err(|error| format!("PMGR states: {error:?}"))?;
-        // The model's offsets are guest PAs. Publish all actual banks together.
+        // The model's offsets are guest PAs. Publish all banks together.
         let bindings: Vec<_> = blocks
             .iter()
             .map(|block| (block.physical, block.bytes, block.physical))
@@ -2244,7 +2244,7 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// Register an actual model's checked lifecycle boundary against its
+    /// Register a model's checked lifecycle boundary against its
     /// canonical first physical aperture. Several real banks may serve one
     /// hardware owner; a bank must not receive conflicting duplicate inputs.
     pub fn register_power_device(
@@ -2470,7 +2470,7 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// Resource names for domains whose actual consumers still lack sinks.
+    /// Resource names for domains whose consumers still lack sinks.
     pub fn power_refusals(&self) -> &[(u64, String)] {
         &self.power_refusals
     }
@@ -2769,7 +2769,7 @@ impl AppleDevices {
 
     /// Serve the unchanged board PE indices and default AICv2/v3 delivery to
     /// the selected boot PE. Group-bit affinity still requires its independent
-    /// source-qualified binding; this supplies no guessed target groups.
+    /// source-checked binding; this supplies no guessed target groups.
     pub fn add_aic_for_processors(
         &mut self,
         physical: u64,
@@ -2861,7 +2861,7 @@ impl AppleDevices {
         self.settle_phys(cpu, now);
     }
 
-    /// Validate every actual affected bank before a PMGR request can change
+    /// Validate every affected bank before a PMGR request can change
     /// its register or any client. A missing functional device is not created
     /// by controller-state completion. Partial capability failures are atomic.
     fn check_power_request(&mut self, physical: u64, value: u64) -> Result<(), DeviceError> {
@@ -3093,7 +3093,7 @@ impl Devices for AppleDevices {
         _memory: &mut dyn stela_engine::machine::engine::CanonicalDeviceMemory,
     ) -> Result<ConsumedPair, DeviceError> {
         self.observe_time(now, "paired read");
-        // Only the actual Prepared publication/status owner has a qualified
+        // Only the Prepared publication/status owner has a checked
         // whole-pair read. Never consume two unrelated scalar registers here.
         self.read_pair(cpu, physical, bytes, now)?.ok_or_else(|| {
             DeviceError::TransferRefused(
@@ -3110,8 +3110,8 @@ impl Devices for AppleDevices {
         now: u64,
     ) -> Result<Option<ConsumedPair>, DeviceError> {
         self.observe_time(now, "paired read");
-        // Probe without effects: both members must belong to the same actual
-        // joint resource at consecutive offsets, not merely adjacent PAs.
+        // Probe without effects: both members must belong to the same
+        // joint resource at consecutive offsets, not adjacent PAs.
         let Some(width) = Width::from_bytes(u64::from(bytes)) else {
             return Ok(None);
         };
@@ -3428,7 +3428,7 @@ impl Devices for AppleDevices {
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         // SAFETY: the persistent native binding admits only the canonical
-        // execution path. Its actual held cohort/fenced Host sessions and
+        // execution path. Its held cohort/fenced Host sessions and
         // exclusive synchronous device owner remain live through this step.
         unsafe {
             self.service_native_pmp_services(cpu, now)?;
@@ -3623,7 +3623,7 @@ impl Devices for AppleDevices {
                 master.port = connector;
                 master.next_poll = 0;
             }
-            // A retained clock/quiesce pause preserves the external session;
+            // A kept clock/quiesce pause preserves the external session;
             // connector changes still cancel it, and reset/power loss above
             // invalidates it before any new USB or DMA transaction.
             if !controller.lifecycle_active() {
@@ -3930,9 +3930,9 @@ mod tests {
         powered_dart_with(retention, supplies, |_| {})
     }
 
-    /// A declared synthetic physical supply for actual mounted native banks.
+    /// A declared synthetic physical supply for mounted native banks.
     /// Tests choose retention explicitly; production constructors do not infer
-    /// it from an RTKit retained-sleep capability.
+    /// it from an RTKit sleep capability.
     fn connect_native_power(
         d: &mut AppleDevices,
         supply: u64,
@@ -4165,7 +4165,7 @@ mod tests {
         for _ in 0..3 {
             d.write(0, spi + 0x10, 4, 0, 0).unwrap();
         }
-        // Closing the now-complete command allows an actual shared reset.
+        // Closing the now-complete command allows a shared reset.
         d.write(0, spi + 0x0c, 4, 2, 0).unwrap();
         for request in [0x40f, 0x8000040f, 0x40f, 15] {
             d.write(0, supply, 4, request, 0).unwrap();
@@ -4179,8 +4179,8 @@ mod tests {
         assert_eq!(*console.0.borrow(), b"a");
     }
 
-    /// A checked native bank fixture shares an actual mounted DART's supply.
-    /// Its refusal models an explicitly unqualified destructive transition,
+    /// A checked native bank fixture shares a mounted DART's supply.
+    /// Its refusal models an explicitly unchecked destructive transition,
     /// without claiming another physical controller implementation.
     struct CheckedPowerBank {
         reject: bool,
@@ -4369,7 +4369,7 @@ mod tests {
             );
         }
         // No lifecycle change: configuration and width validation do not ask
-        // a native bank to qualify an unrelated destructive transition.
+        // a native bank to check an unrelated destructive transition.
         d.write(0, supply, 4, 0x1000f, 0).unwrap();
         assert!(d.write(0, supply, 8, 0, 0).is_err());
         for request in [4, 15, 0x40f] {
@@ -4662,7 +4662,7 @@ mod tests {
             });
             assert!(d.power_refusals().is_empty());
             d.write(0, base + 0x1000, 4, 1, 0).unwrap();
-            d.write(0, supply, 4, 0x3f4, 0).unwrap(); // Read-only actual nibble is ignored.
+            d.write(0, supply, 4, 0x3f4, 0).unwrap(); // Read-only nibble is ignored.
             assert!(d.read(0, base + 0x1000, 4, 0).is_err());
             d.write(0, supply, 4, 15, 0).unwrap();
             assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
@@ -4861,7 +4861,7 @@ mod tests {
         assert_eq!(d.pending_service().unwrap().lifecycle().len(), 1);
         assert!(d.write(0, supply, 4, 15, 1).is_err());
         assert_eq!(d.pending_service().unwrap().lifecycle().len(), 2);
-        // Supplying the missing actual owner can resume the retained edge;
+        // Supplying the missing owner can resume the edge;
         // neither the earlier power-off nor the later power-on is replayed.
         d.add_aic(0x7000_0000, 32, AicLayout::V1).unwrap();
         d.settle(0, 2, None).unwrap();
@@ -5137,7 +5137,7 @@ mod tests {
         // The roll call lists 0x20, which RTBuddy publishes as the
         // ANS2Endpoint1 service the NVMe driver waits for.
         walk_rtkit_start(&mut devices, WRAPPER);
-        // The ASC has no owned mailbox work and qualifies native cold reset;
+        // The ASC has no owned mailbox work and checks native cold reset;
         // the later NVMe bank must veto before either it or PMGR changes.
         let pmgr_before = devices.read(0, SUPPLY, 4, 0).unwrap();
         devices.write(0, SUPPLY, 4, 0x40f, 0).unwrap();
@@ -5187,7 +5187,7 @@ mod tests {
         assert!(Memory::write(&mut ram, RAM, &command));
         assert!(Memory::write(&mut ram, RAM + 0x2000, &tcb));
         devices.write(0, NVME + 0x2490c, 4, 0, 0).unwrap();
-        // A real accepted command is frozen through each retained gate.
+        // A real accepted command is frozen through each gate.
         for gate in [4, 0x40f, 0] {
             devices.write(0, SUPPLY, 4, gate, 0).unwrap();
             devices.transfer(0, &mut ram, 0).unwrap();
@@ -5320,7 +5320,7 @@ mod tests {
         let supply = 0x2_3b70_0410;
         connect_native_power(&mut devices, supply, &[("/arm-io/pmp", WRAPPER)], false);
         // Its committed HELLO survives a real clock gate without restarting
-        // native firmware or fabricating an additional message on release.
+        // native firmware or inventing an additional message on release.
         devices.write(0, supply, 4, 4, 0).unwrap();
         assert!(devices.read(0, WRAPPER + 0x8830, 8, 0).is_err());
         devices.write(0, supply, 4, 15, 0).unwrap();
@@ -5347,7 +5347,7 @@ mod tests {
             shared_l2: 0x8_0000_8000,
         };
         // Reject a complete foreign word and a foreign upper half. Declared
-        // SGX geometry alone cannot qualify either physical bus layout.
+        // SGX geometry alone cannot check either physical bus layout.
         for (base, bytes) in [(CONTROL, 8), (CONTROL + 4, 4)] {
             let mut devices = AppleDevices::new();
             let foreign = devices.bus.add(Box::new(CheckedPowerBank {
@@ -5406,7 +5406,7 @@ mod tests {
                 Ok((block, 0xd04000))
             );
             assert!(devices.read(0, SGX + 0xd04000, 4, 0).is_ok());
-            // No fabricated SGX aperture or successful control-word effect.
+            // No invented SGX aperture or successful control-word effect.
             assert!(
                 devices
                     .bus
@@ -5647,7 +5647,7 @@ mod tests {
             devices.read(0, timer + 4, 4, epoch.counter + 5 * hz),
             Ok(50)
         );
-        // Lines/deadline cannot return Result; they retain an explicit halt.
+        // Lines/deadline cannot return Result; they keep an explicit halt.
         devices.lines(0, epoch.counter);
         let reset = devices.reset.take().unwrap();
         assert_eq!(reset.transition, Transition::Halt);
@@ -5756,7 +5756,7 @@ mod tests {
                     None,
                 )
                 .unwrap()[0];
-            // Validate actual constructed capacity2, not the generation's limit.
+            // Validate constructed capacity2, not the generation's limit.
             refuse(&mut d, owner, 2);
             refuse(&mut d, owner, u32::MAX as usize);
             assert!(
@@ -6729,7 +6729,7 @@ mod tests {
                 ]
             } else {
                 // Source5 -> context4, all other sources identity. Only
-                // context4 is enabled/bypassed; retain input5 independently.
+                // context4 is enabled/bypassed; keep input5 independently.
                 [
                     (0xfc, 1u64 << context),
                     (0x100 + 4 * context, 1 << 8),
@@ -6969,7 +6969,7 @@ mod tests {
     }
 
     fn release_usb_phy(d: &mut AppleDevices, phy: &stela_soc_data::board::TypecPhy) {
-        // Actual USB2 RUN, reset/SIDDQ release, core supply/reset release,
+        // USB2 RUN, reset/SIDDQ release, core supply/reset release,
         // and pipehandler controller RESET_N without clamp.
         for (address, value) in [
             (phy.usb2.0, 2),
@@ -7009,7 +7009,7 @@ mod tests {
         d.write(0, base + 0x468, 4, 1, 0).unwrap();
         d.write(0, base + 0x470, 4, table as u32 as u64, 0).unwrap();
         d.write(0, base + 0x474, 4, table >> 32, 0).unwrap();
-        // The actual placed stream is still disabled. Loading this real
+        // The placed stream is still disabled. Loading this real
         // event segment table must fail through DART, never survey-success.
         for now in [0, 10] {
             let error = d.transfer(0, &mut ram, now).unwrap_err();
@@ -7224,7 +7224,7 @@ mod tests {
         d.transfer(0, &mut ram, 0).unwrap();
         assert_eq!(d.usb_masters[0].epoch, 1);
         for (tick, value) in [(10, 4), (40, 0), (70, 0x40f)] {
-            // clock gate, retained off, quiesce
+            // clock gate, kept off, quiesce
             d.write(0, supply, 4, value, tick).unwrap();
             d.transfer(0, &mut ram, tick + 10).unwrap();
             assert!(d.usb_masters[0].attached);
@@ -7240,7 +7240,7 @@ mod tests {
         d.transfer(0, &mut ram, 100).unwrap();
         assert_eq!(d.usb_masters[0].epoch, 2);
         assert_eq!(d.typec_port(1).snapshot().connection, Some(cable));
-        // PHY PMGR reset reaches the actual pipehandler/controller bank.
+        // PHY PMGR reset reaches the pipehandler/controller bank.
         for value in [0x40f, 0x8000040f, 0x40f, 15] {
             d.write(0, supply, 4, value, 110).unwrap();
         }
@@ -7450,7 +7450,7 @@ mod tests {
                 Err(DeviceError::Refused(_))
             ));
         }
-        // The pipehandler and core event block are the actual ATC PHY's.
+        // The pipehandler and core event block are the ATC PHY's.
         assert_eq!(devices.read(0, placement.ranges[3].0 + 0x1c, 4, 0), Ok(1));
         assert_eq!(devices.read(0, placement.ranges[4].0, 4, 0), Ok(0));
         devices.transfer(0, &mut Ram::new(0, 0x1000), 0).unwrap();

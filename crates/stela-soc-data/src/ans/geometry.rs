@@ -11,7 +11,7 @@ const MAX_TAG_SLOTS: u16 = 256;
 const TAGS_PER_STATUS_WORD: u16 = 8;
 const STATUS_WORD_BYTES: u64 = 4;
 const VDMA_ENTRY_BYTES: u64 = 32;
-/// The only source-qualified NVMMU control encoding. The engine retains no
+/// The only source-checked NVMMU control encoding. The engine keeps no
 /// translation cache after a synchronous command; no alternate encoding's
 /// effect is inferred from the control's historical name/count interpretation.
 pub const NVMMU_CONTROL: u16 = 63;

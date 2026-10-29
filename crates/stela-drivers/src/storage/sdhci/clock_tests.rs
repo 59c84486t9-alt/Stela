@@ -1,4 +1,4 @@
-//! Independent clock register phases, actual monotonic deadlines and source traces.
+//! Independent clock register phases, monotonic deadlines and source traces.
 use super::*;
 use model::CLOCK_TICKS_PER_US;
 

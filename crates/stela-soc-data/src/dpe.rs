@@ -1,6 +1,6 @@
 //! Validated SOC DPE register geometry and sample aliases.
 //! This describes controls and sample widths without allocating counter
-//! state, sampling activity, completion or lifecycle authority.
+//! state, sampling activity, completion or lifecycle permission.
 use alloc::{collections::BTreeMap, vec::Vec};
 
 pub const ENGINES: [u64; 6] = [0x2400, 0x2800, 0x2c00, 0x3000, 0x3400, 0x3800];
@@ -24,7 +24,7 @@ impl Layout {
             }
         }
         // Reporting records and RegGroup save slots are separate sources.
-        // Restore slots exist independently and retain their full-width alias.
+        // Restore slots exist independently and keep their full-width alias.
         for offset in RESTORE {
             described.insert(offset, true);
         }

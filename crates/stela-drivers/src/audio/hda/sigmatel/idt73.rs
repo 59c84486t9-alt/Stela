@@ -55,7 +55,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         state: &mut State,
         gpio: SigmatelGpio,
     ) -> Result<(), Error> {
-        // GPIO source default is already applied after actual D0. Generic init
+        // GPIO source default is already applied after D0. Generic init
         // runs the direct knob verb before synchronizing the port power map.
         state.gpio = Some(gpio);
         self.route_control(
@@ -89,7 +89,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             )?,
         };
         let expected = state.gpio.ok_or(Error::NeedsReset)?;
-        // Only source-owned GPIO0 is an authority invariant. Other GPIO
+        // Only source-owned GPIO0 is a permission invariant. Other GPIO
         // inputs/owners may change; quiet must preserve their fresh values.
         if ((actual.data ^ expected.data)
             | (actual.mask ^ expected.mask)

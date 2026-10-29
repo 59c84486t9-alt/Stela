@@ -1,4 +1,4 @@
-//! Native PC platform services. Actual CPU/root adapters install their capabilities.
+//! Native PC platform services. CPU/root adapters install their capabilities.
 
 #[cfg(feature = "native-acpi")]
 pub mod ac;

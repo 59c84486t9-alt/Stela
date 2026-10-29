@@ -109,8 +109,8 @@ impl State {
     }
 }
 
-/// Clones and aperture aliases retain one control/request/lifecycle owner.
-/// There is deliberately no public completion setter or copied readiness bit.
+/// Clones and aperture aliases keep one control/request/lifecycle owner.
+/// There is no public completion setter or copied readiness bit.
 #[derive(Clone)]
 pub struct Controller(Rc<RefCell<State>>);
 impl Controller {
@@ -191,7 +191,7 @@ impl Controller {
         Ok(u32::from(state.channel(aperture as u8, lane).drain_high) << 16)
     }
     /// Only the enclosing canonical resource may call this, after checking its
-    /// actual RAM identity, live generation and the closed producer cohort.
+    /// RAM identity, live generation and the closed producer cohort.
     pub(crate) fn record_ram_drain(
         &self,
         aperture: usize,

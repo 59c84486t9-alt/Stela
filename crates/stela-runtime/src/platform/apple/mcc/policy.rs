@@ -16,7 +16,7 @@ const AUXILIARY_BASE: u64 = 0x15ffc;
 const COMMAND_BASE: u64 = 0x13ffc;
 const QUOTA_UNIT_BYTES: u64 = 1 << 17;
 
-/// Actual outer-resource disposition, immutable after construction. Cacheless
+/// Outer-resource disposition, immutable after construction. Cacheless
 /// means this object has no cache allocation/fill/writeback path at all. It is
 /// not a report that the native x86 CPU lacks coherent caches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +69,7 @@ impl Controller {
     /// supplies a way-clamp of0, which the unchanged T6000 consumer accepts.
     ///
     /// This does not bind or complete native RAM, DCS drain, CPU cache, DMA,
-    /// power, PMP or DSB services. The parent must admit those actual owners and
+    /// power, PMP or DSB services. The parent must admit those owners and
     /// the original supported configuration route together, before execution.
     pub fn initialized_cacheless(
         configuration: super::Configuration,
@@ -100,11 +100,11 @@ impl Controller {
         self.0.borrow().resource
     }
 
-    /// Borrow actual installed policy through the caller's native operation.
-    /// The caller supplies an independently qualified client→DSID/group join;
+    /// Borrow installed policy through the caller's native operation.
+    /// The caller supplies a checked client→DSID/group join;
     /// this API never infers it from an application, PE or numeric port name.
     /// Configuration/lifecycle mutation is excluded while this borrow lives.
-    /// It grants no canonical-memory, allocation, completion or DSB authority.
+    /// It grants no canonical-memory, allocation, completion or DSB permission.
     pub fn policy(
         &self,
         aperture: u8,
@@ -163,7 +163,7 @@ impl PolicyLoan<'_> {
     pub fn persistence(&self) -> Option<u8> {
         (self.dsid != 0).then(|| self.word(PERSISTENCE_BASE + u64::from(self.dsid) * 4) as u8)
     }
-    /// Occupancy of this actual permanently empty outer cache, not host DRAM
+    /// Occupancy of this permanently empty outer cache, not host DRAM
     /// consumption, native CPU-cache residency or an unobserved physical MCC.
     pub fn owned_outer_bytes(&self) -> u64 {
         0
@@ -338,7 +338,7 @@ mod tests {
         view.write(super::super::CACHE_COMMAND, Width::Word, 0, &mut access)
             .unwrap();
         // A generic initialized input bank is not silently converted into the
-        // cacheless resource merely because a caller happened to request0.
+        // cacheless resource because a caller happened to request0.
         assert!(view.read(CACHE_STATUS, Width::Word, &mut access).is_err());
         assert!(unqualified.policy(0, 1, 0).is_err());
     }

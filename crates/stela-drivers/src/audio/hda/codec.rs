@@ -379,7 +379,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 }
 
-/// Revalidated standard analog authority shared by vendor backends. This
+/// Revalidated standard analog permission shared by vendor backends. This
 /// preserves the observed pin inventory without inferring electrical policy.
 pub(super) struct LiveAnalogCodec {
     pub group: u8,

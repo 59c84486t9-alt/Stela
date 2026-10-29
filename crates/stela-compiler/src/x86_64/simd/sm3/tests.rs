@@ -4,7 +4,7 @@ use crate::{
     GuestState, context::ExecutionContext, x86_64::asm::vector_extensions::execution::Native,
 };
 
-// Literal lane-wise Arm operation model. It intentionally does not share the
+// Literal lane-wise Arm operation model. It does not share the
 // emitted recipe's register allocation, staging, packing or Boolean identities.
 fn reference(
     kind: Kind,

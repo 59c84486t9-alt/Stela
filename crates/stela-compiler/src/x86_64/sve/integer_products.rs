@@ -63,7 +63,7 @@ fn multiplier_element(operand: Operand) -> ElementSize {
         _ => operand.element_size.bytes(),
     };
     // Complex indexed forms are H/S; an unindexed D complex pair never calls
-    // the broadcaster and can retain its component size here.
+    // the broadcaster and can keep its component size here.
     ElementSize::from_bytes(bytes).unwrap_or(operand.element_size)
 }
 

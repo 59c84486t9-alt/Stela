@@ -10,7 +10,7 @@ use reset::Ownership;
 type Failure = (&'static str, BlockError);
 const ENDPOINT_DISABLED: u32 = 0;
 
-/// Minted only after the actual whole-slot retirement boundary. Its fields are
+/// Minted only after the whole-slot retirement boundary. Its fields are
 /// private to this module, so a software status or slot number cannot return DMA.
 pub(super) struct Unpublished {
     slot: u8,
@@ -23,7 +23,7 @@ impl Unpublished {
     }
 }
 
-/// Actual retired root-leaf owner, never reconstructed from a current ledger.
+/// Retired root-leaf owner, never reconstructed from a current ledger.
 /// The original Slot stays in Controller until physical reset and final health.
 struct RetiredRoot {
     id: SlotId,
@@ -41,10 +41,10 @@ impl Published {
     }
 }
 
-/// The mutable controller borrow is retained from the last acknowledged
+/// The mutable controller borrow is held from the last acknowledged
 /// endpoint retirement through Disable Slot. No caller can publish another TD,
 /// run private recovery control, or substitute a different device generation
-/// between those operations. This authority is private and cannot be copied.
+/// between those operations. This permission is private and cannot be copied.
 struct Quiesced<'a> {
     controller: &'a mut Controller,
     slot: u8,
@@ -53,8 +53,8 @@ struct Quiesced<'a> {
 
 impl Controller {
     /// Exclusive root-leaf reset is the only published storage return producer.
-    /// Its private witness retains the original generation/current/attachment
-    /// through actual whole-slot retirement and postsettle physical reset.
+    /// Its private witness keeps the original generation/current/attachment
+    /// through whole-slot retirement and postsettle physical reset.
     pub(super) fn retire_reset_root(&mut self, id: SlotId) -> Result<Published, Failure> {
         let slot = self
             .validate_id(id)
@@ -79,8 +79,8 @@ impl Controller {
         RetiredRoot { id, attachment }.reset(self)
     }
 
-    /// Retire every actual endpoint and its ordered events, then acknowledge
-    /// Disable before clearing DCBAA. Generic Disable retains published owners
+    /// Retire every endpoint and its ordered events, then acknowledge
+    /// Disable before clearing DCBAA. Generic Disable keeps published owners
     /// permanently; only unpublished EP0-only owners enter the retry cache.
     /// The separate RetiredRoot witness additionally requires physical reset
     /// and final health before Published can return complete root-leaf storage.
@@ -93,7 +93,7 @@ impl RetiredRoot {
     fn reset(self, controller: &mut Controller) -> Result<Published, Failure> {
         let slot = self.id.hardware_slot();
         let index = usize::from(slot);
-        // The typed witness binds the actual Disable to these original owners;
+        // The typed witness binds the Disable to these original owners;
         // the current grant is still present before the physical reset.
         if !controller.known_id(self.id)
             || controller.slot_ownership[index] != Ownership::Retired
@@ -111,7 +111,7 @@ impl RetiredRoot {
         controller
             .reset_root_device(self.attachment)
             .map_err(|e| ("acknowledge reusable root reset", e))?;
-        // reset_root_device includes its settling delay. Recheck actual health
+        // reset_root_device includes its settling delay. Recheck health
         // and link after that delay, before erasing a single retired DMA byte.
         controller
             .ready()
@@ -243,7 +243,7 @@ impl<'a> Quiesced<'a> {
         controller
             .ready()
             .map_err(|error| ("pre-Disable Slot event retirement", error))?;
-        // Recheck actual device contexts after every cancellation and its event
+        // Recheck device contexts after every cancellation and its event
         // drain, rather than accepting a software queue count as an idle proof.
         if let Some(state) = controller.slots[index].as_ref() {
             fence(Ordering::Acquire);

@@ -209,7 +209,7 @@ impl<B: Io> Engine<'_, B> {
         self.hci.submit_command(&command)?;
         loop {
             // Vendor EP0 is the only WMT completion source. Interrupt CC/Status
-            // is retained as auxiliary evidence, never synthesized into WMT.
+            // is held as auxiliary evidence, never synthesized into WMT.
             let bytes = self.control_read(crate::usb::xhci::setup(0xc0, 1, 48, 0, 64))?;
             if !bytes.is_empty() {
                 let event = WmtEvent::parse(bytes, operation)?;
@@ -416,8 +416,8 @@ impl<B: Io> Engine<'_, B> {
             .try_into()
             .map_err(|_| Error::protocol("Read Local Version shape", &version))?;
         self.attempt.local_version = Some(raw);
-        // Standard company identifier70 is MediaTek; actual revision fields are
-        // retained without inventing an image-header-to-HCI version mapping.
+        // Standard company identifier70 is MediaTek; revision fields are
+        // without inventing an image-header-to-HCI version mapping.
         if u16::from_le_bytes([raw[5], raw[6]]) != 70 {
             return Err(Error::protocol("observed MediaTek HCI identity", &raw));
         }
@@ -430,7 +430,7 @@ impl<B: Io> Engine<'_, B> {
         if address == [0; 6] || address == [0xff; 6] {
             return Err(Error::protocol("nonempty controller address", &address));
         }
-        // A coalesced event after the last desired CC must be retained as
+        // A coalesced event after the last desired CC must be held as
         // auxiliary evidence or rejected explicitly, never dropped with Engine.
         self.drain_auxiliary()?;
         let policy = HostPolicy::for_device(identity.usb);

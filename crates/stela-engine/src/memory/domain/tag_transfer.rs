@@ -22,7 +22,7 @@ const TAG_GRANULE_MASK: u64 = (TAG_GRANULE_BYTES - 1) as u64;
 
 impl<P: AllocationTagPolicy> MemoryThread<P> {
     /// Execute through the checked platform entry before any guest effects.
-    /// EL0 bulk instructions retain their architectural Undefined outcome even
+    /// EL0 bulk instructions keep their architectural Undefined outcome even
     /// when the host lacks the capability required by privileged data writes.
     pub fn complete_tag_memory(
         &mut self,

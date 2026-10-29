@@ -1,6 +1,6 @@
-//! Source-qualified cold SLID transformation, before the complete patch policy.
+//! Source-checked cold SLID transformation, before the complete patch policy.
 //!
-//! The boot-policy owner supplies actual hardware classification and entropy
+//! The boot-policy owner supplies hardware classification and entropy
 //! provenance. This proposal cannot certify either input or install a mapping.
 use super::{Action, Configured, Field, Policy, Provenance, source_record};
 use crate::coprocessor::{HardwareIdentity, Staged};
@@ -23,7 +23,7 @@ const BOOT_HEADER_OFFSETS: [u64; 8] = [0x20, 0xc0, 0x204, 0xc00, 0x1020, 0x1204,
 pub struct ColdSlideInput {
     pub hardware_boot_type: u16,
     pub hardware_provenance: Provenance,
-    /// Bytes from the parent's actual entropy owner, not decoded PACE/defaults.
+    /// Bytes from the parent's entropy owner, not decoded PACE/defaults.
     /// The full entropy value is consumed and is never included in the proposal.
     pub entropy: u64,
     pub entropy_provenance: Provenance,
@@ -43,8 +43,8 @@ pub struct ColdSlideProposal {
     control_file_offset: u64,
     control_source_sha256: String,
     patch_value: u64,
-    /// Native header/bootstrap virtual delta. The parent must qualify each
-    /// actual segment mapping, including omit-DART policy; never add it to PA.
+    /// Native header/bootstrap virtual delta. The parent must check each
+    /// segment mapping, including omit-DART policy; never add it to PA.
     remap_slide: u64,
     header_image_offset: u64,
     header_file_offset: u64,
@@ -347,7 +347,7 @@ pub(in crate::coprocessor) mod tests {
         let staged = prepare(&decoded)?.stage(0x80000000, 0x3000)?;
         for kind in [0x20, 0x40] {
             let proposal = staged.cold_slide_proposal(slide_input(kind, 0))?;
-            // A genuine entropy owner may return zero; inventing a nonzero slide
+            // An entropy owner may return zero; inventing a nonzero slide
             // would disagree with the original producer. It still authorizes no entry.
             assert_eq!(
                 (proposal.patch_value(), proposal.remap_slide()),

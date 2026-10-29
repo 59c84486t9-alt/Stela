@@ -37,7 +37,7 @@ pub struct Response<'a> {
     pub status: u16,
     pub aggregate_sequence: u16,
     pub scd_ssn: u16,
-    /// Actual host queue-pointer normalization, not MAC sequence authority.
+    /// Host queue-pointer normalization, not MAC sequence permission.
     pub next_pointer: u16,
     pub attempts: u16,
     pub rate: RawRate,
@@ -112,10 +112,10 @@ impl<'a> Response<'a> {
     pub fn raw(&self) -> &'a [u8] {
         self.raw
     }
-    /// Reported direct result only. An actual queue owner must match full body
-    /// queue, short echo index, normalized SSN and retained native epoch before
+    /// Reported direct result only. A queue owner must match full body
+    /// queue, short echo index, normalized SSN and kept native epoch before
     /// assigning this result to one submitted frame. It must separately finish
-    /// canonical descriptor/TB0/payload DMA handoffs and retain the key context.
+    /// canonical descriptor/TB0/payload DMA handoffs and keep the key context.
     pub fn reported_outcome(&self) -> Outcome {
         match self.status & 255 {
             1 => Outcome::Success,

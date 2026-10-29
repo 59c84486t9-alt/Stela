@@ -53,7 +53,7 @@ impl ShortAudioDescriptor {
     }
 }
 
-/// Historical metadata, never a retained display-session or protection grant.
+/// Historical metadata, never a display-session or protection grant.
 #[derive(Debug)]
 pub struct DigitalSink {
     raw: Vec<u8>,
@@ -82,7 +82,7 @@ impl DigitalSink {
         &self.descriptors
     }
     /// Checks this historical ELD alone; use Controller::digital_pcm_supported
-    /// for a fresh poll and actual converter/link-capability intersection.
+    /// for a fresh poll and converter/link-capability intersection.
     /// Canned/partial ELD never grants PCM and no basic-audio fallback is invented.
     pub fn supports_pcm(&self, format: PcmFormat) -> bool {
         !self.partial

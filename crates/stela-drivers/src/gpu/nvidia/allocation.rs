@@ -1,4 +1,4 @@
-//! Retained native RAM CPU views for the official RM kernel-mapping hooks.
+//! Native RAM CPU views for the official RM kernel-mapping hooks.
 //! This accepts canonical pins; it does not allocate RAM, create MMIO aliases,
 //! pin guest pages, install GPU page tables or infer device addresses.
 use super::memory;
@@ -7,8 +7,8 @@ use core::{ffi::c_void, marker::PhantomData, marker::PhantomPinned, pin::Pin, pt
 
 /// An existing native RAM allocation, with its established CPU cache policy.
 /// Pin before borrowing its opaque pointer for an original RM mapping call.
-/// The pointer is valid only while this handle lives; C retains no borrow of
-/// this handle after that call. Each successful view independently retains the
+/// The pointer is valid only while this handle lives; C keeps no borrow of
+/// this handle after that call. Each successful view independently keeps the
 /// underlying pins, so the parent may then be dropped without freeing its RAM.
 /// All calls and final releases obey the common heap/backing's execution rules.
 /// No implicit DMA completion or IRQ-safe release is supplied.
@@ -41,7 +41,7 @@ impl Allocation {
     /// Every call dereferencing this pointer must end before this pinned handle
     /// is dropped. CPU accesses through returned views require the owner's
     /// exclusive-access/coherence protocol; raw pointers do not supply it.
-    /// Native page indices/offsets must use this allocation's actual page
+    /// Native page indices/offsets must use this allocation's page
     /// granule, matching the real backend's `os_page_shift` configuration.
     pub unsafe fn as_raw(self: Pin<&mut Self>) -> *mut c_void {
         // SAFETY: obtain a stable opaque pointer without moving the object.
@@ -68,7 +68,7 @@ impl Allocation {
             .checked_add(bytes)
             .filter(|end| *end <= self.pages.logical_bytes())
             .ok_or(MemoryError::InvalidSize)?;
-        // Retain the existing mapping/pin and cache attribute. Do not expose
+        // Keep the existing mapping/pin and cache attribute. Do not expose
         // whole-page padding beyond the allocation's exact logical payload.
         self.pages
             .cpu_mapping_range(self.pages.cache_attribute(), start..end)
@@ -90,7 +90,7 @@ fn map_with(
     let address = mapping.address(0, mapping.bytes()).ok()?.cast();
     let token = allocate(size_of::<CpuMapping>() as u64)?.cast::<CpuMapping>();
     // SAFETY: the common metadata allocator supplied distinct aligned writable
-    // storage for this exact type. The token owns its retained mapping/pin.
+    // storage for this exact type. The token owns its mapping/pin.
     unsafe { token.as_ptr().write(mapping) };
     Some((address, token))
 }
@@ -128,7 +128,7 @@ unsafe extern "C" fn stela_nvidia_unmap_ram(private: *mut c_void) {
         return;
     }
     // SAFETY: the matching native caller exclusively owns this live token;
-    // dropping CpuMapping releases the actual pin, then its metadata storage.
+    // dropping CpuMapping releases the pin, then its metadata storage.
     unsafe {
         private.cast::<CpuMapping>().drop_in_place();
         memory::free(private);
@@ -182,8 +182,8 @@ mod tests {
     unsafe impl Send for Backing {}
     // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Backing {}
-    // SAFETY: the model retains the same allocation/layout/cache metadata
-    // until the last pin ends; physical labels deliberately differ from VA.
+    // SAFETY: the model keeps the same allocation/layout/cache metadata
+    // until the last pin ends; physical labels differ from VA.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
             self.cpu
@@ -202,7 +202,7 @@ mod tests {
     impl Drop for Backing {
         fn drop(&mut self) {
             self.released.fetch_add(1, Ordering::SeqCst);
-            // SAFETY: the last retained pin is gone; return this exact model
+            // SAFETY: the last pin is gone; return this model
             // allocation once, with its original layout.
             unsafe { dealloc(self.cpu.as_ptr(), self.layout) };
         }
@@ -217,11 +217,11 @@ mod tests {
         let page_bytes = 1usize << page_shift;
         let pages = logical_bytes.div_ceil(page_bytes);
         let layout = Layout::from_size_align(pages * page_bytes, page_bytes).unwrap();
-        // SAFETY: a nonzero checked model allocation, retained by Backing.
+        // SAFETY: a nonzero checked model allocation, kept by Backing.
         let cpu = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let backing = Backing {
             cpu,
-            // Deliberately non-contiguous model physical pages. The existing
+            // Non-contiguous model physical pages. The existing
             // canonical CPU mapping remains consecutive and independent.
             physical: (0..pages)
                 .map(|index| 0x8000_0000 + (index * 2 * page_bytes) as u64)
@@ -267,7 +267,7 @@ mod tests {
         }
         drop(allocation);
         assert_eq!(released.load(Ordering::SeqCst), 0);
-        // SAFETY: both tokens independently retain their ranges/pins, so the
+        // SAFETY: both tokens independently keep their ranges/pins, so the
         // parent is no longer needed. Return each token once after its uses.
         unsafe {
             nv_free_kernel_mapping(ptr::null_mut(), ptr::null_mut(), a, first);
@@ -340,7 +340,7 @@ mod tests {
             assert!(!private.is_null());
             nv_free_kernel_mapping(ptr::null_mut(), raw, address, private);
 
-            // An empty view at the logical end retains a real pin and token;
+            // An empty view at the logical end keeps a real pin and token;
             // it grants no byte access to the page padding.
             let address = nv_alloc_kernel_mapping(ptr::null_mut(), raw, 2, 37, 0, &mut private);
             assert_eq!(address, cpu.add(logical_bytes).as_ptr().cast());

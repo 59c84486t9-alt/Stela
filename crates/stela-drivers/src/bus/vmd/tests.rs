@@ -71,7 +71,7 @@ impl Drop for Model {
         self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: this is an isolated stateful model, never physical hardware authority.
+// SAFETY: this is an isolated stateful model, never physical hardware permission.
 unsafe impl Registers for Model {
     fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error> {
         self.parent_reads.lock().unwrap().push((offset, width));
@@ -294,7 +294,7 @@ fn vendor_shadow_cannot_hide_overlapping_or_cyclic_capability_links() {
     model.set(0xa0, 2, 1);
     let mut host = start(model);
     assert_eq!(host.windows()[0].bus_start, 0x1000_0000);
-    // The valid trailing PM header is actually traversed before addresses.
+    // The valid trailing PM header is traversed before addresses.
     let reads = host.io().parent_reads.lock().unwrap();
     let pm = reads.iter().position(|read| *read == (0xa0, 2)).unwrap();
     let address = reads.iter().position(|read| *read == (0x88, 4)).unwrap();
@@ -364,7 +364,7 @@ fn native_parent_table_programming_keeps_client_vector_zero_masked() {
             data: 0x51,
         },
     ];
-    // SAFETY: isolated register model; no physical IRQ authority is inferred.
+    // SAFETY: isolated register model; no physical IRQ permission is inferred.
     let end = unsafe { host.program_parent_vectors(&messages) }.unwrap();
     assert_eq!(end, 3);
     assert_eq!(host.io().table.get(&12), Some(&1));
@@ -452,7 +452,7 @@ impl Drop for ChildEffects {
         self.drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: isolated lifecycle model; no physical authority or DMA is inferred.
+// SAFETY: isolated lifecycle model; no physical permission or DMA is inferred.
 unsafe impl crate::bus::irq::Source for ChildEffects {
     fn mask(&mut self) -> Result<(), crate::bus::irq::IrqError> {
         self.events.lock().unwrap().push("mask");
@@ -518,9 +518,9 @@ fn actual_child_providers_gate_parent_owner_return_and_uncertain_stop_retention(
         }];
         // SAFETY: isolated source-effect model only, no physical device grant.
         let mut host = start(model);
-        // Isolated effect model of an external genuine native domain attach.
-        // Production exposes no bus-master-enabling API before that authority
-        // exists. This assignment supplies no hardware qualification.
+        // Isolated effect model of an external native domain attach.
+        // Production exposes no bus-master-enabling API before that permission
+        // exists. This assignment supplies no hardware validation.
         host.io().set(
             usize::from(COMMAND),
             2,
@@ -542,7 +542,7 @@ fn actual_child_providers_gate_parent_owner_return_and_uncertain_stop_retention(
             }))
         }
         .unwrap();
-        // SAFETY: modeled registry retains both exact source and fanout.
+        // SAFETY: modeled registry keeps both source and fanout.
         unsafe { source.unmask() }.unwrap();
         assert_eq!(handler.handle(), crate::bus::irq::Disposition::Handled);
         source.mask().unwrap();

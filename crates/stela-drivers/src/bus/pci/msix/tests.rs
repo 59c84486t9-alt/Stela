@@ -4,7 +4,7 @@
 // Copyright (C) 2016 Christoph Hellwig
 // Copyright (C) 2026 Stela contributors
 // The prior Stela peripheral fixture is MIT (repository LICENSE); this combined
-// file retains the GPL-2.0-only legacy owner oracle and its original notices.
+// file keeps the GPL-2.0-only legacy owner oracle and its original notices.
 // Includes the unchanged pre-indexed GPL-2.0-only owner as a legacy trace oracle.
 extern crate std;
 use super::*;
@@ -27,9 +27,9 @@ enum Event {
     BarRead(u64),
     BarWrite(u64, u32),
 }
-// This software peripheral owns each new route's actual callback object until
+// This software peripheral owns each new route's callback object until
 // modeled source stop/drain. Its function is invoked on emitted messages; it
-// grants no physical routing/remapping or kernel IRQ entry authority.
+// grants no physical routing/remapping or kernel IRQ entry permission.
 struct ModelRoute {
     expected: MsiMessage,
     calls: AtomicU64,
@@ -179,7 +179,7 @@ impl ConfigSpace for Config {
 }
 // SAFETY: write16 changes only its two config bytes under the peripheral mutex;
 // write32 rejects access rather than replaying adjacent W1C status. The Config Arc
-// retains all simulated config storage through the owning function lifetime.
+// keeps all simulated config storage through the owning function lifetime.
 unsafe impl MsiConfigSpace for Config {}
 impl Drop for Config {
     fn drop(&mut self) {
@@ -191,7 +191,7 @@ struct Bar {
     span: PhysicalSpan,
     drops: Arc<AtomicU64>,
 }
-// SAFETY: span is immutable and the Arc retains the peripheral storage. Native
+// SAFETY: span is immutable and the Arc keeps the peripheral storage. Native
 // DWORD model operations are serialized by its mutex, check table bounds/masks,
 // and preserve before/after-effect failures without revoking the backing.
 unsafe impl BarAccess for Bar {
@@ -340,7 +340,7 @@ fn attach(f: Fixture) -> (MsixConfig<Config, Bar>, Arc<Mutex<Peripheral>>) {
 // Source-derived legacy oracle: complete original owner/Drop implementations
 // copied from the packet's exact base msix.rs, with ONLY the type name changed.
 // Discovery/UC mapping remain unchanged shared source, and the shared peripheral
-// independently enforces actual mask/enable ordering and records every access.
+// independently enforces mask/enable ordering and records every access.
 mod original {
     use super::*;
     pub struct LegacyReference<C: MsiConfigSpace = EcamConfig, B: BarAccess = MappedBar> {
@@ -351,12 +351,12 @@ mod original {
     }
     impl<C: MsiConfigSpace, B: BarAccess> LegacyReference<C, B> {
         /// # Safety
-        /// Own the actual unique function/config/root/reset epoch and BAR resources,
+        /// Own the unique function/config/root/reset epoch and BAR resources,
         /// with memory decoding already enabled. BAR array indices are hardware
-        /// BIRs. Retained ownership must be genuine, not an inert numeric token.
-        /// Actual old MSI/MSI-X/INTx sources, callbacks, CPU pending/posted messages
+        /// BIRs. Ownership must be genuine, not an inert numeric token.
+        /// Old MSI/MSI-X/INTx sources, callbacks, CPU pending/posted messages
         /// and work have drained. MSI-X disabled alone does not prove that. Native
-        /// MSI routing must be qualified separately. Process/deferred context only.
+        /// MSI routing must be checked separately. Process/deferred context only.
         /// No hardware writes occur on constructor errors; all owners are returned.
         pub unsafe fn new(
             function: Function<C>,
@@ -465,9 +465,9 @@ mod original {
         }
         /// Program vector zero; all unused vectors remain individually masked.
         /// # Safety
-        /// Message belongs to the actual qualified IRQ registry/route. The source,
+        /// Message belongs to the checked IRQ registry/route. The source,
         /// old posted messages, callbacks and work have drained before retargeting;
-        /// masking alone is insufficient. Keep all actual DMA/IRQ owners retained.
+        /// masking alone is insufficient. Keep all DMA/IRQ owners kept.
         pub unsafe fn program(&mut self, message: MsiMessage) -> Result<(), Error> {
             if message.address & 3 != 0 {
                 return Err(Error::InvalidMessage);
@@ -488,8 +488,8 @@ mod original {
             Ok(())
         }
         /// # Safety
-        /// Actual callback/route is installed and published. The requester, all
-        /// source/work/reset/DMA owners and real interrupt controller stay retained.
+        /// Callback/route is installed and published. The requester, all
+        /// source/work/reset/DMA owners and real interrupt controller stay held.
         pub unsafe fn unmask(&mut self) -> Result<(), Error> {
             if self.poisoned {
                 return Err(Error::Quarantined);
@@ -517,12 +517,12 @@ mod original {
             })();
             self.fail(result)
         }
-        /// Return exact owners only after independent real source/IRQ/work drain.
+        /// Return owners only after independent real source/IRQ/work drain.
         /// # Safety
         /// Device is stopped; old pending/posted MSI-X writes, callbacks and all
         /// deferred/reset/timer users have drained and cannot restart. DMA lease,
         /// fence, coherency and IOMMU retirement remain independently owned. Mapped
-        /// BARs must be explicitly retired by their actual owner after this return.
+        /// BARs must be explicitly retired by their owner after this return.
         pub unsafe fn release(&mut self) -> Result<Owners<C, B>, Error> {
             self.disable()?;
             self.owners.take().ok_or(Error::Released)
@@ -559,24 +559,24 @@ fn selected_masks(m: &Peripheral, selected: &[u16]) {
 
 fn indexed_sequence(owner: &mut MsixConfig<Config, Bar>) -> Result<(), Error> {
     for index in [0, 1, 2] {
-        // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-        // callbacks stay retained; table writes and message emission run synchronously.
+        // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+        // callbacks stay held; table writes and message emission run synchronously.
         unsafe { owner.program_indexed(index, message(index)) }?;
     }
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 1]) }?;
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(2, message(2)) }?;
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask_indices(&[0, 1, 2]) }?;
     owner.disable()
 }
 
 // Real allocator refusal, scoped to the child test thread. Other tests/threads
-// retain System allocation. No production fault hook or allocator substitution
+// keep System allocation. No production fault hook or allocator substitution
 // appears in MsixConfig, and the armed phase cannot allocate event log storage.
 #[cfg(not(all(
     feature = "linux-kernel",
@@ -649,7 +649,7 @@ mod allocation {
 static ALLOCATOR: allocation::Allocator = allocation::Allocator;
 
 // The hosted Linux unit binary already owns one canonical GlobalAlloc in
-// gpu/linux/task.rs. Reuse its actual test-only counter/refusal boundary; never
+// gpu/linux/task.rs. Reuse its test-only counter/refusal boundary; never
 // install another allocator in that binary. Only the isolated exact child arms
 // it, excluding other controller fixtures and allocation-producing work.
 #[cfg(all(
@@ -708,18 +708,18 @@ fn metadata_allocation_failure() {
         m.delivered_entries.reserve(2048);
         m.publish(0);
     }
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     unsafe { owner.program(MESSAGE) }.unwrap();
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     unsafe { owner.unmask() }.unwrap();
     let before = m.lock().unwrap().memory.clone();
     let config = m.lock().unwrap().config;
     let events = m.lock().unwrap().events.len();
     allocation::arm();
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     let result = unsafe { owner.program_indexed(2047, message(2047)) };
     let attempts = allocation::disarm();
     assert_eq!(result, Err(Error::Allocation));
@@ -730,16 +730,16 @@ fn metadata_allocation_failure() {
     assert_eq!(m.lock().unwrap().memory, before);
     assert_eq!(m.lock().unwrap().config, config);
     allocation::arm();
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     let programmed = unsafe { owner.program(MESSAGE) };
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     let unmasked = unsafe { owner.unmask() };
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     let indexed = unsafe { owner.program_indexed(0, MESSAGE) };
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     let selected = unsafe { owner.unmask_indices(&[0]) };
     let attempts = allocation::disarm();
@@ -747,17 +747,17 @@ fn metadata_allocation_failure() {
         (programmed, unmasked, indexed, selected, attempts),
         (Ok(()), Ok(()), Ok(()), Ok(()), 0)
     );
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     unsafe { owner.program_indexed(2047, message(2047)) }.unwrap();
     assert_eq!(owner.messages.len(), 2047);
     m.lock().unwrap().publish(2046);
     m.lock().unwrap().publish(2047);
     allocation::arm();
-    // SAFETY: Config and Bar retain the same mutex-protected peripheral. Live route
-    // callbacks stay retained; table writes and message emission run synchronously.
+    // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
+    // callbacks stay held; table writes and message emission run synchronously.
     let programmed = unsafe { owner.program_indexed(2046, message(2046)) };
-    // SAFETY: The fixture retains published ModelRoute callbacks. Emission is synchronous
+    // SAFETY: The fixture keeps published ModelRoute callbacks. Emission is synchronous
     // under its mutex, including failures injected after a modeled hardware effect.
     let unmasked = unsafe { owner.unmask_indices(&[0, 2046, 2047]) };
     let attempts = allocation::disarm();
@@ -765,7 +765,7 @@ fn metadata_allocation_failure() {
     assert_eq!(core::mem::size_of::<EntrySet>(), 256);
     assert!(core::mem::size_of::<MsixConfig<Config, Bar>>() < 2048);
     // SAFETY: All model deliveries finish synchronously while holding the peripheral
-    // mutex. No hardware or background callback can race release of these retained owners.
+    // mutex. No hardware or background callback can race release of these owners.
     drop(unsafe { owner.release() }.unwrap());
 }
 

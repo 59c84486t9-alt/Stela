@@ -1,4 +1,4 @@
-//! Outward UTC arithmetic over actual capture/counter bounds supplied by boot.
+//! Outward UTC arithmetic over capture/counter bounds supplied by boot.
 //! This pure calculation does not admit any clock, firmware service or epoch.
 use super::Timestamp;
 use core::{fmt, ops::RangeInclusive};

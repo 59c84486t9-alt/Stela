@@ -181,7 +181,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
     let compilerxx = capture(Command::new(&toolchain.clangxx).arg("--version"))?;
     let linker = capture(Command::new(&toolchain.linker).arg("--version"))?;
     let archiver = capture(Command::new(&toolchain.archiver).arg("--version"))?;
-    // The retained makefiles track header dependencies but not compiler or
+    // The kept makefiles track header dependencies but not compiler or
     // option changes. Partition their cache by the full source/tool identity.
     let identity = format!(
         "{source_hash}\0{compiler}\0{compilerxx}\0{linker}\0{archiver}\0{}",
@@ -191,7 +191,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
     let build = build_directory("nvidia")
         .join(target.profile())
         .join(&build_key);
-    // The retained makefiles do not support whitespace in paths. Do not
+    // The kept makefiles do not support whitespace in paths. Do not
     // silently split a compiler or output path into shell arguments.
     for path in [
         &source.upstream,

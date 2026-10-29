@@ -116,17 +116,17 @@ impl PublishedReadOnlyRegion {
         };
         if publisher == libc::MAP_FAILED {
             let error = std::io::Error::last_os_error();
-            // The retained guest-mapping guard rolls back this failed pair.
+            // The kept guest-mapping guard rolls back this failed pair.
             return Err(error).context("cannot map runtime publication alias");
         }
         let Some(publisher_mapping) = core::ptr::NonNull::new(publisher) else {
             // SAFETY: release only this newly created null publisher alias;
-            // the retained guest guard rolls back the other mapping.
+            // the guest guard rolls back the other mapping.
             unsafe { libc::munmap(publisher, bytes as usize) };
             bail!("null publication mapping is unsupported");
         };
         // SAFETY: the second complete mapping aliases this same private file at
-        // the same offset; both aliases and the file now share one retained owner.
+        // the same offset; both aliases and the file now share one owner.
         let storage = unsafe {
             NativeStorage::published_aliases(
                 guest_mapping,

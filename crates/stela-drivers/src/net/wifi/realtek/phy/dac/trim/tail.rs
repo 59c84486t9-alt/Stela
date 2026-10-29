@@ -14,9 +14,9 @@ pub struct ThermalTracking {
     pub thermal_reference: u8,
     pub lck_reference: u8,
 }
-/// Bounded initial source PHY sequence finished under its retained prior-phase
+/// Bounded initial source PHY sequence finished under its prior-phase
 /// prerequisites. No operational radio, TX policy, sounding, IQK/DPK, runtime
-/// tracking, cached recovery or independent stop/drain authority is implied.
+/// tracking, cached recovery or independent stop/drain permission is implied.
 #[derive(Debug)]
 pub struct PhyInitialized {
     factory: FactoryInitialized,
@@ -36,13 +36,13 @@ impl PhyInitialized {
 impl FactoryInitialized {
     /// Reset initial thermal tracking and apply source initial MU/NDPA/CSI
     /// defaults. MU transmission/table validity remain disabled as source
-    /// requires until genuine sounding; no operational sounding is started.
+    /// requires until sounding; no operational sounding is started.
     ///
     /// # Safety
-    /// Same genuine retained native requester, Io and Report and uninterrupted
+    /// Same kept native requester, Io and Report and uninterrupted
     /// boot/reset/firmware epoch as every consumed prior phase. Initial source
     /// table/TRX/dynamic/DAC/factory and prior MAC/HCI/board/power prerequisites
-    /// remain valid. Native BAR, claims, queues and pins retained, operational
+    /// remain valid. Native BAR, claims, queues and pins kept, operational
     /// TX and competing reset/IRQ/PHY/RF/OTP workers quiesced. Run once in
     /// exclusive initial process/deferred context. Initial hardware rate/retry
     /// defaults confer no shared OS/regulatory TX permission. This is not

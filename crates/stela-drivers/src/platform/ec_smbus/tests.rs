@@ -135,7 +135,7 @@ impl Drop for Space {
     }
 }
 // SAFETY: this is an independent ordered register peripheral; faults may occur
-// before or after their actual modeled effects, and all state remains owned.
+// before or after their modeled effects, and all state remains owned.
 unsafe impl EcAccess for Space {
     fn read(&mut self, address: u8) -> Result<u8, ec::Error> {
         self.state.lock().unwrap().effect(Op::Read(address))
@@ -168,7 +168,7 @@ fn fixture() -> (ModelHost, Arc<Mutex<Peripheral>>, Arc<AtomicUsize>) {
         jump: None,
     }));
     let drops = Arc::new(AtomicUsize::new(0));
-    // SAFETY: uniquely owned actual independent peripheral, no competing AML,
+    // SAFETY: uniquely owned independent peripheral, no competing AML,
     // query or alarm consumer. The test timer advances on peripheral effects.
     let host = unsafe {
         Host::claim(
@@ -552,8 +552,8 @@ fn descriptor_bounds_clock_wrap_and_read_side_ec_uncertainty_are_explicit() {
         }
     }
     let (space, timer) = host.release().ok().unwrap();
-    // SAFETY: same actual independently modeled EC owner, now with native
-    // read-command fault evidence retained by the adapter.
+    // SAFETY: same independently modeled EC owner, now with native
+    // read-command fault evidence kept by the adapter.
     let mut host = unsafe {
         Host::claim(
             UncertainRead(space),
@@ -641,12 +641,12 @@ fn actual_ec_command_data_engine_drives_sbs_and_preserves_little_endian_native_b
         },
     )
     .unwrap();
-    // SAFETY: unique actual EC byte engine above, real modeled mailbox at the
+    // SAFETY: unique EC byte engine above, real modeled mailbox at the
     // evaluated descriptor, no independent query/alarm handler mutates it.
     let host = unsafe { Host::claim(ec, timer, Descriptor::from_ec(0x4022).unwrap(), 10_000) }
         .ok()
         .unwrap();
-    // SAFETY: the source-qualified single-battery board has no manager/other
+    // SAFETY: the source-checked single-battery board has no manager/other
     // selector owner; the EC host owns every native transfer in the sequence.
     let mut battery = unsafe {
         crate::platform::sbs::Sbs::claim(host, crate::platform::sbs::Topology::Single, false)
@@ -796,7 +796,7 @@ fn lost_firmware_lock_before_any_command_retains_owner_without_claiming_publicat
         _owner: Space,
     }
     // SAFETY: independent EC arbitration model reports the original failure
-    // before any register operation; the actual retained resource is unchanged.
+    // before any register operation; the resource is unchanged.
     unsafe impl EcAccess for LostLock {
         fn read(&mut self, _: u8) -> Result<u8, ec::Error> {
             Err(ec::Error {
@@ -814,7 +814,7 @@ fn lost_firmware_lock_before_any_command_retains_owner_without_claiming_publicat
     }
     let (host, state, drops) = fixture();
     let (space, timer) = host.release().ok().unwrap();
-    // SAFETY: same independent actual register owner, with an EC arbitration
+    // SAFETY: same independent register owner, with an EC arbitration
     // failure injected before any host or native EC command is published.
     let mut host = unsafe {
         Host::claim(

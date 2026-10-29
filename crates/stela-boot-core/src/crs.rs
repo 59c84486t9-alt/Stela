@@ -1,5 +1,5 @@
 //! Direct extended _CRS interrupt routes. As in pinned Linux
-//! drivers/acpi/resource.c acpi_dev_get_irqresource, extended resources retain
+//! drivers/acpi/resource.c acpi_dev_get_irqresource, extended resources keep
 //! their own electrical flags; ISA/MADT override policy is separate. Legacy
 //! IRQ descriptors, producer/source indirection and edge routes are explicitly
 //! unavailable until their full ownership/drain policy is supplied. Wake
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn actual_extended_bytes_preserve_direct_crs_electrical_and_pin_index() {
-        // Actual ACPI Extended IRQ encoding: consumer/shared/low/level, GSI33.
+        // ACPI Extended IRQ encoding: consumer/shared/low/level, GSI33.
         let descriptors = resources::parse(&[0x89, 6, 0, 13, 1, 33, 0, 0, 0, 0x79, 0]).unwrap();
         assert_eq!(
             line(&descriptors, 0, 0),

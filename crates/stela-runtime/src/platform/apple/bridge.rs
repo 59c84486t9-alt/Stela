@@ -4,13 +4,13 @@
 //! The SoC layout catalog contains only the hardware register fields decoded
 //! from `applyBridgeTunables` (kernel file 0x2fa6590), its descriptor lists,
 //! and `_tunableh_apply_configuration` (0x2bbb64c). Configuration is a masked
-//! RMW performed by software: each described full32 word retains all writes.
+//! RMW performed by software: each described full32 word keeps all writes.
 //!
 //! Version3 event configuration follows `_enableBridgeEventCounters`
-//! (0x2b96214..0x2b96b6c). Selector/filter/limit/boundary words are retained;
+//! (0x2b96214..0x2b96b6c). Selector/filter/limit/boundary words are held;
 //! +0x14/+0x2bc accept only the selected initialization bitmap. Their readback
 //! and electrical pulse/ack lifecycle are not established, so reads refuse.
-//! Bit3 of the global configuration is retained: the survey does not
+//! Bit3 of the global configuration is held: the survey does not
 //! establish a self-clearing status bit.
 //!
 //! `_saveBridgeEventCounters` (0xfffffe0009b9aec0) samples each selected
@@ -61,7 +61,7 @@ impl Bridge {
             known: None,
         })
     }
-    /// Actual T6000 source-selected fields and supplied handoff words. Missing
+    /// T6000 source-selected fields and supplied handoff words. Missing
     /// values stay unknown. Captured disabled samples may be read, but this
     /// model cannot enable a native fabric event source or retire its reset.
     pub fn t6000(
@@ -74,8 +74,8 @@ impl Bridge {
     ) -> Result<Self, &'static str> {
         let fields = profile.fields(id)?;
         // Native M1 version3 programming zero-extends the whole side byte at
-        // kernel 0x2b3a674, then computes base + 0x60*side. J314s actually
-        // supplies side3. Final spans must still fit each actual DT view.
+        // kernel 0x2b3a674, then computes base + 0x60*side. J314s
+        // supplies side3. Final spans must still fit each DT view.
         let mut model = Self {
             layout: Layout::t6000(&fields, header, configs, axi)?,
             values: Held::default(),

@@ -43,7 +43,7 @@ pub struct Head {
 
 /// A Stela-owned store outside guest RAM. Implementations must durably and
 /// atomically replace the record AND protected generation, compare the expected
-/// generation, and never silently recreate a lost store. `None` means genuinely
+/// generation, and never silently recreate a lost store. `None` means
 /// unprovisioned. A commit error may have an uncertain outcome: the caller
 /// poisons its live state and requires reopening, never acknowledges success.
 pub trait Backend {

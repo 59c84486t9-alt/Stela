@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Owned non-download resources from the exact accepted RAM image. Selection
-//! follows the pinned PCI CLC loaders; parsed facts grant no radio authority.
+//! follows the pinned PCI CLC loaders; parsed facts grant no radio permission.
 use super::{Chip, Prepared, RamHeader, Requests};
 use alloc::{string::String, vec::Vec};
 
@@ -42,8 +42,8 @@ impl Region {
     }
 }
 
-/// Independent owned bytes and exact source identity, bounded by the prepared
-/// image's 16MiB/64-region limits. Retain this owner through every regulatory/
+/// Independent owned bytes and source identity, bounded by the prepared
+/// image's 16MiB/64-region limits. Keep this owner through every regulatory/
 /// capability consumer. It may outlive the Provider; no firmware pointer or
 /// provider borrow escapes. This does not prove download or the current epoch.
 #[derive(Debug)]
@@ -110,11 +110,11 @@ impl Auxiliary {
         &self.release_information
     }
 
-    /// Pure selection using a supplied actual EEPROM byte. This API neither
+    /// Pure selection using a supplied EEPROM byte. This API neither
     /// queries EEPROM nor authenticates the caller's observation. A native
-    /// regulatory owner must separately bind the actual read, image, device/
+    /// regulatory owner must separately bind the read, image, device/
     /// reset/firmware epoch and successful policy commands. Never default a
-    /// missing EEPROM byte to zero or infer regulatory authority from a slot.
+    /// missing EEPROM byte to zero or infer regulatory permission from a slot.
     pub fn select_clc(&self, eeprom_byte: u8) -> Result<Selection<'_>, Error> {
         let chip = self.requests.chip;
         let encapsulation = eeprom_byte & if chip == Chip::Mt7925 { 3 } else { 1 };
@@ -152,7 +152,7 @@ impl Auxiliary {
                 }
             } else if selected.records[index].is_none() {
                 let matches = if chip == Chip::Mt7925 {
-                    // Both union offsets are checked by the actual helper
+                    // Both union offsets are checked by the helper
                     // for BE_CTRL; do not simplify this to only t2.type.
                     (index != 2 || bytes[6] & 3 == encapsulation) && bytes[7] & 3 == encapsulation
                 } else {

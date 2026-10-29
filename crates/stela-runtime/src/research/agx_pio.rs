@@ -10,7 +10,7 @@
 
 use crate::platform::apple::agx::ring::Shared;
 
-/// The original `AGFIPIORegionType` values used by retained power callbacks.
+/// The original `AGFIPIORegionType` values used by kept power callbacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Kind {
@@ -29,7 +29,7 @@ const DESCRIPTOR_BYTES: u64 = 0x28;
 const WRITABLE: u32 = 2;
 
 /// A validated snapshot of one AP descriptor. Its first physical range is
-/// explicit; subsequent ranges need their actual physical list and cannot be
+/// explicit; subsequent ranges need their physical list and cannot be
 /// inferred by adding to the first base.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
@@ -48,7 +48,7 @@ impl Region {
         (self.physical, self.bytes, self.range_bytes)
     }
 
-    /// An original producer-qualified physical list may qualify later
+    /// An original producer-checked physical list may check later
     /// ranges. No caller may synthesize that list by adding to the first
     /// descriptor base; every resulting native target still walks the UAT.
     pub fn listed_word(&self, offset: u32, bases: &[u64]) -> Result<(u64, u64), &'static str> {
@@ -117,7 +117,7 @@ impl Region {
             return Err("GFX firmware PIO descriptor has unknown access flags");
         }
         // The firmware copies only through +0x23. The last four bytes are
-        // padding and need not be zero in the AP's retained allocation.
+        // padding and need not be zero in the AP's allocation.
         region
             .physical
             .checked_add(u64::from(region.range_bytes))
@@ -130,12 +130,12 @@ impl Region {
     }
 
     /// Address a word in the first known physical range. The native target
-    /// still has to check its actual physical bank and the UAT translation.
+    /// still has to check its physical bank and the UAT translation.
     pub fn word(&self, offset: u32, write: bool) -> Result<(u64, u64), &'static str> {
         self.range(offset, 4, write)
     }
 
-    /// Qualify the complete native access, including eight-byte resource
+    /// Check the complete native access, including eight-byte resource
     /// windows. This does not infer a secondary physical range or bypass UAT.
     pub fn range(&self, offset: u32, bytes: u32, write: bool) -> Result<(u64, u64), &'static str> {
         if !matches!(bytes, 4 | 8) {

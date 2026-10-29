@@ -9,7 +9,7 @@ fn prekey_control_port_transport() {
     let admission = permit(&mut owner, &driver, AssociationUse::Authentication);
     let mut frame = eth(0x888e);
     frame[..6].copy_from_slice(&AP.0);
-    // SAFETY: only this genuine model OS's EAPOL control-port transport is granted.
+    // SAFETY: only this model OS's EAPOL control-port transport is granted.
     unsafe {
         driver.transmit_modern(
             &mut owner,
@@ -35,8 +35,8 @@ fn prekey_control_port_transport() {
     poll(&mut driver, &mut owner, &state, 106).unwrap();
     driver.poll_released().unwrap();
     let eapol = response(0x0208, &[0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e, 1, 2, 3]);
-    // A plaintext data descriptor still needs the actual configured peer WCID.
-    // Retain the original WCID0 input as a hostile profile mismatch first.
+    // A plaintext data descriptor still needs the configured peer WCID.
+    // Keep the original WCID0 input as a hostile profile mismatch first.
     let mut raw = incoming_bytes(&eapol, None, false);
     device_receive(&model.queues[&0xd4520], &raw, true, 0);
     assert!(matches!(
@@ -116,7 +116,7 @@ fn protected_block_ack_receipts() {
     };
     let mut received = Some(original);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    // SAFETY: received owns the authenticated envelope for the current retained
+    // SAFETY: received owns the authenticated envelope for the current kept
     // session. Fresh hardware/OS guards serialize consumption and the pending block-
     // ack state; no borrowed frame escapes the guarded operation.
     unsafe {
@@ -132,9 +132,9 @@ fn protected_block_ack_receipts() {
     assert!(driver.station().active_rx_block_ack(6).is_none());
     for now in [frontend_tick(113), frontend_tick(114)] {
         let admission = permit(&mut owner, &driver, AssociationUse::Management);
-        // SAFETY: The pending block-ack state belongs to this same retained session
+        // SAFETY: The pending block-ack state belongs to this same session
         // and requester. Each synchronous progress step reacquires both leases and
-        // retains command/frame DMA until its modeled acknowledgement.
+        // keeps command/frame DMA until its modeled acknowledgement.
         unsafe { driver.progress_block_ack(&mut owner, admission, &PmfSource(state.clone()), now) }
             .unwrap();
     }

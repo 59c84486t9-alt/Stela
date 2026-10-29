@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Source ordinary ADDBA/DELBA and single-TID BAR fields. No session authority.
+//! Source ordinary ADDBA/DELBA and single-TID BAR fields. No session permission.
 use super::Error;
 use crate::bytes::get_le16;
 use crate::net::{
@@ -183,7 +183,7 @@ pub(super) fn bar(frame: &Mpdu, local: Mac, peer: Mac) -> Result<(u8, u16), Erro
         return Err(Error::InvalidFrame);
     }
     let control = word(frame.bytes(), 16)?;
-    // This entry point implements the ordinary single-TID form; no fabricated
+    // This entry point implements the ordinary single-TID form; no invented
     // multi-TID entries or guessed per-link session are accepted.
     if control & 2 != 0 {
         return Err(Error::Unsupported);

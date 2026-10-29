@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Actual firmware, ROC, DMA-fetch/TX-free and completed-RX peer controls.
+//! Firmware, ROC, DMA-fetch/TX-free and completed-RX peer controls.
 use super::*;
 use crate::net::wifi::mediatek::bootstrap::client::tests::*;
 use crate::net::wifi::mediatek::bootstrap::tests::{Bar, NativeGuard, Q};
@@ -14,13 +14,13 @@ fn finish(mut client: Client<Bar, Q, NativeGuard>, model: Model, now: u64) {
     client.poll(now, &Source, &mut Policy(true)).unwrap();
     assert!(client.poll_released().unwrap().is_empty());
     assert_eq!(client.phase(), Phase::NeedsDrain);
-    // SAFETY: all actual model descriptors, mailbox/ROC notifications and
-    // retained DMA users have been consumed; no independent physical user.
+    // SAFETY: all model descriptors, mailbox/ROC notifications and
+    // DMA users have been consumed; no independent physical user.
     unsafe { client.retire_peer_after_drain() }.unwrap();
     client.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
     model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
-    // SAFETY: actual model stop/reset leaves no DMA, IRQ or external users.
+    // SAFETY: model stop/reset leaves no DMA, IRQ or external users.
     unsafe { client.stop_after_quiesce() }.unwrap();
     drop(client);
     assert_eq!(model.drops.load(Ordering::Relaxed), 1);
@@ -575,7 +575,7 @@ fn actual_rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fi
             0,
         );
         // Native polling consumes one descriptor per turn. A non-LAST
-        // fragment retains assembly ownership and cannot emit authentication.
+        // fragment keeps assembly ownership and cannot emit authentication.
         for _ in 1..fragments {
             assert!(
                 client
@@ -677,7 +677,7 @@ fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication(
             alignment: usize,
             attribute: CacheAttribute,
         ) -> Result<PinnedPages, MemoryError> {
-            // Actual retained controller TSC advances while preparing unpublished
+            // Controller TSC advances while preparing unpublished
             // RAM. No synthetic firmware grant or deadline replacement occurs.
             while self.clock.now_us() < self.deadline {
                 core::hint::spin_loop();
@@ -710,7 +710,7 @@ fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication(
         ),
         Err(Error::GrantTimeout)
     ));
-    // The real ROC grant remains live; it is the distinct retained exchange
+    // The real ROC grant remains live; it is the distinct exchange
     // deadline which prevented producer publication after DMA preparation.
     assert!(source.clock.now_us() < client.state().roc_deadline.unwrap());
     assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
@@ -732,7 +732,7 @@ fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication(
         &session
     ));
     drop(client);
-    // Uncertain owner Drop deliberately retains its actual controller/ROC and
+    // Uncertain owner Drop keeps its controller/ROC and
     // resources; a refused packet cannot authorize an invented reset/drain.
     assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
@@ -741,7 +741,7 @@ fn actual_exchange_deadline_during_dma_preparation_refuses_producer_publication(
 #[test]
 fn actual_peer_firmware_refusal_quarantines_original_exchange_and_resources() {
     let (mut client, model) = setup();
-    // Existing firmware peer model returns its actual nonzero unified status.
+    // Existing firmware peer model returns its nonzero unified status.
     // BSS may have succeeded and the peer command may have affected hardware;
     // no local rejection grants rollback or resets the owned namespace.
     model.response.lock().unwrap().status = 0xc000_0001;

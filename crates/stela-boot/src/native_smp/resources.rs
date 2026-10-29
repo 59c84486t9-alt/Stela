@@ -18,7 +18,7 @@ pub(crate) struct Resources {
     pub stacks: Region,
     /// Separate native invocation frames; never an executor's Rust stack.
     pub invocations: Region,
-    /// One actual BSP work runtime's fixed pool; task roles are admitted later.
+    /// One BSP work runtime's fixed pool; task roles are admitted later.
     pub tasks: Region,
     /// Optional bounded UP diagnostic pool; complete raw prefix/suffix remain owned.
     pub prototype_tasks: Region,

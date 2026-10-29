@@ -1,6 +1,6 @@
 //! Immutable fabric-bridge register roles and validated counter geometry.
 //! Layout construction describes offsets, widths and command encodings only.
-//! Live retained words, knownness, MMIO writes and completion stay device-owned.
+//! Live kept words, knownness, MMIO writes and completion stay device-owned.
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
@@ -157,7 +157,7 @@ impl Layout {
         })
     }
     /// Original T6000 version3 side field accepts the complete source byte.
-    /// Actual DT view extents must be checked independently by the parser.
+    /// DT view extents must be checked independently by the parser.
     pub fn t6000(
         fields: &[(u64, u32)],
         header: [u8; 4],

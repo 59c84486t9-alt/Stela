@@ -2,7 +2,7 @@
 // Copyright (C) 2023 MediaTek Inc.
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
 //! Initial MT7925 WLAN reset from Linux mt792x_wfsys_reset_default. This private
-//! install step provides neither runtime recovery nor shared reset authority.
+//! install step provides neither runtime recovery nor shared reset permission.
 use super::{BarIo, Control, Error, Observation};
 use crate::net::wifi::mediatek::identity::Chip;
 
@@ -12,10 +12,10 @@ const INIT_DONE: u32 = 1 << 4;
 
 impl<I: BarIo> Control<I> {
     /// # Safety
-    /// This is the genuine initial exclusive MT7925 WLAN install epoch, before
+    /// This is the initial exclusive MT7925 WLAN install epoch, before
     /// any rings/engine publication, with no old WLAN firmware/DMA/IRQ users.
     /// External shared power/reset operations still require retirement of all
-    /// affected functions; this WLAN observation grants no such authority.
+    /// affected functions; this WLAN observation grants no such permission.
     pub(in crate::net::wifi::mediatek) unsafe fn initial_wfsys_reset(
         &mut self,
     ) -> Result<Observation, Error> {
@@ -120,8 +120,8 @@ mod tests {
         }
     }
     fn setup(chip: Chip, initial: u32, ack_after: Option<u32>) -> Control<Model> {
-        // Compressed actual TSC delays exercise the real Clock lower bounds;
-        // this scale is not calibrated physical-host timing qualification.
+        // Compressed TSC delays exercise the real Clock lower bounds;
+        // this scale is not calibrated physical-host timing validation.
         let clock = crate::Clock {
             ticks_per_microsecond: 10,
         };
@@ -217,7 +217,7 @@ mod tests {
                 assert!(c.registers.test_io().log.iter().all(|v| v.1 != 0xf0140));
             }
         }
-        // Two RMWs and the first poll: fail every actual MMIO boundary.
+        // Two RMWs and the first poll: fail every MMIO boundary.
         for fail in 1..=5 {
             let mut c = setup(Chip::Mt7925, 0, Some(1));
             c.driver_own(false).unwrap();

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Owned pre-EBS UEFI observation for Intel's packed DSBR variable. Raw EFI
-//! statuses are x86-64 values; only actual NOT_FOUND is classified as absent.
+//! statuses are x86-64 values; only NOT_FOUND is classified as absent.
 use super::{DsbrInput, PlatformInputs};
 
 const UEFI_ERROR_BIT: u64 = 1 << 63;
@@ -35,7 +35,7 @@ pub enum DsbrCaptureObservation {
 }
 impl DsbrCapture {
     /// A successful GetVariable response. Short (or otherwise wrong-size)
-    /// responses retain their exact size and SUCCESS status, not an absence.
+    /// responses keep their exact size and SUCCESS status, not an absence.
     pub fn from_variable(bytes: &[u8], attributes: u32) -> Self {
         Self {
             observation: match bytes.try_into() {
@@ -47,7 +47,7 @@ impl DsbrCapture {
             },
         }
     }
-    /// Preserve the exact native x86-64 EFI_STATUS and returned required size.
+    /// Preserve the native x86-64 EFI_STATUS and returned required size.
     /// BUFFER_TOO_SMALL is a malformed fixed-size variable, never a request to
     /// allocate an arbitrary firmware-controlled buffer or retry a racing read.
     pub fn from_uefi_error(uefi_status: u64, required_bytes: Option<u64>) -> Self {

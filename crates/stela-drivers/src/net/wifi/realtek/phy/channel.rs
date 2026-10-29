@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
-//! Actual source BB/MAC/RF channel sequence. No calibrated radio/TX admission.
+//! Source BB/MAC/RF channel sequence. No calibrated radio/TX admission.
 use super::channel_power::{self, Geometry, Plan, Programmed, Width};
 use super::{Attempt, Error, Io, Path, PhyInitialized, Report, rf};
 use crate::net::wifi::realtek::registers::*;
 
-/// Actual source channel stores and IGI latch completed. This retains the same
-/// physical PHY state; it is not readback/calibration/OS-policy authority.
+/// Source channel stores and IGI latch completed. This keeps the same
+/// physical PHY state; it is not readback/calibration/OS-policy permission.
 #[derive(Debug)]
 pub struct ChannelSet {
     phy: PhyInitialized,
@@ -35,10 +35,10 @@ impl ChannelSet {
     /// Apply the next source power phase for this exact requested geometry.
     ///
     /// # Safety
-    /// All actual same-owner/reset/firmware/board, held native→OS authority,
-    /// current power inputs, quiesced work, queued-air drain and qualification
+    /// All same-owner/reset/firmware/board, held native→OS permission,
+    /// current power inputs, quiesced work, queued-air drain and validation
     /// requirements of PhyInitialized::program_channel_power apply. Required
-    /// genuine coexistence band notification must already complete, preserving
+    /// coexistence band notification must already complete, preserving
     /// the source channel → coexistence → power order. ChannelSet
     /// stores are not proof that the radio tuned/calibrated or can transmit.
     pub unsafe fn program_channel_power<I: Io>(
@@ -50,27 +50,27 @@ impl ChannelSet {
         if self.geometry != plan.geometry() {
             return Err(Error::ChannelPower(channel_power::Error::Geometry));
         }
-        // SAFETY: caller retains the same actual native and policy guards;
+        // SAFETY: caller keeps the same native and policy guards;
         // immutable plan geometry is additionally bound to this source phase.
         unsafe { self.phy.program_channel_power(io, report, plan) }
     }
 }
 impl PhyInitialized {
-    /// Set source baseband, MAC and both RF paths then latch actual current IGI.
+    /// Set source baseband, MAC and both RF paths then latch current IGI.
     ///
     /// # Safety
-    /// Same actual retained requester, control owner, reset/firmware/board epoch
-    /// as this PHY state, Report and Io, not equal fingerprints alone. Retain
-    /// actual claims/queues/pins/full BAR and qualified native clock; genuine
+    /// Same kept requester, control owner, reset/firmware/board epoch
+    /// as this PHY state, Report and Io, not equal fingerprints alone. Keep
+    /// claims/queues/pins/full BAR and checked native clock; genuine
     /// prior MAC/HCI/PHY initialization remains valid. Invalidate old applied
-    /// policy and actually stop/enforce/drain queued air traffic first. Hold
-    /// native control authority followed by genuine OS/location authority for
+    /// policy and stop/enforce/drain queued air traffic first. Hold
+    /// native control permission followed by OS/location permission for
     /// this exact channel/width through the complete sequence; no reverse waits.
     /// Operational TX (including autonomous ACK/beacon/retry), RX and competing
-    /// reset/IRQ/PHY/RF/coexistence/power work remain genuinely quiesced. A
-    /// parsed channel, scan result or caller numeric geometry is not authority.
+    /// reset/IRQ/PHY/RF/coexistence/power work remain quiesced. A
+    /// parsed channel, scan result or caller numeric geometry is not permission.
     /// Caller performs required coexistence notification, per-channel power,
-    /// RFK/IQK/DPK, EDCCA and actual tuning/readback qualification before any
+    /// RFK/IQK/DPK, EDCCA and tuning/readback validation before any
     /// shared RX/TX admission. This does not claim DMA stop or air completion.
     pub unsafe fn set_channel<I: Io>(
         self,
@@ -306,7 +306,7 @@ fn rstb<I: Io>(a: &mut Attempt<'_, I>, on: bool) -> Result<(), Error> {
     Ok(())
 }
 fn rf_channel<I: Io>(a: &mut Attempt<'_, I>, report: &Report, g: Geometry) -> Result<u32, Error> {
-    // SAFETY: public consumed transition holds the actual same serialized
+    // SAFETY: public consumed transition holds the same serialized
     // requester and uninterrupted PHY/firmware epoch with full native domains.
     let old = unsafe { rf::Registers::new(a.io, report) }?.read(Path::A, 0x18, 0xfffff)?;
     let ch = center(g);
@@ -330,7 +330,7 @@ fn rf_channel<I: Io>(a: &mut Attempt<'_, I>, report: &Report, g: Geometry) -> Re
         | width;
     rstb(a, false)?;
     {
-        // SAFETY: same retained guarded control owner; no competing worker
+        // SAFETY: same guarded control owner; no competing worker
         // can reset/revoke the RF domain through this serialized native borrow.
         let mut rf = unsafe { rf::Registers::new(a.io, report) }?;
         for path in [Path::A, Path::B] {

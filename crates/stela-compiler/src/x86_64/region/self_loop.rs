@@ -39,7 +39,7 @@ pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) ->
 }
 
 /// One source-derived plan is shared by cache admission and emission. Existing
-/// qualified five-slot bodies retain their exact recipe; broader shapes use the
+/// checked five-slot bodies keep their exact recipe; broader shapes use the
 /// common live-value allocator, not a participant-count exception.
 pub(crate) struct Plan {
     choice: Choice,

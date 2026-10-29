@@ -13,7 +13,7 @@ use crate::net::wifi::{
 };
 use alloc::vec::Vec;
 
-/// Exact immutable request snapshot and its qualified active-probe profile. This
+/// Exact immutable request snapshot and its checked active-probe profile. This
 /// is an operation description, never a stand-alone device or radio permit.
 #[derive(Clone, Copy, Debug)]
 pub struct ScanOperation<'a> {
@@ -31,7 +31,7 @@ impl<'a> ScanOperation<'a> {
 /// Single-use admission owning the complete immutable request snapshot.
 /// Publication takes no replacement request/profile; its callback receives this
 /// exact one. The snapshot is input data: original native/OS guards supply the
-/// authority. Owning it permits the vendor to mark its Scanner submitted inside
+/// permission. Owning it permits the vendor to mark its Scanner submitted inside
 /// the guarded native handoff without aliasing Scanner::request().
 ///
 /// ```compile_fail
@@ -137,11 +137,11 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         })
     }
     /// Recheck every operation for the same immutable request and same native
-    /// context/OS revision; retain both genuine leases across native submission.
+    /// context/OS revision; keep both leases across native submission.
     /// # Safety
     /// The callback must encode the supplied exact request/profile and publish
-    /// through this concrete hardware guard's actual native owner. It may not
-    /// target another requester or supply an unqualified firmware rate/power,
+    /// through this concrete hardware guard's native owner. It may not
+    /// target another requester or supply an unchecked firmware rate/power,
     /// active/passive, channel/width or probe-frame variation. Revocation must
     /// enforce the providers' existing pending/autonomous-work stop/drain
     /// contracts after publication; closure return is no terminal completion.
@@ -285,7 +285,7 @@ mod tests {
             self.0.os_denied.get() != Some(operation.channel().number)
         }
     }
-    // SAFETY: bounded authority/ordering model with no physical device.
+    // SAFETY: bounded permission/ordering model with no physical device.
     unsafe impl HardwarePolicy for Hardware {
         type Lease<'a> = HardwareGuard<'a>;
         fn acquire(&mut self) -> Option<Self::Lease<'_>> {
@@ -301,7 +301,7 @@ mod tests {
             Some(HardwareGuard(&self.0))
         }
     }
-    // SAFETY: exact modeled native context and live revision; no real OS grant.
+    // SAFETY: modeled native context and live revision; no real OS grant.
     unsafe impl OsPolicy for Os {
         type Lease<'a> = OsGuard<'a>;
         fn acquire(&mut self, native: NativeContext) -> Option<Self::Lease<'_>> {
@@ -652,7 +652,7 @@ mod tests {
         }
         .unwrap();
         assert_eq!(actual, Err(0x92));
-        // Actual/uncertain publication must retain submitted request state.
+        // Actual/uncertain publication must keep submitted request state.
         // Admission release is never command completion, cancellation or drain.
         assert_eq!(scanner.phase(), protocol::Phase::Submitted);
         assert!(scanner.request().is_some());

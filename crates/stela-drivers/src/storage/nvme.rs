@@ -514,7 +514,7 @@ struct HostMemory {
     chunks: Vec<Buffer>,
     bytes: u64,
     /// The controller accepted it, so a re-enable may ask for its contents
-    /// back (`host_mem_descs` retained).
+    /// back (`host_mem_descs` kept).
     returnable: bool,
 }
 
@@ -990,7 +990,7 @@ impl Controller {
         if (queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) != queue.phase {
             return Ok(None);
         }
-        // The domain qualifies the coherent observation; this barrier orders
+        // The domain checks the coherent observation; this barrier orders
         // later CQ words after the device's final phase/status publication.
         fence(Ordering::SeqCst);
         let result = queue.completions.coherent(entry)?;
@@ -2687,7 +2687,7 @@ mod tests {
         disk: Namespace,
         // The real driver uses volatile MMIO/DMA accesses to these owned,
         // stable allocations. This fixture advances completions explicitly;
-        // it is not a physical NVMe model or a reset qualification.
+        // it is not a physical NVMe model or a reset validation.
         _registers: Box<[u64]>,
         _memory: Vec<u64>,
     }
@@ -2698,7 +2698,7 @@ mod tests {
             let mut memory = vec![0u64; 65536];
             let start = memory.as_mut_ptr() as u64;
             // SAFETY: this fixture owns both stable allocations until after
-            // all controller operations; no actual device accesses them.
+            // all controller operations; no device accesses them.
             let (mmio, mut dma) = unsafe {
                 (
                     Mmio::new(registers.as_mut_ptr() as u64),
@@ -2728,7 +2728,7 @@ mod tests {
                 shut_down: false,
                 command_id: 0,
                 // Exercise a real finite deadline with a short captured test
-                // policy; native attachment retains its thirty-second policy.
+                // policy; native attachment keeps its thirty-second policy.
                 clock: Clock {
                     ticks_per_microsecond: 1000,
                 },

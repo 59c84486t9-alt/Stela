@@ -7,10 +7,10 @@
 //!
 //! Profile matching describes the original tables; it grants no device, pad,
 //! firmware or interrupt ownership. Raw constructors remain internal to the
-//! actual native ACPI/MMIO adapter and independent peers. That adapter serves
+//! native ACPI/MMIO adapter and independent peers. That adapter serves
 //! ordinary GPIO OpRegions; these serialized process/deferred operations do not
 //! install a parent interrupt. Lynx Point, Bay Trail and Cherryview use different engines
-//! and are deliberately absent from this modern register interface.
+//! and are absent from this modern register interface.
 mod engine;
 mod registers;
 mod tables;
@@ -69,7 +69,7 @@ pub(super) struct Community {
     groups: &'static [Group],
 }
 
-/// Exact original ACPI/UID and community/group description, not admission.
+/// Original ACPI/UID and community/group description, not admission.
 #[derive(Debug)]
 pub struct Profile {
     name: &'static str,

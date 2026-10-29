@@ -1,4 +1,4 @@
-//! Real guarded mixed-size mappings and retained callback records for profile proofs.
+//! Real guarded mixed-size mappings and kept callback records for profile proofs.
 use super::*;
 use alloc::vec;
 use core::sync::atomic::AtomicUsize;
@@ -12,7 +12,7 @@ pub(super) fn mapped(
 pub(super) fn requirements(kernel_count: usize) -> Vec<StackRequirement> {
     let mut result = vec![ordinary(); 8];
     result[2] = kernel();
-    // Rust workers deliberately precede kernel workers: class is geometry, not slot position.
+    // Rust workers precede kernel workers: class is geometry, not slot position.
     result.extend(core::iter::repeat_n(ordinary(), 24 - kernel_count));
     result.extend(core::iter::repeat_n(kernel(), kernel_count));
     result
@@ -78,14 +78,14 @@ impl Fixture {
             // SAFETY: every fixture callback returned and no producer can wake it again.
             drop(unsafe { r.detach_binding(wake.context_id()) }.unwrap());
         }
-        // SAFETY: no native source exists; queue is closed, all actual frames joined/detached.
+        // SAFETY: no native source exists; queue is closed, all frames joined/detached.
         unsafe { r.retire() }.unwrap();
     }
 }
 pub(super) unsafe extern "C" fn record(context: *mut c_void) {
-    // SAFETY: queue retains Fixture and its stable Case allocation until actual completion.
+    // SAFETY: queue keeps Fixture and its stable Case allocation until completion.
     let case = unsafe { &*context.cast::<Case>() };
-    // SAFETY: Case's immutable owner address names that same retained Fixture allocation.
+    // SAFETY: Case's immutable owner address names that same Fixture allocation.
     let f = unsafe { &*(case.owner as *const Fixture) };
     let r = f.runtime();
     let view = r.current_context().unwrap();
@@ -113,7 +113,7 @@ pub(super) fn executor(
     f: Arc<Fixture>,
 ) -> (Executor<64>, Arc<test_support::CpuModel>, Arc<AtomicUsize>) {
     let cpu = test_support::CpuModel::new();
-    // SAFETY: same-thread model and exact retained fixture owner; no native qualification.
+    // SAFETY: same-thread model and exact fixture owner.
     let q = unsafe { Queue::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
     let executor =

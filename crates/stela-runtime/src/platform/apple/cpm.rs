@@ -3,11 +3,11 @@
 //! at +250/+270/+8400/+8408 and P bit0 at +8b30. Stela hands off disabled
 //! zero configuration; conditional iBoot threshold RMWs are not reproduced.
 //! No physical overload or thermal cause is modeled, so no active throttle
-//! or counter event is invented. Configuration retains every written field.
+//! or counter event is invented. Configuration keeps every written field.
 //!
 //! `restoreHW` (0x2f9cb9c, stores 0x2f9ce74..0x2f9ced8) writes full64 1
 //! at +40f8. The restore request completes immediately against the already
-//! retained configuration. Its completion is recorded; electrical effects and
+//! configuration. Its completion is recorded; electrical effects and
 //! command readback are not proved. Other values and reads of it refuse.
 use super::regfile::Held;
 use alloc::vec::Vec;

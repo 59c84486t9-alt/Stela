@@ -38,7 +38,7 @@ impl From<pnvm::Error> for Error {
     }
 }
 
-/// Actual acquisition outcome, retained even when source policy allows an
+/// Acquisition outcome, kept even when source policy allows an
 /// unavailable BIOS variable or explicitly selects its external fallback.
 #[derive(Clone, Copy, Debug)]
 pub enum Source<'a> {
@@ -79,7 +79,7 @@ fn unavailable(variable: Variable, observation: Observation) -> Result<bool, Err
         Observation::Absent { status, .. } if status == (1 << 63) | 14 => Ok(true),
         Observation::Failed { status, .. } if status & (1 << 63) != 0 => Ok(true),
         // Linux cannot obtain a package payload from a successful variable
-        // shorter than its packed header. Preserve that actual observation.
+        // shorter than its packed header. Preserve that observation.
         Observation::Present { bytes, .. } if bytes < 14 => Ok(true),
         Observation::Present { .. } => Ok(false),
         _ => Err(Error::Observation {
@@ -117,8 +117,8 @@ fn bios<'a>(
     Ok(loaded)
 }
 
-/// Only the owning ROM epoch calls this with its private actually decoded SKU;
-/// this helper grants no upload, signature, firmware status or radio authority.
+/// Only the owning ROM epoch calls this with its private decoded SKU;
+/// this helper grants no upload, signature, firmware status or radio permission.
 pub(super) fn prepare<'a>(
     profile: &Profile,
     sku: [u32; 3],

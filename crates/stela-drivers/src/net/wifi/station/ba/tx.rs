@@ -9,8 +9,8 @@
 //! independent of the firmware's on-air sequence assignment. Real firmware
 //! operational completion enables TX;
 //! plans, peer responses and descriptor flags alone never do. Stop invalidates
-//! publication first, then requires actual command/TX-user retirement. Other
-//! controller DMA, peer/key and queue owners remain independently retained.
+//! publication first, then requires command/TX-user retirement. Other
+//! controller DMA, peer/key and queue owners remain independently kept.
 
 use super::{AssociationContext, Completion, Error, Phase, Station, TIDS, Ticket, wire};
 use crate::net::wifi::frame::{self, MAX_AMPDU_BUF_EHT, MAX_AMPDU_BUF_HE, MAX_AMPDU_BUF_HT};
@@ -23,7 +23,7 @@ const BURST_RETRIES: u8 = 3;
 const TU_US: u64 = 1024;
 const NOT_USING_BLOCK_ACK: u16 = 37;
 
-/// Private identity of this actual association's particular TX negotiation.
+/// Private identity of this association's particular TX negotiation.
 #[derive(Debug)]
 pub struct Session {
     ticket: Ticket,
@@ -71,19 +71,19 @@ pub enum Action {
         ticket: Ticket,
         session: Arc<Session>,
     },
-    /// Some agreement programs TX_OPERATIONAL; None is actual TX_STOP.
+    /// Some agreement programs TX_OPERATIONAL; None is TX_STOP.
     Program {
         ticket: Ticket,
         session: Arc<Session>,
         agreement: Option<Agreement>,
     },
-    /// Exact wire bytes are retained privately and checked before publication.
+    /// Exact wire bytes are held privately and checked before publication.
     Transmit {
         ticket: Ticket,
         session: Arc<Session>,
         bytes: Vec<u8>,
     },
-    /// Native may release retained pending TX into this active agreement only
+    /// Native may release kept pending TX into this active agreement only
     /// under its ordinary current association/radio/key publication guards.
     Operational {
         session: Arc<Session>,
@@ -171,7 +171,7 @@ fn deadline(now: u64, interval: u64) -> Result<u64, Error> {
 }
 
 impl Station {
-    /// Actual source hardware maximum; this is metadata and grants no radio,
+    /// Source hardware maximum; this is metadata and grants no radio,
     /// aggregation, firmware completion or permission to release pending TX.
     pub fn configure_tx_block_ack(&mut self, maximum: u16) -> Result<(), Error> {
         if maximum == 0 || maximum > MAX_AMPDU_BUF_EHT {
@@ -280,7 +280,7 @@ impl Station {
         Ok(record)
     }
 
-    /// Recognize only the exact original operation canceled in the canonical
+    /// Recognize only the original operation canceled in the canonical
     /// record. This does not prove native nonpublication or TX retirement.
     pub(crate) fn validate_tx_block_ack_cancellation(&self, action: &Action) -> Result<(), Error> {
         let (ticket, session) = match action {
@@ -343,12 +343,12 @@ impl Station {
     }
 
     /// # Safety
-    /// Matching actual TID preparation is terminal. Accepted includes blocked
-    /// new TX, synchronized old TX users and the actual canonical per-TID next
+    /// Matching TID preparation is terminal. Accepted includes blocked
+    /// new TX, synchronized old TX users and the canonical per-TID next
     /// 12-bit software sequence counter (as Linux sta->tid_seq>>4). It is not an
     /// observation of firmware/on-air sequence and must not be invented as zero
     /// because the descriptor requests hardware sequence assignment. Native
-    /// must retain that TID/queue owner through all following actions. Rejection
+    /// must keep that TID/queue owner through all following actions. Rejection
     /// may release it only with independently established idle state. Pending
     /// packets remain owned, including every failure/cancellation path.
     pub unsafe fn complete_tx_block_ack_prepare(
@@ -390,8 +390,8 @@ impl Station {
             self.validate_association_context(&record.session.context)?;
             let n = record.session.context.negotiated();
             let maximum = self.tx_ba.maximum.unwrap();
-            // Source non-STRICT HT deliberately requests 64 even if the HW
-            // actual maximum is smaller; the peer result is clamped later.
+            // Source non-STRICT HT requests 64 even if the HW
+            // maximum is smaller; the peer result is clamped later.
             let window = if n.eht.is_some() {
                 maximum
             } else if n.he.is_some() {
@@ -452,9 +452,9 @@ impl Station {
     }
 
     /// # Safety
-    /// The exact retained management frame's matching physical publication is
-    /// terminal. Accepted means admitted and actually queued/published, without
-    /// assuming an on-air ACK. Uncertainty retains the session/owners; it cannot
+    /// The exact management frame's matching physical publication is
+    /// terminal. Accepted means admitted and queued/published, without
+    /// assuming an on-air ACK. Uncertainty keeps the session/owners; it cannot
     /// be converted into permission to reuse an old TX agreement or queue.
     pub unsafe fn complete_tx_block_ack_transmit(
         &mut self,
@@ -525,8 +525,8 @@ impl Station {
         }
         if matches!(record.state, State::Publishing { .. }) {
             // The peer may respond after real publication but before its native
-            // publication callback is dispatched. Retain the first matching
-            // response without activating anything. The actual terminal result
+            // publication callback is dispatched. Keep the first matching
+            // response without activating anything. The terminal result
             // must still be Accepted; cancellation/failure cannot replay this.
             record.early_response.get_or_insert(Response {
                 window,
@@ -588,8 +588,8 @@ impl Station {
 
     /// # Safety
     /// Matching real native operation is terminal. Accepted operational means
-    /// exact peer/TID/window/A-MSDU programming ACKed, with retained pending TX
-    /// still blocked until Operational is consumed. Accepted stop means actual
+    /// exact peer/TID/window/A-MSDU programming ACKed, with kept pending TX
+    /// still blocked until Operational is consumed. Accepted stop means
     /// firmware disable and retirement of old command callbacks and TX users,
     /// including already-published aggregate TX. Independent controller/key/
     /// requester owners remain alive. A rejected stop never proves retirement.
@@ -647,7 +647,7 @@ impl Station {
         }
     }
 
-    /// Revoke aggregate publication before actual native stop. A local request
+    /// Revoke aggregate publication before native stop. A local request
     /// sends initiator DELBA only after completed stop; peer/decline uses false.
     /// An in-flight prepare/publication/operational command must finish before
     /// its dependent stop is emitted, so a late success cannot revive the TID.
@@ -723,8 +723,8 @@ impl Station {
     }
 
     /// # Safety
-    /// Called only for an actual aggregate TX publication under current native
-    /// association/radio/key guards, with this same retained session. Queuing,
+    /// Called only for an aggregate TX publication under current native
+    /// association/radio/key guards, with this same session. Queuing,
     /// packet construction, stale callbacks and failed publication do not count.
     pub unsafe fn tx_block_ack_published(
         &mut self,
@@ -843,7 +843,7 @@ mod tests {
             .unwrap();
         assert_eq!(&bytes[31..33], &0xfff0u16.to_le_bytes());
         assert!(matches!(
-            // SAFETY: modeled exact frame actually admitted/queued, without air-ACK claim.
+            // SAFETY: modeled exact frame admitted/queued, without air-ACK claim.
             unsafe { s.complete_tx_block_ack_transmit(wire, Completion::Accepted, s.now + 1) }
                 .unwrap(),
             TxAction::None
@@ -899,7 +899,7 @@ mod tests {
         let mut s = station(512);
         let (prepare, session) = prepare(&mut s, 3, 19);
         assert!(s.active_tx_block_ack(3).is_none());
-        // SAFETY: modeled synchronized TID/actual next sequence.
+        // SAFETY: modeled synchronized TID/next sequence.
         let (wire, _, bytes) = transmit(
             unsafe {
                 s.complete_tx_block_ack_prepare(prepare, Completion::Accepted, Some(321), s.now + 1)
@@ -921,7 +921,7 @@ mod tests {
         s.validate_tx_block_ack_transmit(wire, &session, &bytes)
             .unwrap();
         // SAFETY: exact wire publication completed; a real matching early peer
-        // response is retained until this acknowledgement, then programs firmware.
+        // response is held until this acknowledgement, then programs firmware.
         let (program, _, agreement) = programming(
             unsafe { s.complete_tx_block_ack_transmit(wire, Completion::Accepted, s.now + 1) }
                 .unwrap(),
@@ -936,7 +936,7 @@ mod tests {
         s.validate_tx_block_ack_program(program, &session, agreement)
             .unwrap();
         assert!(matches!(
-            // SAFETY: actual matching firmware install ACK modeled.
+            // SAFETY: matching firmware install ACK modeled.
             unsafe { s.complete_tx_block_ack_program(program, Completion::Accepted) }.unwrap(),
             TxAction::Operational { .. }
         ));
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(s.allocate_qos_sequence(&context, 3), Err(Error::Busy));
         assert_eq!(s.next_qos_sequence(&context, 3), Ok(17));
         assert_eq!(s.allocate_qos_sequence(&context, 4), Ok(0));
-        // SAFETY: fixture models the actual native synchronization of old TID users
+        // SAFETY: fixture models the native synchronization of old TID users
         // before reading this real canonical cursor; independent TIDs keep working.
         let snapshot = s.next_qos_sequence(&context, 3).unwrap();
         let (wire, _, bytes) = transmit(
@@ -979,7 +979,7 @@ mod tests {
             u16::from_le_bytes(bytes[31..33].try_into().unwrap()) >> 4,
             17
         );
-        // SAFETY: actual request publication then actual peer response modeled.
+        // SAFETY: request publication then peer response modeled.
         unsafe { s.complete_tx_block_ack_transmit(wire, Completion::Accepted, s.now + 1) }.unwrap();
         let frame = peer_response(&session, session.dialog(), 0, 64, 0, true);
         let (program, _, _) = programming(receive_tx(&mut s, &frame), true);
@@ -1003,7 +1003,7 @@ mod tests {
         ] {
             let mut s = station(1024);
             let (prepare_ticket, session) = prepare(&mut s, 3, 0);
-            // SAFETY: actual synchronized software TID counter and retained queue.
+            // SAFETY: synchronized software TID counter and kept queue.
             let (wire, _, _) = transmit(
                 unsafe {
                     s.complete_tx_block_ack_prepare(
@@ -1043,7 +1043,7 @@ mod tests {
             s.validate_tx_block_ack_program(ticket, &session, agreement)
                 .unwrap();
             assert!(matches!(
-                // SAFETY: completed actual disable/retirement before legacy queue release.
+                // SAFETY: completed disable/retirement before legacy queue release.
                 unsafe { s.complete_tx_block_ack_program(ticket, Completion::Accepted) }.unwrap(),
                 TxAction::ResumeLegacy { .. }
             ));
@@ -1086,7 +1086,7 @@ mod tests {
                 .unwrap();
             s.configure_tx_block_ack(hardware_maximum).unwrap();
             let (prepare, session) = prepare(&mut s, 3, 0);
-            // SAFETY: source canonical software cursor after actual native TID drain.
+            // SAFETY: source canonical software cursor after native TID drain.
             let (wire, _, bytes) = transmit(
                 unsafe {
                     s.complete_tx_block_ack_prepare(
@@ -1101,7 +1101,7 @@ mod tests {
             let parameters = u16::from_le_bytes(bytes[27..29].try_into().unwrap());
             assert_eq!(parameters >> 6, request_window);
             assert_eq!(bytes.len(), if mode == Mode::Ht { 33 } else { 36 });
-            // SAFETY: actual request publication modeled before the real peer input.
+            // SAFETY: request publication modeled before the real peer input.
             unsafe { s.complete_tx_block_ack_transmit(wire, Completion::Accepted, s.now + 1) }
                 .unwrap();
             let frame = peer_response(&session, session.dialog(), 0, peer_window, 0, true);
@@ -1160,7 +1160,7 @@ mod tests {
             let mut pending = prepare_ticket;
             let mut agreement = None;
             if stage >= 1 {
-                // SAFETY: actual synchronized TID state, retained through cancellation.
+                // SAFETY: synchronized TID state, kept through cancellation.
                 let (wire, _, _) = transmit(
                     unsafe {
                         s.complete_tx_block_ack_prepare(
@@ -1175,7 +1175,7 @@ mod tests {
                 pending = wire;
             }
             if stage == 2 {
-                // SAFETY: request publication acknowledged before actual peer input.
+                // SAFETY: request publication acknowledged before peer input.
                 unsafe {
                     s.complete_tx_block_ack_transmit(pending, Completion::Accepted, s.now + 1)
                 }
@@ -1215,7 +1215,7 @@ mod tests {
             .unwrap();
             let (stop, _, _) = programming(action, false);
             assert!(matches!(
-                // SAFETY: only an actual completed stop now releases retained pending TX.
+                // SAFETY: only a completed stop now releases kept pending TX.
                 unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
                 TxAction::ResumeLegacy { .. }
             ));
@@ -1235,7 +1235,7 @@ mod tests {
         let (stop, _, _) = programming(s.poll_tx_block_ack(due).unwrap(), false);
         let frame = peer_response(&session, session.dialog(), 0, 64, 0, true);
         assert!(matches!(receive_tx(&mut s, &frame), TxAction::None));
-        // SAFETY: actual stop completion modeled.
+        // SAFETY: stop completion modeled.
         let (wire, _, _) = transmit(
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
         );
@@ -1275,7 +1275,7 @@ mod tests {
             let session = request_sent(&mut s, 3);
             let declined = peer_response(&session, session.dialog(), 37, 64, 0, true);
             let (stop, _, _) = programming(receive_tx(&mut s, &declined), false);
-            // SAFETY: each independent native owner actually stopped/drained.
+            // SAFETY: each independent native owner stopped/drained.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap();
         }
         s.clock(s.now + 15_000_000).unwrap();
@@ -1283,13 +1283,13 @@ mod tests {
             s.begin_tx_block_ack(3, 0, s.now + 1),
             Err(BaError::Busy)
         ));
-        // Other TIDs retain independent budgets. Four actual failed wire requests
+        // Other TIDs keep independent budgets. Four failed wire requests
         // exhaust the burst, then a real accepted peer resets that TID's count.
         for _ in 0..4 {
             let session = request_sent(&mut s, 4);
             let declined = peer_response(&session, session.dialog(), 37, 64, 0, true);
             let (stop, _, _) = programming(receive_tx(&mut s, &declined), false);
-            // SAFETY: matching actual stop completes before this TID's next attempt.
+            // SAFETY: matching stop completes before this TID's next attempt.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap();
         }
         assert!(matches!(
@@ -1300,7 +1300,7 @@ mod tests {
         let other = operational(&mut s, 4, 0);
         assert_eq!(other.tid(), 4);
         let (stop, _, _) = programming(s.stop_tx_block_ack(4, false).unwrap(), false);
-        // SAFETY: exact native session stop/drain modeled.
+        // SAFETY: native session stop/drain modeled.
         unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap();
         assert!(matches!(
             s.begin_tx_block_ack(4, 0, s.now + 1).unwrap(),
@@ -1326,7 +1326,7 @@ mod tests {
         ));
         let (stop, _, _) = programming(s.stop_tx_block_ack(3, false).unwrap(), false);
         assert!(matches!(
-            // SAFETY: rejected disable is deliberately insufficient for actual retirement.
+            // SAFETY: rejected disable is insufficient for retirement.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::RejectedAndIdle) }.unwrap(),
             TxAction::None
         ));
@@ -1344,7 +1344,7 @@ mod tests {
         let frame = peer_response(&session, session.dialog(), 0, 64, 0, true);
         let (enable, _, _) = programming(receive_tx(&mut s, &frame), true);
         assert!(matches!(
-            // SAFETY: transport cannot establish the actual terminal command result.
+            // SAFETY: transport cannot establish the terminal command result.
             unsafe { s.complete_tx_block_ack_program(enable, Completion::Uncertain) }.unwrap(),
             TxAction::None
         ));
@@ -1357,7 +1357,7 @@ mod tests {
         ));
         let (stop, _, _) = programming(s.stop_tx_block_ack(3, false).unwrap(), false);
         assert!(matches!(
-            // SAFETY: independently completed actual disable includes retirement of the old
+            // SAFETY: independently completed disable includes retirement of the old
             // uncertain command callback and every old-session TX user.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
             TxAction::ResumeLegacy { .. }
@@ -1372,7 +1372,7 @@ mod tests {
         let (enable, _, _) = programming(receive_tx(&mut s, &frame), true);
         let removal = s.disconnect().unwrap();
         assert!(s.validate_tx_block_ack(&session).is_err());
-        // SAFETY: old successful operation finishes after actual association revocation.
+        // SAFETY: old successful operation finishes after association revocation.
         let (stop, _, agreement) = programming(
             unsafe { s.complete_tx_block_ack_program(enable, Completion::Accepted) }.unwrap(),
             false,
@@ -1380,7 +1380,7 @@ mod tests {
         s.validate_tx_block_ack_program(stop, &session, agreement)
             .unwrap();
         assert!(matches!(
-            // SAFETY: independently acknowledged native stop under retained old ownership.
+            // SAFETY: independently acknowledged native stop under kept old ownership.
             unsafe { s.complete_tx_block_ack_program(stop, Completion::Accepted) }.unwrap(),
             TxAction::ResumeLegacy { .. }
         ));
@@ -1398,7 +1398,7 @@ mod tests {
                 session: session.clone(),
             };
             if stage >= 1 {
-                // SAFETY: this canonical peer model has synchronized actual TID preparation.
+                // SAFETY: this canonical peer model has synchronized TID preparation.
                 action = unsafe {
                     s.complete_tx_block_ack_prepare(
                         ticket,
@@ -1413,7 +1413,7 @@ mod tests {
                 let TxAction::Transmit { ticket, .. } = action else {
                     unreachable!()
                 };
-                // SAFETY: actual modeled publication completed before the peer response.
+                // SAFETY: modeled publication completed before the peer response.
                 unsafe {
                     s.complete_tx_block_ack_transmit(ticket, Completion::Accepted, s.now + 1)
                 }

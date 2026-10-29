@@ -83,7 +83,7 @@ pub struct Framebuffer {
 #[derive(Debug, Clone)]
 pub struct Machine {
     pub dram_base: u64,
-    /// Guest DRAM bytes actually backed from `dram_base`.
+    /// Guest DRAM bytes backed from `dram_base`.
     pub ram_bytes: u64,
     /// The DRAM the Mac reports (`/chosen dram-size`, `memSizeActual`):
     /// the backed bytes and, above them, the host memory Stela and the

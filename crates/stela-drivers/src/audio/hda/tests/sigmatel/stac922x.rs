@@ -89,7 +89,7 @@ fn knob_capture_range_and_duplex() {
                         (**command >> 20) & 127 == 0x12 && (**command >> 16) & 15 == 3
                     })
                     .collect();
-                assert_eq!(physical.len(), 1); // No fabricated bit7 pre-mute.
+                assert_eq!(physical.len(), 1); // No invented bit7 pre-mute.
                 assert_eq!(*physical[0] as u16, 0xb000); // Both channels, gain0.
                 for channel in 0..2 {
                     assert_eq!(m.amplifiers[&(0x12, true, 0, channel)], 0);

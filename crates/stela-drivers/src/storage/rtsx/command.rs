@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of rtsx_pci_sdmmc.c, Copyright 2009-2013 Realtek.
-//! Actual SD_TRANSFER predicates and ping-pong ownership, never HAIMR ACK as
+//! SD_TRANSFER predicates and ping-pong ownership, never HAIMR ACK as
 //! card-command completion. No HCB/HDB command or data DMA is started here.
 use super::*;
 use crate::storage::mmc::protocol::{Host as CardHost, OCR_330};
@@ -261,7 +261,7 @@ impl Engine {
         )?;
         self.wait_transfer(SD_TRANSFER_END, true, budget)?;
         // sd_read_data consumes END and PPBUF, not an inferred R1 in SD_CMDx.
-        // Hardware CRC/status and the later actual CMD13 readiness own errors.
+        // Hardware CRC/status and the later CMD13 readiness own errors.
         if !tuning {
             for index in 0..bytes {
                 self.scratch[index] = self.rd(budget, PPBUF_BASE2 + index as u16)?;
@@ -347,7 +347,7 @@ impl Engine {
                 ));
             }
             // An incomplete late frame cannot authorize additional reads. The
-            // final completed frame still decodes actual R1/R6 errors first.
+            // final completed frame still decodes R1/R6 errors first.
             if expired && index + 1 < length {
                 return Err(BlockError::Timeout);
             }

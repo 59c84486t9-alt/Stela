@@ -1,4 +1,4 @@
-//! Retained callback wall time, distinct from queued command latency.
+//! Callback wall time, distinct from queued command latency.
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// One callback generation observed active between the sample's counter reads.

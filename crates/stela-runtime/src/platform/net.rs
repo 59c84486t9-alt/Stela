@@ -1,9 +1,9 @@
-//! Dual-stack HTTP and TLS transport over retained native Ethernet adapters.
+//! Dual-stack HTTP and TLS transport over kept native Ethernet adapters.
 //!
 //! smoltcp owns ARP, IPv4/IPv6, DHCPv4, DNS and TCP. SLAAC/RDNSS admission
-//! includes duplicate-address detection; the URL-aware request layer retains
+//! includes duplicate-address detection; the URL-aware request layer keeps
 //! redirect policy and range validators. TLS uses the shared protocol provider
-//! and requires actual owned entropy and a UTC-correlated continuous clock.
+//! and requires owned entropy and a UTC-correlated continuous clock.
 //! Missing native capabilities refuse HTTPS; they cannot select plaintext.
 //! Stateful DHCPv6 is unsupported. Raw guest relay bytes stay opaque.
 use alloc::string::String;
@@ -136,8 +136,8 @@ impl fmt::Display for ClockError {
     }
 }
 impl core::error::Error for ClockError {}
-/// Microseconds from one retained monotonic origin. Native implementations
-/// preserve actual source/context errors instead of substituting a timestamp.
+/// Microseconds from one monotonic origin. Native implementations
+/// preserve source/context errors instead of substituting a timestamp.
 pub trait Clock {
     fn now_us(&self) -> Result<u64, ClockError>;
     /// Sleep until an interrupt or `until_us`; no-sleep clocks return at once.

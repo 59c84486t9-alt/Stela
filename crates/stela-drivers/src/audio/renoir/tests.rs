@@ -227,7 +227,7 @@ impl Device {
 fn assert_claim_refuses(cfg: Config<'_>) {
     let device = Arc::new(Mutex::new(Device::new(1)));
     assert!(
-        // SAFETY: Model and Domain retain the same mutex-serialized Device
+        // SAFETY: Model and Domain keep the same mutex-serialized Device
         // and its owned fixture registers. There is no physical PCI or
         // firmware actor, and no DMA mapping has been published.
         unsafe {

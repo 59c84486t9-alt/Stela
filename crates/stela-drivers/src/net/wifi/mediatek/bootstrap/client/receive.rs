@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
-//! Actual source-queue split-parent ownership before canonical replay. This
-//! deliberately refuses partial flushes rather than promoting loss to a full
+//! Source-queue split-parent ownership before canonical replay. This
+//! refuses partial flushes rather than promoting loss to a full
 //! authenticated parent. Raw AMPDU does not create a negotiated BA session.
 use super::*;
 use wifi::security::aggregate::{OrderedGroup, Shape};
@@ -23,8 +23,8 @@ pub(super) struct ReceivedFrame {
     pub(super) queue: Queue,
     pub(super) frame: crate::net::wifi::mediatek::ring::rx::Frame,
 }
-// This is created only from this Client's actual completed native queue and
-// retained installed peer. It is never minted by a public copied-RX API.
+// This is created only from this Client's completed native queue and
+// installed peer. It is never minted by a public copied-RX API.
 struct SourceOwner<C: 'static> {
     _resource: Arc<C>,
     context: Arc<station::AssociationContext>,
@@ -67,7 +67,7 @@ impl<C> Parent<C> {
             && a.radio.frequency_mhz == b.radio.frequency_mhz
             && b.security.pn.is_none_or(|pn| a.security.pn == Some(pn))
     }
-    // Actual completion and optional BA release are established by this
+    // Completion and optional BA release are established by this
     // private native caller, not by a public first/last or numeric epoch input.
     unsafe fn ordered(self) -> OrderedGroup<SourceOwner<C>> {
         // SAFETY: covered by this function's own safety contract.
@@ -135,8 +135,8 @@ impl<C> Groups<C> {
             };
         }
         let Some(parent) = self.pending[index].as_mut() else {
-            // Source format LAST can describe one genuinely whole one-subframe
-            // A-MSDU. Canonical framing still checks actual QoS/payload/key/PN.
+            // Source format LAST can describe one whole one-subframe
+            // A-MSDU. Canonical framing still checks QoS/payload/key/PN.
             return if observed.last {
                 Ok(Some(next))
             } else {
@@ -181,7 +181,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.station
             .validate_association_context(&context)
             .map_err(Error::Station)?;
-        // Split records repeat their MAC header. Bound the actual parent
+        // Split records repeat their MAC header. Bound the parent
         // payload, never count repeated headers against its source byte cap.
         let bytes = frame.bytes().len() - frame.header().length;
         let key = frame.security.key;
@@ -217,7 +217,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .map_err(Error::Station)?;
         let key = parent.head().security.key;
         // SAFETY: This private entry is reached only by the native source bypass or
-        // the exact currently installed BA queue's actual ordered release.
+        // the exact currently installed BA queue's ordered release.
         let group = unsafe { parent.ordered() };
         let slot = if key.is_some() {
             let owner = if group.members()[0].header().receiver.is_multicast() {

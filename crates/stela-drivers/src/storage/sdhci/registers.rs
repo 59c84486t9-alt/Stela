@@ -4,14 +4,14 @@
 //! through read-modify-write of adjacent command or write-one-to-clear state.
 use crate::bus::mmio::Mmio;
 pub(super) trait Registers {
-    /// An owning vendor provider can revoke its actual PCI/decode epoch before
-    /// the engine touches its controller mapping. Ordinary providers retain
+    /// An owning vendor provider can revoke its PCI/decode epoch before
+    /// the engine touches its controller mapping. Ordinary providers keep
     /// their existing exclusive firmware-mapping contract.
     fn check_authority(&mut self) -> Result<(), crate::block::BlockError> {
         Ok(())
     }
-    /// Runtime vendor controls use the same retained enumerated PCI function.
-    /// Ordinary MMIO providers cannot invent configuration-space authority.
+    /// Runtime vendor controls use the same enumerated PCI function.
+    /// Ordinary MMIO providers cannot invent configuration-space permission.
     fn configuration(
         &mut self,
     ) -> Result<&mut dyn crate::bus::pci::ConfigSpace, crate::block::BlockError> {
@@ -19,8 +19,8 @@ pub(super) trait Registers {
             "SDHCI provider has no retained PCI configuration authority",
         ))
     }
-    /// The ordinary attachment already admitted DMA. A retained vendor owner
-    /// can defer its actual PCI grant until retained descriptors are ready.
+    /// The ordinary attachment already admitted DMA. A kept vendor owner
+    /// can defer its PCI grant until kept descriptors are ready.
     fn dma_ready(&mut self) -> Result<(), crate::block::BlockError> {
         Ok(())
     }

@@ -14,7 +14,7 @@ pub(super) struct DomainState {
     pub(super) servicing: bool,
 }
 
-/// Retained across native execution, finalization and source PC settlement.
+/// Across native execution, finalization and source PC settlement.
 /// It owns the domain, without borrowing a policy or exposing guest storage.
 pub struct MemoryExecutionLoan {
     domain: Arc<MemoryDomain>,
@@ -352,7 +352,7 @@ mod tests {
         );
         assert_eq!(domain.state.lock().unwrap().native_loans, 1);
         assert!(thread.observation_loan().is_err());
-        // A retained identity does not bypass a published failure, and checking
+        // A kept identity does not bypass a published failure, and checking
         // does not change the invocation count.
         system.failed.store(true, Ordering::Release);
         assert_eq!(

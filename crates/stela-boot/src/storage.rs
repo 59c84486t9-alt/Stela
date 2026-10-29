@@ -307,7 +307,7 @@ impl Prepared {
         #[cfg(feature = "diagnostics")]
         let mut devices = if self.usb_media_check {
             // SAFETY: same exclusive post-EBS grant as probe; this explicit
-            // fixture diagnostic attaches native USB and retains every owner.
+            // fixture diagnostic attaches native USB and keeps every owner.
             match unsafe { media_check::probe_and_rescan(&self.handoff, &mut dma, &self.check[0]) }
             {
                 Ok(devices) => devices,

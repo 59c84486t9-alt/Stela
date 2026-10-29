@@ -11,7 +11,7 @@ struct Reservation {
     current: AtomicBool,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: exact synthetic requester/reset epoch, with retained modeled power,
+// SAFETY: synthetic requester/reset epoch, with kept modeled power,
 // serialized CM state and no independent hardware/firmware configuration actor.
 unsafe impl Owner for Reservation {
     fn inventory(&self) -> &Inventory {
@@ -162,7 +162,7 @@ fn wake_programs_sorted_real_ports_then_device_router_with_ack_and_readback() {
         let dropped = owner.dropped.clone();
         let steps = plan(&*owner).unwrap();
         assert_eq!(steps.len(), if route == 0 { 3 } else { 4 });
-        // SAFETY: exact same modeled NHI, retained router and idle CM channel.
+        // SAFETY: same modeled NHI, kept router and idle CM channel.
         let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
         control.poll(0).unwrap();
         let mut index = 0;
@@ -197,7 +197,7 @@ fn wake_programs_sorted_real_ports_then_device_router_with_ack_and_readback() {
         let mut channel = control.into_channel();
         drop(owner);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
-        // SAFETY: independent synthetic CM retains the programmed state.
+        // SAFETY: independent synthetic CM keeps the programmed state.
         unsafe { applied.retire() };
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         channel_release(&mut channel);
@@ -265,7 +265,7 @@ fn sleep_requires_actual_ack_then_ready_status_without_extending_deadline() {
         drop(owner);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         if let Some(value) = receipt {
-            // SAFETY: actual modeled power ownership transferred to native PM.
+            // SAFETY: modeled power ownership transferred to native PM.
             unsafe { value.retire() };
             assert_eq!(dropped.load(Ordering::Relaxed), 1);
         }
@@ -281,7 +281,7 @@ fn uncertain_wake_write_failures_and_revocation_quarantine_original_owner() {
         let owner = owner(1, Operation::Wake(Wake::default()));
         let dropped = owner.dropped.clone();
         let address = plan(&*owner).unwrap()[0].address;
-        // SAFETY: exact modeled router/epoch, exclusive retained wake resources.
+        // SAFETY: modeled router/epoch, exclusive kept wake resources.
         let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
         control.poll(0).unwrap();
         exchange(&mut control, &domain, &model, 0, address, &[0], 1).unwrap();
@@ -340,7 +340,7 @@ fn unconsumed_sleep_completion_keeps_live_native_power_reservation() {
     let owner = owner(1, Operation::Sleep);
     let dropped = owner.dropped.clone();
     let address = plan(&*owner).unwrap()[0].address;
-    // SAFETY: same modeled router and actual retained power/tunnel lifetime.
+    // SAFETY: same modeled router and kept power/tunnel lifetime.
     let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
     control.poll(0).unwrap();
     exchange(&mut control, &domain, &model, 0, address, &[0], 1).unwrap();
@@ -392,7 +392,7 @@ fn wake_admission_rejects_malformed_inventory_capabilities_and_stale_ownership()
             _ => unreachable!(),
         }
         let writes = model.state.lock().unwrap().writes.len();
-        // SAFETY: same modeled channel; intentionally invalid inputs refuse.
+        // SAFETY: same modeled channel; invalid inputs refuse.
         let result = unsafe { Control::new(channel, owner, 0) };
         assert!(matches!(
             result,
@@ -534,7 +534,7 @@ fn deadline_overflow_after_real_writes_permanently_poison_continued_publication(
         .collect();
     let dropped = owner.dropped.clone();
     let steps = plan(&*owner).unwrap();
-    // SAFETY: same modeled router/CM lifetime; clock genuinely advances near its limit.
+    // SAFETY: same modeled router/CM lifetime; clock advances near its limit.
     let mut control = unsafe { Control::new(channel, owner.clone(), start) }.unwrap();
     control.poll(start).unwrap();
     for index in 0..40 {

@@ -3,7 +3,7 @@
 pub const NATIVE_SPILL_WORDS: usize = 16;
 const WORD_BYTES: u16 = core::mem::size_of::<u64>() as u16;
 
-/// A byte offset from the actual interrupted host RSP, within the bounded bank.
+/// A byte offset from the interrupted host RSP, within the bounded bank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpillOffset(u16);
 impl SpillOffset {
@@ -37,7 +37,7 @@ impl core::fmt::Display for InvalidSpillOffset {
 impl core::error::Error for InvalidSpillOffset {}
 
 /// A bounded snapshot populated only by the invocation's capture owner.
-/// Each recorded word requires a checked RSP+offset, retained mapped stack-root
+/// Each recorded word requires a checked RSP+offset, kept mapped stack-root
 /// and code/plan epoch, and an initialized interval in that invocation's lease.
 /// Numeric bounds alone do not authorize reading native memory. Missing words
 /// remain unavailable; XSAVE initialization rules never initialize spill memory.
@@ -53,7 +53,7 @@ impl HostSpillSnapshot {
             available: 0,
         }
     }
-    /// Record a word after the platform has proved its capture authority.
+    /// Record a word after the platform has proved its capture permission.
     /// This method copies data and never reads a native address.
     pub fn record(&mut self, offset: SpillOffset, value: u64) {
         self.words[offset.index()] = value;

@@ -7,8 +7,8 @@ use super::*;
 use stela_contracts::processor::ProcessorTarget;
 
 impl<'a> BspSource<'a> {
-    /// Retains the full original graph but exposes only the selected source PE
-    /// for an actual one-worker BSP plan. The caller separately supplies the
+    /// Keeps the full original graph but exposes only the selected source PE
+    /// for a one-worker BSP plan. The caller separately supplies the
     /// effective harvesting setting, including any start-time overrides.
     pub fn t8112(
         original: &'a [u8],
@@ -26,7 +26,7 @@ impl<'a> BspSource<'a> {
             acc_harvesting,
         )
     }
-    // Member metadata retains the actual running BSP independently of the
+    // Member metadata keeps the running BSP independently of the
     // selected waiting PE. This never rewrites source or prepared CPU state.
     pub(super) fn t8112_member(
         original: &'a [u8],
@@ -177,7 +177,7 @@ impl<'a> BspSource<'a> {
         super::super::super::super::power_resources::validate_power_graph(&graph)?;
         // The canonical resolver also requires any original acc-harvesting
         // property to be exactly one u32 equal to the declared setting zero.
-        // The retained dependency check above binds the prepared value to it.
+        // The kept dependency check above binds the prepared value to it.
         let associations = graph.processor_associations(
             profile.chip,
             &root,

@@ -24,7 +24,7 @@ fn continuous_actual_completed_periods_cross_wraps_without_stopping_dma() {
         assert_eq!(model.words[0x2c04 / 4], 1);
         assert_eq!(model.cpu_syncs, 0);
         assert_eq!(model.words[0x1a0c / 4] & (1 << 16), 0);
-        // Actual source ISR acknowledges period before pointer sampling.
+        // Source ISR acknowledges period before pointer sampling.
         let ack = model
             .accesses
             .iter()

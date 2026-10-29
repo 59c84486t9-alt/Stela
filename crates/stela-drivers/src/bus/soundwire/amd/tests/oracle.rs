@@ -1,4 +1,4 @@
-//! Compare actual immediate stores and results to whole original Linux helpers.
+//! Compare immediate stores and results to whole original Linux helpers.
 extern crate std;
 use super::*;
 

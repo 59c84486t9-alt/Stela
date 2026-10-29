@@ -4,7 +4,7 @@
 // and 1997–1999 Martin Mares. AMD register layouts follow AMD 48882 rev 3.11.
 //! Read-only, function-grouped AMD-Vi register inspection. Layouts follow AMD
 //! 48882 revision 3.11 sections 1.3, 2.3, 3.1–3.4 and 5.2. No register writer,
-//! borrowed mapping view, numeric authority or successful completion is exposed.
+//! borrowed mapping view, numeric permission or successful completion is exposed.
 use crate::bus::{
     dma::amd::ivrs::{HardwareVersion, Ivhd, Ivrs},
     mmio::owned::{CacheAttribute, Error as MappingError, Mapping, Protection},
@@ -66,7 +66,7 @@ pub enum Error {
     Mapping(MappingError),
 }
 
-/// Exact owners on entry and refusal. Returning these never retires a mapping;
+/// Owners on entry and refusal. Returning these never retires a mapping;
 /// the caller still owes its original context and explicit retirement protocol.
 pub struct Inputs {
     pub function: Function<OwnedConfig>,
@@ -109,7 +109,7 @@ pub struct Firmware {
 pub struct Profile {
     pub configuration: Configuration,
     pub firmware: Firmware,
-    /// None means the actual capability makes both registers reserved; they
+    /// None means the capability makes both registers reserved; they
     /// were not read. Raw hardware values grant no firmware-disabled feature.
     pub hardware_extended_features: Option<(u64, u64)>,
     /// Conservative union of physical and firmware decode requirements.
@@ -132,7 +132,7 @@ pub struct Snapshot {
     pub status: u64,
 }
 
-/// Retains one original PCI function and every unit mapping. No independent
+/// Keeps one original PCI function and every unit mapping. No independent
 /// per-capability owner can invalidate another unit's configuration/IRQ epoch.
 /// The complete checksum-validated original IVRS bytes remain attached too.
 pub struct FunctionInspection {
@@ -166,24 +166,24 @@ impl FunctionInspection {
         if !(pointer.as_ptr() as usize).is_multiple_of(size_of::<u64>()) {
             return Err(Error::MappingGeometry);
         }
-        // SAFETY: the native backend's unsafe cold grant retains this exact
-        // exclusive UC/RW unit and qualifies aligned native write64 accesses.
+        // SAFETY: the native backend's unsafe cold grant keeps this exact
+        // exclusive UC/RW unit and checks aligned native write64 accesses.
         // Its closed register selection contains no status W1C writes.
         unsafe { pointer.cast::<u64>().as_ptr().write_volatile(value.to_le()) };
         Ok(())
     }
 
     /// # Safety
-    /// Inputs are the actual IOMMU function and all its selected physical unit
+    /// Inputs are the IOMMU function and all its selected physical unit
     /// resources, under their original exclusive configuration/reset/root and
-    /// MMIO access epochs. The complete IVRS is the actual firmware input for
+    /// MMIO access epochs. The complete IVRS is the firmware input for
     /// that epoch. Firmware, other native drivers and other CPU access paths
     /// cannot mutate configuration or invalidate these resources. The platform
-    /// has independently qualified native aligned read64 accesses to the UC
+    /// has checked native aligned read64 accesses to the UC
     /// mappings, including decode validity of their complete physical spans.
-    /// The caller retains the qualified process/deferred CPU context through
+    /// The caller keeps the checked process/deferred CPU context through
     /// inspection, snapshots, return and final release. This grants no unit
-    /// takeover, engine stop, DMA coherency, IRQ or requester/alias authority.
+    /// takeover, engine stop, DMA coherency, IRQ or requester/alias permission.
     /// No hardware state is changed, including on refusal or allocation failure.
     pub unsafe fn inspect(mut inputs: Inputs, ivrs: &Ivrs<'_>) -> Result<Self, (Error, Inputs)> {
         let mut firmware = Vec::new();
@@ -209,7 +209,7 @@ impl FunctionInspection {
     pub fn profiles(&self) -> &[Profile] {
         &self.profiles
     }
-    /// Returns None for an unrepresented capability, never a fabricated unit.
+    /// Returns None for an unrepresented capability, never an invented unit.
     pub fn snapshot(&self, capability_offset: u16) -> Result<Option<Snapshot>, Error> {
         let Some(profile) = self
             .profiles
@@ -245,8 +245,8 @@ fn read_register(mapping: &Mapping, offset: usize) -> Result<u64, Error> {
     if !(pointer.as_ptr() as usize).is_multiple_of(size_of::<u64>()) {
         return Err(Error::MappingGeometry);
     }
-    // SAFETY: inspect's producer qualifies actual native aligned read64 and
-    // retains the exclusive UC resource/context; callers select known readable
+    // SAFETY: inspect's producer checks native aligned read64 and
+    // keeps the exclusive UC resource/context; callers select known readable
     // non-clearing registers only. Registry access rechecks the original lease.
     let value = u64::from_le(unsafe { pointer.cast::<u64>().as_ptr().read_volatile() });
     if value == u64::MAX {
@@ -371,7 +371,7 @@ fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> 
         });
     }
     // All config/firmware associations have passed. No reserved register is
-    // read when the actual capability lacks EFRSup, regardless of ACPI claims.
+    // read when the capability lacks EFRSup, regardless of ACPI claims.
     // A base without its enable bit (QEMU's amd-iommu leaves it clear) is
     // used when its registers answer, as Linux uses the IVHD's base.
     for profile in &profiles {
@@ -426,7 +426,7 @@ fn validate_mapping(mapping: &Mapping) -> Result<(), Error> {
 fn firmware_counters(unit: Ivhd<'_>, firmware_efr: bool) -> Result<bool, Error> {
     if !firmware_efr {
         // Type 10's feature-reporting field is reserved without IVINFO.EFRSup;
-        // retain its raw bytes, but never derive geometry from reserved data.
+        // keep its raw bytes, but never derive geometry from reserved data.
         return Ok(false);
     }
     if let Some((features, _)) = unit.extended_features() {
@@ -481,7 +481,7 @@ mod tests {
 
     struct Backing(PhysicalSpan);
     // SAFETY: this symbolic resource belongs exclusively to one isolated RAM
-    // model; it confers no native hardware or production mapping authority.
+    // model; it confers no native hardware or production mapping permission.
     unsafe impl ResourceBacking for Backing {
         fn physical_span(&self) -> PhysicalSpan {
             self.0
@@ -528,7 +528,7 @@ mod tests {
     }
     impl Drop for Model {
         fn drop(&mut self) {
-            // SAFETY: actual fixture allocation, exact original layout, all
+            // SAFETY: fixture allocation, original layout, all
             // registry mapping leases and synchronous consumers are gone.
             unsafe {
                 dealloc(
@@ -538,7 +538,7 @@ mod tests {
             };
         }
     }
-    // SAFETY: each retained model maps its actual isolated RAM over one
+    // SAFETY: each model maps its isolated RAM over one
     // symbolic resource. No native cache, physical IOMMU or IRQ is modeled.
     unsafe impl MappingPlatform for Model {
         fn check_context(&self, space: AddressSpace) -> Result<(), MappingError> {
@@ -573,7 +573,7 @@ mod tests {
     fn make_mapping(base: u64, bytes: usize, protection: Protection) -> (Mapping, Arc<Model>) {
         let layout = Layout::from_size_align(bytes, 4096).unwrap();
         // SAFETY: nonzero test-only allocation; page alignment is required by
-        // the actual registry, just as for a native installed mapping.
+        // the registry, just as for a native installed mapping.
         let memory = NonNull::new(unsafe { alloc_zeroed(layout) }).expect("fixture RAM");
         let model = Arc::new(Model {
             memory,
@@ -675,7 +675,7 @@ mod tests {
     }
     fn inspect(inputs: Inputs, bytes: &[u8]) -> Result<FunctionInspection, (Error, Inputs)> {
         let ivrs = Ivrs::parse(bytes, 48).unwrap();
-        // SAFETY: all inputs are actual retained, synchronous isolated fixtures.
+        // SAFETY: all inputs are held, synchronous isolated fixtures.
         unsafe { FunctionInspection::inspect(inputs, &ivrs) }
     }
     fn success(result: Result<FunctionInspection, (Error, Inputs)>) -> FunctionInspection {

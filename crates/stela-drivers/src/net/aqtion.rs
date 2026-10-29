@@ -91,8 +91,8 @@ impl Profile {
 
 /// Exclusive register effects, also used by the independently authored model.
 /// # Safety
-/// This is the actual retained UC BAR of this same function and reset epoch.
-/// A read/write performs the exact native DWORD operation or returns failure.
+/// This is the UC BAR of this same function and reset epoch.
+/// A read/write performs the native DWORD operation or returns failure.
 /// The owner must preserve mappings/reservations if dropped during active DMA.
 pub unsafe trait Registers {
     fn read(&self, offset: usize) -> Result<u32>;
@@ -136,7 +136,7 @@ unsafe impl Registers for MappedRegisters {
             return Err(Error::Unsupported("unaligned AQtion register"));
         }
         let p = self.mapping.address(offset, 4)?;
-        // SAFETY: checked live retained UC DWORD.
+        // SAFETY: checked live UC DWORD.
         unsafe { p.as_ptr().cast::<u32>().write_volatile(value) };
         Ok(())
     }
@@ -240,7 +240,7 @@ fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) 
         return Err(Error::Removed);
     }
     *power = PciPower::Unknown;
-    // Exact native WORD store: leave PME_Status W1C pending and disable PME.
+    // Native WORD store: leave PME_Status W1C pending and disable PME.
     function.config().write16(pmcsr, (control & !0x8103) | 3);
     let observed = function.config().read16(pmcsr);
     if observed == u16::MAX {
@@ -255,12 +255,12 @@ fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) 
     *power = PciPower::D3hot;
     Ok(())
 }
-/// Owns the actual PCI configuration, UC register window, DMA domain and pins.
+/// Owns the PCI configuration, UC register window, DMA domain and pins.
 /// Failed initialization returns this complete owner for stop/retry/inspection.
 /// Drop quarantines every active physical owner; it never invents DMA completion.
 /// Native attachment accepts `OwnedConfig` only. The defaulted configuration
 /// parameter lets protocol peers exercise the same lifecycle implementation;
-/// it supplies no constructor or physical resource authority.
+/// it supplies no constructor or physical resource permission.
 pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock, C: ConfigSpace = OwnedConfig> {
     function: Option<Function<C>>,
     hardware: Option<Hardware<R, T>>,
@@ -278,12 +278,12 @@ pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock, C: ConfigSpa
 }
 impl Aqtion {
     /// # Safety
-    /// The producer transfers this actual physical function exclusively after
+    /// The producer transfers this physical function exclusively after
     /// stopping firmware/other drivers, IRQ sources and workers. BAR and domain
-    /// belong to this exact retained requester/reset epoch; the domain really
-    /// isolates its DMA, including aliases. Reset is qualified to preserve that
+    /// belong to this requester/reset epoch; the domain really
+    /// isolates its DMA, including aliases. Reset is checked to preserve that
     /// epoch and its ATS/NoSnoop policy. Calls occur in serialized process context.
-    /// These are actual resource authorities, never copied PCI identities.
+    /// These are resource permissions, never copied PCI identities.
     // Return the exact uncertain native owners without allocating on failure.
     #[allow(
         clippy::result_large_err,
@@ -325,7 +325,7 @@ impl Aqtion {
             if profile.is_none() || owner.function.as_ref().unwrap().class != [2, 0, 0] {
                 return Err(Error::Unsupported("AQtion device/profile"));
             }
-            // Bind the actual register owner to the BAR decoded from retained config.
+            // Bind the register owner to the BAR decoded from kept config.
             let span = owner.hw().registers.mapping.physical_span()?;
             let required = if owner.profile.generation == Generation::Antigua {
                 0x14800
@@ -371,7 +371,7 @@ impl Aqtion {
 }
 impl Aqtion {
     /// Restore acknowledged D0, then rebuild firmware/queues. A failed PCI
-    /// transition retains the owner and may be retried without touching MMIO.
+    /// transition keeps the owner and may be retried without touching MMIO.
     pub fn resume(&mut self) -> Result<()> {
         self.resume_owned()
     }
@@ -461,7 +461,7 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
     }
     /// Ordinary stop masks IRQs, disables engines, acknowledges their state,
     /// clears BusMaster and drains the real remapper's posted payload writes.
-    /// A failure retains every owner and requires recovery before I/O resumes.
+    /// A failure keeps every owner and requires recovery before I/O resumes.
     pub fn stop(&mut self) -> Result<()> {
         if matches!(self.state, State::Stopped | State::Suspended) {
             return Ok(());
@@ -490,13 +490,13 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
             });
         }
         // SAFETY: engine-disable readbacks and stopped submissions precede this
-        // actual domain write-drain. There are no registered IRQ/work callbacks.
+        // domain write-drain. There are no registered IRQ/work callbacks.
         unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }?;
         self.state = State::Stopped;
         Ok(())
     }
     /// Stop/drain the real queue epoch before requesting PCI D3hot. The
-    /// configuration owner and DMA domain remain retained for ordinary resume.
+    /// configuration owner and DMA domain remain held for ordinary resume.
     pub fn suspend(&mut self) -> Result<()> {
         self.stop()?;
         if self.state == State::Suspended {
@@ -514,7 +514,7 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         self.start()
     }
     /// Explicitly reclaim DMA only after the acknowledged ordinary stop/drain.
-    /// A failed unmap retains the complete owner for retirement retry. Starting
+    /// A failed unmap keeps the complete owner for retirement retry. Starting
     /// retirement permanently revokes queue rebuild, including on first failure.
     pub fn retire(&mut self) -> Result<()> {
         self.stop()?;
@@ -532,7 +532,7 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         if result.is_err() {
             self.state = State::Faulted;
         } else if result == Ok(false) && self.tx_head != self.tx_tail {
-            // Link loss can strand hardware TX descriptors. Retire the actual
+            // Link loss can strand hardware TX descriptors. Retire the
             // engine epoch before reusing their bytes; failures keep it held.
             self.restart()?;
         }
@@ -644,7 +644,7 @@ fn adapter(error: Error) -> LinkError {
 }
 impl<R: Registers, T: Timer, C: ConfigSpace> Drop for Aqtion<R, T, C> {
     fn drop(&mut self) {
-        // Even stopped owners retain their MMIO epoch until the platform retires
+        // Even stopped owners keep their MMIO epoch until the platform retires
         // its mapping explicitly. An unretired DMA mapping quarantines its pins.
         if self.state != State::Stopped || self.power != PciPower::D0 {
             if let Some(f) = self.function.take() {

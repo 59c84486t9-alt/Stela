@@ -125,8 +125,8 @@ pub(super) fn initialize<C: ConfigSpace>(
             3 << 16 | 1 << 30 | 3 << 6 | 3 << 9 | 1 << 21,
             3 << 6 | 3 << 9 | 1 << 21,
         )?;
-        // The unchanged donor deliberately ORs these vendor defaults rather
-        // than replacing every field; preserve actual preexisting PHY bits.
+        // The unchanged donor ORs these vendor defaults rather
+        // than replacing every field; preserve preexisting PHY bits.
         let first = c.read32(0x90c);
         let second = c.read32(0x948);
         let control = c.read32(0x95c);

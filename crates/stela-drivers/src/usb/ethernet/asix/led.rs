@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2011-2013 ASIX
-//! Actual EEPROM/efuse validity and UA1/UA2 LED/PHY page programming.
+//! EEPROM/efuse validity and UA1/UA2 LED/PHY page programming.
 use super::*;
 impl<C: Control> Chip<C> {
     fn srom(&mut self, word: u8) -> Result<u16, BlockError> {

@@ -1,4 +1,4 @@
-//! Cooperative native mailbox ownership over one actual RTKit endpoint slot.
+//! Cooperative native mailbox ownership over one RTKit endpoint slot.
 //! The AP drives start/receive through RTKit; the native service owns the other
 //! half. Payloads are transferred, never echoed, synthesized or interpreted.
 use super::Endpoint;
@@ -13,12 +13,12 @@ struct State {
     outgoing: VecDeque<u64>,
 }
 
-/// Move this actual endpoint half into the chosen RTKit slot. Retained stop or
+/// Move this endpoint half into the chosen RTKit slot. Stop or
 /// disable preserves both queues; RTKit controls when polling/input may occur.
-/// Reset remains unqualified until the owning service releases its resources.
+/// Reset remains unchecked until the owning service releases its resources.
 pub struct NativeEndpoint(Rc<RefCell<State>>);
 
-/// The same endpoint's native mailbox, retained by its service backend. No
+/// The same endpoint's native mailbox, kept by its service backend. No
 /// public constructor accepts received payloads or replaces the shared queues.
 pub struct Mailbox(Rc<RefCell<State>>);
 
@@ -36,14 +36,14 @@ pub fn channel() -> (NativeEndpoint, Mailbox) {
 }
 
 impl Mailbox {
-    /// Actual unread AP messages retained by this paired transport. No payload
-    /// or scheduling/arrival authority is created by this read-only query.
+    /// Unread AP messages kept by this paired transport. No payload
+    /// or scheduling/arrival permission is created by this read-only query.
     pub fn pending_input(&self) -> bool {
         let state = self.0.borrow();
         state.transport_alive && !state.incoming.is_empty()
     }
-    /// Actual endpoint-control start observed by the transport, not readiness
-    /// of the protocol behind it. A disabled endpoint may retain queued work.
+    /// Endpoint-control start observed by the transport, not readiness
+    /// of the protocol behind it. A disabled endpoint may keep queued work.
     pub fn started(&self) -> bool {
         let state = self.0.borrow();
         state.transport_alive && state.started
@@ -67,8 +67,8 @@ impl Mailbox {
         Ok(())
     }
 
-    /// Consume one payload that RTKit actually delivered from the AP. None is
-    /// an empty inbox; it is never a fabricated acknowledgement or command.
+    /// Consume one payload that RTKit delivered from the AP. None is
+    /// an empty inbox; it is never an invented acknowledgement or command.
     pub fn receive(&mut self) -> Result<Option<u64>, &'static str> {
         let mut state = self
             .0

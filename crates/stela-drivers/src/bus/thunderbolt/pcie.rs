@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! Two-direction PCIe tunnels over an actual retained adjacent USB4v1 link.
+//! Two-direction PCIe tunnels over an adjacent USB4v1 link.
 //!
 //! Linux tunnel.c/path.c/switch.c protocol, using the existing native path and
 //! Channel engines. Platform authorization, shared HopID/credit allocation and
@@ -43,12 +43,12 @@ pub struct Grant {
     pub lane_credits: [LaneCredits; 2],
     pub permission: Decision,
 }
-/// Actual native CM reservation for both PCIe endpoints and both path directions.
+/// Native CM reservation for both PCIe endpoints and both path directions.
 ///
 /// # Safety
-/// This owns actual input/output HopIDs, source-selected credits and physical
+/// This owns input/output HopIDs, source-selected credits and physical
 /// endpoint-to-lane mapping from the shared domain allocator in the exact
-/// Linked/NHI/reset/topology epoch. It retains actual _OSC/security PCIe tunnel
+/// Linked/NHI/reset/topology epoch. It keeps _OSC/security PCIe tunnel
 /// authorization and requester DMA/IMR/IOMMU protection. Credit modes/limits
 /// reflect real router VSEC allocation, and reserved credits cover all competing
 /// users. Exclusive CS0 endpoint control, router/link/power and topology admission
@@ -103,7 +103,7 @@ struct PathOwner {
     grant: Grant,
     allocation: path::Allocation,
 }
-// SAFETY: the private adapter carries the original actual combined reservation;
+// SAFETY: the private adapter carries the original combined reservation;
 // fields are only the existing path engine's historical USB3-shaped metadata.
 unsafe impl path::Reservation for PathOwner {
     fn allocation(&self) -> path::Allocation {
@@ -191,7 +191,7 @@ pub(super) fn endpoint(
         header: header.raw,
     })
 }
-/// Both actual directions and enabled endpoints. Drop retains the combined
+/// Both directions and enabled endpoints. Drop keeps the combined
 /// native reservation and complete original link/path chain through uncertainty.
 pub struct Active {
     pub endpoints: [u32; 2],
@@ -217,7 +217,7 @@ impl Active {
     /// ```
     pub unsafe fn retire(mut self) {
         if let Some(path) = self.path.take() {
-            // SAFETY: this method's caller proves full restoration or retained
+            // SAFETY: this method's caller proves full restoration or kept
             // native transfer for both paths and the original link chain.
             unsafe { path.retire() };
         }
@@ -226,7 +226,7 @@ impl Active {
             unsafe { path.retire() };
         }
         if let Some(link) = self.link.take() {
-            // SAFETY: the caller proof includes both actual routers/link even
+            // SAFETY: the caller proof includes both routers/link even
             // when no path had started before ownership was transferred.
             unsafe { link.retire() };
         }
@@ -282,7 +282,7 @@ pub(super) fn storage<T>() -> Result<Box<MaybeUninit<T>>, Error> {
 }
 impl<R: Registers> Activate<R> {
     /// # Safety
-    /// Idle Channel, actual Linked and Reservation belong to one exact physical
+    /// Idle Channel, Linked and Reservation belong to one exact physical
     /// requester/reset/topology lifetime. Every Reservation requirement holds;
     /// matching metadata never creates native security, DMA or allocator rights.
     /// ```compile_fail
@@ -404,7 +404,7 @@ impl<R: Registers> Activate<R> {
             .ok_or(Error::ClockOverflow)?;
         let job = crate::bus::thunderbolt::stage_deadline(now, 10_000, self.job_deadline)
             .ok_or(Error::ClockOverflow)?;
-        // SAFETY: preflight protected both actual plans and retained all native
+        // SAFETY: preflight protected both plans and kept all native
         // rights, link and first-path storage before the first publication.
         self.path = Some(unsafe {
             if index == 0 {
@@ -533,7 +533,7 @@ impl<R: Registers> Activate<R> {
                         let mut slot = self.first_slot.take().ok_or(Error::UnexpectedReceipt)?;
                         slot.write(path);
                         // SAFETY: this preallocated unique exact-layout slot
-                        // now contains the actual completed first path owner.
+                        // now contains the completed first path owner.
                         let previous = unsafe { slot.assume_init() };
                         self.retained
                             .as_mut()
@@ -641,7 +641,7 @@ pub(super) fn checked_reply(reply: Reply, upstream: u8) -> Result<alloc::vec::Ve
     }
 }
 
-/// Local stopped PCIe tunnel, retaining original power/authorization/link and
+/// Local stopped PCIe tunnel, keeping original power/authorization/link and
 /// endpoint DMA/IRQ protection. A local stop never detaches a PCI requester.
 pub struct Stopped {
     pub endpoints: [u32; 2],
@@ -657,8 +657,8 @@ impl Stopped {
         if !self.active.current() {
             return Err((Error::Revoked, self));
         }
-        // SAFETY: actual endpoint disable ACK/readback and all four owned hop
-        // disabled/PENDING0 receipts are retained in this same live epoch.
+        // SAFETY: endpoint disable ACK/readback and all four owned hop
+        // disabled/PENDING0 receipts are held in this same live epoch.
         let link = unsafe {
             self.active
                 .path
@@ -701,9 +701,9 @@ pub struct Stop<R: Registers> {
 }
 impl<R: Registers> Stop<R> {
     /// # Safety
-    /// The idle Channel and complete tunnel belong to one retained native epoch;
+    /// The idle Channel and complete tunnel belong to one native epoch;
     /// native submission is closed and independent endpoint/DMA/IRQ/IOMMU/power
-    /// lifetimes stay retained through both local stop and later reuse.
+    /// lifetimes stay held through both local stop and later reuse.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::{channel::Channel,pcie::{Active,Stop},ring::Registers};
     /// fn stop<R:Registers>(c:Channel<R>,a:Box<Active>){let _=Stop::new(c,a,0);}

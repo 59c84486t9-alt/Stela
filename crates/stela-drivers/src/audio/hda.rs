@@ -5,7 +5,7 @@
 //!
 //! This is the conventional HDA MMIO core. The `pci` module prepares a bounded
 //! conventional Intel/ATI/AMD subset. Intel DSP/firmware ownership, other vendor quirks, ACPI
-//! power resources, the actual HDMI GPU port provider, OEM amplifier/pin policy, suspend and
+//! power resources, the HDMI GPU port provider, OEM amplifier/pin policy, suspend and
 //! guest audio bridging remain platform responsibilities. An ID match alone
 //! does not establish exclusive controller ownership.
 //! All DMA allocations live for the boot, even after an error or drop. Do not
@@ -64,7 +64,7 @@ pub use routing::{AnalogRoute, PinOptions, Vref};
 use stream::{ConverterBinding, Stream};
 pub use stream::{PositionInfo, PositionPolicy, StreamId, StreamStatus, StreamTagPolicy};
 
-/// Select from an actual controller identity/quirk table in platform glue.
+/// Select from a controller identity/quirk table in platform glue.
 /// Intel/AMD standard reset uses the set-then-clear handshake; a self-clearing
 /// controller must be explicitly identified, never inferred from a timeout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub enum CorbReset {
     SelfClearing,
 }
 
-/// Mandatory reset preparation selected from an actual controller identity.
+/// Mandatory reset preparation selected from a controller identity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ResetPolicy {
     #[default]
@@ -183,8 +183,8 @@ pub struct Controller<R, T> {
     stopped: bool,
     streams: Vec<Option<Stream>>,
     routes: Vec<(StreamId, AnalogRoute)>,
-    // Non-route codec controls: owner, codec address, actual node. Observing or
-    // preconditioning a pin does not fabricate a converter path for it.
+    // Non-route codec controls: owner, codec address, node. Observing or
+    // preconditioning a pin does not invent a converter path for it.
     codec_controls: Vec<(StreamId, u8, u8)>,
     converter_bindings: Vec<ConverterBinding>,
     realtek_codecs: Vec<realtek::State>,
@@ -227,7 +227,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// memory and MMIO alive for the boot. On constructor failure, quiesce/reset
     /// hardware before releasing ownership: stop acknowledgement may have failed.
     /// Apply platform PCI/snoop/power/clock/quirk setup before calling this.
-    /// `config.dma_address_bits` must reflect the actual identity/platform DMA
+    /// `config.dma_address_bits` must reflect the identity/platform DMA
     /// reachability ceiling; GCAP's 64-bit flag alone does not establish it.
     pub unsafe fn new(
         registers: R,
@@ -673,7 +673,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     /// `snd_hda_bus_reset`: stop and fully reinitialize the controller, then
-    /// resume each codec from its retained writes, as codec resume replays its
+    /// resume each codec from its writes, as codec resume replays its
     /// register cache. Streams lose their descriptors to the link reset and
     /// stay stopped until released.
     fn bus_reset(&mut self) -> Result<(), Error> {
@@ -718,10 +718,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
-    /// Stop every stream and both command engines. Failure retains ownership:
+    /// Stop every stream and both command engines. Failure keeps ownership:
     /// DMA memory cannot be repurposed and the platform must reset the device.
     pub fn shutdown(&mut self) -> Result<(), Error> {
-        // Only this invocation's actual RUN readbacks may establish quiescence.
+        // Only this invocation's RUN readbacks may establish quiescence.
         // A prior stopped state can survive a failed reset/restart attempt.
         self.stopped = false;
         if let Err(error) = self.refresh_extended() {
@@ -744,7 +744,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 stream.poisoned = true;
             }
         }
-        // Vendor amplifier effects follow actual stream-stop acknowledgements,
+        // Vendor amplifier effects follow stream-stop acknowledgements,
         // before command engines retire. A codec-control failure still permits
         // command-DMA quiescence, but is returned as a real incomplete shutdown.
         let codec_error = if error.is_none() {
@@ -788,8 +788,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 }
 
-/// Check the entire device-visible extent, not merely its base. The caller has
-/// already intersected actual identity/platform limits with GCAP's 32/64 flag.
+/// Check the entire device-visible extent, not its base. The caller has
+/// already intersected identity/platform limits with GCAP's 32/64 flag.
 fn check_dma_range(physical: u64, bytes: usize, align: u64, address_bits: u8) -> Result<(), Error> {
     let end = physical
         .checked_add(bytes as u64)

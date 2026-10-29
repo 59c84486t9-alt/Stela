@@ -189,7 +189,7 @@ fn select_clock(link: Link, value: u32) -> Result<u8, Error> {
 impl ExtendedCapabilities {
     /// Validate the exact first link's observable power/clock state without
     /// changing it. Native PCI preparation calls this before any config write.
-    /// Reset repeats actual selection; this observation is not a power grant.
+    /// Reset repeats selection; this observation is not a power grant.
     pub(super) fn preflight_clock(&self, registers: &mut impl Registers) -> Result<(), Error> {
         if let Some(&link) = self.links.first() {
             select_clock(link, control(registers, link.base + LCTL)?)?;

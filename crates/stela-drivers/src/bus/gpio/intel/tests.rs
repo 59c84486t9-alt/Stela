@@ -335,7 +335,7 @@ fn edge_ack_precedes_consumer_and_preserves_second_edge_and_unowned_causes() {
         assert_eq!(pin, 0);
         let mut state = state.borrow_mut();
         assert_eq!(state.words[&(0, 0x100)], 0b10);
-        state.words.insert((0, 0x100), 0b11); // genuine new edge during handler
+        state.words.insert((0, 0x100), 0b11); // new edge during handler
         Ok(())
     });
     assert_eq!(report.error, None);

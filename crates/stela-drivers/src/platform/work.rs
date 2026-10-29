@@ -1,14 +1,14 @@
-//! Bounded native deferred work with real retained task continuations.
+//! Bounded native deferred work with real kept task continuations.
 //!
 //! This service is pumped by its owning physical CPU. It does not install a
 //! scheduler interrupt, invent an ACPICA provider, or claim autonomous wakeup.
-//! Admission never invokes a callback, allocates or releases retained owners.
+//! Admission never invokes a callback, allocates or releases kept owners.
 //! Process/deferred context owns construction, pumping, retirement and every
 //! final owner release. The pump preserves incoming IF exactly; it never enables
 //! interrupt delivery to manufacture progress. A future SCI/ACPICA adapter must
-//! supply a genuine dispatcher policy that permits hardware IRQ progress and
-//! actual main-owned interrupt metadata, plus IRQ-safe allocation/synchronizers.
-//! This module alone does not qualify that provider.
+//! supply a dispatcher policy that permits hardware IRQ progress and
+//! main-owned interrupt metadata, plus IRQ-safe allocation/synchronizers.
+//! This module alone does not check that provider.
 use crate::bus::dma::memory::{MemoryError, PinnedPages};
 #[cfg(target_arch = "x86_64")]
 use alloc::vec::Vec;
@@ -109,10 +109,10 @@ pub struct Ticket {
     sequence: u64,
 }
 
-/// Main's actual processor/context adapter. There are no no-op defaults.
+/// Main's processor/context adapter. There are no no-op defaults.
 ///
 /// # Safety
-/// All methods operate at CPL0 on one qualified physical CPU, with native
+/// All methods operate at CPL0 on one checked physical CPU, with native
 /// interrupt-safe compiler code (no unprotected red zone), a stable main-owned
 /// GS/FS/root context, and no task migration or root/segment changes by work.
 /// `save_disable` checks
@@ -120,7 +120,7 @@ pub struct Ticket {
 /// `restore` restores those exact flags on that CPU. `in_interrupt` uses real
 /// main-owned IRQ context metadata, not IF or a made-up task ID. `ticks` is a
 /// progressing monotonic clock on this CPU, including while IRQs are disabled.
-/// The adapter, callback code and roots stay retained through quarantine.
+/// The adapter, callback code and roots stay held through quarantine.
 /// `fatal` must not return/unwind. Operations never silently migrate contexts.
 pub unsafe trait Cpu: Send + Sync {
     fn check_cpu(&self) -> Result<(), WorkError>;
@@ -135,13 +135,13 @@ pub unsafe trait Cpu: Send + Sync {
     fn fatal(&self, error: WorkError) -> !;
 }
 
-/// The actual exclusively owned task RAM, guard and all-root mapping lease.
+/// The exclusively owned task RAM, guard and all-root mapping lease.
 ///
 /// # Safety
 /// Bounds are immutable page-aligned writable WB native RAM, exclusively owned
 /// for this task's stack, with no DMA/other mutable owner and no preexisting
-/// live execution frames when admitted to a new executor. `guard` is a genuinely
-/// unmapped page-aligned preceding range in every execution root, never merely
+/// live execution frames when admitted to a new executor. `guard` is an
+/// unmapped page-aligned preceding range in every execution root, never
 /// an address label. The entire RAM/code/root/guard lease remains valid until
 /// Drop, including suspended frames and uncertain executor failure. Drop may
 /// reclaim it only after the context and every producer/IRQ/work user stopped.
@@ -151,13 +151,13 @@ pub unsafe trait StackBacking: Send + Sync {
 
     /// Export a real allocation/mapping pin from this backing's resource owner.
     /// The caller independently checks exact usable coverage/cache/granules;
-    /// an incompatible actual view is refused, never treated as stack access.
+    /// an incompatible view is refused, never treated as stack access.
     /// Metadata setup is fallible and nonblocking, without queue reentry, root
     /// changes, migration or parking. No replacement RAM or PA/VA labels may
-    /// stand in for the real retained allocation and mapping owner.
+    /// stand in for the real allocation and mapping owner.
     ///
     /// # Safety
-    /// The caller exclusively owns genuinely never-entered, fully zeroed usable
+    /// The caller exclusively owns never-entered, fully zeroed usable
     /// backing, with no live frame/DMA/other byte user. Every successful pin
     /// satisfies PageBacking's real ownership contract, including initial zero
     /// and mapping retention. No C stack/address/current permission follows.
@@ -229,7 +229,7 @@ struct State<const N: usize> {
     scheduling: scheduling::Board,
 }
 /// No Runtime/Task pointer crosses into this IRQ-safe read view. A single
-/// actual executor binds these identities to its retained stack ranges.
+/// executor binds these identities to its stack ranges.
 #[cfg(target_arch = "x86_64")]
 struct ActiveContext {
     id: AtomicU64,
@@ -245,7 +245,7 @@ impl ActiveContext {
             end: AtomicUsize::new(0),
         }
     }
-    // Both methods require the qualified CPU with IF clear. No queue lock or
+    // Both methods require the checked CPU with IF clear. No queue lock or
     // borrowed Task state survives the subsequent hardware stack transition.
     fn publish(&self, id: ContextId, bounds: &Range<usize>) {
         self.start.store(bounds.start, Ordering::Relaxed);
@@ -260,7 +260,7 @@ impl ActiveContext {
 }
 
 /// Shared preallocated admission slots. Every active/queued callback is covered
-/// by the actual provider/root owner retained at construction. Callbacks and
+/// by the provider/root owner kept at construction. Callbacks and
 /// their dynamic contexts must obey unsafe enqueue's lifetime contract.
 pub struct Queue<const N: usize> {
     id: u64,
@@ -278,7 +278,7 @@ pub struct Queue<const N: usize> {
 }
 // SAFETY: same-CPU IRQ-save exclusion protects all state; foreign CPUs fail
 // before touching it. A bounded try-lock refuses unexpected/NMI reentry. No
-// callback, allocation, context switch or retained-owner Drop occurs locked.
+// callback, allocation, context switch or kept-owner Drop occurs locked.
 unsafe impl<const N: usize> Send for Queue<N> {}
 // SAFETY: as for Send above.
 unsafe impl<const N: usize> Sync for Queue<N> {}
@@ -303,10 +303,10 @@ impl<const N: usize> Drop for Guard<'_, N> {
 }
 impl<const N: usize> Queue<N> {
     /// # Safety
-    /// `owner` is the actual provider/context/code/root lease for all jobs,
-    /// retained until real producer quiescence and retirement, never a dummy.
-    /// Every IRQ/producer retains an actual Queue Arc through its full source
-    /// lifetime; an unowned raw queue pointer never qualifies. Creation and
+    /// `owner` is the provider/context/code/root lease for all jobs,
+    /// until real producer quiescence and retirement, never a dummy.
+    /// Every IRQ/producer keeps a Queue Arc through its full source
+    /// lifetime; an unowned raw queue pointer never checks. Creation and
     /// final Arc/owner release occur in process/deferred context.
     pub unsafe fn new(cpu: Arc<dyn Cpu>, owner: RetainedOwner) -> Result<Arc<Self>, WorkError> {
         cpu.check_cpu()?;
@@ -368,11 +368,11 @@ impl<const N: usize> Queue<N> {
             Ok(())
         }
     }
-    /// Read the actual executing owned work context, never a Runtime/Task
-    /// pointer. Genuine CPU/IRQ metadata is checked before active metadata or
+    /// Read the executing owned work context, never a Runtime/Task
+    /// pointer. CPU/IRQ metadata is checked before active metadata or
     /// hardware RSP. Arbitrary dispatcher/ISR stacks never receive an ID.
     /// The one executor is permanently bound to this unique queue lifetime;
-    /// retired/abandoned views refuse even if a consumer retained the Arc.
+    /// retired/abandoned views refuse even if a consumer the Arc.
     #[cfg(target_arch = "x86_64")]
     pub fn current_id(&self) -> Result<ContextId, WorkError> {
         self.process()?;
@@ -443,10 +443,10 @@ impl<const N: usize> Queue<N> {
             sequence,
         })
     }
-    /// Actual IRQ-safe admission. It performs no callback/allocator/ref release.
+    /// IRQ-safe admission. It performs no callback/allocator/ref release.
     ///
     /// # Safety
-    /// Callback/context stay valid until actual completion; the retained owner
+    /// Callback/context stay valid until completion; the owner
     /// covers them and any code/resources they can reach. Accepted jobs may
     /// suspend on their real task stacks. They must not unwind, overflow the
     /// owned stack, return holding locks, or free the provider/executor. An
@@ -466,13 +466,13 @@ impl<const N: usize> Queue<N> {
             context,
         )
     }
-    /// Queue General work with explicit geometry in an actual mixed-stack profile.
+    /// Queue General work with explicit geometry in a mixed-stack profile.
     /// This does not reserve an idle worker or implement thread creation.
     ///
     /// # Safety
-    /// As for execute: callback/code/context remain retained through genuine
+    /// As for execute: callback/code/context remain held through
     /// completion or quarantine, and the body fits its requested usable extent.
-    /// Rejection transfers nothing; a descriptor is no native/current authority.
+    /// Rejection transfers nothing; a descriptor is no native/current permission.
     pub unsafe fn execute_general_with_requirement(
         &self,
         requirement: StackRequirement,
@@ -481,13 +481,13 @@ impl<const N: usize> Queue<N> {
     ) -> Result<Ticket, WorkError> {
         self.enqueue_requirement(Lane::General, callback, context, Some(requirement))
     }
-    /// Claim one of the named policy's two actual portal continuations before
+    /// Claim one of the named policy's two portal continuations before
     /// accepting the callback/context. Full means neither idle worker is free;
     /// no request is hidden behind two blocked ordinary AML evaluations.
     ///
     /// # Safety
-    /// The actual provider/request retains callback, context and every reachable
-    /// owner until genuine completion or quarantine, as for [`Self::execute`].
+    /// The provider/request keeps callback, context and every reachable
+    /// owner until completion or quarantine, as for [`Self::execute`].
     /// Rejection transfers nothing. This supplies no ACPICA or native entry grant.
     pub unsafe fn execute_portal(
         &self,
@@ -500,7 +500,7 @@ impl<const N: usize> Queue<N> {
     /// admission slots may hold pending GPE jobs; ordinary stacks never run them.
     ///
     /// # Safety
-    /// The actual provider retains the callback/context through completion or
+    /// The provider keeps the callback/context through completion or
     /// quarantine. On error it still owns them and no callback was admitted.
     pub unsafe fn execute_gpe(
         &self,
@@ -577,9 +577,9 @@ impl<const N: usize> Queue<N> {
     }
     /// # Safety
     /// External IRQ/driver/firmware/work producers have stopped and cannot
-    /// concurrently enqueue or resume an executor. Retain the actual owner,
-    /// CPU/process authority and backing through genuine Runtime retirement.
-    /// Retained jobs, active/suspended callbacks and reservation markers are
+    /// concurrently enqueue or resume an executor. Keep the owner,
+    /// CPU/process permission and backing through Runtime retirement.
+    /// Jobs, active/suspended callbacks and reservation markers are
     /// checked refusal conditions: Pending/Closed does not retire or release
     /// them. Mere close is not producer synchronization, and queue retirement
     /// alone is not a task-stack or terminal C lifecycle proof.
@@ -633,8 +633,8 @@ pub fn quarantined_owners() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }
 
-/// A view of the real retained continuation, never authority to dereference
-/// its stack. Active hooks receive actual RSP; idle detach receives saved RSP.
+/// A view of the real continuation, never permission to dereference
+/// its stack. Active hooks receive RSP; idle detach receives saved RSP.
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -669,17 +669,17 @@ pub enum ParkOutcome {
     Resumed,
 }
 
-/// Retained foreign execution state for one genuine continuation.
+/// Foreign execution state for one continuation.
 ///
 /// # Safety
-/// This object retains every callback/code/context/root it reaches until real
+/// This object keeps every callback/code/context/root it reaches until real
 /// quiescent detach and process-context final release. Hooks never unwind,
 /// allocate, release owners, wait, reenter Runtime or enable hardware IRQs.
-/// `attach`, `still_blocked`, `leave`, `arrive`, `complete` run on the actual
-/// context stack, qualified CPU, with IF=0 and no queue lock. `detach` instead
+/// `attach`, `still_blocked`, `leave`, `arrive`, `complete` run on the
+/// context stack, checked CPU, with IF=0 and no queue lock. `detach` instead
 /// runs on its taskless dispatcher for an idle task; it never invents current.
 /// Returned attach/leave/detach failure is transactional. `still_blocked` only
-/// reads the genuine condition and validates prepared suspension. Linux-owned
+/// reads the condition and validates prepared suspension. Linux-owned
 /// wrappers prepare/drain in process context BEFORE generic park/yield; hooks
 /// never manufacture an owner exit or callback drain at IF=0. `leave` commits
 /// only prepared state/lease suspension and clears foreign current. `arrive`
@@ -690,27 +690,27 @@ pub enum ParkOutcome {
 /// inconsistent foreign context. Detach validates stopped producers and all
 /// real foreign wait/task references; its final owner is released AFTER IF
 /// restoration. TaskContext references are callback-scoped: copy primitive
-/// metadata only, never retain the view pointer. Its ranges are observations,
+/// metadata only, never keep the view pointer. Its ranges are observations,
 /// not an independent stack/root lifetime lease.
 #[cfg(target_arch = "x86_64")]
 pub unsafe trait SwitchBinding: Send + Sync {
     /// # Safety
-    /// Called on the actual current stack at IF0 with all binding roots retained.
+    /// Called on the current stack at IF0 with all binding roots kept.
     unsafe fn attach(&self, context: &TaskContext) -> Result<(), WorkError>;
     /// # Safety
-    /// Called after process PREPARE on the actual current stack at IF0; pure check.
+    /// Called after process PREPARE on the current stack at IF0; pure check.
     unsafe fn still_blocked(&self, context: &TaskContext) -> Result<bool, WorkError>;
     /// # Safety
-    /// Called on the outgoing actual stack at IF0 with prepared state; transactional error.
+    /// Called on the outgoing stack at IF0 with prepared state; transactional error.
     unsafe fn leave(&self, context: &TaskContext, reason: LeaveReason) -> Result<(), WorkError>;
     /// # Safety
-    /// Called on the destination actual stack at IF0 before any hardware IF restore.
+    /// Called on the destination stack at IF0 before any hardware IF restore.
     unsafe fn arrive(&self, context: &TaskContext, new_job: bool) -> Result<(), WorkError>;
     /// # Safety
-    /// Called on the completing actual stack at IF0 after foreign owner already exited.
+    /// Called on the completing stack at IF0 after foreign owner already exited.
     unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError>;
     /// # Safety
-    /// Called on the idle taskless dispatcher at IF0 after genuine foreign quiescence.
+    /// Called on the idle taskless dispatcher at IF0 after foreign quiescence.
     unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError>;
 }
 
@@ -720,7 +720,7 @@ struct WakeSignal {
     sequence: AtomicU64,
     pending: AtomicBool,
 }
-/// IRQ-safe retained read/admission view. No Runtime, Task, foreign task or
+/// IRQ-safe kept read/admission view. No Runtime, Task, foreign task or
 /// stack pointer is stored here. A completed job's handle never authorizes a
 /// future job on the same continuation; stale views may outlive retired stacks.
 #[cfg(target_arch = "x86_64")]
@@ -745,18 +745,18 @@ impl<const N: usize> WakeHandle<N> {
             || self.queue.abandoned.load(Ordering::Acquire)
             || self.signal.sequence.load(Ordering::Acquire) != self.sequence)
     }
-    /// Immutable actual constructor role, not a live task or entry grant.
+    /// Immutable constructor role, not a live task or entry grant.
     #[cfg(feature = "linux-kernel")]
     pub(crate) fn service_reserved(&self) -> Result<bool, WorkError> {
         self.queue.process()?;
         Ok(self.signal.service)
     }
-    /// Qualified same-CPU process/IRQ admission only; never resume inline or
+    /// Checked same-CPU process/IRQ admission only; never resume inline or
     /// change the foreign condition. Close permits wakes for admitted jobs.
     /// Release/acquire pending plus final IF exclusion covers wake at park.
-    /// Qualify process-context owner release on this retained queue's actual
+    /// Check process-context owner release on this queue's
     /// CPU, including after job close. This grants no current task/RSP, live
-    /// sequence, Linux entry or native producer authority and signals nothing.
+    /// sequence, Linux entry or native producer permission and signals nothing.
     #[cfg(feature = "linux-kernel")]
     pub(crate) fn check_process(&self) -> Result<(), WorkError> {
         self.queue.process()
@@ -777,9 +777,9 @@ impl<const N: usize> WakeHandle<N> {
         self.signal.pending.store(true, Ordering::Release);
         Ok(())
     }
-    /// Refresh only from this same genuine executing continuation. Reused-job
+    /// Refresh only from this same executing continuation. Reused-job
     /// arrive can replace an old handle without a Runtime pointer. Runtime's
-    /// active binding retains Queue/signal, so such replacement decrements only
+    /// active binding keeps Queue/signal, so such replacement decrements only
     /// nonfinal Arc references; it cannot release any owner/code/stack backing.
     pub fn renew_current(&self) -> Result<Self, WorkError> {
         if self.queue.current_id()? != self.id {
@@ -802,7 +802,7 @@ impl<const N: usize> WakeHandle<N> {
 impl<const N: usize> Drop for WakeHandle<N> {
     fn drop(&mut self) {
         if self.queue.process().is_ok() {
-            // SAFETY: process context on the qualified CPU. Runtime retains
+            // SAFETY: process context on the checked CPU. Runtime keeps
             // nonfinal refs during attach/arrive replacement; stale handles
             // may finally release an already-retired queue only here.
             unsafe {
@@ -810,7 +810,7 @@ impl<const N: usize> Drop for WakeHandle<N> {
                 ManuallyDrop::drop(&mut self.queue);
             }
         } else {
-            // Destruction is not IRQ/foreign-CPU reclamation authority. Keep
+            // Destruction is not IRQ/foreign-CPU reclamation permission. Keep
             // both allocations/roots rather than freeing a final owner there.
             quarantine();
         }
@@ -848,7 +848,7 @@ pub(crate) const MAX_CONTINUATIONS: usize = 32;
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
 /// task one is serial Notify; an optional Linux service reserves task two and
 /// firmware reserves task three. Remaining stacks run general work. The dispatcher
-/// itself has no fabricated thread ID. All switching happens with IF=0.
+/// itself has no invented thread ID. All switching happens with IF=0.
 #[cfg(target_arch = "x86_64")]
 pub struct Runtime<const N: usize> {
     queue: Arc<Queue<N>>,
@@ -903,7 +903,7 @@ impl<const N: usize> Runtime<N> {
     }
     fn new(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Pin<Box<Self>>, WorkError> {
         Self::validate_stacks(&queue, &stacks)?;
-        // SAFETY: the executor runs on the qualified native CPL0 CPU.
+        // SAFETY: the executor runs on the checked native CPL0 CPU.
         let controls = unsafe { context::controls()? };
         Self::with_controls(queue, stacks, controls)
     }
@@ -1003,7 +1003,7 @@ impl<const N: usize> Runtime<N> {
             {
                 return Err(WorkError::Busy);
             }
-            // The real constructor atomically reserves its actual admission slots.
+            // The real constructor atomically reserves its admission slots.
             // Existing queued jobs are never moved, discarded or reinterpreted.
             state.layout = layout;
             state.stack_profile = profile;
@@ -1029,7 +1029,7 @@ impl<const N: usize> Runtime<N> {
         });
         let pointer = executor.as_ref().get_ref() as *const Self as usize;
         // SAFETY: the executor is not yet shared, and each frame starts on its own
-        // retained stack.
+        // stack.
         unsafe {
             for (i, task) in (&mut *executor.tasks.get()).iter_mut().enumerate() {
                 task.frame
@@ -1060,13 +1060,13 @@ impl<const N: usize> Runtime<N> {
         if self.current.get() != NONE || self.service_started.get() || self.domain().is_some() {
             return Err(WorkError::Busy);
         }
-        // SAFETY: immutable actual constructor role, on qualified dispatcher.
+        // SAFETY: immutable constructor role, on checked dispatcher.
         if unsafe { (*self.task(2)).lane } != Lane::Service {
             return Err(WorkError::Unavailable);
         }
         // Enabling a sidecar cannot reinterpret already suspended task frames.
-        // Queued, unassigned jobs are fine: they enter NORMAL on actual assign.
-        // SAFETY: qualified taskless dispatcher owns the retained task vector;
+        // Queued, unassigned jobs are fine: they enter NORMAL on assign.
+        // SAFETY: checked taskless dispatcher owns the task vector;
         // no continuation runs and this bounded read invokes no callback/switch.
         if unsafe {
             (&*self.tasks.get())
@@ -1085,11 +1085,11 @@ impl<const N: usize> Runtime<N> {
         unsafe { *self.service_domain.get() = Some(domain) };
         Ok(())
     }
-    /// Start the optional reserved service once, on its actual distinct stack.
+    /// Start the optional reserved service once, on its distinct stack.
     /// The ordinary General/Notify queue cannot submit into this private lane.
     ///
     /// # Safety
-    /// The queue's retained owner covers callback/code/context through genuine
+    /// The queue's owner covers callback/code/context through
     /// stop, drain and join. The callback binds its real task and supplied clock
     /// domain before driver admission, never unwinds or returns with an entered
     /// owner. Reservation alone supplies no timer/IRQ-work/RT service or clock.
@@ -1106,7 +1106,7 @@ impl<const N: usize> Runtime<N> {
             return Err(WorkError::Busy);
         }
         // SAFETY: all runtimes have at least four tasks; immutable lane metadata
-        // belongs to this qualified dispatcher and is never caller role bits.
+        // belongs to this checked dispatcher and is never caller role bits.
         if unsafe { (*self.task(2)).lane } != Lane::Service {
             return Err(WorkError::Unavailable);
         }
@@ -1116,10 +1116,10 @@ impl<const N: usize> Runtime<N> {
     }
     /// Start the independently reserved firmware continuation once. Its lane
     /// cannot be consumed by General/Notify work or the Linux service domain.
-    /// Reservation supplies no AML, SCI, hardware or Linux entry authority.
+    /// Reservation supplies no AML, SCI, hardware or Linux entry permission.
     ///
     /// # Safety
-    /// The retained owner covers callback/code/context until genuine stop,
+    /// The kept owner covers callback/code/context until stop,
     /// drain and join. The callback never unwinds or returns with a live foreign
     /// entry; every suspended frame remains on its owned stack until resumed.
     pub unsafe fn start_firmware(
@@ -1134,7 +1134,7 @@ impl<const N: usize> Runtime<N> {
         if self.current.get() != NONE || self.firmware_started.get() {
             return Err(WorkError::Busy);
         }
-        // SAFETY: all runtimes retain at least four tasks. The qualified taskless
+        // SAFETY: all runtimes keep at least four tasks. The checked taskless
         // dispatcher reads immutable constructor metadata without invoking work.
         if unsafe { (*self.task(3)).lane } != Lane::Firmware {
             return Err(WorkError::Unavailable);
@@ -1143,25 +1143,25 @@ impl<const N: usize> Runtime<N> {
         self.firmware_started.set(true);
         Ok(ticket)
     }
-    /// Check actual CPU/current/RSP before identifying the firmware continuation.
+    /// Check CPU/current/RSP before identifying the firmware continuation.
     pub fn firmware_current(&self) -> Result<bool, WorkError> {
         self.current_id()?;
-        // SAFETY: current_id validated the current index, state and retained stack.
+        // SAFETY: current_id validated the current index, state and kept stack.
         Ok(unsafe { (*self.task(self.current.get())).lane } == Lane::Firmware)
     }
-    /// Actual constructor role after validating CPU, current job and real RSP.
+    /// Constructor role after validating CPU, current job and real RSP.
     /// The tag is observation, never an execution or native service capability.
     pub fn firmware_role_current(&self) -> Result<Option<FirmwareRole>, WorkError> {
         self.current_id()?;
-        // SAFETY: current_id validated the current index/state/retained stack.
+        // SAFETY: current_id validated the current index/state/kept stack.
         Ok(self
             .layout
             .role(unsafe { (*self.task(self.current.get())).lane }))
     }
-    /// Check actual CPU/current/RSP before identifying the reserved service.
+    /// Check CPU/current/RSP before identifying the reserved service.
     pub fn service_current(&self) -> Result<bool, WorkError> {
         self.current_id()?;
-        // SAFETY: current_id validated the actual retained continuation.
+        // SAFETY: current_id validated the continuation.
         let task = unsafe { &*self.task(self.current.get()) };
         Ok(task.signal.service)
     }
@@ -1183,7 +1183,7 @@ impl<const N: usize> Runtime<N> {
         Ok(task.id)
     }
     fn context_view(&self, index: usize, active: bool) -> TaskContext {
-        // SAFETY: callers qualify CPU/exclusion and a valid retained index.
+        // SAFETY: callers check CPU/exclusion and a valid index.
         let task = unsafe { &*self.task(index) };
         TaskContext {
             queue_id: self.queue.id,
@@ -1204,9 +1204,9 @@ impl<const N: usize> Runtime<N> {
         self.current_id()?;
         Ok(self.context_view(self.current.get(), true))
     }
-    /// Attach a preallocated retained binding on this actual executing stack.
+    /// Attach a preallocated binding on this executing stack.
     /// No hook runs on a dispatcher/IRQ stack. Failure does not install the
-    /// binding. This call consumes the supplied Arc; retain a separate clone
+    /// binding. This call consumes the supplied Arc; keep a separate clone
     /// before calling if it must be reused after failure. Process-context
     /// failure drops that Arc after restoring any saved IRQ flags. IRQ/foreign-
     /// CPU rejection quarantines the supplied roots instead of releasing them.
@@ -1217,7 +1217,7 @@ impl<const N: usize> Runtime<N> {
         if let Err(error) = self.current_id() {
             if self.queue.process().is_err() {
                 // Rejection on IRQ/foreign CPU is not final owner-release
-                // authority. Preserve the supplied binding's roots there.
+                // permission. Preserve the supplied binding's roots there.
                 core::mem::forget(binding);
                 quarantine();
             }
@@ -1231,12 +1231,12 @@ impl<const N: usize> Runtime<N> {
                 return Err(WorkError::Busy);
             }
             let view = self.context_view(index, true);
-            // SAFETY: current task is retained and IF0 protects its job assignment.
+            // SAFETY: current task is held and IF0 protects its job assignment.
             let task = unsafe { &*self.task(index) };
             if view.sequence == 0 || task.signal.sequence.load(Ordering::Acquire) != view.sequence {
                 return Err(WorkError::CorruptContext);
             }
-            // SAFETY: the retained unsafe binding promises transactional/no-switch hooks.
+            // SAFETY: the unsafe binding promises transactional/no-switch hooks.
             unsafe { binding.attach(&view)? };
             let handle = WakeHandle {
                 queue: ManuallyDrop::new(self.queue.clone()),
@@ -1244,7 +1244,7 @@ impl<const N: usize> Runtime<N> {
                 id: task.id,
                 sequence: view.sequence,
             };
-            // SAFETY: exclusive qualified CPU; prior immutable borrow's last use is above.
+            // SAFETY: exclusive checked CPU; prior immutable borrow's last use is above.
             unsafe {
                 (*self.task(index)).binding = Some(binding.clone());
             }
@@ -1272,8 +1272,8 @@ impl<const N: usize> Runtime<N> {
             sequence,
         })
     }
-    /// Capture scheduling authority for this actual job in the optional domain.
-    /// The handle retains only immutable queue/signal/generation metadata.
+    /// Capture scheduling permission for this job in the optional domain.
+    /// The handle keeps only immutable queue/signal/generation metadata.
     pub fn scheduling_handle(
         self: Pin<&Self>,
     ) -> Result<scheduling::SchedulingHandle<N>, WorkError> {
@@ -1289,9 +1289,9 @@ impl<const N: usize> Runtime<N> {
     fn arrive(&self, index: usize, new_job: bool) {
         self.valid();
         let view = self.context_view(index, true);
-        // SAFETY: retained current task on its real destination stack at IF0.
+        // SAFETY: current task on its real destination stack at IF0.
         if let Some(binding) = unsafe { &(*self.task(index)).binding } {
-            // SAFETY: no lock/switch borrow; the retained hook restores foreign state.
+            // SAFETY: no lock/switch borrow; the hook restores foreign state.
             let result = unsafe { binding.arrive(&view, new_job) };
             if let Err(error) = result {
                 self.queue.cpu.fatal(error);
@@ -1299,7 +1299,7 @@ impl<const N: usize> Runtime<N> {
         }
     }
     /// # Safety
-    /// Real foreign producers/task/wake references are quiescent. The retained
+    /// Real foreign producers/task/wake references are quiescent. The kept
     /// binding validates this at detach; copied metadata is not lifetime proof.
     /// Returned owner is released only in process context after IF restoration.
     pub unsafe fn detach_binding(
@@ -1315,7 +1315,7 @@ impl<const N: usize> Runtime<N> {
             // SAFETY: dispatcher owns all task state with IF=0; vector never resizes.
             let index = unsafe { (&*self.tasks.get()).iter().position(|task| task.id == id) }
                 .ok_or(WorkError::Unavailable)?;
-            // SAFETY: index comes from this retained vector.
+            // SAFETY: index comes from this vector.
             let task = unsafe { &*self.task(index) };
             if task.state != TaskState::Idle || task.job.is_some() {
                 return Err(WorkError::Pending);
@@ -1342,8 +1342,8 @@ impl<const N: usize> Runtime<N> {
             self.queue.cpu.fatal(e)
         }
     }
-    /// Suspend the actual current continuation, returning only when resumed on
-    /// this same retained stack and ContextId. It never calls a queued callback
+    /// Suspend the current continuation, returning only when resumed on
+    /// this same stack and ContextId. It never calls a queued callback
     /// recursively on the lock-owning caller stack.
     pub fn yield_now(self: Pin<&Self>) -> Result<(), WorkError> {
         self.suspend(LeaveReason::Yield).map(|_| ())
@@ -1354,7 +1354,7 @@ impl<const N: usize> Runtime<N> {
     pub fn reschedule(self: Pin<&Self>) -> Result<(), WorkError> {
         self.suspend(LeaveReason::Reschedule).map(|_| ())
     }
-    /// Actual process/current check precedes retained clock/provider entry.
+    /// Process/current check precedes kept clock/provider entry.
     pub fn reschedule_requested(self: Pin<&Self>) -> Result<bool, WorkError> {
         self.current_id()?;
         let Some(domain) = self.domain() else {
@@ -1367,7 +1367,7 @@ impl<const N: usize> Runtime<N> {
         let requested = self.queue.inspection.swap(false, Ordering::AcqRel);
         Ok(domain.inspect_and_wake()? || requested)
     }
-    /// Suspend once only if the retained foreign predicate is still blocked.
+    /// Suspend once only if the foreign predicate is still blocked.
     /// Linux-owned process PREPARE must precede this call. Skipped/error leaves
     /// its original entered lease intact; its wrapper clears prepared state.
     pub fn park_if_blocked(self: Pin<&Self>) -> Result<ParkOutcome, WorkError> {
@@ -1382,14 +1382,14 @@ impl<const N: usize> Runtime<N> {
         let flags = self.queue.cpu.save_disable()?;
         let view = self.context_view(index, true);
         let admission = {
-            // SAFETY: qualified current task and IF0; borrow ends before switch.
+            // SAFETY: checked current task and IF0; borrow ends before switch.
             let binding = unsafe { &(*self.task(index)).binding };
             (|| {
                 if reason == LeaveReason::Blocked {
                     let binding = binding.as_ref().ok_or(WorkError::Unavailable)?;
                     // SAFETY: IF0 pure predicate; process PREPARE is provider-owned.
                     let still_blocked = unsafe { binding.still_blocked(&view)? };
-                    // SAFETY: this retained field is immutable at IF0; the short
+                    // SAFETY: this field is immutable at IF0; the short
                     // borrow ends here before foreign leave or a context switch.
                     let signal = unsafe { &(*self.task(index)).signal };
                     let pending = signal.pending.swap(false, Ordering::AcqRel);
@@ -1442,7 +1442,7 @@ impl<const N: usize> Runtime<N> {
         }
         self.current.set(NONE);
         self.queue.active.clear();
-        // SAFETY: retained initialized frames; no Task reference or queue lock spans switch.
+        // SAFETY: initialized frames; no Task reference or queue lock spans switch.
         unsafe {
             context::switch(
                 core::ptr::addr_of_mut!((*self.task(index)).frame),
@@ -1455,7 +1455,7 @@ impl<const N: usize> Runtime<N> {
         Ok(ParkOutcome::Resumed)
     }
     /// # Safety
-    /// Qualified taskless dispatcher at IF0; all retained task frames are stopped.
+    /// Checked taskless dispatcher at IF0; all kept task frames are stopped.
     unsafe fn next_firmware(&self, count: usize) -> Option<usize> {
         for offset in 0..count {
             let index = (self.firmware_cursor.get() + offset) % count;
@@ -1486,8 +1486,8 @@ impl<const N: usize> Runtime<N> {
         }
         None
     }
-    /// Run at most one genuine task continuation. No callback is inline here:
-    /// actual RIP/RSP switch onto its distinct owned stack precedes callback.
+    /// Run at most one task continuation. No callback is inline here:
+    /// RIP/RSP switch onto its distinct owned stack precedes callback.
     /// Caller is the main dispatcher outside locks/IRQ/native guest execution.
     /// Callback contexts must be provider-owned stable objects, not escaped
     /// references into this dispatcher stack. Queue ownership covers them.
@@ -1555,7 +1555,7 @@ impl<const N: usize> Runtime<N> {
             if task.state == TaskState::Blocked && task.signal.pending.swap(false, Ordering::AcqRel)
             {
                 // A valid generic wake can be posted by a leave hook after
-                // the final pending check but before actual block commit.
+                // the final pending check but before block commit.
                 // Earlier IRQ publication already moved the row; duplicate
                 // wake preserves its original ready order.
                 let ready = (|| {
@@ -1613,12 +1613,12 @@ impl<const N: usize> Runtime<N> {
                 }
             }
         }
-        // SAFETY: the qualified dispatcher still holds actual IF0; all task
+        // SAFETY: the checked dispatcher still holds IF0; all task
         // frames are stopped and no mutable task borrow survives the scan.
         let firmware = unsafe { self.next_firmware(count) };
         // Firmware is outside Linux FIFO ranks. At most one firmware turn
         // separates eligible non-firmware turns; an idle peer set permits it to
-        // continue. Due Linux deadline/IRQ work retains its existing precedence.
+        // continue. Due Linux deadline/IRQ work keeps its existing precedence.
         if let Some(index) = firmware
             && !(due_service && selected == Some(2))
             && (self.firmware_turn.get() || selected.is_none())
@@ -1637,7 +1637,7 @@ impl<const N: usize> Runtime<N> {
             }
             self.cursor.set((i + 1) % count);
         }
-        // SAFETY: immutable selected actual job at IF0; no borrow spans switch.
+        // SAFETY: immutable selected job at IF0; no borrow spans switch.
         let task = unsafe { &*self.task(i) };
         let running = (|| {
             self.queue.lock()?.state().scheduling.running(
@@ -1658,7 +1658,7 @@ impl<const N: usize> Runtime<N> {
             let task = &*self.task(i);
             self.queue.active.publish(task.id, &task.stack.bounds);
         }
-        // SAFETY: both frames are retained, pinned and initialized; IRQs stay disabled
+        // SAFETY: both frames are held, pinned and initialized; IRQs stay disabled
         // across the switch, and no lock or borrow spans it.
         unsafe {
             context::switch(
@@ -1692,8 +1692,8 @@ impl<const N: usize> Runtime<N> {
     /// # Safety
     /// Callback/context ownership and bounded-stack/no-unwind rules match execute.
     /// No caller stack-local reference may escape into the job. Timeout or
-    /// Pending does not cancel or release admitted work: its genuine provider-
-    /// owned context remains retained until completion or permanent quarantine.
+    /// Pending does not cancel or release admitted work: its provider-
+    /// owned context remains held until completion or permanent quarantine.
     pub unsafe fn call_foreground(
         self: Pin<&Self>,
         callback: Callback,
@@ -1716,7 +1716,7 @@ impl<const N: usize> Runtime<N> {
         Ok(())
     }
     /// # Safety
-    /// The qualified dispatcher/current task owns this Runtime, the queue lock
+    /// The checked dispatcher/current task owns this Runtime, the queue lock
     /// holds IF0, all peers are suspended, and no task borrow spans this call.
     unsafe fn peer_progress(&self, current: usize, state: &State<N>) -> bool {
         if current == NONE {
@@ -1735,8 +1735,8 @@ impl<const N: usize> Runtime<N> {
         for job in state.jobs.iter().flatten().filter(|job| !job.running) {
             queued_lanes[lane_index(job.lane)] = true;
         }
-        // SAFETY: caller holds the actual same-CPU IF0 queue guard and all peer
-        // frames are stopped. This read neither switches nor retains references.
+        // SAFETY: caller holds the same-CPU IF0 queue guard and all peer
+        // frames are stopped. This read neither switches nor keeps references.
         unsafe {
             (&*self.tasks.get()).iter().enumerate().any(|(i, task)| {
                 i != current
@@ -1752,9 +1752,9 @@ impl<const N: usize> Runtime<N> {
             })
         }
     }
-    /// Observe the actual constructor's protected GPE admission budget.
+    /// Observe the constructor's protected GPE admission budget.
     /// None means the legacy layout has no protected pending guarantee. This
-    /// copy neither synchronizes IRQs nor grants provider/progress authority.
+    /// copy neither synchronizes IRQs nor grants provider/progress permission.
     pub fn protected_gpe_budget(&self) -> Result<Option<GpeQueueBudget>, WorkError> {
         self.queue.process()?;
         if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
@@ -1762,7 +1762,7 @@ impl<const N: usize> Runtime<N> {
         }
         Ok(self.layout.protected_gpe())
     }
-    /// Check actual CPU/policy/lifetime/current-role eligibility for a firmware
+    /// Check CPU/policy/lifetime/current-role eligibility for a firmware
     /// queue join before a caller mutates C handler state. This does not capture
     /// a flush boundary, run/accept work, attest progress or synchronize an IRQ.
     /// A successful check is not a future execution or provider capability.
@@ -1777,7 +1777,7 @@ impl<const N: usize> Runtime<N> {
         let current = self.current.get();
         if current != NONE {
             self.current_id()?;
-            // SAFETY: actual current frame was checked; its immutable lane is
+            // SAFETY: current frame was checked; its immutable lane is
             // fixed before publication and is never changed by a callback/IRQ.
             if unsafe { (*self.task(current)).lane == queue.lane() } {
                 return Err(WorkError::WouldDeadlock);
@@ -1794,7 +1794,7 @@ impl<const N: usize> Runtime<N> {
     /// Gpe and Notify in that order with separate captures: GPE work may enqueue
     /// Notify work. This method alone grants no IRQ/provider capability.
     /// Joining from the selected queue refuses self-deadlock. Pending/TimedOut
-    /// retain every admitted callback/context. Only NativeFirmware16 has these
+    /// keep every admitted callback/context. Only NativeFirmware16 has these
     /// distinct queues; legacy constructor contracts remain unchanged.
     pub fn join_firmware(
         self: Pin<&Self>,
@@ -1895,7 +1895,7 @@ impl<const N: usize> Runtime<N> {
                 {
                     return Err(WorkError::WouldDeadlock);
                 }
-                // SAFETY: qualified same-CPU queue guard holds IF0; no task
+                // SAFETY: checked same-CPU queue guard holds IF0; no task
                 // reference survives the snapshot or any later switch.
                 let peer_progress = unsafe { self.peer_progress(current, s) };
                 (pending, peer_progress)
@@ -1922,11 +1922,11 @@ impl<const N: usize> Runtime<N> {
     }
     /// # Safety
     /// External IRQ/work/reset and driver users have stopped and cannot
-    /// concurrently enqueue, resume or mutate this executor. Actual owner,
-    /// CPU/process authority and stack backing remain valid throughout the call.
+    /// concurrently enqueue, resume or mutate this executor. Owner,
+    /// CPU/process permission and stack backing remain valid throughout the call.
     /// Current/suspended callbacks, reservations, escrows and bindings are checked
-    /// before retirement; Pending/Closed retains them. Timeout/failed drain is
-    /// not retirement authority. Idle dispatcher continuation frames do not
+    /// before retirement; Pending/Closed keeps them. Timeout/failed drain is
+    /// not retirement permission. Idle dispatcher continuation frames do not
     /// attest execution of an original terminal C lifecycle.
     pub unsafe fn retire(self: Pin<&Self>) -> Result<(), WorkError> {
         self.queue.process()?;
@@ -1962,7 +1962,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
     // SAFETY: covered by this function's own safety contract.
     let executor = unsafe { &*(pointer as *const Runtime<N>) };
     executor.valid();
-    // SAFETY: the actual constructed trampoline just entered this retained
+    // SAFETY: the constructed trampoline just entered this kept
     // worker at IF0. The monotonic history changes only here, before hooks or
     // callbacks; an idle suspended entry frame can never masquerade as cold.
     unsafe { (*executor.task(index)).ever_entered = true };
@@ -1980,9 +1980,9 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
         // SAFETY: covered by this function's own safety contract.
         unsafe { (job.callback)(job.context as *mut c_void) };
         executor.valid();
-        // SAFETY: this actual completing frame owns its immutable task index;
+        // SAFETY: this completing frame owns its immutable task index;
         // only its entered creator can alter the per-job escrow count. Peer
-        // callbacks may complete while another creator retains an owned escrow.
+        // callbacks may complete while another creator keeps an owned escrow.
         let owned_escrows = unsafe { (*executor.task(index)).owned_escrows };
         if executor.pending_reservations.get() != 0 || owned_escrows != 0 {
             executor.queue.abandoned.store(true, Ordering::Release);
@@ -1994,7 +1994,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             Err(e) => executor.queue.cpu.fatal(e),
         };
         let view = executor.context_view(index, true);
-        // SAFETY: actual retained completing task on its own stack at IF0.
+        // SAFETY: completing task on its own stack at IF0.
         if let Some(binding) = unsafe { &(*executor.task(index)).binding } {
             // SAFETY: owner already exited; no lock/switch borrow spans this hook.
             let result = unsafe { binding.complete(&view) };
@@ -2014,7 +2014,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             executor.queue.cpu.fatal(error);
         }
         {
-            // SAFETY: retained signal field; this borrow ends before later Task
+            // SAFETY: signal field; this borrow ends before later Task
             // mutation. Close this exact job so old wake handles remain inert.
             let signal = unsafe { &(*executor.task(index)).signal };
             signal.sequence.store(0, Ordering::Release);
@@ -2046,7 +2046,7 @@ impl<const N: usize> Drop for Runtime<N> {
         if self.retired.get() && self.owned_escrows.get() == 0 {
             // SAFETY: retirement proved no task frame or stack is still live.
             unsafe { ManuallyDrop::drop(&mut self.tasks) };
-            // SAFETY: successful retirement also required actual domain release.
+            // SAFETY: successful retirement also required domain release.
             unsafe { ManuallyDrop::drop(&mut self.service_domain) };
         } else {
             quarantine();
@@ -2061,7 +2061,7 @@ struct DrainFlag {
 #[cfg(target_arch = "x86_64")]
 impl Drop for DrainFlag {
     fn drop(&mut self) {
-        // SAFETY: the flag belongs to a task the executor retains past this drain.
+        // SAFETY: the flag belongs to a task the executor keeps past this drain.
         unsafe {
             self.task.write(false);
         }
@@ -2070,8 +2070,8 @@ impl Drop for DrainFlag {
 
 /// Sole owning constructor for a runtime; its bare pinned allocation is never
 /// publicly returned. Construction and final release require process/deferred
-/// context on the qualified CPU, including the last Arc release of providers.
-/// Owns the complete pinned runtime allocation. An uncertain Drop retains the
+/// context on the checked CPU, including the last Arc release of providers.
+/// Owns the complete pinned runtime allocation. An uncertain Drop keeps the
 /// allocation itself, not just stack pages containing pointers back to it.
 #[cfg(target_arch = "x86_64")]
 pub struct Executor<const N: usize> {
@@ -2084,7 +2084,7 @@ impl<const N: usize> Executor<N> {
             runtime: ManuallyDrop::new(Runtime::new(queue, stacks)?),
         })
     }
-    /// Reserve one actual service continuation in addition to Foreground,
+    /// Reserve one service continuation in addition to Foreground,
     /// Notify and at least two General continuations. Start/bind the service
     /// explicitly before admitting dependent Linux operations.
     pub fn new_with_service(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Self, WorkError> {
@@ -2092,7 +2092,7 @@ impl<const N: usize> Executor<N> {
         if stacks.len() < 5 {
             return Err(WorkError::Unavailable);
         }
-        // SAFETY: same qualified native construction boundary as new().
+        // SAFETY: same checked native construction boundary as new().
         let controls = unsafe { context::controls()? };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_service_controls(
@@ -2111,7 +2111,7 @@ impl<const N: usize> Executor<N> {
         if stacks.len() < 6 {
             return Err(WorkError::Unavailable);
         }
-        // SAFETY: same qualified native construction boundary as new().
+        // SAFETY: same checked native construction boundary as new().
         let controls = unsafe { context::controls()? };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_reserved_controls(
@@ -2119,10 +2119,10 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// Apply a named bounded qualification/prototype reservation policy. The layout reserves
+    /// Apply a named bounded validation/prototype reservation policy. The layout reserves
     /// real workers and admission slots; it supplies no native IRQ/AML/provider
     /// capability. The queue must be empty (Busy otherwise), so every admitted
-    /// Portal/Notify job first claims an actual idle-worker permit. Existing
+    /// Portal/Notify job first claims an idle-worker permit. Existing
     /// constructors keep their original layouts/contracts.
     pub fn new_with_policy(
         queue: Arc<Queue<N>>,
@@ -2132,7 +2132,7 @@ impl<const N: usize> Executor<N> {
         let layout = policy.layout();
         Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
         layout.validate(stacks.len(), N)?;
-        // SAFETY: same qualified native construction boundary as new().
+        // SAFETY: same checked native construction boundary as new().
         let controls = unsafe { context::controls()? };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_layout_controls(
@@ -2140,9 +2140,9 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// Opt into actual mixed stack geometry for the explicit32-stack prototype.
+    /// Opt into mixed stack geometry for the explicit32-stack prototype.
     /// Empty-queue validation is transactional. Descriptors supply no native
-    /// mapping/current/kernel-thread/IRQ authority.
+    /// mapping/current/kernel-thread/IRQ permission.
     pub fn new_with_profile(
         queue: Arc<Queue<N>>,
         stacks: Vec<Stack>,
@@ -2152,7 +2152,7 @@ impl<const N: usize> Executor<N> {
         let layout = policy.layout();
         Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
         layout.validate(stacks.len(), N)?;
-        // SAFETY: same qualified native construction boundary as new_with_policy.
+        // SAFETY: same checked native construction boundary as new_with_policy.
         let controls = unsafe { context::controls()? };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_profile_controls(
@@ -2174,7 +2174,7 @@ impl<const N: usize> Executor<N> {
         let layout = policy.layout();
         Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
         layout.validate(stacks.len(), N)?;
-        // SAFETY: unprivileged control snapshot and genuine owned guarded mmap stacks only.
+        // SAFETY: unprivileged control snapshot and owned guarded mmap stacks only.
         let controls = unsafe { context::read_controls() };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_profile_controls(
@@ -2186,16 +2186,16 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// Genuine hosted continuation mechanism test only. StackBacking must own
+    /// Hosted continuation mechanism test only. StackBacking must own
     /// real mapped guarded stacks; Cpu is an explicit hosted model. This never
-    /// qualifies CPL0/IRQ/native roots or registers a native producer.
+    /// checks CPL0/IRQ/native roots or registers a native producer.
     #[cfg(all(test, unix))]
     pub(crate) fn new_hosted_for_test(
         queue: Arc<Queue<N>>,
         stacks: Vec<Stack>,
     ) -> Result<Self, WorkError> {
         Runtime::<N>::validate_stacks(&queue, &stacks)?;
-        // SAFETY: unprivileged read only, used solely by actual hosted stack tests.
+        // SAFETY: unprivileged read only, used solely by hosted stack tests.
         let controls = unsafe { context::read_controls() };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_controls(queue, stacks, controls)?),
@@ -2207,7 +2207,7 @@ impl<const N: usize> Executor<N> {
         stacks: Vec<Stack>,
     ) -> Result<Self, WorkError> {
         Runtime::<N>::validate_stacks(&queue, &stacks)?;
-        // SAFETY: actual hosted stack mechanism only, as new_hosted_for_test.
+        // SAFETY: hosted stack mechanism only, as new_hosted_for_test.
         let controls = unsafe { context::read_controls() };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_service_controls(
@@ -2232,8 +2232,8 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// The returned actual pinned runtime is what a retained native provider
-    /// binds into its context. Do not retain a pointer to this movable wrapper.
+    /// The returned pinned runtime is what a native provider
+    /// binds into its context. Do not keep a pointer to this movable wrapper.
     pub fn runtime(&self) -> Pin<&Runtime<N>> {
         self.runtime.as_ref()
     }
@@ -2254,11 +2254,11 @@ impl<const N: usize> Drop for Executor<N> {
                 // SAFETY: `flags` came from the save_disable just above.
                 unsafe { self.runtime.queue.cpu.restore(flags) };
             }
-            // If affinity/context is unqualified, closing is atomic and the
-            // complete allocation remains retained; no foreign CPU mutates
+            // If affinity/context is unchecked, closing is atomic and the
+            // complete allocation remains held; no foreign CPU mutates
             // active metadata or releases process-affine owners.
             quarantine();
-            // Keep the actual Runtime allocation, queue/provider owners, task
+            // Keep the Runtime allocation, queue/provider owners, task
             // frames and real stack/root leases even after a timeout/failed drain.
         }
     }

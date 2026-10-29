@@ -1,11 +1,11 @@
 //! Runtime assignment, before firmware publication. Metadata is joined to the
-//! actual BSP observation and a retained resource owner; it is never a stock
-//! SKU count or executor/lifecycle authority. Parent owns RAM/device adoption.
+//! BSP observation and a resource owner; it is never a stock
+//! SKU count or executor/lifecycle permission. Parent owns RAM/device adoption.
 //!
 //! Original J314s source contract: iBoot file3ab04..3ab7c publishes max/E/P;
 //! mac13j XNU VAfffffe000bda7168 enumerates CPU children, not waiting flags;
 //! AppleInterruptControllerV2 file2822dc4/282375c uses #main-cpus. SPTM
-//! VAfffffff0270ca10c requires the three implementation ranges. Exact source
+//! VAfffffff0270ca10c requires the three implementation ranges. Source
 //! hashes/coordinates remain in the immutable j314s-single-core-topology audit.
 //! No source hash selects production behavior and no capacity is inferred here.
 use alloc::{format, string::String, vec::Vec};
@@ -29,9 +29,9 @@ use crate::{record::Capture, topology as native};
 #[cfg(test)]
 use stela_soc_data::board::assigned::GuestSlotId;
 
-/// These count consumers are independently source-qualified for the retained
+/// These count consumers are independently source-checked for the kept
 /// Apple ARM CPU/AIC schema (original J314s audit). They all use the same Plan.
-/// This deliberately adds no cpu-cluster-count or PMGR hardware-cluster rule.
+/// This adds no cpu-cluster-count or PMGR hardware-cluster rule.
 pub const COUNT_FIELDS: [CountField<'static>; 4] = [
     CountField {
         path: "/cpus",
@@ -55,7 +55,7 @@ pub const COUNT_FIELDS: [CountField<'static>; 4] = [
     },
 ];
 
-/// Retains the actual immutable pre-EBS observation. Only the executing BSP is
+/// Keeps the immutable pre-EBS observation. Only the executing BSP is
 /// started by this adapter. Captured AP observations do not imply AP startup.
 pub struct BspRoster<'a> {
     capture: &'a Capture,
@@ -64,9 +64,9 @@ pub struct BspRoster<'a> {
     cores: [AssignedCore; 1],
 }
 impl<'a> BspRoster<'a> {
-    /// `capture` must be the actual record already accepted by native_smp's
+    /// `capture` must be the record already accepted by native_smp's
     /// reservation/source validation. The supplied owner is the installed BSP
-    /// Host, which the caller must retain through subsequent execution. This
+    /// Host, which the caller must keep through subsequent execution. This
     /// view does not bind a runtime WorkerOwner, loan a frame or authorize RAM.
     #[cfg(target_arch = "x86_64")]
     pub fn current(capture: &'a Capture, worker: usize) -> Result<Self, String> {
@@ -126,7 +126,7 @@ impl RetainedRoster for BspRoster<'_> {
         1
     }
     fn cores(&self) -> &[AssignedCore] {
-        // Keep the actual source allocation borrowed for the entire Plan.
+        // Keep the source allocation borrowed for the entire Plan.
         let _ = self.capture;
         &self.cores
     }
@@ -152,11 +152,11 @@ fn current_apic() -> Result<u32, String> {
     .ok_or("assigned BSP has no actual CPUID APIC identity".into())
 }
 
-/// Retain the actual maximum/vendor records together with the leaves they
+/// Keep the maximum/vendor records together with the leaves they
 /// authorize. Keeping maxima only in local variables creates an incomplete
 /// Snapshot that the shared identity decoder must correctly refuse. The query
 /// seam permits direct collector regression tests without a privileged owner
-/// or guessed processor identity; production above queries this actual CPU.
+/// or guessed processor identity; production above queries this CPU.
 fn current_identity(mut query: impl FnMut(u32, u32) -> native::Cpuid) -> native::Snapshot {
     let identity = query(0, 0);
     let extended = query(0x8000_0000, 0);
@@ -211,8 +211,8 @@ pub struct Join {
     pub cpm_impl: RegisterRange,
 }
 
-/// Retained source owner and immutable ADT. Full source power records remain
-/// retained independently of the selected PE subset and unknown PS state.
+/// Source owner and immutable ADT. Full source power records remain
+/// independently of the selected PE subset and unknown PS state.
 pub struct Source<'a> {
     pub resources: BspSource<'a>,
     tree: DeviceTree,
@@ -260,9 +260,9 @@ impl<'a> Source<'a> {
             acc_harvesting: 1,
         })
     }
-    /// Explicit source-family adapter. Checks the actual boot_args snapshot
+    /// Explicit source-family adapter. Checks the boot_args snapshot
     /// before selecting normal harvesting; no kernel override is interpreted
-    /// as a qualified source mode. Physical PMGR/error recipes stay original.
+    /// as a checked source mode. Physical PMGR/error recipes stay original.
     pub fn t8112(
         original: &'a [u8],
         live: &LiveTree,
@@ -286,7 +286,7 @@ impl<'a> Source<'a> {
     pub fn acc_harvesting(&self) -> u32 {
         self.acc_harvesting
     }
-    /// Full selected-source adapter for the retained started-worker roster.
+    /// Full selected-source adapter for the started-worker roster.
     pub fn t8112_assigned(
         original: &'a [u8],
         live: &LiveTree,
@@ -420,7 +420,7 @@ impl<'a> Source<'a> {
         let placement = native::placement(&guest, host, boot)
             .map_err(|error| format!("assigned host core placement: {error:?}"))?;
         for (ordinal, slot) in resources.slots.iter().enumerate() {
-            // Source PE order retains PMGR's cluster ordinal coupling; only
+            // Source PE order keeps PMGR's cluster ordinal coupling; only
             // the host worker assigned to each source slot changes.
             let worker = &roster.cores()[placement[ordinal]];
             let kind = resources
@@ -492,7 +492,7 @@ pub struct Prepared<'a> {
     pub joins: Vec<Join>,
 }
 impl Prepared<'_> {
-    /// Exact checked Plan-to-runtime assignment, preserving actual physical
+    /// Exact checked Plan-to-runtime assignment, preserving physical
     /// worker identity independently of the projected guest logical index.
     pub fn worker_bindings(
         &self,
@@ -513,7 +513,7 @@ impl Prepared<'_> {
             .collect())
     }
     /// Lookup only; original error/start inputs never manufacture an assigned
-    /// PE. The same retained owner revision must still be current at adoption.
+    /// PE. The same owner revision must still be current at adoption.
     pub fn join(&self, reg: u32) -> Result<&Join, String> {
         self.plan
             .revalidate()
@@ -541,7 +541,7 @@ fn matching_count(actual: &CountField<'_>, expected: &CountField<'_>) -> bool {
 }
 
 /// Does not invent an inventory from the loader's synthetic Fixture. The
-/// retained owner must supply actual qualified kinds, slots, cache geometry,
+/// owner must supply checked kinds, slots, cache geometry,
 /// interrupt/start/power identities and whole-consumer capacities. Unknown
 /// ownership or initial state is not supplied by this topology operation.
 #[cfg(test)]
@@ -567,8 +567,8 @@ pub fn prepare<'a>(
     )
 }
 
-/// Additive owner boundary for actual AP executors. A captured snapshot alone
-/// cannot establish started workers: the caller must retain the real admitted
+/// Additive owner boundary for AP executors. A captured snapshot alone
+/// cannot establish started workers: the caller must keep the real admitted
 /// roster/resources and separately join every native publication/Host owner.
 /// BspSource itself remains one-PE only and cannot supply additional resources.
 pub fn prepare_assigned<'a>(
@@ -593,7 +593,7 @@ pub fn prepare_assigned<'a>(
             ));
         }
     }
-    // The original producer's literal3 does not qualify an absent property's
+    // The original producer's literal3 does not check an absent property's
     // reduced-cluster consumers. Preserve all PMGR hardware descriptors.
     if source.counts.iter().any(|field| {
         field.property == "cpu-cluster-count" && tree.property(field.path, field.property).is_none()
@@ -1270,9 +1270,9 @@ mod tests {
             tree.node("/arm-io/pmgr")
         );
         assert_eq!(source.resources.source(), original);
-        // Construction fixture only: exercise the actual selected-source to
+        // Construction fixture only: exercise the selected-source to
         // loader cache-interval/watchdog/profile projection boundary at every
-        // admitted cardinality. This does not create an actual AP executor.
+        // admitted cardinality. This does not create an AP executor.
         struct Roster(Vec<AssignedCore>);
         impl RetainedRoster for Roster {
             fn revision(&self) -> u64 {
@@ -1501,7 +1501,7 @@ mod tests {
             }
         }
         // Keep a member of every source complex. Shorter selections need the
-        // independently reviewed constructor skip rule, not an inferred cap.
+        // reviewed constructor skip rule, not an inferred cap.
         let minimum = regs
             .iter()
             .enumerate()

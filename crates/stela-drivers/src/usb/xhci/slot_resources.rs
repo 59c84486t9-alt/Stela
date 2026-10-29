@@ -16,13 +16,13 @@ pub(super) struct Resources {
 
 pub(super) struct Cache {
     // Keep the entire original owner until a new enabled grant and current
-    // reservation exist. The old generation is never returned as authority.
+    // reservation exist. The old generation is never returned as permission.
     slots: Vec<Option<Slot>>,
     // Retired data/ISO/stream storage remains owned when EP0 is readdressed.
     endpoints: Vec<[Option<Transfer>; 32]>,
     sealed: Vec<bool>,
     rings: Vec<[Option<Ring>; 32]>,
-    // Actual Enable Slot may choose a different vacant numeric ID. The offered
+    // Enable Slot may choose a different vacant numeric ID. The offered
     // complete owner follows that real grant, rather than allocating another set.
     offered: Option<u8>,
 }
@@ -66,8 +66,8 @@ impl Cache {
             "duplicate xHCI published resource owner"
         );
         let index = usize::from(slot);
-        // Unconfigured leftovers already belong to this same retained pool.
-        // Move them with the next actual grant even if its numeric ID differs.
+        // Unconfigured leftovers already belong to this same pool.
+        // Move them with the next grant even if its numeric ID differs.
         for dci in 2..32 {
             if let Some(endpoint) = self.endpoints[index][dci].take() {
                 state.endpoints[dci] = Some(endpoint);

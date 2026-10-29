@@ -1,7 +1,7 @@
-//! Exclusive packet effects from the actual installed T6000 SRAM bytes.
+//! Exclusive packet effects from the installed T6000 SRAM bytes.
 //!
 //! This owns a frozen decode image, not a hardware trigger or active-engine PC.
-//! The mount must separately qualify the real trigger before routing effects.
+//! The mount must separately check the real trigger before routing effects.
 //! There is no supplied arbitrary PC, completion setter or end-retirement API.
 use super::{Controller, Error};
 use crate::platform::apple::pmgr::sequencer::{
@@ -16,8 +16,8 @@ pub struct Effects {
     pub(super) cursor: Rc<RefCell<PacketCursor>>,
 }
 impl Controller {
-    /// Bind complete actual clock inputs and a separately qualified phase to
-    /// this same retained controller. No later call can substitute that clock.
+    /// Bind complete clock inputs and a separately checked phase to
+    /// this same controller. No later call can substitute that clock.
     pub fn bind_native_clock(
         &self,
         image: crate::platform::apple::power::t6000::clock::Image,
@@ -57,14 +57,14 @@ impl Controller {
             .map(|clock| clock.snapshot())
             .ok_or(Error::ClockUnbound)
     }
-    /// Claim packet-effect ownership at an actual published group/slot, using
-    /// its checked pointer and a supplied, qualified emitted image extent and
+    /// Claim packet-effect ownership at a published group/slot, using
+    /// its checked pointer and a supplied, checked emitted image extent and
     /// address format. No request is selected/acknowledged by this operation.
     ///
-    /// Only actual known SRAM bytes are copied into the immutable decode cache.
+    /// Only known SRAM bytes are copied into the immutable decode cache.
     /// The same owner then forbids modifying those bytes or their table/slot
     /// routing. Dropping a cursor cannot erase effects or release that lease;
-    /// reset, end retirement and native cancellation remain unqualified.
+    /// reset, end retirement and native cancellation remain unchecked.
     pub fn native_packet_effects(
         &self,
         group: u8,
@@ -147,7 +147,7 @@ impl Effects {
     pub fn pending_delay(&self) -> Option<u32> {
         self.cursor.borrow().pending_delay()
     }
-    /// Earliest actual system-counter sample for the current delay. Unknown
+    /// Earliest system-counter sample for the current delay. Unknown
     /// clocks return an error; a stopped clock or suspended service has no
     /// runnable deadline. This does not advance time or execute the packet.
     pub fn delay_deadline(&self) -> Result<Option<u64>, Error> {
@@ -172,7 +172,7 @@ impl Effects {
         };
         clock.deadline(remaining).map_err(Error::Clock)
     }
-    /// Join actual 24MHz system time to the separately supplied native clock
+    /// Join 24MHz system time to the separately supplied native clock
     /// frequency/phase. Rail/clock pauses are settled at their real lifecycle
     /// edges. Quiesce blocks instruction service but does not turn that clock
     /// off. A completed wait advances only this packet, never native retirement.

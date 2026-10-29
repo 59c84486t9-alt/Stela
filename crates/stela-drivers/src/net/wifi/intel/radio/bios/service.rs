@@ -20,7 +20,7 @@ pub enum Request {
     /// handle. Other Variable variants are never requested through this case.
     PowerTable(Variable),
     /// Intel DSM GUID f21202bf-8f78-4dc6-a5b3-1f738e285ade, revision 0,
-    /// no fourth-argument payload, at the actual function's ACPI handle.
+    /// no fourth-argument payload, at the function's ACPI handle.
     Dsm(u8),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,9 +35,9 @@ pub enum IoError {
     /// The platform service has not been implemented or cannot be called now.
     /// This is never a BIOS absence and must prevent command publication.
     Unavailable,
-    /// A collection bound prevented a complete actual observation.
+    /// A collection bound prevented a complete observation.
     BoundExceeded,
-    /// Actual qualified lookup/invocation failed, retaining its platform code.
+    /// Checked lookup/invocation failed, keeping its platform code.
     Failed(u64),
     NotFound,
 }
@@ -48,29 +48,29 @@ impl IoError {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DmiIdentity {
-    /// Genuine SMBIOS system/board vendor strings, or observed absent strings.
+    /// SMBIOS system/board vendor strings, or observed absent strings.
     pub system_vendor: Option<String>,
     pub board_vendor: Option<String>,
 }
-/// Actual ACPI and EFI reads, owned independently of copied resource bytes.
+/// ACPI and EFI reads, owned independently of copied resource bytes.
 /// # Safety
 /// Implementors perform real reads at the device/firmware namespace bound by
-/// `ColdRadio::begin_lari`, retaining every resource needed for those services.
-/// ACPI requests must use that function's real handle (including a genuinely
+/// `ColdRadio::begin_lari`, keeping every resource needed for those services.
+/// ACPI requests must use that function's real handle (including an
 /// observed missing handle), exact method/GUID/revision and original values.
 /// EFI reads use the requested descriptor's exact GUID/name and preserve full
-/// returned bytes. NotFound/Failed require an actual attempted qualified read;
+/// returned bytes. NotFound/Failed require an attempted checked read;
 /// missing AML/EFI support, invalid lifetime/root mapping or incomplete capture
 /// must return Unavailable/BoundExceeded, never pretend the object is absent.
 /// Returned objects are bounded to 4096 bytes/256 nodes/depth 4; exceeding that
 /// native collection envelope returns BoundExceeded. The provider must remain
-/// valid until independently stopped; uncertain owner Drop retains it. SMBIOS
-/// vendor strings come from this same retained native platform, preserve actual
+/// valid until independently stopped; uncertain owner Drop keeps it. SMBIOS
+/// vendor strings come from this same native platform, preserve
 /// absence and are individually bounded to 4096 bytes.
 pub unsafe trait BiosIo: 'static {
     fn evaluate(&mut self, request: Request) -> Result<Object, IoError>;
     fn variable(&mut self, variable: Variable) -> Result<Vec<u8>, IoError>;
-    /// Real SMBIOS on the same retained platform; no PCI/ACPI-derived guess.
+    /// Real SMBIOS on the same platform; no PCI/ACPI-derived guess.
     /// The default preserves explicitly unavailable native service support.
     fn dmi_identity(&mut self) -> Result<DmiIdentity, IoError> {
         Err(IoError::Unavailable)
@@ -117,7 +117,7 @@ impl<B: BiosIo> Session<B> {
     pub(crate) fn dmi_identity(&mut self) -> Result<DmiIdentity, Error> {
         let result = self.io.dmi_identity();
         self.reads.push(Read::Dmi(result.clone()));
-        // Any failure is incomplete identity, not a fabricated unapproved board.
+        // Any failure is incomplete identity, not an invented unapproved board.
         let identity = result.map_err(Error::IncompleteDmi)?;
         if identity
             .system_vendor
@@ -135,7 +135,7 @@ impl<B: BiosIo> Session<B> {
     pub(crate) fn reads(&self) -> &[Read] {
         &self.reads
     }
-    /// Actual source ECKV selection in this session's original namespace.
+    /// Source ECKV selection in this session's original namespace.
     /// Missing services are incomplete observations, not an absent clock.
     pub(crate) fn external_clock(&mut self) -> Result<lari::Observation, Error> {
         if let Some(observation) = self.external_clock {
@@ -150,7 +150,7 @@ impl<B: BiosIo> Session<B> {
         Ok(observation)
     }
     /// Source WRDD permits CN only. This records a BIOS observation, never
-    /// location/OS authority or an override of an actual firmware response.
+    /// location/OS permission or an override of a firmware response.
     pub(crate) fn country(&mut self) -> Result<lari::Observation, Error> {
         if let Some(observation) = self.country {
             return Ok(observation);
@@ -376,7 +376,7 @@ mod tests {
     fn buffer(value: u64, length: usize) -> Object {
         Object::Buffer(value.to_le_bytes()[..length].to_vec())
     }
-    // SAFETY: exact modeled raw namespace calls; this grants no real platform
+    // SAFETY: modeled raw namespace calls; this grants no real platform
     // attachment. The unchanged source oracle separately consumes these inputs.
     unsafe impl BiosIo for Model {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
@@ -507,7 +507,7 @@ mod tests {
             session.reads()[1],
             Read::Uefi(Variable::GeneralConfiguration, _)
         ));
-        // Invalid UEFI falls back to actual AML once, and reuses its original
+        // Invalid UEFI falls back to AML once, and reuses its original
         // values/source/revision through later UEFI getter attempts.
         let mut session = Session::new(Model {
             scenario: 2 + 2 * 8 + 3 * 64,
@@ -530,7 +530,7 @@ mod tests {
         variable: Option<Variable>,
         error: IoError,
     }
-    // SAFETY: modeled incomplete/failed service responses, never physical authority.
+    // SAFETY: modeled incomplete/failed service responses, never physical permission.
     unsafe impl BiosIo for Missing {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             if self.request == Some(request) {
@@ -585,8 +585,8 @@ mod tests {
             variable: None,
             error: IoError::Failed(0x1234),
         });
-        // Actual source failure defaults GLAI to unlocked and can exhaust the
-        // genuine ACPI path. The exact failure remains in the original reads.
+        // Source failure defaults GLAI to unlocked and can exhaust the
+        // ACPI path. The exact failure remains in the original reads.
         session.observe(lari::Input::Dsm(4)).unwrap();
         assert_eq!(
             session.reads()[0],
@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(current, Some(4095));
     }
     struct ClockModel(u8);
-    // SAFETY: exact raw modeled ECKV namespaces; no native platform authority.
+    // SAFETY: exact raw modeled ECKV namespaces; no native platform permission.
     unsafe impl BiosIo for ClockModel {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             match request {
@@ -738,7 +738,7 @@ mod tests {
         }
     }
     struct CountryModel(u8);
-    // SAFETY: exact modeled BIOS service reads, never a real location issuer.
+    // SAFETY: modeled BIOS service reads, never a real location issuer.
     unsafe impl BiosIo for CountryModel {
         fn evaluate(&mut self, request: Request) -> Result<Object, IoError> {
             match request {

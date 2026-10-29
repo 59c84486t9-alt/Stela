@@ -1,4 +1,4 @@
-//! Actual public WOPCM/firmware backing owner transitions over isolated peers.
+//! Public WOPCM/firmware backing owner transitions over isolated peers.
 use super::*;
 use bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DomainMapping},
@@ -15,7 +15,7 @@ struct Pages {
     model: Arc<Model>,
 }
 // SAFETY: isolated owned zeroed RAM page, symbolic PA, no hardware or safe
-// aliases. Canonical pin/CPU/DMA ownership retains this same page until Drop.
+// aliases. Canonical pin/CPU/DMA ownership keeps this same page until Drop.
 unsafe impl PageBacking for Pages {
     fn cpu_base(&self) -> NonNull<u8> {
         NonNull::from(&self.page.0[0])
@@ -72,7 +72,7 @@ impl PageSource for Source {
         )
     }
 }
-// SAFETY: synchronous symbolic-domain peer paired with this actual native
+// SAFETY: synchronous symbolic-domain peer paired with this native
 // Device model. It never exposes native DMA or a real GGTT/physical grant.
 unsafe impl DmaDomain for Model {
     unsafe fn map(
@@ -86,7 +86,7 @@ unsafe impl DmaDomain for Model {
         let pages = pages.as_single().unwrap();
         let cpu = pages.cpu_mapping(CacheAttribute::WriteBack).unwrap();
         let pointer = cpu.address(0, 4096).unwrap();
-        // SAFETY: this private synchronous mapping peer observes the actual
+        // SAFETY: this private synchronous mapping peer observes the
         // completed CPU copy; no device or concurrent writer can access it.
         let copied = unsafe { std::slice::from_raw_parts(pointer.as_ptr(), 4096) };
         assert_eq!(&copied[..self.expected.len()], self.expected);
@@ -155,7 +155,7 @@ pub(super) fn owned_firmware_backing(authority: &Authority, next: &AtomicU64) {
         let domain: Arc<dyn DmaDomain> = model.clone();
         let source = Source(model.clone());
         // SAFETY: the private model domain is paired with this same native
-        // Device, reset/WOPCM epoch and context; no actual DMA/GGTT user exists.
+        // Device, reset/WOPCM epoch and context; no DMA/GGTT user exists.
         let (preparation, error) =
             match unsafe { preparation.pin_firmware(&source, domain, u64::MAX) } {
                 Err(failure) => failure,
@@ -205,7 +205,7 @@ pub(super) fn owned_firmware_backing(authority: &Authority, next: &AtomicU64) {
                 continue;
             }
             // SAFETY: no real DMA/firmware/GGTT/IRQ user ever existed in this
-            // model; the same actual native preparation remains valid.
+            // model; the same native preparation remains valid.
             let (published, error) = unsafe { published.retire_after_quiescence() }
                 .err()
                 .expect("programmed invalidation failure");

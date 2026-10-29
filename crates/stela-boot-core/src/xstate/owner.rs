@@ -5,9 +5,9 @@ use super::*;
 use crate::msr;
 use core::marker::PhantomData;
 
-/// One actual physical CPU's descriptor-owned layout. Not Send/Sync; no safe
+/// One physical CPU's descriptor-owned layout. Not Send/Sync; no safe
 /// constructor accepts CPUID records, IDs, masks or caller-supplied booleans.
-/// Retain it and every real IST allocation through the last possible entry,
+/// Keep it and every real IST allocation through the last possible entry,
 /// including terminal NMI/MCE after Host state retirement.
 #[derive(Debug)]
 #[must_use = "retain the actual xstate owner with its descriptor and IST resources"]
@@ -19,12 +19,12 @@ pub struct XstateOwner {
 
 impl XstateOwner {
     /// # Safety
-    /// The caller exclusively owns this actual processor and its pinned
+    /// The caller exclusively owns this processor and its pinned
     /// descriptor/IST resources, without migration through retirement. All
     /// relevant declarations/layouts remain stable under the same trusted
     /// firmware/VMM lifetime contract as NativeCpuOwner. No physical reset,
     /// resume, microcode or state reconfiguration may overlap an entry image.
-    /// This capture changes no controls and cannot qualify the entry stub.
+    /// This capture changes no controls and cannot check the entry stub.
     #[cfg(target_arch = "x86_64")]
     pub unsafe fn capture() -> Result<Self, LayoutError> {
         privilege()?;
@@ -67,9 +67,9 @@ impl XstateOwner {
         &self.layout.abi
     }
 
-    /// Validate actual controls before preparing an entry/transition. The
-    /// assembly entries use the controls this qualified at configuration
-    /// ([`EntryAbi::extended`]) and the actual XCR0, without calling Rust
+    /// Validate controls before preparing an entry/transition. The
+    /// assembly entries use the controls this checked at configuration
+    /// ([`EntryAbi::extended`]) and the XCR0, without calling Rust
     /// first and clobbering interrupted state.
     #[cfg(target_arch = "x86_64")]
     pub fn check(&self) -> Result<SaveFormat, LayoutError> {
@@ -86,7 +86,7 @@ impl XstateOwner {
     }
 
     /// Pure extent check only: numbers do not grant backing ownership. The
-    /// descriptor installer must retain its actual pinned IST allocation and
+    /// descriptor installer must keep its pinned IST allocation and
     /// prove mapping/guard/stack budget across every real execution root.
     pub fn check_entry_extent(
         &self,
@@ -147,14 +147,14 @@ fn msr(register: msr::Msr) -> u64 {
 #[cfg(target_arch = "x86_64")]
 fn read_controls(layout: &Layout) -> Controls {
     let (cr0, cr4): (u64, u64);
-    // SAFETY: internal caller performed the actual privilege/IF preflight.
+    // SAFETY: internal caller performed the privilege/IF preflight.
     unsafe {
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nostack, preserves_flags));
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
     }
     let xcr0 = if cr4 & CR4_OSXSAVE != 0 && layout.abi.xsave_available != 0 {
         let (low, high): (u32, u32);
-        // SAFETY: actual XSAVE hardware and current CR4.OSXSAVE qualify ECX0.
+        // SAFETY: XSAVE hardware and current CR4.OSXSAVE check ECX0.
         unsafe {
             core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") low, out("edx") high, options(nostack, preserves_flags));
         }
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn each_entry_accounts_for_its_own_image_metadata_and_alignment_slop() {
-        // Private layout/extent model only, not an actual CPU owner or save.
+        // Private layout/extent model only, not a CPU owner or save.
         let owner = XstateOwner {
             processor: 0,
             layout: layout(),
@@ -322,7 +322,7 @@ mod tests {
         let seed = [0x35u8; 16];
         let control = 0x3f80u32;
         let default_control = 0x1f80u32;
-        // SAFETY: actual hosted OSXSAVE qualifies these instructions, mask1 is
+        // SAFETY: hosted OSXSAVE checks these instructions, mask1 is
         // always enabled x87, buffers are aligned/sized and header is zero.
         // The complete original legacy state is restored within this one asm
         // boundary. No privileged control changes or unsupported wider opcodes.

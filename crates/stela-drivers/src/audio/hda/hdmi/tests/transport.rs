@@ -63,7 +63,7 @@ fn invalid_port_rejected() {
         }
         let graph = c.enumerate_codec(0).unwrap();
         // SAFETY: The controller and display owner share this fixture's locked Hardware.
-        // Invalid pin/device selectors are rejected before retaining a binding.
+        // Invalid pin/device selectors are rejected before keeping a binding.
         let attached = unsafe { c.attach_hdmi_port(&graph, 4, 0, f.owner.clone()) };
         if fault == 3 || fault == 4 {
             let port = attached.unwrap();
@@ -94,19 +94,19 @@ fn mst_selects_each_device_entry() {
     f.owner.state.lock().unwrap().device = 4;
     assert_eq!(
         // SAFETY: The controller and display owner share this fixture's locked Hardware.
-        // Invalid pin/device selectors are rejected before retaining a binding.
+        // Invalid pin/device selectors are rejected before keeping a binding.
         unsafe { c.attach_hdmi_port(&graph, 4, 4, f.owner.clone()) },
         Err(Error::InvalidHdmiPort)
     );
     assert_eq!(
         // SAFETY: The controller and display owner share this fixture's locked Hardware.
-        // Invalid pin/device selectors are rejected before retaining a binding.
+        // Invalid pin/device selectors are rejected before keeping a binding.
         unsafe { c.attach_hdmi_port(&graph, 4, 2, f.owner.clone()) },
         Err(Error::InvalidHdmiPort)
     );
     f.owner.state.lock().unwrap().device = 2;
     // SAFETY: The controller and display owner share this fixture's locked Hardware.
-    // Invalid pin/device selectors are rejected before retaining a binding.
+    // Invalid pin/device selectors are rejected before keeping a binding.
     let port = unsafe { c.attach_hdmi_port(&graph, 4, 2, f.owner.clone()) }.unwrap();
     let (stream, period) = f.stream(&mut c, 2, 16);
     c.prepare_hdmi(port, stream, 2, None).unwrap();

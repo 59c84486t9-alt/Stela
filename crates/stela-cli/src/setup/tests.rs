@@ -3308,7 +3308,7 @@ fn legacy_operations_reject_oversized_firmware() {
     );
     assert_eq!(snapshot(&f.esp), before);
 
-    // Uninstall retains independently managed host firmware. A new setup
+    // Uninstall keeps independently managed host firmware. A new setup
     // must check it during planning, even when there is no setup record.
     let firmware_before = snapshot(&f.esp.join(DIRECTORY));
     rerun(&f, |c| c.action = Action::Uninstall).unwrap();

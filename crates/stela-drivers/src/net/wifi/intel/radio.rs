@@ -46,8 +46,8 @@ impl InitialCommand {
         &self.bytes
     }
 }
-/// Inputs and output are pure data, never actual NVM/current-epoch proof.
-/// The later owned consumer must prepare this from its own retained firmware
+/// Inputs and output are pure data, never NVM/current-epoch proof.
+/// The later owned consumer must prepare this from its own firmware
 /// and private real NVM completion, not accept a caller-substituted plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitialPlan {
@@ -62,7 +62,7 @@ impl InitialPlan {
         nvm: &Information,
     ) -> Result<Self, Error> {
         let mut tx_antennas = ((firmware.phy_sku().ok_or(Error::MissingPhySku)? >> 16) & 0xf) as u8;
-        // Exact source cast/conditional intersection; upper NVM bits are not
+        // Source cast/conditional intersection; upper NVM bits are not
         // silently interpreted as extra physical antennas.
         let nvm_antennas = nvm.tx_chains as u8;
         if nvm_antennas != 0 {
@@ -121,7 +121,7 @@ impl InitialPlan {
             bt,
         )?;
         if firmware.supports_capability(37) {
-            // Actual standalone cfg/22000.c::iwl_ax200_mac_cfg has omitted
+            // Standalone cfg/22000.c::iwl_ax200_mac_cfg has omitted
             // (zero) latency. cfg/ax210.c::iwl_ty_mac_cfg explicitly sets500.
             let latency: u32 = match family {
                 Family::Ax200 => 0,

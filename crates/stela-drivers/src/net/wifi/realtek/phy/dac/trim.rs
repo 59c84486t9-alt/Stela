@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
-//! Source RF X2 and factory OTP trim effects; no regulatory/TX qualification.
+//! Source RF X2 and factory OTP trim effects.
 mod tail;
 use super::super::super::efuse::Physical;
 use super::{Attempt, DacCalibrated, Error, Io, Path, Report};
@@ -11,7 +11,7 @@ const POWER_5G: [[usize; 5]; 2] = [
     [0x1ec, 0x1e8, 0x1e4, 0x1e0, 0x1dc],
     [0x1eb, 0x1e7, 0x1e3, 0x1df, 0x1db],
 ];
-/// Actual source factory bytes; 0xff is successfully read blank OTP here,
+/// Source factory bytes; 0xff is successfully read blank OTP here,
 /// never substituted for a transport timeout. These are not TX policy values.
 #[derive(Debug)]
 pub struct FactoryBytes {
@@ -23,7 +23,7 @@ pub struct FactoryBytes {
 }
 /// Completed source factory initialization effects, including source-defined
 /// optional/blank behavior. No analog lock, calibrated channel, power policy or
-/// TX authority is implied by stores/delays or a nonbusy X2 observation.
+/// TX permission is implied by stores/delays or a nonbusy X2 observation.
 #[derive(Debug)]
 pub struct FactoryInitialized {
     calibration: DacCalibrated,
@@ -42,7 +42,7 @@ impl FactoryInitialized {
     pub fn raw(&self) -> &FactoryBytes {
         &self.raw
     }
-    /// Source recovery writes/delay ran iff this actual initial bit was set.
+    /// Source recovery writes/delay ran iff this initial bit was set.
     /// Source has no subsequent analog-lock acknowledgment in this routine.
     pub fn x2_busy_observed(&self) -> bool {
         self.x2_busy_observed
@@ -64,20 +64,20 @@ impl FactoryInitialized {
 }
 impl DacCalibrated {
     /// Apply the next source RF X2/thermal/power/PA factory initialization.
-    /// All optional/default effects are retained exactly, with raw presence
-    /// facts exposed separately from actual programmed fields.
+    /// All optional/default effects are held exactly, with raw presence
+    /// facts exposed separately from programmed fields.
     ///
     /// # Safety
-    /// Same genuine retained requester and uninterrupted reset/firmware epoch
+    /// Same kept requester and uninterrupted reset/firmware epoch
     /// for this state, Report, Physical and Io, not just equal fingerprints.
-    /// Physical is the actual immutable OTP image used by the completed prior
-    /// table/TRX/dynamic/DAC phases on this device. All actual source board/
-    /// power prerequisites remain valid, BAR/clocks/queues/pins retained and
+    /// Physical is the immutable OTP image used by the completed prior
+    /// table/TRX/dynamic/DAC phases on this device. All source board/
+    /// power prerequisites remain valid, BAR/clocks/queues/pins kept and
     /// operational TX/competing reset/IRQ/PHY/RF/OTP work quiesced. Run once in
     /// exclusive initial process/deferred context. Immutable OTP reuse avoids
     /// repeated transport reads; it never admits caller-supplied raw bytes.
     /// This phase does not establish trusted OS/channel/power/adaptivity policy,
-    /// analog lock, IQK/DPK, runtime tracking, radio or DMA-stop authority.
+    /// analog lock, IQK/DPK, runtime tracking, radio or DMA-stop permission.
     pub unsafe fn initialize_factory<I: Io>(
         self,
         io: &mut I,
@@ -92,7 +92,7 @@ impl DacCalibrated {
         if cap.rf_phys != 2 || cap.rf_paths != 2 || cap.antenna_tx != 3 || cap.antenna_rx != 3 {
             return Err(Error::UnsupportedRfLayout);
         }
-        // Validate the actual immutable board stream before factory-driven IO;
+        // Validate the immutable board stream before factory-driven IO;
         // same-owner provenance remains the unsafe contract, not this check.
         let board = physical.logical().map_err(Error::Efuse)?.board();
         board.source_rfe().map_err(Error::Efuse)?;
@@ -143,7 +143,7 @@ impl DacCalibrated {
             }
             out[0] = Some(raw[0] & 15);
         }
-        // Source 5 GHz helper has no blank check: a genuine 0xff byte gives
+        // Source 5 GHz helper has no blank check: a 0xff byte gives
         // nibble 0xf. Preserve that defined initialization effect, never
         // reinterpret it as transport success, calibrated EIRP or TX policy.
         if both_2g {
@@ -171,7 +171,7 @@ impl DacCalibrated {
             }
         }
         if present != 0 {
-            // Actual source sequence maps both 2 GHz middle indexes and all
+            // Source sequence maps both 2 GHz middle indexes and all
             // extra 5 GHz aliases, including explicit zero missing groups.
             for (p, gain) in [Path::A, Path::B].into_iter().zip(gain) {
                 a.dac_rf_write(report, p, 0xee, 1 << 19, 1)?;
@@ -187,7 +187,7 @@ impl DacCalibrated {
         }
         a.modify32(0xa70, 0x3ff, 0x3ff)?;
         // Source all 2 GHz paths precede all 5 GHz paths; an absent 2 GHz
-        // value returns early, retaining any earlier path's actual store.
+        // value returns early, keeping any earlier path's store.
         for (band, mask) in [(0, 0xf000), (1, 0xf0000)] {
             for (p, value) in [Path::A, Path::B].into_iter().zip(pa) {
                 if let Some(value) = value[band] {
@@ -217,7 +217,7 @@ impl<I: Io> Attempt<'_, I> {
         reg: u8,
         mask: u32,
     ) -> Result<u32, Error> {
-        // SAFETY: same genuine retained control owner and exclusive live
+        // SAFETY: same control owner and exclusive live
         // initial-phase BB/RF domain required by the consuming transition.
         Ok(unsafe { super::rf::Registers::new(self.io, report) }?.read(p, reg, mask)?)
     }

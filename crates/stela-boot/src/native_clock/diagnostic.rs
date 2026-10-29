@@ -1,4 +1,4 @@
-//! Explicit short native-root fixture. Actual PM/LAPIC/IDT/HLT effects are
+//! Explicit short native-root fixture. PM/LAPIC/IDT/HLT effects are
 //! checked; these authored words are not an original Linux timer-wheel test.
 use super::*;
 
@@ -8,9 +8,9 @@ struct Words {
 }
 
 /// # Safety
-/// Explicit bounded diagnostic on the actual retained native HostOwner. The
+/// Explicit bounded diagnostic on the native HostOwner. The
 /// trusted test platform preserves the PM source and guarantees no >1-second
-/// sample gap, including firmware/VMM interruptions. This authority qualifies
+/// sample gap, including firmware/VMM interruptions. This permission checks
 /// only this short fixture; no arbitrary original driver execution is admitted.
 pub(crate) unsafe fn check(
     owner: &mut host::HostOwner,
@@ -19,15 +19,15 @@ pub(crate) unsafe fn check(
     // SAFETY: caller's explicit short-root profile, not an IRQ-count inference.
     let source = unsafe { prepared.qualify_bounded(pm::NS)? };
     let root_execution = owner.enter_root()?;
-    // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
+    // SAFETY: real owner and unchanged kept tables/roots satisfy attach.
     let installed = unsafe { Installed::attach(owner, &root_execution, source)? };
     run(installed, None)
 }
 
 /// # Safety
-/// Actual production Source counter/root identity and complete original
+/// Production Source counter/root identity and complete original
 /// controller/IRQ/idle handoff remain owned through this bounded native proof.
-/// No finite RAM-absence scope is retained or recreated by this constructor.
+/// No finite RAM-absence scope is held or recreated by this constructor.
 pub(crate) unsafe fn check_native(
     identity: Arc<host::RootIdentity>,
     prepared: Prepared,
@@ -35,8 +35,8 @@ pub(crate) unsafe fn check_native(
     if prepared.hpet_counter().is_none() {
         return Err(WorkError::Unavailable);
     }
-    // SAFETY: this actual owner supplies complete HPET/LAPIC/IDT delivery and
-    // lifecycle; constructor checks exact retained Source identity and ARAT.
+    // SAFETY: this owner supplies complete HPET/LAPIC/IDT delivery and
+    // lifecycle; constructor checks exact Source identity and ARAT.
     let installed = unsafe { Installed::attach_native(identity.clone(), prepared)? };
     let services = installed.services()?;
     services.check_identity(&identity)?;
@@ -57,8 +57,8 @@ fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkErro
     let initial = words.jiffies.load(Ordering::Acquire);
     let origin = clock.now_ns()?;
     let retained: RetainedOwner = words.clone();
-    // SAFETY: actual aligned atomic storage retained independently; same Clock,
-    // same logical HZ and genuine generation. There is no C callback/storage.
+    // SAFETY: aligned atomic storage kept independently; same Clock,
+    // same logical HZ and generation. There is no C callback/storage.
     unsafe {
         installed.bind_counter(
             NonNull::from(&words.jiffies),
@@ -74,11 +74,11 @@ fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkErro
     // progress. The eight additional increments below must come from IRQs.
     let busy_initial = words.jiffies.load(Ordering::Acquire);
     // SAFETY: explicit fixture root grants physical interrupt delivery while
-    // its actual host owner, IDT/IST/xstate and all word/code owners stay live.
+    // its host owner, IDT/IST/xstate and all word/code owners stay live.
     let execution = unsafe { installed.enter_driver_execution()? };
     let limit = origin.checked_add(pm::NS).ok_or(WorkError::Exhausted)?;
     // No service pass, software tick or process publication occurs in this
-    // loop. Only the actual existing timer ISR can advance the observed word.
+    // loop. Only the existing timer ISR can advance the observed word.
     while words
         .jiffies
         .load(Ordering::Acquire)
@@ -95,7 +95,7 @@ fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkErro
         .load(Ordering::Acquire)
         .wrapping_sub(busy_initial);
     idle.notify()?;
-    idle.wait_until_ns(None)?; // Genuine pending event avoids sleeping.
+    idle.wait_until_ns(None)?; // Pending event avoids sleeping.
     let deadline = clock
         .now_ns()?
         .checked_add(5 * TICK_NS)
@@ -110,7 +110,7 @@ fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkErro
     }
     // Exercise the existing guest owner's timer through the same mux. Its
     // deadline survives intervening 1-ms driver heartbeats and is retired only
-    // once actual PM time reaches it. This supplies no guest execution claim.
+    // once PM time reaches it. This supplies no guest execution claim.
     let guest_ticks =
         u32::try_from((installed.state.apic_hz / 100).max(1)).map_err(|_| WorkError::Exhausted)?;
     let saved = flags_disable();

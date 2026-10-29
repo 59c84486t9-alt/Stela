@@ -13,7 +13,7 @@ fn revoked_and_foreign_update_admission() {
     state.allowed.set(false);
     assert!(
         // SAFETY: The original context, pending observation and native backing remain
-        // retained, but OS policy was revoked after preflight. Fresh guards must deny
+        // kept, but OS policy was revoked after preflight. Fresh guards must deny
         // queue publication without changing the applied state.
         unsafe { driver.update_edca_modern(&mut owner, permit, None) }.is_err()
     );
@@ -26,7 +26,7 @@ fn revoked_and_foreign_update_admission() {
     let permit = admit(&mut other_owner, &other, AssociationUse::Management);
     assert!(
         // SAFETY: Both original and foreign model requesters keep their backing live. The
-        // deliberately foreign owner/admission must be rejected before rebranding this
+        // foreign owner/admission must be rejected before rebranding this
         // observation or publishing an EDCA command.
         unsafe { driver.update_edca_modern(&mut other_owner, permit, None) }.is_err()
     );
@@ -51,7 +51,7 @@ fn independent_queue_policy_denials() {
         let result =
         // SAFETY: The pending observation and native owners remain live under the
         // original association admission. One dynamic hardware/OS hook is
-        // deliberately denied; fresh operation-specific guards must refuse before
+        // denied; fresh operation-specific guards must refuse before
         // publication.
         unsafe { driver.update_edca_modern(&mut owner, permit, None) };
         match result {
@@ -86,9 +86,9 @@ fn association_permission_does_not_grant_edca() {
         fn allows_association(&mut self, operation: &reg::AssociationOperation<'_>) -> bool {
             reg::HardwareLease::allows_association(&mut self.0, operation)
         }
-        // Deliberately uses the actual default-deny dynamic provider hook.
+        // Uses the default-deny dynamic provider hook.
     }
-    // SAFETY: delegates this exact retained model policy/guard without extending
+    // SAFETY: delegates this model policy/guard without extending
     // its accepted operations; original context permission never grants EDCA.
     unsafe impl reg::HardwarePolicy for OriginalOnly {
         type Lease<'a> = Guard;
@@ -109,8 +109,8 @@ fn association_permission_does_not_grant_edca() {
         )
         .unwrap();
     assert!(matches!(
-        // SAFETY: The wrapper retains the original model requester and delegates its
-        // real lease/context unchanged. Its dynamic-queue hook deliberately default-
+        // SAFETY: The wrapper keeps the original model requester and delegates its
+        // real lease/context unchanged. Its dynamic-queue hook default-
         // denies, so association permission cannot publish this EDCA update.
         unsafe { driver.update_edca_modern(&mut owner, permit, None) },
         Err(ClientError::Regulatory(reg::Error::HardwareDenied))

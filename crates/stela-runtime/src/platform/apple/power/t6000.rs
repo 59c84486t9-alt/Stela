@@ -1,19 +1,19 @@
-//! T6000 PMGR request banks sharing one retained controller owner.
+//! T6000 PMGR request banks sharing one controller owner.
 //!
 //! Original 26A434 AppleT6000PMGR uses RegMap0 +18000..18014 for six
 //! source complex selectors, +1a034 for four CIO ports per instance, and
 //! +1c0c0/+1c0c8/+1c0d0 for CPM automatic-gating controls. RegMap5b
 //! +38210..3821c owns the separate ISP source/divider/update requests. Callers must
-//! supply the actual board's admitted selector/port/instance geometry and
+//! supply the board's admitted selector/port/instance geometry and
 //! handoff observations; source selector capacity is not hardware inventory.
 //!
 //! Requests are committed controller inputs, not completed native programs.
 //! GPCE bits4/5/6 remain unknown after requests. CIO readback remains unknown
 //! without the explicitly bound Stela-native engine. That engine derives its
-//! command/busy state from actual requests and only retires them after routed
+//! command/busy state from requests and only retires them after routed
 //! effects, a matching source action and the finalized end. No captured Apple
 //! micro-PC, cold state or unsupported native operation is manufactured.
-//! A retained pause preserves every input, observation and chronological prefix
+//! A kept pause preserves every input, observation and chronological prefix
 //! across all mapped views.
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
@@ -50,7 +50,7 @@ pub enum Bank {
 }
 
 /// Positive board geometry supplied by the mount, independently of the source
-/// driver's maximum capacities. Bits select actual devices, not initial states.
+/// driver's maximum capacities. Bits select devices, not initial states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instance {
     pub complexes: u8,
@@ -59,7 +59,7 @@ pub struct Instance {
     pub isp_clocks: u8,
 }
 impl Instance {
-    /// Required word offsets only; the caller must qualify physical placement.
+    /// Required word offsets only; the caller must check physical placement.
     pub fn offsets(self, bank: Bank) -> Vec<u64> {
         if bank == Bank::ClkGenSoc {
             return (0..4)
@@ -85,7 +85,7 @@ impl Instance {
     }
 }
 
-/// An actual register observation, with independently retained knownness. A
+/// A register observation, with independently kept knownness. A
 /// zero known-mask supplies no healthy/reset value despite any backing bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
@@ -160,7 +160,7 @@ impl State {
             .and_then(|native| native.clock.as_mut())
         {
             // Real system time is monotonic. If a caller violates that boundary,
-            // the retained clock quarantines itself; never silently rebase it.
+            // the clock quarantines itself; never silently rebase it.
             let _ = clock.observe(now, running);
         }
         if running != (proposed.powered && proposed.clocked && !proposed.reset) {
@@ -170,7 +170,7 @@ impl State {
     }
 }
 
-/// Shared authority for every mapped instance. Handoff observations cannot be
+/// Shared permission for every mapped instance. Handoff observations cannot be
 /// replaced after requests. The optional CIO native engine consumes only its
 /// own accepted requests through real effects and finalized retirement.
 #[derive(Clone)]
@@ -194,8 +194,8 @@ impl Controller {
         {
             return Err(Error::Geometry);
         }
-        // A caller must supply actual lifecycle inputs; accepting a retained
-        // pause does not qualify cold reset or nonretained register loss.
+        // A caller must supply lifecycle inputs; accepting a kept
+        // pause does not check cold reset or nonretained register loss.
         if lifecycle.reset || (!lifecycle.powered && !lifecycle.retention) {
             return Err(Error::UnqualifiedLifecycle);
         }
@@ -254,8 +254,8 @@ impl Controller {
         }
         Ok(Self(Rc::new(RefCell::new(state))))
     }
-    /// One first-die T6000 owner for actual request, configuration and SRAM
-    /// views. Existing constructors retain unknown/unmounted native resources.
+    /// One first-die T6000 owner for request, configuration and SRAM
+    /// views. Existing constructors keep unknown/unmounted native resources.
     pub fn with_native(
         geometry: Vec<Instance>,
         lifecycle: LifecycleState,
@@ -414,10 +414,10 @@ impl MmioDevice for View {
                     "T6000 CIO only qualifies one admitted port request bit",
                 ));
             }
-            // Without the actual Stela-native execution owner, the AP request
+            // Without the Stela-native execution owner, the AP request
             // and wait alone establish no response or low-bit readback. Keep
             // that unbound path unknown. The explicitly bound engine below
-            // instead reports its own retained command/busy state.
+            // instead reports its own command/busy state.
             let next = if let Some(native) =
                 state.native.as_ref().filter(|native| native.engine_bound())
             {
@@ -770,7 +770,7 @@ mod tests {
         let mut bus = Bus::new();
         let clock = bus.add(Box::new(owner.clock_view(0).unwrap()));
         let pmgr = bus.add(Box::new(owner.view(0).unwrap()));
-        // Exact original J314s RegMap0/RegMap5b placements.
+        // Original J314s RegMap0/RegMap5b placements.
         bus.map(clock, 0x28e000000, 0x80000, 0).unwrap();
         bus.map(pmgr, 0x28e080000, 0x80000, 0).unwrap();
         let mut pins = InterruptLatch::new();
@@ -778,7 +778,7 @@ mod tests {
         for index in 0..4 {
             let address = 0x28e000000 + ISP_CLOCK_BASE + index * 4;
             assert_eq!(bus.read(address, Width::Word, &mut access), Ok(0x4000));
-            // Four source/divider fields are actual requests, not a derived
+            // Four source/divider fields are requests, not a derived
             // camera frequency or a completed PLL/ISP transition.
             let written = 0x80004000 | (index << 24) | (index + 1);
             bus.write(address, Width::Word, written, &mut access)

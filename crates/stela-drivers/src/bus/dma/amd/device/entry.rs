@@ -29,8 +29,8 @@ impl Policy {
 
     fn words(self) -> [u64; 4] {
         // IVHD bit3 is ATCPermit metadata (AMD48882rev3.11 Table106),
-        // not actual DTE bit3 or DTE.I. Permission never enables ATS in this
-        // separately admitted host-only profile with actual ATS/ATC off.
+        // not DTE bit3 or DTE.I. Permission never enables ATS in this
+        // separately admitted host-only profile with ATS/ATC off.
         let mut words = [0; 4];
         for (flag, bit) in [(1, 56), (2, 57), (4, 58), (64, 62), (128, 63)] {
             if self.0 & flag != 0 {
@@ -313,7 +313,7 @@ mod tests {
         let base = [0x6000_1234_5678_9803, 0x5a7c, 0, 0];
         for (word, mask) in [
             (0, 1u64 << 2), // Reserved low control.
-            (0, 1 << 3),    // Actual DTE bit3 is not IVHD ATCPermit.
+            (0, 1 << 3),    // DTE bit3 is not IVHD ATCPermit.
             (0, 1 << 7),    // HAD.
             (0, 1 << 8),    // HAD.
             (0, 1 << 52),   // PPR.

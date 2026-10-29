@@ -149,7 +149,7 @@ fn compact_even_lanes(code: &mut Code, small: u8) {
     match small {
         BYTE_BITS => binary(code, Host::PackUnsignedWordToByte, SOURCE_XMM, SOURCE_XMM),
         WORD_BITS => {
-            // Sign-extend the retained bits before packing: every lane is representable.
+            // Sign-extend the bits before packing: every lane is representable.
             shift(code, DWORD_BITS, Direction::Left, SOURCE_XMM, WORD_BITS);
             shift(
                 code,

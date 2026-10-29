@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2005-2008 Marcel Holtmann <marcel@holtmann.org>
-//! Source-qualified QCA Rome/WCN USB SCO, queued wideband and explicit shutdown.
-//! Uses the shared actual native USB media owner. No physical power/subsystem
+//! Source-checked QCA Rome/WCN USB SCO, queued wideband and explicit shutdown.
+//! Uses the shared native USB media owner. No physical power/subsystem
 //! reset, pairing/profile policy or HCI ISO transport is inferred.
 use super::super::mediatek::media as shared;
 use crate::{
@@ -17,7 +17,7 @@ pub struct Session<B: MediaIo>(shared::Session<B>, Option<ShutdownReport>);
 #[derive(Debug)]
 pub struct ShutdownReport {
     pub completion: SetupReport,
-    /// Actual HCI observations in wire order, including the real reset CC.
+    /// HCI observations in wire order, including the real reset CC.
     pub asynchronous: alloc::vec::Vec<Received>,
     pub output: alloc::vec::Vec<OutputReceipt>,
     /// Set only after media and base transport retirement both acknowledge.
@@ -39,14 +39,14 @@ impl<B: MediaIo> Session<B> {
     pub fn last_reset(&self) -> Option<&SetupReport> {
         self.0.last_reset()
     }
-    /// Historical actual reset/packet evidence also survives failed retirement.
+    /// Historical reset/packet evidence also survives failed retirement.
     pub fn shutdown_report(&self) -> Option<&ShutdownReport> {
         self.1.as_ref()
     }
     pub fn set_voice(&mut self, voice: Voice, dma: &mut dyn DmaAllocator) -> Result<()> {
         self.0.set_voice(voice, dma)
     }
-    /// Actual HCI synchronous payload MTU from the stack. Source QCA prefers
+    /// HCI synchronous payload MTU from the stack. Source QCA prefers
     /// alt6, otherwise alt1; Realtek's alt3 exception never applies here.
     pub fn set_wideband_voice(
         &mut self,
@@ -82,7 +82,7 @@ impl<B: MediaIo> Session<B> {
         self.0.resume()
     }
     /// Source btusb_shutdown_qca sends ordinary HCI Reset, then native transport
-    /// retirement is acknowledged. The caller owns actual current command
+    /// retirement is acknowledged. The caller owns current command
     /// credits and must have no other outstanding command. A zero allowance
     /// refuses without effects; failed completion/retirement is terminal.
     pub fn shutdown(&mut self, command_credits: u8) -> Result<&ShutdownReport> {
@@ -94,7 +94,7 @@ impl<B: MediaIo> Session<B> {
         self.0.submit_command(&[3, 0x0c, 0])?;
         let completion = self.0.last_reset().unwrap().clone();
         let asynchronous = self.0.take_pending_observations();
-        // Install actual Reset/packet evidence before any further fallible
+        // Install Reset/packet evidence before any further fallible
         // output observation or teardown. No live input poll is needed here.
         self.1 = Some(ShutdownReport {
             completion,

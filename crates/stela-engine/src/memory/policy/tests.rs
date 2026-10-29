@@ -17,7 +17,7 @@ struct Storage {
 
 // SAFETY: ownership exposes no references/accesses to the raw allocation.
 unsafe impl Send for Storage {}
-// SAFETY: shared ownership only retains the allocation's lifetime.
+// SAFETY: shared ownership only keeps the allocation's lifetime.
 unsafe impl Sync for Storage {}
 
 impl Drop for Storage {
@@ -29,10 +29,10 @@ impl Drop for Storage {
 
 fn backing(bytes: usize) -> Arc<MemoryBacking> {
     let layout = Layout::from_size_align(bytes, TAG_GRANULE_BYTES).unwrap();
-    // SAFETY: the valid nonzero layout is retained for matching deallocation.
+    // SAFETY: the valid nonzero layout is held for matching deallocation.
     let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let owner = Arc::new(Storage { pointer, layout });
-    // SAFETY: the owner retains raw storage with no Rust byte references;
+    // SAFETY: the owner keeps raw storage with no Rust byte references;
     // these tests only access the separate allocation-tag plane.
     unsafe {
         MemoryBacking::new(

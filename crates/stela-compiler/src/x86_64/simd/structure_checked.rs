@@ -197,7 +197,7 @@ impl CheckedOperand {
                     operand.element_bytes,
                     guest(vector_offset(access.vector) + u32::from(index * operand.element_bytes)),
                 );
-                // A full private staging store is safe; the request retains the
+                // A full private staging store is safe; the request keeps the
                 // exact element width and does not expose unused staging bytes.
                 save(code, Gpr::Rcx, DATA_OFFSET);
             }
@@ -315,7 +315,7 @@ fn replicate(code: &mut Code, bytes: u8, vector_bytes: u8, target: TargetCpu) {
     }
     match bytes {
         BYTE_BYTES | HALFWORD_BYTES if vector_bytes == QWORD_BYTES => {
-            Host::ShuffleLowWord.register_imm(code, 0, 0, 0, TargetCpu::Baseline); // repeat low word, retaining the zero upper64
+            Host::ShuffleLowWord.register_imm(code, 0, 0, 0, TargetCpu::Baseline); // repeat low word, keeping the zero upper64
         }
         BYTE_BYTES | HALFWORD_BYTES => {
             Host::UnpackLowWord.register(code, 0, 0, TargetCpu::Baseline);

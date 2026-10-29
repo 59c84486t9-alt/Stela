@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
-//! Owning link consumes the same native observation; notices retain raw bytes.
+//! Owning link consumes the same native observation; notices keep raw bytes.
 use super::*;
 
 fn beacon(link: &TestLink, count: u8) -> Vec<u8> {
@@ -228,7 +228,7 @@ fn a_channel_switch_to_another_band_disconnects_like_mac80211() {
         link.service().unwrap();
     }
     assert_eq!(link.phase(), Phase::NeedsDrain);
-    // SAFETY: actual model peer/key removal and all old users drained.
+    // SAFETY: model peer/key removal and all old users drained.
     unsafe { link.retire_peer_after_drain() }.unwrap();
     link.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
@@ -248,7 +248,7 @@ fn a_new_association_forgets_the_last_aps_channel_and_timing() {
     assert!(narrowed.downgrade());
     s.channel = Some(narrowed);
     depart(&mut link, &model);
-    // SAFETY: actual model peer/key removal and all old users drained.
+    // SAFETY: model peer/key removal and all old users drained.
     unsafe { link.retire_peer_after_drain() }.unwrap();
     let (join, bss) = modern_inputs(&link.state().client.client);
     associate(&mut link, &model, join, bss);

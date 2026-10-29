@@ -59,7 +59,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
             });
         }
         assert!(matches!(
-            // SAFETY: Source provides fresh exclusive model RAM and boot retains its exact
+            // SAFETY: Source provides fresh exclusive model RAM and boot keeps its exact
             // requester/domain; the modeled RF-kill state is observed before publication.
             unsafe { boot.submit_command(command_id(), &[], &source) },
             Err(Error::RfKilled)
@@ -78,7 +78,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
             [3, 2, 0, 0, 4, 0, 0, 0, 2, 0, 0, 0]
         );
         assert_eq!(
-            // SAFETY: No model completion has been published yet; its same retained DMA
+            // SAFETY: No model completion has been published yet; its same DMA
             // allocations/source remain live while polling the pending command.
             unsafe { init.advance(&source) }.unwrap(),
             InitializationProgress::Pending(InitializationPhase::ExtendedConfiguration)
@@ -90,7 +90,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
             2,
             &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
         );
-        // Retry actual completed-range CPU visibility without replaying the
+        // Retry completed-range CPU visibility without replaying the
         // command or losing its exact initialization stage.
         {
             let mut r = domain.records.lock().unwrap();
@@ -98,14 +98,14 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
         }
         assert!(matches!(
             // SAFETY: The ACK was completed synchronously and injected CPU-sync failure
-            // keeps its mapped buffers retained by this initializer for retry.
+            // keeps its mapped buffers kept by this initializer for retry.
             unsafe { init.advance(&source) },
             Err(Error::CommandReclaim(_))
         ));
         assert_eq!(init.phase(), InitializationPhase::ExtendedConfiguration);
         domain.records.lock().unwrap().cpu_sync_fail = None;
         assert_eq!(
-            // SAFETY: The failed reclaim retained the same domain/source and mappings;
+            // SAFETY: The failed reclaim kept the same domain/source and mappings;
             // clearing the CPU-sync injection adds no device or concurrent writer.
             unsafe { init.advance(&source) }.unwrap(),
             InitializationProgress::Pending(InitializationPhase::AccessComplete)
@@ -118,7 +118,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
             &command_packet(Request::AccessComplete.id(), 1, &[]),
         );
         assert_eq!(
-            // SAFETY: The access-complete ACK was written synchronously to the retained
+            // SAFETY: The access-complete ACK was written synchronously to the kept
             // receive mapping; this owner/source remain live through reclamation.
             unsafe { init.advance(&source) }.unwrap(),
             InitializationProgress::Pending(InitializationPhase::InitNotification)
@@ -144,7 +144,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
         );
         assert_eq!(
             // SAFETY: The unrelated notification was published by the synchronous model;
-            // the original initializer/domain retain every pending buffer and Source.
+            // the original initializer/domain keep every pending buffer and Source.
             unsafe { init.advance(&source) }.unwrap(),
             InitializationProgress::Pending(InitializationPhase::InitNotification)
         );
@@ -176,7 +176,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
         );
         assert_eq!(
             // SAFETY: The NVM response now occupies a synchronously completed live buffer;
-            // the initializer/domain keep it retained through parsing and reclaim.
+            // the initializer/domain keep it kept through parsing and reclaim.
             unsafe { init.advance(&source) }.unwrap(),
             InitializationProgress::Observed
         );
@@ -202,7 +202,7 @@ pub(super) fn exercise_unified_nvm(actual_image: bool) {
             })
         );
         assert_eq!(
-            // SAFETY: Observation retains the same original model owner and source;
+            // SAFETY: Observation keeps the same original model owner and source;
             // reentering this finished state introduces no new mapping or device user.
             unsafe { init.advance(&source) }.unwrap(),
             InitializationProgress::Observed

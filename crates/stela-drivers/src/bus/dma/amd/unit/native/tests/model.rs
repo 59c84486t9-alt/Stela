@@ -40,19 +40,19 @@ struct Registers {
     request: Mutex<Option<MapRequest>>,
 }
 // SAFETY: fixture raw CPU bytes only; synchronous peer access never overlaps
-// another writer. The registry retains the actual allocation through all views.
+// another writer. The registry keeps the allocation through all views.
 unsafe impl Send for Registers {}
 // SAFETY: immutable metadata, locked registry bookkeeping, raw-only CPU access.
 unsafe impl Sync for Registers {}
 impl Registers {
     fn read(&self, offset: usize) -> u64 {
         assert!(offset < 16384 && offset.is_multiple_of(8));
-        // SAFETY: bounded native-aligned actual fixture RAM, synchronous peer.
+        // SAFETY: bounded native-aligned fixture RAM, synchronous peer.
         u64::from_le(unsafe { self.cpu.as_ptr().add(offset).cast::<u64>().read_volatile() })
     }
     fn write(&self, offset: usize, value: u64) {
         assert!(offset < 16384 && offset.is_multiple_of(8));
-        // SAFETY: same actual fixture register allocation; no safe byte aliases.
+        // SAFETY: same fixture register allocation; no safe byte aliases.
         unsafe {
             self.cpu
                 .as_ptr()
@@ -73,8 +73,8 @@ impl Drop for Registers {
         };
     }
 }
-// SAFETY: actual isolated fixture RAM models one retained UC mapping, never a
-// native IOMMU. No claimed cache attributes escape this isolated authority.
+// SAFETY: isolated fixture RAM models one UC mapping, never a
+// native IOMMU. No claimed cache attributes escape this isolated permission.
 unsafe impl MappingPlatform for Registers {
     fn check_context(&self, space: AddressSpace) -> Result<(), MapError> {
         assert_eq!(space, SPACE);
@@ -153,13 +153,13 @@ struct Ram {
     physical: Vec<u64>,
     state: Arc<Mutex<State>>,
 }
-// SAFETY: actual uniquely owned aligned RAM; metadata immutable, bookkeeping
+// SAFETY: uniquely owned aligned RAM; metadata immutable, bookkeeping
 // locked. Raw accesses obey normal caller CPU/device ownership requirements.
 unsafe impl Send for Ram {}
 // SAFETY: exposes immutable metadata/raw pointers; no safe byte references.
 unsafe impl Sync for Ram {}
-// SAFETY: actual CPU allocation retains the exact immutable symbolic native
-// page list; labels deliberately differ from CPU pointers and never reach HW.
+// SAFETY: CPU allocation keeps the exact immutable symbolic native
+// page list; labels differ from CPU pointers and never reach HW.
 unsafe impl PageBacking for Ram {
     fn cpu_base(&self) -> NonNull<u8> {
         self.cpu
@@ -222,7 +222,7 @@ impl PageSource for Platform {
             "allocation requires original process guard"
         );
         let layout = Layout::from_size_align(bytes, alignment).unwrap();
-        // SAFETY: fresh exclusive actual model CPU RAM, retained by Ram.
+        // SAFETY: fresh exclusive model CPU RAM, kept by Ram.
         let cpu = NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
         let first = state.next_pa;
         state.next_pa += bytes as u64;
@@ -243,8 +243,8 @@ impl PageSource for Platform {
         )
     }
 }
-// SAFETY: synchronous peer shares actual coherent fixture RAM. These explicit
-// fixtures model ordering/ownership but do not qualify native cache hardware.
+// SAFETY: synchronous peer shares coherent fixture RAM. These explicit
+// fixtures model ordering/ownership but do not check native cache hardware.
 unsafe impl TableVisibility for Platform {
     unsafe fn publish(&self, cpu: NonNull<u8>, bytes: usize) -> Result<(), MemoryError> {
         let state = self.peer.state.lock().unwrap();
@@ -262,8 +262,8 @@ unsafe impl TableVisibility for Platform {
         Ok(())
     }
 }
-// SAFETY: all unit/requester/config/mapping/RAM resources are actual retained
-// synchronous isolated fixtures. No native hardware/root/clock is qualified.
+// SAFETY: all unit/requester/config/mapping/RAM resources are held
+// synchronous isolated fixtures. No native hardware/root/clock is checked.
 unsafe impl ColdPlatform for Platform {
     type Access<'a> = Guard<'a>;
     fn enter(&self) -> Result<Self::Access<'_>, DmaError> {
@@ -321,7 +321,7 @@ fn pointer(state: &State, physical: u64, bytes: usize) -> *mut u8 {
     (cpu + offset) as *mut u8
 }
 fn word(state: &State, physical: u64) -> u64 {
-    // SAFETY: independently decoded bounded retained peer PA, synchronous read.
+    // SAFETY: independently decoded bounded peer PA, synchronous read.
     u64::from_le(unsafe { pointer(state, physical, 8).cast::<u64>().read_volatile() })
 }
 impl Peer {
@@ -352,7 +352,7 @@ impl Peer {
             assert!(head < RING_BYTES && head.is_multiple_of(16));
             let cpu = pointer(&state, ring + head as u64, 16).cast::<u32>();
             let command = core::array::from_fn(|i| {
-                // SAFETY: exact decoded actual retained ring entry.
+                // SAFETY: exact decoded kept ring entry.
                 u32::from_le(unsafe { cpu.add(i).read_volatile() })
             });
             state.commands.push(command);
@@ -368,7 +368,7 @@ impl Peer {
                         _ => sequence,
                     };
                     if state.mode != Mode::HeadOnly {
-                        // SAFETY: actual checked completion PA named by wire
+                        // SAFETY: checked completion PA named by wire
                         // command, not a predetermined callback return value.
                         unsafe {
                             pointer(&state, target, 8)
@@ -431,7 +431,7 @@ impl Peer {
     pub(super) fn walk(&self, rid: u16, address: u64) -> Option<(u64, bool, bool)> {
         let mut state = self.state.lock().unwrap();
         let table = self.registers.read(DEVICE_TABLE) & PHYSICAL;
-        // Retain positive and negative DTE/page observations until the exact
+        // Keep positive and negative DTE/page observations until the exact
         // matching wire invalidation. Re-reading RAM on every request would
         // conceal a missing RID/domain invalidation in the implementation.
         let words = if let Some(words) = state.dte_cache.get(&rid) {
@@ -530,7 +530,7 @@ impl Peer {
             .ram
             .iter()
             .map(|(&pa, &(cpu, bytes))| {
-                // SAFETY: model is stopped, exact retained RAM, no writer while locked.
+                // SAFETY: model is stopped, exact RAM, no writer while locked.
                 (
                     pa,
                     unsafe { core::slice::from_raw_parts(cpu as *const u8, bytes) }.to_vec(),
@@ -599,7 +599,7 @@ pub(super) fn inputs_hardware(
     miscellaneous: u32,
 ) -> (FunctionInspection, Platform, Peer, Vec<u8>) {
     let layout = Layout::from_size_align(16384, 4096).unwrap();
-    // SAFETY: actual isolated, page-aligned zeroed model register RAM.
+    // SAFETY: isolated, page-aligned zeroed model register RAM.
     let cpu = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let registers = Arc::new(Registers {
         cpu,
@@ -680,7 +680,7 @@ pub(super) fn inputs_hardware(
 pub(super) fn unit() -> (Unit<Platform>, Peer) {
     let (inspection, platform, peer, bytes) = inputs();
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
-    // SAFETY: actual synchronous isolated model PCI/UC/RAM/firmware owners;
+    // SAFETY: synchronous isolated model PCI/UC/RAM/firmware owners;
     // every requester, DMA/IRQ/work user is modeled as initially stopped.
     let unit = unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap();
     (unit, peer)

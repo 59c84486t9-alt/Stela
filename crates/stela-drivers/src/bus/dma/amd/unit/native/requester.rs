@@ -34,7 +34,7 @@ impl Mapping {
     }
 }
 
-/// Actual PCI requester, reserved AMD domain ID, DTE/root and payload pins.
+/// PCI requester, reserved AMD domain ID, DTE/root and payload pins.
 /// Process local ownership preserves the original native context restriction.
 pub struct Requester<P: ColdPlatform> {
     tree: PageTables<Hardware<P>>,
@@ -84,13 +84,13 @@ fn admit_function(function: &mut Function<OwnedConfig>) -> Result<u16, Error> {
 
 impl<P: ColdPlatform> Unit<P> {
     /// # Safety
-    /// `function` is the actual original covered requester in this unit's root
+    /// `function` is the original covered requester in this unit's root
     /// and firmware epoch. The producer transfers its exclusive reset/removal/
-    /// configuration ownership; all its actual aliases are absent in this plain
+    /// configuration ownership; all its aliases are absent in this plain
     /// profile. Engines/submissions and IRQ/work are stopped, all prior payload,
-    /// posted writes and bypass traffic are actually drained, and no DMA can
+    /// posted writes and bypass traffic are drained, and no DMA can
     /// resume until success. BusMaster-clear is checked but is not this proof.
-    /// Failure may retain the requester indefinitely with its uncertain root.
+    /// Failure may keep the requester indefinitely with its uncertain root.
     pub unsafe fn attach(
         &mut self,
         mut function: Function<OwnedConfig>,
@@ -163,7 +163,7 @@ impl<P: ColdPlatform> Unit<P> {
             requester: Some(owner.clone()),
         };
         let level = TableLevel::new(2).map_err(|_| Error::Profile)?;
-        // SAFETY: fixed30-bit IOVA/2-level subset admitted from actual HATS,
+        // SAFETY: fixed30-bit IOVA/2-level subset admitted from HATS,
         // IVINFO, platform PA width and original cold requester ownership.
         let mut tree = unsafe {
             PageTables::new(
@@ -179,8 +179,8 @@ impl<P: ColdPlatform> Unit<P> {
         self.active.borrow_mut().push(rid);
         let root = tree.root_for_publication().map_err(Error::Translation)?;
         for &member in &group {
-            // SAFETY: actual requester stopped/drained by caller; fresh domain
-            // ID and exposed root stay retained through DTE visibility and
+            // SAFETY: requester stopped/drained by caller; fresh domain
+            // ID and exposed root stay held through DTE visibility and
             // the old domain's invalidation.
             unsafe { self.table.borrow_mut().translate(member, root, level, id) }
                 .map_err(Error::DeviceTable)?;
@@ -208,12 +208,12 @@ impl<P: ColdPlatform> Unit<P> {
 }
 
 impl<P: ColdPlatform> Requester<P> {
-    /// Use the original retained PCI function, for example to program the
+    /// Use the original PCI function, for example to program the
     /// owning driver's IRQs and BusMaster after attachment. No cloned config
-    /// or second mapping authority is created.
+    /// or second mapping permission is created.
     ///
     /// # Safety
-    /// The caller owns this actual device's configuration operation and obeys
+    /// The caller owns this device's configuration operation and obeys
     /// its DMA/IRQ/submission ordering. It must preserve original identity,
     /// root/routing, resource assignment and reset/removal epochs, ATS/PASID/PRI
     /// exclusion and the cold platform profile. No returned value may contain a
@@ -327,8 +327,8 @@ impl<P: ColdPlatform> Requester<P> {
         );
         self.next_mapping = next;
         self.poisoned = true;
-        // SAFETY: exclusive new nonoverlapping bounded IOVA, exact retained
-        // pins, no submission can know it yet; actual table hardware retained.
+        // SAFETY: exclusive new nonoverlapping bounded IOVA, kept
+        // pins, no submission can know it yet; table hardware kept.
         let result = unsafe { self.tree.map(address, pages, direction) };
         if let Err(error) = result {
             if !self.tree.is_poisoned() {
@@ -350,13 +350,13 @@ impl<P: ColdPlatform> Requester<P> {
     /// # Safety
     /// Every access to this exact mapping has completed; submissions/engines
     /// and IRQ/work users are stopped and drained and cannot issue new access.
-    /// The original platform's actual process/root/cache context still applies.
+    /// The original platform's process/root/cache context still applies.
     pub unsafe fn unmap(&mut self, mapping: &Mapping) -> Result<(), Error> {
         let address = self.binding(mapping)?.address;
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         self.engine.health()?;
         self.poisoned = true;
-        // SAFETY: validated private original token; caller supplies actual DMA/
+        // SAFETY: validated private original token; caller supplies DMA/
         // submission/IRQ/work quiescence, never inferred from a command store.
         unsafe { self.tree.unmap(address) }.map_err(Error::Translation)?;
         let position = self
@@ -370,7 +370,7 @@ impl<P: ColdPlatform> Requester<P> {
         Ok(())
     }
     /// # Safety
-    /// CPU ownership of a CPU sync range follows actual device completion;
+    /// CPU ownership of a CPU sync range follows device completion;
     /// no ordinary CPU writer may race a device sync. No DMA-stop is implied.
     pub unsafe fn sync(
         &self,
@@ -384,8 +384,8 @@ impl<P: ColdPlatform> Requester<P> {
         }
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         self.engine.health()?;
-        // SAFETY: exact original retained pins/direction and bounded range;
-        // actual CPU/device range ownership is the caller's obligation.
+        // SAFETY: original kept pins/direction and bounded range;
+        // CPU/device range ownership is the caller's obligation.
         unsafe {
             self.engine
                 .resources
@@ -398,9 +398,9 @@ impl<P: ColdPlatform> Requester<P> {
         Err(DmaError::DrainUnavailable)
     }
     /// # Safety
-    /// This actual requester is stopped, every mapping was quiescently removed,
+    /// This requester is stopped, every mapping was quiescently removed,
     /// all payload/posted/IRQ/work users are drained and cannot resume. Original
-    /// configuration/root ownership must remain retained through this operation.
+    /// configuration/root ownership must remain held through this operation.
     pub unsafe fn detach(&mut self) -> Result<(), Error> {
         self.live()?;
         if !self.bindings.is_empty() {
@@ -409,7 +409,7 @@ impl<P: ColdPlatform> Requester<P> {
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         self.engine.health()?;
         self.poisoned = true;
-        // SAFETY: caller supplies complete actual requester quiescence; real
+        // SAFETY: caller supplies complete requester quiescence; real
         // DTE block invalidates old domain before its root may be retired.
         for &member in &self.group {
             // SAFETY: as above, for each ID the requester's DMA arrives under.
@@ -428,9 +428,9 @@ impl<P: ColdPlatform> Requester<P> {
 impl<P: ColdPlatform> Drop for Requester<P> {
     fn drop(&mut self) {
         if !self.detached {
-            // Also retain metadata pins for an unmap whose translation removal
+            // Also keep metadata pins for an unmap whose translation removal
             // completed but outer execution-guard teardown unwound. PageTables
-            // itself retains every still-installed/uncertain mapping and root.
+            // itself keeps every still-installed/uncertain mapping and root.
             core::mem::forget(core::mem::take(&mut self.bindings));
         }
     }

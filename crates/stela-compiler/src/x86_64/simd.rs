@@ -609,7 +609,7 @@ pub(super) fn emit_after(
                     && super::memory_store::aligned_immediate(base, displacement, mode, bytes),
                 xmm0 == Some(vector),
             );
-            // RDX retains the potential writeback across all SSE/GPR staging.
+            // RDX keeps the potential writeback across all SSE/GPR staging.
             memory_writeback(code, base, mode);
         }
     }

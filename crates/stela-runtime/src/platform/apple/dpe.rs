@@ -6,16 +6,16 @@
 //! 0x2fa3620; snapshot/restore 0x2b840f0/0x2b87eec).
 //!
 //! Stela hands off disabled zero controls and empty samples. The emulated
-//! die has no physical DPE energy activity: counts retain software saves.
+//! die has no physical DPE energy activity: counts keep software saves.
 //! Each high/low alias shares a full64 accumulator, so high/low/high sampling
 //! is coherent. Only restore-capable samples accept full64 reads/writes;
 //! other samples expose the DT's split32 read contract. No guessed rates,
 //! conversion parameters, status or unlisted engine words are returned.
 //!
-//! Retained clock/quiesce pauses preserve all controls and sample aliases.
-//! Nonzero sampling controls, physical reset and rail loss require unqualified
+//! Clock/quiesce pauses preserve all controls and sample aliases.
+//! Nonzero sampling controls, physical reset and rail loss require unchecked
 //! hardware sampling/restoration effects and refuse before commit. Clock-stop
-//! MMIO availability is unqualified; quiesce permits nonmutating reads. This
+//! MMIO availability is unchecked; quiesce permits nonmutating reads. This
 //! native-bank hook does not establish its implicit PMGR domain association.
 use super::regfile::Held;
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -403,8 +403,8 @@ mod tests {
             ]
         );
         assert_ne!(engines, ENGINES);
-        // Retain complete original group and restore programs: their sampling
-        // slots/enable predicates must be qualified before mounting this family.
+        // Keep complete original group and restore programs: their sampling
+        // slots/enable predicates must be checked before mounting this family.
         for (offset, len, digest) in [
             (
                 0x2ef5390,

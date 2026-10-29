@@ -67,7 +67,7 @@ pub(in crate::usb::ethernet) fn decode(bytes: &[u8]) -> Result<Vec<Vec<u8>>, &'s
                 return Err("ASIX RX frame exceeds selected MTU");
             }
             // Hardware already removed the FCS. Only the two-byte IP alignment
-            // pseudo header precedes the actual Ethernet frame in this protocol.
+            // pseudo header precedes the Ethernet frame in this protocol.
             packets.push(bytes[cursor + 2..cursor + length].to_vec());
         }
         cursor += padded;

@@ -131,7 +131,7 @@ fn provider_preserves_published_ids_and_only_activates_real_ancestors() {
     assert_eq!(child.clocks, [domain_id(1)]);
     assert_eq!(validate_power_graph(&states), Ok(()));
     // Neither provider role nor absent own start gates manufactures a
-    // source state or a lifecycle sink for its actual inherited supply.
+    // source state or a lifecycle sink for its inherited supply.
     let mut missing = states.clone();
     missing.domains.clear();
     missing.registers.clear();
@@ -516,7 +516,7 @@ fn original_provider_start_and_clock_receiver_source_is_pinned() {
             expected
         );
     }
-    // Actual selected vtable and GOT bindings, including PMGR super-start
+    // Selected vtable and GOT bindings, including PMGR super-start
     // to IOService::start. Authenticated source pointers are kept intact.
     for (offset, expected) in [
         (0x13156b0, 0x80113c6802b0c17cu64), // selected_t6000_start

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Bounded calibration arithmetic; callbacks/model input confer no hardware
 //! access, continuity, source identity or native clock admission. The caller
-//! retains the actual ordered CPU and full64 HPET/control/resource owners.
+//! keeps the ordered CPU and full64 HPET/control/resource owners.
 use super::{Error, RateWindow, ReferenceScale, Sample};
 const WINDOWS: usize = 5;
 const RETRIES: usize = 5;
@@ -48,8 +48,8 @@ fn stable_sample<E: From<Error>>(
 /// exact uncertainty intersection. No timestamp-derived deadline is trusted.
 /// Every read bracket has at most5 attempts; every window at most65536 polls.
 /// Stopped references/TSCs, changed rates and backwards data explicitly refuse.
-/// The actual full64 reference must not wrap/reset or change period/control
-/// during this bounded operation. This function does not qualify that promise.
+/// The full64 reference must not wrap/reset or change period/control
+/// during this bounded operation. This function does not check that promise.
 pub fn calibrate_hpet<E: From<Error>>(
     period_fs: u32,
     mut read: impl FnMut() -> Result<Sample, E>,

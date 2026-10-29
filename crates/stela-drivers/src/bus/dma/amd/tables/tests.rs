@@ -1,4 +1,4 @@
-//! Retained AMD DMA table model, backing provider and shared fixtures.
+//! AMD DMA table model, backing provider and shared fixtures.
 extern crate std;
 use super::*;
 use crate::bus::dma::{
@@ -106,7 +106,7 @@ impl Monitor {
             .map(|allocation| {
                 let words = (0..allocation.bytes / 8)
                     .map(|index| {
-                        // SAFETY: actual retained aligned CPU allocation;
+                        // SAFETY: aligned CPU allocation;
                         // the synchronous observer excludes table writers.
                         u64::from_le(unsafe {
                             (allocation.cpu as *const u64).add(index).read_volatile()
@@ -118,7 +118,7 @@ impl Monitor {
             .collect()
     }
 
-    /// Literal AMDv1 software walk of actual retained CPU words. This does
+    /// Literal AMDv1 software walk of kept CPU words. This does
     /// not call PageEntry/TableLevel decoding or claim a hardware walker.
     fn walk(&self, root: u64, mode: u8, address: u64) -> Option<Walk> {
         let state = self.state.lock().unwrap();
@@ -131,7 +131,7 @@ impl Monitor {
                 .expect("walker reached unowned table memory");
             let shift = 12 + 9 * u32::from(level - 1);
             let index = ((address >> shift) & if level == 6 { 127 } else { 511 }) as usize;
-            // SAFETY: the model's actual live table allocation; writers
+            // SAFETY: the model's live table allocation; writers
             // and table retirement are excluded while this synchronous walk runs.
             let word =
                 u64::from_le(unsafe { (allocation.cpu as *const u64).add(index).read_volatile() });
@@ -171,12 +171,12 @@ struct Backing {
     drops: Arc<AtomicUsize>,
     table_owner: Option<Arc<Monitor>>,
 }
-// SAFETY: actual owned zeroed CPU allocation, immutable metadata and raw
+// SAFETY: owned zeroed CPU allocation, immutable metadata and raw
 // pointers only. This model has no asynchronous writer or physical DMA.
 unsafe impl Send for Backing {}
 // SAFETY: access and release are synchronous; metadata uses the model mutex.
 unsafe impl Sync for Backing {}
-// SAFETY: each backing owns its exact live CPU storage and immutable symbolic
+// SAFETY: each backing owns its live CPU storage and immutable symbolic
 // PA list. Labels are distinct from CPU addresses and never reach hardware.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
@@ -228,7 +228,7 @@ fn pin_with_logical(
     let bytes = physical.len() * granule;
     assert!(logical_bytes > 0 && logical_bytes <= bytes);
     let layout = Layout::from_size_align(bytes, granule).unwrap();
-    // SAFETY: actual fresh zeroed storage, owned by exactly this backing.
+    // SAFETY: fresh zeroed storage, owned by exactly this backing.
     let cpu = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     assert!(!physical.contains(&(cpu.as_ptr() as usize as u64)));
     if let Some(owner) = &owner {
@@ -305,9 +305,9 @@ impl PageSource for Hardware {
         Ok(pages)
     }
 }
-// SAFETY: software-only visibility model snapshots actual preceding stores
+// SAFETY: software-only visibility model snapshots preceding stores
 // synchronously, with no native coherency, IOTLB or completion claim. The
-// model never mutates table words or retains the callback's borrowed pointer.
+// model never mutates table words or keeps the callback's borrowed pointer.
 unsafe impl TableVisibility for Hardware {
     unsafe fn publish(&self, cpu: NonNull<u8>, bytes: usize) -> Result<(), MemoryError> {
         assert_eq!(bytes, 4096);
@@ -325,7 +325,7 @@ unsafe impl TableVisibility for Hardware {
             }
             let mut words = Vec::new();
             for index in 0..512 {
-                // SAFETY: the callback borrows exactly this retained aligned
+                // SAFETY: the callback borrows exactly this aligned
                 // table; software writers are excluded until return/unwind.
                 words.push(u64::from_le(unsafe {
                     cpu.as_ptr().cast::<u64>().add(index).read_volatile()
@@ -352,7 +352,7 @@ unsafe impl TableVisibility for Hardware {
 }
 // SAFETY: isolated synchronous software domain model, not native hardware.
 // Every table is a fresh exclusive pin. The walker performs no A/D writes.
-// Injected failures/panics establish uncertainty, never fabricated success.
+// Injected failures/panics establish uncertainty, never invented success.
 unsafe impl TableHardware for Hardware {
     fn admit_payload(&self, pages: &DmaPages, direction: Direction) -> Result<bool, DmaError> {
         let mut state = self.monitor.state.lock().unwrap();

@@ -111,7 +111,7 @@ fn entropy_and_allocator_failure_leave_no_key_secret_or_live_allocation() {
         assert!(calls.load(Ordering::Acquire) > before);
         let mut output = [0xa5; 32];
         // SAFETY: exclusive exact key and live concrete RNG/peer/output; this
-        // deliberately failed blinding source must not publish partial bytes.
+        // failed blinding source must not publish partial bytes.
         let status = unsafe {
             stela_mbed_kx_shared(
                 key.key.as_ptr(),
@@ -141,7 +141,7 @@ fn failed_generation_does_not_mutate_raw_ffi_outputs() {
         let original = key;
         let mut public = [0xa5; 65];
         let mut length = 123;
-        // SAFETY: exact live output slots and synchronous concrete RNG; the
+        // SAFETY: live output slots and synchronous concrete RNG; the
         // sentinel pointer is never dereferenced and must remain unchanged.
         let status = unsafe {
             stela_mbed_kx_new(
@@ -471,7 +471,7 @@ fn digest_and_hmac_match_independent_vectors_and_wipe_all_backend_allocations() 
         hmac.update(b"There").unwrap();
         let mut sentinel = [0xa5; 64];
         assert_ne!(
-            // SAFETY: exact live affine context and writable sentinel, deliberately mismatched
+            // SAFETY: live affine context and writable sentinel, mismatched
             // output length is rejected before any output write.
             unsafe { stela_mbed_md_finish(hmac.state.as_ptr(), sentinel.as_mut_ptr(), 64) },
             0

@@ -48,7 +48,7 @@ impl core::fmt::Display for ClaimError {
 impl core::error::Error for ClaimError {}
 
 /// Created only by the firmware allocating call below. Dropping this owner
-/// retains LOADER_DATA: these pages belong to Stela for the entire boot.
+/// keeps LOADER_DATA: these pages belong to Stela for the entire boot.
 #[repr(C)]
 struct Allocation {
     region: Region,

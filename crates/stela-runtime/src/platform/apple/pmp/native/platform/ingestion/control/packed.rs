@@ -1,4 +1,4 @@
-//! Exact source register-width arithmetic, with no synthetic observations.
+//! Source register-width arithmetic, with no synthetic observations.
 pub(super) fn local_field(value: u64, start: u32, width: u32) -> u32 {
     let mask = u64::MAX.wrapping_shl(width & 63) ^ u64::from(u32::MAX);
     (value.wrapping_shr(start & 63) & mask) as u32

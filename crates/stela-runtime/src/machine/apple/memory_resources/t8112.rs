@@ -4,7 +4,7 @@
 //! start file 0x2efac98..0x2efacf0 reads eight channels at stride 0x400000;
 //! _dcsWriteQueueFlush file 0x2efde44..0x2efdf14 consumes the low16 clear at +0xa40.
 //! t8112pmp SHA256 b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
-//! files 0x355f8/0x457f8 qualify 256 implemented PTD entries and 16 local routes.
+//! files 0x355f8/0x457f8 check 256 implemented PTD entries and 16 local routes.
 //! Construction initializes declared software backing, never hardware readiness,
 //! native PMP services, DVFS completion or an AP AIC wire. The PMP's PTD duties
 //! the drivers wait for are modeled behaviorally (`pmp::duties`).
@@ -140,7 +140,7 @@ impl Prepared {
     }
 
     /// Complete device-offset bindings. Installing them is placement only;
-    /// source-qualified cache/AMCC and native service admission remain required.
+    /// source-checked cache/AMCC and native service admission remain required.
     pub fn bindings(&self) -> [(u64, u64, u64); 2] {
         [
             (self.descriptor.channels.0, DCS_BYTES, 0),
@@ -172,7 +172,7 @@ impl Prepared {
         if !self.requires_ram_read(offset, width) {
             return Err("T8112 canonical read is not a source DCS drain word");
         }
-        // SAFETY: caller retains the complete live canonical ownership contract.
+        // SAFETY: caller keeps the complete live canonical ownership contract.
         unsafe { self.dcs.read_ram_drain(offset, width, memory) }
     }
     /// # Safety
@@ -189,7 +189,7 @@ impl Prepared {
         if !self.requires_ram_read(offset, width) {
             return Err("T8112 canonical write is not a source DCS drain word");
         }
-        // SAFETY: caller retains the same live closed producer set and RAM hold.
+        // SAFETY: caller keeps the same live closed producer set and RAM hold.
         unsafe { self.dcs.write_ram_drain(offset, width, value, now, memory) }
     }
     fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
@@ -385,7 +385,7 @@ mod tests {
     }
     pub(super) fn descriptor() -> MemoryCache {
         MemoryCache {
-            // Cache/AMCC are deliberately not part of this composition.
+            // Cache/AMCC are not part of this composition.
             cache: stela_soc_data::amcc::Cache {
                 shared: (0, 0),
                 broadcast: 0,
@@ -646,7 +646,7 @@ mod tests {
                 stela_engine::machine::engine::DeviceReadShape::Scalar { bytes: 8 }
             ));
             let resource = super::super::resource_for(&board.bus, id).unwrap();
-            // SAFETY: no PE/background publisher exists; all actual fixture gates and exclusive board ownership remain held.
+            // SAFETY: no PE/background publisher exists; all fixture gates and exclusive board ownership remain held.
             unsafe {
                 assert!(
                     resource
@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(owner.publication_bank().lifecycle_state(), LIVE);
         let service = ram.try_service().unwrap().unwrap();
         assert!(
-            // SAFETY: actual fixture RAM gates held, no independently running publisher.
+            // SAFETY: fixture RAM gates held, no independently running publisher.
             unsafe { owner.read_ram_drain(CHANNEL_STRIDE + DRAIN, Width::Word, &service) }.is_err()
         );
         assert!(owner.read(0xec8, Width::Word, &mut access).is_err());

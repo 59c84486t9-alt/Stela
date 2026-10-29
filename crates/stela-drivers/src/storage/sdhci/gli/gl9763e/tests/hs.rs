@@ -1,4 +1,4 @@
-//! Ordinary eight-pin SDR HS ordering, actual VCC/rate power class and failure.
+//! Ordinary eight-pin SDR HS ordering, VCC/rate power class and failure.
 use super::*;
 
 #[test]
@@ -7,7 +7,7 @@ fn ordinary_mmc_hs_orders_host_status_clock_and_width_before_real_pio_or_adma_io
         for variant in 0..3 {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing retains every descriptor/payload until all aliases retire.
+            // SAFETY: backing keeps every descriptor/payload until all aliases retire.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut owner, card, state) = owner();
             initialize_owner(&mut owner).unwrap();
@@ -65,7 +65,7 @@ fn ordinary_mmc_hs_width_or_power_failure_powers_off_before_publication() {
     for power in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed transition retains the complete original epoch and DMA ranges.
+        // SAFETY: failed transition keeps the complete original epoch and DMA ranges.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut owner, card, _) = owner();
         initialize_owner(&mut owner).unwrap();

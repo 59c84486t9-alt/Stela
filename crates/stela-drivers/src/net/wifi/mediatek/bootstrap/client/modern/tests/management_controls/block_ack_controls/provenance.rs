@@ -67,7 +67,7 @@ fn foreign_and_group_observation_preflight() {
             let mut retained = Some(proof);
             let result =
             // SAFETY: Both independent model peers and their backing stay live. This
-            // foreign session is intentionally mismatched; requester/session
+            // foreign session is mismatched; requester/session
             // validation must refuse it before consuming the original envelope.
             unsafe {
                 driver.receive_management_block_ack(&mut owner, permit, &mut retained, NOW)

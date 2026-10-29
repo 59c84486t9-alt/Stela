@@ -4,7 +4,7 @@
 // Copyright (c) 1998-2002 Frodo Looijaard, Philip Edelbrock,
 // Mark D. Studebaker; (c) 2007-2014 Jean Delvare; (c) 2010 Intel Corporation,
 // David Woodhouse.
-//! Hardware CRC is available only through the actual configuration owner.
+//! Hardware CRC is available only through the configuration owner.
 //!
 //! The pinned donor enables AUXCTL.CRC, not HOSTCNT.PEC_EN. Generation and
 //! verification belong to the controller; payload buffers contain no software
@@ -19,7 +19,7 @@ mod byte_block;
 impl<R: Registers, T: Timer> I801<R, T> {
     pub(super) fn pec_supported(&self, transaction: &Transaction<'_>) -> Result<(), Error> {
         // At the pinned source all exact PCI profiles with E32B also carry
-        // FEATURE_SMBUS_PEC (ICH4+); ICH3 and earlier deliberately do not.
+        // FEATURE_SMBUS_PEC (ICH4+); ICH3 and earlier do not.
         if !self.info.has_hardware_pec() {
             return Err(ErrorKind::UnsupportedPec.into());
         }
@@ -36,7 +36,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
         let status = self.registers.read8(HOST_STATUS);
         let crc = self.registers.read8(AUX_STATUS);
         // Preserve timeout/malformed-transfer causes. Hardware precedence uses
-        // actual retained samples, never a fabricated OR of two status bytes:
+        // samples, never an invented OR of two status bytes:
         // BUS_ERR > DEV_ERR (+CRCE means bad packet) > FAILED. A CRCE-only
         // completion also refuses publication even without the required DEV_ERR.
         if error.is_none()
@@ -74,7 +74,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
         }
         let result = self.finish(error);
         // Exact unrelated AUXCTL bits must survive CRC/E32B cleanup as well.
-        // A W1C write is not proof that CRCE actually cleared.
+        // A W1C write is not proof that CRCE cleared.
         let restored = self.registers.read8(AUX_CONTROL);
         let remaining = self.registers.read8(AUX_STATUS);
         if restored != auxiliary || remaining & AUX_CRC_ERROR != 0 {
@@ -226,8 +226,8 @@ impl<R: Registers, T: Timer> I801<R, T> {
         })();
         self.finish_pec(transfer.err(), auxiliary)?;
         self.completed_deadline(start)?;
-        // The outer retained configuration owner stages these again until its
-        // actual PCI identity/configuration and final deadline checks succeed.
+        // The outer kept configuration owner stages these again until its
+        // PCI identity/configuration and final deadline checks succeed.
         match transaction {
             Transaction::ReceiveByte(output) | Transaction::ReadByte { data: output, .. } => {
                 *output = word[0];

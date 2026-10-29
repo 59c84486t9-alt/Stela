@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Retained ordinary PCIe bootstrap, including every source selectable queue.
-//! Actual protocol facts never publish an associated Link or qualify policy.
+//! Ordinary PCIe bootstrap, including every source selectable queue.
+//! Protocol facts never publish an associated Link or check policy.
 use super::{
     control::{self, Control, mac::MacInitialized, rx_ring, tx_ring},
     firmware::{Prepared, auxiliary::Auxiliary, clc::Inputs as ClcInputs},
@@ -90,7 +90,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     data_tx: Option<DataRing<Q, client::PacketOwner<C>>>,
     data_rx: Option<RxRing<Q>>,
     data_assembly: Assembly,
-    // Retain partially installed rings before enabling or constructing mailbox.
+    // Keep partially installed rings before enabling or constructing mailbox.
     wm: Option<TxRing<Q>>,
     fwdl: Option<TxRing<Q>>,
     event: Option<RxRing<Q>>,
@@ -104,34 +104,34 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     counters: Option<[u32; 11]>,
     counter_reset_ticks: Option<u64>,
 }
-/// Drop after the first actual mutation retains the entire real context,
-/// including fully completed facts. Independent actual quiescence is required
+/// Drop after the first mutation keeps the entire real context,
+/// including fully completed facts. Independent quiescence is required
 /// to release it. Polling is serialized and device IRQ sources stay masked.
 pub struct Controller<I: BarIo, Q: QueueIo, C: 'static> {
     owned: Option<Box<Owned<I, Q, C>>>,
 }
 impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
     /// # Safety
-    /// Actual observed `identity`, powered exclusive PCI/BAR claim and UC
-    /// mapping `base..base+bytes`, retained by `owner`, meet MmioBar/Registers
-    /// and QueueIo contracts. `resource` is the genuine live controller/board/
+    /// Observed `identity`, powered exclusive PCI/BAR claim and UC
+    /// mapping `base..base+bytes`, kept by `owner`, meet MmioBar/Registers
+    /// and QueueIo contracts. `resource` is the live controller/board/
     /// firmware/policy ownership guard, not unrelated copied facts. There are
     /// no old firmware/IRQ/deferred/DMA/token users or possible late responses;
     /// the function's complete ordinary queue/WTBL namespace is exclusively
-    /// owned in a genuine initial sequencing epoch. This is not established by
+    /// owned in an initial sequencing epoch. This is not established by
     /// an idle register, a caller integer or a firmware restart command.
-    /// Calibrate `clock` on the actual executing CPU. All later DMA installs
-    /// require this same actual requester's qualified WB coherence with ATS,
+    /// Calibrate `clock` on the executing CPU. All later DMA installs
+    /// require this same requester's checked WB coherence with ATS,
     /// NoSnoop/PRI/PASID off and its canonical PageSource/DmaDomain. Do not
-    /// qualify physical hardware from the QEMU or WB cache-type observation.
-    /// Serialize all raw reset/IRQ/power/firmware paths for this retained owner.
+    /// check physical hardware from the QEMU or WB cache-type observation.
+    /// Serialize all raw reset/IRQ/power/firmware paths for this owner.
     /// This claims the WLAN function and its initial firmware epoch. The
     /// source WLAN NIC_POWER_CTRL restart is not a Bluetooth setup command;
     /// the pinned source establishes no mandatory PCIe-before-USB probe order.
-    /// Any external shared power/reset path must retain and quiesce every
-    /// affected function's actual users before changing their resources.
+    /// Any external shared power/reset path must keep and quiesce every
+    /// affected function's users before changing their resources.
     /// Neither a local phase nor a copied combo ID grants shared reset or
-    /// recovery authority. Automatic shared reset remains unsupported.
+    /// recovery permission. Automatic shared reset remains unsupported.
     pub unsafe fn new(
         identity: Identity,
         base: NonNull<u8>,
@@ -166,11 +166,11 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
         )
     }
     /// # Safety
-    /// `source`/`domain` are actually attached to this requester's retained
-    /// physical ownership and meet the genuine coherent-WB/32-bit constraints
+    /// `source`/`domain` are attached to this requester's kept
+    /// physical ownership and meet the coherent-WB/32-bit constraints
     /// documented by ring::TxRing::install and this Controller's constructor.
     /// They must not belong to another function or synthetic physical aliases.
-    /// `aspm` is the actual retained requester ASPM-supported state; its source
+    /// `aspm` is the requester ASPM-supported state; its source
     /// wake-delay selection remains bound through the subsequent MCU setup.
     pub unsafe fn install(
         &mut self,
@@ -289,7 +289,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.aspm = Some(aspm);
         s.control.driver_own(aspm).map_err(Error::Control)?;
         if s.identity.chip == Chip::Mt7925 {
-            // SAFETY: mt7925_pci_probe: actual driver-own, WFSYS reset, then DMA init.
+            // SAFETY: mt7925_pci_probe: driver-own, WFSYS reset, then DMA init.
             // No ring is allocated/published or engine enabled before its ACK.
             unsafe { s.control.initial_wfsys_reset() }.map_err(Error::Control)?;
         }
@@ -300,8 +300,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .disable_global_translation()
             .map_err(Error::Control)?;
         let c3 = s.identity.chip == Chip::Mt7925;
-        // Exact source order and complete layout; each returned mapping/queue
-        // is retained before any subsequent fallible allocation/publication.
+        // Source order and complete layout; each returned mapping/queue
+        // is held before any subsequent fallible allocation/publication.
         s.data_tx = Some(
             // SAFETY: covered by this function's own safety contract.
             unsafe {
@@ -359,8 +359,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         );
         // SAFETY: covered by this function's own safety contract.
         unsafe { s.control.start_dma_polling() }.map_err(Error::Control)?;
-        // All real selected queues and owners now precede actual enablement.
-        // Constructor still requires the independently qualified fresh epoch.
+        // All real selected queues and owners now precede enablement.
+        // Constructor still requires the checked fresh epoch.
         s.mailbox = Some(
             // SAFETY: covered by this function's own safety contract.
             unsafe {
@@ -378,11 +378,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.phase = Phase::Queues;
         Ok(())
     }
-    /// Actual NIC restart is one-way DMA completion, followed by real power
+    /// NIC restart is one-way DMA completion, followed by real power
     /// observation and full bound download. The same private mailbox continues
     /// source sequence numbers; no public diagnostic can forge that permission.
-    /// Consume the genuine initial WLAN sequencing epoch exactly once. This
-    /// path issues no Bluetooth WMT or CONNV3 subsystem reset. Failure retains
+    /// Consume the initial WLAN sequencing epoch exactly once. This
+    /// path issues no Bluetooth WMT or CONNV3 subsystem reset. Failure keeps
     /// this function's uncertain resources and cannot be retried in this owner;
     /// it does not grant a caller shared power/reset or sibling recovery.
     pub fn boot(&mut self, prepared: &Prepared<'_>) -> Result<(), Error> {
@@ -417,8 +417,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .or_else(|| self.policy().map(Execution::capabilities))
     }
     /// # Safety
-    /// Resource passed at construction genuinely retains all source-policy/
-    /// stopped-radio authority required by Execution::prepare for these actual
+    /// Resource passed at construction keeps all source-policy/
+    /// stopped-radio permission required by Execution::prepare for these
     /// inputs and this exact downloaded image; none is inferred from raw NIC
     /// flags. The guard remains owned throughout partial/completed execution.
     pub unsafe fn execute_clc(&mut self, inputs: ClcInputs) -> Result<(), Error> {
@@ -448,9 +448,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         Ok(())
     }
     /// # Safety
-    /// Same actual retained authority must meet Execution::prepare_remaining:
-    /// consume real CLC reply restrictions first, resolve all genuine board/
-    /// OS/SAR/per-rate limits, and retain/serialize their revocation. No defaults
+    /// Same kept permission must meet Execution::prepare_remaining:
+    /// consume real CLC reply restrictions first, resolve all board/
+    /// OS/SAR/per-rate limits, and keep/serialize their revocation. No defaults
     /// or policy provider are synthesized by this wire execution.
     pub unsafe fn execute_remaining(&mut self, inputs: remaining::Inputs<'_>) -> Result<(), Error> {
         self.require(Phase::Clc)?;
@@ -473,7 +473,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         Ok(())
     }
     /// # Safety
-    /// The genuine source EEPROM/board override is resolved and retained in C
+    /// The source EEPROM/board override is resolved and kept in C
     /// before EFUSE mode. This initial profile excludes override images needing
     /// a different buffer mode. No live peer/WTBL/key users may exist.
     pub unsafe fn initialize_mac(&mut self) -> Result<(), Error> {
@@ -507,8 +507,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         Ok(())
     }
     /// # Safety
-    /// Current actual source-policy/OS intersection authorizes this exact
-    /// initial non-MLO legacy20 channel and radio operations. C retains those
+    /// Current source-policy/OS intersection authorizes this exact
+    /// initial non-MLO legacy20 channel and radio operations. C keeps those
     /// real guards through queued/uncertain radio/firmware users and revocation.
     /// Raw policy command completion alone cannot satisfy this precondition.
     /// StartFacts remains separate from association, RF-kill/watchdog/event
@@ -536,7 +536,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .antenna_mask()
             .map_err(|_| Error::MissingCapabilities)?;
         // Exact existing resolved domain membership, not a frequency formula
-        // or power-array presence masquerading as trusted channel authority.
+        // or power-array presence masquerading as trusted channel permission.
         if !p.initial_channel_present(band, channel) {
             return Err(Error::ChannelNotInDomain);
         }
@@ -582,10 +582,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         Ok(())
     }
     /// # Safety
-    /// C genuinely owns/reserves these actual initial interface BSS/OMAC/WMM/
+    /// C owns/reserves these initial interface BSS/OMAC/WMM/
     /// WCID indices for this requester, with the per-chip caller ordering and
     /// source selector documented by Interface::claim. No live prior owner or
-    /// concurrent resource allocator exists. This helper implements the actual
+    /// concurrent resource allocator exists. This helper implements the
     /// two-command registration; no peer/associated state is inferred.
     pub unsafe fn register_interface(
         &mut self,
@@ -614,16 +614,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             Err(e) => Err(Error::Interface(e)),
         }
     }
-    /// Actual source per-WCID disable, bound to an already acknowledged
+    /// Source per-WCID disable, bound to an already acknowledged
     /// resource owner. It is not peer creation/association or format admission
-    /// for any other slot. The interface itself retains its resources on Err.
-    /// C3's actual WMWA generic completion is retained as raw evidence and
+    /// for any other slot. The interface itself keeps its resources on Err.
+    /// C3's WMWA generic completion is held as raw evidence and
     /// returns UnvalidatedHeaderFormat; it cannot validate peer format or a
     /// ready/radio permission. Received translation always remains refused.
     /// # Safety
-    /// The registered real Interface owns this actual peer WCID and serializes
+    /// The registered real Interface owns this peer WCID and serializes
     /// all WTBL/peer/key consumers, including through uncertain command error.
-    /// For a peer slot this requires its actual source station installation;
+    /// For a peer slot this requires its source station installation;
     /// a BSS registration alone never creates that peer. Every future peer must
     /// receive its own real disable before raw80211 data admission.
     pub unsafe fn disable_peer_translation<T: 'static>(
@@ -672,7 +672,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.phase = old;
         Ok(())
     }
-    /// Deliver actual MCU/TX-free/unsolicited frames to the real serialized
+    /// Deliver MCU/TX-free/unsolicited frames to the real serialized
     /// event owner, including when no command is pending. This performs no
     /// guessed classification, token release, rfkill or watchdog servicing.
     pub fn poll_events(&mut self) -> Result<Vec<Frame>, Error> {
@@ -699,8 +699,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         }
         result
     }
-    /// Drain one actual data descriptor chain for the vendor decoder/event
-    /// owner. This grants no association, key, replay, channel or MSDU authority.
+    /// Drain one data descriptor chain for the vendor decoder/event
+    /// owner. This grants no association, key, replay, channel or MSDU permission.
     pub fn poll_data(&mut self) -> Result<Option<Frame>, Error> {
         if !matches!(self.phase(), Phase::Mac | Phase::StartFacts) {
             return Err(Error::WrongPhase);
@@ -721,7 +721,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
     /// Independent real source/policy/radio/firmware, PCIe DMA/IOTLB, every
     /// IRQ/deferred user and late response are stopped/cancelled/drained.
     /// Neither this controller's stop register nor a successful one-way command
-    /// is sufficient. On failed mapping removal all real owners stay retained.
+    /// is sufficient. On failed mapping removal all real owners stay held.
     pub unsafe fn retire_after_quiesce(&mut self) -> Result<(), Error> {
         let s = self.state_mut();
         s.phase = Phase::Quarantined;
@@ -1429,7 +1429,7 @@ pub(crate) mod tests {
                 broadcast_wcid: 19,
                 address: crate::net::Mac([2, 1, 2, 3, 4, 5]),
             };
-            // Explicit independent peer-lifetime boundary: a qualified model
+            // Explicit independent peer-lifetime boundary: a checked model
             // owner reserves an already established WCID1. This bootstrap does
             // not implement or claim that missing association/STA installation.
             f.model.lock().unwrap().qualified_peer_slots.insert(1);
@@ -1460,7 +1460,7 @@ pub(crate) mod tests {
             let global = f.controller.mac_observations().unwrap().global_format.value;
             let base = if chip == Chip::Mt7925 { 32 } else { 24 };
             for wcid in [1u16, 2] {
-                // Device chooses actual descriptor format from both independently
+                // Device chooses descriptor format from both independently
                 // applied controls. An unconfigured peer stays explicit foreign.
                 let translated = global & (1 << 19) != 0
                     || !f.model.lock().unwrap().raw_disabled.contains(&wcid);
@@ -1488,9 +1488,9 @@ pub(crate) mod tests {
                     assert_eq!(decoded.payload, &bytes[base..]);
                 }
             }
-            // An actual interface deactivation/drain is required to free it. This
-            // test deliberately drops a live resource: its real guard is retained
-            // even after the separately qualified controller/radio teardown.
+            // An interface deactivation/drain is required to free it. This
+            // test drops a live resource: its real guard is held
+            // even after the separately checked controller/radio teardown.
             drop(interface);
             f.retire();
             let drops = f.drops.clone();

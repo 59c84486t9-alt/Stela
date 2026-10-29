@@ -4,7 +4,7 @@
 //         Leo Duran <leo.duran@amd.com>
 // DTE policy and host update ordering adapted from Linux drivers/iommu/amd
 // at cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
-//! Complete retained per-segment device-table RAM and native atomic updates.
+//! Complete kept per-segment device-table RAM and native atomic updates.
 //! This is not unit takeover, requester admission or a device DMA domain.
 mod atomic;
 mod entry;
@@ -32,7 +32,7 @@ const BASE_SIZE: u64 = DEVICE_TABLE_BYTES as u64 / TABLE_PAGE_BYTES - 1;
 const DMA32_LIMIT: u64 = 1 << 32;
 static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 
-/// Cumulative exposed owners retained by Drop, not reset/reclamation evidence.
+/// Cumulative exposed owners kept by Drop, not reset/reclamation evidence.
 pub fn quarantined_tables() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }
@@ -57,25 +57,25 @@ pub enum DeviceTableError {
 ///
 /// # Safety
 /// Allocations provide fresh, currently zeroed CPU-exclusive table RAM. The
-/// context retains every unit using this segment table plus their actual IRQ,
+/// context keeps every unit using this segment table plus their IRQ,
 /// command and completion resources. Only the admitted host-only profile is
 /// active: unencrypted/SNP-disabled tables, no hardware DTE writes, guest
 /// translation, ATS/PASID/PRI or interrupt-remapping table/pointer owners.
-/// Actual ATS/ATC must also be off for integrated non-PCI devices with alternate
+/// ATS/ATC must also be off for integrated non-PCI devices with alternate
 /// signaling; missing PCI capabilities alone do not establish that fact. IVHD
 /// ATCPermit metadata permits use but neither requires nor enables it here.
-/// `enter` returns a real guard excluding other DTE writers and retaining a
-/// qualified CPU/process/root context through its Drop. CPU-affine qualification
-/// requires preventing migration; a context qualified on every allowed CPU
+/// `enter` returns a real guard excluding other DTE writers and keeping a
+/// checked CPU/process/root context through its Drop. CPU-affine validation
+/// requires preventing migration; a context checked on every allowed CPU
 /// need not prohibit scheduling. After a successful local CX16 probe every CPU
 /// allowed under the guard must support CX16. No IRQ
 /// callback may reenter this owner. The guard must admit completion IRQs during
 /// invalidation; disabling delivery across that wait is not admissible.
-/// Visibility performs actual coherent ordering
-/// or qualified cache maintenance, not a compiler-only fence.
-/// `invalidate` acknowledges actual DTE/observed alias invalidation in every
+/// Visibility performs coherent ordering
+/// or checked cache maintenance, not a compiler-only fence.
+/// `invalidate` acknowledges DTE/observed alias invalidation in every
 /// relevant unit, plus full old-domain IOTLB invalidation when nonzero, before
-/// success. It retains all domain-ID reservations through that completion.
+/// success. It keeps all domain-ID reservations through that completion.
 /// Unsupported operations, fault and timeout return failure; no queue-head or
 /// elapsed-time observation substitutes. Enter/admission must not mutate DTEs.
 pub unsafe trait DeviceTableHardware: PageSource + TableVisibility {
@@ -105,7 +105,7 @@ impl<H> State<H> {
 
     fn words(&self, requester: u16) -> [u64; 4] {
         core::array::from_fn(|word| {
-            // SAFETY: complete retained WB table, bounded aligned word. The
+            // SAFETY: complete kept WB table, bounded aligned word. The
             // admitted hardware is read-only and safe writers require &mut owner.
             u64::from_le(unsafe { self.pointer(requester, word).as_ptr().read_volatile() })
         })
@@ -116,7 +116,7 @@ impl<H> State<H> {
     }
 }
 
-/// A complete actual device table. Root exposure arms Drop quarantine of the
+/// A complete device table. Root exposure arms Drop quarantine of the
 /// original full pin, immutable policy and fixed real unit context together.
 pub struct DeviceTable<H: DeviceTableHardware> {
     state: Option<State<H>>,
@@ -128,7 +128,7 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
     /// # Safety
     /// The producer admits the exact segment, all units and the host-only
     /// hardware profile/physical width. `policies` is the complete effective
-    /// per-RID IVHD policy after actual range/alias resolution, not guessed from
+    /// per-RID IVHD policy after range/alias resolution, not guessed from
     /// one GPU. All units' firmware ownership is resolved before root activation.
     pub unsafe fn new(
         hardware: H,
@@ -201,7 +201,7 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
                 };
             }
         }
-        // SAFETY: exact retained WB CPU span; the guard excludes writers and
+        // SAFETY: exact WB CPU span; the guard excludes writers and
         // the fixed unsafe implementation supplies real hardware visibility.
         unsafe { hardware.publish(address, DEVICE_TABLE_BYTES) }
             .map_err(DeviceTableError::Memory)?;
@@ -223,7 +223,7 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         self.poisoned
     }
 
-    /// Return the actual base-register image, arming retention before PA escape.
+    /// Return the base-register image, arming retention before PA escape.
     /// This programs no register and grants no unit or requester ownership.
     pub fn register_for_publication(&mut self) -> Result<u64, DeviceTableError> {
         if self.poisoned {
@@ -233,7 +233,7 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         Ok(self.state.as_ref().expect("retained device table").physical | BASE_SIZE)
     }
 
-    /// Read the actual image under the real CPU/writer guard. Diagnostics may
+    /// Read the image under the real CPU/writer guard. Diagnostics may
     /// observe a poisoned owner; this grants no mutation, reuse or retirement.
     pub fn snapshot(&self, requester: u16) -> Result<[u64; 4], DeviceTableError> {
         let state = self.state.as_ref().expect("retained device table");
@@ -242,8 +242,8 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
     }
 
     /// # Safety
-    /// The requester and complete actual alias group are stopped/drained with
-    /// no queued DMA. The real root/mode is admitted; retain both old/new roots,
+    /// The requester and complete alias group are stopped/drained with
+    /// no queued DMA. The real root/mode is admitted; keep both old/new roots,
     /// domain reservations and pins until all group entries and required unit
     /// invalidations complete. Expose each page-table root before hardware use.
     /// Do not resume an alias until the complete group transaction succeeds.
@@ -265,9 +265,9 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
     }
 
     /// # Safety
-    /// As for translate: the entire actual alias group and all DMA/IRQ/deferred
+    /// As for translate: the entire alias group and all DMA/IRQ/deferred
     /// users are stopped/drained. Keep the old domain/root until every group
-    /// entry is blocked and actual old-domain invalidation has completed.
+    /// entry is blocked and old-domain invalidation has completed.
     pub unsafe fn block(&mut self, requester: u16) -> Result<(), DeviceTableError> {
         if self.poisoned {
             return Err(DeviceTableError::Poisoned);
@@ -297,8 +297,8 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
             (2, [words[2], words[3]], [new[2], new[3]]),
             (0, [words[0], words[1]], [new[0], new[1]]),
         ] {
-            // SAFETY: actual CX16 execution context remains qualified by the guard;
-            // aligned half-DTE in retained WB RAM with every writer excluded.
+            // SAFETY: CX16 execution context remains checked by the guard;
+            // aligned half-DTE in kept WB RAM with every writer excluded.
             if !unsafe {
                 atomic::replace(
                     state.pointer(requester, word),
@@ -313,7 +313,7 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
             .cpu
             .address(usize::from(requester) * ENTRY_BYTES, ENTRY_BYTES)
             .map_err(DeviceTableError::Memory)?;
-        // SAFETY: exact aligned retained entry span; the fixed guard excludes
+        // SAFETY: exact aligned kept entry span; the fixed guard excludes
         // writers while real visibility completes, including its failure path.
         unsafe { state.hardware.publish(cpu, ENTRY_BYTES) }.map_err(DeviceTableError::Memory)?;
         state
@@ -477,14 +477,14 @@ mod tests {
         attribute: CacheAttribute,
         monitor: Arc<Monitor>,
     }
-    // SAFETY: actual uniquely owned zeroed storage and immutable symbolic PA
+    // SAFETY: uniquely owned zeroed storage and immutable symbolic PA
     // metadata; no safe references or asynchronous device accesses exist.
     unsafe impl Send for Backing {}
     // SAFETY: raw CPU effects are serialized by fixture ownership and its guard;
     // lifetime metadata is mutex-protected. No hardware writes these bytes.
     unsafe impl Sync for Backing {}
     // SAFETY: fresh real CPU RAM models the immutable named physical pages.
-    // Malformed provider cases deliberately return inadmissible geometry/policy
+    // Malformed provider cases return inadmissible geometry/policy
     // metadata for rejection; no label or modeled cache policy reaches hardware.
     unsafe impl PageBacking for Backing {
         fn cpu_base(&self) -> NonNull<u8> {
@@ -514,7 +514,7 @@ mod tests {
                     assert_eq!(
                         // SAFETY: this still-owned aligned buffer has not been deallocated.
                         // Preflight rejection must leave every byte at its real alloc_zeroed image,
-                        // not merely avoid publishing.
+                        // not avoid publishing.
                         unsafe { self.cpu.as_ptr().cast::<u64>().add(word).read_volatile() },
                         0
                     );
@@ -587,7 +587,7 @@ mod tests {
             };
             let native = 1usize << shift;
             let layout = Layout::from_size_align(returned_bytes, native).unwrap();
-            // SAFETY: each call creates fresh, actually zeroed owned storage,
+            // SAFETY: each call creates fresh, zeroed owned storage,
             // never a cloned pin or alias of an earlier returned allocation.
             let cpu =
                 NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(MemoryError::OutOfMemory)?;
@@ -616,7 +616,7 @@ mod tests {
             )
         }
     }
-    // SAFETY: synchronous software observation of actual retained CPU bytes,
+    // SAFETY: synchronous software observation of kept CPU bytes,
     // with a modeled context/guard only. This supplies no native cache, IRQ,
     // CPU-pinning, IOMMU or real completion implementation or evidence.
     unsafe impl TableVisibility for Hardware {
@@ -641,7 +641,7 @@ mod tests {
                     .iter()
                     .map(|index| {
                         core::array::from_fn(|word| {
-                            // SAFETY: exact retained borrowed CPU span, no concurrent
+                            // SAFETY: exact borrowed CPU span, no concurrent
                             // writer. Capture literal LE words independently of Entry.
                             u64::from_le(unsafe {
                                 cpu.as_ptr()
@@ -669,7 +669,7 @@ mod tests {
     }
     // SAFETY: isolated synchronous software-only host profile, with no hardware
     // DTE/guest/ATS/IRQ/encryption writer. The guard models writer/CPU exclusion;
-    // supported() qualifies CX16 under the host OS process ISA contract across
+    // supported() checks CX16 under the host OS process ISA contract across
     // allowed scheduler CPUs; no fake immobility or native IRQ control is claimed.
     unsafe impl DeviceTableHardware for Hardware {
         type Access<'a>
@@ -789,7 +789,7 @@ mod tests {
         table.register_for_publication().unwrap();
         for requester in [0u16, 8, 0xffff] {
             // SAFETY: the model has no active device/ATC/worker. These independent RIDs use the
-            // same retained symbolic root/domain; no native alias or integrated-device admission is
+            // same symbolic root/domain; no native alias or integrated-device admission is
             // inferred from the permission metadata.
             unsafe {
                 table.translate(
@@ -818,7 +818,7 @@ mod tests {
         let Some(mut table) = construct(&monitor, &flags) else {
             return;
         };
-        flags.fill(0); // Caller storage is neither retained nor consulted later.
+        flags.fill(0); // Caller storage is neither kept nor consulted later.
         let expected = [
             (
                 0u16,
@@ -903,7 +903,7 @@ mod tests {
             drop(model);
             assert_eq!(table.snapshot(requester), Ok(expected));
             // SAFETY: same stopped alias transaction, with both old/new symbolic
-            // root/domain reservations retained through the modeled completion.
+            // root/domain reservations kept through the modeled completion.
             unsafe {
                 table.translate(
                     requester,
@@ -1019,7 +1019,7 @@ mod tests {
                 }
             };
             assert!(
-                // SAFETY: isolated deliberately unsuitable provider output; no live base.
+                // SAFETY: isolated unsuitable provider output; no live base.
                 matches!(unsafe { DeviceTable::new(Hardware(monitor.clone()), &policies(), 48) }, Err(error) if error == expected)
             );
             let model = monitor.model.lock().unwrap();
@@ -1062,7 +1062,7 @@ mod tests {
                 let cpu = monitor.cpu();
                 for offset in [DEVICE_TABLE_BYTES, expected - 8] {
                     assert_eq!(
-                        // SAFETY: the original larger native pin is fully retained. Its unused tail
+                        // SAFETY: the original larger native pin is fully kept. Its unused tail
                         // must not receive DTE initialization stores.
                         unsafe { (cpu as *const u8).add(offset).cast::<u64>().read_volatile() },
                         0
@@ -1215,7 +1215,7 @@ mod tests {
                 return;
             };
             table.register_for_publication().unwrap();
-            // SAFETY: stopped symbolic requester, retained roots/domains.
+            // SAFETY: stopped symbolic requester, kept roots/domains.
             unsafe {
                 table.translate(
                     0xffff,
@@ -1254,7 +1254,7 @@ mod tests {
             );
             assert_eq!(monitor.released_pins.load(Ordering::Relaxed), 0);
             assert_eq!(monitor.hardware_drops.load(Ordering::Relaxed), 0);
-            // Poisoned reads remain useful under the actual context guard.
+            // Poisoned reads remain useful under the context guard.
             assert_eq!(table.snapshot(0xffff), Ok(blocked(0xc7)));
             let before = monitor.model.lock().unwrap().events.len();
             assert_eq!(
@@ -1334,8 +1334,8 @@ mod tests {
         };
         table.register_for_publication().unwrap();
         let before = quarantined_tables();
-        // One deliberate complete 2MiB leak proves actual quarantine. Do not
-        // reclaim bytes behind the retained forgotten pin/context owners.
+        // One deliberate complete 2MiB leak proves quarantine. Do not
+        // reclaim bytes behind the forgotten pin/context owners.
         drop(table);
         assert!(quarantined_tables() >= before.saturating_add(1));
         assert_eq!(monitor.live_pins(), 1);

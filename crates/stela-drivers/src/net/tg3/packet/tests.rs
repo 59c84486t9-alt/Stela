@@ -33,7 +33,7 @@ struct Ram {
 unsafe impl Send for Ram {}
 // SAFETY: symbolic test-only RAM; no native DMA or safe references alias it.
 unsafe impl Sync for Ram {}
-// SAFETY: exact page aligned allocation and immutable retained symbolic labels.
+// SAFETY: exact page aligned allocation and immutable kept symbolic labels.
 unsafe impl PageBacking for Ram {
     fn cpu_base(&self) -> NonNull<u8> {
         self.address
@@ -549,7 +549,7 @@ impl Device {
         (u64::from(self.mac[&0x3c38]) << 32) | u64::from(self.mac[&0x3c3c])
     }
     // These expectations use the pinned donor's numeric encodings rather
-    // than the production constants. Check actual stored controls for EVERY
+    // than the production constants. Check stored controls for EVERY
     // device effect; an attach phase or caller-supplied ready flag is no proof.
     fn require_bits(&self, at: u32, mask: u32, value: u32) {
         assert_eq!(
@@ -584,7 +584,7 @@ impl Device {
         );
         self.require_bits(0x4000, 3, 2); // MEMARB enabled, not reset.
         self.require_bits(0x6800, 0x34, 0x34); // data/nonframe word and byte swap.
-        // Exact source profile initialization, including the offload mode bits
+        // Source profile initialization, including the offload mode bits
         // even though the public packet API emits only plain descriptors.
         self.require_bits(
             0x4800,
@@ -602,7 +602,7 @@ impl Device {
         }
         if matches!(path, DmaPath::Tx | DmaPath::Rx) {
             let mode = match self.phy[&0x19] & 0x700 {
-                0x100 | 0x300 => 6, // MII with actual half duplex.
+                0x100 | 0x300 => 6, // MII with half duplex.
                 0x200 | 0x500 => 4, // MII full duplex.
                 0x700 => 8,         // GMII full duplex.
                 _ => panic!("packet DMA without an admitted negotiated PHY mode"),
@@ -729,7 +729,7 @@ impl Device {
         assert_eq!(self.dma_read32(DmaPath::Rx, domain, at + 12), 4);
         let opaque = self.dma_read32(DmaPath::Rx, domain, at + 28);
         assert_eq!(opaque, 0x10000 | self.rx as u32);
-        self.dma_read(DmaPath::Rx, domain, address, 4096); // actual offered page.
+        self.dma_read(DmaPath::Rx, domain, address, 4096); // offered page.
         let returns = (u64::from(self.sram[&0x200]) << 32) | u64::from(self.sram[&0x204]);
         assert_eq!(self.sram[&0x208], (ret_count as u32) << 16);
         let returned = returns + (self.ret * 32) as u64;
@@ -765,7 +765,7 @@ impl Drop for Reg {
     }
 }
 struct Timer;
-// SAFETY: isolated DMA/register peer only; no production timing authority.
+// SAFETY: isolated DMA/register peer only; no production timing permission.
 unsafe impl Delay for Timer {
     fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
         Ok(())
@@ -774,7 +774,7 @@ unsafe impl Delay for Timer {
         Ok(())
     }
 }
-// SAFETY: isolated symbolic device only, deliberately no native authority.
+// SAFETY: isolated symbolic device only, no native permission.
 unsafe impl Registers for Reg {
     fn function_number(&self) -> u8 {
         let peer = self.peer.lock().unwrap();
@@ -785,7 +785,7 @@ unsafe impl Registers for Reg {
         } else {
             3
         }
-    } // Deliberately differs from internal port 0.
+    } // Differs from internal port 0.
     fn config_read32(&mut self, at: u16) -> Result<u32, Error> {
         let mut p = self.peer.lock().unwrap();
         let value = if p.removed_config_read == Some(at) {
@@ -1272,7 +1272,7 @@ fn peer_reads_published_device_snapshot_instead_of_unsynchronized_cpu_bytes() {
             .write_volatile(0xaabbccddu32.to_le());
     }
     assert_eq!(domain.read32(mapping.address().unwrap()), 0x11223344);
-    // This unpublished standalone model allocation is deliberately quarantined
+    // This unpublished standalone model allocation is quarantined
     // on drop; it never impersonates a native completed mapping.
 }
 #[test]
@@ -1452,7 +1452,7 @@ fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
 fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_retained_fault() {
     // Preserve every original single-bit cause: four registers by 32 bits,
     // excluding only the flow low-water bit and message MSI request bit.
-    // Also retain the combined flow mask to exercise simultaneous causes;
+    // Also keep the combined flow mask to exercise simultaneous causes;
     // all-ones reads are independently classified as device removal.
     let single_bits = [0x3c48, 0x6004, 0x4804, 0x4c04]
         .into_iter()

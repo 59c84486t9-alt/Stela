@@ -28,7 +28,7 @@ fn mapping_admission_preflight() {
     ] {
         let before = monitor.state.lock().unwrap().events.len();
         let rejected = Arc::new(AtomicUsize::new(0));
-        // SAFETY: only numeric metadata is intentionally inadmissible.
+        // SAFETY: only numeric metadata is inadmissible.
         assert_eq!(
             // SAFETY: The payload owns live CPU storage with symbolic physical
             // labels, and the model has no requester. Only numeric range metadata is
@@ -44,10 +44,10 @@ fn mapping_admission_preflight() {
     for address in [0x1000, 0x2000] {
         let rejected = Arc::new(AtomicUsize::new(0));
         let pages = pin(vec![0x500000, 0x501000], 12, rejected.clone(), None).into();
-        // SAFETY: model deliberately probes an overlapping reserved interval.
+        // SAFETY: model probes an overlapping reserved interval.
         assert_eq!(
             // SAFETY: Both candidate payload pages have live backing and no
-            // asynchronous users. The intentionally overlapping symbolic interval
+            // asynchronous users. The overlapping symbolic interval
             // must fail without changing the established mapping.
             unsafe { tree.map(address, pages, Direction::ToDevice) },
             Err(TranslationError::Overlap)
@@ -60,7 +60,7 @@ fn mapping_admission_preflight() {
     // SAFETY: the fixed model context explicitly refuses this payload policy.
     assert_eq!(
         // SAFETY: The candidate pin is live and exclusive; the synchronous provider
-        // deliberately rejects its policy before any table publication or requester
+        // rejects its policy before any table publication or requester
         // can use it.
         unsafe { tree.map(0x4000, payload(0x600000, &rejected), Direction::ToDevice) },
         Err(TranslationError::Payload(DmaError::VisibilityFailed))
@@ -75,7 +75,7 @@ fn mapping_admission_preflight() {
     // SAFETY: synchronous fixture has no in-flight hardware accesses.
     assert_eq!(
         // SAFETY: The model has no device, worker or asynchronous walker. This
-        // invalid interior start must be refused without releasing the retained
+        // invalid interior start must be refused without releasing the kept
         // original mapping.
         unsafe { tree.unmap(0x2001) },
         Err(TranslationError::NotMapped)

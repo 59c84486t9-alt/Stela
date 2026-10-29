@@ -287,7 +287,7 @@ fn realtek_wideband_uses_observed_mtu_source_alternates_and_actual_capability() 
     }
     let mut s = Session::start(h).unwrap();
     assert!(s.set_wideband_voice(1, 72, &mut NoDma).is_err());
-    // The same actual descriptor profile previously used only by CVSD models
+    // The same descriptor profile previously used only by CVSD models
     // advertises alt6 at 125us with 102 bytes; it cannot encode source 7/8ms WBS.
     let mut s = session(Model::default());
     assert!(s.set_wideband_voice(1, 60, &mut NoDma).is_err());
@@ -613,7 +613,7 @@ fn realtek_uninitialized_wrong_report_retired_and_aliased_descriptors_refuse() {
     assert!(s.close().is_err());
     assert_eq!(s.0.hci.io.trace.borrow().actions, before);
     let mut h = hci(super::super::Project::Rtl8761Bu, Model::default());
-    // Mutate actual retained configuration: SCO endpoint 0x83 aliases the
+    // Mutate kept configuration: SCO endpoint 0x83 aliases the
     // unclaimed third interface, which must remain outside this driver's owner.
     let cfg = &mut h.binding.device.configuration;
     let i = cfg

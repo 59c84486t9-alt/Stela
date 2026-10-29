@@ -41,8 +41,8 @@ pub(in crate::audio) const DMA_ACTIVE: u32 = 2;
 pub(in crate::audio) const GAIN_MASK: u32 = 3 << 3;
 
 /// One powered, exclusively owned ACP function. Accesses are native 32-bit,
-/// BAR-relative. `identity` must re-read the actual PCI function and check its
-/// retained BAR, power, decoding and interrupt containment on every call.
+/// BAR-relative. `identity` must re-read the PCI function and check its
+/// BAR, power, decoding and interrupt containment on every call.
 pub trait Registers {
     fn region_bytes(&self) -> usize;
     fn identity(&mut self) -> Result<Identity, Error>;

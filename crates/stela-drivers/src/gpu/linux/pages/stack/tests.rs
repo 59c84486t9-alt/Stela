@@ -95,7 +95,7 @@ impl Drop for View {
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: CPU-only view holds the actual mmap object, including its guards.
+// SAFETY: CPU-only view holds the mmap object, including its guards.
 // Usable bytes start zeroed, metadata is immutable and the symbolic page list
 // is never used for hardware. Runtime keeps the same owner during execution.
 unsafe impl PageBacking for View {
@@ -163,7 +163,7 @@ impl Drop for Model {
         self.pool.provider_drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-// SAFETY: isolated CPU model retains all registered mmap owners. It transfers
+// SAFETY: isolated CPU model keeps all registered mmap owners. It transfers
 // one preallocated ordinary heap page, refuses atomic/other orders and never
 // supplies Runtime stack RAM through ordinary allocation. Callbacks do not
 // reenter Linux, change its borrowed owner, or invoke/switch Runtime callbacks.
@@ -201,7 +201,7 @@ struct ModelCpu {
     pool: Arc<Pool>,
     unadmitted: bool,
 }
-// SAFETY: same-OS-thread CPU/flags model, delegating actual checks to CpuModel.
+// SAFETY: same-OS-thread CPU/flags model, delegating checks to CpuModel.
 // No callback runs inside a metadata lock. All frames use real mmap owners.
 unsafe impl Cpu for ModelCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
@@ -214,7 +214,7 @@ unsafe impl Cpu for ModelCpu {
         self.cpu.save_disable()
     }
     unsafe fn restore(&self, flags: u64) {
-        // SAFETY: exact enclosing same-thread model flags from this CPU.
+        // SAFETY: enclosing same-thread model flags from this CPU.
         unsafe { self.cpu.restore(flags) }
     }
     fn ticks(&self) -> u64 {
@@ -242,8 +242,8 @@ struct Scene {
 impl Scene {
     fn runtime(&self) -> Pin<&Runtime<64>> {
         self.cpu.check_cpu().unwrap();
-        // SAFETY: the actual pinned Executor remains alive until every accepted
-        // callback joins, or fatal retains it and ends this isolated process.
+        // SAFETY: the pinned Executor remains alive until every accepted
+        // callback joins, or fatal keeps it and ends this isolated process.
         unsafe { Pin::new_unchecked(&*self.runtime) }
     }
     fn guard(&self) -> Guard<'_> {
@@ -277,7 +277,7 @@ fn catalog(scene: &Scene) -> Catalog<Model> {
     let heap = view(&scene.pool.heap, 0x2000_0000, 1, &scene.pool.heap_pin_drops);
     let mut extents = Vec::new();
     let heap_base = NonNull::new(scene.pool.heap.bounds().start as *mut u8).unwrap();
-    // SAFETY: exact retained real mmap heap coverage in this isolated CPU
+    // SAFETY: real mmap heap coverage in this isolated CPU
     // model; its symbolic PFNs are not a native physical-memory assertion.
     extents.push(Extent::ordinary(
         unsafe {
@@ -299,7 +299,7 @@ fn catalog(scene: &Scene) -> Catalog<Model> {
         if scene.case == Case::Missing && index >= 12 {
             continue;
         }
-        // SAFETY: this provider owns the same actual guarded slot mapping as
+        // SAFETY: this provider owns the same guarded slot mapping as
         // Runtime; immutable symbolic PA/CPU coverage excludes every guard.
         let reservation = unsafe {
             Reservation::new(
@@ -315,7 +315,7 @@ fn catalog(scene: &Scene) -> Catalog<Model> {
             Extent::runtime_stack(reservation)
         });
     }
-    // SAFETY: real retained mmap owners back the whole immutable CPU-model
+    // SAFETY: real kept mmap owners back the whole immutable CPU-model
     // inventory. Root/cache/IRQ/native producers do not exist in this fixture;
     // same-thread construction and all later entry/retirement are serialized.
     unsafe {
@@ -330,12 +330,12 @@ fn catalog(scene: &Scene) -> Catalog<Model> {
     .unwrap()
 }
 unsafe extern "C" fn marker(pointer: *mut c_void) {
-    // SAFETY: the caller retains this exact Scene through the completed ticket.
+    // SAFETY: the caller keeps this exact Scene through the completed ticket.
     let scene = unsafe { &*pointer.cast::<Scene>() };
     scene.marked.fetch_add(1, Ordering::Relaxed);
 }
 unsafe extern "C" fn creator(pointer: *mut c_void) {
-    // SAFETY: run retains this owned Scene until all callbacks join or fatal
+    // SAFETY: run keeps this owned Scene until all callbacks join or fatal
     // terminates the process without releasing reachable data/frames.
     let scene = unsafe { &*pointer.cast::<Scene>() };
     let runtime = scene.runtime();
@@ -421,7 +421,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     }
     let owner = Entered::try_new().unwrap();
     assert_eq!(
-        // SAFETY: isolated real C metadata owner; this exact retained catalog's
+        // SAFETY: isolated real C metadata owner; this exact catalog's
         // native admission count must refuse retirement without freeing context.
         unsafe { stela_linux_page_catalog_unregister(catalog.generation()) },
         -16
@@ -432,7 +432,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     catalog.try_retire().unwrap();
     assert_eq!(scene.pool.provider_drops.load(Ordering::Relaxed), 1);
     // SAFETY: cold cancellation reconstructed the same real frame; this finite
-    // marker fits its kernel geometry and Scene remains retained through drain.
+    // marker fits its kernel geometry and Scene remains held through drain.
     unsafe {
         runtime
             .queue()
@@ -447,8 +447,8 @@ fn run(case: Case) {
         pool: pool.clone(),
         unadmitted: case == Case::UnadmittedDrop,
     });
-    // SAFETY: same constructing OS thread, retained pool/code/mappings, no IRQ
-    // or external producers. Actual contexts retain owners through retirement.
+    // SAFETY: same constructing OS thread, kept pool/code/mappings, no IRQ
+    // or external producers. Contexts keep owners through retirement.
     let queue = unsafe { Queue::<64>::new(cpu.clone(), pool.clone()) }.unwrap();
     let stacks = pool
         .slots
@@ -493,7 +493,7 @@ fn run(case: Case) {
     assert_eq!(pool.hooks.entered.load(Ordering::Acquire), 0);
     runtime.queue().close().unwrap();
     // SAFETY: all external producers are absent, callbacks joined and every
-    // owned marker/frame cancelled. Actual mmap owners remain retained here.
+    // owned marker/frame cancelled. Mmap owners remain held here.
     unsafe { runtime.retire() }.unwrap();
     assert_eq!(pool.mapped_drops.load(Ordering::Relaxed), 0);
     let dropped = pool.mapped_drops.clone();

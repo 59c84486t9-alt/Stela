@@ -2,7 +2,7 @@
 //!
 //! Allocation and the final release of any pin/CPU/DMA mapping must occur in
 //! process or deferred-work context. Raw heap exclusion is maskable-IRQ safe;
-//! that does not qualify pin/cache checks or mapping lifetime transitions in
+//! that does not check pin/cache checks or mapping lifetime transitions in
 //! an ISR. This service is not a VRAM allocator or an IOMMU.
 use crate::heap::Heap;
 use alloc::{boxed::Box, vec::Vec};
@@ -163,7 +163,7 @@ impl NativeMemory {
         }
         drop(pages);
         for index in 0..mapping.bytes() {
-            // SAFETY: CPU-exclusive owned RAM with the retained mapping live.
+            // SAFETY: CPU-exclusive owned RAM with the mapping live.
             if unsafe { pointer.add(index).read_volatile() } != 0 {
                 return Err(MemoryError::InvalidPageList);
             }
@@ -247,7 +247,7 @@ impl NativeMemory {
         if ((cpu as u64) ^ physical_base) & (layout.align() as u64 - 1) != 0 {
             return Err(MemoryError::InvalidAlignment);
         }
-        // The physical ceiling is translated through this ACTUAL retained
+        // The physical ceiling is translated through this ACTUAL kept
         // linear mapping, not pointer identity. Keep only complete payloads;
         // the rounded native tail participates even for a one-byte request.
         let allowed = if let Some(end) = physical_end_exclusive {
@@ -264,7 +264,7 @@ impl NativeMemory {
         } else {
             None
         };
-        // SAFETY: initialize registered the same live heap and qualified CPU/PA
+        // SAFETY: initialize registered the same live heap and checked CPU/PA
         // relation. Pin/cache work remains process/deferred context. Both paths
         // use the canonical allocator and publish only zeroed exclusive pages.
         let pointer = NonNull::new(unsafe {
@@ -341,8 +341,8 @@ unsafe impl Send for HeapAllocation {}
 // SAFETY: shared access exposes immutable metadata and raw pointers only.
 unsafe impl Sync for HeapAllocation {}
 
-// SAFETY: initialize proves the native heap's actual contiguous PA mapping;
-// allocate retains a full aligned/zeroed extent and records every real page.
+// SAFETY: initialize proves the native heap's contiguous PA mapping;
+// allocate keeps a full aligned/zeroed extent and records every real page.
 // Drop returns it to the same allocator only after the last Arc-backed lease.
 unsafe impl PageBacking for HeapAllocation {
     fn cpu_base(&self) -> NonNull<u8> {
@@ -712,7 +712,7 @@ mod tests {
         );
         drop(pin);
         assert_eq!(ALLOCATOR.usage().live, before.live + PAGE);
-        // SAFETY: this CPU mapping retains the actual original RAM pin.
+        // SAFETY: this CPU mapping keeps the original RAM pin.
         unsafe { pointer.add(PAGE - 2).write_volatile(0xd3) };
         drop(tail);
         assert_eq!(ALLOCATOR.usage().live, before.live);
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(ALLOCATOR.usage().carved, before.carved);
         assert_eq!(ALLOCATOR.usage().largest, before.largest);
         // An earlier free hole cannot fit two complete pages plus the real
-        // header. Select the later eligible extent, retaining its actual PA.
+        // header. Select the later eligible extent, keeping its PA.
         let a = source
             .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
             .unwrap();
@@ -760,7 +760,7 @@ mod tests {
             [selected_physical, selected_physical + PAGE as u64]
         );
         assert!(
-            // SAFETY: the retained CPU view still owns b throughout selection.
+            // SAFETY: the CPU view still owns b throughout selection.
             unsafe { core::slice::from_raw_parts(b_pointer, PAGE) }
                 .iter()
                 .all(|byte| *byte == 0x49)
@@ -790,7 +790,7 @@ mod tests {
         let before = ALLOCATOR.usage().live;
         let boundary = 1u64 << 32; // An address-space test boundary, not a device ID.
         // SAFETY: no pin/catalog is live; these are explicit hosted PA labels
-        // for the SAME actual RAM and CPU mapping, not hardware qualification.
+        // for the SAME RAM and CPU mapping, not hardware validation.
         unsafe { initialize(ram as usize, boundary - 4 * PAGE as u64, bytes, 0) };
         let pages = source
             .allocate_below(3 * PAGE, PAGE, CacheAttribute::WriteBack, boundary)
@@ -901,7 +901,7 @@ mod tests {
         let physical = 0x4000_0000 + (pointer as usize - ram as usize) as u64;
         assert_eq!(pin.physical_pages(), &[physical, physical + 4096]);
         assert!(
-            // SAFETY: CPU-exclusive test memory; the mapping retains the whole pin.
+            // SAFETY: CPU-exclusive test memory; the mapping keeps the whole pin.
             unsafe { core::slice::from_raw_parts(pointer, mapping.bytes()) }
                 .iter()
                 .all(|byte| *byte == 0)
@@ -915,7 +915,7 @@ mod tests {
         drop(pin);
         drop(clone);
         assert_eq!(ALLOCATOR.usage().live, before + 8192);
-        // SAFETY: the retained CPU mapping still owns these pages.
+        // SAFETY: the CPU mapping still owns these pages.
         unsafe { pointer.add(8191).write_volatile(0x5a) };
         drop(mapping);
         assert_eq!(ALLOCATOR.usage().live, before);
@@ -992,7 +992,7 @@ mod tests {
         unsafe { dma.sync_for_cpu(0..4096) }.unwrap();
         drop(keep);
         domain.0.lock().unwrap().0 = true;
-        // SAFETY: same quiescent model; failed invalidation must retain real pins.
+        // SAFETY: same quiescent model; failed invalidation must keep real pins.
         assert_eq!(unsafe { dma.unmap() }, Err(DmaError::InvalidationFailed));
         assert_eq!(ALLOCATOR.usage().live, before + 4096);
         domain.0.lock().unwrap().0 = false;
@@ -1030,7 +1030,7 @@ mod tests {
             .unwrap();
         let second_mapping = second.cpu_mapping(CacheAttribute::WriteBack).unwrap();
         assert_eq!(second_mapping.address(0, 8192).unwrap().as_ptr(), pointer);
-        // SAFETY: CPU-exclusive mapping; reclaimed RAM was actually zeroed again.
+        // SAFETY: CPU-exclusive mapping; reclaimed RAM was zeroed again.
         assert_eq!(unsafe { pointer.add(8191).read_volatile() }, 0);
         drop(second_mapping);
         drop(second);
@@ -1051,8 +1051,8 @@ mod tests {
         ));
         assert_eq!(ALLOCATOR.usage().live, before);
         // A physmap-style congruent alias supports every order fitting this
-        // reservation, with actual zeroed data and exact final reclamation.
-        // SAFETY: no live allocation remains; restore the retained model mapping.
+        // reservation, with zeroed data and exact final reclamation.
+        // SAFETY: no live allocation remains; restore the model mapping.
         unsafe { initialize(ram as usize, 0x4000_0000, layout.size(), 0) };
         for order in 0..7 {
             let bytes = PAGE << order;

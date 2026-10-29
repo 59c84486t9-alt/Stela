@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
-// Factory power reference data from pinned rtw8822c_table.c; no OS authority.
+// Factory power reference data from pinned rtw8822c_table.c; no OS permission.
 //! RTL8822C factory power-reference tables from rtw8822c_table.c.
 pub(super) const PG: &[[u32; 6]] = &[
     [0, 0, 0, 3104, 4294967295, 1212960852],

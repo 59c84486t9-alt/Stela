@@ -26,7 +26,7 @@ struct Drain {
     lease: Option<scheduler::Lease>,
     wait: Option<scheduler::Wait>,
 }
-/// Production destination owner. Callback is mandatory; factory callers retain
+/// Production destination owner. Callback is mandatory; factory callers keep
 /// Weak MC service/Samples ownership rather than a Work->Rc<service> cycle.
 /// Queued work and callback return/pending belong solely to scheduler::Work.
 pub struct MetricsBackend {
@@ -69,7 +69,7 @@ impl MetricsBackend {
             last_emission: None,
         }
     }
-    /// Outer source synchronous MC service calls acquire this actual queue;
+    /// Outer source synchronous MC service calls acquire this queue;
     /// Stop's predicate-only return is not permission to skip that caller lock.
     pub fn queue(&self) -> Option<&scheduler::Queue> {
         self.queue.as_ref()
@@ -171,7 +171,7 @@ impl MetricsBackend {
         }
         self.registration = None;
         self.registrations.push((r.clone(), result));
-        //1007d04/MC ignore the source DB return, but retain its actual failure
+        //1007d04/MC ignore the source DB return, but keep its failure
         // instead of claiming publication. The caller retires this prefix first.
         Completion::Retired {
             value: (),
@@ -215,7 +215,7 @@ impl MetricsBackend {
         };
         let job = self.emission.as_mut().unwrap();
         if job.lease.is_none() {
-            // Cooperative serialization of the actual typed trace owner. This
+            // Cooperative serialization of the typed trace owner. This
             // is not an assertion that source101f594 acquires this queue lock.
             match self.runtime.lock(&self.global, &i) {
                 Completion::Retired {

@@ -1,6 +1,6 @@
 //! T6000 direct MCC/DCS resource ownership. The original `MCPolicyMgrT6000`
 //! programs this bank directly; it does not use the T8112 PMP quota protocol.
-//! Explicit Stela initialization and retained physical observations are distinct.
+//! Explicit Stela initialization and kept physical observations are distinct.
 //! Committed inputs never become cache-power or quota completion by themselves.
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
@@ -47,7 +47,7 @@ pub(crate) fn is_drain_word(offset: u64, width: Width) -> bool {
     width == Width::Word && matches!(role(offset), Ok(Role::Drain))
 }
 
-/// One original register with independently qualified bits. A zero known mask
+/// One original register with checked bits. A zero known mask
 /// never creates an observation of healthy/reset/empty hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
@@ -78,7 +78,7 @@ pub enum RequestKind {
     DramConfiguration {
         channel: u8,
     },
-    /// Consuming source queue flush under the actual synchronous RAM owner.
+    /// Consuming source queue flush under the synchronous RAM owner.
     Drain {
         channel: u8,
     },
@@ -199,7 +199,7 @@ impl State {
     }
 }
 
-/// One object for every actual aperture, plane and DRAM channel. No settlement
+/// One object for every aperture, plane and DRAM channel. No settlement
 /// setter exists: completing a request requires its real cache/memory/power
 /// backend, not an arbitrary numeric name, queue enqueue or Boolean readiness.
 #[derive(Clone)]
@@ -246,7 +246,7 @@ impl Controller {
         Ok(controller)
     }
 
-    /// Retained state keeps actual per-bit knownness. Every admitted input/status
+    /// State keeps per-bit knownness. Every admitted input/status
     /// word must be described; absent observations are not default-zero registers.
     pub fn from_observations(
         apertures: u8,
@@ -300,7 +300,7 @@ impl Controller {
             aperture,
         })
     }
-    /// Qualified 32-bit register offsets for a parent router which also owns
+    /// Checked 32-bit register offsets for a parent router which also owns
     /// AMCC lock planes in these same apertures. This does not admit any of the
     /// other MCC/performance effects in the source protocol matrix.
     pub fn register_offsets(&self) -> Vec<u64> {
@@ -533,8 +533,8 @@ impl MmioDevice for View {
             plane, broadcast, ..
         } = kind
         {
-            // Only the cache-command broadcast effect is qualified here. No
-            // requested target is copied into either actual count field.
+            // Only the cache-command broadcast effect is checked here. No
+            // requested target is copied into either count field.
             for target in 0..PLANES {
                 if broadcast || target == plane {
                     let status = state

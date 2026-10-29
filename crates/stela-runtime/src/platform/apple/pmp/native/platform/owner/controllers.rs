@@ -1,4 +1,4 @@
-//! Actual manager controller RMWs and source-ordered counter accumulation.
+//! Manager controller RMWs and source-ordered counter accumulation.
 //!
 //! Original T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! 100f8cc..100f934 saves controller bits19:16 and clears G540; 100f990..100f9e8
@@ -33,7 +33,7 @@ struct Descriptor {
 }
 
 /// Complete configured lists, not inferred empty inventories. Controller IDs
-/// resolve through the actual byte-offset map. Counts and state lengths must
+/// resolve through the byte-offset map. Counts and state lengths must
 /// come from the joined source configuration and DVFS records respectively.
 pub struct Configuration {
     controls: Vec<u64>,
@@ -111,7 +111,7 @@ impl Configuration {
     }
 }
 
-/// Stable identity for one actual platform slot50 call, including its parent
+/// Stable identity for one platform slot50 call, including its parent
 /// manager operation. Selector/kind alone cannot distinguish repeated rows.
 #[derive(Clone)]
 pub struct CounterRequest {
@@ -139,7 +139,7 @@ impl CounterRequest {
         self.kind
     }
 }
-/// The actual fixed registry/counter owner. Busy/refusal retains its real inner
+/// The fixed registry/counter owner. Busy/refusal keeps its real inner
 /// cursor under this request. Retired-with-refusal still returns a real result;
 /// it must be accumulated once before the refusal is surfaced.
 pub trait Counters {
@@ -157,8 +157,8 @@ struct Pending {
     bucket: usize,
 }
 
-/// Owns the actual mapped control device and registry callbacks throughout all
-/// stages. Passing an MMIO proxy must retain that same physical backing; an
+/// Owns the mapped control device and registry callbacks throughout all
+/// stages. Passing an MMIO proxy must keep that same physical backing; an
 /// unrelated copied word array is not an adapter to a controller. Construction
 /// initializes software accumulators only; metrics registration is separate.
 pub struct Manager<D, C> {
@@ -225,8 +225,8 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
     pub fn scratch(&self) -> [u8; 32] {
         self.scratch.bytes()
     }
-    /// The actual G540 storage used by every platform's P250+40 cache masks.
-    /// Cloning does not create another mask array or a reset authority.
+    /// The G540 storage used by every platform's P250+40 cache masks.
+    /// Cloning does not create another mask array or a reset permission.
     pub fn read_masks(&self) -> ReadMasks {
         self.scratch.clone()
     }
@@ -855,7 +855,7 @@ mod tests {
             (0x100f904, 0x32100df0), // OR bits19:16 before capture
             (0x100f908, 0x53104def),
             (0x100f9d4, 0x33100df0), // restore nibble, preserve current other bits
-            (0x100f45c, 0x910283e9), // retained packet sp+a0
+            (0x100f45c, 0x910283e9), // packet sp+a0
             (0x100f4e8, 0xa9002829),
             (0x100fa48, 0xa94a2beb), // bucket input is that packet, not G540
             (0x100e674, 0xb940151c), // joined DVFS count

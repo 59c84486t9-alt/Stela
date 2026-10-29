@@ -408,7 +408,7 @@ fn badd_power_failures_never_publish_dma_or_erase_failed_cleanup_ownership() {
     }
     run(|a| {
         // Playback wakes, then the sibling power observation fails. Neither
-        // stream may publish DMA; retain both domains until real recovery.
+        // stream may publish DMA; keep both domains until real recovery.
         a.transport.fail_domain = 11;
         assert_eq!(
             a.start_playback(0, 48000, &[0; 192], true),

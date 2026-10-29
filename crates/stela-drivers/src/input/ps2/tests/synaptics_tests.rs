@@ -1,4 +1,4 @@
-//! Queried firmware, actual sliced commands and real i8042 data/reply lanes.
+//! Queried firmware, sliced commands and real i8042 data/reply lanes.
 use super::*;
 use alloc::collections::BTreeMap;
 pub(super) struct Peripheral {
@@ -2625,7 +2625,7 @@ fn unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport(
                         1
                     }
                 );
-                // Linux's callback view depends on its actual bound child state.
+                // Linux's callback view depends on its bound child state.
                 // This comparison selects that view without inventing native binding.
                 let bytes = if number(2) != 2 {
                     vec![received.first()]

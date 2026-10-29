@@ -2,7 +2,7 @@
 // Native adaptation of rtsx_pcr.c, rts5227.c and rtsx_pci_sdmmc.c.
 // Copyright(c) 2009-2013 Realtek Semiconductor Corp. All rights reserved.
 // Authors: Wei WANG, Roger Tseng. See ../THIRD_PARTY.md.
-//! Native RTS5227/RTS522A/RTS5229 SD/MMC with actual HAIMR and ping-pong PIO.
+//! Native RTS5227/RTS522A/RTS5229 SD/MMC with HAIMR and ping-pong PIO.
 //! RTS522A has separate UHS hooks. Command/data DMA, Memory Stick, remaining
 //! profile timing modes and global PM require their own native implementations.
 pub use super::mmc::{CardInfo, Failure, Kind, SignalVoltage, Timing};
@@ -66,29 +66,29 @@ impl ChipProfile {
 const STALE: &str = "RTSX card publication is permanently stale";
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Exact source identity and class; other Realtek reader generations have
+/// Source identity and class; other Realtek reader generations have
 /// different PHY/power/clock profiles and cannot inherit this setup.
 pub fn matches<C>(function: &Function<C>) -> bool {
     matches_identity(&function.identity())
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.vendor == VENDOR
         && ChipProfile::select(function.device).is_some()
         && function.class[0] == 0xff
 }
 
-/// Retained even when the socket is empty or card identification fails.
+/// Even when the socket is empty or card identification fails.
 pub struct Attached {
     pub host: Host,
     pub card: Option<Card>,
     pub failure: Option<BlockError>,
 }
 
-/// The actual enumerated function and mapping remain owned through every host
-/// and card alias. PIO never grants bus mastering or fabricates a DMA address.
+/// The enumerated function and mapping remain owned through every host
+/// and card alias. PIO never grants bus mastering or invents a DMA address.
 pub fn attach(mut function: Function, handoff: &Handoff) -> Result<Attached, BlockError> {
     if !matches(&function) {
         return Err(BlockError::Unsupported(
@@ -156,17 +156,17 @@ impl<C: ConfigSpace> Pci for Function<C> {
     }
 }
 
-/// Poll the actual socket explicitly. Observed removal/replacement permanently
+/// Poll the socket explicitly. Observed removal/replacement permanently
 /// retires every old disk alias before another physical card can be published.
 pub struct Host {
     inner: Rc<RefCell<Engine>>,
 }
 impl Host {
-    /// Last actual OCP status sampled before socket power-off (RTS522A only).
+    /// Last OCP status sampled before socket power-off (RTS522A only).
     pub fn overcurrent_status(&self) -> Option<u8> {
         self.inner.borrow().ocp_status
     }
-    /// Retained diagnostics require no PCI/MMIO and preserve the primary error.
+    /// Diagnostics require no PCI/MMIO and preserve the primary error.
     pub fn last_failure(&self) -> Option<Failure> {
         self.inner.borrow().last_failure.clone()
     }
@@ -226,7 +226,7 @@ impl BlockDevice for Card {
             let result = (|| {
                 engine.execute(READ_SINGLE, address, Response::Status, Some(512))?;
                 engine.ready()?;
-                // Output is accepted only after the last actual readiness access.
+                // Output is accepted only after the last readiness access.
                 engine.check_request()?;
                 block.copy_from_slice(&engine.scratch);
                 Ok(())
@@ -421,8 +421,8 @@ mod tests {
     use crate::bus::pci::Address;
     use alloc::{collections::BTreeMap, vec, vec::Vec};
 
-    // A peripheral/card model at the actual PCI/MMIO boundary. Numeric wire
-    // fields below are deliberately decoded independently of the driver helpers.
+    // A peripheral/card model at the PCI/MMIO boundary. Numeric wire
+    // fields below are decoded independently of the driver helpers.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Fault {
         None,
@@ -1645,7 +1645,7 @@ mod tests {
                 assert_eq!(bytes, chip.borrow().card.block(11));
             }
         }
-        // The actual command CHECK requires both END and IDLE, unlike a data
+        // The command CHECK requires both END and IDLE, unlike a data
         // read. An END-only response must not pass as command completion: a
         // cached MMC's cache flush is such a command.
         let chip = Chip::new(true, true);
@@ -1657,13 +1657,13 @@ mod tests {
         assert_eq!(card.flush_cache(), Err(BlockError::Timeout));
         stale(&mut card, &chip);
         // CMD24 accepted the write and the physical data changed, but no END
-        // arrived. No successful write/flush or retained alias may be reported.
+        // arrived. No successful write/flush or kept alias may be reported.
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
         inject(&host, &chip, Fault::AfterWrite);
         // Defer this delay until the data mode: CMD24's separate R1 phase must
-        // complete first, and the physical PPBUF write must actually take effect.
+        // complete first, and the physical PPBUF write must take effect.
         chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
         chip.borrow_mut().delay_us = 5_000_001;
         assert_eq!(card.write(29, &[0xce; 512]), Err(BlockError::Timeout));
@@ -1912,7 +1912,7 @@ mod tests {
                 "{name}: no power/interrupt/BAR writes"
             );
         }
-        // A genuine long, fully measured chain, not repeated fake two-byte
+        // A long, fully measured chain, not repeated fake two-byte
         // headers. The final L1SS includes Control2 through config byte4095.
         let chip = Chip::new(false, false);
         {
@@ -1987,7 +1987,7 @@ mod tests {
     #[test]
     fn native_card_below_source_initial_data_rate_refuses_before_overclocked_data() {
         let chip = Chip::new(false, true);
-        chip.borrow_mut().card.transfer_speed = 0x0a; // actual CSD:10MHz
+        chip.borrow_mut().card.transfer_speed = 0x0a; // CSD:10MHz
         let mut host = make_host(&chip, false).unwrap();
         assert!(matches!(
             host.poll(),

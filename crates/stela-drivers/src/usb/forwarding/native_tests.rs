@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Independent wire peer composed with the original Controller/EP0 DMA fixture.
 //! Numeric wire definitions below come from the xHCI layout, not production
-//! encoding constants. The peer reads actual published contexts/TRBs, writes
-//! actual DMA/event memory and enforces endpoint stop before dequeue changes.
+//! encoding constants. The peer reads published contexts/TRBs, writes
+//! DMA/event memory and enforces endpoint stop before dequeue changes.
 use super::*;
 use crate::{
     bus::pci::{Address, ConfigSpace, Function},
@@ -56,12 +56,12 @@ struct Peer {
 impl Peer {
     fn word(at: u64) -> u32 {
         assert!(at > 65536 && at.is_multiple_of(4));
-        // SAFETY: every address is decoded from a retained fixture allocation.
+        // SAFETY: every address is decoded from a fixture allocation.
         unsafe { (at as *const u32).read_volatile() }
     }
     fn long(at: u64) -> u64 {
         assert!(at > 65536 && at.is_multiple_of(8));
-        // SAFETY: retained aligned fixture DMA.
+        // SAFETY: aligned fixture DMA.
         unsafe { (at as *const u64).read_volatile() }
     }
     fn command(&mut self, kind: u32, parameter: u64, dci: u8, stream: u16, status: u32) {
@@ -82,7 +82,7 @@ impl Peer {
                     if add & (1 << ep) != 0 {
                         let from = parameter + (ep as u64 + 1) * base.context_bytes as u64;
                         let to = base.output + ep as u64 * base.context_bytes as u64;
-                        // SAFETY: real Configure Endpoint contexts retain both allocations.
+                        // SAFETY: real Configure Endpoint contexts keep both allocations.
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 from as *const u8,
@@ -97,7 +97,7 @@ impl Peer {
                             (to as *mut u32).write_volatile(Self::word(to) & !7 | 1);
                         }
                     } else if drop & (1 << ep) != 0 {
-                        // SAFETY: drop context belongs to this retained slot.
+                        // SAFETY: drop context belongs to this slot.
                         unsafe {
                             ((base.output + ep as u64 * base.context_bytes as u64) as *mut u32)
                                 .write_volatile(0);
@@ -111,7 +111,7 @@ impl Peer {
             }
             SET_DEQUEUE => {
                 assert_eq!(self.base.borrow().state(usize::from(dci)), 3);
-                // The acknowledged dequeue command changes the actual hardware
+                // The acknowledged dequeue command changes the hardware
                 // cursor; the original stream context need not be rewritten.
                 self.cursor.insert(
                     (dci, stream),
@@ -197,7 +197,7 @@ impl Peer {
             let base = self.base.borrow();
             base.output + u64::from(dci) * base.context_bytes as u64
         };
-        // Interval comes from the actual configured endpoint context; Frame ID
+        // Interval comes from the configured endpoint context; Frame ID
         // and CFC's implicit subframe progression come from published wire TDs.
         let interval = 1u32 << (Self::word(ep) >> 16 & 0xff);
         assert!(target.is_multiple_of(interval));
@@ -230,7 +230,7 @@ impl Peer {
             self.base.borrow_mut().set_state(usize::from(dci), 2);
         }
         if matches!(code, 1 | 13 | 26 | 28) {
-            // Stopped Short Packet reports actual bytes, unlike the residual
+            // Stopped Short Packet reports bytes, unlike the residual
             // field used by Success, Short Packet and Stopped.
             let actual = if code == 28 {
                 residual
@@ -239,7 +239,7 @@ impl Peer {
             };
             if dci & 1 != 0 {
                 assert_eq!(bytes.len(), actual);
-                // SAFETY: only this terminal TD's retained requested DMA extent is written.
+                // SAFETY: only this terminal TD's requested DMA extent is written.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
@@ -662,7 +662,7 @@ fn ordinary_cancellation_preserves_receive_boundaries_racing_actual_stop() {
         for failure in [None, Some(STOP), Some(SET_DEQUEUE)] {
             let mut ram = vec![0u64; 512 * 1024];
             let start = ram.as_mut_ptr() as u64;
-            // SAFETY: failed acknowledgements retain every original allocation.
+            // SAFETY: failed acknowledgements keep every original allocation.
             let mut dma =
                 unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
             let (mut owner, peer) = fixture(&mut dma, true);
@@ -768,7 +768,7 @@ fn explicit_cancellation_preserves_observed_transport_errors_and_failed_ack_owne
 fn retired_request_refuses_before_mmio_and_preserves_current_unpolled_completion() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: current and retired request records share retained fixture DMA.
+    // SAFETY: current and retired request records share kept fixture DMA.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut owner, peer) = fixture(&mut dma, true);
     let old = owner.submit(0x81, 0, 2, &[]).unwrap();
@@ -894,10 +894,10 @@ fn scheduled_refused_without_publication(
 fn explicit_single_packet_uses_requested_frame_and_cannot_fallback_without_cfc() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original model RAM is retained through terminal events and cancel ACK.
+    // SAFETY: original model RAM is held through terminal events and cancel ACK.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut owner, peer) = fixture(&mut dma, false);
-    // This actual fixture has no Contiguous Frame ID capability. A two-packet
+    // This fixture has no Contiguous Frame ID capability. A two-packet
     // request must fail as a whole before its otherwise-valid first TD escapes.
     scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[2, 3], 16032);
     let request = owner
@@ -1025,7 +1025,7 @@ fn explicit_request_cancellation_and_configuration_retire_original_identities() 
 fn explicit_packet_lists_wrap_real_microframes_and_keep_subframe_queue_continuations() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: every TD/event/payload is within this retained independent RAM.
+    // SAFETY: every TD/event/payload is within this independent RAM.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut owner, peer) = fixture_with_schedule(
         &mut dma,
@@ -1138,7 +1138,7 @@ fn explicit_preflight_uses_actual_interval_and_checks_entire_list_horizon_withou
             &mut dma,
         )
         .unwrap();
-    // Actual FS bInterval=2 configures a 16-microframe interval. Neither an
+    // FS bInterval=2 configures a 16-microframe interval. Neither an
     // aligned gap nor a copied descriptor's wrong phase can change that queue.
     for target in [16056, 16080, 16032] {
         scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[1], target);
@@ -1184,7 +1184,7 @@ fn explicit_preflight_uses_actual_interval_and_checks_entire_list_horizon_withou
 fn explicit_clock_advance_during_publication_requires_real_endpoint_cancellation() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original buffers remain retained until real endpoint retirement ACK.
+    // SAFETY: original buffers remain held until real endpoint retirement ACK.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let (mut owner, peer) = fixture_with_schedule(
         &mut dma,
@@ -1297,7 +1297,7 @@ fn explicit_partial_publication_or_failed_stop_retains_every_original_packet_buf
 fn modeled_state_transitions_preserve_actual_configured_endpoint_context_fields() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
-    // SAFETY: configured endpoint contexts and every retained ring remain in
+    // SAFETY: configured endpoint contexts and every ring remain in
     // this exclusive fixture allocation until their original owners drop.
     let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
     let check = |peer: &Rc<RefCell<Peer>>, dci: u8, mask: u32, expected: u32| {
@@ -1335,7 +1335,7 @@ fn modeled_state_transitions_preserve_actual_configured_endpoint_context_fields(
         2,
         Some((0x110, 0, 1 << 11)),
     );
-    // Original FS bInterval2 is actually configured as Interval4 (16 microframes).
+    // Original FS bInterval2 is configured as Interval4 (16 microframes).
     check(&full_peer, 3, 0xff << 16, 4 << 16);
 
     let (mut superspeed, superspeed_peer) = fixture(&mut dma, true);
@@ -1360,14 +1360,14 @@ fn modeled_state_transitions_preserve_actual_configured_endpoint_context_fields(
         .unwrap()
         .configure(&[endpoint], None, &mut dma)
         .unwrap();
-    // A second actual native Configure command retains nonzero Interval and Mult.
+    // A second native Configure command keeps nonzero Interval and Mult.
     check(&superspeed_peer, 7, 0xff << 16 | 3 << 8, 4 << 16 | 2 << 8);
 }
 
 /// These independent controllers both reached real Address Device ACK for slot
-/// one. Substituting only the retained controller reference models a hostile
+/// one. Substituting only the controller reference models a hostile
 /// old consumer alias; no SlotId or generation is manufactured. Same-controller
-/// published-slot reuse is qualified separately by the topology owner.
+/// published-slot reuse is checked separately by the topology owner.
 #[test]
 fn stale_forwarding_cached_receipts_refuse_before_mmio_and_preserve_current_dma() {
     for iso in [false, true] {
@@ -1428,7 +1428,7 @@ fn stale_forwarding_cached_receipts_refuse_before_mmio_and_preserve_current_dma(
         assert_eq!(previous.configuration, 19);
         assert_eq!(dma.remaining(), remaining);
         assert_eq!(ram, before);
-        // Genuine current cached cancellation ACKs need no hardware access.
+        // Current cached cancellation ACKs need no hardware access.
         assert_eq!(
             current.poll(cached).unwrap().unwrap().status,
             Status::Cancelled
@@ -1542,7 +1542,7 @@ fn actual_same_controller_root_reuse_preserves_stale_forwarding_cache_and_curren
                         .iter()
                         .any(|(kind, slot, _)| *kind == 10 && *slot == original.slot)
                 );
-                // The reset service preserved the genuine original Forwarded
+                // The reset service preserved the original Forwarded
                 // consumer claim and transferred it to this returned generation.
                 let mut current = Device::claimed(shared.clone(), fresh).unwrap();
                 current.configure(1, &mut dma).unwrap();

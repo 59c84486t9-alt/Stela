@@ -10,7 +10,7 @@
 //! Native sends drain synchronously. Native replies wait behind the physical
 //! eight-slot FIFO when full; the backlog is not hardware occupancy. As with
 //! ASC, outbox enable gates AP visibility and its interrupt. A2I enable is
-//! retained readback state; the running native receiver accepts sends even
+//! readback state; the running native receiver accepts sends even
 //! when that bit is clear. The AP send path checks FIFO status; the electrical
 //! meaning of a cleared enable bit is not established. These are stated
 //! emulation choices, not proof of disabled hardware FIFO behavior. Empty
@@ -124,8 +124,8 @@ impl MxWrap {
         let mut produced = Vec::new();
         let result = self.firmware.dma(port, &mut produced);
         // Earlier DMA writes and their emitted notifications can already be
-        // committed when a later transfer faults. Retain those messages in
-        // FIFO/backlog order and publish their actual visibility before the
+        // committed when a later transfer faults. Keep those messages in
+        // FIFO/backlog order and publish their visibility before the
         // error reaches the AP; repairing DMA must not replay or erase them.
         self.deliver(produced);
         self.update_lines(port.access);
@@ -586,7 +586,7 @@ mod tests {
             wrapper.read(A2I_CONTROL, Width::Word, &mut access).unwrap() & ENABLE,
             0
         );
-        // Ready alone is not the firmware's retained-halt power contract.
+        // Ready alone is not the firmware's halt power contract.
         assert!(
             wrapper
                 .write(CPU_RUN, Width::Word, STOP, &mut access)
@@ -606,7 +606,7 @@ mod tests {
         wrapper
             .write(CPU_RUN, Width::Word, RUN, &mut access)
             .unwrap();
-        // Resume appends RUNNING once, behind retained traffic and before
+        // Resume appends RUNNING once, behind kept traffic and before
         // later replies. It preserves the original endpoint enumeration.
         send(&mut wrapper, 3 << 52 | 0x1234, &mut access);
         assert_eq!(receive(&mut wrapper, &mut access).0, 4 << 52 | 0x9999);

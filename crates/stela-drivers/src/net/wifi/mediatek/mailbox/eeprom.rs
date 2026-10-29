@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Native owned encapsulation EEPROM exchange through the actual mailbox.
+//! Native owned encapsulation EEPROM exchange through the mailbox.
 use super::{
     Cause, Event, Mailbox, Operation, PCI_TIMEOUT_US, Packet, PortState, QueueIo, TransportFailure,
 };
@@ -12,7 +12,7 @@ pub struct Reply {
     pub dma_released: bool,
     pub frame: Frame,
 }
-/// Actual completed read, with immutable full raw observations. The private
+/// Completed read, with immutable full raw observations. The private
 /// owner binds historical native command context, not current power/reset/
 /// firmware policy or authentication of source-opaque validity fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,8 +42,8 @@ impl Report {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Failure {
     Transport(TransportFailure),
-    /// Actual response and TX DMA completed, but the reply did not contain
-    /// this complete echoed EEPROM block. Retain its real owned raw frame.
+    /// Response and TX DMA completed, but the reply did not contain
+    /// this complete echoed EEPROM block. Keep its real owned raw frame.
     Malformed {
         error: codec::Error,
         reply: Reply,

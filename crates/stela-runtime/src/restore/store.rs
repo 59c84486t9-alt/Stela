@@ -1,6 +1,6 @@
 //! IPSW-backed verified random reads. Existing ZIP64 and bounded inflater own
 //! archive parsing. A member is scanned once against immutable payload SHA-256;
-//! retained 64-KiB block hashes then detect changes before returning any read.
+//! 64-KiB block hashes then detect changes before returning any read.
 //! BuildManifest's component digest is a different (Image4) digest and remains
 //! attached to the selected identity; it is never replaced with the ZIP hash.
 //!

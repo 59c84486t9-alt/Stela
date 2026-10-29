@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Renoir actual PCI/UC adapter; revision01 and exact class048000 are required.
+//! Renoir PCI/UC adapter; revision01 and exact class048000 are required.
 //! Copyright (C) 2020 Advanced Micro Devices, Inc.
 pub use super::super::acp_pdm::pci::AttachFailure;
 pub type NativeRegisters = super::super::acp_pdm::pci::NativeRegisters<super::Renoir>;
@@ -39,7 +39,7 @@ mod tests {
     const BYTES: usize = 0x20000;
     struct ResourceOwner;
     // SAFETY: isolated model reservation; symbolic BAR labels are never physical
-    // pointers and its actual CPU storage is retained by the mapping platform.
+    // pointers and its CPU storage is held by the mapping platform.
     unsafe impl ResourceBacking for ResourceOwner {
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BYTES as u64).unwrap()
@@ -65,7 +65,7 @@ mod tests {
             unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
         }
     }
-    // SAFETY: independent model's real CPU storage backs exactly one retained
+    // SAFETY: independent model's real CPU storage backs exactly one kept
     // symbolic BAR; all publication/retirement is synchronous and serialized.
     unsafe impl MappingPlatform for Platform {
         fn check_context(&self, _: AddressSpace) -> Result<(), MapError> {
@@ -155,17 +155,17 @@ mod tests {
     }
     fn retire(function: Function<OwnedConfig>, mut mapping: Mapping) {
         let mut config_mapping = function.into_config().into_mapping();
-        // SAFETY: actual model owners have been consumed; no device/callback
+        // SAFETY: model owners have been consumed; no device/callback
         // or raw register accesses remain after the asserted stopped state.
         unsafe { mapping.retire() }.unwrap();
-        // SAFETY: same final config-owner drain, actual registry retirement.
+        // SAFETY: same final config-owner drain, registry retirement.
         unsafe { config_mapping.retire() }.unwrap();
     }
     #[test]
     fn canonical_stopped_function_and_uc_bar_survive_native_width_dma_gating() {
         let requester = stopped();
         let (mapping, unmaps) = mapping();
-        // SAFETY: exact retained symbolic BAR0 plus canonical stopped fixture.
+        // SAFETY: exact symbolic BAR0 plus canonical stopped fixture.
         let mut registers = match unsafe { NativeRegisters::attach(requester, mapping, bar()) } {
             Ok(registers) => registers,
             Err(failure) => panic!("attachment {:?}", failure.error),
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(registers.region_bytes(), BYTES);
         registers.set_bus_master(true).unwrap();
         assert_eq!(registers.function.config().read16(4), 0x406);
-        // The same actual config rejects MSI activation without MMIO writes.
+        // The same config rejects MSI activation without MMIO writes.
         registers.function.config().write16(6, 0x10);
         registers.function.config().write8(0x34, 0x40);
         registers.function.config().write16(0x40, 5);
@@ -196,7 +196,7 @@ mod tests {
         };
         registers.write32(0xc04, 0);
         // This raw UC RAM fixture supplies unspecified command readback. It is
-        // deliberately not evidence for a cache ACK or a hardware value.
+        // not evidence for a cache ACK or a hardware value.
         registers.write32(0xc40, u32::MAX);
         let (function, mapping) = match registers.into_stopped_resources() {
             Ok(owners) => owners,
@@ -238,7 +238,7 @@ mod tests {
             } else {
                 bar()
             };
-            // SAFETY: invalid association is deliberately rejected before writes.
+            // SAFETY: invalid association is rejected before writes.
             let mut failure =
                 match unsafe { NativeRegisters::attach(requester, mapping, candidate) } {
                     Err(failure) => failure,
@@ -268,11 +268,11 @@ mod tests {
         ] {
             let mut function = stopped().into_function();
             function.config().write32(8, revision_class);
-            // Reconstruct genuine function metadata; this is not merely a
+            // Reconstruct function metadata; this is not a
             // stale snapshot mismatch against the stopped-requester fixture.
             let config = function.into_config();
             let function = Function::new(ADDRESS, config).unwrap();
-            // SAFETY: drained isolated actual native configuration fixture.
+            // SAFETY: drained isolated native configuration fixture.
             let requester = match unsafe {
                 StoppedRequester::from_stopped_pci(function, FunctionRole::Physical)
             } {
@@ -280,7 +280,7 @@ mod tests {
                 Err((error, _)) => panic!("fixture {error:?}"),
             };
             let (mapping, unmaps) = mapping();
-            // SAFETY: valid reservation, deliberately unsupported native class/revision.
+            // SAFETY: valid reservation, unsupported native class/revision.
             let failure = match unsafe { NativeRegisters::attach(requester, mapping, bar()) } {
                 Err(failure) => failure,
                 Ok(_) => panic!("wrong source driver admitted"),

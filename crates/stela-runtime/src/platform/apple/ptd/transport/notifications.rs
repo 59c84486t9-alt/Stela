@@ -1,4 +1,4 @@
-//! PMP-local PTD source levels on the actual publication owner. Original
+//! PMP-local PTD source levels on the publication owner. Original
 //! t6000pmp table 0x81300 and IRQ wrappers 0x12618..0x12660 register route r
 //! through RTKit-local IRQ 1+r, encoded in namespace 0x10000. These are not AP
 //! AIC numbers or ASC messages. See docs/research/apple-mcc.md.
@@ -31,7 +31,7 @@ impl NativeProfile {
 }
 
 /// A PTD output in the original PMP-local interrupt namespace. A number alone
-/// grants no authority to clear a pending publication or report service ACKs.
+/// grants no permission to clear a pending publication or report service ACKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalIrq(u8);
 
@@ -53,14 +53,14 @@ impl LocalIrq {
 /// There is no copied line bank, event-erasing pop, callback execution, RTKit
 /// enable mask or acknowledgement here. Pending entries/control on the same
 /// publication bank determine these levels. RTKit callback registration and
-/// actual native service effects remain the recipient's obligations.
+/// native service effects remain the recipient's obligations.
 #[derive(Clone)]
 pub struct LocalNotifications(Ptd);
 
 impl LocalNotifications {
     /// Admit exactly one native recipient before any publication. Aliases keep
-    /// this admission for the bank's whole retained lifetime, including after an
-    /// abandoned recipient. Dropping a native owner is not a qualified reset.
+    /// this admission for the bank's whole lifetime, including after an
+    /// abandoned recipient. Dropping a native owner is not a checked reset.
     pub(crate) fn claim_pmp_recipient(&self) -> Result<(), &'static str> {
         let mut state = self.0.0.borrow_mut();
         if state.pmp_recipient_admitted {
@@ -73,19 +73,19 @@ impl LocalNotifications {
         Ok(())
     }
 
-    /// Check actual backing identity, including after cloning an alias. Equal
+    /// Check backing identity, including after cloning an alias. Equal
     /// numeric ranges on a different object do not satisfy this check.
     pub fn owns(&self, bank: &Ptd) -> bool {
         Rc::ptr_eq(&self.0.0, &bank.0)
     }
 
-    /// The actual bank whose source levels this recipient observes.
+    /// The bank whose source levels this recipient observes.
     pub fn bank(&self) -> &Ptd {
         &self.0
     }
 
     /// Raw level bitmap before recipient RTKit masking or callback dispatch.
-    /// Retained pauses keep existing source levels; this does not authorize
+    /// Pauses keep existing source levels; this does not authorize
     /// running a paused recipient or invent a completed callback.
     pub fn asserted(&self) -> u16 {
         self.0
@@ -105,7 +105,7 @@ impl LocalNotifications {
 }
 
 impl Ptd {
-    /// Admit the caller's source-qualified native profile on the actual bank.
+    /// Admit the caller's source-checked native profile on the bank.
     /// An alias can address more update positions than this controller implements;
     /// that larger extent never creates additional entries or local sources.
     pub fn initialized_local_profile(
@@ -121,9 +121,9 @@ impl Ptd {
         Self::new_local(entries, ranges, lifecycle)
     }
 
-    /// Allocate the qualified native geometry and its actual PMP-local output
+    /// Allocate the checked native geometry and its PMP-local output
     /// owner together, before admitting any source/client. This is explicit
-    /// Stela initialization, not retained Apple reset or RTOS-ready state.
+    /// Stela initialization, not kept Apple reset or RTOS-ready state.
     /// Every entry is unpublished, interrupts disabled, and local levels low.
     pub fn initialized_local(
         entries: u32,
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(notifications.asserted(), 0);
         write(&mut bank, 0x18200, Width::Word, 1, 9, &mut latch).unwrap();
         assert_eq!(notifications.asserted(), 1 << 15);
-        drop(bank); // Recipient retains the exact bank, not a copied line image.
+        drop(bank); // Recipient keeps the exact bank, not a copied line image.
         let entry = notifications
             .bank()
             .consume_entry(0, &mut Access::new(0, 10, &mut latch))
@@ -470,7 +470,7 @@ mod tests {
             assert!(write(&mut bank, offset, width, 0xffff, 2, &mut latch).is_err());
         }
         assert_eq!(bank.requests().len(), 1);
-        // A native AP request produces its actual local transport input only.
+        // A native AP request produces its local transport input only.
         // It cannot create PMP-STATUS or a separate power-service ACK entry.
         write(
             &mut bank,

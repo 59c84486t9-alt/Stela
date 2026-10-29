@@ -32,7 +32,7 @@ impl RegisteredSystemRam {
                 })?;
             let count = (bytes.len() - done).min(region.bytes - offset);
             // SAFETY: preflight checks the whole immutable physical placement;
-            // registration retains the same native writer and private source.
+            // registration keeps the same native writer and private source.
             unsafe {
                 self.system
                     .publish(&region.backing, offset, &bytes[done..done + count])
@@ -71,7 +71,7 @@ impl RegisteredSystemRam {
             .backing
             .host_pointer(offset, 8, AccessKind::Write)
             .map_err(|_| MemoryStatus::Permission)?;
-        // SAFETY: the retained registration closes every physical writer over
+        // SAFETY: the registration closes every physical writer over
         // this exact WB backing; no external DMA/direct writer participates.
         unsafe {
             self.system

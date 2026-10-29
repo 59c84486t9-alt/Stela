@@ -134,7 +134,7 @@ impl State {
             return 1 << 31;
         }
         // Independent tiny memory peripheral: fixed opcode/address formats,
-        // byte-addressed storage, WREN and actual completed program effects.
+        // byte-addressed storage, WREN and completed program effects.
         let address_bytes = match wire.opcode {
             0x0c | 0x3c | 0xbc | 0x6c | 0xec => 4,
             0x03 | 0x0b | 0x3b | 0xbb | 0x6b | 0xeb | 0x02 => 3,
@@ -181,7 +181,7 @@ impl Drop for Registers {
         self.0.borrow_mut().drops += 1;
     }
 }
-// SAFETY: the fixture retains its unique modeled bank and timer; no actual
+// SAFETY: the fixture keeps its unique modeled bank and timer; no
 // mappings, hardware, IRQ or DMA service is admitted by this test provider.
 unsafe impl super::super::Registers for Registers {
     fn profile(&self) -> Profile {
@@ -617,7 +617,7 @@ fn unchanged_linux_memory_wire_effects_and_frontend_frequency_limits_match_nativ
         let (mut controller, state) = fixture(profile);
         state.borrow_mut().store(0x50, number(11) as u32);
         // The C peer begins with an already write-enabled memory peripheral;
-        // the ordinary test above independently exercises actual WREN.
+        // the ordinary test above independently exercises WREN.
         state.borrow_mut().write_enabled[number(9) as usize] = true;
         let mut output = vec![0xa5; number(5) as usize];
         let payload = hex(17);

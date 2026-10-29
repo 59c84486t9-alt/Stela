@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! BCM5761 A0 held-D0 PHY power effects, including the actual source PLL write.
+//! BCM5761 A0 held-D0 PHY power effects, including the source PLL write.
 use super::*;
 
 #[test]

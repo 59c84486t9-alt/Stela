@@ -419,7 +419,7 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
     }
 
     /// Return the port accessor only after an acknowledged idle shutdown. A
-    /// failure returns the controller alongside the error, retaining ownership
+    /// failure returns the controller alongside the error, keeping ownership
     /// until platform reset before its mux/semaphore may be restored.
     pub fn shutdown(mut self) -> Result<(R, T), (Self, Error)> {
         let result = if self.ready {
@@ -579,7 +579,7 @@ mod tests {
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::{Cell, RefCell};
 
-    /// Vendor/reserved bits are deliberately nonzero. They are neither an I801
+    /// Vendor/reserved bits are nonzero. They are neither an I801
     /// INUSE semaphore nor BYTE_DONE; every status write is checked against W1C.
     const OTHER_STATUS: u8 = 0xe0;
 

@@ -45,7 +45,7 @@ impl ObjectHandle {
     }
 }
 
-/// Device reset/removal changes the actual owner's epoch. Parsing an epoch
+/// Device reset/removal changes the owner's epoch. Parsing an epoch
 /// never proves reset or invalidation; the registered backend supplies it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceEpoch(NonZeroU64);
@@ -84,7 +84,7 @@ impl RequestSequence {
     }
 }
 
-/// A failed table operation establishes no resource, task or device authority.
+/// A failed table operation establishes no resource, task or device permission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableError {
     WrongConnection,
@@ -109,7 +109,7 @@ struct Slot<T> {
     next_free: Option<u32>,
 }
 
-/// Actual ownership of objects published by one connection and device epoch.
+/// Ownership of objects published by one connection and device epoch.
 ///
 /// The authenticated dispatcher must keep exactly one table for its registered
 /// connection/epoch, with all resource kinds in `T` (normally a typed enum).
@@ -119,9 +119,9 @@ struct Slot<T> {
 /// table with the same scope while any old handle can reach that dispatcher.
 ///
 /// Removal transfers ownership; it does not retire DMA, submitted commands or
-/// memory mappings. `T` must itself retain those owners until real retirement,
+/// memory mappings. `T` must itself keep those owners until real retirement,
 /// including if a table or returned owner is dropped. Closing a table refuses
-/// every wire access while retaining its objects for the backend's cleanup.
+/// every wire access while keeping its objects for the backend's cleanup.
 /// Mutable access serializes table changes; no internal lock or callback runs.
 pub struct ObjectTable<T> {
     connection: NonZeroU64,
@@ -252,7 +252,7 @@ impl<T> ObjectTable<T> {
         slot.value.as_mut().ok_or(TableError::StaleHandle)
     }
 
-    /// Unpublishes the exact live generation before transferring its owner.
+    /// Unpublishes the live generation before transferring its owner.
     /// Exhaustion permanently retires the slot instead of aliasing an old ID.
     pub fn remove(
         &mut self,
@@ -279,13 +279,13 @@ impl<T> ObjectTable<T> {
         Ok(value)
     }
 
-    /// Fail closed after actual disconnect/reset/removal without releasing any
+    /// Fail closed after disconnect/reset/removal without releasing any
     /// object. This changes no physical device state and is irreversible.
     pub fn close(&mut self) {
         self.closed = true;
     }
 
-    /// Consumes publication storage, transferring each remaining actual owner.
+    /// Consumes publication storage, transferring each remaining owner.
     /// The caller still owes each backend's real retirement/cleanup protocol.
     pub fn into_objects(self) -> impl Iterator<Item = T> {
         self.slots.into_iter().filter_map(|slot| slot.value)

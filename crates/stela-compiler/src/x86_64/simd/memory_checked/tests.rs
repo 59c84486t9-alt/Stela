@@ -177,7 +177,7 @@ struct Harness {
     incoming_mxcsr: Vec<u32>,
 }
 
-/// A test transport, not the production MemorySystem. It deliberately poisons
+/// A test transport, not the production MemorySystem. It poisons
 /// callback scratch registers and MXCSR after touching the reached prefix.
 unsafe extern "sysv64" fn callback(
     view: *mut MemoryContextView,
@@ -227,7 +227,7 @@ unsafe extern "sysv64" fn callback(
         view.completed_bytes += part_bytes as u64;
     }
     let poison_mxcsr: u32 = 0x3f81;
-    // SAFETY: all XMM registers are caller-saved; the deliberately changed
+    // SAFETY: all XMM registers are caller-saved; the changed
     // valid MXCSR is restored by the exact common callback wrapper under test.
     unsafe {
         core::arch::asm!(
@@ -281,7 +281,7 @@ impl NativeCode {
             )
             .unwrap();
         }
-        // SAFETY: private test mapping is retained until all native calls end.
+        // SAFETY: private test mapping is held until all native calls end.
         let address = unsafe {
             mmap(
                 core::ptr::null_mut(),
@@ -387,7 +387,7 @@ fn low_bytes(vector: [u64; 2]) -> [u8; 16] {
 fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes() {
     fn set_mxcsr(value: u32) {
         // SAFETY: tests use only allocated SSE control/status bits, mask
-        // every exception, and restore the actual original environment.
+        // every exception, and restore the original environment.
         unsafe {
             core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack));
         }
@@ -414,8 +414,8 @@ fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes()
             let mut view = view(&mut harness);
             let original = Original(mxcsr());
             set_mxcsr(caller);
-            // This executes the actual emitted common callback wrapper.
-            // The transport records actual entry MXCSR and poisons it
+            // This executes the emitted common callback wrapper.
+            // The transport records entry MXCSR and poisons it
             // before either success or an explicit service refusal.
             let result = code.run(&mut actual, &mut view);
             let returned = mxcsr();

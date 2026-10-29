@@ -4,7 +4,7 @@
 //! Polled raw NHI rings, adapted from Linux nhi.c/nhi_regs.h.
 //!
 //! This initial transport uses the donor's NO_INTERRUPT raw-ring mode. It
-//! deliberately keeps all published DMA leases until an explicitly proven
+//! keeps all published DMA leases until an explicitly proven
 //! device quiescence, even after clearing the ring enable bit. Ring shutdown
 //! register readback alone is not proof that posted DMA/IRQ work has drained.
 use super::config::{Encoded, FRAME_BYTES, PacketType, Received};
@@ -40,22 +40,22 @@ pub fn quarantined_rings() -> u64 {
     QUARANTINED_RINGS.load(Ordering::Relaxed)
 }
 
-/// Actual retained UC MMIO, or a stateful controller model.
+/// UC MMIO, or a stateful controller model.
 ///
 /// # Safety
 /// Accesses must operate on the specified live physical NHI and preserve real
 /// readback/failure effects; `bytes` must describe the complete mapping. The
-/// mapping and function reservation live while any retained Arc exists. No
+/// mapping and function reservation live while any Arc exists. No
 /// other owner changes the NHI's power, reset, ring or interrupt state. Shared
 /// access must obey the caller's platform serialization. Drop must not reclaim
-/// hardware resources while a quarantined Arc retains this object.
+/// hardware resources while a quarantined Arc keeps this object.
 pub unsafe trait Registers: Send + Sync {
     fn bytes(&self) -> usize;
     fn read32(&self, offset: usize) -> u32;
     fn write32(&self, offset: usize, value: u32);
 }
 
-/// A retained native mapping; the platform still owns PCI and mapping lifetime.
+/// A kept native mapping; the platform still owns PCI and mapping lifetime.
 pub struct Mmio {
     base: NonNull<u8>,
     bytes: usize,
@@ -63,7 +63,7 @@ pub struct Mmio {
 impl Mmio {
     /// # Safety
     /// The entire live UC mapping and exact NHI function are exclusively owned
-    /// and retained until every Arc, including quarantined references, ends.
+    /// and kept until every Arc, including quarantined references, ends.
     pub unsafe fn new(base: NonNull<u8>, bytes: usize) -> Result<Self, Error> {
         if !(base.as_ptr() as usize).is_multiple_of(4)
             || bytes < CAPABILITIES + 4
@@ -77,11 +77,11 @@ impl Mmio {
         assert!(
             offset.is_multiple_of(4) && offset.checked_add(4).is_some_and(|end| end <= self.bytes)
         );
-        // SAFETY: retained bounded native mapping established by new().
+        // SAFETY: bounded native mapping established by new().
         unsafe { self.base.as_ptr().add(offset).cast() }
     }
 }
-// SAFETY: new() requires retained exclusive hardware ownership and caller serialization.
+// SAFETY: new() requires kept exclusive hardware ownership and caller serialization.
 unsafe impl Send for Mmio {}
 // SAFETY: as for Send; volatile register operations preserve native effects.
 unsafe impl Sync for Mmio {}
@@ -179,16 +179,16 @@ impl Region {
         Ok(pointer.as_ptr().cast())
     }
     fn read32(&self, offset: usize) -> Result<u32, Error> {
-        // SAFETY: checked retained DMA mapping; callers serialize CPU ownership.
+        // SAFETY: checked DMA mapping; callers serialize CPU ownership.
         Ok(unsafe { self.pointer::<u32>(offset)?.read_volatile() })
     }
     fn write32(&self, offset: usize, value: u32) -> Result<(), Error> {
-        // SAFETY: checked retained DMA mapping; unpublished/reclaimed slot.
+        // SAFETY: checked DMA mapping; unpublished/reclaimed slot.
         unsafe { self.pointer::<u32>(offset)?.write_volatile(value) };
         Ok(())
     }
     fn write64(&self, offset: usize, value: u64) -> Result<(), Error> {
-        // SAFETY: checked retained DMA mapping; unpublished/reclaimed slot.
+        // SAFETY: checked DMA mapping; unpublished/reclaimed slot.
         unsafe { self.pointer::<u64>(offset)?.write_volatile(value) };
         Ok(())
     }
@@ -204,7 +204,7 @@ impl Drop for Region {
     fn drop(&mut self) {
         if !self.published && self.dma.address().is_ok() {
             // SAFETY: no device has ever received this region's address.
-            // A failed unmap is retained by DmaMapping's observable quarantine.
+            // A failed unmap is held by DmaMapping's observable quarantine.
             let _ = unsafe { self.dma.unmap() };
         }
     }
@@ -274,7 +274,7 @@ impl<R: Registers> Ring<R> {
     /// The caller owns this exact NHI function/ring, has established D0 and
     /// memory decode, stopped/drained prior DMA and IRQ work, and masked its
     /// interrupt. Firmware/another connection manager cannot change it. The
-    /// domain is attached to this requester, and ordinary WB DMA is genuinely
+    /// domain is attached to this requester, and ordinary WB DMA is
     /// coherent for volatile completion polling with PCIe No-Snoop disabled.
     /// No other engine accesses these newly allocated mappings before they are
     /// published. The complete native mapping/reservation outlives the Arc.
@@ -293,7 +293,7 @@ impl<R: Registers> Ring<R> {
                 offset: CAPABILITIES,
             });
         }
-        let hops = capabilities & 0x3ff; // Actual nhi_probe mask, not the header's older comment.
+        let hops = capabilities & 0x3ff; // Nhi_probe mask, not the header's older comment.
         if hops == 0 || u32::from(config.hop) >= hops {
             return Err(Error::InvalidConfig);
         }
@@ -436,7 +436,7 @@ impl<R: Registers> Ring<R> {
                 .dma
                 .sync_for_device(0..usize::from(self.config.entries) * DESCRIPTOR_BYTES)?;
             let address = self.descriptors.dma.address()?;
-            // Retain all resources on any uncertain write/enable acknowledgement.
+            // Keep all resources on any uncertain write/enable acknowledgement.
             self.descriptors.published = true;
             self.write_checked(self.descriptor_base, address as u32)?;
             self.write_checked(self.descriptor_base + 4, (address >> 32) as u32)?;
@@ -532,7 +532,7 @@ impl<R: Registers> Ring<R> {
                 .dma
                 .sync_for_device(base..base + DESCRIPTOR_BYTES)?;
             // The descriptor can now expose this buffer. Failed publication
-            // must retain both leases even if software cannot observe progress.
+            // must keep both leases even if software cannot observe progress.
             slot.buffer.published = true;
             slot.pending = Some(Pending {
                 ticket,
@@ -577,7 +577,7 @@ impl<R: Registers> Ring<R> {
             let pending = slot.pending.ok_or(Error::Busy)?;
             // Raw control mode does not define frame-mode CRC/overrun
             // semantics. Linux ctl.c preserves these descriptor bits and
-            // checks the actual wire CRC instead. In particular POSTED shares
+            // checks the wire CRC instead. In particular POSTED shares
             // bit 0x4 with frame-mode BUFFER_OVERRUN and may remain set.
             if flags & !DESCRIPTOR_FLAGS_MASK != 0 {
                 return Err(Error::FrameFlags(flags));
@@ -610,7 +610,7 @@ impl<R: Registers> Ring<R> {
             if self.config.direction == Direction::Rx {
                 data.reserve(bytes);
                 for offset in 0..bytes {
-                    // SAFETY: completed buffer, bounded retained CPU mapping.
+                    // SAFETY: completed buffer, bounded CPU mapping.
                     data.push(unsafe {
                         slot.buffer.cpu.address(offset, 1)?.as_ptr().read_volatile()
                     });
@@ -637,7 +637,7 @@ impl<R: Registers> Ring<R> {
         }
     }
 
-    /// Stop new submissions and clear actual ring configuration. This does not
+    /// Stop new submissions and clear ring configuration. This does not
     /// reclaim DMA or infer posted-write/IRQ drain from register readback.
     pub fn disable(&mut self) -> Result<(), Error> {
         if self.phase == Phase::Released {
@@ -679,7 +679,7 @@ impl<R: Registers> Ring<R> {
             }
         }
         if self.descriptors.dma.address().is_ok() {
-            // SAFETY: as for the frame regions; failed invalidation retains it.
+            // SAFETY: as for the frame regions; failed invalidation keeps it.
             unsafe { self.descriptors.release()? };
         }
         self.phase = Phase::Released;
@@ -715,7 +715,7 @@ impl<R: Registers> Drop for Ring<R> {
             let _ = QUARANTINED_RINGS.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_add(1))
             });
-            // DmaMapping also retains each active domain/page lease. Preserve
+            // DmaMapping also keeps each active domain/page lease. Preserve
             // the physical NHI reservation and MMIO owner alongside them.
             core::mem::forget(self.registers.clone());
         }
@@ -812,7 +812,7 @@ mod tests {
                 }
             }
             assert!(
-                // SAFETY: exclusively owned synthetic mapping; tests deliberately supply invalid
+                // SAFETY: exclusively owned synthetic mapping; tests supply invalid
                 // reported bounds/state to exercise preflight.
                 unsafe {
                     Ring::new(

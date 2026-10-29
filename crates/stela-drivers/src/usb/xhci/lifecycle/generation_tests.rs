@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual enumerated hub/controller DMA peers. Distinct independent controllers
-//! issue genuine identities for identical hardware slot numbers; trap all MMIO
+//! Enumerated hub/controller DMA peers. Distinct independent controllers
+//! issue identities for identical hardware slot numbers; trap all MMIO
 //! when an original topology owner is presented to the replacement generation.
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use alloc::collections::BTreeMap;
 
-// Match the actual PORTSC link handshake used by suspend's existing model.
-// Plain hub RegistersModel deliberately models reset/enumeration only.
+// Match the PORTSC link handshake used by suspend's existing model.
+// Plain hub RegistersModel models reset/enumeration only.
 struct SleepRegisters {
     bus: hub::model::RegistersModel,
     saves: usize,
@@ -211,7 +211,7 @@ fn retained_hub_parent_and_retirement_authority_refuse_same_number_generation_be
         let mut old_memory = vec![0u64; 512 * 1024];
         let mut new_memory = vec![0u64; 512 * 1024];
         let start = old_memory.as_mut_ptr() as u64;
-        // SAFETY: both peers retain distinct live DMA arenas through all owners.
+        // SAFETY: both peers keep distinct live DMA arenas through all owners.
         let mut old_dma =
             unsafe { RegionAllocator::new(start..start + old_memory.len() as u64 * 8) };
         let start = new_memory.as_mut_ptr() as u64;
@@ -302,7 +302,7 @@ fn original_child_identity_cannot_release_current_or_retire_parent_after_parent_
     // SAFETY: all original hardware DMA allocations remain live.
     let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
     let start = foreign_memory.as_mut_ptr() as u64;
-    // SAFETY: independent actual enumeration issues a foreign genuine parent ID.
+    // SAFETY: independent enumeration issues a foreign parent ID.
     let mut foreign_dma =
         unsafe { RegionAllocator::new(start..start + foreign_memory.len() as u64 * 8) };
     let (mut host, shared, _) = fixture(&mut dma, HIGH_SPEED);
@@ -321,7 +321,7 @@ fn original_child_identity_cannot_release_current_or_retire_parent_after_parent_
         .as_ref()
         .unwrap()
         .parent_id;
-    // Hostile retained graph injection keeps the genuine child ID unchanged.
+    // Hostile kept graph injection keeps the child ID unchanged.
     shared.borrow_mut().slots[usize::from(leaf.hardware_slot())]
         .as_mut()
         .unwrap()
@@ -336,8 +336,8 @@ fn original_child_identity_cannot_release_current_or_retire_parent_after_parent_
         );
         assert!(host.retire(root, &mut Changes::default()).is_err());
     });
-    // Also corrupt the retained current graph consistently with that same
-    // foreign genuine parent. A boolean belongs_to would now skip this child;
+    // Also corrupt the current graph consistently with that same
+    // foreign parent. A boolean belongs_to would now skip this child;
     // the fallible complete-root preflight must still reject retirement/release.
     let grant_parent = shared
         .borrow_mut()
@@ -368,7 +368,7 @@ fn genuine_recovery_capability_refuses_an_independent_same_slot_hub_without_muta
     let mut old_memory = vec![0u64; 512 * 1024];
     let mut new_memory = vec![0u64; 512 * 1024];
     let start = old_memory.as_mut_ptr() as u64;
-    // SAFETY: old quiesced owners retain every original allocation.
+    // SAFETY: old quiesced owners keep every original allocation.
     let mut old_dma = unsafe { RegionAllocator::new(start..start + old_memory.len() as u64 * 8) };
     let start = new_memory.as_mut_ptr() as u64;
     // SAFETY: current controller DMA has separate live backing.
@@ -399,7 +399,7 @@ fn public_resume_rejects_stale_snapshot_before_controller_restore_and_keeps_curr
     let mut old_memory = vec![0u64; 512 * 1024];
     let mut new_memory = vec![0u64; 512 * 1024];
     let start = old_memory.as_mut_ptr() as u64;
-    // SAFETY: snapshots retain all canceled original DMA backing.
+    // SAFETY: snapshots keep all canceled original DMA backing.
     let mut old_dma = unsafe { RegionAllocator::new(start..start + old_memory.len() as u64 * 8) };
     let start = new_memory.as_mut_ptr() as u64;
     // SAFETY: current suspended hardware owns independent live DMA backing.
@@ -449,7 +449,7 @@ fn acknowledged_nested_retirement_preserves_seals_and_current_until_physical_res
             ]);
             let mut memory = vec![0u64; 1024 * 1024];
             let start = memory.as_mut_ptr() as u64;
-            // SAFETY: every original context, ring and status buffer retains RAM.
+            // SAFETY: every original context, ring and status buffer keeps RAM.
             let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
             let (mut controller, hardware) = hub::tests::controller(&mut dma, context, nodes);
             let mut failures = Vec::new();
@@ -493,7 +493,7 @@ fn acknowledged_nested_retirement_preserves_seals_and_current_until_physical_res
                 assert!(repeated.removed.is_empty());
                 assert!(shared.borrow_mut().device(child).is_err());
             });
-            // A retained real identity from another original slot cannot stand
+            // A kept real identity from another original slot cannot stand
             // in for this disabled child's inventory, even without new DMA.
             shared.borrow_mut().slots[usize::from(child.hardware_slot())]
                 .as_mut()

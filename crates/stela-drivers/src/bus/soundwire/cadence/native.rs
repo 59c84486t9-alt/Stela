@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Original UC link mapping and actual platform grants, retained together.
+//! Original UC link mapping and platform grants, kept together.
 use super::{IoError, Layout, Registers};
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
 
@@ -11,12 +11,12 @@ pub struct NativeRegisters<P> {
 }
 impl<P: 'static> NativeRegisters<P> {
     /// # Safety
-    /// `platform` retains this exact Cadence link's original audio/DSP/SHIM
-    /// device, actual mapping reservation, enabled frame/reference clocks,
+    /// `platform` keeps this exact Cadence link's original audio/DSP/SHIM
+    /// device, mapping reservation, enabled frame/reference clocks,
     /// power/reset/pins, firmware arbitration and command/IRQ/work exclusion.
     /// Initialization/frame shape is acknowledged and no clock-stop/reset or
     /// deferred user can intervene. `layout` is observed from that same owner.
-    /// Leaking this object must retain every grant, not merely its description.
+    /// Leaking this object must keep every grant, not its description.
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,
@@ -42,7 +42,7 @@ impl<P: 'static> NativeRegisters<P> {
     /// # Safety
     /// The original controller released and all parent frame/stream/DMA/IRQ/
     /// work users and posted MMIO are stopped/drained. No extracted pointer
-    /// remains usable. Failed unmap retains exact remaining original owners.
+    /// remains usable. Failed unmap keeps exact remaining original owners.
     pub unsafe fn retire(mut self) -> Result<P, Self> {
         // SAFETY: original parent producer proves complete users' retirement.
         if unsafe { self.mapping.retire() }.is_err() {
@@ -51,7 +51,7 @@ impl<P: 'static> NativeRegisters<P> {
         Ok(self.platform)
     }
 }
-// SAFETY: claim binds actual original link/platform lifetime to its complete
+// SAFETY: claim binds original link/platform lifetime to its complete
 // bounded aligned UC register aperture; volatile accesses preserve DWORD width.
 unsafe impl<P: 'static> Registers for NativeRegisters<P> {
     fn layout(&self) -> Layout {

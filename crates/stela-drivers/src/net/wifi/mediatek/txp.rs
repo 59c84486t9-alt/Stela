@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Ordinary hardware TXP scatter descriptors from mt76_connac_write_hw_txp.
-//! Mapped spans keep actual canonical leases borrowed while encoding. This is
+//! Mapped spans keep canonical leases borrowed while encoding. This is
 //! wire construction, not publication, token allocation or DMA completion.
 use crate::bus::dma::mapping::{DmaError, DmaMapping};
 use alloc::vec::Vec;
@@ -76,8 +76,8 @@ pub struct Encoded<'a> {
     _spans: Vec<Span<'a>>,
 }
 impl<'a> Encoded<'a> {
-    /// Encode one actual live token and 1..=4 mapped data segments. The owner
-    /// must retain those mappings, the separate 32-byte TXD and actual PCI
+    /// Encode one live token and 1..=4 mapped data segments. The owner
+    /// must keep those mappings, the separate 32-byte TXD and PCI
     /// requester through device publication, DMA consumption and firmware TX-free.
     /// This borrow only protects construction; copying the wire bytes is not a
     /// lifetime, direction, coherence, key-generation or hardware-epoch proof.

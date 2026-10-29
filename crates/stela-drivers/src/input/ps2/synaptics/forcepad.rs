@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Original Synaptics notices: ../synaptics.rs and input/THIRD_PARTY.md.
 //! ForcePad selection and sustained-pressure state from the Synaptics driver.
-//! The caller supplies the actual native firmware identifier; packet bits alone
+//! The caller supplies the native firmware identifier; packet bits alone
 //! cannot distinguish a ForcePad from a conventional touchpad.
 pub(super) fn matches(firmware_id: &str) -> bool {
     firmware_id.strip_prefix("PNP: ").is_some_and(|ids| {

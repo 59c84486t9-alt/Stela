@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual PIP touch/button/proximity/wake records and complete raw packets.
+//! PIP touch/button/proximity/wake records and complete raw packets.
 use super::{Capabilities, ErrorKind, Packet};
 use alloc::boxed::Box;
 const TOUCH_HEADER: usize = 7;
@@ -38,7 +38,7 @@ pub struct Contact {
 pub enum Record {
     Contact(Contact),
     /// The donor consumes only the tracking ID/event on liftoff. Other fields
-    /// may be unavailable; retain actual bytes without inventing coordinates.
+    /// may be unavailable; keep bytes without inventing coordinates.
     Liftoff {
         id: u8,
         tip_liftoff: bool,

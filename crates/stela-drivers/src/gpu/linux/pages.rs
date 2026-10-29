@@ -1,4 +1,4 @@
-//! Owned platform pins behind Linux's actual PFN-indexed page descriptors.
+//! Owned platform pins behind Linux's PFN-indexed page descriptors.
 //! The catalog supplies no DMA mapping or GPU attachment. Its provider and
 //! reservation survive until explicit retirement, or observable quarantine.
 use crate::bus::dma::memory::{CacheAttribute, MemoryError, PinnedPages};
@@ -28,7 +28,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 static QUARANTINED_CATALOGS: AtomicU64 = AtomicU64::new(0);
 
 /// Catalogs whose Drop could not establish exclusive, fully retired ownership.
-/// Their provider and descriptor storage remain retained; this is not a count
+/// Their provider and descriptor storage remain held; this is not a count
 /// of reclaimed or reset resources.
 pub fn quarantined_catalogs() -> u64 {
     QUARANTINED_CATALOGS.load(Ordering::Relaxed)
@@ -56,7 +56,7 @@ impl Reservation {
     /// # Safety
     /// This exact page-aligned RAM extent is exclusively reserved, excluded
     /// from guest/free inventories, and mapped linearly writable WB at cpu_base.
-    /// The provider retains that reservation and mapping through catalog
+    /// The provider keeps that reservation and mapping through catalog
     /// retirement or quarantine. It may allocate only from this generation;
     /// root changes cannot invalidate the mapping or retarget the provider.
     /// Ordinary heap/metadata addresses gain no Linux page ownership.
@@ -84,14 +84,14 @@ impl Reservation {
     }
 }
 
-/// Immutable allocation policy for a retained physical/CPU extent.
+/// Immutable allocation policy for a physical/CPU extent.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtentKind {
     Ordinary = 0,
     RuntimeStack = 1,
 }
-/// Classified coverage retained by the catalog's provider. Stack payload
+/// Classified coverage kept by the catalog's provider. Stack payload
 /// admission separately consumes a pinned cold worker.
 #[derive(Clone, Copy)]
 pub struct Extent {
@@ -138,8 +138,8 @@ impl Request {
 
     /// Reclaimable-class RAM with the otherwise ordinary flag policy.
     /// A provider must explicitly supply Linux's permitted unmovable fallback
-    /// from its actual retained RAM. This grants no migration, background
-    /// reclaim, atomic context or physical/DMA authority by itself.
+    /// from its RAM. This grants no migration, background
+    /// reclaim, atomic context or physical/DMA permission by itself.
     pub fn reclaimable_ram(self) -> bool {
         // SAFETY: pure classification using the pinned Linux GFP constants.
         unsafe { stela_linux_page_request_reclaimable(self.gfp) }
@@ -152,7 +152,7 @@ impl Request {
 }
 
 /// Observation of the exact pin's final platform ownership fences.
-/// Retain keeps the mapping, allocation markers and provider alive; it is not
+/// Keep keeps the mapping, allocation markers and provider alive; it is not
 /// a native stack/terminal acknowledgment or a permission token by itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PinRetirement {
@@ -160,7 +160,7 @@ pub enum PinRetirement {
     Retain,
 }
 
-/// A retained platform source, not an allocator that invents physical labels.
+/// A kept platform source, not an allocator that invents physical labels.
 ///
 /// # Safety
 /// Successful allocations meet PageBacking's real reservation/mapping contract
@@ -171,10 +171,10 @@ pub enum PinRetirement {
 /// semantics. No callback reenters Linux, unwinds or migrates the execution
 /// context. Allocation can run in the indicated atomic context; unsupported
 /// contexts must be refused before any platform operation. Final pin release
-/// occurs only at checked serialized quiescence. The owned provider retains
+/// occurs only at checked serialized quiescence. The owned provider keeps
 /// its source generation even if a busy catalog is quarantined. Pins with
-/// additional native/task/RCU lifetimes override `retirement` and retain until
-/// those actual owners acknowledge; C logical free alone is insufficient.
+/// additional native/task/RCU lifetimes override `retirement` and keep until
+/// those owners acknowledge; C logical free alone is insufficient.
 /// Another
 /// serialized native owner may invoke it; no creator-thread affinity is assumed.
 pub unsafe trait Provider: Send + Sync + 'static {
@@ -188,7 +188,7 @@ pub unsafe trait Provider: Send + Sync + 'static {
     /// This callback must not allocate, block, reenter Linux or change its
     /// execution state. The default applies to ordinary pins whose final
     /// PageBacking release is valid at that point. A future external Runtime
-    /// stack provider must retain until its genuine native/stackref/task/RCU
+    /// stack provider must keep until its native/stackref/task/RCU
     /// fences acknowledge; C free alone cannot establish that observation.
     fn retirement(&self, _pages: &PinnedPages) -> PinRetirement {
         PinRetirement::Ready
@@ -303,7 +303,7 @@ fn try_box<T>(value: T) -> Result<Box<T>, Error> {
             .cast::<T>()
     };
     // SAFETY: fresh aligned storage (or the standard ZST dangling allocation),
-    // initialized exactly once. Box owns the exact original global layout.
+    // initialized exactly once. Box owns the original global layout.
     Ok(unsafe {
         pointer.as_ptr().write(value);
         Box::from_raw(pointer.as_ptr())
@@ -325,7 +325,7 @@ unsafe extern "C" fn allocate<P: Provider>(
     atomic: bool,
     output: *mut NativeAllocation,
 ) -> c_int {
-    // SAFETY: the catalog retains this exact typed provider through callbacks.
+    // SAFETY: the catalog keeps this exact typed provider through callbacks.
     let context = unsafe { &*context.cast::<Context<P>>() };
     let request = Request { gfp, order, atomic };
     if let Err(error) = context.provider.validate(request) {
@@ -358,7 +358,7 @@ unsafe extern "C" fn allocate<P: Provider>(
         Ok(cpu) => cpu,
         Err(error) => return allocation_error(error),
     };
-    // Validate every actual retained page against the immutable inventory.
+    // Validate every page against the immutable inventory.
     // Adjacent physical extents may have different CPU mappings: only the
     // real mapping for each page establishes its relation, never a direct-map
     // assumption or an inferred address in an unmapped guard gap.
@@ -397,7 +397,7 @@ unsafe extern "C" fn validate<P: Provider>(
     order: u32,
     atomic: bool,
 ) -> c_int {
-    // SAFETY: C retains the exact registered Context and invokes callbacks only
+    // SAFETY: C keeps the exact registered Context and invokes callbacks only
     // in its serialized execution. Validation borrows no backing allocation.
     let context = unsafe { &*context.cast::<Context<P>>() };
     match context.provider.validate(Request { gfp, order, atomic }) {
@@ -408,7 +408,7 @@ unsafe extern "C" fn validate<P: Provider>(
 
 unsafe extern "C" fn release_ready<P: Provider>(context: *mut c_void, pin: *mut c_void) -> bool {
     // SAFETY: the same registered Context and exact transferred Pin remain
-    // retained by C; this serialized observation neither takes nor drops them.
+    // by C; this serialized observation neither takes nor drops them.
     let (context, pin) = unsafe { (&*context.cast::<Context<P>>(), &*pin.cast::<Pin>()) };
     context.provider.retirement(&pin.pages) == PinRetirement::Ready
 }
@@ -419,7 +419,7 @@ unsafe extern "C" fn release(_context: *mut c_void, pin: *mut c_void) {
     drop(unsafe { Box::from_raw(pin.cast::<Pin>()) });
 }
 
-/// Owns the platform provider while C retains its descriptor catalog.
+/// Owns the platform provider while C keeps its descriptor catalog.
 /// This handle is affine to its creating native context, including retirement.
 pub struct Catalog<P: Provider> {
     context: Option<Box<Context<P>>>,
@@ -431,7 +431,7 @@ impl<P: Provider> Catalog<P> {
     /// # Safety
     /// Call in process/deferred context with native IRQ/reentry, migration and
     /// reservation/root changes excluded. The provider and Reservation satisfy
-    /// their retained authority contracts. Retirement and final Drop must obey
+    /// their permission contracts. Retirement and final Drop must obey
     /// the same context rules; a busy drop quarantines, never frees live pages.
     pub unsafe fn register(provider: P, reservation: Reservation) -> Result<Self, Error> {
         let mut reservations = Vec::new();
@@ -439,20 +439,20 @@ impl<P: Provider> Catalog<P> {
             .try_reserve_exact(1)
             .map_err(|_| Error::OutOfMemory)?;
         reservations.push(reservation);
-        // SAFETY: the same retained provider/reservation and caller context
-        // contract is forwarded; a one-extent inventory adds no authority.
+        // SAFETY: the same provider/reservation and caller context
+        // contract is forwarded; a one-extent inventory adds no permission.
         unsafe { Self::register_extents(provider, reservations) }
     }
 
-    /// Register the complete immutable actual reservation inventory.
+    /// Register the complete immutable reservation inventory.
     ///
     /// Every extent is copied into the one canonical C descriptor owner.
     /// Physical gaps and guard mappings are absent. Descriptor addresses stay
     /// stable until full retirement; admission cannot grow a live catalog.
-    /// This does not qualify dynamic sparse-memory or native stack ownership.
+    /// This does not check dynamic sparse-memory or native stack ownership.
     ///
     /// # Safety
-    /// Each reservation satisfies its actual retained mapping/physical contract
+    /// Each reservation satisfies its mapping/physical contract
     /// under this provider. No physical or writable CPU extent aliases another;
     /// the provider may allocate only exact pinned pages in this inventory.
     /// The process/IRQ/root/retirement requirements of `register` also apply.
@@ -476,7 +476,7 @@ impl<P: Provider> Catalog<P> {
     /// RuntimeStack extents remain reserved after unpublished markers end.
     ///
     /// # Safety
-    /// The provider retains every actual allocation/mapping owner through
+    /// The provider keeps every allocation/mapping owner through
     /// retirement or quarantine. RuntimeStack entries describe Linux-compatible
     /// worker slots excluded from ordinary heap allocation. All register_extents
     /// process/root/IRQ/ownership requirements also apply.
@@ -484,7 +484,7 @@ impl<P: Provider> Catalog<P> {
         provider: P,
         reservations: Vec<Extent>,
     ) -> Result<Self, Error> {
-        // SAFETY: this forwards exactly the caller's retained classified owner
+        // SAFETY: this forwards exactly the caller's classified owner
         // inventory; C validates geometry/classes before publishing descriptors.
         unsafe { Self::register_inventory(provider, reservations, true) }
     }
@@ -548,7 +548,7 @@ impl<P: Provider> Catalog<P> {
             let _entered = Entered::try_new()?;
             // SAFETY: arrays contain their declared number of initialized
             // repr(C) records. Provider-owned reservations and Context remain
-            // retained while C validates and copies the selected inventory.
+            // while C validates and copies the selected inventory.
             unsafe {
                 if annotated {
                     let inventory = NativeInventoryV3 {
@@ -587,14 +587,14 @@ impl<P: Provider> Catalog<P> {
         self.generation
     }
 
-    /// Authored service diagnostic over the actual provider and Linux page API.
-    /// This neither attaches hardware nor qualifies a GPU or DMA mapping.
+    /// Authored service diagnostic over the provider and Linux page API.
+    /// This neither attaches hardware nor checks a GPU or DMA mapping.
     pub fn verify(&self) -> Result<(), Error> {
         if self.context.is_none() {
             return Err(Error::InvalidReservation);
         }
         let _entered = Entered::try_new()?;
-        // SAFETY: the retained generation/provider remain registered; the
+        // SAFETY: the generation/provider remain registered; the
         // diagnostic owns and retires its temporary page references.
         let result = unsafe { stela_linux_page_catalog_verify(self.generation) };
         if result == 0 {
@@ -628,8 +628,8 @@ impl<P: Provider> Catalog<P> {
 impl<P: Provider> Drop for Catalog<P> {
     fn drop(&mut self) {
         if self.try_retire().is_err() {
-            // The C catalog may retain callbacks and page descriptors. Keep
-            // their actual provider stable even after losing the Rust handle.
+            // The C catalog may keep callbacks and page descriptors. Keep
+            // their provider stable even after losing the Rust handle.
             if let Some(context) = self.context.take() {
                 core::mem::forget(context);
                 let _ = QUARANTINED_CATALOGS.try_update(

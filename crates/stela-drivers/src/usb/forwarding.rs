@@ -5,7 +5,7 @@
 //! claim. Descriptors remain the device's original bytes. No guest addresses,
 //! USB/IP socket, application identity or synthetic class driver is involved.
 //! Ordinary transfers use one bounded TD per endpoint. ISO requests queue bounded
-//! packet lists on the native controller's actual service-interval scheduler;
+//! packet lists on the native controller's service-interval scheduler;
 //! primary streams inherit the native controller's explicit admission limits.
 use super::xhci::{self, Endpoint, Interface, Shared};
 use crate::{
@@ -25,7 +25,7 @@ mod transfer;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Request(u64);
 
-/// Actual hardware transfer result. Packet-level ISO faults are retained.
+/// Hardware transfer result. Packet-level ISO faults are held.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Complete,
@@ -43,7 +43,7 @@ pub struct Completion {
     pub actual: Option<usize>,
     /// IN data only, copied after hardware relinquishes the complete buffer.
     pub data: Vec<u8>,
-    /// Empty for a single TD. A packet-list request retains every packet,
+    /// Empty for a single TD. A packet-list request keeps every packet,
     /// including short, missed-service, failed and cancelled intervals. Its IN
     /// payloads are in these records; `data` stays empty to preserve holes.
     pub packets: Vec<IsoPacketCompletion>,
@@ -94,7 +94,7 @@ pub struct Device {
 }
 
 impl Device {
-    /// Only the topology authority may call this after reserving the physical
+    /// Only the topology permission may call this after reserving the physical
     /// device and excluding all other native class owners, including EP0 users.
     pub(in crate::usb) fn claimed(
         controller: Shared,
@@ -147,7 +147,7 @@ impl Device {
             .endpoint_ready(1)
     }
 
-    /// Send an actual EP0 request. Requests that change host-managed USB state
+    /// Send an EP0 request. Requests that change host-managed USB state
     /// must use configure/set_interface/clear_halt so physical and host contexts
     /// cannot diverge. SET_ADDRESS and hub operations remain topology-owned.
     pub fn control(&mut self, request: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
@@ -238,7 +238,7 @@ impl Device {
 }
 
 impl xhci::Host {
-    /// Claim an actual enumerated, unbound physical leaf for whole-device
+    /// Claim an enumerated, unbound physical leaf for whole-device
     /// forwarding. Native class claims and prior forwarding claims are refused
     /// by the topology/controller ledger before an owner is constructed.
     pub fn forward_device(&mut self, id: xhci::SlotId) -> Result<Device, BlockError> {

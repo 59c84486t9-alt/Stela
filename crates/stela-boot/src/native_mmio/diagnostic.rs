@@ -1,5 +1,5 @@
-//! Actual page-table/UC/IOAPIC source composition. This bounded diagnostic
-//! publishes no Linux driver and qualifies no physical hardware profile.
+//! Page-table/UC/IOAPIC source composition. This bounded diagnostic
+//! publishes no Linux driver and checks no physical hardware profile.
 use super::*;
 use crate::{
     engine::host::HostOwner,
@@ -43,13 +43,13 @@ impl From<stela_drivers::platform::work::WorkError> for ClockError {
 }
 /// # Safety
 /// Explicit owned UP diagnostic on the original native host. An HPET capture
-/// selects the actual whole-controller path; otherwise the existing bounded PM
-/// fixture retains its explicit source-gap limits. Neither admits a Linux owner.
+/// selects the whole-controller path; otherwise the existing bounded PM
+/// fixture keeps its explicit source-gap limits. Neither admits a Linux owner.
 pub(crate) unsafe fn clock(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), ClockError> {
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable.into());
     }
-    // SAFETY: original loader capture and physical tables remain retained.
+    // SAFETY: original loader capture and physical tables remain held.
     let wire = unsafe { captured(handoff) }?;
     if wire.hpet().is_empty() {
         let prepared = Prepared::from_fadt(wire.fadt())?;
@@ -58,26 +58,26 @@ pub(crate) unsafe fn clock(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         unsafe { crate::native_clock::diagnostic::check(owner, prepared) }?;
         Ok(())
     } else {
-        // SAFETY: actual whole-controller exclusive diagnostic handoff, with
-        // no second authority or asynchronous production owner in this boot.
+        // SAFETY: whole-controller exclusive diagnostic handoff, with
+        // no second permission or asynchronous production owner in this boot.
         unsafe { check_native_hpet(handoff, owner) }
     }
 }
 
-/// Exercise the actual production HPET owner, retire it, then reacquire through
-/// the same authority for a bounded IRQ/HLT/clock retirement proof. No Runtime
+/// Exercise the production HPET owner, retire it, then reacquire through
+/// the same permission for a bounded IRQ/HLT/clock retirement proof. No Runtime
 /// or finite RAM-absence capability is published.
 /// # Safety
 /// The caller supplies the same complete whole-controller diagnostic handoff as
-/// check. The original BSP/root and actual table/backing stay pinned through
+/// check. The original BSP/root and table/backing stay pinned through
 /// acknowledged configuration restoration, UC unmap and resource retirement.
 unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), ClockError> {
-    // SAFETY: the original immutable loader capture is retained by this boot.
+    // SAFETY: the original immutable loader capture is held by this boot.
     let wire = unsafe { captured(handoff) }?;
-    // SAFETY: actual original BSP before other processors or device owners.
+    // SAFETY: original BSP before other processors or device owners.
     let source = unsafe { Source::activate(wire, owner, handoff.tsc_hz) }?;
     let identity = owner.root_identity()?;
-    // SAFETY: this explicit fixture has actual exclusive HPET control, no SMM,
+    // SAFETY: this explicit fixture has exclusive HPET control, no SMM,
     // firmware/native comparator routes or other counter readers/writers.
     let owned = unsafe { source.take_hpet(identity.clone()) }?;
     let mut counter = crate::native_clock::HpetCounter::attach_native_exclusive(owned)?;
@@ -95,8 +95,8 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     if after <= before {
         return Err(Error::InvalidPlatformReply.into());
     }
-    // SAFETY: the same genuine handoff/RootIdentity/native HPET owner is
-    // retained with IF0, active-spin only, before this source is retired.
+    // SAFETY: the same handoff/RootIdentity/native HPET owner is
+    // with IF0, active-spin only, before this source is retired.
     match unsafe {
         crate::native_clock::tsc::Candidate::observe(handoff, identity.clone(), &counter)
     } {
@@ -127,7 +127,7 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     }
     let base = counter.descriptor().registers().start();
     // SAFETY: this stack frame is the only counter reader, no IRQ/publication
-    // exists, and every actual Source/RootIdentity/controller owner remains live.
+    // exists, and every Source/RootIdentity/controller owner remains live.
     unsafe { counter.retire() }?;
     if counter.read_irq().is_ok() {
         return Err(Error::InvalidPlatformReply.into());
@@ -144,18 +144,18 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     crate::output::arguments(format_args!(
         "CHECK native-hpet-owner PASS source=production identity=actual base={base:#x} counter=progressed retire=config-restored+UC-unmapped+resource-released; no IRQ, Runtime or RAM-adoption grant\n"
     ));
-    // Reuse this same permanent authority after acknowledged first retirement;
+    // Reuse this same permanent permission after acknowledged first retirement;
     // never activate a competing registry for the subsequent timed proof.
-    // SAFETY: exact same whole-controller owner, no external user was admitted.
+    // SAFETY: same whole-controller owner, no external user was admitted.
     let owned = unsafe { source.take_hpet(identity.clone()) }?;
     let prepared = Prepared::exclusive_native_hpet(owned)?;
     let counter = prepared.hpet_counter().ok_or(Error::Unavailable)?.clone();
-    // SAFETY: actual original Source/RootIdentity, controller, IDT and ARAT
+    // SAFETY: original Source/RootIdentity, controller, IDT and ARAT
     // delivery stay pinned. This diagnostic creates no production producer.
     unsafe { crate::native_clock::diagnostic::check_native(identity, prepared) }?;
     let mut counter = alloc::sync::Arc::try_unwrap(counter).map_err(|_| Error::ResourceConflict)?;
     // SAFETY: acknowledged clock retirement removed ISR/publication views;
-    // unique Arc proves no retained counter reader remains in that graph.
+    // unique Arc proves no kept counter reader remains in that graph.
     unsafe { counter.retire() }?;
     let status = source.authority().status()?;
     if status.live != 0
@@ -172,11 +172,11 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
 }
 
 /// # Safety
-/// Explicit native diagnostic owns this actual post-EBS BSP, all controller
+/// Explicit native diagnostic owns this post-EBS BSP, all controller
 /// resources and the complete original HPET/LAPIC source. No firmware, SMM,
 /// other CPU or legacy driver owns or accesses HPET control/counter/comparator/
-/// decode/route state or IOAPIC/ECAM during the retained kernel-image epoch. Caller stops the boot immediately afterward, preserving the
-/// permanently installed Authority/IRQ/clock's physical root owner.
+/// decode/route state or IOAPIC/ECAM during the kernel-image epoch. Caller stops the boot immediately afterward, preserving the
+/// permanently installed Permission/IRQ/clock's physical root owner.
 pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), Error> {
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable);
@@ -189,18 +189,18 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
     let (source, session) = stage("authority-activate", unsafe {
         ScopedSource::activate(wire, &root)
     })?;
-    // SAFETY: actual diagnostic's complete post-EBS wholeblock handoff excludes
+    // SAFETY: diagnostic's complete post-EBS wholeblock handoff excludes
     // firmware/SMM/native comparator/counter/decode/route owners. Original SDT
     // and idle register values alone are not that physical ownership proof.
     let hpet = stage("hpet-wholeblock", unsafe { source.take_hpet() })?;
     let prepared = Prepared::exclusive_hpet(hpet).map_err(failed)?;
     let counter = prepared.hpet_counter().ok_or(Error::Unavailable)?.clone();
-    // SAFETY: exact actual Owner/canonical RootExecution and admitted source.
+    // SAFETY: exact Owner/canonical RootExecution and admitted source.
     let installed = unsafe { Installed::attach(owner, &root, prepared) }.map_err(failed)?;
-    // SAFETY: this explicit diagnostic now owns actual interrupt delivery.
+    // SAFETY: this explicit diagnostic now owns interrupt delivery.
     let execution = unsafe { installed.enter_driver_execution() }.map_err(failed)?;
     let publication = source.root_publication(&root)?;
-    // SAFETY: publication and genuine timed Cpu share the actual canonical
+    // SAFETY: publication and timed Cpu share the canonical
     // RootContext checked by Installed; RootExecution/Installed/DriverExecution
     // remain alive through ALL finite queue/frame/stack/source/publication Drops.
     // This supplies no Linux owner or ExecutionClock/CPU-time accounting grant.
@@ -227,7 +227,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
             failed(error)
         }),
     )?;
-    // SAFETY: Actual original MCFG and RootBridge bus membership bind this resource;
+    // SAFETY: Original MCFG and RootBridge bus membership bind this resource;
     // read one vendor word through the newly installed UC leaf, then retire.
     let (window, ecam) = stage("ecam-claim", unsafe { source.claim_ecam(0, 0..=0) })?;
     let mut mapping = stage(
@@ -249,7 +249,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
     let cpu_view = execution.cpu().map_err(failed)?;
     let saved = cpu_view.save_disable().map_err(failed)?;
     let previous: u64;
-    // SAFETY: exact retained original loader root shares all engine code,
+    // SAFETY: original loader root shares all engine code,
     // stack/GS/IDT and this aperture. No interrupt can run during the switch.
     unsafe {
         asm!("mov {}, cr3", out(reg) previous, options(nomem, nostack, preserves_flags));
@@ -311,13 +311,13 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         window.base, window.start_bus, window.end_bus
     ));
     drop(execution);
-    // The permanent IRQ registry retains timed RootCpu -> real HPET mapping.
-    // Preserve the active actual root/session; no finite HPET/root retirement
-    // is claimed. Caller stops immediately with actual HostOwner still live.
+    // The permanent IRQ registry keeps timed RootCpu -> real HPET mapping.
+    // Preserve the active root/session; no finite HPET/root retirement
+    // is claimed. Caller stops immediately with HostOwner still live.
     core::mem::forget(session);
     core::mem::forget(root);
-    // Authority and native IRQ registration are deliberately permanent. They
-    // retain the actual RootCpu; the caller stops with HostOwner still live.
+    // Permission and native IRQ registration are permanent. They
+    // keep the RootCpu; the caller stops with HostOwner still live.
     // Installed's fields are ManuallyDrop: ending this stack binding preserves
     // the permanent registration and its real root pins without a teardown.
     let _permanent_clock = installed;

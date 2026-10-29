@@ -1,4 +1,4 @@
-//! Explicit hosted tests of the actual bounded nouveau parser/size helpers.
+//! Explicit hosted tests of the bounded nouveau parser/size helpers.
 //! Preparation is fresh and source-bound; no complete driver is compiled here.
 use std::{env, path::PathBuf};
 

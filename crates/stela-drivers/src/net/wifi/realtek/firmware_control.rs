@@ -2,7 +2,7 @@
 // Copyright(c) 2018-2019 Realtek Corporation
 //! Native register-mailbox state and initial firmware calibration control.
 //! Publication, mailbox availability, DMA release and raw RFK status are
-//! separate observations. None creates OS/air or independent stop authority.
+//! separate observations. None creates OS/air or independent stop permission.
 use super::{
     features::Report,
     identity::{Chip, Profile},
@@ -52,7 +52,7 @@ impl Published {
     }
 }
 /// Source RFK status observed after the finish command; the source reuses a
-/// sticky one-bit field. This record deliberately proves no fresh finish ACK,
+/// sticky one-bit field. This record proves no fresh finish ACK,
 /// coexistence handoff, calibration completion or TX permission.
 #[derive(Debug)]
 pub struct RfkFinishObservation {
@@ -82,9 +82,9 @@ impl InitialIqkObservation {
         self.status
     }
 }
-/// Same retained native Io, moved here after bootstrap; no second BAR/config,
-/// mapping or requester owner is acquired. Mailbox cursor persists until actual
-/// stop, never reset merely because a command times out or a status is seen.
+/// Same kept native Io, moved here after bootstrap; no second BAR/config,
+/// mapping or requester owner is acquired. Mailbox cursor persists until
+/// stop, never reset because a command times out or a status is seen.
 pub struct Control<I: Io> {
     io: Option<I>,
     profile: Profile,
@@ -117,13 +117,13 @@ impl<R: transmit::Registers> Drop for PacketAttempt<'_, R> {
 }
 impl<I: Io> Control<I> {
     /// # Safety
-    /// Consume the genuine serialized native control Io for this actual
+    /// Consume the serialized native control Io for this
     /// requester, Report and uninterrupted freshly downloaded firmware epoch.
-    /// Its actual register-mailbox cursor is the initial zero, no old commands
+    /// Its register-mailbox cursor is the initial zero, no old commands
     /// or competing native/IRQ/firmware/reset worker exist, and mailbox status
-    /// is genuinely idle. Real MAC/PHY/HCI initialization/queues/pins/claims,
+    /// is idle. Real MAC/PHY/HCI initialization/queues/pins/claims,
     /// native clock calibration and CPU affinity remain valid. Caller keeps
-    /// operational TX gated pending genuine complete radio/policy qualification.
+    /// operational TX gated pending complete radio/policy validation.
     /// Fingerprints, copied receipts or numeric counters are not ownership.
     pub unsafe fn new(io: I, report: &Report) -> Result<Self, Error> {
         let profile = io.profile();
@@ -208,7 +208,7 @@ impl<I: Io> Control<I> {
         let start = self.now()?;
         let end = start.checked_add(timeout).ok_or(Error::Clock)?;
         // Exact wall-time predicate and final post-expiry sample from source.
-        // The independent count guard detects an unqualified stalled clock.
+        // The independent count guard detects an unchecked stalled clock.
         for _ in 0..(timeout / delay + 3) * 2 {
             let now = self.now()?;
             let expired = now > end;
@@ -256,15 +256,15 @@ impl<I: Io> Control<I> {
         self.verify()?;
         Ok(Published { mailbox })
     }
-    /// Begin source GAPK's RFK handshake from a genuinely non-set baseline.
+    /// Begin source GAPK's RFK handshake from a non-set baseline.
     /// BT IQK must be observed idle; no source timeout-skip fallback is minted.
     ///
     /// # Safety
-    /// Actual same retained device/firmware/channel/board epoch, genuine held
-    /// native→OS/coexistence authority, required current power/RF calibration
+    /// Same kept device/firmware/channel/board epoch, held
+    /// native→OS/coexistence permission, required current power/RF calibration
     /// emission permission/gates and exclusive RFK worker. Operational TX and
-    /// competing BT/WiFi/reset/IRQ/RF/PHY work remain genuinely stopped. A raw
-    /// BT-idle status does not replace actual retained BT/coexistence ownership.
+    /// competing BT/WiFi/reset/IRQ/RF/PHY work remain stopped. A raw
+    /// BT-idle status does not replace kept BT/coexistence ownership.
     /// This establishes only a new observed source start-status bit, not GAPK,
     /// finish completion, DMA stop or permission for normal TX.
     pub unsafe fn begin_rfk(&mut self) -> Result<Published, Error> {
@@ -294,13 +294,13 @@ impl<I: Io> Control<I> {
         })();
         self.finish(result)
     }
-    /// Observe the source finish-status condition after actual finish mailbox
+    /// Observe the source finish-status condition after finish mailbox
     /// publication. Sticky status is explicitly not promoted to a fresh ACK.
     ///
     /// # Safety
-    /// Same actual retained source RFK session/authority as begin_rfk. GAPK work
-    /// has genuinely completed/stopped and all source restore obligations hold.
-    /// Real firmware/coexistence handoff and radio qualification remain caller-
+    /// Same kept source RFK session/permission as begin_rfk. GAPK work
+    /// has completed/stopped and all source restore obligations hold.
+    /// Real firmware/coexistence handoff and radio validation remain caller-
     /// owned; this observation cannot authorize a later ordinary transmission.
     pub unsafe fn finish_rfk(&mut self) -> Result<RfkFinishObservation, Error> {
         self.ready()?;
@@ -331,14 +331,14 @@ impl<I: Io> Control<I> {
     /// can satisfy this command. A post-expiry final fresh AA is source-valid.
     ///
     /// # Safety
-    /// Rings and this control are the same actual requester/firmware epoch,
+    /// Rings and this control are the same requester/firmware epoch,
     /// not matching fingerprints. Real source PHYDM and GAPK completed, actual
-    /// firmware/coexistence handoff is independently qualified, current channel/
-    /// power and genuine native→OS/calibration emission authority held; ordinary
+    /// firmware/coexistence handoff is checked, current channel/
+    /// power and native→OS/calibration emission permission held; ordinary
     /// RX/TX and competing reset/RFK/IRQ workers remain quiesced. IQK can emit
     /// calibration signals. Source ready status is not DPK, applied policy or
     /// normal-TX permission. Real command DMA and firmware retirement remain
-    /// independently owned through actual completion or acknowledged stop.
+    /// independently owned through completion or acknowledged stop.
     pub unsafe fn initial_iqk<R: transmit::Registers>(
         &mut self,
         rings: &mut transmit::Rings<R>,
@@ -360,7 +360,7 @@ impl<I: Io> Control<I> {
                 return Err(Error::StaleIqk);
             }
             self.iqk_used = true;
-            // SAFETY: caller holds real same native rings/control/authority;
+            // SAFETY: caller holds real same native rings/control/permission;
             // status was sampled before this exact command publication.
             unsafe { packet.rings.initial_iqk_command(source) }?;
             self.published = true;
@@ -380,12 +380,12 @@ impl<I: Io> Control<I> {
         packet.done = result.is_ok();
         self.finish(result)
     }
-    /// Return the same native Io only after actual independent shutdown.
+    /// Return the same native Io only after independent shutdown.
     ///
     /// # Safety
     /// Vendor DMA/firmware/RFK/autonomous RX/TX, PCI requester activity, posted
-    /// interrupts and native callbacks/work have genuinely stopped and drained;
-    /// rings/pins remain retained until actual quiescence and all users retired.
+    /// interrupts and native callbacks/work have stopped and drained;
+    /// rings/pins remain held until quiescence and all users retired.
     /// Mailbox free, raw finish bit, IQK AA, masking and queue emptiness are not
     /// stop proof. No future firmware command can change this device epoch.
     pub unsafe fn release_after_stop(&mut self) -> Result<I, Error> {
@@ -516,7 +516,7 @@ pub(super) mod tests {
         )
     }
     // SAFETY: exclusively serialized byte-register and clock/firmware-response
-    // model with retained actual model owner, not physical readiness evidence.
+    // model with kept model owner, not physical readiness evidence.
     unsafe impl Io for Bus {
         fn profile(&self) -> Profile {
             self.model.lock().unwrap_or_else(|e| e.into_inner()).profile

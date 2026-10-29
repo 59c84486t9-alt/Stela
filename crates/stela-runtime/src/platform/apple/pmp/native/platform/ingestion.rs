@@ -1,4 +1,4 @@
-//! Generic native counter ingestion and postprocessing over actual Frames receipts.
+//! Generic native counter ingestion and postprocessing over Frames receipts.
 //!
 //! Original26A434 T8112 PMP SHA256 b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! capture101a780..101ab30, postprocess101ab30..101b074, query101b29c,
@@ -7,7 +7,7 @@
 //! Copied/Retained inputs bind storage, not hardware events, lifecycle or an ACK.
 //! This is the generic base; specialized DCS/AMCC/AGX/ANE surrounding hooks
 //! remain separate owners. Provider and auxiliary operations have no default
-//! success implementation; their actual owners retain any inner partial work.
+//! success implementation; their owners keep any inner partial work.
 mod arithmetic;
 pub mod control;
 mod model;
@@ -21,7 +21,7 @@ use stela_contracts::bus::Access;
 
 const TIME_MASK: u64 = (1 << 54) - 1;
 /// Pure original101b974 field arithmetic over supplied frame data; no copy,
-/// event or arrival authority is created by this helper.
+/// event or arrival permission is created by this helper.
 pub fn extract_field(cells: &[Frame], start: u32, width: u32) -> Result<u64, Error> {
     extract(cells, start, width)
 }
@@ -50,7 +50,7 @@ impl Request {
             && self.cursor == other.cursor
     }
 }
-/// Actual resource calls. Numeric IDs are typed descriptor selectors, never
+/// Resource calls. Numeric IDs are typed descriptor selectors, never
 /// native code addresses. Snapshot returns require the real fixed provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
@@ -65,7 +65,7 @@ pub enum Call {
     Clock,
     /// Actual101ba6c provider-cache read: consume only if that real bank/index
     /// has not been consumed in the source manager cycle. A repeated timestamp
-    /// read returns the retained tuple and must never consume the PTD twice.
+    /// read returns the tuple and must never consume the PTD twice.
     ExtendedFrame {
         bank: u32,
         index: u32,
@@ -74,7 +74,7 @@ pub enum Call {
     ExtendedCount {
         bank: u32,
     },
-    /// Retained result of actual provider initialization(+40), not a new
+    /// Result of provider initialization(+40), not a new
     /// initialization call during Postprocess or a nominal scale fallback.
     InitializedScale {
         reference: u32,
@@ -87,18 +87,18 @@ pub enum Call {
         current: u32,
     },
     /// Full reached101b464 control tail, including101bb08 transitions, member
-    /// reads/writes and auxiliary PTD consumes. Backend must retain its own inner
+    /// reads/writes and auxiliary PTD consumes. Backend must keep its own inner
     /// cursor; absent/unknown configured callbacks must explicitly refuse.
     ControlTail {
         ordinal: Ordinal,
         context: CounterContext,
-        /// Actual retained P294 activation from this ingestion operation.
+        /// P294 activation from this ingestion operation.
         /// P10 activity in `context` is a distinct source operand.
         activation: u32,
         descriptors: Vec<Auxiliary>,
     },
-    /// Actual source-derived coefficient rows after101c2e4 initialization/update.
-    /// This is observed provider/configuration data, never completion authority.
+    /// Source-derived coefficient rows after101c2e4 initialization/update.
+    /// This is observed provider/configuration data, never completion permission.
     Coefficients {
         row: u32,
         source: Frequency,
@@ -216,7 +216,7 @@ impl FrameInput {
         .map_err(Error::Contract)
     }
 }
-/// Retained native software counter buffers; zeros are explicit initializer
+/// Native software counter buffers; zeros are explicit initializer
 /// state, never observations of hardware. A real frame storage view remains owned
 /// throughout Capture/Postprocess and is revalidated before every advance.
 pub struct Owner<B: Backend> {
@@ -277,14 +277,14 @@ impl<B: Backend> Owner<B> {
     pub fn ordinal(&self) -> Ordinal {
         self.config.ordinal
     }
-    /// Actual initialized source P268/P270 software cells, not elapsed host time.
+    /// Initialized source P268/P270 software cells, not elapsed host time.
     pub fn periods(&self) -> (u32, u64) {
         self.config.periods
     }
     /// Source101c54c STR XZR,[P+10] on enable-from-zero resets P14 along
     /// with the parent's activity. This mutates software data only; it grants
-    /// no activation, provider completion, frame/event or arrival authority.
-    /// The actual activation owner calls this at that store's retained cursor,
+    /// no activation, provider completion, frame/event or arrival permission.
+    /// The activation owner calls this at that store's cursor,
     /// before its later real provider/PTD effects. Existing buffers are kept.
     pub fn apply_source_activation_reset(&mut self) -> Result<(), Error> {
         self.idle()?;
@@ -300,8 +300,8 @@ impl<B: Backend> Owner<B> {
     pub fn backend(&self) -> &B {
         &self.backend
     }
-    /// Read only through the retained actual storage view. This grants no
-    /// Capture-completion, arrival or hardware-event authority to a wrapper.
+    /// Read only through the storage view. This grants no
+    /// Capture-completion, arrival or hardware-event permission to a wrapper.
     pub fn cells<'a>(&self, frames: &'a Frames) -> Result<&'a [Frame], Error> {
         self.receipt
             .as_ref()
@@ -351,7 +351,7 @@ impl<B: Backend> Owner<B> {
         self.begin_capture_input(frames, FrameInput::Copied(copied), d, context, activation)
     }
     /// Source101a7b0/101a7b8 skips bulk for zero counter count or zero P10.
-    /// Read the same retained
+    /// Read the same kept
     /// software storage without copying, consuming, or mutating Frames progress.
     /// Initial software cells remain explicitly distinguishable from samples.
     pub fn begin_retained_capture(

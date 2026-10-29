@@ -13,7 +13,7 @@ pub const RECORD_BYTES: usize = 124;
 const SOURCE_IDS: u32 = 256;
 
 /// The source record's distinct identities. Labels/FourCCs are not dispatch
-/// keys. Flags retain their original bits without claiming a power effect.
+/// keys. Flags keep their original bits without claiming a power effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Device {
     pub ordinal: u32,

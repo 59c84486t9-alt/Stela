@@ -67,7 +67,7 @@ impl Mapping {
     }
 
     /// Address of the owned RX mapping. It remains valid only while this
-    /// mapping is retained; using it requires the caller's native ABI and
+    /// mapping is held; using it requires the caller's native ABI and
     /// source/target/memory/fault contracts.
     pub fn entry(&self) -> usize {
         self.pointer.as_ptr() as usize
@@ -76,8 +76,8 @@ impl Mapping {
     /// Invoke this owned mapping with the compiler's leaf ABI.
     ///
     /// # Safety
-    /// The bytes must implement the leaf ABI for the actual admitted host
-    /// target. The caller retains exclusive guest state and every accessed
+    /// The bytes must implement the leaf ABI for the admitted host
+    /// target. The caller keeps exclusive guest state and every accessed
     /// memory/service owner through return and any fault settlement.
     pub unsafe fn call(&self, state: &mut GuestState) -> Result<()> {
         // SAFETY: the mapping is still owned and the caller upholds the
@@ -94,7 +94,7 @@ impl Mapping {
     ///
     /// # Safety
     /// The code, target, source map and context requirements must describe the
-    /// same checked compilation. The caller retains exclusive state, the live
+    /// same checked compilation. The caller keeps exclusive state, the live
     /// context and all reachable memory/service owners through return, context
     /// finalization and recovered source-PC settlement; entry cannot reenter.
     pub unsafe fn call_context_block(
@@ -115,7 +115,7 @@ impl Mapping {
     /// recorded in the memory view, never inferred from RAX.
     /// # Safety
     /// The bytes must implement the two-argument context-leaf ABI for the
-    /// actual admitted target. The caller retains exclusive state and a valid
+    /// admitted target. The caller keeps exclusive state and a valid
     /// context with all borrowed memory/service owners until call completion
     /// and architectural failure finalization. No callback may reenter them.
     pub unsafe fn call_context(
@@ -195,9 +195,9 @@ impl Mapping {
     /// Invoke this owned mapping with the compiler's ordinary block ABI.
     ///
     /// # Safety
-    /// The bytes must implement the struct-return block ABI for the actual
+    /// The bytes must implement the struct-return block ABI for the
     /// admitted target. Every directly addressed guest range must remain
-    /// mapped with the compiled rights, and the caller retains exclusive
+    /// mapped with the compiled rights, and the caller keeps exclusive
     /// state, memory/fault owners and source identity through full settlement.
     pub unsafe fn call_block(
         &self,
@@ -246,9 +246,9 @@ impl Mapping {
 }
 
 // SAFETY: Mapping::new exclusively owns fresh initialized mmap storage,
-// atomically transitioned to RX. Escaped addresses require the unsafe caller to retain this owner. Calls borrow
+// atomically transitioned to RX. Escaped addresses require the unsafe caller to keep this owner. Calls borrow
 // self; no unmap or writable alias can coexist through safe runtime APIs.
-// Host ownership is infallible to retain, so no fallible frame postcheck is
+// Host ownership is infallible to keep, so no fallible frame postcheck is
 // invented for this implementation. Guest ABI/PE admission stays at callsite.
 unsafe impl ExecutableStorage for Mapping {
     type Error = Infallible;
@@ -262,7 +262,7 @@ unsafe impl ExecutableStorage for Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: the mapping is uniquely owned and safe calls borrow `self`; external raw entry users must retain this owner.
+        // SAFETY: the mapping is uniquely owned and safe calls borrow `self`; external raw entry users must keep this owner.
         unsafe { libc::munmap(self.pointer.as_ptr().cast(), self.length) };
     }
 }

@@ -1,6 +1,6 @@
 //! PTD publication-bank and update-alias geometry from the original AP/PMP
 //! contract. This validates physical extents without granting transport or
-//! controller-effect authority. See `docs/research/apple-mcc.md`.
+//! controller-effect permission. See `docs/research/apple-mcc.md`.
 use alloc::string::String;
 
 /// The shared publication bank and its AP/PMP update alias.
@@ -71,8 +71,8 @@ impl Geometry {
     }
 }
 
-/// A source-qualified `ptd-range` identity. The fourth DT word (the interrupt
-/// resource) must also be retained by the mount; it is not an AIC input number.
+/// A source-checked `ptd-range` identity. The fourth DT word (the interrupt
+/// resource) must also be held by the mount; it is not an AIC input number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Range {
     pub id: u32,

@@ -1,10 +1,10 @@
 //! Original T6000 ACC/CPM register ownership, independent of T8112 layout.
 //!
 //! Offsets are the driver's logical ACC coordinates, routed by
-//! `stela_soc_data::pmgr::t6000::Layout` through the actual E/P0/P1 DT views. Every readable
-//! value is an actual supplied image word or a committed software write.
+//! `stela_soc_data::pmgr::t6000::Layout` through the E/P0/P1 DT views. Every readable
+//! value is a supplied image word or a committed software write.
 //! Native performance/APSC, DVMR, throttling and autonomous counter execution
-//! require their actual controller owner; neither zero nor a cleared BUSY is
+//! require their controller owner; neither zero nor a cleared BUSY is
 //! manufactured to satisfy the driver's polls.
 use alloc::{collections::BTreeMap, vec::Vec};
 use {
@@ -35,7 +35,7 @@ const COUNTERS: u64 = 0x15;
 const ENERGY_COUNTERS: u64 = (1 << 61) | (1 << 63);
 const THROTTLERS: [u64; 3] = [0xe40250, 0xe40240, 0xe48400];
 
-/// Actual first-die hardware complex, not a CPU kind shared by two P banks.
+/// First-die hardware complex, not a CPU kind shared by two P banks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Complex {
     Efficiency,
@@ -79,7 +79,7 @@ enum Role {
     Restore,
 }
 
-/// Known words only. The caller retains their handoff provenance separately;
+/// Known words only. The caller keeps their handoff provenance separately;
 /// source metadata, an enclosing aperture and a missing row supply no value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -203,8 +203,8 @@ impl T6000 {
     pub fn restore(image: &Snapshot) -> Result<Self, &'static str> {
         Self::new(image.complex, image.states, &image.words)
     }
-    /// Actual full64 logical words only; the mount routes each whole word
-    /// through the source-qualified physical view, never a synthetic span.
+    /// Full64 logical words only; the mount routes each whole word
+    /// through the source-checked physical view, never a synthetic span.
     pub fn offsets(&self) -> impl Iterator<Item = u64> + '_ {
         self.roles.keys().copied()
     }
@@ -246,7 +246,7 @@ impl T6000 {
             _ => Ok(()),
         }
     }
-    /// Pure whole-word preflight. No trigger is accepted without its actual
+    /// Pure whole-word preflight. No trigger is accepted without its
     /// native execution/retirement owner, and no status bit is cleared here.
     pub fn check_write(&self, offset: u64, width: Width, value: u64) -> Result<(), &'static str> {
         let role = self.role(offset, width)?;
@@ -394,7 +394,7 @@ mod tests {
             }
             let restored = T6000::restore(&saved).unwrap();
             assert_eq!(restored.snapshot(), saved);
-            assert!(model.lifecycle().is_none()); // actual CPU/cache execution sink is separate
+            assert!(model.lifecycle().is_none()); // CPU/cache execution sink is separate
         }
     }
     #[test]
@@ -492,12 +492,12 @@ mod original {
             assert_eq!(hex::encode(Sha256::digest(&bytes[lo..hi])), digest);
         }
         for (offset, opcode) in [
-            (0x2f05240, 0x0b001502), // actual table stride32
+            (0x2f05240, 0x0b001502), // table stride32
             (0x2f05354, 0x0b001502),
             (0x2f06f8c, 0x927cec08), // preserve all but low4 state bits
             (0x2f06f90, 0x52a04009), // SET25
             (0x2f06f94, 0x33000f29), // native low4 selector replacement
-            (0x2f0733c, 0x37fffca0), // actual BUSY31 poll, no completion proof
+            (0x2f0733c, 0x37fffca0), // BUSY31 poll, no completion proof
             (0x2f07624, 0x7100405f), //16 paired state indices
             (0x2f0764c, 0x71006c5f), //27 special indices
             (0x2f0756c, 0x528002a9), //counter enables0/2/4

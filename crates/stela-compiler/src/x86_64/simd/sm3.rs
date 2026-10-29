@@ -11,7 +11,7 @@ const TEMP: u8 = 9;
 const OTHER: u8 = 10;
 const EXTRA: u8 = 11;
 
-/// x XOR ROL(x,a) XOR ROL(x,b), retaining the original x in scratch.
+/// x XOR ROL(x,a) XOR ROL(x,b), keeping the original x in scratch.
 fn permutation(code: &mut Code, value: u8, scratch: [u8; 2], rotations: [u8; 2]) {
     use Scalar32::*;
     for (register, rotation) in scratch.into_iter().zip(rotations) {
@@ -65,7 +65,7 @@ fn sum(code: &mut Code, operand: &Operand, third: u8) {
     Add.state(code, VALUE, operand.right, 3);
     Add.state(code, VALUE, third, 3);
     Rotate32::Left.emit(code, VALUE, 7);
-    // The three low words are architectural zero, not retained destination data.
+    // The three low words are architectural zero, not kept destination data.
     Xor.register(code, WORDS[0], WORDS[0]);
     pack_state(code, [WORDS[0], WORDS[0], WORDS[0], VALUE]);
 }

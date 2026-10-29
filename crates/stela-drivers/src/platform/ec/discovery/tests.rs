@@ -22,7 +22,7 @@ fn ecdt() -> Vec<u8> {
     bytes
 }
 fn crs() -> Vec<u8> {
-    // Actual small IO descriptors, first data and then command/status.
+    // Small IO descriptors, first data and then command/status.
     alloc::vec![
         0x47, 1, 0x62, 0, 0x62, 0, 1, 1, 0x47, 1, 0x66, 0, 0x66, 0, 1, 1, 0x79, 0
     ]

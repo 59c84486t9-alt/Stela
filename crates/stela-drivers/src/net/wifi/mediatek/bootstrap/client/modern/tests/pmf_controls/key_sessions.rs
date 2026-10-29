@@ -39,7 +39,7 @@ fn configuration_and_igtk_failure() {
         for (pairwise, index, material) in [(true, 0, 1), (false, 2, 0x44)] {
             let admission = permit(&mut owner, &driver, AssociationUse::Management);
             // SAFETY: The authenticated fixture OS supplies this pairwise/group key
-            // material for its current peer. The same retained native context is
+            // material for its current peer. The same native context is
             // serialized by both guards, with no concurrent key or frame user.
             unsafe {
                 driver.install_key_modern(
@@ -63,7 +63,7 @@ fn configuration_and_igtk_failure() {
         assert!(
             // SAFETY: No prior management session, key callback or asynchronous IRQ
             // user exists in this fixture. Its current epoch and native backing
-            // remain owned while a deliberately failed acknowledgement is retained.
+            // remain owned while a failed acknowledgement is held.
             unsafe {
                 driver.install_management_key_modern(
                     &mut owner,
@@ -98,7 +98,7 @@ fn igtk_rotation_revokes_old_session() {
     protection.port.set(true);
     let first = attach(&mut driver, &mut owner);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    // SAFETY: The first session belongs to this current retained peer and its key
+    // SAFETY: The first session belongs to this current peer and its key
     // acknowledgements completed synchronously. The fixture explicitly grants its
     // authenticated port policy under both leases.
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &first) }.unwrap();
@@ -113,7 +113,7 @@ fn igtk_rotation_revokes_old_session() {
         panic!("original authenticated envelope")
     };
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    // SAFETY: same modeled OS exchange, old slot peer-retired, actual users drained.
+    // SAFETY: same modeled OS exchange, old slot peer-retired, users drained.
     let second = unsafe {
         driver.rotate_management_key_modern(
             &mut owner,
@@ -136,7 +136,7 @@ fn igtk_rotation_revokes_old_session() {
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     assert!(
         // SAFETY: The old session remains a live Arc, but rotation replaced its
-        // authority. The original requester and current guards must reject that stale
+        // permission. The original requester and current guards must reject that stale
         // session before any modeled register effect.
         unsafe { driver.authorize_port_pmf(&mut owner, admission, &first) }.is_err()
     );
@@ -155,13 +155,13 @@ fn igtk_rotation_revokes_old_session() {
     assert_eq!(model.bar.0.lock().unwrap().log.len(), before);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     // SAFETY: The second session is the current acknowledged rotation result, with
-    // unchanged retained data-key owners. The same fixture OS grants port
+    // unchanged kept data-key owners. The same fixture OS grants port
     // authorization under newly acquired hardware/OS leases.
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &second) }.unwrap();
     let admission = permit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
     // SAFETY: The data frame is borrowed only for this call; its queued DMA and key
-    // owners remain retained. The current requester and authenticated model OS grant
+    // owners remain held. The current requester and authenticated model OS grant
     // data submission under both guards.
     unsafe {
         driver.transmit_modern(

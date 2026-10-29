@@ -1,7 +1,7 @@
 //! Persistent storage service across the engine's shadow-page-table roots.
 //!
 //! PC drivers currently use identity addresses for their ECAM/MMIO and DMA
-//! buffers. Keep their accesses in the loader's retained root, which also
+//! buffers. Keep their accesses in the loader's root, which also
 //! maps the engine window, and restore the current engine root afterwards.
 //! This boundary never maps host identity addresses into a guest root. All
 //! buffers passed here belong to the engine window, not guest virtual RAM.
@@ -51,7 +51,7 @@ const KEEP_ENTRIES: u64 = 1 << 63;
 /// into the host drivers. Every engine root keeps context 0, whose CR3
 /// writes still flush, so INVLPG and root reloads keep their meaning; no
 /// engine mapping changes inside a driver call. Dropped, CR4 is restored
-/// for the native qualifications, which require PCIDE clear.
+/// for the native validations, which require PCIDE clear.
 pub(super) struct TaggedRoots {
     cr4: u64,
 }
@@ -88,8 +88,8 @@ impl Drop for TaggedRoots {
 static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
 static HOST_DRIVERS_GS: AtomicU64 = AtomicU64::new(0);
 
-/// Validate the existing manager's actual same-CPU entered loader context.
-/// Allocation and CPU authority remain with the caller's genuine retained owner.
+/// Validate the existing manager's same-CPU entered loader context.
+/// Allocation and CPU permission remain with the caller's owner.
 pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -> bool {
     if !HOST_DRIVERS.load(Ordering::Acquire) {
         return false;
@@ -156,7 +156,7 @@ impl RestoreRoot {
     /// driver never calls back into the engine's host interfaces.
     ///
     /// # Safety
-    /// `root` is the live loader root, retaining the engine window.
+    /// `root` is the live loader root, keeping the engine window.
     pub(super) unsafe fn enter(root: u64) -> Self {
         lock_host_drivers();
         let (previous, flags, cr4): (u64, u64, u64);
@@ -165,7 +165,7 @@ impl RestoreRoot {
         unsafe {
             asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov {cr4}, cr4",flags=out(reg)flags,previous=out(reg)previous,cr4=out(reg)cr4);
         }
-        // SAFETY: actual native CPU; this records the same concrete manager
+        // SAFETY: native CPU; this records the same concrete manager
         // owner while IF0 excludes its own IRQ/reentrant root transition.
         let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
         HOST_DRIVERS_GS.store(gs, Ordering::Release);
@@ -421,7 +421,7 @@ pub struct Partitions<'a> {
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, `root` is the loader's root, and it and the window
-/// remain live for the boot. The actual owned work dispatcher already holds
+/// remain live for the boot. The owned work dispatcher already holds
 /// its RestoreRoot/host-driver guard and this is a real admitted continuation;
 /// acquiring that non-reentrant guard again is forbidden.
 pub unsafe fn open(

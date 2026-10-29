@@ -2,7 +2,7 @@
 //!
 //! No register access, doorbell write, firmware load or hardware activation is
 //! performed here. Original AMDGPU register routing and device lifecycle remain
-//! mandatory; this module only retains their real, bounded CPU windows.
+//! mandatory; this module only keeps their real, bounded CPU windows.
 use super::pci::{Admission, IpPath, MatchedFunction};
 use crate::bus::{
     mmio::owned::{
@@ -33,7 +33,7 @@ pub enum Stage {
 }
 
 /// Failure ownership is truthful even when attachment fails after a real map.
-/// The canonical authority owns uncertain failed-map reservations internally.
+/// The canonical permission owns uncertain failed-map reservations internally.
 /// `rollback` describes the already-installed, unpublished register window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttachError {
@@ -46,18 +46,18 @@ pub struct AttachError {
 pub enum Rollback {
     NotAttempted,
     Retired,
-    /// Drop retained the real mapping/resource in canonical quarantine after
+    /// Drop kept the real mapping/resource in canonical quarantine after
     /// this failed retirement. No resource or native table was freed here.
     Quarantined(MmioError),
 }
 
-/// The actual resource owner, not a physical BAR tuple or a DMA allocation.
+/// The resource owner, not a physical BAR tuple or a DMA allocation.
 pub struct RegisterBar {
     pub index: u8,
     pub resource: Resource,
 }
 
-/// Actual original kernel doorbell reservation within BAR2. The resource's
+/// Original kernel doorbell reservation within BAR2. The resource's
 /// original backing must pin this allocation as well as the whole BAR through
 /// acknowledged retirement or permanent canonical quarantine, including Drop.
 /// `reserved_bytes` covers complete physical pages; `logical_dwords` is the
@@ -101,8 +101,8 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// The lifetime also borrows the actual matched PCI function. ResourceBacking
-/// retains the real resource/reset epoch; caller's original owner retains its
+/// The lifetime also borrows the matched PCI function. ResourceBacking
+/// keeps the real resource/reset epoch; caller's original owner keeps its
 /// doorbell BO reservation and all C consumers through this borrow.
 pub struct AttachedBars<'a> {
     identity: Identity,
@@ -202,13 +202,13 @@ impl<'a> AttachedBars<'a> {
         Ok((self.registers()?, admission))
     }
 
-    /// Attach from the actual original normal PCI match. The private result is
-    /// retained on this exact mapping owner; the legacy manual unsafe path
+    /// Attach from the original normal PCI match. The private result is
+    /// on this exact mapping owner; the legacy manual unsafe path
     /// cannot mint this admission. No firmware/static fallback or activation.
     ///
     /// # Safety
-    /// All actual resource/context/exclusion requirements of [`Self::attach`]
-    /// hold. The matched function and resources are from this same genuine
+    /// All resource/context/exclusion requirements of [`Self::attach`]
+    /// hold. The matched function and resources are from this same
     /// owner/reset epoch. Keep its original source/static plan; matching does
     /// not acquire the selected firmware or implement static IP initialization.
     pub unsafe fn attach_matched<C: ConfigSpace>(
@@ -218,7 +218,7 @@ impl<'a> AttachedBars<'a> {
         doorbells: Option<KernelDoorbells>,
     ) -> Result<Self, AttachError> {
         let admission = matched.admission();
-        // SAFETY: actual owner/resource contract above; ASIC/flags are private
+        // SAFETY: owner/resource contract above; ASIC/flags are private
         // outputs of original matching, not independently supplied labels.
         let mut bars = unsafe {
             Self::attach(
@@ -240,8 +240,8 @@ impl<'a> AttachedBars<'a> {
         self.admission.map(Admission::path)
     }
 
-    /// Attach unpublished CPU windows for an actual original AMDGPU PCI match.
-    /// The display-only diagnostic inventory is intentionally not consulted.
+    /// Attach unpublished CPU windows for an original AMDGPU PCI match.
+    /// The display-only diagnostic inventory is not consulted.
     ///
     /// # Safety
     /// `function`, `original_flags` and `asic_type` must describe the same real
@@ -251,9 +251,9 @@ impl<'a> AttachedBars<'a> {
     /// must be the complete original register BAR. `None` bootstraps registers
     /// before original IP discovery/BO initialization; it never reports doors
     /// or an initialized device. A supplied `doorbells` must describe the
-    /// actual original kernel BO reservation in BAR2, actual ASIC
+    /// original kernel BO reservation in BAR2, ASIC
     /// max_assignment and post-allocation logical extent, including paging/MES
-    /// pages. The original owner must retain that suballocation and prevent
+    /// pages. The original owner must keep that suballocation and prevent
     /// rebinding/reset/removal or C access after teardown begins, until every
     /// borrowed window is released and retirement is acknowledged. No booleans
     /// supplied here establish firmware, queue, power or device readiness.
@@ -312,7 +312,7 @@ impl<'a> AttachedBars<'a> {
                         Ok(()) => Rollback::Retired,
                         Err(error) => Rollback::Quarantined(error),
                     };
-                    // Failed retire is retained by canonical Drop quarantine.
+                    // Failed retire is held by canonical Drop quarantine.
                     drop(registers);
                     return Err(AttachError {
                         stage: Stage::Doorbells,
@@ -342,7 +342,7 @@ impl<'a> AttachedBars<'a> {
         self.identity
     }
 
-    /// Retained views may be held by the original native C owner independently
+    /// Views may be held by the original native C owner independently
     /// of this container; canonical retirement stays Busy until they drain.
     pub fn registers(&self) -> Result<RegisterWindow<'a>, Error> {
         if !self.active {
@@ -383,8 +383,8 @@ impl<'a> AttachedBars<'a> {
     /// # Safety
     /// The reservation/backing, ASIC assignment and original owner must obey
     /// `attach`'s same-device/reset-epoch and lifetime requirements. The backing
-    /// retains the actual BO suballocation even on permanent map quarantine.
-    /// Original device initialization remains serialized by its actual owner.
+    /// keeps the BO suballocation even on permanent map quarantine.
+    /// Original device initialization remains serialized by its owner.
     pub unsafe fn attach_kernel_doorbells(
         &mut self,
         authority: &Authority,
@@ -415,7 +415,7 @@ impl<'a> AttachedBars<'a> {
     }
 
     /// Retire only after real original consumers stop and posted accesses drain.
-    /// An error disables new windows and retains the exact mappings for retry;
+    /// An error disables new windows and keeps the exact mappings for retry;
     /// Drop without acknowledged retirement uses canonical quarantine.
     ///
     /// # Safety
@@ -430,7 +430,7 @@ impl<'a> AttachedBars<'a> {
             unsafe { mapping.retire().map_err(Error::Mapping)? };
             self.doorbells = None;
         }
-        // SAFETY: the same actual consumer drain and context proof apply.
+        // SAFETY: the same consumer drain and context proof apply.
         unsafe { self.registers.retire().map_err(Error::Mapping) }
     }
 }
@@ -450,9 +450,9 @@ impl RegisterWindow<'_> {
     /// No Rust reference is formed, and no register is read or written.
     ///
     /// # Safety
-    /// The pointer must not escape this borrowed window's lifetime. All actual
+    /// The pointer must not escape this borrowed window's lifetime. All
     /// accesses must use original AMDGPU register routing/width/order/reset
-    /// semantics. A pointer is not authority to bypass indirect/KIQ/XCC routes.
+    /// semantics. A pointer is not permission to bypass indirect/KIQ/XCC routes.
     pub unsafe fn native_base(&self) -> Result<NonNull<u8>, Error> {
         self.view.address(0, self.bytes()).map_err(Error::Mapping)
     }

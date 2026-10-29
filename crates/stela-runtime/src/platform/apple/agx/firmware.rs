@@ -42,7 +42,7 @@
 //! complete ([`super::signal`]), with their events posted on the firmware
 //! event ring ([`super::event`]) and each announced by the 0x42 message on
 //! 0x20; every command that needs the GPU refuses by its type and stays
-//! pending, so no GPU work is retired and no completion is fabricated.
+//! pending, so no GPU work is retired and no completion is invented.
 
 use super::super::asc::{Firmware, Message as Mail};
 use super::super::rtkit::{Endpoint, RtKit};
@@ -262,7 +262,7 @@ impl ActiveCommand {
     }
 }
 
-/// A data-master entry retains the descriptor, channel and final read-index
+/// A data-master entry keeps the descriptor, channel and final read-index
 /// publication until the channel's accepted commands have all completed.
 #[derive(Debug)]
 struct ActiveWork {
@@ -493,7 +493,7 @@ pub struct State {
     pub initdata_va: Option<u64>,
     /// The root was validated through the UAT and startup status committed.
     pub initdata_checked: bool,
-    /// The validated root, retained even if startup-status DMA later faults.
+    /// The validated root, kept even if startup-status DMA later faults.
     pub root: Option<Root>,
     startup_word: usize,
     /// Work doorbells received, in order, as (pipe, submission index).
@@ -726,7 +726,7 @@ impl State {
                 let active = self.active_work.as_ref().unwrap();
                 if active.command.is_none() {
                     let Some(va) = active.submission.next(memory)? else {
-                        // The target is retained even if this final DMA
+                        // The target is held even if this final DMA
                         // fails. It cannot retire a later entry on retry.
                         self.active_work.as_mut().unwrap().retiring = true;
                         break;
@@ -1057,7 +1057,7 @@ impl Coprocessor {
     }
 
     /// Attach the native power/register owner of the mounted SGX instance.
-    /// A qualified physical binding does not make unknown callbacks successful.
+    /// A checked physical binding does not make unknown callbacks successful.
     pub fn with_power(
         family: &'static Family,
         power: super::sgx::FirmwarePower,
@@ -2638,7 +2638,7 @@ mod tests {
                 // but belongs to the next data-master entry. It must not be
                 // executed or block completion of the accepted interval.
                 let later = OWNED_COMMAND + 0xb00;
-                memory.put_u32(later, 1); // source-qualified but unexecuted 3D
+                memory.put_u32(later, 1); // source-checked but unexecuted 3D
                 memory.put_u64(later + 0x14, later + 0x1000);
                 memory.put_u32(later + 0x1c, 0x200);
                 memory.put_u32(later + 0x1000, 7);

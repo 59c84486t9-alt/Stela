@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
-//! Private source-enabled cold response envelope on the actual original owner.
+//! Private source-enabled cold response envelope on the original owner.
 use super::*;
 use crate::net::wifi::regulatory::{
     HardwareLease, HardwarePolicy, LegacyRate, OsLease, Purpose, TxProfile, Width,
@@ -62,20 +62,20 @@ struct Guard<'g, 'p, 'a, Q: BootIo, B: BiosIo> {
     rate_mask: u16,
 }
 // SAFETY: construction is private to the original completed power owner. Its
-// initialized HR2 firmware/NVM, actual TX-antenna command, BIOS/board/SAR, MCC
-// and SET_LINK ceiling all belong to that same retained epoch. Firmware owns
+// initialized HR2 firmware/NVM, TX-antenna command, BIOS/board/SAR, MCC
+// and SET_LINK ceiling all belong to that same epoch. Firmware owns
 // source calibration and rate/antenna power enforcement, as in Linux's unified
 // HR2 path; this does not claim host-measured EIRP. The cold MAC has exactly the
 // source basic response masks0xf/0x15, long preamble, no associated peer or HT
 // transmit configuration and no data queues. The private legacy-peer owner
 // may additionally program only a finite NON_HT rate bitmap at20MHz. The
 // selected MLD continuation may publish one empty scheduler queue for that
-// actual station, with invalid TFDs and no frame/rate/association change.
+// station, with invalid TFDs and no frame/rate/association change.
 // This policy still admits no frame publication. SET_LINK/HR2 calibration
 // apply to every such source legacy rate under the same original board/MCC.
-// Every enabled response/configured rate is checked against the genuine
+// Every enabled response/configured rate is checked against the
 // original OS lease at publication; restrictive revocation remains armed until
-// actual unbind/stop under unsafe begin_binding's retained-service contract.
+// unbind/stop under unsafe begin_binding's service contract.
 unsafe impl<'p, 'a, Q: BootIo, B: BiosIo> HardwarePolicy for Hardware<'p, 'a, Q, B> {
     type Lease<'g>
         = Guard<'g, 'p, 'a, Q, B>
@@ -120,8 +120,8 @@ impl<Q: BootIo, B: BiosIo> HardwareLease for Guard<'_, '_, '_, Q, B> {
         }
     }
 }
-/// One actual hardware-then-OS guard pair covers the complete finite union,
-/// then the exact original native HCMD visibility. No copied admission, caller
+/// One hardware-then-OS guard pair covers the complete finite union,
+/// then the original native HCMD visibility. No copied admission, caller
 /// calibration boolean or single-rate grant can replace any rate check.
 pub(super) unsafe fn publish<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     power: &mut Ax200TransmitPower<'_, Q, B, O>,
@@ -134,7 +134,7 @@ pub(super) unsafe fn publish<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
 /// The private legacy peer may additionally configure a finite NON_HT rate
 /// bitmap. This admits no frame or queue publication and no modern rates.
 /// Every source-enabled cold response and configured rate is held under the
-/// same genuine provider pair; the actual SET_LINK applies to all these rates.
+/// same provider pair; the SET_LINK applies to all these rates.
 pub(super) unsafe fn publish_legacy<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     power: &mut Ax200TransmitPower<'_, Q, B, O>,
     id: Id,
@@ -143,7 +143,7 @@ pub(super) unsafe fn publish_legacy<Q: BootIo, B: BiosIo, O: CountryIo + OsPolic
     source: &dyn PageSource,
 ) -> Result<CommandTicket, Ax200BindingError> {
     // SAFETY: same exact finite envelope and original native page contract;
-    // the existing command submission stays inside both actual leases.
+    // the existing command submission stays inside both leases.
     unsafe {
         with_legacy_policy(power, legacy_mask, |boot| {
             boot.submit_command(id, bytes, source)
@@ -151,7 +151,7 @@ pub(super) unsafe fn publish_legacy<Q: BootIo, B: BiosIo, O: CountryIo + OsPolic
     }?
     .map_err(Ax200BindingError::Boot)
 }
-/// Keep both actual leases held through a private checked native publication.
+/// Keep both leases held through a private checked native publication.
 /// The queue continuation additionally initializes and exposes its fresh DMA
 /// inside this closure, before the HCMD publishes those exact addresses.
 /// # Safety

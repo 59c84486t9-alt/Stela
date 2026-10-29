@@ -8,8 +8,8 @@ const CONNECTED: usize = 1 << (usize::BITS - 1);
 const CLOSED: usize = CONNECTED >> 1;
 const COUNT: usize = CLOSED - 1;
 
-/// Only actual category-owned connection/activation ACKs publish this state.
-/// There is deliberately no public constructor or caller-supplied ready flag.
+/// Only category-owned connection/activation ACKs publish this state.
+/// There is no public constructor or caller-supplied ready flag.
 pub(crate) struct SupplierState {
     // Admission and the active count share one modification order. A successful
     // claim either precedes closure (and is counted) or observes it and refuses.
@@ -51,7 +51,7 @@ impl SupplierState {
         Ok(DependencyPin(self.clone()))
     }
 }
-/// Callback-retained ownership contains no namespace handle or interpreter
+/// Callback-kept ownership contains no namespace handle or interpreter
 /// pointer. Cleanup can keep this pin through native hardware uncertainty.
 pub(crate) struct DependencyPin(Arc<SupplierState>);
 impl Clone for DependencyPin {
@@ -71,7 +71,7 @@ impl Drop for DependencyPin {
     }
 }
 
-/// An actual installed EC/GPIO supplier receipt, acquired only after its category
+/// An installed EC/GPIO supplier receipt, acquired only after its category
 /// reports successful connection and the required native activation phase.
 pub struct Dependency<'a> {
     handle: Handle<'a>,

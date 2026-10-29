@@ -7,7 +7,7 @@ use crate::bus::dma::{
 };
 use alloc::sync::Arc;
 
-// Retained xe_guc_ct.c: separate BOs; descriptors are 64 bytes at H2G offset 0
+// Xe_guc_ct.c: separate BOs; descriptors are 64 bytes at H2G offset 0
 // and G2H offset 0x800. Commands start at 0x1000 in each BO.
 const DESCRIPTOR_BYTES: usize = 16 * 4;
 const COMMAND_OFFSET: usize = 4096;
@@ -38,7 +38,7 @@ pub enum CtBuffer {
     GucToHost,
 }
 
-/// Matches the four region selectors in the retained native CT I/O adapter.
+/// Matches the four region selectors in the native CT I/O adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum CtRegion {
@@ -127,7 +127,7 @@ impl Storage {
     /// # Safety
     /// Both allocations satisfy Buffer::unmap's complete quiescence contract.
     unsafe fn unmap(&mut self) -> Result<(), DmaError> {
-        // Try both independent removals. A failed lease stays retained for
+        // Try both independent removals. A failed lease stays held for
         // retry, while successful removal never targets a reused token again.
         let h2g = self.h2g.as_mut().map_or(Ok(()), |buffer| {
             // SAFETY: the caller establishes quiescence for both buffers.
@@ -184,7 +184,7 @@ impl UnpublishedCtStorage {
         Ok(result)
     }
 
-    /// The borrowed canonical CPU mapping retains its pin. Dereferencing a raw
+    /// The borrowed canonical CPU mapping keeps its pin. Dereferencing a raw
     /// address requires exclusive CPU access and this storage's live lifetime.
     /// No device IOVA or GGTT address is available in the unpublished state.
     pub fn cpu_region(&self, region: CtRegion) -> &CpuMapping {
@@ -193,14 +193,14 @@ impl UnpublishedCtStorage {
 
     /// Remove mappings that have never been exposed to the device. Call in
     /// the domain's allowed process/deferred context. Failed leases remain
-    /// retained for retry; abandoning them invokes canonical quarantine.
+    /// for retry; abandoning them invokes canonical quarantine.
     pub fn rollback(&mut self) -> Result<(), DmaError> {
         // SAFETY: only the unpublished type offers this safe operation, and
         // it has no API exposing an IOVA or installing a GGTT/device binding.
         unsafe { self.storage.unmap() }
     }
 
-    /// Consume the unpublished state and complete the domain's actual DMA
+    /// Consume the unpublished state and complete the domain's DMA
     /// visibility operations before exposing any IOVA. This is a conservative
     /// publication boundary, not firmware registration or an enable ack. The
     /// owner can now install real GPU GGTT bindings and register/enable CT.
@@ -225,7 +225,7 @@ impl UnpublishedCtStorage {
 
 /// Potentially published leases. `mapping().address()` is device IOVA, NEVER
 /// GuC GGTT VA. Firmware registration requires separate real GGTT ownership.
-/// Active CT access additionally needs actual concurrent DMA coherence, GT
+/// Active CT access additionally needs concurrent DMA coherence, GT
 /// power/forcewake, ordered MMIO and IRQ/fence ownership. This helper supplies
 /// none of those services and must not be attached to CT callbacks as a proxy.
 pub struct PublishedCtStorage {
@@ -237,10 +237,10 @@ impl PublishedCtStorage {
         self.storage.buffer(buffer).mapping()
     }
 
-    /// Raw CPU views only. The owner must retain this storage while pointers
+    /// Raw CPU views only. The owner must keep this storage while pointers
     /// are used, prove the device's real coherence/ownership protocol for each
     /// access and serialize CPU/firmware/IRQ users. No safe slice is exposed.
-    /// DmaMapping::sync_for_cpu still requires its actual exclusive-completion
+    /// DmaMapping::sync_for_cpu still requires its exclusive-completion
     /// contract; it cannot be used to pretend a concurrent GuC descriptor is
     /// quiescent. WB CPU cache policy alone does not prove device coherence.
     pub fn cpu_region(&self, region: CtRegion) -> &CpuMapping {
@@ -248,12 +248,12 @@ impl PublishedCtStorage {
     }
 
     /// # Safety
-    /// Firmware CT is actually disabled/acknowledged, device accesses have
+    /// Firmware CT is disabled/acknowledged, device accesses have
     /// ended, submissions and IRQ workers are stopped/drained, real GGTT
     /// bindings are removed with completed GT invalidation, and no future
     /// accesses can begin. Owner process/context restrictions still apply.
-    /// Errors retain failed leases for retry; abandoning them quarantines the
-    /// actual pages/domain. This method never manufactures completion proof.
+    /// Errors keep failed leases for retry; abandoning them quarantines the
+    /// pages/domain. This method never manufactures completion proof.
     pub unsafe fn unmap_after_quiescence(&mut self) -> Result<(), DmaError> {
         // SAFETY: the caller establishes the complete hardware/worker stop.
         unsafe { self.storage.unmap() }
@@ -308,7 +308,7 @@ mod tests {
     }
     // SAFETY: model-only owned aligned CPU RAM, immutable metadata and no
     // hardware DMA or safe references. Fixture physical numbers are not used
-    // as actual physical addresses by any platform implementation.
+    // as physical addresses by any platform implementation.
     unsafe impl Send for Backing {}
     // SAFETY: same model-only allocation; all mutation uses checked raw access.
     unsafe impl Sync for Backing {}
@@ -499,7 +499,7 @@ mod tests {
             published.mapping(CtBuffer::GucToHost),
             Err(DmaError::Unmapped)
         ));
-        assert_eq!(model.released.load(Ordering::Relaxed), 0); // CPU views retain pins.
+        assert_eq!(model.released.load(Ordering::Relaxed), 0); // CPU views keep pins.
         drop(published);
         assert_eq!(model.released.load(Ordering::Relaxed), 2);
     }

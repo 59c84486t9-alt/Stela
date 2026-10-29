@@ -1,4 +1,4 @@
-//! Actual BSP work continuations over the loader's separately reserved stacks.
+//! BSP work continuations over the loader's separately reserved stacks.
 //! Admission here creates no Linux service, ACPI capability, or cross-CPU
 //! execution grant. Those producers must join this affine owner explicitly.
 use super::{
@@ -89,12 +89,12 @@ struct Backing {
     guard: Range<usize>,
     physical: u64,
 }
-// SAFETY: prepare consumes one actual loader allocation exactly once, verifies
+// SAFETY: prepare consumes one loader allocation exactly once, verifies
 // every root's exact RW/NX/supervisor/WB backing and absent guards, and verifies
 // effective MTRRs on the original BSP. Slots are disjoint and excluded from
 // guest/DMA allocations. The physical reservation and shared window are never
-// reclaimed during this boot; each backing additionally pins the actual CPU/
-// descriptor/root owner. Runtime retains paused/quarantined frames and backing.
+// reclaimed during this boot; each backing additionally pins the CPU/
+// descriptor/root owner. Runtime keeps paused/quarantined frames and backing.
 unsafe impl StackBacking for Backing {
     fn bounds(&self) -> Range<usize> {
         self.bounds.clone()
@@ -106,8 +106,8 @@ unsafe impl StackBacking for Backing {
         &self,
     ) -> Result<stela_drivers::bus::dma::memory::PinnedPages, MemoryError> {
         // SAFETY: the work owner holds this never-entered slot in Preparing
-        // and has zeroed only its usable range. The allocation and qualified
-        // mappings remain retained by this backing throughout export.
+        // and has zeroed only its usable range. The allocation and checked
+        // mappings remain held by this backing throughout export.
         unsafe { pin::export(self) }
     }
 }
@@ -124,13 +124,13 @@ struct NativeCpu {
     reservation: Arc<Reservation>,
     clock: Clock,
 }
-// SAFETY: immutable actual RootIdentity checks CPU/GS/descriptors and the real
-// retained root catalog before local-state access. IRQ enqueue/wake may observe
+// SAFETY: immutable RootIdentity checks CPU/GS/descriptors and the real
+// root catalog before local-state access. IRQ enqueue/wake may observe
 // another owned guest root, but execution switches happen only via the affine
 // owner under RestoreRoot; Runtime additionally checks captured CR3/controls.
 // Ticks use the executing BSP's real calibrated progressing TSC; no task migrates
 // or reconfigures controls. This constructor grants no fixed-rate Linux clock or
-// idle/deadline service, which needs separate clock/IRQ qualification. Descriptor/local storage is permanently retained even on quarantine.
+// idle/deadline service, which needs separate clock/IRQ validation. Descriptor/local storage is permanently kept even on quarantine.
 unsafe impl Cpu for NativeCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
         self.reservation.identity.check_irq_cpu()
@@ -141,7 +141,7 @@ unsafe impl Cpu for NativeCpu {
     fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
         let saved;
-        // SAFETY: actual owning CPL0 CPU; exact save brackets metadata changes.
+        // SAFETY: owning CPL0 CPU; exact save brackets metadata changes.
         unsafe {
             asm!("pushfq","pop {}","cli",out(reg)saved);
         }
@@ -151,7 +151,7 @@ unsafe impl Cpu for NativeCpu {
         if let Err(error) = self.check_cpu() {
             self.fatal(error);
         }
-        // SAFETY: caller supplies this CPU's exact enclosing save after restoring
+        // SAFETY: caller supplies this CPU's enclosing save after restoring
         // task metadata/context; no queue lock spans this restoration.
         unsafe {
             asm!("push {}","popfq",in(reg)flags);
@@ -187,10 +187,10 @@ struct OwnedCall<F, T> {
 }
 unsafe extern "C" fn owned_call<F: FnOnce() -> T, T>(context: *mut c_void) {
     // SAFETY: call_owned admitted this exact owned box once on the real affine
-    // runtime. It remains retained through completion or permanent quarantine.
+    // runtime. It remains held through completion or permanent quarantine.
     let call = unsafe { &*context.cast::<OwnedCall<F, T>>() };
     // SAFETY: only this one callback takes the closure; the dispatcher waits
-    // for its actual ticket completion before reading or freeing output.
+    // for its ticket completion before reading or freeing output.
     let Some(function) = (unsafe { &mut *call.input.get() }).take() else {
         return;
     };
@@ -202,31 +202,31 @@ unsafe extern "C" fn owned_call<F: FnOnce() -> T, T>(context: *mut c_void) {
 
 impl KernelWork {
     /// # Safety
-    /// Actual post-EBS BSP owns this immutable validated handoff and all loader
+    /// Post-EBS BSP owns this immutable validated handoff and all loader
     /// allocations, before APs/producers run. Reserved stack bytes have never
     /// carried another frame or been lent to a device; source tables and all
-    /// aliases remain retained WB. No external root/cache writer overlaps.
+    /// aliases remain held WB. No external root/cache writer overlaps.
     pub(super) unsafe fn prepare(
         handoff: &'static Handoff,
         owner: &mut HostOwner,
     ) -> Result<Self, Error> {
-        // SAFETY: original caller's actual handoff/owner/stack lifetime contract.
+        // SAFETY: original caller's handoff/owner/stack lifetime contract.
         unsafe { Self::prepare_plan(handoff, owner, Plan::uniform(handoff)) }
     }
     /// # Safety
-    /// Same actual original handoff/owner contract as prepare. A Plan describes
-    /// only layout; it cannot supply allocation, root or execution authority.
+    /// Same original handoff/owner contract as prepare. A Plan describes
+    /// only layout; it cannot supply allocation, root or execution permission.
     unsafe fn prepare_plan(
         handoff: &'static Handoff,
         owner: &mut HostOwner,
         plan: Plan,
     ) -> Result<Self, Error> {
         plan.validate(handoff)?;
-        // SAFETY: inherited genuine handoff/physmap lifetime and sealed capture.
+        // SAFETY: inherited handoff/physmap lifetime and sealed capture.
         let wire = unsafe { native_mmio::captured(handoff) }.map_err(|_| Error::Inventory)?;
         let identity = owner.root_identity().map_err(Error::Work)?;
         let snapshot = identity.memory_snapshot().map_err(Error::Work)?;
-        // SAFETY: same immutable genuine processor capture as native admission.
+        // SAFETY: same immutable processor capture as native admission.
         let capture = unsafe { native_smp::firmware::captured(handoff.native_processors) }
             .map_err(|_| Error::Inventory)?;
         let bsp = capture.processors[capture.selected[0] as usize];
@@ -243,7 +243,7 @@ impl KernelWork {
         {
             return Err(Error::Inventory);
         }
-        // SAFETY: genuine retained loader root, excluding task/native entry.
+        // SAFETY: loader root, excluding task/native entry.
         let _root = unsafe { RestoreRoot::enter(handoff.root) };
         let mut spans = Vec::new();
         spans
@@ -254,7 +254,7 @@ impl KernelWork {
             if !wire.table_owned(table) {
                 return None;
             }
-            // SAFETY: actual sealed retained LoaderData table; walker bounds
+            // SAFETY: sealed kept LoaderData table; walker bounds
             // index to0..512 and this root exclusion admits no table writer.
             Some(unsafe {
                 (layout::physical(table) as *const u64)
@@ -283,7 +283,7 @@ impl KernelWork {
                 &mut read,
             )
             .map_err(Error::Mapping)?;
-            // Qualify every physical slot, not merely the first MTRR interval.
+            // Check every physical slot, not the first MTRR interval.
             crate::native_memory::cache::verify_writeback(
                 slot.usable.start,
                 physical,
@@ -328,7 +328,7 @@ impl KernelWork {
                 native_smp::resources::ClaimError::Absent
                 | native_smp::resources::ClaimError::DescriptorMismatch => Error::Inventory,
             })?;
-        // A failed/uncertain admission intentionally never reuses this pool.
+        // A failed/uncertain admission never reuses this pool.
         let reservation = Arc::new(Reservation {
             identity,
             _wire: wire,
@@ -370,7 +370,7 @@ impl KernelWork {
                 .map_err(Error::Work)?,
             );
         }
-        // SAFETY: real retained source/root/code ownership; callbacks cannot
+        // SAFETY: real kept source/root/code ownership; callbacks cannot
         // outlive this boot, and no producer is published by construction.
         let queue =
             unsafe { Queue::<SLOTS>::new(cpu.clone(), reservation) }.map_err(Error::Work)?;
@@ -396,7 +396,7 @@ impl KernelWork {
             #[cfg(feature = "diagnostics")]
             stack_pages,
         };
-        // Qualification enters the owned-call boundary, which acquires the
+        // Validation enters the owned-call boundary, which acquires the
         // global driver/root guard itself. No mapping walk or table borrower
         // survives here; release this non-reentrant construction guard first.
         drop(_root);
@@ -406,7 +406,7 @@ impl KernelWork {
     /// Execute owned boot preparation in a real foreground continuation.
     /// Neither closure nor result may borrow the caller's stack. This is not
     /// asynchronous producer admission or a fixed-rate deadline-clock grant.
-    /// An uncertain call retains its whole job/runtime and closes this sync
+    /// An uncertain call keeps its whole job/runtime and closes this sync
     /// entry, so repeated callers cannot leak another job on every poll.
     pub(super) fn call_owned<F: FnOnce() -> T + 'static, T: 'static>(
         &self,
@@ -429,10 +429,10 @@ impl KernelWork {
             Err(WorkError::Unavailable) => {}
             Err(error) => return Err(Error::Work(error)),
         }
-        // SAFETY: genuine retained loader root on this physical BSP, no native
-        // or IRQ frame; every continuation was qualified in this same domain.
+        // SAFETY: loader root on this physical BSP, no native
+        // or IRQ frame; every continuation was checked in this same domain.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        // This checks the genuine original allocation/entered root link only;
+        // This checks the original allocation/entered root link only;
         // it supplies no rate, timer, firmware-service or task admission grant.
         self._cpu
             .reservation
@@ -452,16 +452,16 @@ impl KernelWork {
             output: UnsafeCell::new(None),
             complete: AtomicBool::new(false),
         }));
-        // SAFETY: owned 'static closure/result, genuine pinned runtime and
+        // SAFETY: owned 'static closure/result, pinned runtime and
         // static monomorphized callback code. On error the owned box stays
-        // retained; Executor also quarantines uncertain continuation frames.
+        // kept; Executor also quarantines uncertain continuation frames.
         unsafe { runtime.call_foreground(owned_call::<F, T>, call.cast(), deadline) }
             .map_err(Error::Work)?;
-        // SAFETY: allocation remains owned; the actual callback ticket completed.
+        // SAFETY: allocation remains owned; the callback ticket completed.
         if !unsafe { &*call }.complete.load(Ordering::Acquire) {
             return Err(Error::Qualification);
         }
-        // SAFETY: actual completed ticket excludes every callback borrower; this
+        // SAFETY: completed ticket excludes every callback borrower; this
         // function is the only owner allowed to reclaim this exact Rust box.
         let call = unsafe { Box::from_raw(call) };
         // SAFETY: completed callback published output and cannot run again.
@@ -472,7 +472,7 @@ impl KernelWork {
         self.busy.set(false);
         Ok(result)
     }
-    /// Actual continuation identity; dispatcher/IRQ/foreign-root callers refuse.
+    /// Continuation identity; dispatcher/IRQ/foreign-root callers refuse.
     pub(super) fn current_id(&self) -> Result<u64, Error> {
         self.executor
             .runtime()
@@ -480,7 +480,7 @@ impl KernelWork {
             .map(|id| id.get())
             .map_err(Error::Work)
     }
-    /// Check the actual continuation and both OSL flush roles immediately before
+    /// Check the continuation and both OSL flush roles immediately before
     /// C removal. This neither captures queue boundaries nor synchronizes SCI.
     pub(super) fn check_firmware_wait(&self) -> Result<(), Error> {
         let runtime = self.executor.runtime();
@@ -494,7 +494,7 @@ impl KernelWork {
     }
     /// Run only on the real owned foreground stack, under the dispatcher's
     /// existing serialized original-root guard. No borrowed caller stack or
-    /// process authority is captured or retained in a queued job.
+    /// process permission is captured or kept in a queued job.
     pub(super) fn call_firmware_owned<F, T>(&self, timeout_us: u64, function: F) -> Result<T, Error>
     where
         F: FnOnce(&super::FirmwareContext<'_>) -> T + 'static,

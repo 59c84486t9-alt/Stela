@@ -41,7 +41,7 @@ pub enum AccessError {
 }
 
 /// Exclusive process-context CSR access and a real advancing delay source.
-/// Native construction requires a qualified MMIO/PCI ownership contract.
+/// Native construction requires a checked MMIO/PCI ownership contract.
 pub trait Csr {
     fn read32(&mut self, register: u32) -> Result<u32, AccessError>;
     fn write32(&mut self, register: u32, value: u32) -> Result<(), AccessError>;
@@ -233,7 +233,7 @@ impl<C: Csr> Power<C> {
         if self.profile.family() != Family::Ax200 {
             return Ok(());
         }
-        // AX200's actual pinned MAC cfg has umac_prph_offset=0. AX210 uses
+        // AX200's pinned MAC cfg has umac_prph_offset=0. AX210 uses
         // +0x300000, but has no persistence-clear step in this donor routine.
         let hpm = self.read_prph(0xa03440)?;
         if hpm & (1 << 12) != 0 {
@@ -299,7 +299,7 @@ impl<C: Csr> Power<C> {
         }
     }
     /// Wake the MAC clock with interrupts masked. Retrying an uncertain reset
-    /// requires a new qualified ownership/reset epoch, never this used object.
+    /// requires a new checked ownership/reset epoch, never this used object.
     pub fn wake(&mut self, management: ManagementSession) -> Result<Awake, Error> {
         if self.state != State::Cold {
             return Err(Error::State);

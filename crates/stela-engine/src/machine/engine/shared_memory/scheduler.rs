@@ -27,7 +27,7 @@ fn completing<H: Host, D: Devices>(
     let retired = machine.cpu.retired;
     let step = machine.completing(machine.cpu.pc, complete);
     // A refused stopped service has not completed the source instruction.
-    // Keep the actual native prefix's retirement; never count a denied word.
+    // Keep the native prefix's retirement; never count a denied word.
     if matches!(step, Err(Stop::Unsupported(_))) {
         machine.cpu.retired = retired;
     }
@@ -101,7 +101,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 .transport
                 .fail_stopped("native source Host sessions already active");
         }
-        // Each actual owner fenced its last stores in WorkerOwner::invalidate
+        // Each owner fenced its last stores in WorkerOwner::invalidate
         // before publishing the receipt consumed by hold_all. No guest or
         // device work occurs while these software sessions open. Keep that
         // completed fence instead of sending another command to every owner.
@@ -169,17 +169,17 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     }
 
     /// Execute one bounded round on fixed physical workers and settle every
-    /// reached source boundary while all actual workers are recovered and held.
+    /// reached source boundary while all workers are recovered and held.
     /// No old direct-RAM execution or copied monitor/event state is used.
     ///
     /// # Safety
     /// The full shared_native_run RAM/control/publication contract applies.
-    /// External DMA/device jobs and code/MMU writers are excluded or retain the
-    /// canonical all-writer authority through this whole call. Host counter and
-    /// IRQ delivery are qualified for these assigned workers. Reset/rebind,
+    /// External DMA/device jobs and code/MMU writers are excluded or keep the
+    /// canonical all-writer permission through this whole call. Host counter and
+    /// IRQ delivery are checked for these assigned workers. Reset/rebind,
     /// Device/MMIO completion, debug/PMU/AMX/scalable resources remain explicit
-    /// refusals until their actual platform owners join this candidate. Calling
-    /// this method does not enable production SMP or qualify original macOS.
+    /// refusals until their platform owners join this candidate. Calling
+    /// this method does not enable production SMP or check original macOS.
     pub unsafe fn native_round(&mut self) -> Result<usize, Stop> {
         // SAFETY: identical caller contract. One body PER runnable PE, with
         // the complete cohort preserved; a total budget of1 would starve peers.
@@ -222,7 +222,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         if let Some(pending) = self.pending_native_device_access() {
             return pending;
         }
-        // SAFETY: the caller retains the run_serialized ownership contract.
+        // SAFETY: the caller keeps the run_serialized ownership contract.
         if let Err(stop) = unsafe { self.hold_serialized() } {
             return stop;
         }
@@ -249,7 +249,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     }
 
     /// Execute at most `body_budget` bodies, allowing warm epochs only for one
-    /// instantiated online PE. Other online PEs retain one-body publications.
+    /// instantiated online PE. Other online PEs keep one-body publications.
     /// `deadline` uses Host::counter, not the adjusted guest clock or raw TSC.
     /// A body/service already entered may overrun this soft observation bound.
     ///
@@ -280,7 +280,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         let mut scratch = core::mem::take(&mut self.host.round_scratch);
         // SAFETY: this wrapper forwards the caller's full native-round contract.
         // Restore only cleared plain metadata on every ordinary Result return;
-        // actual loans, receipts and holds keep their existing linear protocol.
+        // loans, receipts and holds keep their existing linear protocol.
         let result = unsafe {
             self.native_round_with_scratch(&mut scratch, body_budget, deadline, allow_epochs)
         };
@@ -301,7 +301,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     ) -> Result<usize, Stop> {
         // A recovered bus continuation has already entered its instruction.
         // Newly installed host points apply to future entries; they cannot
-        // revoke this retained generation or replay its possible effects.
+        // revoke this generation or replay its possible effects.
         if let Some(pending) = self.pending_native_device_access() {
             return Err(pending);
         }
@@ -327,7 +327,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         }
         let held = self.hold_native_services()?;
         // Serial fair-share lag cannot represent concurrently executing cores.
-        // This lane observes the qualified common host counter without drift.
+        // This lane observes the checked common host counter without drift.
         self.clock.follow_host();
         let current = bindings
             .iter()
@@ -383,7 +383,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 self.take(crate::machine::cpu::Exception::undefined(self.cpu.pc));
             }
             for boundary in 0..64 {
-                // Observe the actual stopped frame before fetching or servicing
+                // Observe the stopped frame before fetching or servicing
                 // its instruction, including a source-side exception boundary.
                 if self.breakpoints.binary_search(&self.cpu.pc).is_ok() {
                     self.release_native_services(held);
@@ -396,7 +396,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                     break;
                 }
                 if boundary == 63 {
-                    // A bounded source-check quantum: retain actual progress
+                    // A bounded source-check quantum: keep progress
                     // and return to host work before preparing another loan.
                     self.retain_native_services(held);
                     return Ok(0);
@@ -404,7 +404,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             }
         }
         // Preflight/source services may have started another PE or changed PMU
-        // eligibility. Never infer permission merely from one runnable frame.
+        // eligibility. Never infer permission from one runnable frame.
         if !self.epoch_eligible() {
             limits = native_run::Limits::single();
         }
@@ -550,7 +550,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         .flatten()
         .min();
         // deadline() can itself advance devices. Publish any newly produced
-        // starts/reset/interrupts before constructing or lending actual frames.
+        // starts/reset/interrupts before constructing or lending frames.
         self.take_starts()?;
         if let Some(reset) = self.devices.take_reset() {
             return Err(Stop::Reset(reset));
@@ -878,9 +878,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                         )
                     })
                 }) {
-                    // All native owners are actually held after their CPU
+                    // All native owners are held after their CPU
                     // fences; fence this PE and BSP helper copyout as well.
-                    // External Device/DMA/MCC completion remains unqualified.
+                    // External Device/DMA/MCC completion remains unchecked.
                     self.host.memory_barrier();
                 }
                 completing(self, |machine| {

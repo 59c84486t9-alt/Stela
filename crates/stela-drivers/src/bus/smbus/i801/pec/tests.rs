@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Independent hardware/peripheral CRC peers around the actual retained owner.
+//! Independent hardware/peripheral CRC peers around the owner.
 use super::super::i2c_block::{Controller, OwnedConfiguration};
 use super::*;
 use crate::bus::pci::{self, ConfigSpace, Function};
@@ -504,8 +504,8 @@ fn fixture(device: u16, buffer: bool) -> Fixture {
         NativeConfig(state.clone()),
     )
     .unwrap();
-    // SAFETY: the actual model function and register owner share the same
-    // powered, exclusive controller/reset epoch; these are retained root leases.
+    // SAFETY: the model function and register owner share the same
+    // powered, exclusive controller/reset epoch; these are held root leases.
     let configuration =
         unsafe { OwnedConfiguration::claim(function, Lease(configuration_drop.clone())) }
             .ok()

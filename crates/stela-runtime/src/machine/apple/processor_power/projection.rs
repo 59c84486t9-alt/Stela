@@ -1,4 +1,4 @@
-//! Physical CPU-domain identities projected through one retained assigned Plan.
+//! Physical CPU-domain identities projected through one assigned Plan.
 use super::*;
 use stela_contracts::identity::Identity;
 use stela_contracts::processor::ProcessorTarget;
@@ -35,7 +35,7 @@ fn lifecycle(state: DomainState) -> LifecycleState {
         clocked: state.power == ACTIVE,
         quiesced: state.disabled,
         reset: state.reset,
-        // CPU supply loss/reset has no implemented retained-state contract.
+        // CPU supply loss/reset has no implemented kept-state contract.
         // This declares that limitation; it is not a sampled PMGR control bit.
         retention: false,
     }
@@ -129,7 +129,7 @@ impl AssignedPower {
         }
         let assigned = Self { plan, domains };
         // Purely validate the initial state against the existing CPU boundary.
-        // In particular an actual supply-off/reset model state cannot be hidden
+        // In particular a supply-off/reset model state cannot be hidden
         // by substituting a fixture ACTIVE state before binding the Machine.
         Processors::new(pes.len())
             .and_then(|processors| {

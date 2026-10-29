@@ -35,7 +35,7 @@ use stela_soc_data::pmu::WallClock;
     reason = "cold placement resources are moved once and consumed together before guest entry"
 )]
 pub enum MemoryResources {
-    /// Source-checked cold resources whose lifecycle is sampled from the actual
+    /// Source-checked cold resources whose lifecycle is sampled from the
     /// placed PMGR before the native memory owners are constructed.
     T8112Cold(super::apple::t8112_cold::Plan),
     /// Direct MCC/AMCC/PTD frontend; keeps its full source graph and canonical
@@ -107,7 +107,7 @@ pub fn memory_locks(
     programmed
 }
 
-/// Report unsupported PMGR qualifications once, before a device is placed.
+/// Report unsupported PMGR validations once, before a device is placed.
 /// A diagnostic supplies no successful MMIO or lifecycle response.
 pub fn pmgr_qualifications(refusals: &[PmgrBankRefusal], log: &mut dyn FnMut(fmt::Arguments<'_>)) {
     for (index, refusal) in refusals.iter().enumerate() {
@@ -121,7 +121,7 @@ pub fn pmgr_qualifications(refusals: &[PmgrBankRefusal], log: &mut dyn FnMut(fmt
     }
 }
 
-/// Paths qualified by immutable source identity and bundle admission. Keeping
+/// Paths checked by immutable source identity and bundle admission. Keeping
 /// CLPC unavailable is a documented degradation, not a successful controller.
 pub fn clpc_absence(hidden: &[String], log: &mut dyn FnMut(fmt::Arguments<'_>)) {
     for (index, path) in hidden.iter().enumerate() {
@@ -178,8 +178,8 @@ pub fn devices<C: ConsoleSink + 'static>(
     devices_with_memory(board, console, inputs, None, log)
 }
 
-/// Mount the ordinary board around actual native memory owners. Callers must
-/// retain their registered RAM and close all native/host writers before guest
+/// Mount the ordinary board around native memory owners. Callers must
+/// keep their registered RAM and close all native/host writers before guest
 /// entry. No legacy memory constructor is used when native owners are supplied.
 pub fn devices_with_memory<C: ConsoleSink + 'static>(
     board: &Board,
@@ -285,7 +285,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         // A newly created Stela PMIC starts with its own oscillator origin
         // and no pending native fault or off-to-wake events. These are explicit
         // cold resource inputs, not Apple persistent/reset-state measurements.
-        // Retained PMIC resources must instead supply their actual history.
+        // PMIC resources must instead supply their history.
         let history = spmi
             .pmus
             .iter()
@@ -421,7 +421,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             blocks.len()
         ));
     }
-    // The display's PTD update view must borrow this actual publication bank,
+    // The display's PTD update view must borrow this publication bank,
     // before a broad display container can claim any overlapping bytes.
     if let Some(memory) = memory {
         match memory {
@@ -724,7 +724,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_gfx(gfx, build)?;
     }
     // Finalize only after every native constructor, including SGX's final
-    // overlapping-window placement, has registered its actual banks.
+    // overlapping-window placement, has registered its banks.
     if let Some(states) = board.power_states.as_ref() {
         let retention = board
             .darts

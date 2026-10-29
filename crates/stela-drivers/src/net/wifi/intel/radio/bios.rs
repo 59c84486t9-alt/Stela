@@ -2,7 +2,7 @@
 // Copyright (C) 2021-2026 Intel Corporation
 //! Pure packed UEFI radio configuration observations from fw/uefi.{c,h}.
 //! These parsers prove no evaluated GLAI, locked-variable source preference,
-//! actual ACPI fallback, vendor authenticity, programmed power or RF authority.
+//! ACPI fallback, vendor authenticity, programmed power or RF permission.
 use crate::bytes::le32;
 const MAX_RAW_BYTES: usize = 4096;
 pub mod power_tables;
@@ -63,7 +63,7 @@ pub struct Scalar<'a> {
 }
 impl<'a> Scalar<'a> {
     /// Source WRDD/ECKV/WBEM/SPLC revision0 packed prefix. Trailing data is
-    /// retained within the explicit native 4 KiB bound, not silently discarded.
+    /// within the explicit native 4 KiB bound, not silently discarded.
     pub fn parse(kind: ScalarKind, raw: &'a [u8]) -> Result<Self, Error> {
         prefix(raw, 5, 0)?;
         let raw_value = le32(raw, 1);
@@ -122,7 +122,7 @@ impl<'a> GeneralConfiguration<'a> {
     pub fn raw(self) -> &'a [u8] {
         self.raw
     }
-    /// The whole 32-entry source package is retained, including entries the
+    /// The whole 32-entry source package is held, including entries the
     /// current driver does not interpret. This is not a valid-function grant.
     pub fn raw_function(self, index: usize) -> Option<u32> {
         (index < 32).then(|| le32(self.raw, 1 + index * 4))
@@ -133,7 +133,7 @@ impl<'a> GeneralConfiguration<'a> {
     pub fn source_function_bitmap(self) -> u32 {
         self.raw_function_bitmap() | 1
     }
-    /// Exact source supported-function range, forced cached query bit and
+    /// Source supported-function range, forced cached query bit and
     /// unsupported function 5 behavior. Missing data never becomes zero.
     pub fn function(self, index: u8) -> Result<u32, Error> {
         Self::supported(index)?;

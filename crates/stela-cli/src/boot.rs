@@ -31,7 +31,7 @@ const RAMDISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const RESTORE_ENVIRONMENT: OsEnvironment = OsEnvironment::DarwinosRamdisk;
 /// The console boot-args when `--boot-args` gives none: verbose boot, with
 /// the kernel console and panic text on the modeled `uart0`, so every run's
-/// log retains the guest's own account of its boot.
+/// log keeps the guest's own account of its boot.
 const DEFAULT_BOOT_ARGS: &str = "-v serial=3 serial-device-name=uart0";
 /// The boot-args a restore host has iBoot pass to the restore ramdisk
 /// (idevicerestore `restore.c`): the ramdisk root, NAND reformat permission,
@@ -1186,7 +1186,7 @@ mod tests {
             Some(FirmwareBootCommand::TetheredRestore)
         );
         assert_eq!(update.options(None).unwrap().root, Some(Root::Ramdisk));
-        // Merely overriding the environment and arguments does not claim
+        // Overriding the environment and arguments does not claim
         // that an iBEC image was received from a restore host.
         let manual = Line::try_parse_from([
             "prepare",

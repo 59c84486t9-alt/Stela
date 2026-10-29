@@ -1,4 +1,4 @@
-//! Original RM global page facts from an actual canonical RAM provider.
+//! Original RM global page facts from a canonical RAM provider.
 //! This publishes metadata only, never RAM, cache policy or RM readiness.
 use crate::bus::dma::memory::{MemoryError, PageGeometry, PageSource};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -87,18 +87,18 @@ pub fn installed() -> Result<PageGeometry, Error> {
 }
 
 /// Publish once before any original RM/native page-fact consumer runs. Matching
-/// repeats query the actual source but do not write the C data again. Unknown
+/// repeats query the source but do not write the C data again. Unknown
 /// providers, concurrent installation and conflicting profiles explicitly fail.
 /// Multi-granule profiles are unsupported by the current native page producer
-/// and fail before publication; the actual source profile is never narrowed.
+/// and fail before publication; the source profile is never narrowed.
 /// No reset/uninstall is provided: all native callers share these original globals.
 ///
 /// # Safety
-/// `source` must be the actual native RAM provider, with truthful immutable
+/// `source` must be the native RAM provider, with truthful immutable
 /// geometry for every RM device using these facts. Exclude all original C/RM
 /// callers throughout the initial installation; plain original global reads
 /// must never race these writes. Keep the native profile stable for the entire
-/// RM lifetime, including every allocation/mapping/retained quarantine. Calls
+/// RM lifetime, including every allocation/mapping/kept quarantine. Calls
 /// obey the provider's real process/context rules and cannot unwind or reenter
 /// native RM. This does not establish a heap, physical mapping, cache policy,
 /// DMA domain, IRQ context or complete RM initialization.
@@ -169,7 +169,7 @@ pub(super) mod tests {
     }
 
     /// Original 16KiB-native RAM models run unchanged in fresh processes instead of
-    /// changing global native geometry while other 4KiB models retain allocations.
+    /// changing global native geometry while other 4KiB models keep allocations.
     pub(crate) fn separate_model_process(test: &str, shift: u8) -> bool {
         const VARIABLE: &str = "STELA_NVIDIA_PAGE_GEOMETRY_MODEL";
         if let Ok(value) = std::env::var(VARIABLE) {

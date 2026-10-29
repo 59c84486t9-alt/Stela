@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! F12 descriptor-qualified contact input. Raw object/tool values and the
-//! complete actual packet remain available to the native input consumer.
+//! F12 descriptor-checked contact input. Raw object/tool values and the
+//! complete packet remain available to the native input consumer.
 use super::{
     Error, Function,
     descriptor::Descriptor,

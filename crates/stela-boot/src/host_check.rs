@@ -164,7 +164,7 @@ impl Timing {
 
 /// What the check takes from the firmware, handed to [`run`].
 struct Machine {
-    /// Actual activated table/catalog owner; no hardware grant from metadata.
+    /// Activated table/catalog owner; no hardware grant from metadata.
     active_tables: Option<paging::ActivatedTables>,
     config_prepared: Option<paging::config::Prepared>,
     config_source: Option<paging::config::Source>,
@@ -292,7 +292,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
             .ok_or("native DMA fixture needs PCI discovery")?;
         // This is now scoped protocol discovery and copied DATA only. Keep
         // application TPL: PCI_IO/handle/pool services may allocate internally.
-        // Actual destructive BAR sizing moved after EBS and device quiescence.
+        // Destructive BAR sizing moved after EBS and device quiescence.
         let prepared = crate::native_dma::diagnostic::Prepared::prepare(
             handoff,
             machine.options.native_dma_isolation_check,
@@ -376,7 +376,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
             .active_tables
             .as_ref()
             .unwrap_or_else(|| output::fatal("actual native root missing"));
-        // SAFETY: this exact bounded TCG HostCheck path owns the actual retained
+        // SAFETY: this exact bounded TCG HostCheck path owns the kept
         // root and firmware-transferred config/controller inventory; no AP or
         // guest executes, and every pre-EBS accessor has ended.
         let source =
@@ -441,7 +441,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
                     error,
                 );
                 // The unit/requester may be in an uncertain DMA state. Unit
-                // and lease Drop retained its resources; do not resume probe.
+                // and lease Drop kept its resources; do not resume probe.
                 output::fatal("native DMA fixture failed; normal probing inhibited");
             }
         }
@@ -716,7 +716,7 @@ fn enabled(ticks: u64, mut done: impl FnMut() -> bool) -> u64 {
 
 extern "sysv64" fn interrupt(frame: &mut Frame, _saved: &interrupts::SavedState<'_>) {
     let _configuration_interrupt = paging::config::Interrupt::enter();
-    // SAFETY: unchanged IDT/IST entry supplies this actual hardware frame.
+    // SAFETY: unchanged IDT/IST entry supplies this hardware frame.
     if unsafe { crate::native_irq::dispatch_frame(frame.vector as u8, frame.rsp as usize) } {
         return;
     }

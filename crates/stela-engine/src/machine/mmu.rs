@@ -107,7 +107,7 @@ fn within(base: u64, bytes: u64, (first, last): (u64, u64)) -> bool {
 impl Ctrr {
     /// Apply physical CTRR protection after successful translation. A denied
     /// store or privileged fetch reports the level-3 Permission fault XNU
-    /// expects; the caller retains the original virtual fault address. Clear
+    /// expects; the caller keeps the original virtual fault address. Clear
     /// removed rights so a cached allowed read cannot admit a later store.
     fn limit(&self, mut translation: Translation, access: Access, requester: Requester) -> Outcome {
         let privileged = self
@@ -642,7 +642,7 @@ pub fn translate_checked(
 }
 
 /// Translate one reached MemSingle part after the caller checked the original
-/// Mem access's SCTLR alignment rules. Preserve Mem's actual `aligned` value
+/// Mem access's SCTLR alignment rules. Preserve Mem's `aligned` value
 /// through both stages, ahead of their permission checks; splitting must not
 /// reinterpret this part as a new whole instruction.
 pub fn translate_checked_part(

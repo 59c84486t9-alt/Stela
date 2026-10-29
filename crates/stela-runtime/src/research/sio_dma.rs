@@ -5,12 +5,12 @@
 //! six slots. `_startDMACommand` (0x2e66764) writes flags/count at +56/+60;
 //! `_segmentFunction` (0x2e67538) emits {u64 IOVA,u32 size} entries at +72.
 //! `deliverMessage` (0x2e677e0) consumes terminal REPORT 0x68, bit31 set,
-//! with the original tag and actual progress in bits63:32. SIO firmware TX
+//! with the original tag and progress in bits63:32. SIO firmware TX
 //! progress (VA0x17f8) excludes bytes still owned by its shim FIFO.
 //!
 //! This implements real DMA into a bounded peripheral FIFO, not sample
 //! playback or a successful SIO firmware handshake. Callers must provide the
-//! actual DART stream and consume FIFO data explicitly; no data is discarded
+//! DART stream and consume FIFO data explicitly; no data is discarded
 //! to manufacture progress. Full SIO setup/control, mailbox dispatch, receive
 //! channels and DPA physical reset ownership remain separate requirements.
 //! Consequently this boundary is not yet registered as complete PMGR coverage.
@@ -34,7 +34,7 @@ const REPORT: u64 = 0x68 << 16;
 const REPORT_TERMINAL: u64 = 1 << 31;
 
 /// The recovered pool geometry is explicit. Other firmware ABIs, including
-/// the public older 48-byte descriptor, must select their own qualified layout.
+/// the public older 48-byte descriptor, must select their own checked layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorLayout {
     ScatterGather72,
@@ -50,8 +50,8 @@ pub struct Pool {
 }
 
 /// A terminal descriptor report, including an explicit short transfer after
-/// software termination. Its count is the bytes actually consumed by the
-/// peripheral, not merely copied into the shim FIFO or audibly played.
+/// software termination. Its count is the bytes consumed by the
+/// peripheral, not copied into the shim FIFO or audibly played.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Completion {
     pub channel: u8,
@@ -249,8 +249,8 @@ impl Channel {
     }
 
     /// Recovered per-channel CONFIGURE(5)/ISSUE(6)/TERMINATE(8) request. The ACK denotes
-    /// actual configuration or descriptor ownership; REPORT is separate and
-    /// appears only after actual peripheral delivery or explicit termination.
+    /// configuration or descriptor ownership; REPORT is separate and
+    /// appears only after peripheral delivery or explicit termination.
     /// Global SIO initialization is not faked.
     pub fn command(
         &mut self,
@@ -289,8 +289,8 @@ impl Channel {
     /// original command ownership to finish. `deliverMessage` turns a short
     /// terminal byte count into an explicit underrun. Firmware VA0x17f8
     /// subtracts current TX FIFO occupancy from progress; stop VA0x31c0..31d4
-    /// samples that value. Retain committed but undelivered bytes, inhibit
-    /// further FIFO consumption and report actual delivery exactly once.
+    /// samples that value. Keep committed but undelivered bytes, inhibit
+    /// further FIFO consumption and report delivery exactly once.
     pub fn terminate(&mut self) -> Result<(), Error> {
         if !self.available() {
             return Err(Error::Unsupported(
@@ -434,7 +434,7 @@ impl Channel {
         Ok(moved)
     }
 
-    /// Actual peripheral consumption. Supply/clock pauses retain samples and
+    /// Peripheral consumption. Supply/clock pauses keep samples and
     /// make no forward progress; no timer silently discards buffered output.
     pub fn consume(&mut self, output: &mut [u8]) -> usize {
         if !self.active() {
@@ -473,7 +473,7 @@ impl Channel {
         Ok(())
     }
 
-    /// Retained suspension is real, but a PMGR shim reset must not discard
+    /// Suspension is real, but a PMGR shim reset must not discard
     /// SIO firmware-owned commands, report delivery or FIFO samples. Until
     /// physical reset/cancellation is recovered, destructive edges refuse.
     pub fn check_lifecycle(&self, state: LifecycleState) -> Result<(), Error> {
@@ -902,7 +902,7 @@ mod tests {
             hex::encode(Sha256::digest(&bytes)),
             "06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d"
         );
-        // Exact original instructions are source-integrity evidence for this
+        // Original instructions are source-integrity evidence for this
         // ABI. Production dispatch never consults offsets or input hashes.
         for (offset, opcode) in [
             (0x2e660f4, 0x52800189),

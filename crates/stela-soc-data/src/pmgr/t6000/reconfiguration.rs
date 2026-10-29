@@ -44,7 +44,7 @@ struct Selected {
 }
 
 /// Borrowed original image. It cannot be replaced while any returned program
-/// is borrowed, and every extent is checked against these same actual bytes.
+/// is borrowed, and every extent is checked against these same bytes.
 pub struct Image<'a> {
     bytes: &'a [u8],
     profiles: Vec<Selected>,
@@ -425,10 +425,10 @@ mod tests {
         assert_eq!(u32_at(&data, 0x1f270), Ok(0x250006));
         assert_eq!(u64_at(&data, 0x1f288 + 8), Ok(0xf0));
         assert_eq!(u64_at(&data, 0x1f288 + 16), Ok(0xf0));
-        // Exact native value1 polarity and execute/skip dispatch. A caller
+        // Native value1 polarity and execute/skip dispatch. A caller
         // cannot transfer the opposite predicate from another generation.
         for (offset, opcode) in [
-            (0x1311c, 0xea13011f), // TST actual feature word, mask
+            (0x1311c, 0xea13011f), // TST feature word, mask
             (0x13120, 0x1a9f17e0), // CSET EQ for source operand1
             (0x12ae0, 0x7100067f), // predicate == 1
             (0x12ae8, 0x94000024), // execute nested source row
@@ -438,6 +438,6 @@ mod tests {
         }
         assert_eq!(u64_at(&llb, 0x1ae790), Ok(0x20600201));
         // Physical PS values, trigger events and native terminal semantics are
-        // deliberately absent from this input type.
+        // absent from this input type.
     }
 }

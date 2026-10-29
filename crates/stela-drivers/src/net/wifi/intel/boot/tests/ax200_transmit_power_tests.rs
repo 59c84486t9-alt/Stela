@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Actual same-owner MAC0 ceiling programming; no binding or RF permission.
+//! Same-owner MAC0 ceiling programming; no binding or RF permission.
 use super::*;
 use crate::net::wifi::intel::command::{Command, Id};
 const POWER: Id = Id {

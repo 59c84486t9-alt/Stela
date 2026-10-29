@@ -49,7 +49,7 @@ impl Progress {
     fn observe(&mut self, position: u32, ioc: bool, now: u64) -> Result<(), Error> {
         let elapsed = now.wrapping_sub(self.time);
         // Refuse ambiguous full laps using an independent monotonic clock.
-        // This is deliberately conservative if the device temporarily stalled.
+        // This is conservative if the device temporarily stalled.
         let possible = elapsed
             .saturating_mul(self.bytes_per_second)
             .div_ceil(1_000_000)
@@ -101,7 +101,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         );
         let count = stream.bdl_entries;
         let base = stream_base(id.descriptor_index());
-        // Fresh explicit start is an actual stream descriptor reset, not an
+        // Fresh explicit start is a stream descriptor reset, not an
         // assumed zero coordinate or continuation of stale PCM/IOC ownership.
         self.reset_descriptor(id.descriptor_index())?;
         self.registers.write8(base + SD_CTL + 2, id.tag() << 4);
@@ -120,9 +120,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 offset: base + 0x10,
             });
         }
-        // Actual FIFO capacity plus one complete link packet is excluded from
+        // FIFO capacity plus one complete link packet is excluded from
         // the writable next-lap window. LPIB is the transport coordinate, never
-        // a FIFO-corrected audible position used to fabricate extra free RAM.
+        // a FIFO-corrected audible position used to invent extra free RAM.
         let guard = u64::from(fifo) + 1 + format.packet_bytes()? as u64;
         let progress = Progress::new(
             period,
@@ -170,13 +170,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Refill exactly the next actually completed period while DMA runs. RAM
-    /// stays owned by this driver and actual coherent HDA allocation. No client
+    /// Refill exactly the next completed period while DMA runs. RAM
+    /// stays owned by this driver and coherent HDA allocation. No client
     /// pointer, cache-sync-as-ownership or repeated stop/start is used.
     ///
-    /// Call often enough to keep unread fresh PCM ahead of the actual FIFO.
+    /// Call often enough to keep unread fresh PCM ahead of the FIFO.
     /// BCIS is coalesced, so elapsed >= one ring, a consumed queue, or hardware
-    /// entering the copy window causes PlaybackUnderrun and actual stop. An
+    /// entering the copy window causes PlaybackUnderrun and stop. An
     /// unbounded preemption can permit a partial late device read; failure does
     /// NOT promise rollback, atomic audio or a successfully committed period.
     pub fn refill_hdmi_period(
@@ -208,7 +208,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let start = (progress.refilled % progress.ring as u64) as usize;
         let sequence = progress.refilled / period as u64;
         // Checked aligned volatile words, not a mutable slice alias over active
-        // device RAM. Controller::new's actual coherent RAM grant is mandatory.
+        // device RAM. Controller::new's coherent RAM grant is mandatory.
         for (word, bytes) in pcm.as_chunks::<4>().0.iter().enumerate() {
             self.streams[usize::from(id.descriptor_index())]
                 .as_mut()

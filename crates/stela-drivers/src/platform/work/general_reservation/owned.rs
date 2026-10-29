@@ -3,14 +3,14 @@ use super::*;
 mod cold;
 pub use cold::{ColdStackPreparation, PinnedColdStackPreparation, StackPinError};
 
-/// Retains a genuine compatible idle worker and job slot without a process-scope
-/// borrow. The lifetime pins the actual Runtime and its StackBacking owners;
+/// Keeps a compatible idle worker and job slot without a process-scope
+/// borrow. The lifetime pins the Runtime and its StackBacking owners;
 /// this is not an Arc<Runtime>, stack pointer grant, ticket or Linux task.
 ///
-/// Explicit cancel requires fresh actual authority for the same creator job.
-/// Drop cannot obtain that authority and therefore closes and quarantines the
+/// Explicit cancel requires fresh permission for the same creator job.
+/// Drop cannot obtain that permission and therefore closes and quarantines the
 /// captured queue atomically, without accessing the affine Runtime. Forgetting
-/// the value retains its markers/counts and prevents creator return/retirement.
+/// the value keeps its markers/counts and prevents creator return/retirement.
 #[must_use = "cancel with fresh entered authority; Drop retains and closes admission"]
 pub struct OwnedGeneralEscrow<'runtime, const N: usize> {
     runtime: Pin<&'runtime Runtime<N>>,
@@ -48,13 +48,13 @@ impl<'runtime, const N: usize> GeneralReservation<'runtime, '_, N> {
                 .checked_add(1)
                 .ok_or(WorkError::Exhausted)?;
             let creator_worker = self.runtime.current.get();
-            // SAFETY: current() validated this actual creator frame twice; IF0
+            // SAFETY: current() validated this creator frame twice; IF0
             // stops peers and no callback/switch spans this bounded field read.
             let count = unsafe { (*self.runtime.task(creator_worker)).owned_escrows }
                 .checked_add(1)
                 .ok_or(WorkError::Exhausted)?;
             // No fallible operation follows the exact ownership transfer.
-            // SAFETY: the private matching worker/nonce and actual creator were
+            // SAFETY: the private matching worker/nonce and creator were
             // validated under the same IF0 queue guard; no aliases survive.
             unsafe {
                 (*self.runtime.task(self.worker)).state = TaskState::Escrow;
@@ -79,7 +79,7 @@ impl<'runtime, const N: usize> GeneralReservation<'runtime, '_, N> {
                 _local: PhantomData,
             })
         })();
-        // SAFETY: exact enclosing save_disable flags; all task/queue borrows ended.
+        // SAFETY: enclosing save_disable flags; all task/queue borrows ended.
         unsafe { self.queue.cpu.restore(flags) };
         result
     }
@@ -105,8 +105,8 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
         {
             return Err(WorkError::CorruptContext);
         }
-        // SAFETY: caller proved fresh actual authority and exact creator at IF0;
-        // both constructor-captured workers stay retained and stopped here.
+        // SAFETY: caller proved fresh permission and exact creator at IF0;
+        // both constructor-captured workers stay held and stopped here.
         let (task, creator) = unsafe {
             (
                 &*self.runtime.task(self.worker),
@@ -158,9 +158,9 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
         unsafe { self.queue.cpu.restore(flags) };
         result
     }
-    /// Release only this unpublished exclusion under fresh actual authority for
+    /// Release only this unpublished exclusion under fresh permission for
     /// its original creator job. A closed queue still allows exact cleanup;
-    /// stale, foreign or uncertain ownership instead retains the whole executor.
+    /// stale, foreign or uncertain ownership instead keeps the whole executor.
     pub fn cancel(mut self, entered: &dyn EnteredProcess) -> Result<(), WorkError> {
         let result = self.rollback(entered);
         if result.is_err() {
@@ -169,8 +169,8 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
         result
     }
     fn abandon(&mut self) {
-        // Only the independently retained atomic queue view is touched. Never
-        // inspect Runtime/stack metadata without fresh actual entered authority.
+        // Only the independently atomic queue view is touched. Never
+        // inspect Runtime/stack metadata without fresh entered permission.
         self.queue.abandoned.store(true, Ordering::Release);
         quarantine();
         self.live = false;

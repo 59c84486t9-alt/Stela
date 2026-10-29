@@ -1,5 +1,5 @@
 //! Optional selected-recipe metadata. This is separate from the serialized
-//! native artifact and never supplies execution or recovery authority.
+//! native artifact and never supplies execution or recovery permission.
 use alloc::vec::Vec;
 
 /// Counts emitted guest-register-frame memory operands on covered successful
@@ -23,7 +23,7 @@ pub struct RegisterTraffic {
     pub nzcv_pressure_stores: u64,
     pub nzcv_boundary_stores: u64,
     pub nzcv_direct_stores: u64,
-    /// Peak retained GPR/NZCV values, aggregated by maximum rather than sum.
+    /// Peak kept GPR/NZCV values, aggregated by maximum rather than sum.
     pub peak_resident: u64,
 }
 

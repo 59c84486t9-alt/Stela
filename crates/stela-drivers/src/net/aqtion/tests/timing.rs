@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual checked provider admission and reset/PM failure ownership.
+//! Checked provider admission and reset/PM failure ownership.
 use super::*;
 
 fn native_clock(

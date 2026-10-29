@@ -163,7 +163,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         &rollback,
         pc,
     );
-    // Complex operations retain guest RC and fresh IXC under either AH value.
+    // Complex operations keep guest RC and fresh IXC under either AH value.
     // The shared frame initialized all inactive result lanes to zero; NEP is ignored.
     lanes::commit_inexact(code);
     commit(code, operand.destination, lanes::LEFT);

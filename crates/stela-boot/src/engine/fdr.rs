@@ -56,7 +56,7 @@ impl<'a> Placement<'a> {
 }
 
 /// One existing handoff slot carries placement plus selected diagnostic. No
-/// extra file slot is consumed, and committed state retains the seed identity.
+/// extra file slot is consumed, and committed state keeps the seed identity.
 pub fn prepare(
     partition: [u8; 16],
     path: &str,
@@ -77,7 +77,7 @@ pub fn prepare(
     let diagnostic = snapshot.as_deref().unwrap_or(seed);
     let bytes = HEADER + path.len() + diagnostic.len();
     let physical = firmware::pages(bytes.div_ceil(PAGE)).map_err(String::from)?;
-    // SAFETY: fresh loader pages, retained for the whole boot.
+    // SAFETY: fresh loader pages, kept for the whole boot.
     let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, bytes) };
     buffer.fill(0);
     buffer[..8].copy_from_slice(MAGIC);

@@ -17,13 +17,13 @@ pub(in crate::net::wifi::mediatek::bootstrap::client) struct BaSubmission<C: 'st
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Consume this original authenticated unicast BA action for the real OS's
     /// negotiated management service. Ordinary RX only reports the observation.
-    /// Refusal retains the original envelope in `received`; successful accepted
+    /// Refusal keeps the original envelope in `received`; successful accepted
     /// consumption takes it. A full bounded action queue never discards RX.
     /// Native queue programming and responses still await separate guarded
-    /// progress and actual firmware ACKs; no callback return invents completion.
+    /// progress and firmware ACKs; no callback return invents completion.
     ///
     /// # Safety
-    /// Inherit configure_modern's exact requester/authority/revocation contract.
+    /// Inherit configure_modern's requester/permission/revocation contract.
     /// The real OS explicitly authorizes this original action and subsequent
     /// deferred BA responses, timers and teardown under its negotiated protected
     /// management policy. Session installation alone supplies no such policy.
@@ -53,7 +53,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::Busy);
         }
         s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        // SAFETY: actual authenticated original envelope, exact Station, both
+        // SAFETY: authenticated original envelope, exact Station, both
         // current providers and explicitly supplied negotiated OS policy.
         let action = unsafe {
             authority.consume_association(admission, &mut s.station, |station, _| {
@@ -78,7 +78,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// begin remains refused when a management transport is attached.
     ///
     /// # Safety
-    /// Same retained requester/current policy and negotiated OS authorization
+    /// Same kept requester/current policy and negotiated OS authorization
     /// as receive_management_block_ack, including deferred automatic responses
     /// and local DELBA. No PMF, SAE or 6GHz negotiation is inferred here.
     pub unsafe fn begin_management_block_ack<H: HardwarePolicy, O: OsPolicy>(
@@ -106,7 +106,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::Busy);
         }
         s.ba_actions.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        // SAFETY: same exact original Station and both current policy guards.
+        // SAFETY: same original Station and both current policy guards.
         let action = unsafe {
             authority.consume_association(admission, &mut s.station, |station, _| {
                 station.begin_authenticated_tx_block_ack(tid, timeout_tu, now)

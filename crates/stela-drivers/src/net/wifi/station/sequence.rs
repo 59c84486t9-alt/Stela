@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux net/mac80211/tx.c ieee80211_tx_next_seq/ieee80211_tx_h_sequence.
-// Original mac80211 notices are retained in THIRD_PARTY.md.
+// Original mac80211 notices are held in THIRD_PARTY.md.
 //! Per-station software QoS sequence input, independent of on-air assignment.
 
 use super::{AssociationContext, Error, Phase, Station};
@@ -21,11 +21,11 @@ impl Station {
         Ok(usize::from(tid))
     }
 
-    /// Actual next software sequence input, never an observed on-air sequence.
+    /// Next software sequence input, never an observed on-air sequence.
     /// A preview is not allocation, queue synchronization or a BA agreement.
     /// For ADDBA, native code must first block this TID, synchronize its real
-    /// preparation/publication users, and retain that block through the actual
-    /// source exchange. Preview intentionally remains available while blocked.
+    /// preparation/publication users, and keep that block through the
+    /// source exchange. Preview remains available while blocked.
     pub fn next_qos_sequence(&self, context: &AssociationContext, tid: u8) -> Result<u16, Error> {
         let index = self.qos_sequence_index(context, tid)?;
         Ok(self.qos_sequence[index])
@@ -34,12 +34,12 @@ impl Station {
     /// Consume one host-prepared sequence for a real unicast QoS data plan.
     /// Call only after all other fallible preparation succeeds, and put this
     /// number in the MAC header (shifted left four, with zero fragment bits).
-    /// Device-owned air assignment and the actual descriptor fields remain
+    /// Device-owned air assignment and the descriptor fields remain
     /// independent: this does not enable SN_VALID or prove the on-air value.
     ///
     /// Consumption is not rolled back for a failed publication/air outcome.
     /// Current private association and TID blocking are checked again here;
-    /// actual publication still needs its own context/radio/key validation.
+    /// publication still needs its own context/radio/key validation.
     pub fn allocate_qos_sequence(
         &mut self,
         context: &AssociationContext,
@@ -98,7 +98,7 @@ mod tests {
         assert_eq!(station.next_qos_sequence(&context, 3), Ok(0));
         assert_eq!(station.next_qos_sequence(&context, 3), Ok(0));
         assert_eq!(station.allocate_qos_sequence(&context, 3), Ok(0));
-        // A caller may discard a prepared plan; no TX status is fabricated here.
+        // A caller may discard a prepared plan; no TX status is invented here.
         assert_eq!(station.allocate_qos_sequence(&context, 3), Ok(1));
         assert_eq!(station.next_qos_sequence(&context, 3), Ok(2));
         assert_eq!(station.next_qos_sequence(&context, 4), Ok(0));

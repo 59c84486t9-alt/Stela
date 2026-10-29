@@ -4,8 +4,8 @@
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! constructor10066f0..10067b8, selected vtable1035608, initialize1026008,
 //! dispatch1026194, signal1026280/10263f8, registry10262b4/1026328.
-//! Exact fresh static evidence: memory/native-interrupts-r1. Firmware is never
-//! executed. Required actual device/line/callback owners have no defaults.
+//! Fresh static evidence: memory/native-interrupts-r1. Firmware is never
+//! executed. Required device/line/callback owners have no defaults.
 mod auxiliary;
 pub mod device;
 mod owner;
@@ -36,7 +36,7 @@ pub struct Placement {
 }
 impl Placement {
     ///1044650 is relocatable:1006714..28 adds actual1079fb0. Zero is allowed
-    /// only when it is the actual declared runtime relocation, never a default.
+    /// only when it is the declared runtime relocation, never a default.
     pub fn t8112(relocation: u64) -> Result<Self, Error> {
         let address = 0x23b0c0000u64
             .checked_add(relocation)
@@ -54,9 +54,9 @@ impl Placement {
     }
 }
 
-/// Actual source software configuration or a retained observation of it, not
+/// Source software configuration or an observation of it, not
 /// controller reset/enable state. The original global BSS image has zero bytes
-/// at P28/P8c; runtime overrides require their actual producers. Only bit0 is
+/// at P28/P8c; runtime overrides require their producers. Only bit0 is
 /// interpreted. Snapshot-enabled lifecycle paths require real saved words.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SoftwareConfiguration {
@@ -64,15 +64,15 @@ pub struct SoftwareConfiguration {
     pub save_flags: u8,
 }
 
-/// Required actual native device, ordering and CPU IRQ route. Numeric aperture
-/// matching alone does not qualify an independently copied register bank.
+/// Required native device, ordering and CPU IRQ route. Numeric aperture
+/// matching alone does not check an independently copied register bank.
 /// Refused must be effect-free; every ambiguous MMIO error is Uncertain.
 pub trait Device {
     fn placement(&self) -> Placement;
     fn read(&mut self, offset: u64, access: &mut Access<'_>) -> Result<u32, Error>;
     fn write(&mut self, offset: u64, value: u32, access: &mut Access<'_>) -> Result<(), Error>;
     fn order(&mut self, access: &mut Access<'_>) -> Result<(), Error>;
-    /// Actual native ISR_EL1 bit7 route after one dispatched event. Never an
+    /// Native ISR_EL1 bit7 route after one dispatched event. Never an
     /// expected mask, AP IRQ, queued request or guessed cache-counter event.
     fn irq_pending(&mut self, access: &mut Access<'_>) -> Result<bool, Error>;
 }
@@ -81,9 +81,9 @@ pub trait Route {
     fn irq_pending(&mut self, access: &mut Access<'_>) -> Result<bool, Error>;
 }
 
-/// Adapter retaining actual MMIO and native line/order owners. `new` stores a
-/// declared placement; it grants no actual mapped-borrow capability. Root must
-/// qualify the same bus-owned view and native route when composing the owner.
+/// Adapter keeping MMIO and native line/order owners. `new` stores a
+/// declared placement; it grants no mapped-borrow capability. Root must
+/// check the same bus-owned view and native route when composing the owner.
 /// Bounds checks below establish only the declared aperture, never identity.
 pub struct Mapped<M, R> {
     placement: Placement,
@@ -140,7 +140,7 @@ impl<M: MmioDevice, R: Route> Device for Mapped<M, R> {
     }
 }
 
-/// Actual retired source return or event outcome; none denotes native command
+/// Retired source return or event outcome; none denotes native command
 /// ACK, a device event producer, controller readiness or whole boot admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -661,7 +661,7 @@ mod tests {
         };
         assert_eq!(wide(0x1044650), 0x23b0c0000);
         assert_eq!(wide(0x1044658), 0x20000);
-        assert_eq!(word(0x1044660), 1); // Actual relocation is mandatory.
+        assert_eq!(word(0x1044660), 1); // Relocation is mandatory.
         assert_eq!(word(0x1044680), 1);
         assert_eq!(word(0x1044684), 2); // target1,type2.
         assert_eq!(wide(0x1035608 + 0x28), 0x1026280);

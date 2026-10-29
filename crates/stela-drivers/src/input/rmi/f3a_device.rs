@@ -10,7 +10,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
     pub fn f3a_capabilities(&self) -> impl Iterator<Item = &f3a::Capabilities> {
         self.f3a.iter().map(|engine| &engine.capabilities)
     }
-    /// Read actual F3A existence/direction bitmaps before enabling input IRQs.
+    /// Read F3A existence/direction bitmaps before enabling input IRQs.
     /// Firmware wiring and logical button/trackstick mapping remain frontend
     /// responsibilities; no F3A direction controls are changed.
     pub fn initialize_f3a(&mut self) -> Result<(), Error> {

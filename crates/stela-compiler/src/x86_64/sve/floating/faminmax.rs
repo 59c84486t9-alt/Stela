@@ -52,7 +52,7 @@ pub(crate) fn emit(
     )?;
     let mut failures = Vec::new();
     // Full-wrapper comparisons cover these static scopes without Full A64.
-    // EBF16/RPRES do not affect this emitter; other scopes retain baseline.
+    // EBF16/RPRES do not affect this emitter; other scopes keep baseline.
     let selection_target = if !features.full_a64() {
         match (operand.format, length.bytes()) {
             (Format::Single, 16 | 64 | 256) if target.supports(TargetCpu::Sse41) => {

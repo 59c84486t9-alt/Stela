@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Full single-link MT7925 modern station/BSS/EDCA and BA requests.
-//! Negotiated metadata encodes capabilities; only the actual current shared
+//! Negotiated metadata encodes capabilities; only the current shared
 //! association owner and matching native completions can install these bytes.
 use super::{Error, Profile, put16, put32, tlv};
 use crate::net::wifi::{
@@ -10,7 +10,7 @@ use crate::net::wifi::{
 };
 use alloc::vec::Vec;
 
-/// Actual selected operating channel, including the second center used by
+/// Selected operating channel, including the second center used by
 /// 80+80/320 and the disabled-subchannel bitmap. These are source channel
 /// numbers, not MHz or inferred regulatory permissions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,8 +29,8 @@ pub struct HeOperation {
     pub color_enabled: bool,
     pub color: u8,
 }
-/// Retains the exact validated local/peer provenance and operation. This is
-/// deliberately not an association, key, radio or applied-policy receipt.
+/// Keeps the exact validated local/peer provenance and operation. This is
+/// not an association, key, radio or applied-policy receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Configuration {
     negotiated: Negotiated,
@@ -89,7 +89,7 @@ impl Configuration {
         profile.validate_inner(true)?;
         // The pinned MT7925 local advertisement includes160MHz, not80+80;
         // is_320mhz_supported() explicitly admits onlyMT7927. Generic shared
-        // metadata can describe those widths without qualifying this device.
+        // metadata can describe those widths without checking this device.
         if matches!(negotiated.width, Width::Mhz80P80 | Width::Mhz320) {
             return Err(Error::UnsupportedWidth);
         }
@@ -159,7 +159,7 @@ impl Configuration {
         profile.bss_request_inner(enable, Some(self))
     }
     fn matches(&self, profile: Profile) -> Result<(), Error> {
-        // Recheck actual supplied resources/rates/antenna against this retained
+        // Recheck supplied resources/rates/antenna against this kept
         // metadata on every request, before any caller can publish it.
         Self::checked(
             profile,
@@ -269,12 +269,12 @@ impl Configuration {
         let (mode, ext) = bss_phy_mode(p.channel.band, n);
         out[4 + 25] = mode;
         out[4 + 30] = ext;
-        // QBSS WMM flag, sourced from the actual negotiated station WME state.
+        // QBSS WMM flag, sourced from the negotiated station WME state.
         let qos = find_tlv_mut(out, 4, 15).ok_or(Error::InvalidNegotiation)?;
         qos[4] = u8::from(n.wmm.is_some());
         if let Some(op) = self.operation.he {
             let h = tlv(out, 5, 16);
-            // Exact source defaults on actual parsed zero-valued operation
+            // Source defaults on parsed zero-valued operation
             // fields; these are firmware packet-extension/RTS values, no policy.
             put16(
                 h,
@@ -377,7 +377,7 @@ impl Configuration {
         super::recount(&mut out, 4);
         Ok(out)
     }
-    /// Separate actual source EHT puncture update, including a zero bitmap.
+    /// Separate source EHT puncture update, including a zero bitmap.
     pub fn puncture_request(&self, p: Profile) -> Result<Vec<u8>, Error> {
         self.matches(p)?;
         if self.negotiated.eht.is_none() {
@@ -417,7 +417,7 @@ fn bss_phy_mode(band: Band, n: &Negotiated) -> (u8, u8) {
     match band {
         Band::Ghz2 => (6 | ht << 3 | he << 6, eht << 1),
         Band::Ghz5 => (1 | ht << 4 | vht << 5 | he << 7, eht << 2),
-        // Source intentionally advertises A|AN|AC|AX5 on6GHz plus extension,
+        // Source advertises A|AN|AC|AX5 on6GHz plus extension,
         // independent of the invalid/absent HT/VHT IEs on that band.
         Band::Ghz6 => (
             0xb1,
@@ -469,7 +469,7 @@ fn validate_geometry(p: Profile, width: Width, op: Operation) -> Result<(), Erro
 }
 
 /// Source STA_REC_BA (recipient/originator), not an ADDBA exchange or reorder
-/// receipt. Caller must bind actual peer/TID/generation and retain the genuine
+/// receipt. Caller must bind peer/TID/generation and keep the
 /// reorder/token/key owners through the matching command and later drain.
 pub fn ba_request(
     p: Profile,
@@ -548,7 +548,7 @@ mod tests {
     }
     fn eht(width_bits: u8, role: Role, width320: bool) -> Vec<u8> {
         let mut data = vec![0; 11];
-        data[0] = 1 << 6; // Actual 2.4GHz max-MPDU selection; ignored elsewhere.
+        data[0] = 1 << 6; // 2.4GHz max-MPDU selection; ignored elsewhere.
         data[2] = if width320 { 2 } else { 0 };
         if width_bits & 2 != 0 {
             data.extend_from_slice(&[0x22, 0x22, 0x11]);
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(wire.mcs_80p80, None);
         let body = c.bss_request(p, true).unwrap();
         let he = field(&body, 4, 5);
-        // Full actual source initialization writes160 on2GHz, while source
+        // Full source initialization writes160 on2GHz, while source
         // zero-allocation leaves80+80 untouched. Wire absence is not either value.
         assert_eq!(&he[8..10], &wire.mcs_80.tx.to_le_bytes());
         assert_eq!(&he[10..12], &wire.mcs_80.tx.to_le_bytes());

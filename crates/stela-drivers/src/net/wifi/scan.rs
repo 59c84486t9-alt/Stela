@@ -5,8 +5,8 @@
 // 2013-2015 Intel Mobile Communications GmbH; 2016-2017 Intel Deutschland GmbH;
 // 2018-2025 Intel Corporation. See THIRD_PARTY.md.
 //! Bounded hardware-scan request lifetime. A request/command acknowledgement
-//! never means scan completion. Cancellation/timeout retains ownership until
-//! the actual completion and radio/request retirement are both established.
+//! never means scan completion. Cancellation/timeout keeps ownership until
+//! the completion and radio/request retirement are both established.
 
 use super::{Band, Channel};
 use alloc::vec::Vec;
@@ -17,7 +17,7 @@ pub mod six_ghz;
 static NEXT_SCAN: super::Identities = super::Identities::new();
 // Shared ceilings informed by initial AX200/210, MT7921/22/25, RTL8822CE/8852BE
 // sources. These are not capabilities: vendor encoders must enforce narrower
-// negotiated firmware limits and actual built-probe/reserved-page bounds.
+// negotiated firmware limits and built-probe/reserved-page bounds.
 pub(super) const MAX_SSIDS: usize = 4;
 pub(super) const MAX_SSID_BYTES: usize = 32;
 pub(super) const MAX_SIX_GHZ: usize = 64;
@@ -49,7 +49,7 @@ pub trait Policy {
 }
 
 /// A 6 GHz target [`six_ghz::second_part`] plans, as cfg80211_scan_6ghz does.
-/// RNR/PSC metadata selects firmware targets; it never grants probe authority.
+/// RNR/PSC metadata selects firmware targets; it never grants probe permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SixGhz {
     pub channel_index: usize,
@@ -78,7 +78,7 @@ impl Request {
     ) -> Result<Self, Error> {
         Self::with_six_ghz(channels, ssids, extra_elements, Vec::new())
     }
-    /// Explicit prepared 6GHz targets, retaining all source input fields. A
+    /// Explicit prepared 6GHz targets, keeping all source input fields. A
     /// vendor must implement their protocol or refuse before publication.
     pub fn with_six_ghz(
         channels: Vec<Channel>,
@@ -213,7 +213,7 @@ pub enum Outcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retirement {
-    /// Any accepted scan actually completed/aborted; operating-channel
+    /// Any accepted scan completed/aborted; operating-channel
     /// restoration (when applicable), DMA and old notification/deferred-user
     /// drain are proven. A never-submitted rejected request has no hardware
     /// scan to complete, but must likewise have no outstanding users.
@@ -236,7 +236,7 @@ pub struct Scanner {
 impl Scanner {
     /// Pure protocol state, not ownership of a physical radio. The vendor's
     /// single canonical radio owner serializes scans against association/data
-    /// channel work and retains this state until actual request retirement.
+    /// channel work and keeps this state until request retirement.
     pub fn new(local: crate::net::Mac) -> Result<Self, Error> {
         if local.is_multicast() || local.0 == [0; 6] {
             return Err(Error::Invalid("scan interface address"));
@@ -277,7 +277,7 @@ impl Scanner {
     }
 
     /// Caller supplies its real scan budget. This only grants a request ticket;
-    /// the actual firmware scan encoder/transport remains the vendor's job.
+    /// the firmware scan encoder/transport remains the vendor's job.
     pub fn begin(
         &mut self,
         request: Request,
@@ -304,9 +304,9 @@ impl Scanner {
         Ok(self.ticket)
     }
 
-    /// Recheck just before actual transport publication, serialized by the
+    /// Recheck just before transport publication, serialized by the
     /// canonical owner with cancellation and regulatory changes. This grants
-    /// no hardware acknowledgement. Expiration retains the cancelled request.
+    /// no hardware acknowledgement. Expiration keeps the cancelled request.
     pub fn validate_submission(
         &mut self,
         ticket: Ticket,
@@ -330,7 +330,7 @@ impl Scanner {
 
     /// Release a locally prepared request that never reached transport. The
     /// vendor owner must call submitted before handoff; once Submitted (or
-    /// cancelling/retiring), only actual completion/drain may retire the scan.
+    /// cancelling/retiring), only completion/drain may retire the scan.
     /// This records no invented firmware rejection or terminal outcome.
     pub(super) fn withdraw_unsubmitted(&mut self, ticket: Ticket) -> Result<Request, Error> {
         self.current(ticket)?;
@@ -344,7 +344,7 @@ impl Scanner {
         Ok(request)
     }
 
-    /// Mark actual transport handoff after validate_submission, within that
+    /// Mark transport handoff after validate_submission, within that
     /// same owner serialization; not firmware acceptance or completion.
     pub fn submitted(&mut self, ticket: Ticket) -> Result<(), Error> {
         self.current(ticket)?;
@@ -355,7 +355,7 @@ impl Scanner {
         Ok(())
     }
 
-    /// True means request actual cancellation from the vendor. No resources
+    /// True means request cancellation from the vendor. No resources
     /// are released here, including cancellation during command submission.
     pub fn cancel(&mut self, ticket: Ticket) -> Result<bool, Error> {
         self.current(ticket)?;
@@ -388,7 +388,7 @@ impl Scanner {
         self.cancel(ticket)
     }
 
-    /// Bind to the actual retained vendor request generation/notification,
+    /// Bind to the vendor request generation/notification,
     /// never tag an old raw scan ID with the current ticket. A transport ACK or
     /// local abort helper alone cannot supply this completion observation.
     pub fn completed(&mut self, ticket: Ticket, outcome: Outcome) -> Result<(), Error> {
@@ -401,7 +401,7 @@ impl Scanner {
         Ok(())
     }
 
-    /// Ticket is bound to the actual retained transport/RX scan generation.
+    /// Ticket is bound to the transport/RX scan generation.
     /// Device raw IDs may be narrower; old notification drain is required
     /// before their reuse, never a current-ticket lookup on an old event.
     pub fn observe(
@@ -426,7 +426,7 @@ impl Scanner {
         result::parse(ticket, frame, self.local, policy)
     }
 
-    /// Record a local encoder rejection before submission, or an actual
+    /// Record a local encoder rejection before submission, or a
     /// rejection of the original start command. An abort/cancel response (for
     /// example "not found") is not this proof. Retirement still requires proof
     /// that it did not start and no hardware/old notification users remain.
@@ -462,9 +462,9 @@ impl Scanner {
     }
 
     /// # Safety
-    /// The canonical owner must have independently stopped/reset this actual
+    /// The canonical owner must have independently stopped/reset this
     /// radio, restored the operating context as needed, drained DMA and all old
-    /// scan notifications/deferred users. Merely requesting reset is insufficient.
+    /// scan notifications/deferred users. Requesting reset is insufficient.
     pub unsafe fn reset_drained(&mut self, ticket: Ticket) -> Result<Outcome, Error> {
         self.current(ticket)?;
         self.request = None;
@@ -650,7 +650,7 @@ mod tests {
             .validate_submission(ticket, 100, &mut policy)
             .unwrap();
         scanner.submitted(ticket).unwrap();
-        // The first DS claim is deliberately from the wrong band. 6GHz uses
+        // The first DS claim is from the wrong band. 6GHz uses
         // the complete HE Operation extension's primary channel instead.
         let mut ies = vec![3, 1, 6, 255, 12, 36, 0, 0, 2, 0, 0, 0, 5, 0, 5, 0, 6];
         let result = scanner
@@ -709,7 +709,7 @@ mod tests {
             Error::Regulatory
         );
         // Incomplete optional fields carry no corrected channel, matching
-        // cfg80211; the actual admitted receive observation stays available.
+        // cfg80211; the admitted receive observation stays available.
         let partial = [255, 7, 36, 0, 0, 2, 0, 0, 0];
         assert_eq!(
             scanner

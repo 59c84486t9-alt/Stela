@@ -99,14 +99,14 @@ fn staging_failures_unwind_and_failed_stop_invalidation_retries() {
         assert_eq!(
             // SAFETY: the fixture has no device or asynchronous worker. The
             // injected IOMMU invalidation failure does not create a DMA user;
-            // its live mappings remain retained for the following retry.
+            // its live mappings remain held for the following retry.
             unsafe { table.release_after_stop() },
             Err(Error::Dma(dma::Error::Dma(DmaError::InvalidationFailed)))
         );
         assert_eq!(table.state, State::Exposed);
         assert!(!domain.records.lock().unwrap().live.is_empty());
         // SAFETY: the same no-device fixture is still quiescent; the failed
-        // invalidation retained the allocation and domain mapping for retry.
+        // invalidation kept the allocation and domain mapping for retry.
         unsafe {
             table.release_after_stop().unwrap();
         }

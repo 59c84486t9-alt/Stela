@@ -19,9 +19,9 @@ impl<I: BarIo> Control<I> {
     pub fn chip(&self) -> Chip {
         self.registers.chip()
     }
-    /// Actual C2 normal-mode write precedes the source PCI MCU driver-own
+    /// C2 normal-mode write precedes the source PCI MCU driver-own
     /// handshake. C3 first performs its source FW-own→driver-own sequence.
-    /// All operations retain the existing exclusive controller and real clock.
+    /// All operations keep the existing exclusive controller and real clock.
     pub fn prepare_firmware(&mut self, aspm_supported: bool) -> Result<(), Error> {
         self.guard(false)?;
         let result = (|| {
@@ -124,13 +124,13 @@ impl<I: BarIo> Control<I> {
         self.finish(result)
     }
     /// # Safety
-    /// This is actual initial post-EFUSE MAC setup on freshly booted firmware
+    /// This is initial post-EFUSE MAC setup on freshly booted firmware
     /// with no live peer/key/WTBL/TX/RX consumer. The owning lifecycle serializes
     /// the source whole-WTBL admission-counter clear and basic-rate writes with
-    /// all real users and retains all owners through any partial failure.
+    /// all real users and keeps all owners through any partial failure.
     /// Both later firmware/per-WCID translation controls must also be disabled
     /// before claiming that a peer's payload is raw80211. This method itself
-    /// establishes only the actual global bit and source initialization effects.
+    /// establishes only the global bit and source initialization effects.
     pub unsafe fn initialize_mac_raw(&mut self) -> Result<MacInitialized, Error> {
         self.guard(true)?;
         let result = (|| {
@@ -222,7 +222,7 @@ impl<I: BarIo> Control<I> {
     }
     /// Reject stale dormant queue counts before enabling this exact ordinary
     /// source layout. No speculative queue is installed and no live foreign
-    /// queue is silently reset. Actual fresh namespace ownership is required.
+    /// queue is silently reset. Fresh namespace ownership is required.
     pub(in crate::net::wifi::mediatek) fn verify_unused_queues(&mut self) -> Result<(), Error> {
         self.guard(true)?;
         let result = (|| {
@@ -261,8 +261,8 @@ impl<I: BarIo> Control<I> {
         })();
         self.finish(result)
     }
-    /// Actual read-to-clear and airtime reset effects. Host accounting/time
-    /// is retained by the lifecycle; no air/duration result is fabricated.
+    /// Read-to-clear and airtime reset effects. Host accounting/time
+    /// is held by the lifecycle; no air/duration result is invented.
     pub(in crate::net::wifi::mediatek) fn reset_mac_counters(
         &mut self,
     ) -> Result<[u32; 11], Error> {

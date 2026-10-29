@@ -101,7 +101,7 @@
 //! Hector Martin's 2021-12-18 AICv2 observations identify selector 0 as AP
 //! delivery and suggest coprocessor destinations otherwise; they distinguish
 //! the separate three-bit IRQ configuration group. Linux names that group
-//! DELAY_IDX [7:5], but its delay/priority effects remain unqualified here.
+//! DELAY_IDX [7:5], but its delay/priority effects remain unchecked here.
 //! Nonzero TARGET or DELAY_IDX therefore refuses before changing state.
 //! The configured AP roster is software policy, not a silicon arbitration
 //! contract or proof of delivery to any physical MPIDR (including 0x100).
@@ -120,7 +120,7 @@
 //! Physical lifecycle is checked independently of CONFIG.ENABLE. Retained
 //! clock/quiesce pauses require delivery disabled and all timestamp slots
 //! disarmed: capture/wake behavior while the physical clock is stopped is
-//! unqualified. Software pending, current external levels, masks, routes and
+//! unchecked. Software pending, current external levels, masks, routes and
 //! timestamp history remain owned. Supply loss and physical reset refuse.
 
 #[cfg(test)]
@@ -626,7 +626,7 @@ impl Lifecycle for Aic2 {
     }
 
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
-        // All-bank preflight has already qualified this edge. Input levels,
+        // All-bank preflight has already checked this edge. Input levels,
         // software pending bits, masks and timestamp history remain owned.
         self.lifecycle = proposed;
         self.update(access);
@@ -1058,7 +1058,7 @@ mod tests {
     fn ext_intr_cfg_and_refusals() {
         let mut latch = InterruptLatch::new();
         let mut aic = aic(2);
-        // IRQ 0x2e3 (739) retains the supported AP selector0.
+        // IRQ 0x2e3 (739) keeps the supported AP selector0.
         aic.apply_ext_intr_cfg(&[0xe3, 0x02, 0x00]).unwrap();
         assert_eq!(read(&mut aic, &mut latch, 0, IRQ_CFG + 4 * 739), 0);
         assert!(
@@ -1194,7 +1194,7 @@ mod tests {
         let mut aic = Aic2::new_with_layout(config, layout).unwrap();
         let first_index = aic.input_index(AicInput::new(0, 3));
         let second_index = aic.input_index(AicInput::new(1, 3));
-        // Seed an unadmitted retained selector so applying the valid prefix
+        // Seed an unadmitted selector so applying the valid prefix
         // would visibly change it. Production never accepts this selector.
         aic.irq_cfg[first_index] = 5;
         let before = aic.irq_cfg.clone();
@@ -1204,7 +1204,7 @@ mod tests {
             assert_eq!(aic.irq_cfg, before);
         }
         // A firmware target replacement must also validate the whole word:
-        // it cannot preserve an unqualified nonzero delay field.
+        // it cannot preserve an unchecked nonzero delay field.
         aic.irq_cfg[second_index] = 1 << 5;
         let before = aic.irq_cfg.clone();
         assert_eq!(

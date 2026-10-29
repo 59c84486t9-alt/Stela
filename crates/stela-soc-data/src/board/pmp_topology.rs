@@ -12,12 +12,12 @@ pub struct PmpController {
     pub interrupts: [u16; 4],
     pub quiesced: bool,
     /// Original IOMapper provider. Absence does not prove RTBuddy selected its
-    /// null-mapper physical-buffer branch; native services must qualify it.
+    /// null-mapper physical-buffer branch; native services must check it.
     pub mapper: Option<u32>,
 }
 
 impl PmpController {
-    /// Read the static physical-parent/nub inputs used by the qualified RTBuddy
+    /// Read the static physical-parent/nub inputs used by the checked RTBuddy
     /// startup. This is not an observer of later IORegistry property overrides.
     /// The caller must exclude those overrides for the lifetime of native DMA.
     pub fn native_dma_configuration(
@@ -105,7 +105,7 @@ impl PmpController {
         found.ok_or_else(|| "PMP configuration has no matching physical source owner".into())
     }
 
-    /// Join the original phandle to one declared actual DART context. Buffer
+    /// Join the original phandle to one declared DART context. Buffer
     /// mapping must subsequently use that placed owner, preserving its remap.
     pub fn dma_route(&self, darts: &[Iommu]) -> Result<NativeDmaRoute, String> {
         native_dma_route(

@@ -184,7 +184,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
     }
     pub(super) fn stop_queues(&self) -> Result<()> {
         self.mask_interrupts()?;
-        // Stop every queue: retained firmware could have left unused queues on.
+        // Stop every queue: firmware could have left unused queues on.
         for q in 0..32 {
             for f in [f::TDM_TX_DESC_EN_SET, f::RDM_RX_DESC_EN_SET] {
                 self.set(f, q, 0)?;

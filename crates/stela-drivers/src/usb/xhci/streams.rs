@@ -19,8 +19,8 @@ const STOPPED_LENGTH_INVALID: u32 = 27;
 const INVALID_STREAM_ID: u32 = 34;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
-/// Immutable qualification for this controller's current reset/ownership
-/// epoch. Public raw-register starts have no actual PCI observation.
+/// Immutable validation for this controller's current reset/ownership
+/// epoch. Public raw-register starts have no PCI observation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Policy {
     Unknown,
@@ -79,7 +79,7 @@ pub(super) fn dequeue_status(stream: u16) -> u32 {
 
 /// An exact submitted TD, including its addressed-device generation and
 /// controller-independent, nonwrapping TD identity. Dropping a ticket does not
-/// cancel hardware: the endpoint retains its active record and blocks reuse
+/// cancel hardware: the endpoint keeps its active record and blocks reuse
 /// until acknowledged endpoint cancellation.
 #[derive(Debug)]
 pub struct StreamTransfer {
@@ -301,9 +301,9 @@ impl Streams {
 
     pub fn dequeue_acknowledged(&mut self, id: u16) {
         if self.cadence {
-            // Linux xhci_handle_cmd_set_deq: Cadence retains hidden state in
+            // Linux xhci_handle_cmd_set_deq: Cadence keeps hidden state in
             // these reserved words after Set TR Dequeue. Clear only after its
-            // actual success, while the entire endpoint is still stopped.
+            // success, while the entire endpoint is still stopped.
             let at = usize::from(id) * STREAM_CONTEXT_BYTES;
             self.array.write(at + 8, 0u32);
             self.array.write(at + 12, 0u32);
@@ -348,7 +348,7 @@ impl Controller {
 
     /// Pure planning query for an addressed slot in this controller epoch.
     /// The result is a negotiable limit, not an allocation/configuration ACK.
-    /// It intentionally works before SET_CONFIGURATION so a selector can fall
+    /// It works before SET_CONFIGURATION so a selector can fall
     /// back to BOT without first changing the device's alternate setting.
     #[cfg(test)]
     pub(crate) fn stream_capacity(
@@ -362,8 +362,8 @@ impl Controller {
         self.stream_capacity_owned(slot, endpoints, selected, requested)
     }
 
-    /// Plan streams for one genuine addressed generation without MMIO or DMA
-    /// publication. A recycled hardware slot retains its permanent raw fence;
+    /// Plan streams for one addressed generation without MMIO or DMA
+    /// publication. A recycled hardware slot keeps its permanent raw fence;
     /// only its current identity may reach the private capacity calculation.
     pub(crate) fn stream_capacity_for_device(
         &self,
@@ -407,8 +407,8 @@ impl Controller {
 
     /// Configures new endpoints, with primary streams on exactly the selected
     /// endpoint addresses. All rings/arrays are allocated before publication;
-    /// any uncertain Configure Endpoint keeps all of them inaccessible/retained.
-    /// Returns the actual usable nonzero IDs shared by every selected endpoint.
+    /// any uncertain Configure Endpoint keeps all of them inaccessible/kept.
+    /// Returns the usable nonzero IDs shared by every selected endpoint.
     pub fn configure_streams(
         &mut self,
         id: impl DeviceRef,
@@ -435,7 +435,7 @@ impl Controller {
 
     /// Publishes one TD on a nonzero stream. Each stream accepts only one
     /// outstanding ticket; different streams/endpoints may complete in any
-    /// order. The caller retains the actual DMA buffer unchanged until success
+    /// order. The caller keeps the DMA buffer unchanged until success
     /// or acknowledged endpoint-wide cancellation. An error alone never grants
     /// permission to reuse any possibly outstanding contributor's buffer.
     pub fn submit_stream(
@@ -586,7 +586,7 @@ impl Controller {
         Ok(())
     }
 
-    /// Polls the exact active ticket. Successful completion returns the actual
+    /// Polls the exact active ticket. Successful completion returns the
     /// transferred length; a terminal error remains recorded until cancellation.
     /// Stale, cancelled and foreign tickets cannot consume a current TD's event.
     pub fn completed_stream(
@@ -739,7 +739,7 @@ mod tests {
     }
     impl Hardware {
         fn word(address: u64) -> u32 {
-            // SAFETY: the model only accesses retained, aligned allocator
+            // SAFETY: the model only accesses kept, aligned allocator
             // ranges published in the real controller's contexts/TRBs.
             unsafe { (address as *const u32).read_volatile() }
         }
@@ -804,7 +804,7 @@ mod tests {
                             }
                             let from = parameter + (u64::from(ep) + 1) * self.context_bytes as u64;
                             let to = self.output + u64::from(ep) * self.context_bytes as u64;
-                            // SAFETY: separate retained input/output contexts,
+                            // SAFETY: separate kept input/output contexts,
                             // validated by the real Configure Endpoint path.
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
@@ -857,7 +857,7 @@ mod tests {
                             if self.cadence {
                                 let at = self.output + u64::from(dci) * self.context_bytes as u64;
                                 let array = Self::long(at + 8);
-                                // SAFETY: retained stream array in the actual
+                                // SAFETY: stream array in the
                                 // output endpoint context; emulate its quirk.
                                 unsafe {
                                     ((array + u64::from(stream) * 16 + 8) as *mut u32)
@@ -959,7 +959,7 @@ mod tests {
             if matches!(code, SUCCESS | SHORT_PACKET) && residual <= td.bytes {
                 let n = td.bytes - residual;
                 if dci & 1 != 0 {
-                    // SAFETY: the exact real submitted DMA range is retained; only device model
+                    // SAFETY: the real submitted DMA range is held; only device model
                     // accesses it before the event below.
                     unsafe { core::ptr::write_bytes(td.buffer as *mut u8, stream as u8, n) };
                 }
@@ -1355,7 +1355,7 @@ mod tests {
     fn actual_ordinary_and_stream_submissions_reject_high_payloads_before_ring_mutation() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the model retains exclusive live backing for all DMA.
+        // SAFETY: the model keeps exclusive live backing for all DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32);
         controller
@@ -1422,7 +1422,7 @@ mod tests {
         for halted in [false, true] {
             let mut backing = vec![0u64; 256 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: all actual context/ring/data addresses remain live.
+            // SAFETY: all context/ring/data addresses remain live.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = controller(&mut dma, 32);
             controller
@@ -1487,7 +1487,7 @@ mod tests {
     fn stream_transaction_errors_soft_retry_every_pending_stream_like_linux() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all actual context/ring/data addresses remain live.
+        // SAFETY: all context/ring/data addresses remain live.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32);
         controller
@@ -1535,7 +1535,7 @@ mod tests {
     fn transferless_stream_errors_reset_the_endpoint_like_linux() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all actual context/ring/data addresses remain live.
+        // SAFETY: all context/ring/data addresses remain live.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32);
         controller
@@ -1597,7 +1597,7 @@ mod tests {
         for fail_stream in 1..=3 {
             let mut backing = vec![0u64; 256 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: this test retains every allocation after uncertain stop.
+            // SAFETY: this test keeps every allocation after uncertain stop.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = controller(&mut dma, 32);
             controller
@@ -1689,7 +1689,7 @@ mod tests {
         for configure_error in [false, true] {
             let mut backing = vec![0u64; 256 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: all allocations retained through completion/poison checks.
+            // SAFETY: all allocations kept through completion/poison checks.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = controller(&mut dma, 32);
             if configure_error {
@@ -1788,7 +1788,7 @@ mod tests {
     fn status_and_data_streams_are_posted_before_ordinary_uas_command() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusively retained RAM for all device/context/ring accesses.
+        // SAFETY: exclusively kept RAM for all device/context/ring accesses.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 64);
         let endpoints = [
@@ -1831,7 +1831,7 @@ mod tests {
     fn foreign_ticket_cannot_consume_another_controllers_pending_completion() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: a single allocator gives distinct retained ranges to both controllers.
+        // SAFETY: a single allocator gives distinct kept ranges to both controllers.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut first, one) = controller(&mut dma, 32);
         let (mut second, two) = controller(&mut dma, 32);
@@ -1873,7 +1873,7 @@ mod tests {
         for fail_at in 0..13 {
             let mut backing = vec![0u64; 256 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: exclusively retained backing for all actual test DMA.
+            // SAFETY: exclusively kept backing for all test DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = controller(&mut dma, 32);
             let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();
@@ -1904,7 +1904,7 @@ mod tests {
     fn command_timeout_and_32bit_dma_refusal_keep_unacknowledged_streams_inaccessible() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all allocations retained even after uncertain command completion.
+        // SAFETY: all allocations kept even after uncertain command completion.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32);
         model.borrow_mut().silent_command = Some(CONFIGURE_ENDPOINT);
@@ -1924,7 +1924,7 @@ mod tests {
                 .submit_stream(1, 3, 1, data.physical(), 64)
                 .is_err()
         );
-        // The hosted allocation's actual pointer is above the narrow hardware
+        // The hosted allocation's pointer is above the narrow hardware
         // aperture; it must never be truncated into an apparently valid address.
         if start > u64::from(u32::MAX) {
             let layout = Layout::new(16, SUPER_SPEED, &[endpoint(0x81, 4)], &[0x81], 2).unwrap();
@@ -2012,7 +2012,7 @@ mod tests {
     fn pure_capacity_query_never_publishes_and_unknown_or_broken_identity_refuses() {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: single retained exclusive model allocation range.
+        // SAFETY: single kept exclusive model allocation range.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = controller(&mut dma, 32);
         controller.slots[1].as_mut().unwrap().current_configuration = Some(0);

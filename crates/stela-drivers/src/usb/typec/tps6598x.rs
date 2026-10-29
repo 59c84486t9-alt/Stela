@@ -4,7 +4,7 @@
 //! TI TPS65981/82/86 and TPS65987/88 DH/DK physical PD controllers.
 //!
 //! Adapted from pinned Linux tipd/core.c and tps6598x.h. The platform supplies
-//! the actual powered I²C target and exclusive controller ownership. This is
+//! the powered I²C target and exclusive controller ownership. This is
 //! the ordinary TI register protocol, not Apple's CD321x guest/emulation path.
 //! Unsupported silicon, modes, task results and patch failures remain errors.
 
@@ -79,7 +79,7 @@ pub enum Error {
     NeedsPlatformReset,
 }
 
-/// Retained verified-provider receipt; no firmware bytes or provider borrow.
+/// Verified-provider receipt; no firmware bytes or provider borrow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatchReceipt {
     pub name: String,
@@ -548,7 +548,7 @@ impl<B: Bus, C: Timer> Tps6598x<B, C> {
             result => result,
         }
     }
-    /// Disable event generation. Failure retains fault and requires platform
+    /// Disable event generation. Failure keeps fault and requires platform
     /// reset; no shutdown success or release of controller ownership is implied.
     pub fn quiesce(&mut self) -> Result<(), Error> {
         self.check_ready()?;

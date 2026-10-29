@@ -1,4 +1,4 @@
-//! Real cold backing initialization/reseed, with modeled process authority only.
+//! Real cold backing initialization/reseed, with modeled process permission only.
 use super::*;
 use core::cell::Cell;
 use std::{println, process::Command, string::String};
@@ -21,8 +21,8 @@ struct ModelCpu {
     watch_state: AtomicU64,
     restored: AtomicBool,
 }
-// SAFETY: actual same-host-thread flags only. The bounded watch observes an
-// exclusively retained unstarted fixture backing; it never calls Runtime,
+// SAFETY: same-host-thread flags only. The bounded watch observes an
+// exclusively kept unstarted fixture backing; it never calls Runtime,
 // allocates, switches or grants a native CPU/root/provider capability.
 unsafe impl Cpu for ModelCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
@@ -38,23 +38,23 @@ unsafe impl Cpu for ModelCpu {
         if flags & 0x200 != 0 {
             let address = self.watch.load(Ordering::Acquire);
             let state = self.watch_state.load(Ordering::Acquire);
-            // SAFETY: an armed watch retains this exact excluded Task field on
+            // SAFETY: an armed watch keeps this exact excluded Task field on
             // the model's same OS thread. Earlier checks may restore flags, but
-            // only the actual Preparing transfer makes this the zeroing boundary.
+            // only the Preparing transfer makes this the zeroing boundary.
             let preparing = address != 0
                 && unsafe { (state as *const TaskState).read() } == TaskState::Preparing;
             if preparing {
                 self.watch.store(0, Ordering::Release);
                 assert_eq!(
                     // SAFETY: creator armed the exact owned cold usable base
-                    // after poisoning it; backing stays retained through this read.
+                    // after poisoning it; backing stays held through this read.
                     unsafe { (address as *const u8).read_volatile() },
                     0xa7
                 );
                 self.restored.store(true, Ordering::Release);
             }
         }
-        // SAFETY: flags are this same model's actual enclosing save_disable.
+        // SAFETY: flags are this same model's enclosing save_disable.
         unsafe { self.model.restore(flags) }
     }
     fn ticks(&self) -> u64 {
@@ -89,9 +89,9 @@ impl Authority {
         }
     }
 }
-// SAFETY: hosted callback model checks its actual OS thread and active borrowed
+// SAFETY: hosted callback model checks its OS thread and active borrowed
 // segment without allocation/wait, including IF0. Native DriverExecution and
-// Guest park/reentry remain separate production qualification requirements.
+// Guest park/reentry remain separate production validation requirements.
 unsafe impl EnteredProcess for Authority {
     fn check(&self) -> Result<(), WorkError> {
         self.cpu.check_cpu()?;
@@ -112,8 +112,8 @@ struct Scene {
 }
 impl Scene {
     fn runtime(&self) -> Pin<&Runtime<64>> {
-        // SAFETY: exact pinned executor is retained through every fixture use;
-        // fatal paths retain the complete allocation before any destruction.
+        // SAFETY: exact pinned executor is held through every fixture use;
+        // fatal paths keep the complete allocation before any destruction.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<64>))
         }
@@ -121,8 +121,8 @@ impl Scene {
     fn reserved(&self) -> (usize, core::ops::Range<usize>) {
         let r = self.runtime();
         let flags = self.cpu.save_disable().unwrap();
-        // SAFETY: actual creator/dispatcher fixture holds IF0 and all peers are
-        // stopped. These reads inspect immutable retained geometry/history only.
+        // SAFETY: creator/dispatcher fixture holds IF0 and all peers are
+        // stopped. These reads inspect immutable kept geometry/history only.
         let found = unsafe {
             (&*r.tasks.get())
                 .iter()
@@ -131,13 +131,13 @@ impl Scene {
                 .map(|(i, t)| (i, t.stack.bounds.clone()))
         }
         .unwrap();
-        // SAFETY: exact enclosing model flags, no task borrow survives restore.
+        // SAFETY: enclosing model flags, no task borrow survives restore.
         unsafe { self.cpu.restore(flags) };
         found
     }
 }
 unsafe extern "C" fn marker(pointer: *mut c_void) {
-    // SAFETY: Scene/code remain queue-owned through actual completion/quarantine.
+    // SAFETY: Scene/code remain queue-owned through completion/quarantine.
     let f = unsafe { &*pointer.cast::<Scene>() };
     let r = f.runtime();
     f.marked.fetch_add(1, Ordering::Relaxed);
@@ -164,7 +164,7 @@ fn take_cold<'a>(
     }
 }
 unsafe extern "C" fn creator(pointer: *mut c_void) {
-    // SAFETY: queue owns Scene and this actual Foreground stack through join.
+    // SAFETY: queue owns Scene and this Foreground stack through join.
     let f = unsafe { &*pointer.cast::<Scene>() };
     let r = f.runtime();
     let authority = Authority::new(&f.cpu);
@@ -177,7 +177,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             .unwrap();
         let (index, _) = f.reserved();
         assert_eq!(
-            // SAFETY: actual unbound idle reserved worker; no peer can mutate it.
+            // SAFETY: unbound idle reserved worker; no peer can mutate it.
             unsafe { (*r.task(index)).id },
             hot
         );
@@ -194,13 +194,13 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         .unwrap();
     let (index, range) = f.reserved();
     assert!(
-        // SAFETY: actual worker is retained/excluded/unbound. Private history
+        // SAFETY: worker is held/excluded/unbound. Private history
         // is written only by real entry, which cannot run while reserved.
         !unsafe { (*r.task(index)).ever_entered }
     );
     if f.mode == Mode::Hot {
         assert_ne!(
-            // SAFETY: same retained excluded actual worker; only identity is read.
+            // SAFETY: same excluded worker; only identity is read.
             unsafe { (*r.task(index)).id },
             f.hot.lock().unwrap().unwrap()
         );
@@ -230,7 +230,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         return;
     }
     let top = range.end - 2 * size_of::<usize>();
-    // SAFETY: actual never-entered retained range has only the constructor's
+    // SAFETY: never-entered kept range has only the constructor's
     // two bootstrap words. Copy those initialized words, then poison only the
     // other usable bytes; both PROT_NONE guards and bootstrap remain untouched.
     let before = unsafe {
@@ -239,8 +239,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         core::ptr::write_bytes(range.start as *mut u8, 0xa7, top - range.start);
         (words, zero)
     };
-    // SAFETY: exact retained excluded worker, immutable Task allocation; the
-    // same-thread restore observer reads only its actual preparation state.
+    // SAFETY: exact excluded worker, immutable Task allocation; the
+    // same-thread restore observer reads only its preparation state.
     let state = unsafe { core::ptr::addr_of!((*r.task(index)).state) };
     f.cpu.watch_state.store(state as u64, Ordering::Release);
     f.cpu.watch.store(range.start as u64, Ordering::Release);
@@ -248,7 +248,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     assert!(f.cpu.restored.load(Ordering::Acquire));
     assert_eq!(f.cpu.model.flags(), 0x202);
     assert!(
-        // SAFETY: Preparing retains/excludes this entire actual mapped usable
+        // SAFETY: Preparing keeps/excludes this entire mapped usable
         // range. Production exposes no byte/address API; zeroing initialized it.
         unsafe { core::slice::from_raw_parts(range.start as *const u8, range.len()) }
             .iter()
@@ -298,8 +298,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         );
     }
     if f.mode != Mode::Park {
-        // SAFETY: exact queue-retained marker fits real compiled kernel geometry;
-        // after reseed/cancel the original actual entry frame must run normally.
+        // SAFETY: exact queue-kept marker fits real compiled kernel geometry;
+        // after reseed/cancel the original entry frame must run normally.
         unsafe {
             r.queue
                 .execute_general_with_requirement(kernel(), marker, pointer)
@@ -325,7 +325,7 @@ fn run(mode: Mode) {
         hot: Mutex::new(None),
         binding: Mutex::new(None),
     });
-    // SAFETY: same-thread model and Scene remain retained through join/quarantine.
+    // SAFETY: same-thread model and Scene remain held through join/quarantine.
     let q = unsafe { Queue::<64>::new(cpu.clone(), f.clone()) }.unwrap();
     let executor = Executor::new_hosted_profile_for_test(
         q,
@@ -339,7 +339,7 @@ fn run(mode: Mode) {
         .store(r.get_ref() as *const Runtime<64> as u64, Ordering::Release);
     let pointer = Arc::as_ptr(&f) as *mut c_void;
     if mode == Mode::Hot {
-        // SAFETY: retained exact kernel-size marker genuinely enters one worker.
+        // SAFETY: exact kernel-size marker enters one worker.
         unsafe {
             r.queue
                 .execute_general_with_requirement(kernel(), marker, pointer)
@@ -348,10 +348,10 @@ fn run(mode: Mode) {
         r.drain(cpu.ticks() + 1_000_000_000).unwrap();
     }
     if mode == Mode::Park {
-        // SAFETY: retained ordinary wake peer cannot run inline and owns no cold bytes.
+        // SAFETY: ordinary wake peer cannot run inline and owns no cold bytes.
         unsafe { r.queue.execute(Kind::General, marker, pointer) }.unwrap();
     }
-    // SAFETY: real Foreground callback/context and all mappings survive actual joins.
+    // SAFETY: real Foreground callback/context and all mappings survive joins.
     unsafe { r.call_foreground(creator, pointer, cpu.ticks() + 1_000_000_000) }.unwrap();
     r.drain(cpu.ticks() + 1_000_000_000).unwrap();
     if let Some((binding, wake)) = f.binding.lock().unwrap().take() {
@@ -369,7 +369,7 @@ fn run(mode: Mode) {
         }
     );
     r.queue.close().unwrap();
-    // SAFETY: no external producer can enqueue/resume; actual CPU/backing retained.
+    // SAFETY: no external producer can enqueue/resume; CPU/backing kept.
     unsafe { r.retire() }.unwrap();
     drop(executor);
     assert_eq!(dropped.load(Ordering::Relaxed), 32);

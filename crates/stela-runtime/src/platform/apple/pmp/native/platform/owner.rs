@@ -1,6 +1,6 @@
 //! The generic platform lifecycle owner. `Owner` runs initialize, start, stop,
-//! selection, evaluation cycles and counter hooks as retained operations over
-//! a `Backend` that supplies the actual effects, using the `Observation`,
+//! selection, evaluation cycles and counter hooks as kept operations over
+//! a `Backend` that supplies the effects, using the `Observation`,
 //! `Effect` and `Completion` vocabulary defined here.
 use super::super::{
     Packets,
@@ -13,8 +13,8 @@ use stela_contracts::bus::Access;
 
 pub mod controllers;
 
-/// An immutable actual pending snapshot. Numeric bits are observations only.
-/// The built-in adapter retains Frames' non-Clone owner-bound capture.
+/// An immutable pending snapshot. Numeric bits are observations only.
+/// The built-in adapter keeps Frames' non-Clone owner-bound capture.
 pub trait Pending {
     fn bits(&self, start: u32, count: u32) -> Result<u128, &'static str>;
 }
@@ -49,7 +49,7 @@ pub enum Completion<T> {
         deadline: Option<u64>,
     },
     Refused(&'static str),
-    /// The actual source operation retired. Preserve any committed prefix
+    /// The source operation retired. Preserve any committed prefix
     /// before returning its refusal and never replay it on the next advance.
     Retired {
         value: T,
@@ -68,20 +68,20 @@ pub enum Observation {
         ordinal: Ordinal,
         address: u64,
     },
-    ///10115f0 consumes an actual PTD entry; return ENTRY VALUE low32,
+    ///10115f0 consumes a PTD entry; return ENTRY VALUE low32,
     /// never the metadata timestamp or a synthesized source time.
     ConsumeFreshnessValue {
         ordinal: Ordinal,
         entry: u32,
     },
-    /// Actual source SOC-device request payload, resolved through its PTD
+    /// Source SOC-device request payload, resolved through its PTD
     /// request-index→registry-ordinal map (1010ecc..1010f00).
     DeviceRequest {
         ordinal: Ordinal,
     },
-    /// Actual source control-counter flags before software100a020 mutation.
+    /// Source control-counter flags before software100a020 mutation.
     CounterControls,
-    ///100e9bc..e9fc diagnostic result from the actual cycle trace owner.
+    ///100e9bc..e9fc diagnostic result from the cycle trace owner.
     DispatchControl,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,14 +106,14 @@ pub struct ControlFlags {
     pub high: u8,
 }
 
-/// Software operands retained across actual capture/postprocess hooks. Numeric
+/// Software operands kept across capture/postprocess hooks. Numeric
 /// selection is data; only the borrowed owner-bound Snapshot can authorize copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CounterContext {
     pub selected: u128,
-    /// Retained P2b0 from evaluation, independent of later manager Clock reads.
+    /// P2b0 from evaluation, independent of later manager Clock reads.
     pub evaluation_tick: u64,
-    /// Actual retained manager six-word packet, separately observed from its
+    /// Manager six-word packet, separately observed from its
     /// real owner. This is not constructed from selection, Captured or requests.
     pub current_packet: Packets,
     pub activity: u32,
@@ -123,7 +123,7 @@ pub struct CounterContext {
     pub evaluated: u32,
     pub pending: u8,
 }
-/// Actual native hook arithmetic products (P14/P48/P4c), never readiness,
+/// Native hook arithmetic products (P14/P48/P4c), never readiness,
 /// activation, evaluated state, arrival, BUSY-clear or an ACK capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectValue {
@@ -137,7 +137,7 @@ pub enum EffectValue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
-    /// Actual full source init hook, including provider/resource binds. The
+    /// Full source init hook, including provider/resource binds. The
     /// separate pure software constructor does not assert this effect ran.
     Initialize {
         ordinal: Ordinal,
@@ -154,7 +154,7 @@ pub enum Effect {
     /// Full retained101c550..101cb58 tail after its software activation store:
     /// counter bind/clear, PTD notifications, provider actions, observer RMW,
     /// trace/refresh and optional extra hooks. Missing inner effects must refuse;
-    /// backend retains its inner cursor under this same operation identity.
+    /// backend keeps its inner cursor under this same operation identity.
     Activation {
         ordinal: Ordinal,
         enable: bool,
@@ -200,21 +200,21 @@ pub enum Effect {
 }
 
 /// Reached manager operations around the platform hooks. The fixed backend owns
-/// the actual configured controller list, its saved nibble vector and the shared G540
+/// the configured controller list, its saved nibble vector and the shared G540
 /// provider-cache read masks. Source addresses document order, never dispatch keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagerEffect {
-    ///100f8cc..100f934: for cfg28 controller records, resolve the actual index
+    ///100f8cc..100f934: for cfg28 controller records, resolve the index
     /// map, save bits19:16, OR0xf0000 into each word; then clear32 bytes at G540.
-    /// A zero-count skip requires the actual source configuration, not absence.
+    /// A zero-count skip requires the source configuration, not absence.
     BeforeCapture,
-    ///100f990..100f9e8: restore each saved nibble with an actual word RMW after
-    /// all Capture hooks and a fresh actual clock observation100f97c..100f990.
+    ///100f990..100f9e8: restore each saved nibble with a word RMW after
+    /// all Capture hooks and a fresh clock observation100f97c..100f990.
     RestoreControllers,
     ///100fa18..100fb14: process actual24-byte accumulator descriptors, intersect
-    /// each mask with eligible, extract its logical nibble from the retained
+    /// each mask with eligible, extract its logical nibble from the kept
     /// current packet (sp+a0, not the separately cleared G540 scratch) and invoke
-    /// both actual counter callbacks(+50, arguments selector/0 then selector/1),
+    /// both counter callbacks(+50, arguments selector/0 then selector/1),
     /// accumulating their u32 results into the selected16-byte bucket.
     AccumulateCounters,
 }
@@ -227,11 +227,11 @@ pub struct ManagerContext {
 }
 
 /// Backend has no default implementation. Every reached inner source effect
-/// must finish, remain Busy, or refuse with its committed inner cursor retained.
+/// must finish, remain Busy, or refuse with its committed inner cursor kept.
 /// Source VAs are provenance only: dispatch uses typed effects/layout, never
 /// a source call-site address. Capture must belong to this fixed backend
-/// Frames owner and remain associated through both passes and actual copies.
-/// It owns actual time/counters/observer/provider/workqueue resources; it must
+/// Frames owner and remain associated through both passes and copies.
+/// It owns time/counters/observer/provider/workqueue resources; it must
 /// not derive observations or completion from requested bits or these effects.
 pub trait Backend {
     type Snapshot: Pending;
@@ -278,7 +278,7 @@ pub enum Error {
 }
 
 /// Private native software fields with explicit original zero initialization.
-/// No caller can mark readiness/evaluated state, clear BUSY or fabricate ACK.
+/// No caller can mark readiness/evaluated state, clear BUSY or invent ACK.
 #[derive(Clone, Debug)]
 struct State {
     activation: u32,
@@ -301,7 +301,7 @@ struct State {
 impl State {
     fn initialized(d: &Descriptor, descriptors: &[Descriptor]) -> Self {
         //1019f50..9fa0: aggregates and passive leaves derive this gate from
-        // the actual parent descriptor. No unconditional PMGR requirement.
+        // the parent descriptor. No unconditional PMGR requirement.
         let gate_candidate =
             d.aggregate != 0 || (d.counters.is_none() && d.observer_write & 1 == 0);
         let parent_gate = u8::from(
@@ -398,7 +398,7 @@ struct Batch<S> {
     output: Evaluation,
 }
 
-/// Retained generic-platform lifecycle owner. Eligibility remains observable
+/// Generic-platform lifecycle owner. Eligibility remains observable
 /// even when later effects refuse, but no effect-completion token is minted.
 pub struct Owner<B: Backend> {
     identity: Rc<()>,
@@ -556,7 +556,7 @@ impl<B: Backend> Owner<B> {
         self.begin(ops)
     }
     /// Resolution is pure source policy. Its two packet-pair constraints must
-    /// be checked against an actual backend observation before activation.
+    /// be checked against a backend observation before activation.
     pub fn begin_selection(&mut self, resolution: Resolution) -> Result<(), Error> {
         if !self.started {
             return Err(Error::Contract(
@@ -654,9 +654,9 @@ impl<B: Backend> Owner<B> {
         d.selection.replace(result.desired);
         Ok(result)
     }
-    ///10129f0..1012a20 after the actual registry ID lookup resolves ordinal.
+    ///10129f0..1012a20 after the registry ID lookup resolves ordinal.
     /// This changes only source-enabled policy; it cannot activate, evaluate,
-    /// finish an effect or publish an ACK. The callback owner retains its ID.
+    /// finish an effect or publish an ACK. The callback owner keeps its ID.
     pub fn apply_source_enable(&mut self, ordinal: Ordinal, value: u32) -> Result<(), Error> {
         if self.batch.is_some() || self.fault.is_some() {
             return Err(Error::Contract(
@@ -670,7 +670,7 @@ impl<B: Backend> Owner<B> {
         }
         Ok(())
     }
-    /// Retain a native software configuration write; no activation/current or
+    /// Keep a native software configuration write; no activation/current or
     /// readiness setter exists. The source writer/registry owns authorization.
     pub fn apply_configuration(
         &mut self,
@@ -906,7 +906,7 @@ impl<B: Backend> Owner<B> {
                 if let Some(controller) = d.controller {
                     packed.set(controller, target);
                 } else {
-                    //1010fd4: a controller-less mode2 retains its state-table
+                    //1010fd4: a controller-less mode2 keeps its state-table
                     // index for the cfg38 requirement row rather than a nibble.
                     index = Some(target);
                 }
@@ -942,7 +942,7 @@ impl<B: Backend> Owner<B> {
         Self::prepend(batch, ops);
         Ok(())
     }
-    /// Advance a retained prefix. A refused operation cannot be replaced with
+    /// Advance a prefix. A refused operation cannot be replaced with
     /// a different batch, backend or snapshot. Busy resumes the same request.
     pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
         if let Some(reason) = self.fault {
@@ -1148,7 +1148,7 @@ impl<B: Backend> Owner<B> {
                     };
                     if resolution.check_packets(packets) != ConstraintState::WithinConstraints {
                         // Source leaves old accepted selection intact. A fresh
-                        // actual snapshot is required on each retry.
+                        // snapshot is required on each retry.
                         Self::prepend(batch, [Op::Observe(Observation::PolicyPackets), op]);
                         return Ok(Progress::Busy { deadline: None });
                     }
@@ -1874,7 +1874,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(tail.len(), 37); //one refused activation plus18 retained pairs
+        assert_eq!(tail.len(), 37); //one refused activation plus18 kept pairs
         assert_eq!(tail[0], tail[1]);
         for (i, pair) in tail[1..].as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(*pair, [(i, 0), (i, 1)]);

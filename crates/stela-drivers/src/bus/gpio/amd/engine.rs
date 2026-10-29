@@ -72,9 +72,9 @@ fn insert(bits: &mut [u64; 3], pad: Pad) {
 }
 
 /// Owned register protocol with sticky failure containment. Dropping an
-/// unfinished/uncertain controller retains its original register transport;
+/// unfinished/uncertain controller keeps its original register transport;
 /// only successful retirement permits final transport release. Native admission
-/// belongs to the actual ACPI/resource adapter; raw constructors stay internal.
+/// belongs to the ACPI/resource adapter; raw constructors stay internal.
 pub struct Controller<R: RegisterIo> {
     registers: ManuallyDrop<R>,
     profile: Profile,
@@ -87,7 +87,7 @@ pub struct Controller<R: RegisterIo> {
 }
 impl<R: RegisterIo> Controller<R> {
     // The bitmap is internal protocol inventory, never a native grant. The real
-    // resource adapter starts empty and captures each actually claimed line.
+    // resource adapter starts empty and captures each claimed line.
     #[cfg(any(test, feature = "native-acpi"))]
     pub(in crate::bus::gpio) fn new(
         registers: R,
@@ -108,7 +108,7 @@ impl<R: RegisterIo> Controller<R> {
             return Err(Error::InvalidPad);
         }
         // Read-only admission: no global IRQ/wake initialization steals pads
-        // from firmware. On uncertain access retain the complete transport.
+        // from firmware. On uncertain access keep the complete transport.
         for number in 0..PADS as u8 {
             let Ok(pad) = Pad::new(number) else { continue };
             if !contains(&owned, pad) {
@@ -180,7 +180,7 @@ impl<R: RegisterIo> Controller<R> {
         self.check(pad)?;
         self.update(pad, VALUE, if high { VALUE } else { 0 })
     }
-    /// The supplier masks and drains this line's actual users before release.
+    /// The supplier masks and drains this line's users before release.
     pub(in crate::bus::gpio) fn release_pad(&mut self, pad: Pad) -> Result<(), Error> {
         if self.retired {
             return Err(Error::Retired);
@@ -322,7 +322,7 @@ impl<R: RegisterIo> Controller<R> {
         Ok(())
     }
     /// Linux's exact time-bin encoding (microseconds); no extra timing
-    /// precision is claimed. Pin0's actual internal-debounce bit overrides it.
+    /// precision is claimed. Pin0's internal-debounce bit overrides it.
     pub fn debounce(&mut self, pad: Pad, mut micros: u32) -> Result<(), Error> {
         self.check(pad)?;
         if micros >= 1_000_000 {
@@ -347,7 +347,7 @@ impl<R: RegisterIo> Controller<R> {
         // MaskStsEn suppression is controller-wide. Do not disturb an unowned
         // firmware IRQ or an active sibling while changing debounce/type. A
         // future native owner must also serialize firmware/OpRegion access;
-        // this actual register inventory is not a replacement for that lease.
+        // this register inventory is not a replacement for that lease.
         for number in 0..PADS as u8 {
             let Ok(other) = Pad::new(number) else {
                 continue;
@@ -417,7 +417,7 @@ impl<R: RegisterIo> Controller<R> {
         self.update(pad, ENABLE | UNMASK, 0)
     }
     /// Bounded demultiplex: one summary snapshot, four pins per bit, at most
-    ///183 callbacks. The consumer handles the actual device before fresh RMW
+    ///183 callbacks. The consumer handles the device before fresh RMW
     ///acknowledgement. New pending bits are never cleared by ordinary updates.
     ///A reasserted cause is masked after ACK to bound interrupt storms, and
     ///reported for explicit deferred recovery. Unowned pins are untouched.
@@ -462,7 +462,7 @@ impl<R: RegisterIo> Controller<R> {
             if pending & STATUS == 0 || pending & UNMASK == 0 {
                 continue;
             }
-            // Level sources are actually masked through the whole consumer.
+            // Level sources are masked through the whole consumer.
             let level = pending & LEVEL != 0;
             if level {
                 self.update(pad, UNMASK, 0)?;
@@ -476,7 +476,7 @@ impl<R: RegisterIo> Controller<R> {
             )
             .is_err()
             {
-                // Consumer failure leaves the actual source masked; pending
+                // Consumer failure leaves the source masked; pending
                 // architectural status is not silently acknowledged.
                 self.update(pad, UNMASK, 0)?;
                 return Err(Error::Consumer);
@@ -503,7 +503,7 @@ impl<R: RegisterIo> Controller<R> {
     }
     /// Mask/disable and restore only this controller's original owned pad
     ///controls. No global reset, firmware wake clearing or neighboring writes.
-    ///A failure retains every original transport owner and can be retried;
+    ///A failure keeps every original transport owner and can be retried;
     ///normal I/O remains faulted throughout an uncertain retirement.
     pub fn retire(&mut self) -> Result<(), Error> {
         if self.retired {
@@ -550,9 +550,9 @@ impl<R: RegisterIo> Drop for Controller<R> {
     fn drop(&mut self) {
         if self.retired {
             // SAFETY: no registration exists in this protocol-only cut; all
-            // serialized callers stopped and actual pad restoration succeeded.
+            // serialized callers stopped and pad restoration succeeded.
             unsafe { ManuallyDrop::drop(&mut self.registers) };
         }
-        // Otherwise leave the actual owner retained, including failed effects.
+        // Otherwise leave the owner kept, including failed effects.
     }
 }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
 //! RTL8822C source initial table phase and later TRX path configuration.
-//! Each phase retains its own completion boundary. Initial dynamic PHY state
-//! has no qualified adaptivity policy. RF/DPK/IQK calibration, power tracking
+//! Each phase keeps its own completion boundary. Initial dynamic PHY state
+//! has no checked adaptivity policy. RF/DPK/IQK calibration, power tracking
 //! and operational radio are separate.
 mod board_power;
 pub mod channel;
@@ -107,10 +107,10 @@ impl Loaded {
     /// Consuming Loaded prevents repeating this transition through this value.
     ///
     /// # Safety
-    /// Same genuine retained requester and uninterrupted boot/reset epoch as
+    /// Same kept requester and uninterrupted boot/reset epoch as
     /// this Loaded state and Report, not matching fingerprints alone. The
-    /// initial source table phase completed on this actual Io and has not been
-    /// invalidated. All queues/pins/claims remain retained; transmit, competing
+    /// initial source table phase completed on this Io and has not been
+    /// invalidated. All queues/pins/claims remain held; transmit, competing
     /// reset/IRQ/PHY/RF work remain quiesced. Run once in initial exclusive
     /// process/deferred context. This performs BB resets, never DMA-stop proof.
     pub unsafe fn configure_paths<I: Io>(
@@ -142,8 +142,8 @@ impl Loaded {
         })
     }
 }
-/// Actual initial dynamic-PHY observations and initialized tracking state.
-/// No adaptivity jurisdiction/threshold policy is selected or qualified here.
+/// Initial dynamic-PHY observations and initialized tracking state.
+/// No adaptivity jurisdiction/threshold policy is selected or checked here.
 /// Source initial EDCCA thresholds are hardware setup, never TX permission.
 /// RF/IQK/DAC calibration and operational tracking have not run.
 #[derive(Debug)]
@@ -156,7 +156,7 @@ pub struct InitialPhy {
     power: FactoryPower,
 }
 /// Diagnostic initialized tracking values; copying these grants no hardware,
-/// calibration or transmit authority. No runtime tracking worker runs yet.
+/// calibration or transmit permission. No runtime tracking worker runs yet.
 #[derive(Debug)]
 pub struct InitialTracking {
     pub fa_history: [u16; 4],
@@ -183,7 +183,7 @@ impl InitialPhy {
     pub fn tracking(&self) -> &InitialTracking {
         &self.tracking
     }
-    /// Actual source upper/lower CCK GI observations (six bits each).
+    /// Source upper/lower CCK GI observations (six bits each).
     pub fn cck_bounds(&self) -> [u8; 2] {
         self.cck_bounds
     }
@@ -193,17 +193,17 @@ impl InitialPhy {
 }
 impl PathsConfigured {
     /// Observe the initial IGI, initialize source common EDCCA registers and
-    /// capture actual CCK GI bounds. Initial CFO crystal state derives from
-    /// the actual cap programmed by the consumed table/path phase.
+    /// capture CCK GI bounds. Initial CFO crystal state derives from
+    /// the cap programmed by the consumed table/path phase.
     ///
     /// # Safety
-    /// Same genuine retained requester and uninterrupted reset/firmware epoch
+    /// Same kept requester and uninterrupted reset/firmware epoch
     /// as this state and Report. Completed tables/paths must remain valid on
-    /// this actual Io, with all claims/queues/pins retained and transmit and
+    /// this Io, with all claims/queues/pins kept and transmit and
     /// competing reset/IRQ/PHY/RF work quiesced. Run once in exclusive initial
     /// process/deferred context. Source adaptivity mode depends on trusted OS
-    /// jurisdiction; this phase deliberately leaves it unqualified. No TX,
-    /// calibration, channel/power policy or DMA-stop authority is returned.
+    /// jurisdiction; this phase leaves it unchecked. No TX,
+    /// calibration, channel/power policy or DMA-stop permission is returned.
     pub unsafe fn initialize_dynamic<I: Io>(
         self,
         io: &mut I,
@@ -222,7 +222,7 @@ impl PathsConfigured {
             done: false,
         };
         a.domain()?;
-        // Actual fresh source read, not the earlier TRX IGI observation.
+        // Fresh source read, not the earlier TRX IGI observation.
         let igi = (a.io.read32(0x1d70)? & 0x7f) as u8;
         // Both source threshold offsets are 0x80: 0x7f + 0x80 = 0xff.
         // This identical initial hardware setup precedes runtime adaptivity
@@ -285,8 +285,8 @@ fn positive(driver: u32, condition: u32) -> bool {
         && (interface == 0 || interface == (driver >> 8) & 15)
         && (condition & 255) == (driver & 255)
 }
-/// Validate the actual flat source branch stream before any table-driven I/O.
-/// Source's positive/negative/else semantics are retained for valid streams;
+/// Validate the flat source branch stream before any table-driven I/O.
+/// Source's positive/negative/else semantics are held for valid streams;
 /// malformed metadata never falls through to successful-looking writes.
 fn walk(
     mut driver: u32,
@@ -444,7 +444,7 @@ impl<I: Io> Attempt<'_, I> {
         // one-PHY layouts and other runtime modes are not admitted here.
         self.modify32(0x1800, 0xfffff, 0x33312)?;
         self.modify32(0x4100, 0xfffff, 0x33312)?;
-        // CCK receive AB, in exact source mask order.
+        // CCK receive AB, in source mask order.
         self.modify32(0x1a2c, 0x00600000, 1)?;
         self.modify32(0x1a2c, 0x00060000, 1)?;
         self.modify32(0x1a04, 0x0f000000, 1)?;
@@ -468,7 +468,7 @@ impl<I: Io> Attempt<'_, I> {
         self.reset_bb()?;
         self.reset_bb()?;
         let igi = self.io.read32(0x1d70)? & 0x7f;
-        // Source u32 subtraction wraps before the actual masked stores; the
+        // Source u32 subtraction wraps before the masked stores; the
         // 0/1 cases must neither panic nor discard the transient latch writes.
         self.modify32(0x1d70, 0x7f, igi.wrapping_sub(2))?;
         self.modify32(0x1d70, 0x7f00, igi.wrapping_sub(2))?;
@@ -506,8 +506,8 @@ impl<I: Io> Attempt<'_, I> {
         self.verify()?;
         let count = match kind {
             Kind::Rf(path) => {
-                // SAFETY: outer initializer requires genuine same requester,
-                // report boot epoch, retained full BAR/pins and exclusive
+                // SAFETY: outer initializer requires same requester,
+                // report boot epoch, kept full BAR/pins and exclusive
                 // source-phase ownership; domain enable was performed above.
                 let mut rf = unsafe { rf::Registers::new(self.io, report) }?;
                 walk(condition, table, |address, value| {
@@ -547,15 +547,15 @@ impl<I: Io> Attempt<'_, I> {
 
 /// Prepare concrete source factory PG/by-rate/limit data and load the complete
 /// bounded source table phase for admitted two-PHY 8822C. Factory sheets do not
-/// select a current OS jurisdiction/channel or qualify operational TX power.
+/// select a current OS jurisdiction/channel or check operational TX power.
 ///
 /// # Safety
-/// The actual Io, immutable OTP Board and fresh firmware Report belong to the
-/// same retained physical requester and uninterrupted reset/boot epoch. Matching
+/// The Io, immutable OTP Board and fresh firmware Report belong to the
+/// same physical requester and uninterrupted reset/boot epoch. Matching
 /// hardware fingerprints alone do not prove this. Full native HCI/FIFO/MAC
 /// configuration and source board power-policy setup precede this call; the
-/// actual mapped BAR extends through 0x5000, all actual native queues/pins/claims
-/// remain retained and no DMA/reset/IRQ/RF worker competes. Transmit remains
+/// mapped BAR extends through 0x5000, all native queues/pins/claims
+/// remain held and no DMA/reset/IRQ/RF worker competes. Transmit remains
 /// quiesced through later source TRX/calibration/channel/policy admission. Call
 /// once in the initial source PHY phase per boot. Run in
 /// exclusive process/deferred context with calibrated real delays. Loaded is

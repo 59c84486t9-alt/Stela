@@ -80,7 +80,7 @@ fn v3_head_tail_and_early_tail_keep_actual_head_provenance_and_clickpad_effects(
             head.frames[0].report,
             elantech::Report::Head { point: (200, 800) }
         );
-        // Source caches the actual head even across an intervening single report.
+        // Source caches the head even across an intervening single report.
         emit(&h, Port::Mouse, &packet(crc, true, 1, 700, 800, 0));
         c.poll_elantech().unwrap();
         emit(&h, Port::Mouse, &packet(crc, false, 2, 900, 700, 3));

@@ -69,7 +69,7 @@ impl Drop for Storage {
 fn memory(allocation_tag: u8, mapped_bytes: usize, readable: bool) -> Result<Arc<MemoryDomain>> {
     let system = MemorySystem::new(RAM_ALIGNMENT as u64, 4).unwrap();
     let layout = Layout::from_size_align(RAM_BYTES, RAM_ALIGNMENT)?;
-    // SAFETY: valid nonempty layout; owner retains allocation until last backing.
+    // SAFETY: valid nonempty layout; owner keeps allocation until last backing.
     let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let storage = Arc::new(Storage { pointer, layout });
     // SAFETY: raw storage is pinned, coherent and disjoint from Rust byte references.

@@ -4,7 +4,7 @@
 //! configurations and reads 76-byte device dependency rows. T8112 KC file
 //! 0x2b71bd8..0x2b71fd8/0x2b73c80 and T6000 0x2b3a674 establish the same
 //! table geometry. Register layout, optional-bank tuning and initial contents
-//! remain separate, chip-qualified inputs.
+//! remain separate, chip-checked inputs.
 use super::super::Node;
 use alloc::{string::String, vec::Vec};
 

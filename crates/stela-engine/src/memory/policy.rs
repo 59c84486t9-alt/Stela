@@ -148,7 +148,7 @@ impl MemoryControls {
     }
 
     #[cfg(feature = "std")]
-    /// Build the temporary snapshot from the checked CPU authority. Only the
+    /// Build the temporary snapshot from the checked CPU permission. Only the
     /// process owner's same-thread borrow may install it; its native scope
     /// holds the controls, system state and event endpoint and restores the
     /// previous policy on every return, refusal or unwind.
@@ -195,7 +195,7 @@ impl MemoryControls {
     }
 
     /// Resolve the unchecked increment specialization only from the process
-    /// owner's qualified CPA0/CPA1 declaration. CPA2 needs its separate live
+    /// owner's checked CPA0/CPA1 declaration. CPA2 needs its separate live
     /// pointer-control owner; an unbound public policy has no such proof.
     pub(crate) fn with_unchecked_address_authority(
         mut self,
@@ -266,7 +266,7 @@ impl MemoryControls {
                     .read(offset)
                     .map_err(|error| match error {
                         // A partial physical granule needs a backing representation
-                        // that can retain its complete tag; it is not a guest fault.
+                        // that can keep its complete tag; it is not a guest fault.
                         TagStoreError::OutOfBounds => MemoryStatus::Unsupported,
                         _ => MemoryStatus::Domain,
                     })?;

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! Reserved two-hop protocol paths over an actual retained native USB4 link.
+//! Reserved two-hop protocol paths over a native USB4 link.
 //! Linux path.c activation and tunnel.c settings; no tunnel/endpoint enable,
-//! HopID allocator, bandwidth or platform authorization provider is fabricated.
+//! HopID allocator, bandwidth or platform authorization provider is invented.
 use super::{
     channel::{self, Channel},
     config::{self, Address, Reply, Route, Space},
@@ -28,7 +28,7 @@ pub enum Direction {
     Downstream,
     Upstream,
 }
-/// Source lane credit choice. RouterAllocated is the actual source-selected
+/// Source lane credit choice. RouterAllocated is the source-selected
 /// protocol reservation (USB3's max_usb3_credits in the public API), never the
 /// register total or an unreserved caller estimate. PCIe additionally checks
 /// its source six-credit minimum in the private protocol plan.
@@ -46,7 +46,7 @@ impl LaneCredits {
         }
     }
 }
-/// Metadata of an independently protected real allocation; never authority by
+/// Metadata of an independently protected real allocation; never permission by
 /// itself. Hop pairs are (ingress HopID, outgoing HopID), source to destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Allocation {
@@ -55,9 +55,9 @@ pub struct Allocation {
     pub grant_epoch: u64,
     pub direction: Direction,
     /// Public USB3 endpoint. The private PCIe adapter uses this historical
-    /// storage field for its actual PCIe endpoint, selected by a private profile.
+    /// storage field for its PCIe endpoint, selected by a private profile.
     pub usb3_down: u8,
-    /// Opposite actual protocol endpoint, under the same private profile.
+    /// Opposite protocol endpoint, under the same private profile.
     pub usb3_up: u8,
     pub hops: [(u16, u16); 2],
     pub lane_credits: LaneCredits,
@@ -66,27 +66,27 @@ pub struct Allocation {
 /// Real protected native protocol path reservation, including permission/lifetimes.
 ///
 /// # Safety
-/// This object retains exclusive actual input AND output HopIDs on all four
+/// This object keeps exclusive input AND output HopIDs on all four
 /// ports, including any stale configuration at those IDs, from the shared native
-/// domain allocator. They belong to the exact retained Linked/NHI/reset/topology
-/// epoch and actual protocol-to-primary-lane mapping. Neither firmware nor another
+/// domain allocator. They belong to the exact Linked/NHI/reset/topology
+/// epoch and protocol-to-primary-lane mapping. Neither firmware nor another
 /// CM can reuse them or modify the path. Permission is a real platform/_OSC and
 /// security decision for these endpoints, with protected grant_epoch; it is not
 /// an integer tuple assertion or a default authorization. Credit mode is from
-/// actual router VSEC allocation support, and the source-sized lane credits are
-/// reserved against every competing path, not merely compared to total buffers.
+/// router VSEC allocation support, and the source-sized lane credits are
+/// reserved against every competing path, not compared to total buffers.
 /// The native owner has serialized dependent paths/power/CL0, satisfies any real
-/// preactivation bandwidth prerequisites and retains endpoint/DMA/IMR/IOMMU/IRQ
+/// preactivation bandwidth prerequisites and keeps endpoint/DMA/IMR/IOMMU/IRQ
 /// ownership independently. Stale-hop draining must not release any prior ID,
 /// posted DMA, endpoint or attachment. Drop releases this reservation only after
-/// no mutation, proven restoration/reset, independently retained transfer, or
-/// a genuine same-epoch complete local path disable/pending drain. That last
+/// no mutation, proven restoration/reset, independently kept transfer, or
+/// a same-epoch complete local path disable/pending drain. That last
 /// proof returns only local HopID/flow-credit rights; independent endpoint DMA,
-/// IRQ/IOMMU, link and residual bandwidth/permission lifetimes stay retained.
+/// IRQ/IOMMU, link and residual bandwidth/permission lifetimes stay held.
 /// No production implementation of these missing native services is supplied.
 pub unsafe trait Reservation: Send + Sync {
     fn allocation(&self) -> Allocation;
-    /// Real retained native admission state, checked before publication and
+    /// Real kept native admission state, checked before publication and
     /// completion. It also pins this in-flight physical lifetime against reuse;
     /// integer tuple equality is never a native reset/topology guard.
     fn is_current(&self) -> bool;
@@ -124,7 +124,7 @@ pub enum Error {
 pub struct Words {
     pub raw: [u32; 2],
 }
-/// Active local path, retaining the original link and actual path allocation.
+/// Active local path, keeping the original link and path allocation.
 /// Neither this receipt nor a pending-bit observation authorizes endpoint enable
 /// or finishes a protocol tunnel, security/attachment admission or endpoint teardown.
 pub struct Active {
@@ -239,9 +239,9 @@ impl Active {
         }))
     }
     /// # Safety
-    /// Exact same-epoch PCIe stop proved both endpoints disabled and all four
+    /// Same-epoch PCIe stop proved both endpoints disabled and all four
     /// hops disabled/PENDING0 in source normal-stop order. Source clear_fc=false
-    /// retains FC bits; only the original local IDs/credits return to the same
+    /// keeps FC bits; only the original local IDs/credits return to the same
     /// reservation. Independent endpoint DMA, IRQ/IOMMU and platform lifetimes
     /// remain with the returned real owners.
     pub(super) unsafe fn release_direct_stopped(mut self) -> Box<Linked> {
@@ -257,7 +257,7 @@ impl Active {
     }
     /// # Safety
     /// Native DP stop proved both endpoints disabled, all six owned hops
-    /// EN0/PENDING0 and actual video NFC returned in the same live epoch.
+    /// EN0/PENDING0 and video NFC returned in the same live epoch.
     /// Only original local rights return; independent GPU/DMA/IRQ stay held.
     pub(super) unsafe fn release_dp_stopped(mut self) -> Box<Linked> {
         let Some(Backing::Previous(mut aux)) = self.link.take() else {
@@ -276,9 +276,9 @@ impl Active {
     }
     /// # Safety
     /// The containing stopped receipt proves matching live epoch, both PE0 and
-    /// every actual hop disabled/PENDING0. Only LOCAL path IDs/flow credits may
+    /// every hop disabled/PENDING0. Only LOCAL path IDs/flow credits may
     /// become reusable; independent endpoint DMA/IRQ/IOMMU and residual native
-    /// permission/accounting remain retained by the returned bandwidth object.
+    /// permission/accounting remain held by the returned bandwidth object.
     pub(super) unsafe fn release_stopped(
         mut self,
     ) -> (Box<super::usb3::Allocated>, [Arc<dyn Reservation>; 2]) {
@@ -296,9 +296,9 @@ impl Active {
         (bandwidth, [down_owner, up_owner])
     }
     /// # Safety
-    /// Actual path/link restoration or reset and all independent dependent DMA,
+    /// Path/link restoration or reset and all independent dependent DMA,
     /// IRQ/power lifetimes are satisfied, or the complete live path, both router
-    /// owners and reciprocal link reservation are independently retained by the
+    /// owners and reciprocal link reservation are independently kept by the
     /// real native CM. This must never release an unknown prior owner's IDs.
     /// ```compile_fail
     /// use stela_drivers::bus::thunderbolt::path::Active;
@@ -306,7 +306,7 @@ impl Active {
     /// ```
     pub unsafe fn retire(mut self) {
         if let Some(link) = self.link.take() {
-            // SAFETY: caller proves the actual full ownership transfer or drain.
+            // SAFETY: caller proves the full ownership transfer or drain.
             unsafe { link.retire() };
         }
         self.reservation.take();
@@ -360,7 +360,7 @@ impl Hop {
     }
     fn program(self, before: Words, index: usize) -> Words {
         // Real tb_regs_hop bitfields, including counter=-1 with enable=0.
-        // USB4 protocol-adapter credits/IFC/ISE are vendor-defined and retained.
+        // USB4 protocol-adapter credits/IFC/ISE are vendor-defined and kept.
         let credits = if self.lane {
             u32::from(self.credits) << 17
         } else {
@@ -429,7 +429,7 @@ fn plan_profile(
     if !link.link_usb4 || !matches!(link.generation, 2 | 3) {
         return Err(Error::Unsupported);
     }
-    // Router::Policy owns USB3/PCIe only. DP authorization comes from its actual
+    // Router::Policy owns USB3/PCIe only. DP authorization comes from its
     // separate native display reservation; no USB3/PCIe decision implies it.
     let policies = match profile {
         Profile::Usb3 => Some((
@@ -563,8 +563,8 @@ impl DrainHop {
         (0..2).all(|i| words.raw[i] & self.mask[i] == self.expected.raw[i] & self.mask[i])
     }
 }
-/// Private composition plan checked against the genuine protected link before
-/// any first-path write. It carries no independent hardware authority.
+/// Private composition plan checked against the protected link before
+/// any first-path write. It carries no independent hardware permission.
 pub(super) struct Prepared {
     allocation: Allocation,
     hops: [Hop; 2],
@@ -614,8 +614,8 @@ enum Stage {
     Done,
     Fault,
 }
-/// Polled actual path programming. DP video additionally owns real lane NFC;
-/// all profiles have no allocated counters, so no counter clear is fabricated.
+/// Polled path programming. DP video additionally owns real lane NFC;
+/// all profiles have no allocated counters, so no counter clear is invented.
 pub struct Activate<R: Registers> {
     channel: Option<Channel<R>>,
     retained: Option<Active>,
@@ -629,7 +629,7 @@ pub struct Activate<R: Registers> {
 }
 impl<R: Registers> Activate<R> {
     /// # Safety
-    /// The containing native CM owns the actual current link/allocator/security
+    /// The containing native CM owns the current link/allocator/security
     /// grant and preflighted this exact private plan and every clock addition.
     pub(super) unsafe fn start_pcie(
         channel: Channel<R>,
@@ -651,7 +651,7 @@ impl<R: Registers> Activate<R> {
         )
     }
     /// # Safety
-    /// The Channel, complete retained Linked and native allocation are the exact
+    /// The Channel, complete kept Linked and native allocation are the exact
     /// same physical NHI/reset/topology/grant epoch, exclusively idle/current.
     /// Reservation's real allocator, permission, mapping, bandwidth, credit and
     /// dependent-path lifetime obligations hold; matching numbers alone do not
@@ -745,8 +745,8 @@ impl<R: Registers> Activate<R> {
         ))
     }
     /// # Safety
-    /// The containing actual native CM has preflighted this exact protected
-    /// plan, same physical pairing and endpoint authority, and checked all clock
+    /// The containing native CM has preflighted this exact protected
+    /// plan, same physical pairing and endpoint permission, and checked all clock
     /// additions before moving ownership. This is not a public admission API.
     pub(super) unsafe fn start_bandwidth(
         channel: Channel<R>,
@@ -799,8 +799,8 @@ impl<R: Registers> Activate<R> {
         deadline: u64,
         job_deadline: u64,
     ) -> Self {
-        // A prior actual bandwidth/path success makes the complete transaction
-        // live already. Retain the new path reservation even if later preflight
+        // A prior bandwidth/path success makes the complete transaction
+        // live already. Keep the new path reservation even if later preflight
         // or construction fails before its first own write.
         let changed = !matches!(link, Backing::Direct(_));
         Self {
@@ -1144,7 +1144,7 @@ mod tests {
                     } = path_fixture(direction, credits);
                     let mut peer = PathPeer::new(&linked, reservation.allocation, stale, 5);
                     let protocol = peer.raw[0];
-                    // SAFETY: real model protected IDs/credits/permission and exact retained physical link.
+                    // SAFETY: real model protected IDs/credits/permission and exact physical link.
                     let mut activate =
                         unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
                     let active = drive_path(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -1170,7 +1170,7 @@ mod tests {
                             .all(|counter| counter.load(Ordering::Relaxed) == 0)
                     );
                     let mut channel = activate.into_channel();
-                    // SAFETY: actual model complete path and all owners transfer into independently retained CM through final drain.
+                    // SAFETY: model complete path and all owners transfer into independently kept CM through final drain.
                     unsafe { active.retire() };
                     assert!(
                         dropped
@@ -1425,7 +1425,7 @@ mod tests {
                 .collect();
             let final_words = &values[9 + count * 5..];
             assert_eq!(final_words.len(), 4);
-            // SAFETY: same actual fixture link and independently protected model allocations/grants.
+            // SAFETY: same fixture link and independently protected model allocations/grants.
             let mut activate =
                 unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
             let active = drive_path(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -1433,7 +1433,7 @@ mod tests {
             assert_eq!(active.words[0].raw, final_words[..2], "case={cases}");
             assert_eq!(active.words[1].raw, final_words[2..], "case={cases}");
             let mut channel = activate.into_channel();
-            // SAFETY: all native synthetic owners transfer across actual model final drain.
+            // SAFETY: all native synthetic owners transfer across model final drain.
             unsafe { active.retire() };
             assert!(
                 dropped

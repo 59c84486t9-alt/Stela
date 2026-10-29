@@ -222,8 +222,8 @@ const INVLPG_PAGES: u64 = 16;
 const FAULT_KIND: u64 = 0xffff;
 pub(crate) const COUNTER_HZ: u64 = 24_000_000;
 
-/// Fresh ticks from the actual installed physical Host's configured 24 MHz
-/// clock. Native PMP services execute on the retained BSP owner and share this
+/// Fresh ticks from the installed physical Host's configured 24 MHz
+/// clock. Native PMP services execute on the BSP owner and share this
 /// same source, rather than reusing an Access timestamp or a copied sample.
 pub(crate) fn fresh_counter() -> u64 {
     let state = state();
@@ -260,7 +260,7 @@ pub struct State {
     pool: Pool,
     /// Engine root without any guest mapping.
     host_root: u64,
-    /// Original actual loader root retained from install, never caller metadata.
+    /// Original loader root kept from install, never caller metadata.
     window_root: u64,
     _loader_tables: &'static crate::paging::loader::LoaderTables,
     roots: [u64; ROOTS],
@@ -285,8 +285,8 @@ pub struct State {
     /// installed last.
     code_unit: u64,
     code_used: u64,
-    /// Successful initialized installs in each retained arena unit. These
-    /// metadata ranges require this State's actual backing/root/CPU owner.
+    /// Successful initialized installs in each arena unit. These
+    /// metadata ranges require this State's backing/root/CPU owner.
     installed_ranges: [Vec<(u64, u64)>; CODE_UNITS as usize],
     /// The furthest the arena's code has reached: what the run needed of it
     /// until it first filled and new code reclaimed the oldest.
@@ -395,7 +395,7 @@ pub struct Config {
 /// VMM preserve them throughout ownership. Stop and retire the owner before
 /// physical reset/resume, microcode update or feature reconfiguration, including
 /// SMT-shared changes; reinstall and re-enumerate afterwards. ExitBootServices
-/// and CPUID do not prove that external promise or hardware qualification.
+/// and CPUID do not prove that external promise or hardware validation.
 pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
     let mut pool = Pool {
         base: config.pool_physical,
@@ -420,7 +420,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
                 .loader_tables
                 .boot_entry(entry)
                 .map_err(|_| "original loader table context changed before host installation")?;
-            // SAFETY: this actual processor's fresh permanent pool allocation.
+            // SAFETY: this processor's fresh permanent pool allocation.
             unsafe {
                 (layout::physical(frame) as *mut u64)
                     .add(entry)
@@ -652,7 +652,7 @@ pub(crate) fn profile_snapshot() -> profile::Snapshot {
     state().native_profile.snapshot()
 }
 
-/// Inclusive work counters retain the outer phase, so native helper calls in
+/// Inclusive work counters keep the outer phase, so native helper calls in
 /// stopped services do not masquerade as checked-body execution time.
 #[cfg(feature = "native-profile")]
 pub(crate) fn profile_work_report() {
@@ -918,8 +918,8 @@ impl mmu::TableMemory for GuestTables<'_> {
                 return None;
             }
             let mut bytes = [0; 8];
-            // SAFETY: private descriptor staging; the retained canonical owner
-            // supplies the all-writer mapping and exact native scalar read.
+            // SAFETY: private descriptor staging; the canonical owner
+            // supplies the all-writer mapping and native scalar read.
             unsafe { ram.read_physical(physical, &mut bytes) }.ok()?;
             return Some(u64::from_le_bytes(bytes));
         }
@@ -944,7 +944,7 @@ impl mmu::TableMemory for GuestTables<'_> {
     }
 }
 
-// Retained in the actual owning host stack through native/context execution.
+// In the owning host stack through native/context execution.
 // recovery_rsp points to the complete image, never to a naked GPR snapshot.
 // The adjacent footer preserves both original stack ownership and BlockExit's
 // two result registers across scalar-only state restoration.
@@ -992,7 +992,7 @@ stela_enter_owned:
     call {save}
     fninit
     ldmxcsr [rip + {default_mxcsr}]
-    // Publish only a complete actual owned image. IRQs use separate IST images;
+    // Publish only a complete owned image. IRQs use separate IST images;
     // a terminal NMI can never return through a half-published recovery frame.
     mov gs:[{recovery}], rsp
     mov r11, gs:[{image_bytes}]
@@ -1273,7 +1273,7 @@ pub(crate) fn clear_interrupted() {
 
 pub(crate) fn wake_interrupt() {
     state().apic.eoi();
-    // Release publication follows actual EOI; startup evidence cannot race
+    // Release publication follows EOI; startup evidence cannot race
     // ahead of retirement of the directed interrupt at this physical LAPIC.
     local::doorbell();
 }
@@ -1386,7 +1386,7 @@ pub fn stray_interrupt(_vector: u8) {
     state.apic.eoi();
 }
 
-/// Complete one real owner-local native return, retaining exact fault GPRs.
+/// Complete one real owner-local native return, keeping exact fault GPRs.
 fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit {
     crate::native_mmio::shootdown::service();
     let state = state();
@@ -1627,7 +1627,7 @@ impl Host for BareHost<'_> {
         }
         let offset = code.0 as u64 - state.code_virtual;
         // SAFETY: successful install metadata proves this exact initialized,
-        // unreclaimed extent. The actual IF0 CPU owner retains the arena's
+        // unreclaimed extent. The IF0 CPU owner keeps the arena's
         // backing/root and physmap; no native frame/executable borrow is live.
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -1710,8 +1710,8 @@ impl Host for BareHost<'_> {
         );
         state().native = true;
         let entered = rdtsc();
-        // SAFETY: caller holds the installed context block, exact live frame
-        // and service owners. The current GS HostOwner retains recovery state.
+        // SAFETY: caller holds the installed context block, live frame
+        // and service owners. The current GS HostOwner keeps recovery state.
         let exit = unsafe { stela_enter_context_block(guest, context, code.0) };
         let returned = native_return(code, exit, entered);
         #[cfg(feature = "native-profile")]

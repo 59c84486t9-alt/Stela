@@ -3,7 +3,7 @@ use super::*;
 fn install(h: &Rc<RefCell<Hardware>>) {
     let mut h = h.borrow_mut();
     h.memory[0xe8] = 0;
-    // Three actual F1A interrupt sources; all belong to the same record.
+    // Three F1A interrupt sources; all belong to the same record.
     h.memory[0x1e9..0x1ef].copy_from_slice(&[0x10, 0x30, 0x40, 0x80, 3, 0x1a]);
 }
 fn frame(poll: &InputPoll) -> &f1a::Frame {

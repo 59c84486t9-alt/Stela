@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Real DesignWare PIO child, retaining the original LPSS resources on failure.
+//! Real DesignWare PIO child, keeping the original LPSS resources on failure.
 use super::*;
 use crate::bus::i2c::{self, Bus, DesignWare, Operation, Timer};
 
@@ -10,11 +10,11 @@ pub enum AttachError {
 }
 pub struct AttachFailure {
     pub error: AttachError,
-    /// Exact owners rejected before any hardware programming. None means the
-    /// original actual resources are quarantined after possible effects.
+    /// Owners rejected before any hardware programming. None means the
+    /// original resources are quarantined after possible effects.
     pub unmodified: Option<NativeResources>,
 }
-/// A disabled/reset owner produced only by actual successful retirement.
+/// A disabled/reset owner produced only by successful retirement.
 pub struct Retired<R: Registers> {
     pub(super) registers: R,
 }
@@ -36,17 +36,17 @@ impl<R: ChildAccess> i2c::Registers for Child<R> {
             .child_write32(offset, value);
     }
 }
-/// The actual existing PIO FIFO engine. Drop retains the whole live engine;
+/// The existing PIO FIFO engine. Drop keeps the whole live engine;
 /// explicit acknowledged shutdown returns the original disabled/reset owners.
 pub struct I2c<R: ChildAccess, T: Timer + 'static> {
     engine: Option<DesignWare<Child<R>, T>>,
 }
 impl<R: ChildAccess> Controller<R> {
     /// # Safety
-    /// Timing counts are genuine firmware/board-derived values for this exact
+    /// Timing counts are firmware/board-derived values for this exact
     /// source profile's input clock, rise/fall/hold wiring and power epoch.
     /// Neither this source clock nor its hold/falling properties authorize
-    /// guessed SCL counts. SDA_HOLD must include actual RX hold requirements
+    /// guessed SCL counts. SDA_HOLD must include RX hold requirements
     /// as well as TX hold; source nanoseconds alone are not that register.
     /// This owner is the sole child; no iDMA/IRQ is enabled.
     pub unsafe fn into_i2c<T: Timer + 'static>(
@@ -63,7 +63,7 @@ impl<R: ChildAccess> Controller<R> {
 impl<T: Timer + 'static> I2c<NativeRegisters, T> {
     /// # Safety
     /// All NativeRegisters mapping/stopped epoch and Controller board-timing
-    /// contracts hold for the same actual native Function. No generic alias or
+    /// contracts hold for the same native Function. No generic alias or
     /// firmware resource override is allowed, including the Surface Go quirks.
     pub unsafe fn attach_native(
         requester: StoppedRequester,
@@ -81,7 +81,7 @@ impl<T: Timer + 'static> I2c<NativeRegisters, T> {
                 unmodified: Some((requester.into_function(), mapping)),
             });
         }
-        // SAFETY: same actual mapped/stopped function authority as this entry.
+        // SAFETY: same mapped/stopped function permission as this entry.
         let registers = unsafe { NativeRegisters::claim(requester, mapping) }.map_err(
             |(error, resources)| AttachFailure {
                 error: AttachError::Platform(error),
@@ -93,7 +93,7 @@ impl<T: Timer + 'static> I2c<NativeRegisters, T> {
                 error: AttachError::Platform(error),
                 unmodified: registers.map(NativeRegisters::into_resources),
             })?;
-        // SAFETY: this entry requires actual observed board timing/clock grants.
+        // SAFETY: this entry requires observed board timing/clock grants.
         unsafe { owner.into_i2c(timer, config) }.map_err(|error| AttachFailure {
             error: AttachError::I2c(error),
             unmodified: None,
@@ -120,7 +120,7 @@ impl<R: ChildAccess, T: Timer + 'static> I2c<R, T> {
             .unwrap()
             .shutdown()
             .map_err(AttachError::I2c)?;
-        // SAFETY: the same actual child acknowledged disable; no mutable or
+        // SAFETY: the same child acknowledged disable; no mutable or
         // shared child escape exists and this owner never enabled DMA/IRQs.
         let retired = unsafe { child.0.retire() }.map_err(AttachError::Platform)?;
         Ok((retired, timer))

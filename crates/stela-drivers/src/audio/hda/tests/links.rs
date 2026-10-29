@@ -34,7 +34,7 @@ fn clock_selection_preserves_other_links() {
                     .unwrap();
             let timer = model.borrow().clock.clone();
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
-            // retains the aligned DMA backing, and polling is the only model execution.
+            // keeps the aligned DMA backing, and polling is the only model execution.
             let mut controller = unsafe {
                 Controller::new(registers, timer, &mut fixture.allocator, modern_config())
             }
@@ -102,7 +102,7 @@ fn invalid_link_preflight() {
         let remaining = fixture.allocator.remaining();
         assert!(
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
-            // retains the aligned DMA backing, and polling is the only model execution.
+            // keeps the aligned DMA backing, and polling is the only model execution.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
                 .is_err(),
             "variant {variant}"
@@ -155,7 +155,7 @@ fn link_failure_restores_power() {
         let timer = model.borrow().clock.clone();
         let result =
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
-            // retains the aligned DMA backing, and polling is the only model execution.
+            // keeps the aligned DMA backing, and polling is the only model execution.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) };
         let error = match result {
             Err(error) => error,
@@ -214,7 +214,7 @@ fn dsp_ownership_blocks_reset_and_shutdown() {
     let timer = model.borrow().clock.clone();
     let mut controller =
         // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
-        // retains the aligned DMA backing, and polling is the only model execution.
+        // keeps the aligned DMA backing, and polling is the only model execution.
         unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
             .unwrap();
     let id = controller
@@ -272,7 +272,7 @@ fn failed_reinitialize_stales_link_clock() {
         let timer = model.borrow().clock.clone();
         let mut controller =
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
-            // retains the aligned DMA backing, and polling is the only model execution.
+            // keeps the aligned DMA backing, and polling is the only model execution.
             unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
                 .unwrap();
         assert_eq!(

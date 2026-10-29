@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Included by acpi::tests to exercise actual native AML and EC operation regions.
+// Included by acpi::tests to exercise native AML and EC operation regions.
 #[test]
 fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
     use crate::platform::ec::{
@@ -114,7 +114,7 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
         if context.is_null() || value.is_null() {
             return BAD_PARAMETER.0;
         }
-        // SAFETY: setup returned the retained exact controller context.
+        // SAFETY: setup returned the exact controller context.
         let controller = unsafe { &*context.cast::<Mutex<Controller>>() };
         let mut controller = controller.lock().unwrap();
         match function {
@@ -228,12 +228,12 @@ fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {
         )
         .unwrap(),
     ));
-    // SAFETY: actual callbacks execute the EC core, whose sole boxed owner is
-    // retained until explicit removal below; no other handler accesses it.
+    // SAFETY: callbacks execute the EC core, whose sole boxed owner is
+    // until explicit removal below; no other handler accesses it.
     unsafe { handle.install_region(3, region, setup, Arc::as_ptr(&controller).cast_mut().cast()) }
         .unwrap();
     for (value, success) in [(0xab, true), (0xac, false), (0xad, false)] {
-        // Deliberately end the owner guard before AML. A handler-issued EC
+        // End the owner guard before AML. A handler-issued EC
         // transaction would otherwise deadlock on its same native controller.
         let receipt = controller.lock().unwrap().poll_query().unwrap().unwrap();
         assert_eq!(receipt.value(), value);

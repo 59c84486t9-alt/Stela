@@ -85,7 +85,7 @@ pub(super) fn drive_nvm<'a>(
         Ok(_) => panic!("uninitialized owner admitted"),
     };
     assert_eq!(state.lock().unwrap().ops.len(), before);
-    // SAFETY: All helper callers retain the original boot Source/Domain pair; its RAM
+    // SAFETY: All helper callers keep the original boot Source/Domain pair; its RAM
     // is exclusive and the refused begin_radio returned that exact initializer.
     unsafe { init.advance(source) }.unwrap();
     complete(
@@ -96,7 +96,7 @@ pub(super) fn drive_nvm<'a>(
         &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
     );
     // SAFETY: The extended-configuration ACK was synchronously completed in the same
-    // retained Domain; the caller's original Source supplies exclusive model pages.
+    // Domain; the caller's original Source supplies exclusive model pages.
     unsafe { init.advance(source) }.unwrap();
     complete(
         &init.boot,
@@ -124,7 +124,7 @@ pub(super) fn drive_nvm<'a>(
         ),
     );
     // SAFETY: The init notification was completed synchronously through the original
-    // Domain; Source and all model mappings remain retained by this initializer.
+    // Domain; Source and all model mappings remain held by this initializer.
     unsafe { init.advance(source) }.unwrap();
     complete(
         &init.boot,
@@ -154,7 +154,7 @@ pub(super) fn drive_cold_prefix<'a>(
     )
     .unwrap();
     let mut radio = init.begin_radio().unwrap_or_else(|_| panic!("actual NVM"));
-    // SAFETY: Callers retain the exact Source/Domain for init, and begin_radio moves
+    // SAFETY: Callers keep the exact Source/Domain for init, and begin_radio moves
     // that original owner; the NVM-derived plan uses exclusive model allocations.
     unsafe { radio.advance(source) }.unwrap();
     for (i, command) in expected.commands().iter().enumerate() {
@@ -170,7 +170,7 @@ pub(super) fn drive_cold_prefix<'a>(
             &command_packet(id, 3 + i as u16, &[]),
         );
         // SAFETY: Each prefix ACK was synchronously completed through that same Domain;
-        // radio retains the original Source and DMA backing through the next command.
+        // radio keeps the original Source and DMA backing through the next command.
         unsafe { radio.advance(source) }.unwrap();
     }
     assert_eq!(radio.phase(), ColdRadioPhase::PlatformConfigurationRequired);

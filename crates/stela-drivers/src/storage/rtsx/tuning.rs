@@ -2,7 +2,7 @@
 // Native adaptation of rtsx_pci_sdmmc.c/rts5227.c, Copyright 2009-2013 Realtek.
 // CMD11 sequence also adapts MMC core.c: Copyright 2003-2004 Russell King,
 // 2004 Ian Molton, 2005-2008 Pierre Ossman, 2006 Philip Langdale.
-//! Qualified RTSX CMD11 electrical transitions, SD UHS clocks and phase tuning.
+//! Checked RTSX CMD11 electrical transitions, SD UHS clocks and phase tuning.
 use super::*;
 
 impl Engine {
@@ -166,7 +166,7 @@ impl Engine {
         let selected =
             final_phase(intersection).ok_or(BlockError::Unsupported("RTSX empty tuning window"))?;
         self.phase(selected, true)?;
-        // Recheck an actual completed tuning transaction at the selected phase.
+        // Recheck a completed tuning transaction at the selected phase.
         self.execute(SD_SEND_TUNING, 0, Response::Status, Some(64))?;
         Ok(())
     }

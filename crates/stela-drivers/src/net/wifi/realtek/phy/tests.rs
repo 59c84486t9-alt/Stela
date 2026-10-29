@@ -308,7 +308,7 @@ fn setup(
         panic_delay: false,
         panic_register: None,
     };
-    // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+    // SAFETY: Bus keeps the register buffer and 512-byte OTP array behind its mutex.
     // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
     let board = unsafe { super::super::efuse::read(&mut bus) }
         .unwrap()
@@ -344,7 +344,7 @@ fn source_events(events: &[[u32; 4]]) -> Vec<u8> {
         if events[index][..3] == [0, 0xf0, 4] {
             assert_eq!(events[index + 1][..3], [0, 0x80, 2]);
             index += 2;
-            // Native RF guard adds actual domain reads; prefix/header
+            // Native RF guard adds domain reads; prefix/header
             // source operations never contain this contiguous triple.
             if events.get(index).map(|x| &x[..3]) == Some(&[0, 2, 1][..])
                 && events.get(index + 1).map(|x| &x[..3]) == Some(&[0, 0x1f, 1][..])
@@ -369,7 +369,7 @@ fn paths_setup(pattern: usize, igi: u32) -> (Bus, Loaded, Report) {
     {
         let mut m = bus.model.lock().unwrap();
         // Broad source-helper input patterns model volatile BB state at
-        // this boundary; the table phase was genuinely executed above.
+        // this boundary; the table phase was executed above.
         m.initial(pattern);
         let bb = m.get(2, 1) | 3;
         m.set(2, 1, bb);
@@ -395,12 +395,12 @@ fn dynamic_setup(
     // SAFETY: Bus exclusively serializes its Arc-held register and OTP model.
     // Board/report values stay live, including mismatch cases; no DMA or other client runs.
     let loaded = unsafe { initialize(&mut bus, &board, &report) }.unwrap();
-    // SAFETY: The phase value and report remain live while Bus retains its register/RF
+    // SAFETY: The phase value and report remain live while Bus keeps its register/RF
     // model. No other RF client runs; any domain drift is injected by the serialized model.
     let paths = unsafe { loaded.configure_paths(&mut bus, &report) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
-        // Actual prior phases execute above; these broad volatile inputs
+        // Prior phases execute above; these broad volatile inputs
         // exercise this bounded phase rather than claim physical RF state.
         m.initial(pattern);
         let bb = m.get(2, 1) | 3;
@@ -447,7 +447,7 @@ fn dynamic_words(state: &InitialPhy) -> Vec<u32> {
 }
 fn dac_setup(seed: u32) -> (Bus, InitialPhy, Report) {
     let (mut bus, paths, report) = dynamic_setup(0, 0, 63, 0, 0);
-    // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+    // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
     // Reads, writes and injected failures occur sequentially without another RF client.
     let initial = unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
     {
@@ -474,14 +474,14 @@ fn dac_setup(seed: u32) -> (Bus, InitialPhy, Report) {
 }
 fn trim_setup(case: u32) -> (Bus, DacCalibrated, Report, super::super::efuse::Physical) {
     let (mut bus, initial, report) = dac_setup(case % 64);
-    // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+    // SAFETY: The Bus Arc keeps register and scripted ADC/DAC sample storage.
     // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
     let calibration = unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
         m.dac = None;
         // Factory bytes live entirely in the protected OTP tail, outside
-        // the actual logical board stream used by previous phases.
+        // the logical board stream used by previous phases.
         let addresses = [
             0x1ef, 0x1b0, 0x1d4, 0x1ee, 0x1d2, 0x1ec, 0x1e8, 0x1e4, 0x1e0, 0x1dc, 0x1eb, 0x1e7,
             0x1e3, 0x1df, 0x1db, 0x1d6, 0x1d8, 0x1d5, 0x1d7,
@@ -496,7 +496,7 @@ fn trim_setup(case: u32) -> (Bus, DacCalibrated, Report, super::super::efuse::Ph
     }
     // This is the real private-provenance 512-byte native OTP transport,
     // not a publicly constructed Physical or copied diagnostic byte token.
-    // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+    // SAFETY: Bus keeps the register buffer and 512-byte OTP array behind its mutex.
     // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
     let physical = unsafe { super::super::efuse::read(&mut bus) }.unwrap();
     {
@@ -521,7 +521,7 @@ fn tail_setup(pattern: usize, a: u8, b: u8) -> (Bus, FactoryInitialized, Report)
         let mut m = bus.model.lock().unwrap();
         m.physical[16..21].copy_from_slice(&[0x4f, 0x3e, a, b, 255]);
     }
-    // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+    // SAFETY: Bus keeps the register buffer and 512-byte OTP array behind its mutex.
     // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
     let physical = unsafe { super::super::efuse::read(&mut bus) }.unwrap();
     assert_eq!(
@@ -579,7 +579,7 @@ pub(super) fn control_fixture() -> (PhyInitialized, Report) {
 }
 fn power_setup() -> (Bus, PhyInitialized, Report, channel_power::Plan) {
     let (mut bus, factory, report) = tail_setup(0, 5, 6);
-    // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+    // SAFETY: Bus keeps the thermal/beamforming register model and all phase inputs.
     // There is no concurrent RF, packet or reset producer during these serialized effects.
     let phy = unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
     let g = channel_power::Geometry::new(1, channel_power::Width::Mhz20, None, None).unwrap();

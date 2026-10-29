@@ -1,4 +1,4 @@
-//! Actual engine boundary refusal and authorized Before settlement tests.
+//! Engine boundary refusal and authorized Before settlement tests.
 use super::tests::{BASE, FakeHost, NATIVE_CODE_STRIDE, machine};
 use super::*;
 use stela_compiler::block::{
@@ -163,7 +163,7 @@ fn portable_missing_guest_tag_is_refused_instead_of_falling_back_to_source_map()
 
 /// Keep impossible ADD/BTI injection cases separate from an emitted memory
 /// operand reached by a real chain contract. FakeHost simulates the transfer;
-/// the operand RIP and retirement come from the actual compiler-minted plan.
+/// the operand RIP and retirement come from the compiler-minted plan.
 fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
     use stela_compiler::x86_64::chain;
     let mut words = vec![branch, 0, 0];

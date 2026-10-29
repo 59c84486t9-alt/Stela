@@ -94,7 +94,7 @@ impl Transfer {
             unsafe { buffer.release()? };
         }
         if let Some(payloads) = self.payloads.as_mut() {
-            // SAFETY: same actual whole-requester retirement.
+            // SAFETY: same whole-requester retirement.
             unsafe { payloads.release()? };
         }
         Ok(())
@@ -166,7 +166,7 @@ impl<P: Platform> Transport<P> {
     pub(super) fn initialize_context(&mut self) {
         let base = self.core().address();
         let mut context = [0; 104];
-        // Donor prose says 2, but its actual initializer writes version 1.
+        // Donor prose says 2, but its initializer writes version 1.
         put16(&mut context, 0, 1);
         put16(&mut context, 2, 104);
         put32(&mut context, 4, 2);
@@ -358,7 +358,7 @@ impl<P: Platform> Transport<P> {
         }
         Ok(())
     }
-    /// Publish a source descriptor, not a fabricated DMA/HCI completion.
+    /// Publish a source descriptor, not an invented DMA/HCI completion.
     pub fn send(&mut self, kind: Kind, bytes: &[u8]) -> Result<Submission> {
         if self.state != State::Active {
             return Err(Error::State(self.state));
@@ -578,7 +578,7 @@ impl<P: Platform> Transport<P> {
             }
         }
         // Source ring destroys do not stop its firmware/control DMA. The real
-        // retained root/platform must separately acknowledge whole retirement.
+        // root/platform must separately acknowledge whole retirement.
         if self.state != State::Allocated {
             self.refresh_snapshot()?;
         }
@@ -597,7 +597,7 @@ impl<P: Platform> Transport<P> {
             }
         }
         self.record_bytes(self.observations.retired_without_ack.len() * 4)?;
-        // SAFETY: actual platform DMA/posted/CPU/IRQ/callback/work retirement.
+        // SAFETY: platform DMA/posted/CPU/IRQ/callback/work retirement.
         // Allocated state has never published any device address or MMIO write.
         unsafe {
             self.core.as_mut().unwrap().release()?;

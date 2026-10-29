@@ -226,7 +226,7 @@ pub struct Ram<'a> {
     pub header: RamHeader,
     regions: Vec<RamRegion<'a>>,
     /// Release/feature information between payloads and the region table.
-    /// It is retained for capability/CLC consumers, never sent as an extra
+    /// It is held for capability/CLC consumers, never sent as an extra
     /// implicit firmware region or discarded as though it were padding.
     pub release_information: &'a [u8],
 }
@@ -335,7 +335,7 @@ impl Requests {
             let requirement = self.requirement(patch);
             let image = provider.load(requirement)?;
             // Catalog enforces this contract, but a safe custom Provider can
-            // redirect to another valid Catalog Image. Validate the actual
+            // redirect to another valid Catalog Image. Validate the
             // returned identity before parsing or publishing private Prepared.
             if image.name() != requirement.name || image.target() != requirement.target {
                 return Err(resources::Error {

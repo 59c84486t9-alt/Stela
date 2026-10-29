@@ -147,7 +147,7 @@ fn integer_lane(kind: Kind, fpcr: u32, bits: u64) -> Result<Outcome, CompletionE
 
 /// Sources, old destination and governing predicate are captured before any
 /// numerical evaluation. Status and the complete Z destination commit together.
-/// Raw FPCR remains unchanged when ordinary streaming masks retained enables.
+/// Raw FPCR remains unchanged when ordinary streaming masks kept enables.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

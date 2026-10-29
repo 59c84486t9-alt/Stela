@@ -18,8 +18,8 @@ fn pmf_admission_and_legacy_denial() {
     let admission = permit(&mut owner, &driver, AssociationUse::Configure);
     protection.selected.set(false);
     assert!(
-        // SAFETY: The admission names this retained model requester and context.
-        // Selection was deliberately revoked after preflight; fresh OS guards must deny
+        // SAFETY: The admission names this model requester and context.
+        // Selection was revoked after preflight; fresh OS guards must deny
         // configuration before any modeled command is published.
         unsafe { driver.configure_modern(&mut owner, admission, 105) }.is_err()
     );
@@ -27,7 +27,7 @@ fn pmf_admission_and_legacy_denial() {
     assert!(!state.hardware.get() && !state.os.get());
     protection.selected.set(true);
     let admission = permit(&mut owner, &driver, AssociationUse::Configure);
-    // SAFETY: Selection is restored for the original retained context and native
+    // SAFETY: Selection is restored for the original context and native
     // memory. Both model leases are reacquired synchronously and no device, reset or
     // concurrent policy writer can race configuration.
     unsafe { driver.configure_modern(&mut owner, admission, 105) }.unwrap();
@@ -116,9 +116,9 @@ fn scan_observation_provenance() {
     let (mut owner, state, _) = authority_pmf(old.clone(), &join, &model);
     let before = model.bar.0.lock().unwrap().log.len();
     assert!(
-        // SAFETY: Both original and foreign observations retain their own model
-        // backing. The foreign observation is intentionally mismatched; requester
-        // validation must reject it before minting authentication authority.
+        // SAFETY: Both original and foreign observations keep their own model
+        // backing. The foreign observation is mismatched; requester
+        // validation must reject it before minting authentication permission.
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
@@ -164,7 +164,7 @@ fn scan_observation_provenance() {
     assert!(state.tickets.borrow().is_empty());
     // SAFETY: This fresh observation belongs to the original live requester and
     // selected request. Both current model leases cover authentication submission and
-    // retain its scan and native-memory owners.
+    // keep its scan and native-memory owners.
     unsafe {
         driver.join_modern_pmf(
             &mut owner,

@@ -2,7 +2,7 @@
 /// The interrupt groups the 3-bit group field selects.
 pub const GROUPS: usize = 8;
 
-/// Source-qualified register behavior; board nets and lifecycle remain
+/// Source-checked register behavior; board nets and lifecycle remain
 /// separately owned. The S5L driver does not implement T8101 lockGPIO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {

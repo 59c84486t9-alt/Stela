@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Actual post-MCC scan configuration on the original modeled native owner.
+//! Post-MCC scan configuration on the original modeled native owner.
 use super::{ax200_tests::*, *};
 pub(super) fn finish_mcc<'a>(
     setup: Ax200Setup<'a, Model, ClockBios>,
@@ -150,7 +150,7 @@ fn exercise(actual: bool) {
             let records = domain.records.lock().unwrap();
             assert_eq!(records.sync_fail, Some(records.syncs - 1));
             drop(records);
-            // The original transport retained its pending command before the
+            // The original transport kept its pending command before the
             // uncertain descriptor store; no producer doorbell was issued.
             assert_eq!(
                 scan.mcc.setup.lari.radio.initialized.boot.state,
@@ -196,7 +196,7 @@ fn exercise(actual: bool) {
                 command.bytes()
             );
             let bell = state.lock().unwrap().registers[&0x460];
-            // Deadline cases deliberately use a one-tick wait from creation.
+            // Deadline cases use a one-tick wait from creation.
             // Do not expect an extra pending poll to beat that elapsed deadline.
             if case < 5 {
                 assert_eq!(

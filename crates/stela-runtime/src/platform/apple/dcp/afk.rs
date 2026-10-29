@@ -281,8 +281,8 @@ impl Afk {
                     || (self.peer == lifecycle::PeerState::Running && self.interfaces.pending())))
     }
 
-    /// Partial messages are retained RAM, not queued DMA work. The CPU may
-    /// stop with one assembled prefix and finish it after retained wake.
+    /// Partial messages are held RAM, not queued DMA work. The CPU may
+    /// stop with one assembled prefix and finish it after kept wake.
     pub(super) fn retained_idle(&self) -> bool {
         self.incoming.is_empty()
             && self.accepted.is_none()
@@ -1103,7 +1103,7 @@ mod tests {
             );
             assert_eq!(calls.get(), 1);
             assert!(afk.pending() && !afk.retained_idle());
-            // Repairing translation resumes retained transport writes, with no
+            // Repairing translation resumes kept transport writes, with no
             // duplicate service call or extra AP doorbell required.
             afk.dma(&mut memory, &mut out).unwrap();
             assert_eq!(calls.get(), 1);

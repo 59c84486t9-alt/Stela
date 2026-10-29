@@ -39,7 +39,7 @@ pub struct Access {
     pub source_pc: u64,
     pub pan: bool,
     pub uao: bool,
-    /// Actual source access's natural alignment, computed by its instruction
+    /// Source access's natural alignment, computed by its instruction
     /// owner. This is not guessed from a flattened aggregate transfer width.
     pub aligned: bool,
 }

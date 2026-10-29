@@ -143,7 +143,7 @@ pub(in crate::x86_64) fn guard_normal_zero_or_infinity(
     failures.push(asm.jcc(Cond::Ne).offset());
 }
 
-/// Active numerical work with retained guest exception enables takes the whole
+/// Active numerical work with kept guest exception enables takes the whole
 /// instruction fallback. Ordinary streaming without FullA64 masks these enables
 /// through its established effective-control policy and needs no rejection.
 /// All-inactive work bypasses the raw control read. Preserves every XMM register;

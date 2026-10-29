@@ -82,7 +82,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::UnsupportedTopology);
         }
-        // Graph fields are public metadata. Recheck the actual selected pin,
+        // Graph fields are public metadata. Recheck the selected pin,
         // rather than authorizing pin/amp writes from edited cached fields.
         let nodes = self.realtek_parameter(graph.address, 1, 4)?;
         let first = (nodes >> 16) & 255;
@@ -244,7 +244,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// node53 analog-reset pulse and node20 controls, including the literal
     /// 0x5757 PC-beep/1Ah routing choice. The same live pin/codec/format and
     /// presence checks as ALC298 apply. ULP, OEM headset/GPIO/amp and shutup
-    /// policies are not selected; those need their own actual board ownership.
+    /// policies are not selected; those need their own board ownership.
     pub fn configure_realtek_alc256_headphone(
         &mut self,
         graph: &CodecGraph,

@@ -63,7 +63,7 @@ pub struct WmmAc {
     pub cw_min: u16,
     pub cw_max: u16,
     pub aifsn: u8,
-    /// Exact source 1000×db-COT assignment to cfg80211's u16, including
+    /// Source 1000×db-COT assignment to cfg80211's u16, including
     /// truncation. The source EDCA clamp subsequently divides this value by 32.
     pub cot_us: u16,
 }
@@ -87,14 +87,14 @@ pub struct Rule {
     pub wmm: Option<Wmm>,
 }
 
-/// Immutable source bytes are retained alongside decoded country rules.
+/// Immutable source bytes are held alongside decoded country rules.
 #[derive(Clone)]
 pub struct Database {
     bytes: Arc<[u8]>,
     digest: [u8; 32],
 }
 /// Explicit privileged OS/setup country selection and its source database.
-/// This is a data input, not authority to use an unrelated physical radio.
+/// This is a data input, not permission to use an unrelated physical radio.
 #[derive(Clone)]
 pub struct Country {
     database: Database,

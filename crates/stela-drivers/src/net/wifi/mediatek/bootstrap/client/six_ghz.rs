@@ -26,7 +26,7 @@ impl Bound {
         &self.codec
     }
 }
-/// CPU wire builder only, used exclusively under the actual held transport
+/// CPU wire builder only, used exclusively under the held transport
 /// providers. It supplies no hardware or OS permission on its own.
 struct WirePolicy;
 impl station::RegulatoryPolicy for WirePolicy {
@@ -38,15 +38,15 @@ impl station::RegulatoryPolicy for WirePolicy {
     }
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
-    /// Native6GHz remains a separate transport API until a genuine OS SAE
+    /// Native6GHz remains a separate transport API until an OS SAE
     /// service can consume the exact authenticated exchange into association.
     ///
     /// # Safety
-    /// Same actual retained requester, board, firmware, policy and DMA owners
-    /// as join_modern_pmf. The providers qualify exact real selected transport,
+    /// Same kept requester, board, firmware, policy and DMA owners
+    /// as join_modern_pmf. The providers check real selected transport,
     /// programmed CLC/domain/per-rate/SAR/antenna/indoor policy and the entire
-    /// source HE20/OFDM/automatic retry+ACK envelope. Revocation actually stops
-    /// or enforces restrictions on already armed radio work and retains every
+    /// source HE20/OFDM/automatic retry+ACK envelope. Revocation stops
+    /// or enforces restrictions on already armed radio work and keeps every
     /// original owner through cancellation, uncertainty and independent drain.
     /// The OS lease selects this precise request; it does not authenticate SAE.
     pub unsafe fn begin_six_ghz_external_authentication<H: HardwarePolicy, O: OsPolicy>(
@@ -240,7 +240,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let binding = guard
             .qualify(&six.session, &six.profile, Some(&six.binding), purpose)
             .map_err(Error::Regulatory)?;
-        // Lease acquisition and provider qualification can consume time. This
+        // Lease acquisition and provider validation can consume time. This
         // check occurs after both, immediately before each native publication.
         let after = Self::six_time(s, now)?;
         s.six_ghz.as_mut().unwrap().binding = binding;
@@ -271,7 +271,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .station
             .external_authentication_transmit(session, frame, after, &mut WirePolicy)
             .map_err(Error::Station)?;
-        // SAFETY: actual freshly held providers cover ROC and final DMA publish.
+        // SAFETY: freshly held providers cover ROC and final DMA publish.
         let result = unsafe {
             authority.with_six_ghz_authentication(self, |client, guard| {
                 let s = client.state_mut();
@@ -280,7 +280,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
                 let prepared = Self::prepare_submission(s, &bytes, None, true, true)?;
                 // Includes potentially slow source allocation/map/coherence work;
-                // publish_submission's actual submit_if repeats native expiry.
+                // publish_submission's submit_if repeats native expiry.
                 Self::qualify_six(s, guard, Use::Transmit(&bytes), now)?;
                 let receipt =
                     Self::publish_submission(&mut s.controller, source, &bytes, prepared)?;
@@ -296,7 +296,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         result
     }
     /// # Safety
-    /// The same real owner/revocation contract as begin applies. Only actual
+    /// The same real owner/revocation contract as begin applies. Only
     /// completed native RX under both held current providers is delivered.
     pub unsafe fn poll_six_ghz_external_authentication<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
@@ -488,7 +488,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 .validate_external_exchange(&session)
                 .is_ok()
         {
-            // Preserve the primary refusal. Failed cleanup retains the whole
+            // Preserve the primary refusal. Failed cleanup keeps the whole
             // original owner in Removing/Quarantined until independent reset.
             let _ = self.cancel_six_ghz_external_authentication(&session);
         }

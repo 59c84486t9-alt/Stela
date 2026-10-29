@@ -104,7 +104,7 @@ struct LocalImage {
 }
 
 fn local_image(path: &Path) -> Result<LocalImage> {
-    // Read only metadata into the wizard, rather than retaining every board's
+    // Read only metadata into the wizard, rather than keeping every board's
     // component map. Preparation validates the selected identity before erase.
     let bytes = restore::archive::read_member(path, "BuildManifest.plist", 64 * 1024 * 1024)?;
     Ok(plist::from_reader(std::io::Cursor::new(bytes))?)

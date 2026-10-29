@@ -17,10 +17,10 @@ fn requester_mapping_lifecycle() {
     );
     assert_eq!(unit.drain_posted_writes(), Err(DmaError::DrainUnavailable));
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     assert_eq!(
-        // SAFETY: The retained OwnedConfig is this requester's fixture function. The
+        // SAFETY: The kept OwnedConfig is this requester's fixture function. The
         // closure changes only its command word; identity/BAR state and payload traffic remain unchanged.
         unsafe {
             requester.with_function(|function| {
@@ -53,20 +53,20 @@ fn requester_mapping_lifecycle() {
             );
         }
         // SAFETY: The peer has no concurrent CPU or device payload writer. Live bindings
-        // retain their page pins; foreign/stale tokens are checked before accessing those bindings.
+        // keep their page pins; foreign/stale tokens are checked before accessing those bindings.
         unsafe { requester.sync(&mapping, 0..mapping.bytes(), false) }.unwrap();
         // SAFETY: The peer has no concurrent CPU or device payload writer. Live bindings
-        // retain their page pins; foreign/stale tokens are checked before accessing those bindings.
+        // keep their page pins; foreign/stale tokens are checked before accessing those bindings.
         unsafe { requester.sync(&mapping, 0..mapping.bytes(), true) }.unwrap();
         assert_eq!(peer.syncs(), 2);
         peer.clear_syncs();
         // SAFETY: No modeled requester or CPU accesses the payload during removal.
-        // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+        // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
         unsafe { requester.unmap(&mapping) }.unwrap();
         assert_eq!(peer.walk(0x20, mapping.address()), None);
         let before = peer.commands();
         // SAFETY: No modeled requester or CPU accesses the payload during removal.
-        // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+        // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
         assert_eq!(unsafe { requester.unmap(&mapping) }, Err(Error::Mapping));
         assert_eq!(peer.commands(), before);
     }
@@ -90,31 +90,31 @@ fn requester_mapping_lifecycle() {
         );
     }
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     assert_eq!(unsafe { requester.detach() }, Err(Error::Busy));
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     unsafe { requester.unmap(&mapping) }.unwrap();
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { requester.detach() }.unwrap();
     assert_eq!(peer.walk(0x20, 4096), None);
     let before = peer.commands();
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     assert_eq!(unsafe { requester.detach() }, Err(Error::Poisoned));
     assert_eq!(peer.commands(), before);
     drop(requester);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     let before = peer.registers();
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert_eq!(unsafe { unit.retire() }, Err(Error::Poisoned));
     assert!(matches!(
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         unsafe { unit.attach(function(0x21)) },
         Err(Error::Poisoned)
     ));
@@ -127,10 +127,10 @@ fn requester_mapping_lifecycle() {
 fn foreign_and_stale_mapping_tokens() {
     let (mut unit, peer) = model::unit();
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut first = unsafe { unit.attach(function(0x20)) }.unwrap();
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut second = unsafe { unit.attach(function(0x21)) }.unwrap();
     let mapping = first
         .map(
@@ -142,11 +142,11 @@ fn foreign_and_stale_mapping_tokens() {
     let before = peer.image();
     let entries = peer.enters();
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     assert_eq!(unsafe { second.unmap(&mapping) }, Err(Error::Mapping));
     assert_eq!(
         // SAFETY: The peer has no concurrent CPU or device payload writer. Live bindings
-        // retain their page pins; foreign/stale tokens are checked before accessing those bindings.
+        // keep their page pins; foreign/stale tokens are checked before accessing those bindings.
         unsafe { second.sync(&mapping, 0..4096, false) },
         Err(Error::Mapping)
     );
@@ -157,7 +157,7 @@ fn foreign_and_stale_mapping_tokens() {
     );
     assert_eq!(peer.image(), before);
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     unsafe { first.unmap(&mapping) }.unwrap();
     let replacement = first
         .map(
@@ -173,27 +173,27 @@ fn foreign_and_stale_mapping_tokens() {
     );
     let before = peer.image();
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     assert_eq!(unsafe { first.unmap(&mapping) }, Err(Error::Mapping));
     assert_eq!(
         // SAFETY: The peer has no concurrent CPU or device payload writer. Live bindings
-        // retain their page pins; foreign/stale tokens are checked before accessing those bindings.
+        // keep their page pins; foreign/stale tokens are checked before accessing those bindings.
         unsafe { first.sync(&mapping, 0..4096, true) },
         Err(Error::Mapping)
     );
     assert_eq!(peer.image(), before);
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     unsafe { first.unmap(&replacement) }.unwrap();
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { first.detach() }.unwrap();
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { second.detach() }.unwrap();
     drop((first, second));
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     drop(unit);
     assert_eq!(peer.live_ram(), 0);
@@ -203,9 +203,9 @@ fn foreign_and_stale_mapping_tokens() {
 fn queue_wrap_and_completion_store() {
     let (mut unit, peer) = model::unit();
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
-    // More than512 actual commands wraps the real ring multiple times. The
+    // More than512 commands wraps the real ring multiple times. The
     // peer decodes ring RAM and writes the PA named by every completion entry.
     for _ in 0..300 {
         let mapping = requester
@@ -216,7 +216,7 @@ fn queue_wrap_and_completion_store() {
             )
             .unwrap();
         // SAFETY: No modeled requester or CPU accesses the payload during removal.
-        // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+        // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
         unsafe { requester.unmap(&mapping) }.unwrap();
     }
     assert!(peer.commands().len() > 1024);
@@ -229,14 +229,14 @@ fn queue_wrap_and_completion_store() {
         )
         .unwrap();
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     unsafe { requester.unmap(&mapping) }.unwrap();
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { requester.detach() }.unwrap();
     drop(requester);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     drop(unit);
     assert_eq!(peer.live_ram(), 0);
@@ -254,7 +254,7 @@ fn queue_wrap_and_completion_store() {
     ] {
         let (mut unit, peer) = model::unit();
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
         peer.mode(mode);
         assert!(
@@ -268,7 +268,7 @@ fn queue_wrap_and_completion_store() {
         );
         assert!(unit.check_health().is_err());
         // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-        // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+        // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
         assert_eq!(unsafe { requester.detach() }, Err(Error::Poisoned));
         let commands = peer.commands();
         assert!(
@@ -302,7 +302,7 @@ fn queue_wrap_and_completion_store() {
 fn failed_unmap_retains_payload() {
     let (mut unit, peer) = model::unit();
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     let mapping = requester
         .map(
@@ -313,7 +313,7 @@ fn failed_unmap_retains_payload() {
         .unwrap();
     peer.mode(Mode::HeadOnly);
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     assert!(unsafe { requester.unmap(&mapping) }.is_err());
     assert_eq!(
         peer.walk(0x20, mapping.address()),
@@ -322,10 +322,10 @@ fn failed_unmap_retains_payload() {
     );
     let retained = peer.live_ram();
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     assert_eq!(unsafe { requester.unmap(&mapping) }, Err(Error::Poisoned));
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert_eq!(unsafe { unit.retire() }, Err(Error::Busy));
     drop(requester);
     drop(unit);
@@ -348,7 +348,7 @@ fn cold_preflight_refusals() {
         let ivrs = Ivrs::parse(&bytes, 8);
         if let Ok(ivrs) = ivrs {
             // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-            // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+            // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
             assert!(unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.is_err());
             assert_eq!(peer.register(DEVICE_TABLE), 0);
             assert_eq!(peer.register(COMMAND_BASE), 0);
@@ -363,7 +363,7 @@ fn unit_with_entries(entries: &[u8]) -> (Unit<Platform>, Peer) {
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     (
         // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-        // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+        // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
         unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap(),
         peer,
     )
@@ -373,7 +373,7 @@ fn unit_with_entries(entries: &[u8]) -> (Unit<Platform>, Peer) {
 fn alias_domain_ownership() {
     let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     let pages = peer.pages(4096);
     let physical = pages.physical_pages()[0];
@@ -387,10 +387,10 @@ fn alias_domain_ownership() {
         );
     }
     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
     unsafe { requester.unmap(&mapping) }.unwrap();
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { requester.detach() }.unwrap();
     assert_eq!(peer.walk(0x21, mapping.address()), None);
     // Two sources under one alias: neither gets a domain of its own.
@@ -399,7 +399,7 @@ fn alias_domain_ownership() {
     ]);
     assert!(matches!(
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         unsafe { unit.attach(function(0x20)) },
         Err(Error::Requester)
     ));
@@ -454,12 +454,12 @@ fn alias_range_window() {
     }
     assert!(matches!(
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         unsafe { unit.attach(function(0x21)) },
         Err(Error::Requester)
     ));
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
 }
 
@@ -481,17 +481,17 @@ fn window_handoff_on_attach() {
     }
     assert_eq!(peer.walk(0x22, physical), None);
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut own = unsafe { unit.attach(function(0x20)) }.unwrap();
     assert_eq!(peer.walk(0x20, physical), None);
     assert_eq!(peer.walk(0x21, physical), Some((physical, true, true)));
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { own.detach() }.unwrap();
     drop(own);
     assert_eq!(peer.walk(0x20, physical), None);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     drop(unit);
     // Retirement releases every pin, the window's included.
@@ -503,33 +503,33 @@ fn requester_coverage_and_exclusivity() {
     let (inspection, platform, peer, bytes) = inputs_with_entries(&[2, 0x20, 0, 0]);
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-    // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+    // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
     let mut unit = unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap();
     let before = peer.image();
     assert!(matches!(
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         unsafe { unit.attach(function(0x21)) },
         Err(Error::Requester)
     ));
     assert_eq!(peer.image(), before);
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut owner = unsafe { unit.attach(function(0x20)) }.unwrap();
     let before = peer.image();
     assert!(matches!(
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         unsafe { unit.attach(function(0x20)) },
         Err(Error::Busy)
     ));
     assert_eq!(peer.image(), before);
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { owner.detach() }.unwrap();
     drop(owner);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     drop(unit);
     assert_eq!(peer.live_ram(), 0);
@@ -542,7 +542,7 @@ fn completion_timeout_quarantines_unit() {
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     assert!(matches!(
         // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-        // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+        // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
         unsafe { Unit::cold(inspection, &ivrs, platform, limits()) },
         Err(Error::Timeout)
     ));
@@ -556,13 +556,13 @@ fn completion_timeout_quarantines_unit() {
     let (mut unit, peer) = model::unit();
     peer.mode(Mode::OldStore);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert_eq!(unsafe { unit.retire() }, Err(Error::Timeout));
     let retained = peer.live_ram();
     assert_eq!(retained, 4);
     let commands = peer.commands();
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert_eq!(unsafe { unit.retire() }, Err(Error::Poisoned));
     assert_eq!(peer.commands(), commands);
     drop(unit);
@@ -576,7 +576,7 @@ fn guard_unwind_quarantines_resources() {
     for remove in [false, true] {
         let (mut unit, peer) = model::unit();
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
         let mapping = if remove {
             Some(
@@ -601,7 +601,7 @@ fn guard_unwind_quarantines_resources() {
             catch_unwind(AssertUnwindSafe(|| {
                 if let Some(mapping) = &mapping {
                     // SAFETY: No modeled requester or CPU accesses the payload during removal.
-                    // The binding retains its page pins until acknowledged invalidation, or quarantine on failure.
+                    // The binding keeps its page pins until acknowledged invalidation, or quarantine on failure.
                     unsafe { requester.unmap(mapping) }.unwrap();
                 } else {
                     requester
@@ -617,7 +617,7 @@ fn guard_unwind_quarantines_resources() {
             "exact original payload PA remains pinned after caught teardown unwind"
         );
         // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-        // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+        // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
         assert_eq!(unsafe { requester.detach() }, Err(Error::Poisoned));
         let retained = peer.live_ram();
         drop(requester);
@@ -631,12 +631,12 @@ fn guard_unwind_quarantines_resources() {
     let (mut unit, peer) = model::unit();
     peer.fail_outer_guard();
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert!(catch_unwind(AssertUnwindSafe(|| unsafe { unit.retire() })).is_err());
     let retained = peer.live_ram();
     assert_eq!(retained, 4);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert_eq!(unsafe { unit.retire() }, Err(Error::Poisoned));
     drop(unit);
     assert_eq!(peer.live_ram(), retained);
@@ -650,7 +650,7 @@ fn failed_dte_attach_retains_requester() {
     peer.mode(Mode::HeadOnly);
     assert!(matches!(
         // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-        // submits DMA or work, and the unit retains the matching configuration/root epoch.
+        // submits DMA or work, and the unit keeps the matching configuration/root epoch.
         unsafe { unit.attach(function) },
         Err(Error::DeviceTable(DeviceTableError::Invalidation(
             DmaError::InvalidationFailed
@@ -674,7 +674,7 @@ fn failed_dte_attach_retains_requester() {
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
     assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     assert_eq!(unsafe { unit.retire() }, Err(Error::Busy));
     let retained = peer.live_ram();
     drop(unit);
@@ -691,7 +691,7 @@ fn ivinfo_profile_admission() {
         (ordinary | (1 << 23), 1 << 6), // Reserved IVinfo upper byte.
         (1 | (31 << 8) | (48 << 15), 1 << 6),
         (1 | (48 << 8) | (29 << 15), 1 << 6),
-        (ordinary, 0),                    // No actual invalidate-all support.
+        (ordinary, 0),                    // No invalidate-all support.
         (ordinary, (1 << 6) | (3 << 10)), // Reserved HATS.
         (ordinary, (1 << 6) | (1 << 63)), // SNP changes completion ownership.
     ] {
@@ -699,7 +699,7 @@ fn ivinfo_profile_admission() {
         let ivrs = Ivrs::parse(&bytes, 8).unwrap();
         assert!(matches!(
             // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-            // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+            // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
             unsafe { Unit::cold(inspection, &ivrs, platform, limits()) },
             Err(Error::Profile)
         ));
@@ -712,10 +712,10 @@ fn ivinfo_profile_admission() {
         inputs_profile(&[1, 0, 0, 0], ordinary | (2 << 5), 1 << 6);
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-    // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+    // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
     let mut unit = unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap();
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     drop(unit);
     assert_eq!(peer.live_ram(), 0);
@@ -735,7 +735,7 @@ fn hardware_width_bounds_payload() {
         let ivrs = Ivrs::parse(&bytes, 8).unwrap();
         assert!(matches!(
             // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-            // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+            // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
             unsafe { Unit::cold(inspection, &ivrs, platform, limits()) },
             Err(Error::Profile)
         ));
@@ -746,14 +746,14 @@ fn hardware_width_bounds_payload() {
         inputs_hardware(&[1, 0, 0, 0], info, 1 << 6, (40 << 8) | (32 << 15));
     let ivrs = Ivrs::parse(&bytes, 8).unwrap();
     // SAFETY: inputs constructs this isolated register/RAM peer and matching IVRS
-    // inspection. No firmware or requester runs concurrently; the peer retains every backing allocation.
+    // inspection. No firmware or requester runs concurrently; the peer keeps every backing allocation.
     let mut unit = unsafe { Unit::cold(inspection, &ivrs, platform, limits()) }.unwrap();
     assert_eq!(
         unit.physical_bits, 40,
         "actual unit width bounds wider firmware and native CPU"
     );
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
-    // submits DMA or work, and the unit retains the matching configuration/root epoch.
+    // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
     peer.next_physical(1 << 40);
     let pages = peer.pages(4096);
@@ -768,11 +768,11 @@ fn hardware_width_bounds_payload() {
     assert_eq!(peer.commands(), commands);
     drop(pages);
     // SAFETY: The synchronous requester has no DMA, IRQ or deferred work in flight.
-    // Its bindings keep payload pins until unmap; failed detach leaves the retained owner intact.
+    // Its bindings keep payload pins until unmap; failed detach leaves the owner intact.
     unsafe { requester.detach() }.unwrap();
     drop(requester);
     // SAFETY: The peer has no external producers or concurrent register access.
-    // Unit quiescence/ownership checks run while its RAM remains retained; failures preserve those pins.
+    // Unit quiescence/ownership checks run while its RAM remains held; failures preserve those pins.
     unsafe { unit.retire() }.unwrap();
     drop(unit);
     assert_eq!(peer.live_ram(), 0);

@@ -3,7 +3,7 @@
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Pure source MCC channel observations. Neither valid flags nor a decoded
-//! country supply OS/location authority, programmed power or a publication lease.
+//! country supply OS/location permission, programmed power or a publication lease.
 use super::{Capabilities, Response};
 use alloc::vec::Vec;
 
@@ -35,8 +35,8 @@ pub struct Channel {
     pub frequency_mhz: u16,
 }
 impl Channel {
-    /// Exact source extended/UHB/UNII9 index table; choosing an inventory is
-    /// pure input, not proof of the actual controller's configured inventory.
+    /// Source extended/UHB/UNII9 index table; choosing an inventory is
+    /// pure input, not proof of the controller's configured inventory.
     pub fn at(inventory: Inventory, index: usize) -> Option<Self> {
         const FIVE: [u16; 37] = [
             36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112,
@@ -148,8 +148,8 @@ pub struct InventoryMismatch {
 }
 impl Response {
     /// No invented power limit: source max_eirp is a default annotated as not
-    /// used by firmware, not actual per-channel calibration or programming.
-    /// Invalid channels and unknown high bits are retained. Empty stays empty;
+    /// used by firmware, not per-channel calibration or programming.
+    /// Invalid channels and unknown high bits are held. Empty stays empty;
     /// the cfg80211-only unusable dummy rule is not a usable native channel.
     pub fn channel_observations(
         &self,

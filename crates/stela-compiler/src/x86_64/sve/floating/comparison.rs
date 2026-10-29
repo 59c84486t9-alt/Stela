@@ -97,7 +97,7 @@ fn packed_leading_bits(element: ElementSize) -> u32 {
 }
 
 /// Stage one complete packed P result, committing only after every guard passes.
-/// Half and exceptional active inputs retain whole-instruction completion.
+/// Half and exceptional active inputs keep whole-instruction completion.
 /// Accepted host comparisons preserve caller MXCSR without saving/installing it.
 /// Clobbers RAX/RCX/RDX, host flags and XMM0..7; preserves RDI/R15 and guest NZCV.
 pub(crate) fn emit(

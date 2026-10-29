@@ -1,9 +1,9 @@
-//! Select an actual storage alternate before configuration, using this host's
+//! Select a storage alternate before configuration, using this host's
 //! stream policy. Capability planning never claims an endpoint configuration ACK.
 use super::*;
 use crate::usb::xhci::{Controller, FULL_SPEED, HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS};
 
-/// One retained alternate and its actual endpoint inventory.
+/// One kept alternate and its endpoint inventory.
 #[derive(Clone, Debug)]
 pub enum Binding {
     Bot {

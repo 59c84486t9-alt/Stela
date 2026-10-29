@@ -151,7 +151,7 @@ pub(super) fn start<'a>(
     state: &Arc<Mutex<ModelState>>,
     drops: &Arc<AtomicUsize>,
 ) -> Ax200Boot<'a, Model> {
-    // SAFETY: fixture owns fresh actual host RAM and a synchronous isolated
+    // SAFETY: fixture owns fresh host RAM and a synchronous isolated
     // coherent domain/device; no IRQ, competing worker or real DMA exists.
     unsafe {
         Ax200Boot::start(

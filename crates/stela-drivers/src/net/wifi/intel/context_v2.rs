@@ -4,10 +4,10 @@
 //! and pcie/iwl-context-info-v2.h at the pinned Linux revision.
 //!
 //! This is CPU-only serialization, not a DMA, IML/ROM or PNVM completion.
-//! Addresses require real retained mappings. The whole 4KiB peripheral-info
+//! Addresses require real kept mappings. The whole 4KiB peripheral-info
 //! allocation is device writable, including dummy tail locations at 2/3KiB.
 //! Context/scratch/info survive ALIVE for the later PNVM protocol; IML and
-//! transient firmware can be released only on actual retained-epoch ALIVE.
+//! transient firmware can be released only on kept-epoch ALIVE.
 use super::{
     context::{self, Images, Region, validate},
     firmware::{self, Family, Firmware},
@@ -24,15 +24,15 @@ pub const INFO_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Queues {
-    /// AX210 transfer descriptors are 16 bytes per actual receive entry.
+    /// AX210 transfer descriptors are 16 bytes per receive entry.
     pub free: Region,
-    /// AX210 completion descriptors are 32 bytes per actual receive entry.
+    /// AX210 completion descriptors are 32 bytes per receive entry.
     pub used: Region,
     /// AX210 hardware producer status is a single 16-bit value.
     pub status: Region,
     /// max(IWL_CMD_QUEUE_SIZE, AX210 min_txq_size) = 128 long 256-byte TFDs.
     pub command: Region,
-    /// Actual count after the AX210 family doubling, not the cfg base count.
+    /// Count after the AX210 family doubling, not the cfg base count.
     pub receive_entries: u16,
 }
 
@@ -73,7 +73,7 @@ impl Ax210Context {
     /// zero; ECKV radio init remains a separate firmware operation.
     ///
     /// This bounded allocator profile admits 16..1024 receive entries. The
-    /// upper bound keeps the actual 32-byte used ring within the transport's
+    /// upper bound keeps the 32-byte used ring within the transport's
     /// 32KiB allocation limit; it is not a claim about the hardware maximum.
     /// All inputs are serialization data, never ownership/visibility proof.
     pub fn encode(

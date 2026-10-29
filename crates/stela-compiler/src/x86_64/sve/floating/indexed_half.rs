@@ -396,9 +396,9 @@ pub(in crate::x86_64) fn emit(
     emit_candidate(code, operand, length, features, pc, target, recipe)
 }
 
-/// Paired CPU and wall measurements qualify these operation/length choices.
+/// Paired CPU and wall measurements check these operation/length choices.
 /// FCMLA at SVL16 was slower and FMUL at SVL16 tied; both keep the baseline.
-/// Unmeasured lengths and unavailable F16C also retain the integer recipe.
+/// Unmeasured lengths and unavailable F16C also keep the integer recipe.
 fn selected_recipe(operand: Operand, length: VectorLength, target: TargetCpu) -> Recipe {
     if !target.supports(TargetCpu::F16c) {
         return Recipe::Baseline;

@@ -130,7 +130,7 @@ impl Descriptor {
                     }
                 }
                 // Linux ignores explicit zero-size entries. Their selectors do
-                // not appear in its retained register list; preserve that rule.
+                // not appear in its register list; preserve that rule.
                 if size != 0 {
                     registers.try_reserve(1).map_err(|_| Error::Allocation)?;
                     registers.push(Register {

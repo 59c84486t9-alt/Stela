@@ -1,10 +1,10 @@
-//! Actual shared101ba6c provider-frame cache and G540 read masks.
+//! Shared101ba6c provider-frame cache and G540 read masks.
 //!
 //! Original26A434 T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //!100cab4..100cb30 selects PTD slots4..7 and initializes four bank tuples;
 //!100d8f8..100d90c binds every platform P250 to G500. Thus cache masks at
 //! P250+40 are the SAME G540 bytes cleared by100f924..100f930 before Capture.
-//!101ba6c consumes each first bank/index read and returns retained native tuple.
+//!101ba6c consumes each first bank/index read and returns kept native tuple.
 //! No firmware executes, hardware events, samples, eligibility or ACKs arise.
 use super::super::counters::{CaptureIdentity, Captured, Frame, Frames};
 use super::{ingestion, owner::Completion};
@@ -17,7 +17,7 @@ use {
 
 type Error = &'static str;
 /// Unique native PMP allocation claim. Dropping it never permits another cache
-/// on this source recipient or changes the actual PTD publication owner.
+/// on this source recipient or changes the PTD publication owner.
 pub struct Claim {
     recipient: Rc<()>,
     local: LocalNotifications,
@@ -46,7 +46,7 @@ impl Claim {
         }
     }
 }
-/// Unique binding from the actual native recipient to its manager's G540.
+/// Unique binding from the native recipient to its manager's G540.
 /// It proves neither physical controller geometry nor configuration provenance.
 pub struct ManagerClaim {
     recipient: Rc<()>,
@@ -79,7 +79,7 @@ struct MaskState {
     generation: u64,
     bound: bool,
 }
-/// Identity of the actual G540 software storage, shared with the manager
+/// Identity of the G540 software storage, shared with the manager
 /// controller owner. No public constructor/reset/set-mask interface exists.
 #[derive(Clone)]
 pub struct ReadMasks(Rc<RefCell<MaskState>>);
@@ -166,7 +166,7 @@ struct Bank {
     cells: Vec<Frame>,
 }
 /// The real shared global cache. Source per-instance block rows are DATA from
-/// a still-required actual configuration producer, not range lengths or a SKU.
+/// a still-required configuration producer, not range lengths or a SKU.
 /// Each product row contains the four banks' source words at G3d0+58/+60/+68/+70
 /// plus the source instance index*4; the Rust array is not a raw structure cast. Source allocation uses sum(blocks)*8 and skips
 /// absent/zero-start/zero-count banks. Top bytes are explicit native software
@@ -246,7 +246,7 @@ impl Cache {
     pub fn read_masks(&self) -> ReadMasks {
         self.masks.clone()
     }
-    /// Join one actual latest manager capture to an actual source G540 reset.
+    /// Join one latest manager capture to a source G540 reset.
     /// This neither resets the mask nor manufactures a capture/cycle. Rebinding
     /// another capture without the source reset refuses, even on the same bank.
     pub fn bind_capture(&mut self, frames: &Frames, captured: &Captured) -> Result<(), Error> {
@@ -303,9 +303,9 @@ impl Cache {
         }
         self.read_bound(frames, bank, index, access)
     }
-    /// Revalidates the retained non-Clone identity from actual bind_capture.
+    /// Revalidates the non-Clone identity from bind_capture.
     /// This lets nested provider callbacks share that same capture across Busy
-    /// without cloning Captured or turning numeric masks into new authority.
+    /// without cloning Captured or turning numeric masks into new permission.
     pub fn read_bound(
         &mut self,
         frames: &Frames,
@@ -323,7 +323,7 @@ impl Cache {
             return Completion::Refused("native source provider index exceeds initialized bank");
         };
         // Exact A64 LSL X index semantics: indices64+ alias the mask bit. The
-        // source then returns that index's retained cell without a consume.
+        // source then returns that index's cell without a consume.
         let bit = 1u64.wrapping_shl(index);
         let offset = bank as usize * 8;
         let mask = u64::from_le_bytes(
@@ -351,9 +351,9 @@ impl Cache {
             Ok(entry) => entry,
             Err(e) => return Completion::Refused(e),
         };
-        // No fallible operation lies between this actual consumption and its
-        // retained tuple/progress. A post-consumption reset race poisons reuse,
-        // while returning the actual value with a retired-prefix diagnostic.
+        // No fallible operation lies between this consumption and its
+        // tuple/progress. A post-consumption reset race poisons reuse,
+        // while returning the value with a retired-prefix diagnostic.
         cell.copy(entry);
         self.consumed = next;
         let mut state = self.masks.0.borrow_mut();
@@ -379,7 +379,7 @@ impl Cache {
             .ok_or("native provider bank selector exceeds source four-bank table")
     }
     /// Shared routing for generic ingestion. Other provider classes require
-    /// their actual owners; this is not a successful catch-all Backend.
+    /// their owners; this is not a successful catch-all Backend.
     pub fn ingestion_call(
         &mut self,
         _: &ingestion::Request,

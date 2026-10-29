@@ -11,7 +11,7 @@
 //! Stela's boot stage hands off with every valid source masked: the mask
 //! words equal the valid bitmap, since a set bit inhibits a source. This is
 //! the handoff of a boot chain that enables none of these wake sources;
-//! iBoot's conditional programming is not reproduced. Masks retain full
+//! iBoot's conditional programming is not reproduced. Masks keep full
 //! writes. No status/acknowledgement lifecycle is established, so
 //! no status words are claimed. AOP/NUB/SMC/ATC physical wake generators are
 //! not emulated; this model supplies mask state for a supported generator to
@@ -40,7 +40,7 @@ impl WakeMasks {
         }
     }
 
-    /// Whether the retained mask allows source n to wake the AP. Every
+    /// Whether the mask allows source n to wake the AP. Every
     /// valid source starts masked; unsupported source numbers refuse.
     pub fn enabled(&self, source: u8) -> Result<bool, &'static str> {
         let word = usize::from(source) / u32::BITS as usize;

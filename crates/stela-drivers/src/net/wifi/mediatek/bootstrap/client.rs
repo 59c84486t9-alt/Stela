@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Single-interface MT7925 client ownership. Plain STA_REC installation binds
-//! raw-header format to the actual retained peer; generic WMWA facts never do.
+//! raw-header format to the peer; generic WMWA facts never do.
 use super::{Controller, Phase as ControllerPhase};
 
 mod action;
@@ -150,8 +150,8 @@ pub enum Phase {
     ControllerDrain,
     Stopped,
 }
-/// Per-packet retained actual device/peer/key generation, not a copied current
-/// epoch lookup. DataRing owns it through actual descriptor + TX-free + unmap.
+/// Per-packet kept device/peer/key generation, not a copied current
+/// epoch lookup. DataRing owns it through descriptor + TX-free + unmap.
 pub struct PacketOwner<C: 'static> {
     resource: Arc<C>,
     association: u64,
@@ -277,22 +277,22 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     /// The bound 6 GHz transport until its peer retires after drain.
     six_ghz: Option<six_ghz::Bound>,
 }
-/// On uncertain/live Drop retain the entire controller, station, real key
-/// material history and actual resources. No new owner may reset their PN.
+/// On uncertain/live Drop keep the entire controller, station, real key
+/// material history and resources. No new owner may reset their PN.
 pub struct Client<I: BarIo, Q: QueueIo, C: 'static> {
     owned: Option<Box<Owned<I, Q, C>>>,
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// # Safety
-    /// C is the genuine exclusive MT7925 controller/radio/OS-policy guard. It
-    /// retains the complete initial interface + sole peer WCID namespace, actual
-    /// board/antenna/MAC resources and nonrevoked source/OS regulatory authority.
+    /// C is the exclusive MT7925 controller/radio/OS-policy guard. It
+    /// keeps the complete initial interface + sole peer WCID namespace, actual
+    /// board/antenna/MAC resources and nonrevoked source/OS regulatory permission.
     /// Every public publication is serialized with reset, key retirement and
     /// restrictive policy change. Revocation must stop/cancel/drain queued radio
-    /// work, not merely change preflight booleans. Controller and Interface are
-    /// from this same actual requester, after completed bootstrap/source policy.
+    /// work, not change preflight booleans. Controller and Interface are
+    /// from this same requester, after completed bootstrap/source policy.
     /// No external raw mailbox/radio/WTBL or delayed previous peer/scan user
-    /// exists; all actual DMA/IRQ/coherence contracts remain those of Controller.
+    /// exists; all DMA/IRQ/coherence contracts remain those of Controller.
     /// No temporal key used by any earlier native owner may be reinstalled
     /// with reset transmit counters. Preserve this Client/key history through
     /// reconnect/retry; do not create a replacement owner to bypass it. A real
@@ -400,7 +400,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         command: Command,
         body: &[u8],
     ) -> Result<(), Error> {
-        // Reserve before mutation so actual reply bytes stay owned.
+        // Reserve before mutation so reply bytes stay owned.
         replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let m = controller.state_mut().mailbox.as_mut().unwrap();
         let result = m.unified(command, body);
@@ -425,7 +425,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
         }
     }
-    /// Selected actual scan/beacon profile supplies timing/antenna/rate facts;
+    /// Selected scan/beacon profile supplies timing/antenna/rate facts;
     /// no PHY capability, channel or OS credential is guessed. The legacy
     /// request/response and this profile must describe the same real BSS.
     pub fn join(
@@ -560,7 +560,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 None => Err(Error::ModernAdmissionRequired),
             };
             if let Err(error) = outcome {
-                // No native mutation has happened: withdraw only this genuine
+                // No native mutation has happened: withdraw only this
                 // unsubmitted canonical generation, keeping epochs monotonic.
                 s.station
                     .withdraw_unsubmitted_pmf(ticket)
@@ -615,7 +615,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             ),
         ] {
             if let Some(key) = owner {
-                // SAFETY: the key is idle between associations and keeps its retained slot.
+                // SAFETY: the key is idle between associations and keeps its slot.
                 unsafe { key.rebind(key_context, scope) }.map_err(Error::Key)?;
             } else {
                 *owner = Some(
@@ -688,7 +688,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 if p.peer != bssid || p.channel != channel || response.aid == 0 {
                     return Err(Error::WrongProfile);
                 }
-                // Actual response provides AID; actual source/OS observation
+                // Response provides AID; source/OS observation
                 // supplies beacon/DTIM/basic bitmap. Never invent association0.
                 p.aid = response.aid;
                 let (supported, _) = rates(&response.elements, channel.band)?;
@@ -781,7 +781,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         Ok(())
     }
-    /// Actual source BSS cipher update precedes first key programming. Frontend
+    /// Source BSS cipher update precedes first key programming. Frontend
     /// supplies authenticated key/RSC after its real EAPOL exchange; this driver
     /// does not substitute an OS supplicant or treat EAPOL classification as MIC.
     pub fn install_key(
@@ -819,7 +819,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         outcome.map_err(Error::Key)
     }
-    /// Explicit real OS controlled-port activation against both actual installed
+    /// Explicit real OS controlled-port activation against both installed
     /// original slots. No firmware PORT_SECURE wire value grants this permission.
     pub fn authorize_port(&mut self, epoch: u64) -> Result<(), Error> {
         let s = self.state_mut();
@@ -834,7 +834,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             )
             .map_err(Error::Station)
     }
-    /// Poll the actual retained DMA queues and dispatch synchronously. There is
+    /// Poll the DMA queues and dispatch synchronously. There is
     /// no public "assign current epoch" function for copied/deferred RX bytes.
     pub fn poll(
         &mut self,
@@ -976,7 +976,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.asynchronous.push(f);
                 continue;
             }
-            // Cancelled external sessions retain old RX until the independent
+            // Cancelled external sessions keep old RX until the independent
             // drain fence; do not reinterpret it as a new association.
             if s.station.external_authentication().is_some()
                 && matches!(s.phase, Phase::Removing | Phase::NeedsDrain)
@@ -1222,11 +1222,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.format_generation = None;
         // Canonical disconnect has already invalidated these sessions. This
         // serialized owner cancels its real timers/callbacks and terminally
-        // discards buffered CPU parents before actual firmware peer removal.
+        // discards buffered CPU parents before firmware peer removal.
         for native in s.receive_ba.iter_mut().flatten() {
             native.stop();
         }
-        // Stop new publication first, then await actual TX-free, descriptor
+        // Stop new publication first, then await TX-free, descriptor
         // consumption and mapping release before destroying firmware keys/peer.
         // A local queue-empty/index observation alone is insufficient.
         let q = s.controller.state().data_tx.as_ref().unwrap();
@@ -1235,8 +1235,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         Self::abort_channel(s)?;
         let six = s.six_ghz.as_ref().map(|six| six.codec().clone());
-        // Explicit key removal precedes peer destruction. Retain their canonical
-        // histories and actual ACKs until independent old-user drain completes.
+        // Explicit key removal precedes peer destruction. Keep their canonical
+        // histories and ACKs until independent old-user drain completes.
         for (key, receipt) in [
             (&mut s.ptk, &mut s.ptk_removed),
             (&mut s.gtk, &mut s.gtk_removed),
@@ -1348,7 +1348,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
     }
     /// # Safety
-    /// Actual peer/key removal responses above are complete AND all old RX/TX,
+    /// Peer/key removal responses above are complete AND all old RX/TX,
     /// radio, IRQ/deferred users and late notifications are independently
     /// drained. Empty TX tokens alone do not establish RX/firmware quiescence.
     /// The same reserved physical peer/BCMC slots stay owned across reconnect.
@@ -1391,8 +1391,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             )
             .map_err(Error::Station)?;
         s.phase = Phase::Idle;
-        // The inherited actual hardware/RX/work drain contract is now complete;
-        // incomplete host-only parents can release their retained old owners.
+        // The inherited hardware/RX/work drain contract is now complete;
+        // incomplete host-only parents can release their old owners.
         s.receive_groups.clear();
         s.ciphers = None;
         s.management_cipher = None;
@@ -1418,7 +1418,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.six_ghz = None;
         Ok(())
     }
-    /// Actual interface disable ACKs then WFDMA disable/idle observation. This
+    /// Interface disable ACKs then WFDMA disable/idle observation. This
     /// never claims the independent firmware/CPU/IOMMU fence from idle alone.
     pub fn stop(&mut self) -> Result<(), Error> {
         let s = self.state_mut();
@@ -1440,7 +1440,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
     /// # Safety
-    /// Genuine whole-controller radio/firmware/DMA/IOTLB/IRQ/work quiescence
+    /// Whole-controller radio/firmware/DMA/IOTLB/IRQ/work quiescence
     /// meets Controller::retire_after_quiesce. This is an independent platform
     /// fence, not a command ACK or a local stop-request boolean.
     pub unsafe fn stop_after_quiesce(&mut self) -> Result<(), Error> {
@@ -1726,8 +1726,8 @@ pub(crate) mod tests {
         assert_ne!(*direction, crate::bus::dma::mapping::Direction::FromDevice);
         (*pointer + offset) as *const u8
     }
-    // Actual model device fetches the published descriptor, then TXWI/TXP and
-    // payload via the same requester's registry. It retains no CPU-address alias.
+    // Model device fetches the published descriptor, then TXWI/TXP and
+    // payload via the same requester's registry. It keeps no CPU-address alias.
     pub(crate) fn finish_tx(model: &Model) -> Vec<Vec<u8>> {
         finish_tx_on(model, 36)
     }
@@ -1974,7 +1974,7 @@ pub(crate) mod tests {
             .begin_scan(request, 0, 1_000_000, &mut Policy(true))
             .unwrap();
         assert_eq!(driver.phase(), ClientPhase::Scanning);
-        // Generic scan command response has no status/scan completion authority.
+        // Generic scan command response has no status/scan completion permission.
         assert!(matches!(
             driver.transport_facts().last(),
             Some(crate::net::wifi::mediatek::mailbox::init::Fact::GenericResponse(_))
@@ -2174,7 +2174,7 @@ pub(crate) mod tests {
             driver.join(join(), profile(), 0, &Source, &mut Policy(true)),
             Err(ClientError::Firmware(0xdeadbeef))
         ));
-        // Actual device already consumed and programmed the full peer command;
+        // Device already consumed and programmed the full peer command;
         // response failure cannot become a clean rollback, nor format permission.
         assert!(model.response.lock().unwrap().peers.contains_key(&1));
         assert_eq!(driver.phase(), ClientPhase::Quarantined);
@@ -2238,7 +2238,7 @@ pub(crate) mod tests {
             Err(ClientError::NeedsDrain)
         ));
         // Even real remove ACKs cannot release still-reachable data mappings/key
-        // owners. Complete actual hardware users before independent RX/work drain.
+        // owners. Complete hardware users before independent RX/work drain.
         finish_tx(&model);
         driver
             .poll(frontend_tick(10), &Source, &mut Policy(true))
@@ -2279,8 +2279,8 @@ pub(crate) mod tests {
             unsafe { driver.retire_peer_after_drain() },
             Err(ClientError::NeedsDrain)
         ));
-        // End and consume the actual old chain before the independent old-user
-        // drain can qualify a new key/peer generation. No old bytes are retagged.
+        // End and consume the old chain before the independent old-user
+        // drain can check a new key/peer generation. No old bytes are retagged.
         device_receive(&model.queues[&0xd4520], &bytes[40..], true, 0);
         assert!(
             driver
@@ -2337,7 +2337,7 @@ pub(crate) mod tests {
         assert_eq!(model.memory.lock().unwrap().mappings.len(), before);
         assert_eq!(driver.phase(), ClientPhase::Quarantined);
         // This never-published packet may unmap, but the real programmed peer,
-        // actual grant and all controller/IRQ resources remain retained.
+        // grant and all controller/IRQ resources remain held.
         assert!(model.response.lock().unwrap().peers.contains_key(&1));
         assert_eq!(model.response.lock().unwrap().roc_channel, Some(36));
         drop(driver);
@@ -2436,7 +2436,7 @@ pub(crate) mod tests {
             driver.install_key(false, 2, &[2; 16], ReplaySeed::ZERO),
             Err(ClientError::WrongPhase)
         ));
-        // Model processes the actual install before returning its nonzero status;
+        // Model processes the install before returning its nonzero status;
         // no RejectedAndEmpty claim can release the programmed GTK or old floors.
         assert!(
             model
@@ -2490,7 +2490,7 @@ pub(crate) mod tests {
         drop(driver);
         assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     }
-    // Actual key ACK + completed requester-DMA management RX model.
+    // Key ACK + completed requester-DMA management RX model.
     use super::{Integrity, Mpdu, PacketNumber, SecurityStatus};
     use station::data::Ingress;
     fn completed(
@@ -2530,10 +2530,10 @@ pub(crate) mod tests {
         for case in 0..12 {
             let mut bad = raw(9);
             match case {
-                0 => bad[4] = 2,                     // wrong actual raw peer WCID
+                0 => bad[4] = 2,                     // wrong raw peer WCID
                 1 => bad[6] |= 1 << 5,               // wrong key index
                 2 => bad[10] = (bad[10] & !31) | 11, // GCMP status cannot bind CCMP PTK
-                3 => bad[7] |= 1 << 1,               // actual ICV failure
+                3 => bad[7] |= 1 << 1,               // ICV failure
                 4 => {
                     bad.drain(32..48);
                     bad[6] &= !1;
@@ -2543,7 +2543,7 @@ pub(crate) mod tests {
                 7 => bad[48 + 10] ^= 2,              // wrong transmitter
                 8 => bad[48 + 16] ^= 2,              // wrong BSSID
                 9 => bad[48 + 4] ^= 2,               // wrong local receiver
-                10 => bad[13] = 40,                  // wrong actual channel
+                10 => bad[13] = 40,                  // wrong channel
                 _ => {
                     bad.pop();
                 } // incomplete reason code

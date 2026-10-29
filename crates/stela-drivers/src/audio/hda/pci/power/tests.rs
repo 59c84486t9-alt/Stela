@@ -113,7 +113,7 @@ impl State {
                 self.ready = self.clock.now_us() + if old & 3 == 3 { 10_000 } else { 0 };
                 if old & 3 == 3 && value & 3 == 0 {
                     self.config[4..10].fill(0);
-                    // Actual soft-reset effect: PCI vendor snoop controls lost.
+                    // Soft-reset effect: PCI vendor snoop controls lost.
                     self.config[17] = 0xa5a5_fff7;
                     self.config[30] = 0xf91f_7a55;
                 }
@@ -168,7 +168,7 @@ impl State {
         assert_ne!(self.get(0x5c, 1) & 2, 0);
         let corb = u64::from(self.get(0x40, 4)) | (u64::from(self.get(0x44, 4)) << 32);
         let rirb = u64::from(self.get(0x50, 4)) | (u64::from(self.get(0x54, 4)) << 32);
-        // SAFETY: production-programmed ring addresses name the retained
+        // SAFETY: production-programmed ring addresses name the kept
         // unique model RAM, and this synchronous model is its device owner.
         let command =
             u32::from_le(unsafe { (corb as *const u32).add(wp as usize).read_volatile() });
@@ -194,7 +194,7 @@ impl State {
         };
         self.set(0x4a, 2, wp);
         let next = (self.get(0x58, 2) + 1) % 256;
-        // SAFETY: same retained production allocation and device ownership.
+        // SAFETY: same production allocation and device ownership.
         unsafe {
             let entry = (rirb as *mut u32).add(next as usize * 2);
             entry.write_volatile(u32::to_le(response));
@@ -398,7 +398,7 @@ fn controller<'a>(
         transition_timeout_us: 100,
         ..registers.config()
     };
-    // SAFETY: The adapter retains this test's PCI/MMIO model and ram owns the coherent
+    // SAFETY: The adapter keeps this test's PCI/MMIO model and ram owns the coherent
     // DMA allocation. Model activity occurs only while the controller is polled.
     unsafe { Controller::new(registers, clock, &mut ram.allocator, config) }.unwrap()
 }
@@ -448,7 +448,7 @@ fn d3hot_resume_invalidates_stream_handles() {
         assert_eq!(c.start(capture), Err(Error::InvalidStream));
         assert_eq!(state.borrow().config16(0x54), 0x8000);
         // Linux's ICH6 profile has no SCH/PCH NoSnoop operation. Its
-        // retained word must survive without a write; every other exact
+        // word must survive without a write; every other exact
         // profile in this matrix selects SCH/PCH snooping after D0.
         let expected_devc = if device == 0x2668 {
             0xf91f_7a55
@@ -504,7 +504,7 @@ impl Drop for HdmiGrant {
         self.powered.store(false, Ordering::SeqCst);
     }
 }
-// SAFETY: this original symbolic provider retains actual modeled link power
+// SAFETY: this original symbolic provider keeps modeled link power
 // through every controller access. Only explicit controller port retirement
 // releases its sole Arc. The model refuses playback; it tests idle grants.
 unsafe impl DisplayAudioPort for HdmiGrant {
@@ -553,7 +553,7 @@ fn hdmi_grant_survives_failed_suspend() {
         let retired_at = Arc::new(AtomicU64::new(u64::MAX));
         state.borrow_mut().required_hdmi_power = Some(powered.clone());
         // Public discovery/attachment consumes real programmed CORB/RIRB
-        // responses, never a fabricated graph or inserted private Port.
+        // responses, never an invented graph or inserted private Port.
         let graph = c.enumerate_codec(0).unwrap();
         let grant = Arc::new(HdmiGrant {
             clock: clock.clone(),

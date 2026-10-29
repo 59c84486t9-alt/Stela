@@ -69,7 +69,7 @@ fn baseline(code: &mut Code) {
     multiply(code, 9, 8, 8); // x2
     multiply(code, 10, 9, 8); // x3
     multiply(code, 11, 10, 10); // x6
-    multiply(code, 11, 11, 11); // x12, retained until the final product
+    multiply(code, 11, 11, 11); // x12, kept until the final product
     multiply(code, 8, 11, 10); // x15
     for _ in 0..4 {
         multiply(code, 8, 8, 8);

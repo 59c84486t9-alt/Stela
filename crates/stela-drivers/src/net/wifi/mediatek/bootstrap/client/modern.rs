@@ -22,12 +22,12 @@ impl Configuration {
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Program the original canonical key owner and source BSS cipher under
-    /// the same complete modern hardware/OS authority. Material/RSC come from
-    /// the actual OS authentication service; this is no supplicant substitute.
+    /// the same complete modern hardware/OS permission. Material/RSC come from
+    /// the OS authentication service; this is no supplicant substitute.
     ///
     /// # Safety
     /// The exact-controller, policy retention and revocation requirements of
-    /// `configure_modern` apply to both actual BSS and key command publication.
+    /// `configure_modern` apply to both BSS and key command publication.
     pub unsafe fn install_key_modern<
         H: wifi::regulatory::HardwarePolicy,
         O: wifi::regulatory::OsPolicy,
@@ -117,8 +117,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         .map_err(Error::Regulatory)?
     }
 
-    /// Begin source-backed single-link modern negotiation. Actual modern
-    /// configuration remains pending until genuine context-bound hardware/OS
+    /// Begin source-backed single-link modern negotiation. Modern
+    /// configuration remains pending until context-bound hardware/OS
     /// admission covers its complete firmware/autonomous transmission set.
     pub fn join_modern(
         &mut self,
@@ -152,7 +152,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
-    /// Actual private shared context retained by this native owner. Inspection
+    /// Private shared context kept by this native owner. Inspection
     /// is neither modern publication permission nor a firmware completion.
     pub fn modern_context(&self) -> Option<&Arc<AssociationContext>> {
         self.state().modern.as_ref().map(|m| &m.context)
@@ -203,14 +203,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Station only after real matching firmware and DMA completions.
     ///
     /// # Safety
-    /// `authority` belongs to this exact retained controller/requester and C,
-    /// with genuine current reset/firmware/policy epochs and actual applied
+    /// `authority` belongs to this exact controller/requester and C,
+    /// with current reset/firmware/policy epochs and applied
     /// per-rate power. Its acquired guards serialize this native path; C keeps
     /// their underlying policy/board/radio/queue/key resources alive through
     /// partial/uncertain programming and all armed autonomous/deferred users.
-    /// Revocation must enforce/stop/cancel/drain those real users, not merely
-    /// change an admission boolean. A different device's valid authority or a
-    /// copied source plan cannot qualify this native attachment.
+    /// Revocation must enforce/stop/cancel/drain those real users, not
+    /// change an admission boolean. A different device's valid permission or a
+    /// copied source plan cannot check this native attachment.
     pub unsafe fn configure_modern<
         H: wifi::regulatory::HardwarePolicy,
         O: wifi::regulatory::OsPolicy,
@@ -301,7 +301,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             Ok(result) => result?,
         }
         // The plain source STA_REC command/ACK, not WMWA or an opaque generic
-        // response, establishes this actual peer's raw-header generation.
+        // response, establishes this peer's raw-header generation.
         s.format_generation = Some(s.peer_generation);
         Self::abort_channel(s)?;
         let ticket = s.modern.as_ref().unwrap().context.ticket();
@@ -313,7 +313,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.station
             .complete_configuration(ticket, Completion::Accepted, completed_now)
             .map_err(Error::Station)?;
-        // Actual NIC/local issuer and source link negotiation bound the receive
+        // NIC/local issuer and source link negotiation bound the receive
         // window; no session exists until an ADDBA exchange and real BA ACK.
         let n = s.modern.as_ref().unwrap().context.negotiated();
         let window = if n.eht.is_some() {
@@ -373,7 +373,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::WrongProfile);
         }
-        // Retain Station's same private context even if subsequent preparation
+        // Keep Station's same private context even if subsequent preparation
         // fails. Existing programmed peer/controller remain owned/quarantined.
         s.phase = Phase::Quarantined;
         let actual = local::current(s, p.channel.band).map_err(|_| Error::WrongProfile)?;
@@ -386,7 +386,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         p.beacon_interval = context.beacon().beacon_interval;
         p.dtim_period = context.dtim_period();
         // Source use_short_slot is always true outside2GHz and follows the
-        // actual AP capability on2GHz; no caller timing guess enters Configure.
+        // AP capability on2GHz; no caller timing guess enters Configure.
         p.slot_time = if p.channel.band != wifi::Band::Ghz2
             || context.response().capabilities & (1 << 10) != 0
         {
@@ -820,7 +820,7 @@ pub(super) mod tests {
                 wifi::security::aggregate::Error::Security(wifi::security::Error::Replay)
             ))
         ));
-        // A separate TID starts from its actual original slot's independent floor.
+        // A separate TID starts from its original slot's independent floor.
         packet[24] = 5;
         incoming(&model, &packet, Some((1, 0, 1)), false);
         driver
@@ -867,7 +867,7 @@ pub(super) mod tests {
         (driver, model, authority, state)
     }
 
-    /// Shared actual native setup for the TX cancellation peer controls.
+    /// Shared native setup for the TX cancellation peer controls.
     pub(in crate::net::wifi::mediatek::bootstrap::client) struct TxFixture {
         pub(in crate::net::wifi::mediatek::bootstrap::client) driver: Client<Bar, Q, NativeGuard>,
         pub(in crate::net::wifi::mediatek::bootstrap::client) model: Model,
@@ -896,7 +896,7 @@ pub(super) mod tests {
                 &self.driver,
                 AssociationUse::Management,
             );
-            // SAFETY: these retained guards qualify only this stateful simulated requester.
+            // SAFETY: these guards check only this stateful simulated requester.
             unsafe {
                 self.driver.progress_block_ack(
                     &mut self.authority,
@@ -911,7 +911,7 @@ pub(super) mod tests {
         ) -> Result<Receipt, ClientError> {
             let permit = admit(&mut self.authority, &self.driver, AssociationUse::Data);
             let epoch = self.driver.station().association_epoch().unwrap();
-            // SAFETY: actual same-requester model guards and retained native policy.
+            // SAFETY: same-requester model guards and kept native policy.
             unsafe {
                 self.driver.transmit_modern(
                     &mut self.authority,
@@ -930,7 +930,7 @@ pub(super) mod tests {
         pub(in crate::net::wifi::mediatek::bootstrap::client) fn transmit(&mut self) {
             let permit = admit(&mut self.authority, &self.driver, AssociationUse::Data);
             let epoch = self.driver.station().association_epoch().unwrap();
-            // SAFETY: the model's genuine same-requester guards enclose this publication.
+            // SAFETY: the model's same-requester guards enclose this publication.
             unsafe {
                 self.driver.transmit_modern(
                     &mut self.authority,
@@ -1049,7 +1049,7 @@ pub(super) mod tests {
         frame.extend_from_slice(&[6 | 0x80, 0]);
         frame.extend_from_slice(&payload);
         let mut bytes = incoming_bytes(&frame, Some((1, 0, pn.unwrap_or(0))), false);
-        // Actual split RXD carries the source two-byte pad after the MAC header.
+        // Split RXD carries the source two-byte pad after the MAC header.
         bytes.splice(48 + 26..48 + 26, [0, 0]);
         bytes[16..20].copy_from_slice(&u32::from(format).to_le_bytes());
         if pn.is_none() {
@@ -1075,8 +1075,8 @@ pub(super) mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // The same apparent SSN/TID on another actual queue cannot complete it or
-        // inherit its PN. A genuine one-record parent needs its own observed PN.
+        // The same apparent SSN/TID on another queue cannot complete it or
+        // inherit its PN. A one-record parent needs its own observed PN.
         device_receive(&model.queues[&0xd4520], &tail, true, 0);
         assert!(matches!(
             driver.poll(1_000_000 + 111, &Source, &mut Policy(true)),
@@ -1112,7 +1112,7 @@ pub(super) mod tests {
             ))
         ));
         // A malformed later constituent refuses the whole group before replay;
-        // the same actual parent PN remains available for a valid replacement.
+        // the same parent PN remains available for a valid replacement.
         let head = split_bytes(3, Some(21), 1);
         let mut bad = split_bytes(1, Some(22), 2);
         device_receive(&model.queues[&0xd4500], &head, true, 0);
@@ -1251,7 +1251,7 @@ pub(super) mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // Exact source timeout is strict after, and release then advances replay.
+        // Source timeout is strict after, and release then advances replay.
         assert_eq!(
             driver
                 .poll(1_080_118, &Source, &mut Policy(true))
@@ -1259,8 +1259,8 @@ pub(super) mod tests {
                 .len(),
             1
         );
-        // Peer DELBA invalidates before actual firmware stop; stop never needs a
-        // new transmit permission even after genuine model policy revocation.
+        // Peer DELBA invalidates before firmware stop; stop never needs a
+        // new transmit permission even after model policy revocation.
         let mut delete = vec![3, 2];
         delete.extend_from_slice(&((6u16 << 12) | 0x0800).to_le_bytes());
         delete.extend_from_slice(&37u16.to_le_bytes());
@@ -1353,7 +1353,7 @@ pub(super) mod tests {
                 1
             );
             // A valid descriptor layout for another cipher cannot inherit this
-            // actual key identity merely because WCID/index/PN look plausible.
+            // key identity because WCID/index/PN look plausible.
             let wrong = if firmware == 4 { 11 } else { 4 };
             raw[8..12].copy_from_slice(&((r2 & !(31 << 16)) | (wrong << 16)).to_le_bytes());
             device_receive(&model.queues[&0xd4520], &raw, true, 0);
@@ -1443,7 +1443,7 @@ pub(super) mod tests {
         let (mut driver, model, _) = awaiting();
         let (mut authority, _) = authority(&driver, &model);
         let permit = admit(&mut authority, &driver, AssociationUse::Configure);
-        // Real publication/ACK remains within PCI3s. Its actual elapsed time must
+        // Real publication/ACK remains within PCI3s. Its elapsed time must
         // nevertheless exceed the independent canonical500ms Configure lifetime.
         model.response.lock().unwrap().pause_next_index_us = 600_000;
         assert!(matches!(
@@ -1504,7 +1504,7 @@ pub(super) mod tests {
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
     }
 
-    // Authority for the same stateful simulated PCI requester, never physical
+    // Permission for the same stateful simulated PCI requester, never physical
     // permission. The model's revocation and source allocations obey held guards.
 
     struct EdcaInspection {
@@ -1521,7 +1521,7 @@ pub(super) mod tests {
         native: reg::NativeContext,
         context: Arc<station::AssociationContext>,
         response: Arc<Mutex<Response>>,
-        // Retain this exact requester registry independently of diagnostic numbers.
+        // Keep this requester registry independently of diagnostic numbers.
         _memory: Arc<Mutex<Memory>>,
         windows: RefCell<Vec<(usize, usize)>>,
         allocations: Cell<usize>,
@@ -1623,8 +1623,8 @@ pub(super) mod tests {
                 && reg::wmm::station(operation.effective(), None).is_ok()
         }
     }
-    // SAFETY: only this single-threaded model's requester is qualified. Revocation
-    // respects these held guards; this supplies no physical platform authority.
+    // SAFETY: only this single-threaded model's requester is checked. Revocation
+    // respects these held guards; this supplies no physical platform permission.
     unsafe impl reg::HardwarePolicy for Hardware {
         type Lease<'a> = HardwareGuard;
         fn acquire(&mut self) -> Option<Self::Lease<'_>> {
@@ -1639,7 +1639,7 @@ pub(super) mod tests {
             })
         }
     }
-    // SAFETY: model OS authority belongs to that exact retained requester/context
+    // SAFETY: model OS permission belongs to that requester/context
     // and remains inside its hardware guard, including real packet allocations.
     unsafe impl reg::OsPolicy for Os {
         type Lease<'a> = OsGuard;

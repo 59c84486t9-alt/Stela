@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Stela contributors
-//! Exact native volatile accesses through original retained UC BAR mappings.
+//! Native volatile accesses through original kept UC BAR mappings.
 use super::{Error, Space};
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, PhysicalSpan, Protection};
 
-/// Actual original native BAR0/2 resources, or an explicit independent model.
+/// Original native BAR0/2 resources, or an explicit independent model.
 /// # Safety
-/// Each span is the complete actual exclusive BAR resource, with an original
-/// UC/RW mapping covering all accesses. Mappings retain the same native root /
+/// Each span is the complete exclusive BAR resource, with an original
+/// UC/RW mapping covering all accesses. Mappings keep the same native root /
 /// reset epoch as configuration; no competing raw views/reset/removal exists.
-/// Accesses have exact native width and bounds. Failed retirement must retain
+/// Accesses have native width and bounds. Failed retirement must keep
 /// uncertain mapping/resource owners, never release or reuse native storage.
 pub unsafe trait Registers: 'static {
     fn spans(&self) -> [PhysicalSpan; 2];
@@ -27,11 +27,11 @@ pub struct MappedRegisters {
 }
 impl MappedRegisters {
     /// # Safety
-    /// Both full spans and original mappings belong to this same actual native
-    /// endpoint and retained assignment/reset epoch. They reserve complete BAR
+    /// Both full spans and original mappings belong to this same native
+    /// endpoint and kept assignment/reset epoch. They reserve complete BAR
     /// resources; native mappings are exclusive with no escaped views/accessors.
     /// Metadata matching is insufficient to grant real hardware ownership.
-    /// Rejection returns the exact original mappings without native accesses.
+    /// Rejection returns the original mappings without native accesses.
     pub unsafe fn new(
         full_bars: [PhysicalSpan; 2],
         mappings: [Mapping; 2],
@@ -70,7 +70,7 @@ impl MappedRegisters {
         }
     }
 }
-// SAFETY: constructor retains actual original exclusive UC resources; each
+// SAFETY: constructor keeps original exclusive UC resources; each
 // concrete access is bounded and exactly the native byte/DWORD requested.
 unsafe impl Registers for MappedRegisters {
     fn spans(&self) -> [PhysicalSpan; 2] {
@@ -84,7 +84,7 @@ unsafe impl Registers for MappedRegisters {
             .mapping(space)?
             .address(offset as usize, 4)
             .map_err(Error::Mapping)?;
-        // SAFETY: checked aligned retained live UC DWORD, no Rust reference.
+        // SAFETY: checked aligned kept live UC DWORD, no Rust reference.
         Ok(unsafe { pointer.as_ptr().cast::<u32>().read_volatile() })
     }
     fn write32(&self, space: Space, offset: u32, value: u32) -> Result<(), Error> {
@@ -95,7 +95,7 @@ unsafe impl Registers for MappedRegisters {
             .mapping(space)?
             .address(offset as usize, 4)
             .map_err(Error::Mapping)?;
-        // SAFETY: checked exact native DWORD, never a W1C wider RMW.
+        // SAFETY: checked native DWORD, never a W1C wider RMW.
         unsafe { pointer.as_ptr().cast::<u32>().write_volatile(value) };
         Ok(())
     }
@@ -104,12 +104,12 @@ unsafe impl Registers for MappedRegisters {
             .mapping(space)?
             .address(offset as usize, 1)
             .map_err(Error::Mapping)?;
-        // SAFETY: checked retained UC byte, used for actual original OTP.
+        // SAFETY: checked UC byte, used for original OTP.
         Ok(unsafe { pointer.as_ptr().read_volatile() })
     }
     unsafe fn retire(&mut self) -> Result<(), Error> {
         for mapping in &mut self.mappings {
-            // SAFETY: enclosing caller proves actual native completion/drain.
+            // SAFETY: enclosing caller proves native completion/drain.
             unsafe { mapping.retire() }.map_err(Error::Mapping)?;
         }
         Ok(())

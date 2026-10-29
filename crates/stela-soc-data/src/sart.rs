@@ -1,5 +1,5 @@
 //! Immutable SART register/entry geometry from the original SPTM layout tables.
-//! This describes placement and encoding, never live DMA permissions, retained
+//! This describes placement and encoding, never live DMA permissions, kept
 //! power, a hardware mapping, outstanding work or an execution owner.
 /// Largest supported layout, version4.
 pub const MAX_ENTRIES: usize = 24;

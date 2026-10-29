@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! UAC3 class discovery executes actual high-capability cluster transactions;
+//! UAC3 class discovery executes high-capability cluster transactions;
 //! only the returned complete Binding may create a native PCM owner.
 use super::descriptors::scope;
 use super::{Binding, CLASS, CONTROL_SUBCLASS, Control, Error, STREAMING_SUBCLASS, UAC3};

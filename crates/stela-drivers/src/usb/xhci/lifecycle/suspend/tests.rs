@@ -282,7 +282,7 @@ fn fixture(memory: &mut [u64], speed: u8, hub: bool) -> Fixture {
 
 fn fixture_with_leaf(memory: &mut [u64], speed: u8, hub: bool, leaf: Node) -> Fixture {
     let start = memory.as_mut_ptr() as u64;
-    // SAFETY: the caller retains this exclusive backing through every owner.
+    // SAFETY: the caller keeps this exclusive backing through every owner.
     let mut dma =
         unsafe { RegionAllocator::new(start..start + core::mem::size_of_val(memory) as u64) };
     let nodes = if hub {
@@ -315,8 +315,8 @@ fn fixture_with_leaf(memory: &mut [u64], speed: u8, hub: bool, leaf: Node) -> Fi
     (host, devices, hardware, state, dma)
 }
 
-/// Retained bare-slot consumer shaped like the legacy HID/CDC/storage owners.
-/// Configuration and initial I/O use the actual native command/TRB model.
+/// Bare-slot consumer shaped like the legacy HID/CDC/storage owners.
+/// Configuration and initial I/O use the native command/TRB model.
 struct RawConsumer {
     controller: Shared,
     slot: u8,
@@ -390,7 +390,7 @@ impl RawConsumer {
             )
         };
         let payload = self.buffer.bytes().to_vec();
-        // Exercise the retained legacy owner itself, not only SlotId access.
+        // Exercise the legacy owner itself, not only SlotId access.
         assert!(self.submit().is_err());
         let mut c = self.controller.borrow_mut();
         assert!(c.endpoint_ready(self.slot, self.endpoint.dci()).is_err());
@@ -437,8 +437,8 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         let mut memory = vec![0u64; 1024 * 1024];
         let (mut host, old, hardware, state, mut dma) =
             fixture_with_leaf(&mut memory, speed, true, Node::bot_disk(speed));
-        // Host::new retains topology/hubs; normal class binding separately
-        // configures the actual addressed BOT leaf and publishes its disk.
+        // Host::new keeps topology/hubs; normal class binding separately
+        // configures the addressed BOT leaf and publishes its disk.
         let mut original = Found::default();
         for device in old
             .iter()
@@ -456,7 +456,7 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         assert_eq!(original_read, retained_payload);
         let original_commands = hardware.borrow().nodes[&1].bot_commands().len();
         if speed >= SUPER_SPEED {
-            // Seed actual acknowledged function options in both configured
+            // Seed acknowledged function options in both configured
             // devices. Suspend must clear them through each native EP0 ring.
             for device in &old {
                 host.controller
@@ -552,7 +552,7 @@ fn topology_suspend_uses_real_hub_links_and_controller_save_then_fresh_owners() 
         for opcode in [0x12, 0x00, 0x25, 0x28, 0x2a] {
             assert!(commands.iter().any(|(_, op)| *op == opcode));
         }
-        // Each real class binding owns a new BOT tag sequence. Retain both
+        // Each real class binding owns a new BOT tag sequence. Keep both
         // command histories; resetting a physical address does not erase it.
         for binding_commands in [
             &commands[..original_commands],
@@ -628,7 +628,7 @@ fn post_fence_suspend_errors_quarantine_raw_consumers_without_fake_retirement() 
             matches!(host.controller.borrow().hardware, hardware::State::Died),
             failure == 3
         );
-        // These failures precede bulk cancellation. Keep its actual TD and
+        // These failures precede bulk cancellation. Keep its TD and
         // original buffers even when EP0/command ownership is unresolved.
         assert_eq!(
             host.controller.borrow().slots[usize::from(consumer.slot)]
@@ -704,7 +704,7 @@ fn failed_resume_after_controller_restart_does_not_revive_raw_consumers() {
         removed.added.failures
     );
     assert_eq!(removed.removed.len(), devices.len());
-    // An actual connection-change latch invalidates the restored session even
+    // A connection-change latch invalidates the restored session even
     // if CCS and speed happen to match the original values.
     *hardware.borrow_mut().root_status.as_mut().unwrap() |= CSC;
     let refused = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));

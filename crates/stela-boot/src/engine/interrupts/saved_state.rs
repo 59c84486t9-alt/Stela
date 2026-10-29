@@ -1,4 +1,4 @@
-//! A view of the image the actual assembly entry saved on its retained IST.
+//! A view of the image the assembly entry saved on its IST.
 //! Construction is private to that entry: a source pointer or stack interval
 //! supplied by a native producer cannot mint this resource borrow.
 use super::{Frame, HANDLER_STACK_BYTES, Tables, host};
@@ -6,7 +6,7 @@ use crate::engine::xstate;
 use core::marker::PhantomData;
 
 /// Short-lived, read-only image of one active descriptor-owned interrupt entry.
-/// The original Tables retains both this IST allocation and its CPU layout.
+/// The original Tables keeps both this IST allocation and its CPU layout.
 /// This is not an invocation, code-arena or initialized native-spill permit.
 pub(crate) struct SavedState<'entry> {
     owner: &'entry xstate::XstateOwner,
@@ -69,7 +69,7 @@ pub(super) fn terminal(frame: *mut Frame, image: *const u8) -> ! {
         });
     // Same-IST terminal recursion stops in assembly before image reuse. Its
     // raw original Frame can be overwritten, but this local copy lives below
-    // the retained image and is never written back or returned through IRETQ.
+    // the image and is never written back or returned through IRETQ.
     super::fatal(&captured.frame)
 }
 

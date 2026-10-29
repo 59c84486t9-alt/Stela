@@ -48,7 +48,7 @@ pub unsafe fn after_ebs(resources: &Resources) -> Result<Option<Arc<Catalog>>, &
     Ok(catalog)
 }
 
-/// Resolve each component by enumerating its actual directory once. UEFI/FAT
+/// Resolve each component by enumerating its directory once. UEFI/FAT
 /// case-insensitive matching is accepted only when exactly one entry matches;
 /// a second case alias is refused even on firmware with a case-sensitive driver.
 fn open(root: &mut Directory, relative: &str) -> Result<Option<RegularFile>, &'static str> {

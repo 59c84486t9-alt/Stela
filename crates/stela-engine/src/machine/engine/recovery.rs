@@ -1,4 +1,4 @@
-//! Invocation-retained source/profile and immutable native recovery templates.
+//! Invocation-kept source/profile and immutable native recovery templates.
 use super::{Host, NativeCode, NativeFault, Preparation};
 use crate::translations::{Digest, StoredBlock};
 use alloc::collections::BTreeMap;
@@ -31,8 +31,8 @@ pub(super) struct CodeTemplate {
     pub(super) direct_exits: Vec<DirectExit>,
 }
 
-/// An installed owner retains one row bank. Portable records have no minted
-/// authority; successful lazy qualification replaces that bank, never duplicates it.
+/// An installed owner keeps one row bank. Portable records have no minted
+/// permission; successful lazy validation replaces that bank, never duplicates it.
 enum RecoveryRows {
     Pending(Box<[UnqualifiedFaultRecovery]>),
     Qualified(Box<[FaultRecovery]>),
@@ -76,7 +76,7 @@ pub(super) struct CapturedFailure {
     pub(super) summary: Arc<NativeFailure>,
     pub(super) capture: NativeFault,
 }
-/// Original raw-page lookup and admitted preparation binding retained after
+/// Original raw-page lookup and admitted preparation binding kept after
 /// cache eviction. The key describes the fetched page, not current data RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRecord {
@@ -144,7 +144,7 @@ impl CodeRecovery {
     }
     /// A portable request may only reject this legacy implementation. Absence
     /// of tags never grants private/APX admission: that must be derived from an
-    /// actual compiler/profile ABI permit before future eager invocation.
+    /// compiler/profile ABI permit before future eager invocation.
     pub(super) fn portable_requires_unavailable_capture(&self) -> bool {
         use stela_compiler::block::{
             RecoveryBinding, RecoverySource, RetirementPhase, RetirementPoint,
@@ -340,7 +340,7 @@ impl CodeRecovery {
             qualification_attempts: 0,
         }
     }
-    /// Called only after actual installed-code/patch-owner validation, in the
+    /// Called only after installed-code/patch-owner validation, in the
     /// dispatcher. No portable tag authorizes a guest projection before this.
     pub(super) fn qualify(&mut self, pc: u64) -> Result<&[FaultRecovery], NativeFailureReason> {
         if !self.source_record_checked {

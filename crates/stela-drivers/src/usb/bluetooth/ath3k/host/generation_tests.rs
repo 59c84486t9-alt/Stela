@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Native pre-HCI initializer admission, with a genuinely retained device ID.
+//! Native pre-HCI initializer admission, with a device ID.
 use super::*;
 use crate::usb::xhci::{self, Device};
 

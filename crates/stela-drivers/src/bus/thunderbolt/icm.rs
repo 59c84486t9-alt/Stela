@@ -329,10 +329,10 @@ pub struct Host<R: Registers> {
 }
 impl<R: Registers> Host<R> {
     /// # Safety
-    /// PCI config, Registers, PageSource and actual attached DmaDomain identify
+    /// PCI config, Registers, PageSource and attached DmaDomain identify
     /// the same live physical requester and ownership/reset epoch. The native
     /// platform positively selected already-running firmware ICM, resolved
-    /// actual power/IMR/mastering/protected firmware-DMA requirements and owns
+    /// power/IMR/mastering/protected firmware-DMA requirements and owns
     /// the host's NHI rings exclusively. Firmware may produce/consume packets,
     /// but cannot reprogram these host ring registers; no software CM exists.
     /// All Ring::new DMA/coherence/NoSnoop, prior drain and IRQ-mask grants hold.
@@ -610,7 +610,7 @@ impl<R: Registers> Host<R> {
         }
     }
     /// # Safety
-    /// Both host rings have actual final posted-DMA/IRQ/deferred drain as
+    /// Both host rings have final posted-DMA/IRQ/deferred drain as
     /// required by Ring::release; firmware cannot use them again. Process or
     /// deferred context only. This does not stop firmware-owned device tunnels.
     pub unsafe fn release(&mut self) -> Result<(), Error> {
@@ -1027,10 +1027,10 @@ mod tests {
         host.disable().unwrap();
         domain.fail_unmap_at.store(12, Ordering::Relaxed);
         // SAFETY: final synthetic device/IRQ/work drain is complete, including
-        // the active request. Failed invalidation retains its mapping for retry.
+        // the active request. Failed invalidation keeps its mapping for retry.
         assert!(unsafe { host.release() }.is_err());
         assert!(!domain.state.lock().unwrap().maps.is_empty());
-        // SAFETY: the same exact drained reservation remains retained.
+        // SAFETY: the same exact drained reservation remains held.
         unsafe { host.release() }.unwrap();
         assert!(domain.state.lock().unwrap().maps.is_empty());
     }

@@ -100,7 +100,7 @@ pub const PC_SAMPLE: u64 = 0x90;
 /// +0x90 as a word to trigger a sample, then reads the same address as a
 /// doubleword. Without the word read the initial result is zero. The exact
 /// 26A434 kernel does both at file offsets 0x4d7dd60 and 0x4d7dd64.
-/// The engine publishes actual execution PCs; the trigger latches that
+/// The engine publishes execution PCs; the trigger latches that
 /// observation so another PE's execution cannot change a sample being read.
 /// XNU discards the trigger read's result. Returning the sampled PC's low
 /// word is an inferred register alias, not a measured hardware encoding.

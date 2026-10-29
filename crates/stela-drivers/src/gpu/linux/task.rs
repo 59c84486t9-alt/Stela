@@ -1,7 +1,7 @@
-//! Actual Linux task metadata on retained cooperative continuations.
+//! Linux task metadata on kept cooperative continuations.
 //!
 //! This binds original C task_struct/current and the entered service lease.
-//! The shared normal/WW mutex adapter supplies genuine wake/signal/I/O effects.
+//! The shared normal/WW mutex adapter supplies wake/signal/I/O effects.
 //! Native producers and the distinct RT-mutex/I2C extension remain unadmitted.
 use crate::platform::work::{
     ContextId, LeaveReason, ParkOutcome, Runtime, SwitchBinding, TaskContext, WakeHandle, WorkError,
@@ -61,8 +61,8 @@ unsafe extern "C" {
     fn stela_linux_task_signal(task: *mut CTask, expected_sequence: u64, kind: u32) -> i32;
 }
 
-/// Geometry from the actual compiled Linux configuration, for resource planning.
-/// It does not attest mappings, CPU/current authority or a native provider.
+/// Geometry from the compiled Linux configuration, for resource planning.
+/// It does not attest mappings, CPU/current permission or a native provider.
 pub fn stack_requirement() -> Result<crate::platform::work::StackRequirement, WorkError> {
     // SAFETY: these three C functions return immutable compiled constants only;
     // they inspect no task, entered owner, mutable catalog or native pointer.
@@ -78,15 +78,15 @@ pub fn stack_requirement() -> Result<crate::platform::work::StackRequirement, Wo
 
 static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 
-/// Metadata kept because its final release was not explicitly qualified.
-/// This counts no native/GPU qualification and never reclaims uncertain tasks.
+/// Metadata kept because its final release was not explicitly checked.
+/// This counts no native/GPU validation and never reclaims uncertain tasks.
 pub fn quarantined() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }
 
-/// Retains the C task independently of a per-enter borrowed service owner.
-/// The first immutable waker validates actual CPU/IRQ/RSP before C state access;
-/// renew_current obtains the actual existing job ticket on stack reuse.
+/// Keeps the C task independently of a per-enter borrowed service owner.
+/// The first immutable waker validates CPU/IRQ/RSP before C state access;
+/// renew_current obtains the existing job ticket on stack reuse.
 pub struct TaskBinding<const N: usize> {
     task: NonNull<CTask>,
     first: UnsafeCell<MaybeUninit<WakeHandle<N>>>,
@@ -95,11 +95,11 @@ pub struct TaskBinding<const N: usize> {
     detached: AtomicBool,
     released: bool,
 }
-// SAFETY: no foreign CPU mutates the C task or first waker. Actual Runtime
+// SAFETY: no foreign CPU mutates the C task or first waker. Runtime
 // identity is checked before C entry; publication is single-writer release/
-// acquire and the immutable waker is retained until safe detach/release.
+// acquire and the immutable waker is held until safe detach/release.
 unsafe impl<const N: usize> Send for TaskBinding<N> {}
-// SAFETY: same single qualified CPU contract; IRQ wake views contain no C task.
+// SAFETY: same single checked CPU contract; IRQ wake views contain no C task.
 unsafe impl<const N: usize> Sync for TaskBinding<N> {}
 
 fn status(value: i32) -> Result<(), WorkError> {
@@ -126,10 +126,10 @@ impl<const N: usize> TaskBinding<N> {
     /// Allocate original task metadata before entering a Linux owner.
     ///
     /// # Safety
-    /// Call in qualified process context on the Runtime CPU, with the canonical
+    /// Call in checked process context on the Runtime CPU, with the canonical
     /// heap initialized. Every binding using the common !SMP C archive must stay
-    /// on that SAME qualified physical CPU for its lifetime; retain all actual
-    /// CPU/code/root authority separately. No native producer is established
+    /// on that SAME checked physical CPU for its lifetime; keep all
+    /// CPU/code/root permission separately. No native producer is established
     /// by this allocation. C metadata failure is fallible; Arc allocation uses
     /// the image's existing global allocation-error policy.
     pub unsafe fn new() -> Result<Arc<Self>, WorkError> {
@@ -139,7 +139,7 @@ impl<const N: usize> TaskBinding<N> {
         {
             return Err(WorkError::Unavailable);
         }
-        // SAFETY: caller supplies actual canonical heap/process authority.
+        // SAFETY: caller supplies canonical heap/process permission.
         let task = NonNull::new(unsafe { stela_linux_task_allocate() }).ok_or(WorkError::Full)?;
         Ok(Arc::new(Self {
             task,
@@ -151,7 +151,7 @@ impl<const N: usize> TaskBinding<N> {
         }))
     }
 
-    /// Attach only to this actual current continuation, before Linux entry.
+    /// Attach only to this current continuation, before Linux entry.
     /// Initial waker publication completes before any original C task service.
     pub fn bind_current(self: &Arc<Self>, runtime: Pin<&Runtime<N>>) -> Result<(), WorkError> {
         if self.published.load(Ordering::Acquire) {
@@ -159,7 +159,7 @@ impl<const N: usize> TaskBinding<N> {
         }
         let handle = runtime.bind_current(self.clone())?;
         // SAFETY: one successful Runtime attachment owns this same-CPU initial
-        // publication. Runtime retains this binding before returning the handle.
+        // publication. Runtime keeps this binding before returning the handle.
         unsafe {
             (*self.first.get()).write(handle.clone());
             (*self.target.get()).write(handle);
@@ -183,7 +183,7 @@ impl<const N: usize> TaskBinding<N> {
     pub fn current_wake(&self) -> Result<WakeHandle<N>, WorkError> {
         self.first()?.renew_current()
     }
-    /// Capture this actual current job, retaining metadata independently of
+    /// Capture this current job, keeping metadata independently of
     /// original C usage refs. An old target may outlive clean job completion;
     /// its expected sequence can never signal or inspect a future job.
     pub fn target_current(self: &Arc<Self>) -> Result<TargetTask<N>, WorkError> {
@@ -195,14 +195,14 @@ impl<const N: usize> TaskBinding<N> {
     }
 
     unsafe extern "C" fn wake_target(binding: *mut c_void, expected: u64) -> i32 {
-        // SAFETY: C validated an actual entered same-CPU caller and retained
+        // SAFETY: C validated an entered same-CPU caller and kept
         // target reference. It cannot run a callback/switch or free this Arc.
         let this = unsafe { &*binding.cast::<Self>() };
         if !this.published.load(Ordering::Acquire) || this.detached.load(Ordering::Acquire) {
             return -116; // ESTALE
         }
         // SAFETY: same-CPU exclusion and acquired initial publication; only an
-        // actual new-job arrive updates this field, before C can target it.
+        // new-job arrive updates this field, before C can target it.
         let handle = unsafe { (*this.target.get()).assume_init_ref() };
         if expected == 0 || handle.sequence() != expected {
             return -116;
@@ -215,8 +215,8 @@ impl<const N: usize> TaskBinding<N> {
         }
     }
     unsafe extern "C" fn service_reserved(binding: *mut c_void) -> bool {
-        // SAFETY: C retained this binding and validated the target generation.
-        // The first immutable signal owns the constructor's actual stack role,
+        // SAFETY: C kept this binding and validated the target generation.
+        // The first immutable signal owns the constructor's stack role,
         // even after an ordinary task reused its stack for a later job.
         let this = unsafe { &*binding.cast::<Self>() };
         if let Ok(first) = this.first()
@@ -235,31 +235,31 @@ impl<const N: usize> TaskBinding<N> {
         {
             return Err(WorkError::CorruptContext);
         }
-        // Runtime retains Queue/signal while attached: this temporary handle's
+        // Runtime keeps Queue/signal while attached: this temporary handle's
         // drop is necessarily nonfinal, including IF=0 arrive callbacks.
         Ok(())
     }
     unsafe extern "C" fn current(binding: *mut c_void, context: *const TaskContext) -> bool {
-        // SAFETY: retained Arc receiver and callback-scoped readable view.
+        // SAFETY: Arc receiver and callback-scoped readable view.
         let this = unsafe { &*binding.cast::<Self>() };
-        // Validate actual CPU/IRQ/RSP independently BEFORE dereferencing any
-        // mutable C task/context field. ops/binding stay immutable and retained
+        // Validate CPU/IRQ/RSP independently BEFORE dereferencing any
+        // mutable C task/context field. ops/binding stay immutable and kept
         // throughout attached lifetime, including taskless/IRQ rejection.
         let Ok(handle) = this.current_wake() else {
             return false;
         };
-        // SAFETY: actual same-CPU current has now been established. C supplies
-        // copied primitive metadata, not a retained temporary Runtime view.
+        // SAFETY: same-CPU current has now been established. C supplies
+        // copied primitive metadata, not a temporary Runtime view.
         let view = unsafe { &*context };
         handle.context_id().get() == view.context_id && handle.sequence() == view.sequence
     }
 
-    /// Run C with a shared retained Runtime capability on this actual stack.
+    /// Run C with a shared Runtime capability on this stack.
     ///
     /// # Safety
     /// `body`/`context` remain valid through every real suspension; C may not
     /// unwind, escape the capability, leave a Linux owner/critical state live,
-    /// or retire the Runtime/stack/binding. Retain shared owner roots and use
+    /// or retire the Runtime/stack/binding. Keep shared owner roots and use
     /// the checked C lease for mutations. An exclusive Rust owner/context
     /// borrow may not span park if another continuation can access that owner.
     pub unsafe fn run_scoped(
@@ -271,11 +271,11 @@ impl<const N: usize> TaskBinding<N> {
         let view = runtime.current_context()?;
         self.validate(&view)?;
         let scope = Scope { runtime };
-        // Pin the actual stack-local capability; it may not move/escape while
+        // Pin the stack-local capability; it may not move/escape while
         // suspended C frames borrow it. Pin<&Runtime> is shared, never &mut.
         let scope = core::pin::pin!(scope);
         let pointer = scope.as_ref().get_ref() as *const Scope<'_, N> as *mut c_void;
-        // SAFETY: retained task/current and immovable scoped capability above.
+        // SAFETY: task/current and immovable scoped capability above.
         status(unsafe {
             stela_linux_task_scope_begin(self.task.as_ptr(), &Self::SCOPE_OPS, pointer)
         })?;
@@ -283,7 +283,7 @@ impl<const N: usize> TaskBinding<N> {
         unsafe { body(context) };
         // SAFETY: body returned only after Linux exit and restored task state.
         let ended = unsafe { stela_linux_task_scope_end(self.task.as_ptr()) };
-        // A returning error would destroy a scope C might still retain. This is
+        // A returning error would destroy a scope C might still keep. This is
         // a fail-closed contract violation, not a recoverable lifetime release.
         if ended != 0 {
             // SAFETY: an escaped C borrow cannot be released or unwound. Stop
@@ -293,8 +293,8 @@ impl<const N: usize> TaskBinding<N> {
         Ok(())
     }
     unsafe extern "C" fn park(scope: *mut c_void) -> i32 {
-        // SAFETY: run_scoped retains this pinned shared Runtime borrow until C
-        // returns, including the actual suspended stack and borrowed owners.
+        // SAFETY: run_scoped keeps this pinned shared Runtime borrow until C
+        // returns, including the suspended stack and borrowed owners.
         match unsafe { &*scope.cast::<Scope<'_, N>>() }
             .runtime
             .park_if_blocked()
@@ -306,7 +306,7 @@ impl<const N: usize> TaskBinding<N> {
         }
     }
     unsafe extern "C" fn yield_now(scope: *mut c_void) -> i32 {
-        // SAFETY: same retained shared scoped capability as park.
+        // SAFETY: same shared scoped capability as park.
         match unsafe { &*scope.cast::<Scope<'_, N>>() }
             .runtime
             .yield_now()
@@ -318,7 +318,7 @@ impl<const N: usize> TaskBinding<N> {
     }
 
     unsafe extern "C" fn reschedule(scope: *mut c_void) -> i32 {
-        // SAFETY: same pinned shared Runtime scope; C proved a genuine process
+        // SAFETY: same pinned shared Runtime scope; C proved a process
         // preparation or its private outside-owner scope-end preparation.
         match unsafe { &*scope.cast::<Scope<'_, N>>() }
             .runtime
@@ -330,7 +330,7 @@ impl<const N: usize> TaskBinding<N> {
         }
     }
     unsafe extern "C" fn reschedule_requested(scope: *mut c_void) -> bool {
-        // SAFETY: C checks actual current, critical state and scope before this
+        // SAFETY: C checks current, critical state and scope before this
         // bounded clock/query callback. It invokes no C delivery or switch.
         match unsafe { &*scope.cast::<Scope<'_, N>>() }
             .runtime
@@ -347,7 +347,7 @@ impl<const N: usize> TaskBinding<N> {
     /// Release a pristine unattached task, or after Runtime detach restored flags.
     ///
     /// # Safety
-    /// Actual producer/waiter/task/code users have stopped, on the qualified
+    /// Producer/waiter/task/code users have stopped, on the checked
     /// process CPU outside IRQ and Linux entry, after native flags restoration.
     /// Detach's unsafe quiescence promise is real, not inferred from Arc counts.
     pub unsafe fn release_quiescent(self: Arc<Self>) -> Result<(), Arc<Self>> {
@@ -365,7 +365,7 @@ struct Scope<'a, const N: usize> {
     runtime: Pin<&'a Runtime<N>>,
 }
 
-// SAFETY: Runtime owns real current/stack/IF exclusion and retains this Arc.
+// SAFETY: Runtime owns real current/stack/IF exclusion and keeps this Arc.
 // Each C hook is transactional before leave or bounded after committed arrival;
 // no drain/allocator/final release occurs in any hook. C copies view metadata.
 unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
@@ -373,7 +373,7 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
         if self.published.load(Ordering::Acquire) || self.detached.load(Ordering::Acquire) {
             return Err(WorkError::Busy);
         }
-        // SAFETY: initial actual-stack hook precedes initial WakeHandle publication.
+        // SAFETY: initial stack hook precedes initial WakeHandle publication.
         status(unsafe {
             stela_linux_task_attach(
                 self.task.as_ptr(),
@@ -395,21 +395,21 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
     }
     unsafe fn leave(&self, context: &TaskContext, reason: LeaveReason) -> Result<(), WorkError> {
         self.validate(context)?;
-        // SAFETY: actual outgoing stack/IF0, C requires prepared process snapshot.
+        // SAFETY: outgoing stack/IF0, C requires prepared process snapshot.
         status(unsafe { stela_linux_task_leave(self.task.as_ptr(), context, reason as u32) })
     }
     unsafe fn arrive(&self, context: &TaskContext, new_job: bool) -> Result<(), WorkError> {
         self.validate(context)?;
         if new_job {
             let next = self.current_wake()?;
-            // SAFETY: actual same-CPU destination stack/IF0, no foreign C or
+            // SAFETY: same-CPU destination stack/IF0, no foreign C or
             // IRQ task-pointer reader. The mutable field borrow ends before
-            // any hook. Runtime retains Queue/signal so old Drop is nonfinal.
+            // any hook. Runtime keeps Queue/signal so old Drop is nonfinal.
             let previous =
                 unsafe { core::ptr::replace((*self.target.get()).assume_init_mut(), next) };
             drop(previous);
         }
-        // SAFETY: actual resumed/new job stack and existing ticket before IF restore.
+        // SAFETY: resumed/new job stack and existing ticket before IF restore.
         status(unsafe { stela_linux_task_arrive(self.task.as_ptr(), context, new_job) })
     }
     unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError> {
@@ -418,12 +418,12 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
         status(unsafe { stela_linux_task_complete(self.task.as_ptr(), context) })
     }
     unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError> {
-        // No current validation is fabricated on the idle dispatcher. Runtime
-        // already qualifies CPU/IF0/quiescence and supplies saved actual RSP.
+        // No current validation is invented on the idle dispatcher. Runtime
+        // already checks CPU/IF0/quiescence and supplies saved RSP.
         if self.first()?.context_id().get() != context.context_id {
             return Err(WorkError::CorruptContext);
         }
-        // SAFETY: unsafe caller's producer quiescence and genuine idle hook.
+        // SAFETY: unsafe caller's producer quiescence and idle hook.
         status(unsafe { stela_linux_task_detach(self.task.as_ptr(), context) })?;
         self.detached.store(true, Ordering::Release);
         Ok(())
@@ -432,9 +432,9 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
 impl<const N: usize> Drop for TaskBinding<N> {
     fn drop(&mut self) {
         if !self.released {
-            // No uncertain Drop can become C metadata release authority. A live
-            // Runtime still retains an Arc; safely detached but unconsumed task
-            // metadata is deliberately retained and observable here.
+            // No uncertain Drop can become C metadata release permission. A live
+            // Runtime still keeps an Arc; safely detached but unconsumed task
+            // metadata is held and observable here.
             QUARANTINED.fetch_add(1, Ordering::Relaxed);
         }
         if self.published.load(Ordering::Acquire) {
@@ -459,7 +459,7 @@ pub enum WaitSignal {
 }
 
 /// Owns metadata and an immutable expected job, not a permanent C usage ref.
-/// Completion can close the job while this handle is retained. Only the plain
+/// Completion can close the job while this handle is held. Only the plain
 /// WakeHandle is an IRQ signal view; TargetTask's C operations are process-only.
 pub struct TargetTask<const N: usize> {
     binding: ManuallyDrop<Arc<TaskBinding<N>>>,
@@ -481,11 +481,11 @@ impl<const N: usize> TargetTask<N> {
         self.wake.sequence()
     }
     /// Post to the captured job only. Closed/reused jobs return Closed before
-    /// future C state is accessed; retaining this target is not a Linux task ref.
+    /// future C state is accessed; keeping this target is not a Linux task ref.
     ///
     /// # Safety
     /// Call on the real same-CPU entered Linux process continuation described
-    /// by `caller`, with shared service roots retained. Do not call from IRQ,
+    /// by `caller`, with shared service roots kept. Do not call from IRQ,
     /// IF0 switch hooks, a dispatcher, or outside run_scoped/Linux entry.
     /// Target wait cancellation returns Busy once its body has returned (or
     /// no C body is active); generic immutable wakes remain valid.
@@ -496,8 +496,8 @@ impl<const N: usize> TargetTask<N> {
     ) -> Result<(), WorkError> {
         self.wake.check_process()?;
         caller.current_context()?;
-        // SAFETY: immutable expected generation plus separately retained C
-        // metadata; caller proves actual entered Linux process authority.
+        // SAFETY: immutable expected generation plus separately kept C
+        // metadata; caller proves entered Linux process permission.
         match unsafe {
             stela_linux_task_signal(self.binding.task.as_ptr(), self.sequence(), kind as u32)
         } {
@@ -512,7 +512,7 @@ impl<const N: usize> TargetTask<N> {
 impl<const N: usize> Drop for TargetTask<N> {
     fn drop(&mut self) {
         if self.wake.check_process().is_ok() {
-            // SAFETY: qualified process CPU. Native callers retain the normal
+            // SAFETY: checked process CPU. Native callers keep the normal
             // flags-restored release boundary; no switch hook owns a TargetTask.
             // Keep the immutable wake owner until after binding destruction.
             unsafe {
@@ -533,9 +533,9 @@ impl<const N: usize> Drop for TargetTask<N> {
     any(target_os = "linux", target_os = "macos")
 ))]
 pub(crate) mod tests {
-    //! Hosted source fixtures only. Real mmap stacks/guards and actual Runtime
+    //! Hosted source fixtures only. Real mmap stacks/guards and Runtime
     //! continuations; the CPU/IRQ model grants no native admission. All C tree
-    //! assertions are retained. This plain Rust child is not whole-C ASan/UBSan.
+    //! assertions are held. This plain Rust child is not whole-C ASan/UBSan.
     extern crate std;
     use super::*;
     use crate::platform::work::service;
@@ -627,7 +627,7 @@ pub(crate) mod tests {
     // Raw free does not allocate/drop/spin. Other unit tests keep System behavior.
     unsafe impl GlobalAlloc for CanonicalHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            // SAFETY: observe this actual ordinary backend attempt once;
+            // SAFETY: observe this ordinary backend attempt once;
             // refusal returns NULL before the SAME canonical System call.
             if !unsafe { stela_test_allocation_attempt(0) } {
                 return ptr::null_mut();
@@ -636,7 +636,7 @@ pub(crate) mod tests {
             unsafe { System.alloc(layout) }
         }
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            // SAFETY: observe this actual ordinary backend attempt once;
+            // SAFETY: observe this ordinary backend attempt once;
             // refusal returns NULL before the SAME canonical System call.
             if !unsafe { stela_test_allocation_attempt(0) } {
                 return ptr::null_mut();
@@ -656,7 +656,7 @@ pub(crate) mod tests {
     }
     unsafe fn try_allocate(layout: Layout) -> *mut u8 {
         // SAFETY: immutable registry uses this canonical allocator's raw branch;
-        // matching free goes through the actual production Rust heap bridge.
+        // matching free goes through the production Rust heap bridge.
         unsafe { RAW.allocate(layout) }
     }
     #[unsafe(no_mangle)]
@@ -714,7 +714,7 @@ pub(crate) mod tests {
         bytes: usize,
         dropped: Arc<AtomicU64>,
     }
-    // SAFETY: real exclusive OS mapping, PROT_NONE guard, retained through every
+    // SAFETY: real exclusive OS mapping, PROT_NONE guard, kept through every
     // switched frame. Hosted test only; this is no native root/IRQ/provider grant.
     unsafe impl StackBacking for MappedStack {
         fn bounds(&self) -> Range<usize> {
@@ -742,10 +742,10 @@ pub(crate) mod tests {
                 #[cfg(not(target_os = "macos"))]
                 let anonymous = 0x20;
                 let bytes = usable + 4096;
-                // SAFETY: actual OS-owned anonymous RW memory; no preexisting frames.
+                // SAFETY: OS-owned anonymous RW memory; no preexisting frames.
                 let base = unsafe { mmap(ptr::null_mut(), bytes, 3, 2 | anonymous, -1, 0) };
                 assert_ne!(base as usize, usize::MAX);
-                // SAFETY: first page of this owned mapping becomes genuinely unmapped.
+                // SAFETY: first page of this owned mapping becomes unmapped.
                 assert_eq!(unsafe { mprotect(base, 4096, 0) }, 0);
                 Stack::new(Box::new(MappedStack {
                     base: base as usize,
@@ -773,7 +773,7 @@ pub(crate) mod tests {
         }
     }
     // SAFETY: explicit hosted same-thread exclusion/IRQ model. No CPL0 CLI/STI or
-    // real native producer is claimed. Runtime still uses actual switched stacks.
+    // real native producer is claimed. Runtime still uses switched stacks.
     unsafe impl Cpu for CpuModel {
         fn check_cpu(&self) -> Result<(), WorkError> {
             if self.thread == thread::current().id() {
@@ -839,17 +839,17 @@ pub(crate) mod tests {
         unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
             self.cpu.check_cpu().unwrap();
             // SAFETY: harness owns pinned executor through all callbacks/retirement;
-            // Queue retains this fixture. This private process-only helper cannot
-            // escape into an IRQ waker; production run_scoped retains a real borrow.
+            // Queue keeps this fixture. This private process-only helper cannot
+            // escape into an IRQ waker; production run_scoped keeps a real borrow.
             unsafe { Pin::new_unchecked(&*self.runtime.load(Ordering::Acquire)) }
         }
         fn binding(&self, index: usize) -> Arc<TaskBinding<16>> {
             if let Some(binding) = self.bindings[index].lock().unwrap().clone() {
                 return binding;
             }
-            // SAFETY: actual hosted qualified process thread before Linux entry.
+            // SAFETY: hosted checked process thread before Linux entry.
             let binding = unsafe { TaskBinding::new() }.unwrap();
-            // SAFETY: the harness retains the pinned executor through every callback and
+            // SAFETY: the harness keeps the pinned executor through every callback and
             // retirement.
             binding.bind_current(unsafe { self.runtime() }).unwrap();
             *self.bindings[index].lock().unwrap() = Some(binding.clone());
@@ -857,32 +857,32 @@ pub(crate) mod tests {
         }
     }
     unsafe fn fixture<'a>(context: *mut c_void) -> &'a Fixture {
-        // SAFETY: actual Queue owner retains this private fixture through callback.
+        // SAFETY: Queue owner keeps this private fixture through callback.
         unsafe { &*context.cast::<Fixture>() }
     }
     unsafe extern "C" fn worker(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
         let binding = f.binding(1);
         // SAFETY: shared Runtime/fixture live through complete scoped C body.
         unsafe { binding.run_scoped(f.runtime(), stela_linux_task_test_worker, context) }.unwrap();
         let wake = f.wake.lock().unwrap().take().unwrap();
         wake.wake().unwrap();
-        // SAFETY: the same retained real worker now exercises original
+        // SAFETY: the same real worker now exercises original
         // schedule's distinct process preempt0 sleep/wake boundary.
         unsafe { binding.run_scoped(f.runtime(), stela_linux_task_test_schedule_worker, context) }
             .unwrap();
     }
     unsafe extern "C" fn unprepared(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         // SAFETY: the C test hook only checks task state on this thread's entered continuation.
         unsafe { stela_linux_task_test_unprepared_begin() };
         let before = runtime.current_context().unwrap();
         // Direct generic yield cannot silently suspend an entered C lease. A
-        // refusal keeps the SAME actual task, native flags and service owner.
+        // refusal keeps the SAME task, native flags and service owner.
         assert_eq!(runtime.yield_now(), Err(WorkError::Busy));
         assert_eq!(
             runtime.current_context().unwrap().context_id,
@@ -896,32 +896,32 @@ pub(crate) mod tests {
         f.cpu.flags.load(Ordering::Acquire)
     }
     unsafe extern "C" fn foreground(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         let binding = f.binding(0);
         let prepared_view = runtime.current_context().unwrap();
         // SAFETY: this real attached current has no Linux owner/scope yet. The
-        // C fixture retains its own scope and checks before-effect refusal.
+        // C fixture keeps its own scope and checks before-effect refusal.
         unsafe {
             stela_linux_atomic_callback_prepared_fixture(binding.task.as_ptr(), &prepared_view)
         };
         let wake = binding.current_wake().unwrap();
         *f.late.lock().unwrap() = Some(wake.clone());
         *f.wake.lock().unwrap() = Some(wake);
-        // Genuine worker executes only after the blocked foreground released its
-        // prepared owner lease. It wakes this exact old job's retained signal.
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // Worker executes only after the blocked foreground released its
+        // prepared owner lease. It wakes this exact old job's signal.
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe { runtime.queue().execute(Kind::General, worker, context) }.unwrap();
         // Refuse an unprepared entered lease without leaving or changing identity.
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // through every suspension.
         unsafe { binding.run_scoped(runtime, unprepared, context) }.unwrap();
         let view = runtime.current_context().unwrap();
         // Additional C fixture checks all entered IRQ/BH/RCU/preempt refusals.
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // through every suspension.
         unsafe { binding.run_scoped(runtime, stela_linux_task_test_foreground, context) }.unwrap();
         assert_eq!(
@@ -929,47 +929,47 @@ pub(crate) mod tests {
             view.context_id
         );
         binding.current_wake().unwrap().wake().unwrap();
-        // SAFETY: this actual job and scope retain the pending generic wake;
+        // SAFETY: this job and scope keep the pending generic wake;
         // the C fixture checks schedule's state restoration without a switch.
         unsafe { binding.run_scoped(runtime, stela_linux_task_test_pending_schedule, context) }
             .unwrap();
     }
     unsafe extern "C" fn trees_body(_: *mut c_void) {
-        // SAFETY: actual reused foreground job, old worker metadata retained.
+        // SAFETY: reused foreground job, old worker metadata kept.
         unsafe { stela_linux_task_test_closed_stack() };
         // SAFETY: same real attached task and RunScoped body; this callable
-        // fixture enters/exits its own owner and retains no callback/context.
+        // fixture enters/exits its own owner and keeps no callback/context.
         unsafe { stela_linux_percpu_fixture(ptr::null_mut()) };
-        // SAFETY: retained actual C task, entered by the unchanged fixture body.
+        // SAFETY: C task, entered by the unchanged fixture body.
         assert_eq!(unsafe { stela_linux_trees_fixture() }, 0);
     }
     unsafe extern "C" fn trees(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
         let binding = f.binding(0);
-        // SAFETY: scope retains actual shared Runtime and all owner/model backing.
+        // SAFETY: scope keeps shared Runtime and all owner/model backing.
         unsafe { binding.run_scoped(f.runtime(), trees_body, context) }.unwrap();
         f.trees.fetch_add(1, Ordering::Relaxed);
     }
     unsafe extern "C" fn reject_large_stack(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
         // SAFETY: process context on the runtime CPU with the hosted heap initialized.
         let binding = unsafe { TaskBinding::<16>::new() }.unwrap();
         assert_eq!(
-            // SAFETY: the harness retains the pinned executor through every callback and
+            // SAFETY: the harness keeps the pinned executor through every callback and
             // retirement.
             binding.bind_current(unsafe { f.runtime() }),
             Err(WorkError::CorruptContext)
         );
         // Rejected initial attach installed no C task or binding; unique metadata
-        // rollback occurs here in actual process context, never IF=0 hooks.
+        // rollback occurs here in process context, never IF=0 hooks.
         // SAFETY: the runtime detached this binding and no job or waker still uses it.
         assert!(unsafe { binding.release_quiescent() }.is_ok());
         f.refused.store(true, Ordering::Release);
     }
 
-    /// Invoked in its own current unit-test executable, so actual C globals and
+    /// Invoked in its own current unit-test executable, so C globals and
     /// permanent canonical registry cannot race parallel parent unit fixtures.
     pub(crate) fn run_trees_child() {
         assert_eq!(
@@ -992,7 +992,7 @@ pub(crate) mod tests {
         let stdout = std::string::String::from_utf8_lossy(&output.stdout);
         let stderr = std::string::String::from_utf8_lossy(&output.stderr);
         // A missing/cfg-excluded exact selector exits successfully with zero
-        // tests. Require actual named execution AND exactly one passing test.
+        // tests. Require named execution AND exactly one passing test.
         let named = stdout
             .lines()
             .any(|line| line == "test gpu::linux::task::tests::trees_child ... ok");
@@ -1015,7 +1015,7 @@ pub(crate) mod tests {
         assert!(unsafe { crate::gpu::linux::heap::register(try_allocate) }.is_ok());
         // SAFETY: the C test hook only checks task state on this thread's entered continuation.
         unsafe { stela_linux_task_test_taskless() };
-        // SAFETY: actual taskless dispatcher, before any TaskBinding attach;
+        // SAFETY: taskless dispatcher, before any TaskBinding attach;
         // the observer requires a trap before backing allocation is attempted.
         unsafe { stela_linux_percpu_taskless_fixture() };
         let dropped = Arc::new(AtomicU64::new(0));
@@ -1023,7 +1023,7 @@ pub(crate) mod tests {
         {
             let cpu = CpuModel::new();
             let f = Fixture::new(cpu.clone());
-            // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+            // SAFETY: the fixture is the queue's owner, and only this test thread produces
             // work.
             let queue = unsafe { Queue::<16>::new(cpu, f.clone()) }.unwrap();
             let executor =
@@ -1034,7 +1034,7 @@ pub(crate) mod tests {
                 Ordering::Release,
             );
             // SAFETY: the callbacks are static, never unwind, and take the fixture the queue
-            // retains until completion.
+            // keeps until completion.
             unsafe {
                 runtime.call_foreground(reject_large_stack, Arc::as_ptr(&f) as *mut c_void, 10000)
             }
@@ -1048,7 +1048,7 @@ pub(crate) mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 4);
         let cpu = CpuModel::new();
         let f = Fixture::new(cpu.clone());
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
         let executor = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
@@ -1059,7 +1059,7 @@ pub(crate) mod tests {
         );
         let context = Arc::as_ptr(&f) as *mut c_void;
         assert_eq!(runtime.current_context(), Err(WorkError::Unavailable));
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe { runtime.call_foreground(foreground, context, 10000) }.unwrap();
         assert_eq!(
@@ -1073,8 +1073,8 @@ pub(crate) mod tests {
             .unwrap()
             .context_id()
             .unwrap();
-        // Reuse the SAME actual continuation/C task with a new existing job ticket.
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // Reuse the SAME continuation/C task with a new existing job ticket.
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe { runtime.call_foreground(trees, context, 10000) }.unwrap();
         assert_eq!(f.trees.load(Ordering::Relaxed), 1);
@@ -1102,7 +1102,7 @@ pub(crate) mod tests {
             let Some(binding) = slot.lock().unwrap().take() else {
                 continue;
             };
-            // SAFETY: both actual callbacks completed, no C waiter/foreign producer;
+            // SAFETY: both callbacks completed, no C waiter/foreign producer;
             // no registered IRQ producer or C task reference escapes this child.
             let retained =
                 unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
@@ -1128,31 +1128,31 @@ pub(crate) mod tests {
     }
 
     unsafe extern "C" fn service_wait(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         assert_eq!(runtime.service_current(), Ok(true));
         let binding = f.binding(2);
         *f.service_target.lock().unwrap() = Some(binding.target_current().unwrap());
-        // SAFETY: actual reserved continuation and retained fixture/code roots.
+        // SAFETY: reserved continuation and kept fixture/code roots.
         unsafe { binding.run_scoped(runtime, stela_linux_task_test_service_wait, context) }
             .unwrap();
     }
     unsafe extern "C" fn service_cancel_and_wake(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
         let target = f.service_target.lock().unwrap().as_ref().unwrap().clone();
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         assert_eq!(
-            // SAFETY: callback from the actual entered same-CPU foreground C owner.
+            // SAFETY: callback from the entered same-CPU foreground C owner.
             unsafe { target.signal(runtime, WaitSignal::Interrupt) },
             Err(WorkError::Unavailable)
         );
         assert_eq!(
             // SAFETY: this is the entered same-CPU continuation inside `run_scoped`, with the
-            // service roots retained.
+            // service roots kept.
             unsafe { target.signal(runtime, WaitSignal::Fatal) },
             Err(WorkError::Unavailable)
         );
@@ -1164,9 +1164,9 @@ pub(crate) mod tests {
         cancel_and_wake: unsafe extern "C" fn(*mut c_void),
     }
     unsafe extern "C" fn service_caller(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         assert_eq!(runtime.service_current(), Ok(false));
         let binding = f.binding(0);
@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
     fn service_roundtrip() {
         let cpu = CpuModel::new();
         let f = Fixture::new(cpu.clone());
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -1200,17 +1200,17 @@ pub(crate) mod tests {
             Ordering::Release,
         );
         let context = Arc::as_ptr(&f) as *mut c_void;
-        // SAFETY: fixture roots retain both actual callbacks through join below.
+        // SAFETY: fixture roots keep both callbacks through join below.
         let service = unsafe { runtime.start_service(service_wait, context) }.unwrap();
         assert!(runtime.step().unwrap());
         assert!(!runtime.queue().completed(service).unwrap());
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe { runtime.call_foreground(service_caller, context, 10000) }.unwrap();
         runtime.drain(10000).unwrap();
         assert!(runtime.queue().completed(service).unwrap());
         assert_eq!(
-            // SAFETY: the queue owner retains the fixture, and this service binds its task before
+            // SAFETY: the queue owner keeps the fixture, and this service binds its task before
             // any admission.
             unsafe { runtime.start_service(service_wait, context) },
             Err(WorkError::Busy)
@@ -1244,7 +1244,7 @@ pub(crate) mod tests {
         reads: Arc<AtomicU64>,
         start: std::time::Instant,
     }
-    // SAFETY: actual retained hosted monotonic clock; no native IRQ attestation.
+    // SAFETY: hosted monotonic clock; no native IRQ attestation.
     unsafe impl service::Clock for ServiceClock {
         fn cpu(&self) -> &Arc<dyn Cpu> {
             &self.cpu
@@ -1264,8 +1264,8 @@ pub(crate) mod tests {
         owner: thread::Thread,
         waits: AtomicU64,
     }
-    // SAFETY: actual hosted park/unpark event token; no native ISR is admitted.
-    // Unpark is retained across check-to-park and never runs a callback inline.
+    // SAFETY: hosted park/unpark event token; no native ISR is admitted.
+    // Unpark is held across check-to-park and never runs a callback inline.
     unsafe impl service::Idle for ServiceIdle {
         fn clock(&self) -> &Arc<dyn service::Clock> {
             &self.clock
@@ -1294,9 +1294,9 @@ pub(crate) mod tests {
         boundary: unsafe extern "C" fn(*mut c_void) -> bool,
     }
     unsafe extern "C" fn clock_boundary(context: *mut c_void) -> bool {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         assert_eq!(runtime.service_current(), Ok(true));
         let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
@@ -1310,29 +1310,29 @@ pub(crate) mod tests {
             if f.boundary_mode.load(Ordering::Relaxed) == 2 {
                 let target = f.scope_target.lock().unwrap().as_ref().unwrap().clone();
                 assert_eq!(
-                    // SAFETY: actual same-CPU entered service; target has genuinely returned its
+                    // SAFETY: same-CPU entered service; target has returned its
                     // body and is in its private scope-end switch.
                     unsafe { target.signal(runtime, WaitSignal::Interrupt) },
                     Err(WorkError::Busy)
                 );
                 assert_eq!(
                     // SAFETY: this is the entered same-CPU continuation inside `run_scoped`, with
-                    // the service roots retained.
+                    // the service roots kept.
                     unsafe { target.signal(runtime, WaitSignal::Fatal) },
                     Err(WorkError::Busy)
                 );
                 target.wake.wake().unwrap();
             }
-            // SAFETY: actual reserved task delivered this fixture's counter
+            // SAFETY: reserved task delivered this fixture's counter
             // consumer. No original IRQ-work/timer storage is admitted by it.
             unsafe { domain.finish(runtime, batch, None) }.unwrap();
         }
         f.ticks.load(Ordering::Relaxed) >= f.tick_goal.load(Ordering::Relaxed)
     }
     unsafe extern "C" fn clock_service(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         let binding = f.binding(2);
         let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
@@ -1341,7 +1341,7 @@ pub(crate) mod tests {
             context,
             boundary: clock_boundary,
         };
-        // SAFETY: real retained C task/stack and stack-local callback descriptor.
+        // SAFETY: real kept C task/stack and stack-local callback descriptor.
         unsafe {
             binding.run_scoped(
                 runtime,
@@ -1361,27 +1361,27 @@ pub(crate) mod tests {
         ticks: unsafe extern "C" fn(*mut c_void) -> u64,
     }
     unsafe extern "C" fn boundary_make_due(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
         f.boundary_ready.store(true, Ordering::Release);
-        // Real elapsed hosted time, with the actual Runtime task still Running.
+        // Real elapsed hosted time, with the Runtime task still Running.
         // This invokes no Runtime park/yield, fake tick or service callback.
         thread::sleep(std::time::Duration::from_millis(2));
     }
     unsafe extern "C" fn boundary_reads(context: *mut c_void) -> u64 {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         unsafe { fixture(context) }
             .clock_reads
             .load(Ordering::Relaxed)
     }
     unsafe extern "C" fn boundary_ticks(context: *mut c_void) -> u64 {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         unsafe { fixture(context) }.ticks.load(Ordering::Relaxed)
     }
     unsafe extern "C" fn runnable_boundary(context: *mut c_void) {
-        // SAFETY: the queue owner retains the fixture behind `context` through this callback.
+        // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
         let f = unsafe { fixture(context) };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         let binding = f.binding(0);
         if f.boundary_mode.load(Ordering::Relaxed) == 2 {
@@ -1394,7 +1394,7 @@ pub(crate) mod tests {
             reads: boundary_reads,
             ticks: boundary_ticks,
         };
-        // SAFETY: actual same-CPU C scope retains descriptor and providers.
+        // SAFETY: same-CPU C scope keeps descriptor and providers.
         unsafe {
             binding.run_scoped(
                 runtime,
@@ -1416,7 +1416,7 @@ pub(crate) mod tests {
         f.boundary_mode.store(mode, Ordering::Relaxed);
         f.tick_goal
             .store(if mode == 0 { 2 } else { 1 }, Ordering::Relaxed);
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -1442,7 +1442,7 @@ pub(crate) mod tests {
         runtime.attach_service_domain(domain.clone()).unwrap();
         *f.service_domain.lock().unwrap() = Some(domain.clone());
         let context = Arc::as_ptr(&f) as *mut c_void;
-        // SAFETY: fixture and registered domain retain all actual code/providers.
+        // SAFETY: fixture and registered domain keep all code/providers.
         let ticket = unsafe { runtime.start_service(clock_service, context) }.unwrap();
         if mode == 0 {
             let mut attempts = 0;
@@ -1461,8 +1461,8 @@ pub(crate) mod tests {
                 "Cpu::ticks is not nanoseconds"
             );
         } else {
-            assert!(runtime.step().unwrap()); // actual service setup/block
-            // SAFETY: rooted actual caller; it must remain Runtime-runnable.
+            assert!(runtime.step().unwrap()); // service setup/block
+            // SAFETY: rooted caller; it must remain Runtime-runnable.
             unsafe { runtime.call_foreground(runnable_boundary, context, 10000) }.unwrap();
             assert!(runtime.queue().completed(ticket).unwrap());
             assert_eq!(idle.waits.load(Ordering::Relaxed), 0);
@@ -1472,14 +1472,14 @@ pub(crate) mod tests {
             f.tick_goal.load(Ordering::Relaxed)
         );
         domain.stop_producers().unwrap();
-        // SAFETY: actual service job completed, no original C timer/work/storage
+        // SAFETY: service job completed, no original C timer/work/storage
         // was admitted; the fixture consumer has no outstanding callback/user.
         unsafe { domain.retire() }.unwrap();
         for slot in &f.bindings {
             let Some(binding) = slot.lock().unwrap().take() else {
                 continue;
             };
-            // SAFETY: actual service and caller jobs/consumers are now joined.
+            // SAFETY: service and caller jobs/consumers are now joined.
             let retained =
                 unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
             drop(retained);
@@ -1515,7 +1515,7 @@ pub(crate) mod tests {
         }
         unsafe fn runtime(&self) -> Pin<&Runtime<64>> {
             self.cpu.check_cpu().unwrap();
-            // SAFETY: actual fixture owner retains this pinned runtime through
+            // SAFETY: fixture owner keeps this pinned runtime through
             // all admitted callbacks, detach and process-context metadata free.
             unsafe { Pin::new_unchecked(&*self.runtime.load(Ordering::Acquire)) }
         }
@@ -1538,18 +1538,18 @@ pub(crate) mod tests {
         }
     }
     unsafe extern "C" fn catalog_bind(context: *mut c_void) {
-        // SAFETY: rooted fixture owns this pointer through actual completion.
+        // SAFETY: rooted fixture owns this pointer through completion.
         let f = unsafe { &*context.cast::<CatalogFixture>() };
         // SAFETY: process context on the runtime CPU with the hosted heap initialized.
         let binding = unsafe { TaskBinding::<64>::new() }.unwrap();
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         binding.bind_current(unsafe { f.runtime() }).unwrap();
         f.bindings.lock().unwrap().push(binding);
     }
     unsafe extern "C" fn catalog_refused(context: *mut c_void) {
-        // SAFETY: same rooted actual fixture/stack, with a full original catalog.
+        // SAFETY: same rooted fixture/stack, with a full original catalog.
         let f = unsafe { &*context.cast::<CatalogFixture>() };
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         let before = runtime.current_context().unwrap();
         // SAFETY: process context on the runtime CPU with the hosted heap initialized.
@@ -1564,7 +1564,7 @@ pub(crate) mod tests {
         let cpu = CpuModel::new();
         let dropped = Arc::new(AtomicU64::new(0));
         let first = CatalogFixture::new(cpu.clone());
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<64>::new(cpu.clone(), first.clone()) }.unwrap();
         let executor = Executor::new_hosted_policy_for_test(
@@ -1578,20 +1578,20 @@ pub(crate) mod tests {
         let runtime = executor.runtime();
         first.publish(runtime);
         let context = Arc::as_ptr(&first) as *mut c_void;
-        // SAFETY: each actual role/worker callback borrows first, retained by queue through detach.
+        // SAFETY: each role/worker callback borrows first, kept by queue through detach.
         unsafe { runtime.start_service(catalog_bind, context) }.unwrap();
-        // SAFETY: independent actual control worker, same retained immutable fixture owner.
+        // SAFETY: independent control worker, same immutable fixture owner.
         unsafe { runtime.start_firmware(catalog_bind, context) }.unwrap();
-        // SAFETY: serial GPE has one actual mapped worker; its callback owner survives join.
+        // SAFETY: serial GPE has one mapped worker; its callback owner survives join.
         unsafe { runtime.queue().execute_gpe(catalog_bind, context) }.unwrap();
         for _ in 0..2 {
-            // SAFETY: each accepted Notify permit owns a distinct actual stack.
+            // SAFETY: each accepted Notify permit owns a distinct stack.
             unsafe { runtime.queue().execute(Kind::Notify, catalog_bind, context) }.unwrap();
-            // SAFETY: each accepted Portal permit owns a distinct actual stack.
+            // SAFETY: each accepted Portal permit owns a distinct stack.
             unsafe { runtime.queue().execute_portal(catalog_bind, context) }.unwrap();
         }
         for _ in 0..24 {
-            // SAFETY: each General callback retains first and binds one actual mapped continuation.
+            // SAFETY: each General callback keeps first and binds one mapped continuation.
             unsafe {
                 runtime
                     .queue()
@@ -1599,7 +1599,7 @@ pub(crate) mod tests {
             }
             .unwrap();
         }
-        // SAFETY: Foreground's retained mapped stack is distinct from all31 peers above.
+        // SAFETY: Foreground's mapped stack is distinct from all31 peers above.
         unsafe { runtime.call_foreground(catalog_bind, context, 10000) }.unwrap();
         runtime.drain(10000).unwrap();
         let mut ids: Vec<_> = first
@@ -1613,13 +1613,13 @@ pub(crate) mod tests {
         ids.dedup();
         assert_eq!(ids.len(), 32);
         let second = CatalogFixture::new(cpu.clone());
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<64>::new(cpu.clone(), second.clone()) }.unwrap();
         let refused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
         let rejected = refused.runtime();
         second.publish(rejected);
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe {
             rejected.call_foreground(catalog_refused, Arc::as_ptr(&second) as *mut c_void, 10000)
@@ -1638,15 +1638,15 @@ pub(crate) mod tests {
         unsafe { runtime.retire() }.unwrap();
         drop(executor);
         assert_eq!(dropped.load(Ordering::Relaxed), 36);
-        // Every retired slot is available to actual fresh mappings again.
+        // Every retired slot is available to fresh mappings again.
         let third = CatalogFixture::new(cpu.clone());
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<64>::new(cpu.clone(), third.clone()) }.unwrap();
         let reused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
         let available = reused.runtime();
         third.publish(available);
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe {
             available.call_foreground(catalog_bind, Arc::as_ptr(&third) as *mut c_void, 10000)
@@ -1716,7 +1716,7 @@ pub(crate) mod tests {
         }
         unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
             self.cpu.check_cpu().unwrap();
-            // SAFETY: this private hosted fixture's retained executor owns the
+            // SAFETY: this private hosted fixture's executor owns the
             // exact pinned Runtime until all callbacks end and bindings detach.
             unsafe { Pin::new_unchecked(&*self.runtime.load(Ordering::Acquire)) }
         }
@@ -1726,7 +1726,7 @@ pub(crate) mod tests {
             }
             // SAFETY: real process stack/CPU, outside entered C/IF0 hooks.
             let binding = unsafe { TaskBinding::new() }.unwrap();
-            // SAFETY: the harness retains the pinned executor through every callback and
+            // SAFETY: the harness keeps the pinned executor through every callback and
             // retirement.
             binding.bind_current(unsafe { self.runtime() }).unwrap();
             *self.bindings[index].lock().unwrap() = Some(binding.clone());
@@ -1738,7 +1738,7 @@ pub(crate) mod tests {
         fn target(&self, role: usize) -> TargetTask<16> {
             // This is also used in an original RCU process-retirement callback.
             // Refuse contention instead of blocking at SOFTIRQ_OFFSET; cloning
-            // only increments retained owners, with nonfinal drops afterward.
+            // only increments kept owners, with nonfinal drops afterward.
             self.targets[role]
                 .try_lock()
                 .unwrap()
@@ -1763,14 +1763,14 @@ pub(crate) mod tests {
         }
     }
     unsafe fn mutex_job<'a>(context: *mut c_void) -> &'a MutexRole {
-        // SAFETY: stable boxed role retained by the actual Queue fixture owner.
+        // SAFETY: stable boxed role kept by the Queue fixture owner.
         unsafe { &*context.cast::<MutexRole>() }
     }
     unsafe extern "C" fn mutex_checkpoint(context: *mut c_void, event: u32) {
-        // SAFETY: the queue owner retains this boxed role through the callback.
+        // SAFETY: the queue owner keeps this boxed role through the callback.
         let job = unsafe { mutex_job(context) };
         let f = job.fixture.upgrade().unwrap();
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         match event {
             1 => {
@@ -1801,7 +1801,7 @@ pub(crate) mod tests {
                 let old = f.target(1);
                 assert_eq!(
                     // SAFETY: this is the entered same-CPU continuation inside `run_scoped`, with
-                    // the service roots retained.
+                    // the service roots kept.
                     unsafe { old.signal(runtime, WaitSignal::Fatal) },
                     Err(WorkError::Closed)
                 );
@@ -1815,7 +1815,7 @@ pub(crate) mod tests {
                 } else {
                     WaitSignal::Fatal
                 };
-                // SAFETY: actual entered current posts to its own expected job.
+                // SAFETY: entered current posts to its own expected job.
                 unsafe { target.signal(runtime, kind) }.unwrap();
                 f.self_signals.fetch_add(1, Ordering::Relaxed);
             }
@@ -1823,7 +1823,7 @@ pub(crate) mod tests {
                 let target = f.target(1);
                 let wake = (*target.wake).clone();
                 drop(target);
-                // Explicit hosted IRQ model: only the retained generic atomic
+                // Explicit hosted IRQ model: only the generic atomic
                 // signal view is reachable here, never a C task/Runtime pointer.
                 f.cpu.irq.store(true, Ordering::Release);
                 wake.wake().unwrap();
@@ -1835,10 +1835,10 @@ pub(crate) mod tests {
         }
     }
     unsafe extern "C" fn mutex_role(context: *mut c_void) {
-        // SAFETY: the queue owner retains this boxed role through the callback.
+        // SAFETY: the queue owner keeps this boxed role through the callback.
         let job = unsafe { mutex_job(context) };
         let f = job.fixture.upgrade().unwrap();
-        // SAFETY: the harness retains the pinned executor through every callback and retirement.
+        // SAFETY: the harness keeps the pinned executor through every callback and retirement.
         let runtime = unsafe { f.runtime() };
         let index = if job.role == 4 { 1 } else { job.role };
         let binding = f.binding(index);
@@ -1855,8 +1855,8 @@ pub(crate) mod tests {
             context,
             checkpoint: mutex_checkpoint,
         };
-        // SAFETY: only shared retained Runtime/owner roots span suspension;
-        // call is an actual immovable stack local until this C body returns.
+        // SAFETY: only shared kept Runtime/owner roots span suspension;
+        // call is an immovable stack local until this C body returns.
         unsafe {
             binding.run_scoped(
                 runtime,
@@ -1912,7 +1912,7 @@ pub(crate) mod tests {
         for scenario in 0..11 {
             let cpu = CpuModel::new();
             let f = MutexFixture::new(cpu.clone(), scenario);
-            // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+            // SAFETY: the fixture is the queue's owner, and only this test thread produces
             // work.
             let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
             let executor =
@@ -1922,7 +1922,7 @@ pub(crate) mod tests {
                 runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
                 Ordering::Release,
             );
-            // SAFETY: actual guarded stacks and retained fixture/job roots, no
+            // SAFETY: guarded stacks and kept fixture/job roots, no
             // C owner/ref survives completion, no native admission is asserted.
             unsafe { runtime.call_foreground(mutex_role, f.context(0), 100000) }.unwrap();
             assert_eq!(
@@ -1948,7 +1948,7 @@ pub(crate) mod tests {
                 if scenario < 7 || scenario == 10 { 2 } else { 0 }
             );
             // All expected-job snapshots are now inert even though metadata is
-            // still retained. Taking them in process context breaks Arc cycles.
+            // still held. Taking them in process context breaks Arc cycles.
             for slot in &f.targets {
                 if let Some(target) = slot.lock().unwrap().take() {
                     assert_eq!(target.wake.wake(), Err(WorkError::Closed));
@@ -1968,7 +1968,7 @@ pub(crate) mod tests {
                         unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
                     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
                     drop(retained);
-                    // SAFETY: actual jobs completed; C refs, waiters, signal
+                    // SAFETY: jobs completed; C refs, waiters, signal
                     // snapshots and all producer borrows ended independently.
                     assert!(unsafe { binding.release_quiescent() }.is_ok());
                 }
@@ -1990,8 +1990,8 @@ pub(crate) mod tests {
 
     unsafe extern "C" fn quarantine_targets(context: *mut c_void) {
         // No Linux entry is needed for capture/drop mechanics. Runtime still
-        // provides actual current/C task identity on its real guarded stack.
-        // SAFETY: the queue owner retains this boxed role through the callback.
+        // provides current/C task identity on its real guarded stack.
+        // SAFETY: the queue owner keeps this boxed role through the callback.
         let job = unsafe { mutex_job(context) };
         let f = job.fixture.upgrade().unwrap();
         let binding = f.binding(0);
@@ -2016,7 +2016,7 @@ pub(crate) mod tests {
         let dropped = Arc::new(AtomicU64::new(0));
         let cpu = CpuModel::new();
         let f = MutexFixture::new(cpu.clone(), 0);
-        // SAFETY: the fixture is the queue's retained owner, and only this test thread produces
+        // SAFETY: the fixture is the queue's owner, and only this test thread produces
         // work.
         let queue = unsafe { Queue::<16>::new(cpu, f.clone()) }.unwrap();
         let executor = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
@@ -2025,7 +2025,7 @@ pub(crate) mod tests {
             runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
             Ordering::Release,
         );
-        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue retains
+        // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
         // until completion.
         unsafe { runtime.call_foreground(quarantine_targets, f.context(0), 100000) }.unwrap();
         runtime.queue().close().unwrap();
@@ -2033,13 +2033,13 @@ pub(crate) mod tests {
         // SAFETY: the queue is closed and no producer, task or waker still uses this binding.
         let retained = unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
         drop(retained);
-        // The two improper drops intentionally kept real metadata owners. A
+        // The two improper drops kept real metadata owners. A
         // claimed unique release must refuse; no final C free is smuggled into
         // the foreign thread/IRQ model or inferred from task usage alone.
         // SAFETY: the runtime detached this binding and no job or waker still uses it.
         let unreleased = unsafe { binding.release_quiescent() }.err().unwrap();
         assert_eq!(Arc::strong_count(&unreleased), 3);
-        drop(unreleased); // nonfinal process-context drop; two retained owners remain
+        drop(unreleased); // nonfinal process-context drop; two kept owners remain
         // SAFETY: the queue is closed and this test thread is the only producer; pending work is a
         // checked refusal.
         unsafe { runtime.retire() }.unwrap();

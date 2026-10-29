@@ -311,7 +311,7 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub target: Target,
-    /// The original NVRAM command, retained through one-shot consumption;
+    /// The original NVRAM command, kept through one-shot consumption;
     /// post-upgrade has a distinct firmware handoff despite booting macOS.
     pub command: Option<Command>,
     /// The boot volume, when NVRAM names one; otherwise the disk's only
@@ -556,7 +556,7 @@ pub const BUNDLE_OPTION: &str = "--bundle";
 /// a safe-mode boot.
 pub const BOOT_VOLUME_OPTION: &str = "--boot-volume";
 pub const SAFE_BOOT_OPTION: &str = "--safe-boot";
-/// The previous-stage entry code retained after consuming NVRAM commands.
+/// The previous-stage entry code kept after consuming NVRAM commands.
 pub const BOOT_COMMAND_OPTION: &str = "--boot-command";
 /// Build the bundle from the Preboot disk's Update volume
 /// (`stela_loader::upgrade`) instead of its installed system.

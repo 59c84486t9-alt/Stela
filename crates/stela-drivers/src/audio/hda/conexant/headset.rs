@@ -102,9 +102,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .iter()
             .find(|widget| widget.node == MIC)
             .ok_or(Error::InvalidCodecGraph)?;
-        // The fixed source protocol needs actual microphone input, Hi-Z and
+        // The fixed source protocol needs microphone input, Hi-Z and
         // 80% VREF. The live identity walk validates these cached capabilities
-        // and proves both fixed nodes lie in the actual audio function group.
+        // and proves both fixed nodes lie in the audio function group.
         if mic.kind != WidgetKind::Pin
             || mic
                 .pin_capabilities
@@ -219,7 +219,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     return Err(Error::RouteRejected);
                 }
                 // The detection helper writes VREF for a recognized headset;
-                // the outer callback repeats it below. Preserve both actual
+                // the outer callback repeats it below. Preserve both
                 // transactions rather than assuming duplicate writes are inert.
                 if kind & (TYPE_CTIA | TYPE_OMTP) != 0 {
                     self.conexant_microphone_control(graph.address, true)?;

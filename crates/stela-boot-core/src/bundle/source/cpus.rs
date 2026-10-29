@@ -1,4 +1,4 @@
-//! Selected PE provenance and the prepared CPU sequence retained across loading.
+//! Selected PE provenance and the prepared CPU sequence kept across loading.
 use alloc::{format, string::String, vec::Vec};
 use stela_loader::apple_device_tree::{DeviceTree, Node, Property};
 use {stela_formats::boot_bundle::BootCpu, stela_formats::boot_bundle::BootCpuSelection};
@@ -169,7 +169,7 @@ mod tests {
             root: Node::named("device-tree").unwrap(),
         };
         tree.ensure_child("/", "cpus").unwrap();
-        // Neither node names nor affinities are sorted; DT traversal is authority.
+        // Neither node names nor affinities are sorted; DT traversal is permission.
         for (name, affinity, kind) in [
             ("cpu9", 1u32, b'E'),
             ("cpu4", 0x101, b'P'),
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(contract.processor(), 0);
         assert_eq!(record.original_index, 1);
         assert!(contract.validate_live(&retained).is_ok());
-        // A variant may remove the first source P. Select the first retained P.
+        // A variant may remove the first source P. Select the first P.
         let mut retained = tree(Some("cpu2"));
         retained.node_mut("/cpus").unwrap().children.remove(1);
         let record = BootCpu {
@@ -328,7 +328,7 @@ mod tests {
         mutations.push(reordered);
         let mut deleted = prepared.clone();
         deleted.node_mut("/cpus").unwrap().children.remove(2);
-        // Preparation may retain a proper subsequence; live patches cannot prune it.
+        // Preparation may keep a proper subsequence; live patches cannot prune it.
         assert!(Prepared::verify(&original, &deleted, &selected()).is_ok());
         assert!(contract.validate_live(&deleted).is_err());
         for (key, value) in [

@@ -2,10 +2,10 @@
 // Copyright (C) 2018 Felix Fietkau <nbd@nbd.name>
 //! Serialized receive BA reorder queue, adapted from pinned mt76/agg-rx.c.
 //!
-//! A queue belongs to one actual peer/association/TID BA session. The caller
+//! A queue belongs to one peer/association/TID BA session. The caller
 //! selects it only after checking that identity, the real RX aggregate status
 //! and ACK policy. Non-aggregate/no-ACK traffic bypasses the source queue. A BAR
-//! must likewise name this actual peer and TID. This module does not authorize
+//! must likewise name this peer and TID. This module does not authorize
 //! a session, install firmware BA state, authenticate a frame or advance PN.
 //!
 //! Payloads are completed host-owned RX packets, not outstanding DMA owners.
@@ -21,7 +21,7 @@ use crate::net::wifi::frame::{MAX_AMPDU_BUF_EHT, SEQUENCE_MASK, next_sequence as
 use alloc::vec::Vec;
 
 const SEQUENCE_HALF: u16 = 0x0800;
-/// EHT's maximum BA window; negotiation and actual firmware may limit it further.
+/// EHT's maximum BA window; negotiation and firmware may limit it further.
 pub const MAX_WINDOW: u16 = MAX_AMPDU_BUF_EHT;
 
 fn before(a: u16, b: u16) -> bool {
@@ -72,9 +72,9 @@ pub struct Reorder<T> {
 }
 
 impl<T> Reorder<T> {
-    /// `window` is the already negotiated nonzero actual BA size, not its wire
+    /// `window` is the already negotiated nonzero BA size, not its wire
     /// encoding (whose zero has a separate negotiated default). `start` is the
-    /// actual SSN. Source timing is ticks_per_second / (TID >= 4 ? 25 : 10).
+    /// SSN. Source timing is ticks_per_second / (TID >= 4 ? 25 : 10).
     /// TID8..15 are representable here; current station BA negotiation must
     /// separately reject unsupported TSPEC TIDs, as mac80211 does.
     pub fn new(tid: u8, start: u16, window: u16, ticks_per_second: u32) -> Result<Self, Error> {
@@ -153,7 +153,7 @@ impl<T> Reorder<T> {
         }
     }
 
-    /// Consume one eligible MPDU. Source behavior deliberately passes an old
+    /// Consume one eligible MPDU. Source behavior passes an old
     /// sequence before the first in-window packet starts the queue. Once
     /// started, old sequences and occupied slots are duplicates and discarded.
     /// This sequencing decision alone is never proof of frame authenticity.
@@ -221,7 +221,7 @@ impl<T> Reorder<T> {
     }
 
     /// Apply the SSN of an already validated single-TID BAR to this session.
-    /// The caller retains/handles the BAR itself; only buffered data is emitted.
+    /// The caller keeps/handles the BAR itself; only buffered data is emitted.
     pub fn bar(&mut self, sequence: u16, mut release: impl FnMut(T)) -> Result<(), Error> {
         if self.stopped {
             return Err(Error::Stopped);
@@ -263,8 +263,8 @@ impl<T> Reorder<T> {
     }
 
     /// Terminal host-queue shutdown. Discard buffered CPU packets and disable
-    /// further timer/BAR/RX use. The native session must separately stop actual
-    /// firmware BA work and retain uncertain peer/key/DMA owners on failure.
+    /// further timer/BAR/RX use. The native session must separately stop
+    /// firmware BA work and keep uncertain peer/key/DMA owners on failure.
     pub fn stop(&mut self) -> usize {
         self.stopped = true;
         let discarded = self.buffered;

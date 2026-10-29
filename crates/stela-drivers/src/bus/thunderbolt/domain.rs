@@ -13,7 +13,7 @@ use super::{
 use crate::bus::pci;
 use alloc::vec::Vec;
 
-/// The actual enumerated NHI requester plus a platform-issued ownership/reset
+/// The enumerated NHI requester plus a platform-issued ownership/reset
 /// epoch. The platform must never reuse an epoch for a new controller lifetime.
 /// This is not a Type-C connector identity or a guessed connector/router map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +38,7 @@ pub enum Error {
 pub struct Observation {
     pub generation: u64,
     pub inventory: Inventory,
-    /// None means currently observed; the invalidating generation is retained
+    /// None means currently observed; the invalidating generation is held
     /// forever in this bounded journal. Old inventory bytes are never rewritten.
     pub invalidated_at: Option<u64>,
 }
@@ -222,7 +222,7 @@ impl Domain {
     }
     /// Apply a checked event from this domain's own Channel. Unknown sources
     /// remain errors; port numbers never create observations or authorization.
-    /// The containing CM must independently tear actual tunnels down before
+    /// The containing CM must independently tear tunnels down before
     /// releasing requester domains or allowing any affected device reuse.
     pub fn hotplug(&mut self, event: PlugEvent) -> Result<Hotplug, Error> {
         let record = self.current(event.route).ok_or(Error::UnknownRouter)?;

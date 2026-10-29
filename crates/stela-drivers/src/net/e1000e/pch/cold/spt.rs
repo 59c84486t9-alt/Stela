@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright(c) 1999 - 2018 Intel Corporation.
 // Copyright (c) 2026 Stela contributors
-//! Initial SPT I219 LM/V (156f/1570), with the actual integrated flash window,
+//! Initial SPT I219 LM/V (156f/1570), with the integrated flash window,
 //! unmanaged force-ULP exit and descriptor-flush status. Later I219 generations
 //! are not selected by their common I217 PHY ID. Initial PHY identity must be
 //! accessible; firmware/SMM, ME ownership and other users remain excluded.
@@ -54,15 +54,15 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
     ///
     /// # Safety
     /// All `Controller::new` same-function physical ownership/reset/exclusion
-    /// requirements apply, with actual vendor8086/class020000/device156f/1570.
-    /// Actual config/MMIO/integrated MAC+e000 flash/PHY share one retained
+    /// requirements apply, with vendor8086/class020000/device156f/1570.
+    /// Config/MMIO/integrated MAC+e000 flash/PHY share one kept
     /// Function/reset epoch. LTR words remain immutable, while config e4 is a
     /// real live read at every required reset/stop point. The initial PHY is
     /// accessible and identifies as I217 before the forced interconnect cycle.
     /// A foreign ring requiring flush is refused without touching foreign RAM.
     /// No native config/MMIO/DMA provider or probe admission is supplied here.
     pub unsafe fn new_spt(device: u16, io: R, delay: D) -> Result<Self, Error> {
-        // SAFETY: caller supplies the exact live same-function cold epoch.
+        // SAFETY: caller supplies the live same-function cold epoch.
         let mut this = unsafe { Self::claim_spt(device, io, delay) }?;
         if let Err(error) = this.initialize_i219() {
             this.poisoned = true;
@@ -75,12 +75,12 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
         if !matches!(device, 0x156f | 0x1570) {
             return Err(Error::UnsupportedDevice(device));
         }
-        // SAFETY: same exact actual initial SPT grant passed to the shared owner.
+        // SAFETY: same exact initial SPT grant passed to the shared owner.
         unsafe { Self::claim_i219(device, io, delay) }
     }
     pub(super) unsafe fn claim_i219(device: u16, io: R, delay: D) -> Result<Self, Error> {
         let family = i219::Family::from_device(device).ok_or(Error::UnsupportedDevice(device))?;
-        // SAFETY: exact source-selected actual family under the same owner grant.
+        // SAFETY: source-selected family under the same owner grant.
         unsafe { Self::claim_integrated(io, delay, |limits| Profile::I219(limits, family)) }
     }
     pub(super) unsafe fn claim_integrated(
@@ -101,9 +101,9 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
                 return Err(error);
             }
         };
-        // SAFETY: the retained actual SPT function owns its integrated window.
+        // SAFETY: the SPT function owns its integrated window.
         let nvm = unsafe { nvm::Nvm::new(nvm::Layout::Spt, bus.clone(), delay.clone()) }?;
-        // SAFETY: exact actual PCI cohort selects the reviewed I217 transport.
+        // SAFETY: exact PCI cohort selects the reviewed I217 transport.
         let phy = unsafe { Phy::new(Kind::I217, bus, delay) };
         Ok(Self {
             phy,
@@ -225,7 +225,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
             p.retry_enabled = false;
             // A mode-switch MDIC error is a source-defined transition, not an
             // access/removal fault. Only the exact CV_SMB_CTRL response may
-            // take this path; final actual readback must prove PCIe mode.
+            // take this path; final readback must prove PCIe mode.
             p.page(SMB_CONTROL.page)?;
             let mut word = match p.mdic(1, SMB_CONTROL.index, None) {
                 Ok(value) => value,
@@ -308,7 +308,7 @@ pub(super) mod tests {
         io: Io,
         timer: Timer,
     ) -> Result<Controller<Io, Timer>, Error> {
-        // SAFETY: one actual synchronous modeled Function/config/PHY/flash.
+        // SAFETY: one synchronous modeled Function/config/PHY/flash.
         unsafe { Controller::new_spt(device, io, timer) }
     }
     pub(in crate::net::e1000e::pch::cold) fn oracle_cases(
@@ -407,7 +407,7 @@ pub(super) mod tests {
         assert_eq!(cases.len(), 36);
         for ([busy, hidden, force, ulp], expected) in cases {
             let (state, _, io, timer) = fixture_spt();
-            // SAFETY: actual same-function model with integrated flash geometry.
+            // SAFETY: same-function model with integrated flash geometry.
             let mut controller =
                 unsafe { super::super::mtp::tests::claim_any(device, io, timer) }.unwrap();
             {

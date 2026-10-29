@@ -67,7 +67,7 @@ fn property_at(data: &[u8], offset: usize) -> Option<Property<'_>> {
 }
 
 impl<'a> Node<'a> {
-    /// Translate a complete extent through this node's actual `ranges`.
+    /// Translate a complete extent through this node's `ranges`.
     /// Adjacent rows may contribute only when every byte has the same affine
     /// translation. Matching endpoints alone cannot establish ownership.
     /// Rows may overlap where they translate the shared bytes alike, as the

@@ -105,7 +105,7 @@ impl Metadata {
         bytes[0x20..0x30].copy_from_slice(&self.group.0);
         bytes[0x30..0x38].copy_from_slice(&self.unit.to_le_bytes());
         // Native ABI choice: AP-ignored private getter/context slots are zero.
-        // The actual typed live getter remains owned out-of-band. These are
+        // The typed live getter remains owned out-of-band. These are
         // not claimed original literal zeros and never expose host pointers.
         bytes[0x48..0x4c].copy_from_slice(&self.layout.count().to_le_bytes());
         if let Layout::States { descriptions, .. } = self.layout {
@@ -116,7 +116,7 @@ impl Metadata {
 }
 
 /// Original1007d40..1007dd0 counter channel ID arithmetic. The input is the
-/// actual incremented global counter-registration ordinal, not a group number.
+/// incremented global counter-registration ordinal, not a group number.
 pub fn counter_channel(ordinal: u64) -> u64 {
     const TENTHS: u64 = 0xcccc_cccc_cccc_cccd;
     const HUNDREDTHS: u64 = 0x28f5_c28f_5c28_f5c3;

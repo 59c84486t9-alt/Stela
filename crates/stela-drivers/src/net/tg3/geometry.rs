@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Source tg3 ring geometry follows actual ASIC capabilities, not PCI aliases.
+//! Source tg3 ring geometry follows ASIC capabilities, not PCI aliases.
 use super::Asic;
 
 #[derive(Clone, Copy)]

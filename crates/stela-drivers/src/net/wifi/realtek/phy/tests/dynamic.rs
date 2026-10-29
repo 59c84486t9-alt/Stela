@@ -6,7 +6,7 @@ use super::*;
 fn dynamic_igi_and_edcca_bits() {
     let (mut bus, paths, report) = dynamic_setup(3, 127, 0x7f, 63, 0);
     let old = bus.model.lock().unwrap().get(0x84c, 4);
-    // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+    // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
     // Reads, writes and injected failures occur sequentially without another RF client.
     let state = unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
     assert_eq!(state.profile(), bus.profile());
@@ -41,7 +41,7 @@ fn dynamic_igi_and_edcca_bits() {
 #[test]
 fn dynamic_domain_loss_quarantines() {
     let (mut bus, paths, report) = dynamic_setup(0, 0, 63, 0, 63);
-    // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+    // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
     // Reads, writes and injected failures occur sequentially without another RF client.
     unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -49,7 +49,7 @@ fn dynamic_domain_loss_quarantines() {
         let (mut bus, paths, report) = dynamic_setup(0, 0, 63, 0, 63);
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
-            // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+            // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
             // Reads, writes and injected failures occur sequentially without another RF client.
             unsafe { paths.initialize_dynamic(&mut bus, &report) }.is_err(),
             "{at}"
@@ -65,7 +65,7 @@ fn dynamic_domain_loss_quarantines() {
     ] {
         let (mut bus, paths, report) = dynamic_setup(0, 0, 63, 0, 63);
         bus.model.lock().unwrap().mutate = Some((at, r, w, value));
-        // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+        // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
         // Reads, writes and injected failures occur sequentially without another RF client.
         assert!(unsafe { paths.initialize_dynamic(&mut bus, &report) }.is_err());
         let m = bus.model.lock().unwrap();
@@ -78,7 +78,7 @@ fn dynamic_domain_loss_quarantines() {
 fn dynamic_partial_write_unwind() {
     let (mut bus, paths, report) = dynamic_setup(0, 0, 0, 0, 0);
     bus.panic_register = Some(0x524);
-    // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+    // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
     // Reads, writes and injected failures occur sequentially without another RF client.
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         paths.initialize_dynamic(&mut bus, &report)
@@ -94,7 +94,7 @@ fn dynamic_profile_preflight() {
     let (mut bus, paths, _) = dynamic_setup(0, 0, 0, 0, 0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
-        // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+        // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
         // Reads, writes and injected failures occur sequentially without another RF client.
         unsafe { paths.initialize_dynamic(&mut bus, &other) },
         Err(Error::WrongProfile)
@@ -103,7 +103,7 @@ fn dynamic_profile_preflight() {
     let (mut bus, paths, _) = dynamic_setup(0, 0, 0, 0, 0);
     let (_, _, one) = setup(1, 0, 0, 0, true, false);
     assert!(matches!(
-        // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+        // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
         // Reads, writes and injected failures occur sequentially without another RF client.
         unsafe { paths.initialize_dynamic(&mut bus, &one) },
         Err(Error::UnsupportedRfLayout)
@@ -113,7 +113,7 @@ fn dynamic_profile_preflight() {
         let (mut bus, paths, report) = dynamic_setup(0, 0, 0, 0, 0);
         bus.model.lock().unwrap().set(r, w, 0);
         assert!(matches!(
-            // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+            // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
             // Reads, writes and injected failures occur sequentially without another RF client.
             unsafe { paths.initialize_dynamic(&mut bus, &report) },
             Err(Error::DomainOff)
@@ -142,7 +142,7 @@ fn rtl8822c_dynamic_matches_linux() {
         let [pattern, igi, crystal, upper, lower, events] = header;
         let (mut bus, paths, report) =
             dynamic_setup(pattern as usize, igi, crystal as u8, upper, lower);
-        // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+        // SAFETY: Bus keeps the modeled IGI/CCK/EDCCA registers and phase arguments.
         // Reads, writes and injected failures occur sequentially without another RF client.
         let state = unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
         let m = bus.model.lock().unwrap();

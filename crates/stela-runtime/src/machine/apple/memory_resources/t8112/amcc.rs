@@ -140,7 +140,7 @@ impl LockResource {
             }
         }
         // The caller declares limits and clear controls in NEW software backing.
-        // This is not retained Apple reset state. Strip the status descriptor
+        // This is not kept Apple reset state. Strip the status descriptor
         // internally so even the lock-only leaf cannot leak its legacy default.
         let mut lock_layout = layout;
         lock_layout.cache_status = None;

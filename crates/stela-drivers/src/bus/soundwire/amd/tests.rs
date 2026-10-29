@@ -222,7 +222,7 @@ unsafe impl Registers for RegistersPeer {
 }
 struct Time(Rc<Cell<u64>>);
 impl Timer for Time {
-    // Deliberately unusable absolute quotient: all intervals must use origins.
+    // Unusable absolute quotient: all intervals must use origins.
     fn now_us(&self) -> u64 {
         panic!("absolute divided timer used")
     }

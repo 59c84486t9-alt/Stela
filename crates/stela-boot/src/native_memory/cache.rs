@@ -23,8 +23,8 @@ pub(crate) fn verify_writeback(
     if [vendor.ebx, vendor.edx, vendor.ecx] == [0x6874_7541, 0x6974_6e65, 0x444d_4163] {
         return verify_amd_writeback(cpu, start, bytes, table_offset);
     }
-    // This decoder is qualified against Intel's architectural controls. Other
-    // vendors need their own routing qualification, not an Intel fallback.
+    // This decoder is checked against Intel's architectural controls. Other
+    // vendors need their own routing validation, not an Intel fallback.
     if [vendor.ebx, vendor.edx, vendor.ecx] != [0x756e_6547, 0x4965_6e69, 0x6c65_746e] {
         return Err(MemoryError::CacheAttributeUnavailable);
     }
@@ -68,7 +68,7 @@ pub(crate) fn verify_writeback(
                 .checked_add(table)?
                 .checked_add(index as u64 * 8)?;
             // SAFETY: initialize's table_offset contract covers all active
-            // table pages; every index is within its retained 4 KiB page.
+            // table pages; every index is within its 4 KiB page.
             Some(unsafe { (address as *const u64).read_volatile() })
         },
     )?;
@@ -117,7 +117,7 @@ fn verify_amd_writeback(
         MemoryError::CacheAttributeUnavailable
     }
     // SAFETY: initialize's contract excludes migration, root/cache writers
-    // and IRQ allocation. This is the actual current CPL0 processor; observe
+    // and IRQ allocation. This is the current CPL0 processor; observe
     // restores AMD's read-visibility control without changing routing.
     let before = unsafe { firmware::observe() }.map_err(unavailable)?;
     let image = Image::from_snapshot(&before).map_err(unavailable)?;
@@ -138,7 +138,7 @@ fn verify_amd_writeback(
             let address = table_offset
                 .checked_add(table)?
                 .checked_add(index as u64 * 8)?;
-            // SAFETY: initialize pins each actual root-reachable table page;
+            // SAFETY: initialize pins each root-reachable table page;
             // the index stays inside its readable 4 KiB mapping.
             Some(unsafe { (address as *const u64).read_volatile() })
         },

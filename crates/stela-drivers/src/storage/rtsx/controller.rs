@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of rtsx_pcr.c and rts5227.c, Copyright 2009-2013 Realtek.
-//! Owned PCI profile, actual HAIMR/PHY access, standard clocks and socket power.
+//! Owned PCI profile, HAIMR/PHY access, standard clocks and socket power.
 use super::*;
 
 const PCI_EXP: u8 = 0x10;
@@ -42,7 +42,7 @@ pub(super) fn admission<C: ConfigSpace>(
 }
 
 // A header inside an unknown/variable body's payload must never become L1SS
-// authority. Unknown generations/layouts are refused before ownership effects.
+// permission. Unknown generations/layouts are refused before ownership effects.
 fn extended_capabilities<C: ConfigSpace>(config: &C) -> Result<Option<u16>, BlockError> {
     super::super::pci::measured_extended(
         config,
@@ -191,7 +191,7 @@ impl Engine {
                 break;
             }
         }
-        // Source init_params observes the actual revision before PHY/extra
+        // Source init_params observes the revision before PHY/extra
         // initialization; a failed read grants no electrical profile effects.
         if engine.config.profile == ChipProfile::Rts5229 {
             engine.silicon_version = engine.read_reg(DUMMY_REG_RESET_0)? & 15;
@@ -222,7 +222,7 @@ impl Engine {
             Ok(value)
         }
     }
-    // A terminal value remains available for actual error decoding even if the
+    // A terminal value remains available for error decoding even if the
     // same completed observation was late. It never authorizes late success.
     pub(super) fn observe_reg_before(
         &mut self,

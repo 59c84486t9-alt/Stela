@@ -299,7 +299,7 @@ fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_rea
 fn native_gl9763e_fixed_180_supply_and_wide_adma_use_actual_card_and_controller_state() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the model DMA engine consumes these actual retained descriptor/payload pages.
+    // SAFETY: the model DMA engine consumes these descriptor/payload pages.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (mut owner, card, state) = owner();
     {
@@ -360,7 +360,7 @@ fn native_gl9763e_revoked_pci_or_reenabled_queue_fences_published_mmc_before_com
     for queue in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: revoked original requester retains every DMA range and stale card alias.
+        // SAFETY: revoked original requester keeps every DMA range and stale card alias.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
@@ -492,7 +492,7 @@ fn native_gl9763e_current_metadata_uses_the_actual_vcc_supply_field() {
     ] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: metadata initialization retains these original DMA ranges.
+        // SAFETY: metadata initialization keeps these original DMA ranges.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut owner, card, _) = owner();
         initialize_owner(&mut owner).unwrap();

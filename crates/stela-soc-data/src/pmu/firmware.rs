@@ -3,9 +3,9 @@ use super::Window;
 use alloc::vec::Vec;
 pub const WINDOW_BYTES: u16 = 16;
 /// Known original AP startup register routes whose device-side effects have
-/// not yet been qualified. Binding one makes accesses explicit requirements,
+/// not yet been checked. Binding one makes accesses explicit requirements,
 /// never bus NACKs or apparently healthy storage/status values. This grants no
-/// firmware execution or identity; callers qualify the actual resource family.
+/// firmware execution or identity; callers check the resource family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirmwareStartup {
     Maverick,

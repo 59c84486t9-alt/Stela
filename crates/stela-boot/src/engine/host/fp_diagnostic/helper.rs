@@ -30,7 +30,7 @@ struct Observation {
     fp_errors: u64,
 }
 
-// Own the actual native heap pins/verified WB CPU mapping through the last
+// Own the native heap pins/verified WB CPU mapping through the last
 // native/helper frame. The original guest RAM is never read or modified.
 struct GuestScope {
     _pages: PinnedPages,
@@ -65,8 +65,8 @@ impl GuestScope {
         let mapping = pages
             .cpu_mapping(CacheAttribute::WriteBack)
             .map_err(|_| "helper FP private CPU mapping unavailable")?;
-        // Four genuinely owned ARM 4KiB tables followed by one data page.
-        // Software walks read them through this same actual RAM reservation.
+        // Four owned ARM 4KiB tables followed by one data page.
+        // Software walks read them through this same RAM reservation.
         for level in 0..3 {
             let table = mapping
                 .address(level * PAGE, 8)
@@ -134,7 +134,7 @@ impl GuestScope {
 impl Drop for GuestScope {
     fn drop(&mut self) {
         // No allocation or pin release can bypass a live native/helper frame.
-        // A failure here is terminal, retaining this stack and backing.
+        // A failure here is terminal, keeping this stack and backing.
         assert!(
             !state().native && super::super::local::native_frames_idle(),
             "helper FP private RAM still has a live frame"
@@ -156,8 +156,8 @@ impl Drop for GuestScope {
 }
 
 // Copied body is position-independent: every data/label reference stays inside
-// its exact source extent. The real helper address is supplied through the
-// retained private GuestState, never identified by an application/call site.
+// its source extent. The real helper address is supplied through the
+// private GuestState, never identified by an application/call site.
 global_asm!(
     r#"
 .global stela_helper_fp_body
@@ -255,7 +255,7 @@ stela_helper_fp_return:
     mov rcx, [rax]
     mov [rbp], rcx
     mov dword ptr [rbp + {guest_reserved}], {done}
-    // Compare actual defined FP fields before returning through any Rust.
+    // Compare defined FP fields before returning through any Rust.
     mov eax, [r12 + {expected}]
     cmp eax, [r12 + {returned}]
     jne stela_helper_fp_bad
@@ -448,8 +448,8 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             }
             state().native = true;
             let entered = super::super::rdtsc();
-            // SAFETY: sealed current actual Host, private pinned ARM tables/data,
-            // caller/probe/frame/context and exact installed code remain owned
+            // SAFETY: sealed current Host, private pinned ARM tables/data,
+            // caller/probe/frame/context and installed code remain owned
             // through the true helper/return/recovery. No synthetic TLB fill.
             unsafe {
                 stela_native_fp_probe(&mut probe, code.0, &mut guest, &mut context, context_abi);
@@ -518,7 +518,7 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             }
         }
     }
-    // Retire every actual translation while its real pages/mapping stay owned.
+    // Retire every translation while its real pages/mapping stay owned.
     drop(scope);
     host.discard_code();
     Ok(())

@@ -23,7 +23,7 @@ const UNIX_THREAD_COMMAND_BYTES: usize =
     STATE_OFFSET + ARM_THREAD_STATE64_WORDS as usize * WORD_BYTES;
 
 /// Original ARM_THREAD_STATE64 descriptor, not a live execution context.
-/// PC retains its image-linked virtual address. Serialized x0, SP and CPSR do
+/// PC keeps its image-linked virtual address. Serialized x0, SP and CPSR do
 /// not establish process arguments, a physical entry address or firmware state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Arm64UnixThread {

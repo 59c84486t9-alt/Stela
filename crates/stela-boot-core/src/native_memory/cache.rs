@@ -1,4 +1,4 @@
-//! Read-only qualification of the native heap's effective WB cache policy.
+//! Read-only validation of the native heap's effective WB cache policy.
 //! This does not change PAT/MTRRs or authorize aliases with another policy.
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -13,7 +13,7 @@ const LARGE: u64 = 1 << 7;
 #[cfg(test)]
 const NX: u64 = 1 << 63;
 
-/// Prove each actual current leaf maps the expected physical pages with a WB
+/// Prove each current leaf maps the expected physical pages with a WB
 /// PAT selection. Intermediate cache bits affect table fetches, not data PAT.
 pub fn verify_mappings(
     cpu: u64,
@@ -177,7 +177,7 @@ mod tests {
             pages.insert((leaf_table, index + 1), 0x802000 | PRESENT | WRITABLE | NX);
             assert!(check(&pages, 6).is_err());
             // PAT bit 7 in a 4 KiB PTE selects entry 4; PAT0 WB alone is
-            // insufficient when the actual leaf selects an uncached entry.
+            // insufficient when the leaf selects an uncached entry.
             pages.insert(
                 (leaf_table, index),
                 0x800000 | PRESENT | WRITABLE | NX | LARGE,

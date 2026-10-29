@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native RMI F03 single-device PS/2 passthrough register protocol.
-//! Pinned source and retained copyrights are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyrights are in input/THIRD_PARTY.md.
 use super::{
     Error, Function,
     transport::{Transport, buffer},
@@ -37,7 +37,7 @@ impl ReceivedByte {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub function: Function,
-    /// Every actual output-buffer slot, including inactive and unknown status
+    /// Every output-buffer slot, including inactive and unknown status
     /// bits. Only available slots belong to the received PS/2 byte stream.
     pub slots: Vec<ReceivedByte>,
 }
@@ -95,7 +95,7 @@ impl Engine {
                 length,
             });
         }
-        // Opening the port discards actual stale announcements before enabling
+        // Opening the port discards stale announcements before enabling
         // receive attention. A drain error cannot establish an open port.
         let mut stale = buffer(length)?;
         transport.read(receive_address, &mut stale)?;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2026 Intel Corporation
-//! Actual cold MLD MAC0+inactive link0, source command order and lifetime.
+//! Cold MLD MAC0+inactive link0, source command order and lifetime.
 use super::*;
 fn image(mac_version: u8, link_version: Option<u8>) -> Vec<u8> {
     let mut bytes = firmware_bytes(0);
@@ -93,7 +93,7 @@ fn exercise(bytes: &[u8]) {
     assert!(mac.mac_id_and_color().is_none());
     assert!(mac.inactive_link_id().is_none());
     mac.replenish_completed_receive().unwrap();
-    // SAFETY: Source allocates exclusive model RAM for this same retained
+    // SAFETY: Source allocates exclusive model RAM for this same kept
     // requester/domain; Native keeps the policy owner and no real device runs.
     unsafe { mac.advance(&source) }.unwrap();
     let commands = mac.commands().to_vec();
@@ -137,7 +137,7 @@ fn exercise(bytes: &[u8]) {
         records.cpu_sync_fail = Some(records.cpu_syncs + 1);
         drop(records);
         assert!(matches!(
-            // SAFETY: this synchronous ACK retains the command/receive maps;
+            // SAFETY: this synchronous ACK keeps the command/receive maps;
             // injected CPU-sync failure cannot release or race those allocations.
             unsafe { mac.advance(&source) },
             Err(Ax200MacError::Boot(Error::CommandReclaim(_)))
@@ -155,7 +155,7 @@ fn exercise(bytes: &[u8]) {
     native.revoked.store(true, Ordering::SeqCst);
     mac.begin_remove().unwrap();
     // SAFETY: revocation starts ordered removal while the same model MAC owner
-    // retains Source and every pending mapping, without asynchronous hardware.
+    // keeps Source and every pending mapping, without asynchronous hardware.
     unsafe { mac.advance(&source) }.unwrap();
     let commands = mac.commands()[4..].to_vec();
     assert_eq!(
@@ -170,7 +170,7 @@ fn exercise(bytes: &[u8]) {
         emitted(&mac, &native, &command);
         complete_mld(&mac, &native, &command);
         // SAFETY: this removal ACK completed synchronously; its original MAC
-        // and domain retain the receive/command mappings until reclaim finishes.
+        // and domain keep the receive/command mappings until reclaim finishes.
         unsafe { mac.advance(&source) }.unwrap();
         mac.replenish_completed_receive().unwrap();
     }

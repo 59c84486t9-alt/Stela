@@ -415,7 +415,7 @@ impl TargetCpu {
 
     /// Classify the documented aligned cacheable 16-byte load guarantee from
     /// CPUID.0 vendor and CPUID.1 ECX ([`Vendor`]): it requires AVX hardware;
-    /// OS AVX state is separate. These raw values alone are not authority to
+    /// OS AVX state is separate. These raw values alone are not permission to
     /// enter native code or RAM.
     pub const fn atomic_load16_guaranteed(vendor: [u32; 3], leaf1_ecx: u32) -> bool {
         matches!(Vendor::from_cpuid(vendor), Vendor::Intel | Vendor::Amd)

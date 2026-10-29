@@ -14,7 +14,7 @@ pub enum AirMode {
     Cvsd,
     Transparent,
 }
-/// Actual host-stack SCO connection/voice observations, not guessed link state.
+/// Host-stack SCO connection/voice observations, not guessed link state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Voice {
     pub connections: u8,
@@ -156,7 +156,7 @@ impl Bindings {
             .iter()
             .any(|i| super::binding::pair(i, self.speed, 1) == Ok(pair))
     }
-    /// The caller supplies actual current voice state. Missing/malformed
+    /// The caller supplies current voice state. Missing/malformed
     /// source-selected alternates refuse, with no invented bandwidth fallback.
     pub fn sco(&self, voice: Voice) -> Result<Option<Pair>> {
         if voice.connections == 0 {

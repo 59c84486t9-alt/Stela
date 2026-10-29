@@ -31,9 +31,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         // A failed codec amplifier-off readback can still leave every DMA RUN
         // acknowledged off (stopped=true). Reset is its recovery boundary;
-        // that codec failure never licenses reuse without this actual reset.
+        // that codec failure never licenses reuse without this reset.
         // Invalidate public handles now, but keep the original reservations
-        // until actual link/ring reset and retained GPU cleanup both succeed.
+        // until link/ring reset and kept GPU cleanup both succeed.
         self.token.generation = generation;
         self.corb_wp = 0;
         self.rirb_rp = 0;
@@ -49,11 +49,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let _ = self.shutdown();
             return Err(error);
         }
-        // CRST actually disabled codec unsolicited state and the controller
+        // CRST disabled codec unsolicited state and the controller
         // gate; old tags/events cannot authorize the new reset generation.
         self.unsolicited = super::unsolicited::State::new();
-        // New command epoch is live only after actual link/ring reset. Failed
-        // HDMI teardown retains original owners and requires another reset.
+        // New command epoch is live only after link/ring reset. Failed
+        // HDMI teardown keeps original owners and requires another reset.
         self.command_poisoned = false;
         self.lifecycle_failed = false;
         self.stopped = false;
@@ -80,7 +80,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 }
 
-/// Discovery budget selected from the actual controller identity. Retry is an
+/// Discovery budget selected from the controller identity. Retry is an
 /// explicit pre-stream operation, never a hidden recovery of live DMA/routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProbePolicy {
@@ -106,7 +106,7 @@ impl ProbePolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodecFailure {
-    /// One-based attempt and the actual codec address that failed enumeration.
+    /// One-based attempt and the codec address that failed enumeration.
     pub attempt: u8,
     pub address: u8,
     pub error: Error,
@@ -133,7 +133,7 @@ pub struct DiscoveryFailure {
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Enumerate the advertised codecs before any stream has been allocated.
     /// At least one standard audio graph and a healthy command transport are
-    /// required. Codec-specific failures are retained even on partial success.
+    /// required. Codec-specific failures are held even on partial success.
     /// Each retry delays, then fully reinitializes the link and command rings;
     /// timed-out/ambiguous responses are never followed by another unsafe verb.
     /// This adapts the bounded retry in Linux intel.c::azx_probe_continue and

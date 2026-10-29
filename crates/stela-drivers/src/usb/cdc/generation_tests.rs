@@ -23,8 +23,8 @@ pub(crate) fn queue(peer: &mut UsbNet) {
 }
 
 pub(crate) fn refuse(peer: &mut UsbNet, target: &Shared) {
-    // Production retains its original Shared. Substituting another genuinely
-    // addressed controller here tests that the separately retained identity,
+    // Production keeps its original Shared. Substituting another
+    // addressed controller here tests that the separately identity,
     // rather than a matching slot number or descriptor, is the credential.
     peer.controller = target.clone();
     let before_id = peer.id;

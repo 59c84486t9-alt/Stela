@@ -1,7 +1,7 @@
 //! Immutable checked GPR blocks with a private native mapping per worker.
 //!
 //! This is a bounded execution boundary, not a native machine SMP
-//! scheduler. Every memory access uses the retained shared memory service;
+//! scheduler. Every memory access uses the shared memory service;
 //! direct-RAM blocks and caller-supplied native artifacts are excluded.
 
 use super::{context::ContextLoan, floating_environment::HostFloatingEnvironment, platform};
@@ -91,7 +91,7 @@ impl core::error::Error for FinalizationFailure {}
 
 impl CheckedMemoryBlock {
     /// Compile one complete source block. Trailing unconsumed bytes are refused
-    /// so the retained identity always describes exactly what may execute.
+    /// so the identity always describes exactly what may execute.
     pub fn compile(
         address_space: u64,
         entry: GuestAddress,
@@ -135,9 +135,9 @@ impl CheckedMemoryBlock {
             plan.source_bytes() == source.len(),
             "source contains unconsumed trailing bytes"
         );
-        // The fixed memory authority establishes LSE2/EL0 memory controls, not
+        // The fixed memory permission establishes LSE2/EL0 memory controls, not
         // arbitrary guest instruction extensions. The typed structure-memory
-        // adapter requires the separate low128 FP entry authority at execution;
+        // adapter requires the separate low128 FP entry permission at execution;
         // compiling it does not authorize the ordinary GPR entry.
         for (index, bytes) in source.as_chunks::<4>().0.iter().enumerate() {
             let word = u32::from_le_bytes(*bytes);
@@ -198,21 +198,21 @@ impl CheckedMemoryBlock {
         &self.identity
     }
 
-    /// Enter with the existing typed CPU authority. Its controls, PE event
+    /// Enter with the existing typed CPU permission. Its controls, PE event
     /// attachment, domain and effective policy remain borrowed until the memory
     /// service finalizes. Distinct workers may hold execution loans together;
     /// mapping/protection publication still requires an exclusive service loan.
     ///
     /// # Safety
-    /// The outer execution owner must qualify instruction fetch of this exact
+    /// The outer execution owner must check instruction fetch of this exact
     /// immutable source at its original PC, the guest's baseline instruction
     /// availability and source attributes, and debug/step/interrupt admission.
     /// Its CPU state and memory controls must describe this same PE and machine.
-    /// All guest storage and writers must obey the retained domain's binding
+    /// All guest storage and writers must obey the domain's binding
     /// contract, with no external/direct-RAM writers or concurrent host rights
     /// changes. Source, state, native code, host stacks and runtime metadata
     /// must be disjoint from writable guest RAM. This method supplies checked
-    /// memory invocation and PC settlement, not full PE execution authority.
+    /// memory invocation and PC settlement, not full PE execution permission.
     pub unsafe fn run(
         &self,
         controls: &FixedProcessMemoryControls,
@@ -220,7 +220,7 @@ impl CheckedMemoryBlock {
         thread: PeThread<'_>,
         state: &mut ThreadState,
     ) -> Result<Observation> {
-        // SAFETY: forwards the unchanged caller contract with no FP authority.
+        // SAFETY: forwards the unchanged caller contract with no FP permission.
         unsafe {
             self.run_registers(
                 controls,
@@ -235,14 +235,14 @@ impl CheckedMemoryBlock {
 
     /// Enter the exact checked block with the same live low128 FP bank and
     /// controls held by `access`. The ordinary entry keeps refusing ASIMD.
-    /// `pc` is settled only after the retained memory service finalizes.
+    /// `pc` is settled only after the memory service finalizes.
     ///
     /// # Safety
     /// The source, debug/interrupt, memory-domain and all-writer contracts of
     /// `run` apply. `debug` describes this PE's current effective debug state;
     /// it must remain unchanged throughout this synchronous invocation. The
-    /// caller obtains `access` through `with_nonstreaming_low128`, retaining
-    /// that authority and the original register bank through PC settlement.
+    /// caller obtains `access` through `with_nonstreaming_low128`, keeping
+    /// that permission and the original register bank through PC settlement.
     pub unsafe fn run_with_low128(
         &self,
         controls: &FixedProcessMemoryControls,
@@ -253,7 +253,7 @@ impl CheckedMemoryBlock {
         access: &mut Low128FpAccess<'_, '_>,
     ) -> Result<Observation> {
         access.with_guest(|context, registers| {
-            // SAFETY: the context and mutable bank are split by their actual
+            // SAFETY: the context and mutable bank are split by their
             // owner. The same source/domain contracts apply to both entries.
             unsafe {
                 self.run_registers(
@@ -281,7 +281,7 @@ impl CheckedMemoryBlock {
             *pc == self.identity.entry,
             "thread PC differs from checked source entry"
         );
-        // Retain this outer loan through exact architectural PC settlement.
+        // Keep this outer loan through exact architectural PC settlement.
         let _publication = thread
             .memory
             .execution_loan()
@@ -317,7 +317,7 @@ impl CheckedMemoryBlock {
                 "checked body/authority mismatch"
             );
             let _floating = HostFloatingEnvironment::capture();
-            // SAFETY: the actual context stays borrowed through the checked
+            // SAFETY: the context stays borrowed through the checked
             // callback; only the same split register bank enters native code.
             let result = unsafe {
                 entry.with_view(registers, |_, registers, view| {
@@ -388,8 +388,8 @@ impl CheckedMemoryBlock {
     ) -> Result<()> {
         let mut context = ExecutionContext::default();
         let mut loan = ContextLoan::memory(&mut context, view);
-        // SAFETY: the invoking entry retains exact source, CPU/context and
-        // all-writer memory authority through this synchronous call.
+        // SAFETY: the invoking entry keeps source, CPU/context and
+        // all-writer memory permission through this synchronous call.
         let exit = unsafe { self.mapping.call_context_block(registers, loan.context()) }?;
         *raw_memory = Some(RawMemoryObservation {
             version: view.version,
@@ -437,7 +437,7 @@ impl CheckedMemoryBlock {
     any(target_os = "macos", target_os = "linux")
 ))]
 mod tests {
-    //! Native two-worker qualification of the existing typed process authority.
+    //! Native two-worker validation of the existing typed process permission.
     use super::*;
     use crate::{
         memory::{
@@ -505,7 +505,7 @@ mod tests {
         // SAFETY: `layout` has a nonzero size.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let storage = Arc::new(Storage { pointer, layout });
-        // SAFETY: the retained owner pins coherent raw RAM and rights. One backing
+        // SAFETY: the owner pins coherent raw RAM and rights. One backing
         // identity covers both guest aliases and no external writer exists.
         let backing = unsafe { MemoryBacking::new(pointer, 128, RIGHTS, storage) }.unwrap();
         let view = MemoryView::new(Arc::clone(&backing), DATA, 0, 128, RIGHTS).unwrap();
@@ -642,7 +642,7 @@ mod tests {
                 pc: block.identity.entry,
             };
             // SAFETY: closed immutable baseline EL0 fixture, no debug/IRQ state or
-            // external writers; every byte access uses the retained shared domain.
+            // external writers; every byte access uses the shared domain.
             let observed = unsafe {
                 block.run(
                     &self.controls,
@@ -780,7 +780,7 @@ mod tests {
                     &mut registers,
                     pc,
                     |mut access| {
-                        // SAFETY: immutable authored source, actual same FP bank and
+                        // SAFETY: immutable authored source, same FP bank and
                         // SystemState, disabled debug/IRQ and one all-writer domain.
                         unsafe {
                             body.run_with_low128(
@@ -881,7 +881,7 @@ mod tests {
                         &mut registers,
                         pc,
                         |mut access| {
-                            // SAFETY: immutable authored literal source, exact same FP bank,
+                            // SAFETY: immutable authored literal source, same FP bank,
                             // disabled debug/IRQ state and one checked all-writer domain.
                             unsafe {
                                 body.run_with_low128(
@@ -937,8 +937,8 @@ mod tests {
             &mut registers,
             pc,
             |mut access| {
-                // SAFETY: negative test retains the exact bank and domain;
-                // different actual SystemState objects must be refused before native entry.
+                // SAFETY: negative test keeps the exact bank and domain;
+                // different SystemState objects must be refused before native entry.
                 unsafe {
                     body.run_with_low128(
                         &worker.controls,
@@ -1250,7 +1250,7 @@ mod tests {
         assert_eq!(registers, before);
         assert_eq!(worker.read(), 9);
 
-        // A genuine architectural fault settles the local reservation before a
+        // An architectural fault settles the local reservation before a
         // later native call; returning a fault observation must not skip cleanup.
         registers.x[0] = DATA;
         worker.run(&block(&[LDXR, RET]), &mut registers).unwrap();
@@ -1759,7 +1759,7 @@ mod tests {
                 for index in 0..ITERATIONS {
                     let bytes = if index % 2 == 0 { u64::MAX } else { 0 }.to_le_bytes();
                     // SAFETY: private bytes and pinned raw RAM; publication uses the
-                    // exact same physical system/backing as both guest aliases.
+                    // same physical system/backing as both guest aliases.
                     unsafe { system.publish(&backing, 0, &bytes) }.unwrap();
                 }
             }
@@ -1967,7 +1967,7 @@ mod tests {
         producer.join().unwrap();
     }
 
-    /// Opt-in actual native execution benchmark, never an acceptance throughput
+    /// Opt-in native execution benchmark, never an acceptance throughput
     /// claim. Run with --release --ignored --nocapture and record host/load/source.
     #[test]
     #[ignore = "manual: opt-in"]

@@ -77,7 +77,7 @@ fn compatible_admission_checks_the_full_list() {
         ATC_PHY,
         Some(b"atc-phy,t8112\0atc-phy,t6020\0")
     ));
-    // A supplied property must actually contain the requested model name.
+    // A supplied property must contain the requested model name.
     assert!(!i2c_compatible("i2c,t6000", Some(b"i2c,t8101\0")));
     assert!(!usb_controller_compatible(
         "usb-drd,t6020",
@@ -351,7 +351,7 @@ fn typec_placement_distinguishes_i2c_addresses_from_mmio_and_preserves_phy_alias
     assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
     // The retimer's register protocol is undetermined: hidden, not refused.
     assert!(!models(RETIMER, |_| None));
-    // Hidden PHYs are not parsed or mapped merely because reg survives.
+    // Hidden PHYs are not parsed or mapped because reg survives.
     let io = encode(&[("name", b"arm-io\0")], &[i2c, phy(b"hidden\0"), usb]);
     assert!(place(&io, 0x63, Some(&gpio)).unwrap().1.is_empty());
 }

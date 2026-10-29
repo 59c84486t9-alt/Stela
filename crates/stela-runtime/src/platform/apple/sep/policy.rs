@@ -25,7 +25,7 @@
 //! nonce lifecycle used by the native trust policy. The recovered empty-body
 //! recoveryOS commands bind it through `boot_policy::nonces`; authenticated
 //! owner-bearing bodies and macOS policy signing remain unbound to the wire.
-//! `--sep-observe` can retain their requests without inventing authorization.
+//! `--sep-observe` can keep their requests without inventing authorization.
 use super::{
     Entropy,
     store::{Backend, Nonces, POLICY_NONCE_BYTES, PolicyNonce},

@@ -1,4 +1,4 @@
-//! Seeded CSPRNG state retained by a Linux execution owner.
+//! Seeded CSPRNG state kept by a Linux execution owner.
 //! This supplies random bytes, not CPU, IRQ, task or Linux CRNG readiness.
 use crate::entropy::{Entropy, EntropyError};
 use stela_crypto::random::Generator;
@@ -6,9 +6,9 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An owned stream created only after the platform supplied its secure seed.
 /// Construction belongs before kernel registration. The eventual owner keeps
-/// this value private and supplies actual IRQ-safe, non-migrating serialization
+/// this value private and supplies IRQ-safe, non-migrating serialization
 /// before calling it through the common C random callback. This type alone
-/// grants no native execution authority.
+/// grants no native execution permission.
 pub struct Seeded {
     generator: Generator,
 }

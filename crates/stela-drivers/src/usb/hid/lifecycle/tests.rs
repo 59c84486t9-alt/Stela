@@ -110,7 +110,7 @@ fn stale_hid_stop_and_cached_stopped_success_preserve_state_before_mmio() {
     for stopped in [false, true] {
         let mut ram = vec![0u64; 512 * 1024];
         let start = ram.as_mut_ptr() as u64;
-        // SAFETY: both original addressed controllers retain exclusive live RAM.
+        // SAFETY: both original addressed controllers keep exclusive live RAM.
         let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
         let (mut previous, old_peer, _) = fixture(&mut dma);
         let (mut current, peer, trap) = fixture(&mut dma);
@@ -182,7 +182,7 @@ fn stale_hid_stop_and_cached_stopped_success_preserve_state_before_mmio() {
                 pressed: true
             }]
         );
-        // Restoring the original controller lets its genuine owner complete
+        // Restoring the original controller lets its owner complete
         // lifecycle work. The rejected alias changed neither held keys nor
         // decoder state, so a running owner still emits its real release.
         previous.controller = original;
@@ -248,7 +248,7 @@ fn actual_same_controller_root_reuse_refuses_retained_hid_stop_without_touching_
                     assert_eq!(previous.state(), State::Stopped);
                 }
                 // SAFETY: the fixture exclusively owns the original complete
-                // leaf inventory; retained old consumers are exercised only
+                // leaf inventory; old consumers are exercised only
                 // for pure rejection after this acknowledged retirement.
                 let mut fresh = unsafe {
                     shared.borrow_mut().reset_and_reuse_root(

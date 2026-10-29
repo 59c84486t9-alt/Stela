@@ -26,7 +26,7 @@ where
 {
     let mut loses_info = false;
     let mut result: StatusAnd<F> = value.convert_r(round, &mut loses_info);
-    // Arm rounds toward zero, then jams the retained significand's low bit.
+    // Arm rounds toward zero, then jams the significand's low bit.
     // This includes zero/subnormal results; toward-zero overflow is finite.
     if odd && result.status.contains(Status::INEXACT) {
         result.value = F::from_bits(result.value.to_bits() | 1);
@@ -51,7 +51,7 @@ where
     } else if result.value.abs() < minimum {
         !value.is_zero()
     } else if result.value.abs() == minimum && result.status.contains(Status::INEXACT) {
-        // Scaling an exact source by two avoids constrained subnormal rounding
+        // Scaling a source by two avoids constrained subnormal rounding
         // when testing Arm's unconstrained, precision-only rounded tininess.
         convert::<F>(value.scalbn(1), round, odd).value.abs() < minimum.scalbn(1)
     } else {
@@ -66,7 +66,7 @@ where
 }
 
 /// Round an exact finite Quad value to IEEE H/S/D. Integer conversions share
-/// this primitive but retain their own unpacking, scaling and AHP policy.
+/// this primitive but keep their own unpacking, scaling and AHP policy.
 pub(super) fn round_ieee(
     value: Quad,
     destination: Format,

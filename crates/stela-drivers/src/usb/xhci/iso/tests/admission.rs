@@ -7,7 +7,7 @@ fn descriptor_route_and_submission_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma =
-    // SAFETY: This admission fixture retains the exact unresized vector for all
+    // SAFETY: This admission fixture keeps the exact unresized vector for all
     // command, endpoint and payload allocations. Rejected descriptors and routes
     // cannot start physical DMA or background work.
     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };

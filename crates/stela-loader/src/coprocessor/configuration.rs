@@ -1,7 +1,7 @@
 //! Complete bounded patchbay updates supplied by a selected boot-policy owner.
 //!
-//! A provenance claim is retained, not automatically certified. This byte-level
-//! operation does not qualify policy values, entropy, vendor trust or RUN.
+//! A provenance claim is held, not automatically certified. This byte-level
+//! operation does not check policy values, entropy, vendor trust or RUN.
 use super::{Plan, Staged, digest, label, macho::file_bytes};
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};

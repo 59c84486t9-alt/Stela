@@ -230,7 +230,7 @@ pub(super) type DiagnosticScript = VecDeque<(Vec<u8>, Vec<(Pipe, Vec<u8>)>)>;
 pub(super) fn diagnostic_fixture(sub: u16) -> (Device, Catalog, DiagnosticScript) {
     let (hci, _) = model(sub);
     // Future completions must remain in the peripheral until their exact
-    // command is delivered. Reset/minidriver settling genuinely polls HCI.
+    // command is delivered. Reset/minidriver settling polls HCI.
     let replies = hci
         .io
         .steps
@@ -568,7 +568,7 @@ fn short_identity_and_finalize_responses_fail_with_partial_observations() {
         }
     }
     let (mut hci, trace) = model(0x220e);
-    hci.io.steps[1].responses[0].0[10] = 0xff; // Actual manufacturer low byte.
+    hci.io.steps[1].responses[0].0[10] = 0xff; // Manufacturer low byte.
     let error = initialize(&mut hci, &catalog(0x220e, false, image_bytes())).unwrap_err();
     assert!(matches!(attempt(&error).0, Error::Protocol { .. }));
     assert_eq!(trace.borrow().commands.len(), 2);

@@ -27,7 +27,7 @@ pub(super) struct Backing {
 unsafe impl Send for Backing {}
 // SAFETY: no safe references into device-mutated RAM escape.
 unsafe impl Sync for Backing {}
-// SAFETY: actual retained aligned CPU allocation, scattered symbolic physical
+// SAFETY: aligned CPU allocation, scattered symbolic physical
 // pages used solely by the independent domain, never as CPU pointers.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
@@ -87,7 +87,7 @@ pub(super) struct Translation {
     pub(super) direction: DmaDirection,
     pub(super) device: bool,
 }
-// Deliberately independent literals: PS/Renoir offsets cannot be selected by
+// Independent literals: PS/Renoir offsets cannot be selected by
 // the implementation and accidentally accepted by a shared profile model.
 pub(super) fn layout(revision: u8, slot: usize) -> (usize, usize, usize, u32) {
     match (revision, slot) {
@@ -300,14 +300,14 @@ impl Device {
                     let pointer = translation.cpu.address(offset, 1).unwrap();
                     if slot.is_multiple_of(2) {
                         assert_eq!(translation.direction, DmaDirection::ToDevice);
-                        // SAFETY: device only reads retained model RAM through actual programmed PTE/domain.
+                        // SAFETY: device only reads kept model RAM through programmed PTE/domain.
                         self.output[slot].push(unsafe { pointer.as_ptr().read_volatile() });
                     } else {
                         assert_eq!(translation.direction, DmaDirection::FromDevice);
                         if self.defer_payload {
                             self.posted.push((translation.token.id, offset, *byte));
                         } else {
-                            // SAFETY: serialized independent device producer, retained actual CPU allocation.
+                            // SAFETY: serialized independent device producer, kept CPU allocation.
                             unsafe { pointer.as_ptr().write_volatile(*byte) };
                         }
                     }
@@ -467,7 +467,7 @@ unsafe impl DmaDomain for Domain {
         assert!(offset.is_multiple_of(4));
         assert!(offset + 4 <= token.bytes);
         let pointer = mapping.cpu.address(offset, 4).unwrap();
-        // SAFETY: actual retained coherent RAM; one serialized model word read.
+        // SAFETY: coherent RAM; one serialized model word read.
         let value = unsafe { pointer.as_ptr().cast::<u32>().read_volatile() };
         device.coherent += 1;
         if let Some((at, slot, frames)) = device.race_copy
@@ -492,7 +492,7 @@ unsafe impl DmaDomain for Domain {
                 .find(|mapping| mapping.token.id == id)
                 .unwrap();
             let pointer = mapping.cpu.address(offset, 1).unwrap();
-            // SAFETY: actual independent fabric completes queued bytes into retained RAM.
+            // SAFETY: independent fabric completes queued bytes into kept RAM.
             unsafe { pointer.as_ptr().write_volatile(byte) };
         }
         device.drains += 1;
@@ -511,8 +511,8 @@ impl Timer for Time {
 pub(super) fn fixture(revision: u8) -> (Controller<Model, Time>, Arc<Mutex<Device>>, Source) {
     let device = Arc::new(Mutex::new(Device::new(revision)));
     let clock = device.lock().unwrap().clock.clone();
-    // SAFETY: independent fixture's exact requester/domain, clock/board
-    // model and controller are isolated and exclusively retained.
+    // SAFETY: independent fixture's requester/domain, clock/board
+    // model and controller are isolated and exclusively kept.
     let controller = unsafe {
         Controller::claim(
             Model(device.clone()),

@@ -1,10 +1,10 @@
-//! Source-native auxiliary control tail and its retained state transitions.
+//! Source-native auxiliary control tail and its state transitions.
 //!
 //! Original26A434 T8112 PMP SHA256
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //!101b464..101b8fc,101bb08..101c05c. This module does not execute firmware.
-//! Local reads use actual retained Frames. Shared bank2 reads and concrete
-//! controller/control-loop calls require their actual owners, never defaults.
+//! Local reads use kept Frames. Shared bank2 reads and concrete
+//! controller/control-loop calls require their owners, never defaults.
 //! Evidence: .stela/goal-20261023/memory/control-tail-r1.
 pub mod controller;
 mod model;
@@ -19,7 +19,7 @@ pub use model::{Configuration, SlotImage, SoftwareImage};
 pub use owner::{AuxiliaryBinding, Owner};
 use stela_contracts::bus::Access;
 
-/// Identity of the actual retained resource composition; no completion rights.
+/// Identity of the resource composition; no completion rights.
 #[derive(Clone)]
 pub struct Identity(Rc<()>);
 impl Default for Identity {
@@ -46,7 +46,7 @@ pub enum FlagsMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
     /// Actual101cff0 callback/context registration. Backend binds the same
-    /// Owner's AuxiliaryBinding; retirement means actual registry storage.
+    /// Owner's AuxiliaryBinding; retirement means registry storage.
     RegisterAuxiliary {
         slot: usize,
         source: u32,
@@ -90,7 +90,7 @@ pub enum ResourceValue {
 }
 
 /// Inner operation identity. Repeated calls after Busy refer to this same
-/// operation and preserve the actual provider's consuming/write prefix.
+/// operation and preserve the provider's consuming/write prefix.
 #[derive(Clone)]
 pub struct ResourceRequest {
     identity: Identity,
@@ -107,8 +107,8 @@ impl ResourceRequest {
 /// Required real owners. Refused means no retirement; Retired-with-refusal
 /// supplies the real result and keeps the completed prefix. No absent resource
 /// has a successful implementation. Controller slots cannot use a copied word
-/// image instead of the actual mapped source provider. Shared ExtendedFrame
-/// must retain its existing consuming-read cache and manager-cycle binding.
+/// image instead of the mapped source provider. Shared ExtendedFrame
+/// must keep its existing consuming-read cache and manager-cycle binding.
 pub trait Resources {
     fn identity(&self) -> &Identity;
     fn notifications(&self) -> &LocalNotifications;
@@ -120,7 +120,7 @@ pub trait Resources {
     ) -> Completion<ResourceValue>;
 }
 
-/// Identity of one source caller, not a fabricated lifecycle/ACK receipt.
+/// Identity of one source caller, not an invented lifecycle/ACK receipt.
 #[derive(Clone)]
 pub(super) enum Caller {
     Tail(Request),

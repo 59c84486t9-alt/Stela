@@ -5,7 +5,7 @@ pub(crate) use stela_boot_core::assigned_topology::*;
 use stela_boot_core::{record::Capture, topology as native};
 use stela_soc_data::board::assigned::{AssignedCore, RetainedRoster};
 
-/// A retained roster of actual started executors. Captured AP inventory alone
+/// A kept roster of started executors. Captured AP inventory alone
 /// cannot construct this view: each selected AP must have acknowledged its
 /// private installed Host and CPUID identity through Executors::start.
 pub(crate) struct AssignedRoster<'a> {
@@ -60,8 +60,8 @@ impl<'a> AssignedRoster<'a> {
             cores,
         })
     }
-    /// Select actual started workers before any Plan borrows this roster.
-    /// Physical IDs stay unchanged; omitted executors remain retained/parked.
+    /// Select started workers before any Plan borrows this roster.
+    /// Physical IDs stay unchanged; omitted executors remain held/parked.
     pub(crate) fn select(&mut self, workers: &[usize]) -> Result<(), String> {
         if workers.is_empty()
             || !workers.contains(&0)

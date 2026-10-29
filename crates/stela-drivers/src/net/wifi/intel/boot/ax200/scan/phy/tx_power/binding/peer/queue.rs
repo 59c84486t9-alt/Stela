@@ -2,7 +2,7 @@
 // Copyright (C) 2003-2015, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Actual MLD station0 non-QoS queue allocation and empty queue lifetime.
+//! MLD station0 non-QoS queue allocation and empty queue lifetime.
 //! No frame or descriptor is published by this owner yet.
 use super::*;
 mod coexistence;
@@ -61,9 +61,9 @@ pub struct Ax200ManagementQueue<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolic
     first_error: Option<Ax200ManagementQueueError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B, O> {
-    /// Allocate the original non-QoS/management queue for this actual MLD peer.
+    /// Allocate the original non-QoS/management queue for this MLD peer.
     /// # Safety
-    /// The genuine provider, restrictive revocation and unique requester/domain
+    /// The provider, restrictive revocation and unique requester/domain
     /// contracts of begin_mld_peer persist. No competing queue/station worker,
     /// descriptor, frame or interrupt submission may race this polling owner.
     pub unsafe fn begin_mld_management_queue(
@@ -94,7 +94,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Drop for Ax200ManagementQueu
     fn drop(&mut self) {
         if self.memory.as_ref().is_some_and(NativeMemory::uncertain) {
             // Extra queue maps can remain uncertain even after RomBoot stopped
-            // (for example an invalidation failure). Retain its original OS,
+            // (for example an invalidation failure). Keep its original OS,
             // board, requester/domain and native owner with those mappings.
             if let Some(peer) = self.peer.take() {
                 core::mem::forget(peer);
@@ -115,7 +115,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     pub fn responses(&self) -> &[CommandResponse] {
         &self.responses
     }
-    /// Actual full nine-bit queue identity, never the five-bit echo sequence.
+    /// Full nine-bit queue identity, never the five-bit echo sequence.
     pub fn queue_id(&self) -> Option<u16> {
         (self.phase == Ax200ManagementQueuePhase::ManagementFramesRequired)
             .then(|| self.reply.unwrap().queue)
@@ -183,7 +183,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         self.phase = Ax200ManagementQueuePhase::WaitingFlush;
         Ok(())
     }
-    /// Return the original active link only after actual station removal,
+    /// Return the original active link only after station removal,
     /// scheduler removal and every extra DMA invalidation have completed.
     pub fn into_binding(mut self) -> Result<Ax200Binding<'a, Q, B, O>, Box<Self>> {
         if self.phase != Ax200ManagementQueuePhase::Removed
@@ -393,7 +393,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
             let memory = &mut self.memory;
             let configuration = &mut self.configuration;
             // SAFETY: every enabled rate/ceiling and both real leases remain
-            // held through fresh queue DMA initialization and actual HCMD.
+            // held through fresh queue DMA initialization and HCMD.
             unsafe {
                 admission::with_legacy_policy(&mut peer.binding.power, peer.peer.rates, |boot| {
                     *memory = Some(
@@ -410,7 +410,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                         .unwrap()
                         .configuration(1, 15)
                         .map_err(Ax200ManagementQueueError::Queue)?;
-                    // SAFETY: exclusive fresh actual queue mappings, before any
+                    // SAFETY: exclusive fresh queue mappings, before any
                     // address is submitted, under both same-device policy leases.
                     memory
                         .as_mut()
@@ -483,8 +483,8 @@ fn flush_empty(raw: &[u8], queue: Reply) -> Result<(), Ax200ManagementQueueError
             // Original pcie_reclaim exits before using read_after when
             // is_flush and host read_ptr == write_ptr. This unique owner has
             // never submitted a frame, so those host pointers remain equal.
-            // Raw pointer metadata stays in the retained response; it grants
-            // no descriptor completion. Actual SCD_REMOVE still gates release.
+            // Raw pointer metadata stays in the response; it grants
+            // no descriptor completion. SCD_REMOVE still gates release.
             Ok(())
         }
         count => Err(Ax200ManagementQueueError::FlushQueues(count)),

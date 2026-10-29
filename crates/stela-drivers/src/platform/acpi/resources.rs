@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-//! Firmware resource decoding and reservations backed by actual native owners.
+//! Firmware resource decoding and reservations backed by native owners.
 //!
 //! A `_CRS` address is descriptive, not ownership. `MemoryBroker` subdivides
 //! already reserved native resources; it never turns an AML integer into MMIO
-//! authority. Namespace handles remain CPU-affine in `DeviceResources` while
-//! mapping pins retain the underlying native reservation independently.
+//! permission. Namespace handles remain CPU-affine in `DeviceResources` while
+//! mapping pins keep the underlying native reservation independently.
 
 mod decode;
 pub mod gpio;
@@ -54,7 +54,7 @@ pub struct Source {
     pub path: String,
 }
 impl Source {
-    /// Resolve relative to the resource's actual namespace device, preserving
+    /// Resolve relative to the resource's namespace device, preserving
     /// ACPI parent-prefix and absolute-path semantics through ACPICA itself.
     pub fn resolve<'a>(&self, device: Handle<'a>) -> Result<Handle<'a>, Error> {
         Ok(device.child(&self.path)?)
@@ -170,7 +170,7 @@ pub enum Resource {
     Interrupt(Interrupt),
     Gpio(Gpio),
     Serial(Serial),
-    /// Retained verbatim for reporting; never silently treated as implemented.
+    /// Verbatim for reporting; never silently treated as implemented.
     Unsupported {
         tag: u8,
         bytes: Vec<u8>,
@@ -182,7 +182,7 @@ pub struct Descriptor {
     /// Resource-template ordinal, including unsupported descriptors.
     pub ordinal: usize,
     pub offset: usize,
-    /// Exact original descriptor, including reserved/padding/vendor bytes.
+    /// Original descriptor, including reserved/padding/vendor bytes.
     pub bytes: Vec<u8>,
     pub resource: Resource,
 }

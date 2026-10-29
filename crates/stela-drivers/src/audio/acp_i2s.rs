@@ -4,9 +4,9 @@
 //! at a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //! Copyright (C) 2016, 2021, 2023 Advanced Micro Devices, Inc.
 //!
-//! One retained whole-function controller, four native stream slots. Firmware,
-//! board/codec routing and serial clocks are actual platform prerequisites;
-//! this module never fabricates those grants from an ID or pin configuration.
+//! One kept whole-function controller, four native stream slots. Firmware,
+//! board/codec routing and serial clocks are platform prerequisites;
+//! this module never invents those grants from an ID or pin configuration.
 //! This controller candidate does not establish an attached codec/frontend.
 pub use super::acp_pdm::{Error, Identity, Phase, Registers, State};
 use super::{
@@ -54,7 +54,7 @@ impl Generation {
 pub enum Port {
     SpeakerPlayback = 0,
     SpeakerCapture = 1,
-    /// Raven BT interface; Vangogh HS interface. Actual board wiring selects it.
+    /// Raven BT interface; Vangogh HS interface. Board wiring selects it.
     AuxiliaryPlayback = 2,
     AuxiliaryCapture = 3,
 }
@@ -152,9 +152,9 @@ impl Format {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Clock {
-    /// The actual codec/board owner supplies correctly qualified BCLK/LRCLK.
+    /// The codec/board owner supplies correctly checked BCLK/LRCLK.
     External,
-    /// Actual Vangogh serial generator reference in this retained board epoch.
+    /// Vangogh serial generator reference in this board epoch.
     /// It must equal rate * source BCLK divider * source LRCLK divider.
     Master { reference_hz: u32 },
 }
@@ -164,7 +164,7 @@ pub struct Config {
     pub dma_address_bits: u8,
     pub clock: Clock,
 }
-/// Actual cyclic ring geometry within the source's 2..8 / 1..8-KiB limits.
+/// Cyclic ring geometry within the source's 2..8 / 1..8-KiB limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ring {
     pub period_bytes: usize,
@@ -223,12 +223,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// # Safety
     /// The exact function's PCI D0, board rails, clocks, codec routing and
     /// firmware/SOF/AML/SMM/CPU exclusion remain owned for this entire epoch.
-    /// Registers retain canonical PCI/UC owners; domain is the actually attached
-    /// requester/root path and source allocates qualified coherent WB RAM.
-    /// External or master serial-clock evidence must be actual board/codec
+    /// Registers keep canonical PCI/UC owners; domain is the attached
+    /// requester/root path and source allocates checked coherent WB RAM.
+    /// External or master serial-clock evidence must be board/codec
     /// observations, with routing/clock ownership held through errors or drop.
     /// No parallel PDM/SDW/firmware engines may submit DMA. Native interrupts
-    /// remain contained. Retain every root, pin and board grant until this
+    /// remain contained. Keep every root, pin and board grant until this
     /// controller acknowledges complete stop/reset/drain and retirement.
     pub unsafe fn claim(
         mut registers: R,
@@ -363,7 +363,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.quiet_engines()
     }
     fn drain(&self) -> Result<(), Error> {
-        // SAFETY: each caller first read actual stopped engines or acknowledged
+        // SAFETY: each caller first read stopped engines or acknowledged
         // a whole-function reset. The attached domain/root and all pins remain.
         unsafe { self.domain.drain_posted_writes() }.map_err(Error::Dma)
     }
@@ -371,7 +371,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.drain()?;
         for stream in &mut self.streams {
             if let Some(owned) = stream {
-                // SAFETY: whole reset, disabled group1/BME and actual requester
+                // SAFETY: whole reset, disabled group1/BME and requester
                 // payload drain were established before releasing any lease.
                 unsafe { owned.dma.unmap() }.map_err(Error::Dma)?;
             }
@@ -421,7 +421,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Actual whole-function reset recovery. Old mappings are released only
+    /// Whole-function reset recovery. Old mappings are released only
     /// after complete acknowledged reset, group1/BME containment and domain drain.
     pub fn initialize(&mut self) -> Result<(), Error> {
         if self.state == State::Shutdown {
@@ -454,8 +454,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Controller-level PM with the actual original PCI D0/board epoch held.
-    /// Platform D3/S3/S0ix/wake transitions require the actual platform owner.
+    /// Controller-level PM with the original PCI D0/board epoch held.
+    /// Platform D3/S3/S0ix/wake transitions require the platform owner.
     pub fn suspend_held_d0(&mut self) -> Result<(), Error> {
         self.usable()?;
         let result = self.quiet_controller();
@@ -464,7 +464,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         self.finish(result)
     }
-    /// Recreate every retained stream's PTE/ring/format. Explicit start is
+    /// Recreate every stream's PTE/ring/format. Explicit start is
     /// required; old PCM/counter progress never appears as resumed capture.
     pub fn resume_held_d0(&mut self) -> Result<(), Error> {
         match self.state {
@@ -515,7 +515,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         self.finish(result)
     }
-    /// Retain a nonretired controller intact; failed ownership return allocates
+    /// Keep a nonretired controller intact; failed ownership return allocates
     /// nothing and cannot drop an active native/DMA owner.
     #[allow(
         clippy::result_large_err,

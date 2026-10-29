@@ -112,9 +112,9 @@ struct Packet<C> {
     free: Option<FreeEvidence>,
 }
 
-/// One actual data queue and the requester's sole ordinary 8192-token table.
-/// `C` retains the caller's real association/key-generation context. Completion
-/// returns it only after DMA removal; uncertain Drop retains it with the claim.
+/// One data queue and the requester's sole ordinary 8192-token table.
+/// `C` keeps the caller's real association/key-generation context. Completion
+/// returns it only after DMA removal; uncertain Drop keeps it with the claim.
 pub struct DataRing<Q: QueueIo, C: 'static> {
     io: Option<Q>,
     descriptors: Allocation,
@@ -136,11 +136,11 @@ pub struct DataRing<Q: QueueIo, C: 'static> {
 impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
     /// # Safety
     /// All `super::TxRing::install` requester/coherent-WB/NoSnoop/ATS/idle
-    /// qualifications apply. This owns the actual data queue and the complete
+    /// validations apply. This owns the data queue and the complete
     /// token namespace; no other data submit/free/reset owner may exist. It is
     /// a fresh firmware/token epoch: prior TX, RX, IRQ/deferred work and late
-    /// firmware completions are actually drained/reset, not merely forgotten.
-    /// The caller serializes station/key retirement with submission and retains
+    /// firmware completions are drained/reset, not forgotten.
+    /// The caller serializes station/key retirement with submission and keeps
     /// any other users (including TXS) independently. Process/deferred context
     /// is required for canonical allocation, sync, unmap and final Drop.
     pub unsafe fn install(
@@ -207,7 +207,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
     pub fn outstanding_tokens(&self) -> usize {
         self.outstanding
     }
-    /// Serialized native lifecycle view of actual retained packet contexts.
+    /// Serialized native lifecycle view of kept packet contexts.
     /// False does not establish requester-wide or unrelated deferred quiescence.
     pub(in crate::net::wifi::mediatek) fn has_pending_context(
         &self,
@@ -226,11 +226,11 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         }
     }
     /// Copies an already validated ordinary MPDU into owned canonical mappings.
-    /// Config must describe those bytes and the actual acknowledged firmware
+    /// Config must describe those bytes and the acknowledged firmware
     /// station/key/rate tables; encoding cannot validate that shared state.
-    /// `context` must retain that generation through completion/quarantine.
-    /// Success means queued; an error after publication poisons and retains all
-    /// hardware-reachable mappings and context until actual quiescence.
+    /// `context` must keep that generation through completion/quarantine.
+    /// Success means queued; an error after publication poisons and keeps all
+    /// hardware-reachable mappings and context until quiescence.
     pub fn submit(
         &mut self,
         source: &dyn PageSource,
@@ -334,7 +334,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         self.next_token = (token + 1) % TOKENS;
         self.serial = serial;
         self.outstanding += 1;
-        // Retain context before the first prefetchable descriptor address store.
+        // Keep context before the first prefetchable descriptor address store.
         let packet = self.tokens[token].as_mut().expect("inserted token");
         packet.txwi.published = true;
         for data in &mut packet.payload {
@@ -365,7 +365,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
             .publish(self.head as u16)?;
         Ok(())
     }
-    /// Observe one actual WFDMA index advancement. This permits slot reuse,
+    /// Observe one WFDMA index advancement. This permits slot reuse,
     /// never payload/TXWI removal or a successful air status by itself.
     pub fn poll_consumed(&mut self) -> Result<Option<Receipt>, Error> {
         self.live()?;
@@ -386,7 +386,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         }
         fence(Ordering::SeqCst);
         let at = self.tail * DESC_BYTES;
-        // SAFETY: actual requester index passed this exact descriptor slot.
+        // SAFETY: requester index passed this exact descriptor slot.
         unsafe {
             self.descriptors.dma.sync_for_cpu(at..at + DESC_BYTES)?;
         }
@@ -410,10 +410,10 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
     /// optional WCID has been validated. A bad batch mutates no packet state.
     ///
     /// # Safety
-    /// Bytes must be an actual complete, non-dropped type-6 firmware packet from
-    /// this requester's owned completed RX queue, in this exact fresh firmware
+    /// Bytes must be a complete, non-dropped type-6 firmware packet from
+    /// this requester's owned completed RX queue, in this fresh firmware
     /// epoch, delivered once by the serialized RX owner. They must never come
-    /// from a network MPDU, fabricated frame or old queue/worker/reset epoch.
+    /// from a network MPDU, invented frame or old queue/worker/reset epoch.
     /// Firmware must obey its source token-release contract: all references to
     /// each released TXWI/MSDU have ended and no delayed duplicate release can
     /// follow token reuse. The wire has no generation field; a host cookie or
@@ -485,7 +485,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         }
         Ok(usize::from(notification.declared_tokens))
     }
-    /// Remove mappings only after both actual receipts. Every mapping and
+    /// Remove mappings only after both receipts. Every mapping and
     /// context stays owned if a sync/unmap fails; the epoch then fails closed.
     pub fn take_released(&mut self) -> Result<Option<Released<C>>, Error> {
         self.live()?;
@@ -506,7 +506,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         if !packet.consumed {
             return Err(super::Error::OwnershipMismatch.into());
         }
-        // SAFETY: observed index consumption AND actual firmware TX-free ended
+        // SAFETY: observed index consumption AND firmware TX-free ended
         // all hardware references. Serialized exclusive owner has no other users.
         unsafe {
             packet.txwi.dma.sync_for_cpu(0..txp::TXWI_BYTES)?;
@@ -532,7 +532,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
     /// # Safety
     /// Full hardware/firmware and CPU-worker fence as for raw ring teardown,
     /// including firmware TXP payload accesses and all prior token completions.
-    /// A DMA-engine idle bit alone is insufficient. Failed removal retains all
+    /// A DMA-engine idle bit alone is insufficient. Failed removal keeps all
     /// contexts; retry requires this proof still to hold.
     pub unsafe fn release_after_quiesce(&mut self) -> Result<Vec<C>, Error> {
         self.poisoned = true;
@@ -570,7 +570,7 @@ impl<Q: QueueIo, C: 'static> Drop for DataRing<Q, C> {
     fn drop(&mut self) {
         if self.descriptors.published && !self.released {
             retain_queue(self.io.take());
-            // DMA leases quarantine their pins/domain; keep actual station/key
+            // DMA leases quarantine their pins/domain; keep station/key
             // context too, including partial successful unmaps before failure.
             for packet in self.tokens.iter_mut().flatten() {
                 if let Some(context) = packet.context.take() {
@@ -617,7 +617,7 @@ mod tests {
         }));
         let domain: Arc<dyn DmaDomain> = Arc::new(Domain(memory.clone()));
         // SAFETY: one fresh, stopped modeled requester; both queues resolve DMA
-        // through its one actual mapping registry. No physical claim is made.
+        // through its one mapping registry. No physical claim is made.
         let ring =
             unsafe { DataRing::install(Io(tx.clone()), &Source, domain.clone(), count, chip) }
                 .unwrap();
@@ -811,7 +811,7 @@ mod tests {
             Context(model.drops.clone(), 1),
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
-                // Both actual payload and TXWI are mapped before the gate.
+                // Both payload and TXWI are mapped before the gate.
                 assert_eq!(model.memory.lock().unwrap().mappings.len(), before + 2);
                 false
             },
@@ -865,7 +865,7 @@ mod tests {
                 assert_eq!(finish(&model, &packet), bytes);
                 let wire = notification(chip, &[packet.token], packet.wcid);
                 let complete = deliver(&mut model, &wire);
-                // SAFETY: actual modeled firmware finished all TXP reads and
+                // SAFETY: modeled firmware finished all TXP reads and
                 // delivered this once through this requester's completed RX.
                 unsafe { ring.apply_tx_free(ring.epoch(), &complete) }.unwrap();
                 if n % 2 == 1 {

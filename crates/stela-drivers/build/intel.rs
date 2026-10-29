@@ -188,7 +188,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
 }
 
 /// Mesa detects HAVE_ENDIAN_H by compiling the header with its C compiler.
-/// Use this hosted build's actual compiler, target, flags and system headers;
+/// Use this hosted build's compiler, target, flags and system headers;
 /// the freestanding encoder keeps its separate compiler-derived header route.
 fn hosted_endian_header(base: &cc::Build) -> bool {
     let source = native::out_dir().join("intel-hosted-endian.c");

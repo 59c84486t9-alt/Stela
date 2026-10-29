@@ -3,7 +3,7 @@
 //! Intel Volume Management Device host bridge. This is a PCI configuration and
 //! resource-routing backend, never an Intel RST RAID-volume implementation.
 //!
-//! Physical attachment uses actual stopped PCI ownership and UC mappings. DMA
+//! Physical attachment uses stopped PCI ownership and UC mappings. DMA
 //! requester aliases and native child-driver attachment require the platform's
 //! independently owned VMD DMA domain; this module never invents an identity
 //! domain or enables a child bus master on the strength of a numeric BDF.
@@ -165,14 +165,14 @@ impl Window {
 /// Native hardware effects. Tests may implement this with a register model.
 ///
 /// # Safety
-/// Own the actual VMD parent config, all three reserved BARs and current child
+/// Own the VMD parent config, all three reserved BARs and current child
 /// hierarchy epoch. All firmware/other-driver users and child DMA/IRQ/work are
 /// stopped and drained before construction. Each access is a native aligned
 /// width; child writes include an equal-width readback to flush VMD's posted
 /// config writes. No config access occurs from IRQ context or outside the sole
 /// mutable host owner; this exclusion serializes the entire CFGBAR, not each
-/// child separately. A failed effect must retain the original owners.
-/// The original stopped-requester owner qualifies the complete standard
+/// child separately. A failed effect must keep the original owners.
+/// The original stopped-requester owner checks the complete standard
 /// capability framing before native attachment; vendor Length fields still
 /// bound every vendor-specific read performed here.
 pub unsafe trait Registers {
@@ -217,8 +217,8 @@ pub struct Host<R: Registers> {
     remap_layout: Option<remap::Layout>,
 }
 impl<R: Registers> Host<R> {
-    /// Initialize the actual aperture without enabling bus mastering. All
-    /// children must have a genuine firmware/takeover stopped grant. The
+    /// Initialize the aperture without enabling bus mastering. All
+    /// children must have a firmware/takeover stopped grant. The
     /// original owners are returned only on failure before any hardware effect.
     pub fn initialize(mut registers: R) -> Result<Self, (Error, Option<R>)> {
         let prepared = (|| {
@@ -228,9 +228,9 @@ impl<R: Registers> Host<R> {
                 return Err(Error::InvalidResource);
             }
             // VMD uses the three 64-bit BAR pairs 0/1, 2/3 and 4/5. Check
-            // actual config against the original reservation before touching
+            // config against the original reservation before touching
             // decode or accepting a shadow translation. The reservation
-            // authority, rather than probing live child windows, owns sizing.
+            // permission, rather than probing live child windows, owns sizing.
             for index in [0, 2, 4] {
                 let offset = 0x10 + u16::from(index) * 4;
                 let low = registers.parent_read(offset, 4)?;
@@ -287,7 +287,7 @@ impl<R: Registers> Host<R> {
         let result = (|| {
             host.parent_write_checked(COMMAND, command | MEMORY | INTX_DISABLE)?;
             host.discover()?;
-            // Remapping remains enabled until an actual parent MSI-X/domain
+            // Remapping remains enabled until a parent MSI-X/domain
             // owner is attached. No child IRQ may be unmasked by this host.
             host.set_remapping(true)?;
             Ok(())
@@ -461,7 +461,7 @@ impl<R: Registers> Host<R> {
             Ok(())
         }
     }
-    /// Actual child config is serialized by one mutable borrow of the whole
+    /// Child config is serialized by one mutable borrow of the whole
     /// host. The child cannot outlive, reset or retire its parent.
     pub fn config(
         &mut self,
@@ -497,7 +497,7 @@ impl<R: Registers> Host<R> {
         config::scan(self)
     }
     /// # Safety
-    /// All actual child DMA/IRQ/work has stopped and drained, and every native
+    /// All child DMA/IRQ/work has stopped and drained, and every native
     /// parent IRQ registration has retired, before entering platform sleep.
     /// Keep the entire resource/reset assignment and this owner across sleep.
     pub unsafe fn suspend(&mut self) -> Result<(), Error> {
@@ -567,7 +567,7 @@ impl<R: Registers> Host<R> {
         result
     }
     /// Configure VMD's hardware remap control, preserving bus restrictions.
-    /// No bypass is admitted before the separate native IRQ and DMA authorities.
+    /// No bypass is admitted before the separate native IRQ and DMA permissions.
     fn set_remapping(&mut self, enabled: bool) -> Result<(), Error> {
         if self.profile.shadow == Shadow::Bios {
             return Ok(());
@@ -587,7 +587,7 @@ impl<R: Registers> Host<R> {
     }
     /// # Safety
     /// Every child engine, DMA request, IRQ registration, CPU callback and work
-    /// item is stopped/drained under its genuine native owner. No future access
+    /// item is stopped/drained under its native owner. No future access
     /// can begin. Parent disable never proves these child completion facts.
     pub unsafe fn retire(mut self) -> Result<R, Error> {
         self.check_live()?;

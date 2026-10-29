@@ -26,7 +26,7 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Actual acknowledged firmware BSS/OMAC context. A byte-sized index alone is
+/// Acknowledged firmware BSS/OMAC context. A byte-sized index alone is
 /// not proof that firmware allocated it or associated it with this WCID/peer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Context {
@@ -34,8 +34,8 @@ pub struct Context {
     pub omac_index: u8,
     pub station_disabled: bool,
 }
-/// Sensitive command bytes intentionally have no Debug/Clone implementation.
-/// These bytes retain no on-wire key generation; actual native ownership and
+/// Sensitive command bytes have no Debug/Clone implementation.
+/// These bytes keep no on-wire key generation; native ownership and
 /// completion must bind the exact canonical ticket separately.
 pub struct Request {
     key: KeyIdentity,
@@ -66,8 +66,8 @@ impl Request {
         }
         Self::build(chip, context, key, Some(material))
     }
-    /// Source remove targets this actual WCID/peer context. It carries neither
-    /// key bytes nor a fabricated per-index completion. ACK and old users/DMA
+    /// Source remove targets this WCID/peer context. It carries neither
+    /// key bytes nor an invented per-index completion. ACK and old users/DMA
     /// drain remain separate prerequisites for canonical slot retirement.
     pub fn remove(chip: Chip, context: Context, key: KeyIdentity) -> Result<Self, Error> {
         Self::build(chip, context, key, None)
@@ -100,14 +100,14 @@ impl Request {
         bytes.resize(length, 0);
         bytes[0] = context.bss_index;
         bytes[1] = key.slot() as u8;
-        bytes[2..4].copy_from_slice(&1u16.to_le_bytes()); // actual one TLV
+        bytes[2..4].copy_from_slice(&1u16.to_le_bytes()); // one TLV
         bytes[4] = 1; // is_tlv_append
         bytes[5] = if !pairwise && !context.station_disabled {
             0x0e
         } else {
             context.omac_index
         };
-        // Admitted 20-entry WTBL keeps actual to_wcid_hi zero; no masked slot.
+        // Admitted 20-entry WTBL keeps to_wcid_hi zero; no masked slot.
         if connac3 {
             bytes[8..10].copy_from_slice(&0x27u16.to_le_bytes()); // STA_REC_KEY_V3
             bytes[10..12].copy_from_slice(&68u16.to_le_bytes());
@@ -142,7 +142,7 @@ impl Request {
             bytes[10..12]
                 .copy_from_slice(&(if material.is_some() { 44u16 } else { 8 }).to_le_bytes());
             // Connac2 copies enum set_key_cmd: SET_KEY0 / DISABLE_KEY1.
-            // It is intentionally the reverse of Connac3's explicit add flag.
+            // It is the reverse of Connac3's explicit add flag.
             bytes[12] = u8::from(material.is_none());
             if let Some(material) = material {
                 bytes[13] = 1;
@@ -155,7 +155,7 @@ impl Request {
                     Cipher::Gcmp128 => 7,
                     Cipher::Gcmp256 => 8,
                 };
-                bytes[17] = 36; // actual sec_key structure size
+                bytes[17] = 36; // sec_key structure size
                 bytes[18] = key.index();
                 bytes[19] = material.len() as u8;
                 put_key(&mut bytes[20..20 + material.len()], key.cipher(), material);

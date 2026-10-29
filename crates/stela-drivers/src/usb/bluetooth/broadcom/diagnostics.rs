@@ -63,7 +63,7 @@ impl From<HciError> for Error {
 }
 
 /// Same native function's independent bulk endpoints. Failed cancellation must
-/// retain all uncertain DMA and forbid reuse, exactly like the HCI Io boundary.
+/// keep all uncertain DMA and forbid reuse, exactly like the HCI Io boundary.
 pub trait DiagnosticIo: Io {
     fn start_diagnostics(
         &mut self,
@@ -115,7 +115,7 @@ impl<B: DiagnosticIo> Session<B> {
     pub fn last_delivery(&self) -> Option<bool> {
         self.last_delivery
     }
-    /// Historical actual retirement metadata; no native I/O or ownership grant.
+    /// Historical retirement metadata; no native I/O or ownership grant.
     pub fn retirement(&self) -> Option<&Retirement> {
         self.hci.io.diagnostic_retirement()
     }
@@ -137,8 +137,8 @@ impl<B: DiagnosticIo> Session<B> {
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.hci.submit_acl(packet).map_err(Into::into)
     }
-    /// At most one completed native diagnostic USB record, retaining its exact
-    /// boundary including a genuine zero-length completion. Ordinary HCI data
+    /// At most one completed native diagnostic USB record, keeping its exact
+    /// boundary including a zero-length completion. Ordinary HCI data
     /// observed before a later diagnostic failure remains explicitly drainable.
     pub fn poll(&mut self) -> Result<Vec<Received>, Error> {
         self.hci.open()?;
@@ -165,7 +165,7 @@ impl<B: DiagnosticIo> Session<B> {
         Ok(core::mem::take(&mut self.pending))
     }
     /// Already observed historical bytes only. This performs no native I/O and
-    /// grants no authority to a retired generation.
+    /// grants no permission to a retired generation.
     pub fn take_pending_observations(&mut self) -> Vec<Received> {
         core::mem::take(&mut self.pending)
     }

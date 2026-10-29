@@ -1,5 +1,5 @@
 //! Immutable DART family, stream-remap and register-window contracts.
-//! Resolving a mapper's declared route establishes no physical DMA authority.
+//! Resolving a mapper's declared route establishes no physical DMA permission.
 pub const DAPF_BYTES: u64 = 0x4000;
 /// The largest DT translation window: M4/M5-generation `dart,t8110` nodes
 /// declare 0xc000 or 0x20000 bytes (J604AP, J700AP, J714cAP).
@@ -9,7 +9,7 @@ pub const T8110_RECORD: u64 = 0x40;
 pub const T8110_REGISTER_BYTES_2_2: u64 = T8110_RECORDS + 256 * T8110_RECORD;
 
 /// Register and page-entry format, independently selected for each DT node.
-/// This does not qualify every optional feature of a physical chip.
+/// This does not check every optional feature of a physical chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     T8020,
@@ -25,7 +25,7 @@ pub enum Profile {
 impl Profile {
     /// Select one native family from an entire DT compatible string list.
     /// A conflicting or unknown DART family cannot fall back to another
-    /// entry in the list. Selection alone does not qualify optional features.
+    /// entry in the list. Selection alone does not check optional features.
     pub fn from_compatible(compatible: &[u8]) -> Option<Self> {
         let mut selected = None;
         for name in compatible

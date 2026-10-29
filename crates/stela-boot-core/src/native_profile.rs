@@ -1,5 +1,5 @@
 //! Sparse, jittered, owner-local timing. Staging is allocated before sampled
-//! Begin timestamps; no sample buffer grows during actual epoch execution.
+//! Begin timestamps; no sample buffer grows during epoch execution.
 use alloc::vec::Vec;
 use stela_engine::machine::engine::MAX_NATIVE_EPOCH_BODIES;
 use stela_engine::machine::engine::NativeTimingPhase as Phase;
@@ -167,7 +167,7 @@ impl Profile {
         self.snapshot.timestamp_pair_min = minimum;
     }
 
-    /// Unsampled checkpoints never read the clock. Partial/error paths retain
+    /// Unsampled checkpoints never read the clock. Partial/error paths keep
     /// whole-round time separately and cannot pollute complete phase totals.
     pub fn event(&mut self, phase: Phase, clock: impl FnOnce() -> u64) {
         if phase == Phase::Begin {
@@ -187,7 +187,7 @@ impl Profile {
             self.jitter ^= self.jitter >> 7;
             self.jitter ^= self.jitter << 17;
             self.remaining = MIN_INTERVAL + (self.jitter & INTERVAL_MASK);
-            // Allocate only for an actual sampled owner, before clock(). A
+            // Allocate only for a sampled owner, before clock(). A
             // failed reservation remains explicit drops; it cannot grow later.
             if self.pending_words.capacity() < MAX_NATIVE_EPOCH_BODIES {
                 let _ = self

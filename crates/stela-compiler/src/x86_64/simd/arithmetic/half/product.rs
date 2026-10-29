@@ -96,7 +96,7 @@ fn group(code: &mut Code, helper: &mut Vec<usize>) {
     asm.unary(Unary::Not, Size::Dword, Rax);
     asm.alu_imm8(Alu::And, Size::Dword, Rax, ACTIVE_LANE_MASK as i8);
     asm.alu(Alu::Or, Size::Dword, R10, Rax);
-    // Increment = retained parity + ((product sign & direction) XOR bias).
+    // Increment = kept parity + ((product sign & direction) XOR bias).
     packed(code, Host::MoveAligned, TEMPORARY, RESULT);
     ShiftOpcode::RightDword.emit(code, TEMPORARY, DISCARDED_BITS);
     broadcast_integer_rounding(code, ZERO, IntegerRoundingRegister::Parity);

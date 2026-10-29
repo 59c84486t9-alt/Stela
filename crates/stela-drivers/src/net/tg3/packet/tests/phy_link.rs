@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Source 10/100 half-duplex negotiation reaches the actual native MAC and DMA.
+//! Source 10/100 half-duplex negotiation reaches the native MAC and DMA.
 use super::*;
 
 fn attached(bcm5762: bool) -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {

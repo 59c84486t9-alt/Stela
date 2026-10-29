@@ -1,4 +1,4 @@
-//! Independent length-prefixed FIFO and actual asynchronous command effects.
+//! Independent length-prefixed FIFO and asynchronous command effects.
 use super::*;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual host volatile windows and original owner Drop boundaries. These are
-//! isolated RAM/config models and never confer native PCI or DMA authority.
+//! Host volatile windows and original owner Drop boundaries. These are
+//! isolated RAM/config models and never confer native PCI or DMA permission.
 extern crate std;
 use super::*;
 use crate::bus::pci::Address;
@@ -110,8 +110,8 @@ fn invalid_first_or_second_window_returns_both_exact_original_owners_without_eff
             _ => ape_bytes = usize::MAX,
         }
         let before_reads = counts.reads.load(Ordering::Relaxed);
-        // SAFETY: isolated retained host RAM; invalid geometry must be refused
-        // before any access. This is not an actual native resource producer.
+        // SAFETY: isolated kept host RAM; invalid geometry must be refused
+        // before any access. This is not a native resource producer.
         let (mut original, retained) = match unsafe {
             Mmio::from_owned_windows(original, mac, mac_bytes, ape, ape_bytes, owner)
         } {
@@ -137,7 +137,7 @@ fn invalid_first_or_second_window_returns_both_exact_original_owners_without_eff
             assert_eq!(unsafe { cell.get().read_volatile() }, 0);
         }
         drop(actual);
-        // The actual caller still owns cleanup. This isolated fixture has no
+        // The caller still owns cleanup. This isolated fixture has no
         // live requester/IRQs and can explicitly drop its returned originals.
         drop(original);
         assert_eq!(counts.config_drops.load(Ordering::Relaxed), 1);
@@ -154,8 +154,8 @@ fn failed_window_can_retry_with_same_originals_and_actual_bounded_volatile_acces
     let original = function(counts.clone());
     let owner = windows(counts.clone());
     let (mac, ape) = pointers(&owner.lock().unwrap());
-    // SAFETY: isolated retained host RAM with an intentionally short second
-    // window; no native authority or live requester exists in this model.
+    // SAFETY: isolated kept host RAM with a short second
+    // window; no native permission or live requester exists in this model.
     let (original, owner) =
         match unsafe { Mmio::from_owned_windows(original, mac, 0x8000, ape, 0x843f, owner) } {
             Err((Error::Bounds, original, owner)) => (original, owner),

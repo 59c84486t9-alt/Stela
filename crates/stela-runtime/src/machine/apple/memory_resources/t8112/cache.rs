@@ -1,11 +1,11 @@
-//! Permanently empty T8112 outer cache, composed with its one actual lock owner.
+//! Permanently empty T8112 outer cache, composed with its one lock owner.
 //!
 //! Original 26A434 J473 KC SHA256
 //! 06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d:
 //! generic zero selection file1c71874..1c719d8; T8112 way waiter
 //! 2efd010..2efd234, enable2efd354..2efd5b0, raw flush2efd234..2efd354,
-//! direct quota2eff664..2eff924 and occupancy2effa54..2effb34. Exact original
-//! windows are retained in t8112-cache-contract-r1/contract.json. This is new
+//! direct quota2eff664..2eff924 and occupancy2effa54..2effb34. Original
+//! windows are held in t8112-cache-contract-r1/contract.json. This is new
 //! software backing, never an Apple reset observation or a nonempty flush.
 //! Native quota views: t8112pmp SHA256
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,
@@ -49,7 +49,7 @@ const QUOTA_FIELDS: u32 = 0x1ff | (0xff << 16) | (1 << 30);
 const PERF_CONFIG: core::ops::Range<u64> = 0x18000..0x18800;
 
 /// Declared original driver configuration, not a readiness or mount token.
-/// The caller must coordinate this selection with the actual live original
+/// The caller must coordinate this selection with the live original
 /// boot argument/provider input. In particular a conflicting numeric clamp can
 /// override ProviderDisabled, while DisableArgument bypasses numeric parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,18 +61,18 @@ pub enum ZeroWayConfiguration {
 
 /// Explicitly initialized software words, not captured or inferred reset state.
 /// Counts/flush-busy must be clear because this object owns no outer entries.
-/// Other status bits are opaque retained inputs, not newly decoded effects.
+/// Other status bits are opaque kept inputs, not newly decoded effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SoftwareImage {
     pub way_status: [u32; PLANES],
     pub disabled: [bool; PLANES],
     pub flush_status: [u32; PLANES],
-    /// One actual full32 register per group. AP's low7 getter and native
+    /// One full32 register per group. AP's low7 getter and native
     /// low9 programming/attributes observe this same backing, not two limits.
     pub quota_words: [u32; 32],
 }
 impl SoftwareImage {
-    /// Deliberately allocate clear software words and disabled controls. This
+    /// Allocate clear software words and disabled controls. This
     /// does not assert that Apple firmware or a physical cache had these words.
     pub const fn zeroed_control_image() -> Self {
         Self {
@@ -91,7 +91,7 @@ pub struct FlushCompletion {
     pub ram_generation: u64,
 }
 
-/// Fixed-size progress. Numeric observations confer no completion authority.
+/// Fixed-size progress. Numeric observations confer no completion permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Progress {
     pub way_commands: u64,
@@ -114,10 +114,10 @@ pub struct EmptyResource {
     perf_config: BTreeMap<u64, u64>,
 }
 impl EmptyResource {
-    /// Construct before admitting cache clients, with an actually selected
+    /// Construct before admitting cache clients, with a selected
     /// original zero-way configuration. `selection` declares that input but
     /// cannot verify boot arguments, insert a flag, grant mount admission or
-    /// change an observed Apple resource into an empty one. The same retained
+    /// change an observed Apple resource into an empty one. The same kept
     /// DCS/PTD RAM and lock state are consumed without cloning their backing.
     pub fn initialized(
         locks: LockResource,
@@ -178,9 +178,9 @@ impl EmptyResource {
     pub fn requires_ram_flush(&self, offset: u64, width: Width) -> bool {
         offset == BROADCAST + FLUSH && width == Width::Word
     }
-    /// Consume the source broadcast write1 through the engine's sealed actual
+    /// Consume the source broadcast write1 through the engine's sealed
     /// held-memory adapter. Preflight precedes ordering and every cache effect.
-    /// The adapter retains all stopped native owners, the closed synchronous
+    /// The adapter keeps all stopped native owners, the closed synchronous
     /// producer set and same RAM generation. Its fence supplies CPU/copyout
     /// visibility; only this object's permanent absence of outer entries makes
     /// its own eviction/writeback effect empty. Neither establishes nonempty
@@ -196,7 +196,7 @@ impl EmptyResource {
         let completion = self.prepare_flush(offset, width, value, at, memory.memory())?;
         memory.fence_cpu_memory();
         // The exclusive composite borrow excludes control changes. Recheck
-        // actual writer/mapping identity after the real adapter's ordering.
+        // writer/mapping identity after the real adapter's ordering.
         self.check_ram_service(memory.memory())?;
         self.complete_flush(completion);
         Ok(())
@@ -224,7 +224,7 @@ impl EmptyResource {
         })
     }
     fn complete_flush(&mut self, completion: FlushCompletion) {
-        // Only a preflighted, actually ordered empty-resource operation reaches
+        // Only a preflighted, ordered empty-resource operation reaches
         // this private consumer. Initial idle words are never counted as work.
         self.progress.completed_flushes = completion.serial;
         self.progress.latest_flush = Some(completion);
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(read(&mut cache, plane), 0x40fe_01ff);
         assert_eq!(read(&mut cache, broadcast), 0x40fe_01ff);
         // An AP full32 low7 write replaces the word, including the attributes;
-        // a native publisher must retain its own actual source attribute cache.
+        // a native publisher must keep its own source attribute cache.
         write(&mut cache, broadcast, 17);
         assert_eq!(read(&mut cache, plane), 17);
         assert_eq!(read(&mut cache, broadcast), 17);
@@ -752,8 +752,8 @@ mod tests {
         );
         write(&mut cache, BROADCAST + STATUS, 1);
         // The fixture has no native PE/DMA/client, so its permanent-empty
-        // effect can exercise this private consumer under actual RAM exclusion.
-        // Production enters only through the sealed adapter and actual fences.
+        // effect can exercise this private consumer under RAM exclusion.
+        // Production enters only through the sealed adapter and fences.
         for at in 1..=3 {
             let prepared = cache
                 .prepare_flush(BROADCAST + FLUSH, Width::Word, 1, at, &service)

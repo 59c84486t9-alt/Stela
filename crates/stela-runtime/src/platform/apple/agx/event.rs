@@ -95,7 +95,7 @@ pub struct Publication {
 }
 
 impl Publication {
-    /// `None` is genuine backpressure: no slot or output has been acquired.
+    /// `None` is backpressure: no slot or output has been acquired.
     pub fn reserve(
         memory: &mut dyn Shared,
         root: &Root,
@@ -145,7 +145,7 @@ impl Publication {
     }
 }
 
-/// Synchronous component helper; production retains a `Publication` and
+/// Synchronous component helper; production keeps a `Publication` and
 /// waits for space without re-executing the command that produced the event.
 #[cfg(test)]
 pub fn post(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<(), &'static str> {

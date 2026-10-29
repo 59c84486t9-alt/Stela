@@ -177,8 +177,8 @@ fn staged_profile_diagnostic_name_board_and_driver_swaps_refuse_before_io_or_dma
         let state = Arc::new(Mutex::new(ModelState::default()));
         let drops = Arc::new(AtomicUsize::new(0));
         let power = awake(state.clone(), drops.clone());
-        // SAFETY: The model retains its original Source/Domain and has no concurrent user;
-        // swapped firmware metadata is deliberately refused before I/O or DMA publication.
+        // SAFETY: The model keeps its original Source/Domain and has no concurrent user;
+        // swapped firmware metadata is refused before I/O or DMA publication.
         let result = unsafe { Ax200Boot::start(power, staged, &source, Some(domain.clone()), 32) };
         assert!(matches!(result, Err(Error::FirmwareBinding)), "swap{mode}");
         assert_eq!(source.calls.load(Ordering::Relaxed), 0);

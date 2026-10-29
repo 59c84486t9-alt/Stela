@@ -1,4 +1,4 @@
-//! Actual ACPICA Wait/Signal on genuine hosted role stacks; no native grant.
+//! ACPICA Wait/Signal on hosted role stacks; no native grant.
 use super::*;
 use crate::platform::work::{
     self, ContextId, FirmwareRole, ParkOutcome, SwitchBinding, TaskContext, WakeHandle, WorkError,
@@ -25,9 +25,9 @@ impl Binding {
         assert_eq!((view.stack_start..view.stack_end).contains(&rsp), active);
     }
 }
-// SAFETY: this fixture has real retained same-thread stacks and atomics only.
+// SAFETY: this fixture has real kept same-thread stacks and atomics only.
 // Hooks never switch, allocate or drop a resource; semaphore allocations remain
-// live until all waiting frames join and the actual Session tears down.
+// live until all waiting frames join and the Session tears down.
 unsafe impl SwitchBinding for Binding {
     unsafe fn attach(&self, v: &TaskContext) -> Result<(), WorkError> {
         self.id.store(v.context_id, Ordering::Release);
@@ -41,7 +41,7 @@ unsafe impl SwitchBinding for Binding {
             return Ok(false);
         }
         // SAFETY: wait publishes a live Sem pointer before parking; Core never
-        // deletes it with a pending waiter, and the fixture retains the Session.
+        // deletes it with a pending waiter, and the fixture keeps the Session.
         Ok(unsafe { &*(pointer as *const Sem) }
             .units
             .load(Ordering::Acquire)
@@ -83,8 +83,8 @@ impl Scene {
     }
     fn session(&self) -> &Session {
         self.runtime().current_id().unwrap();
-        // SAFETY: a heap-stable ManuallyDrop Session is retained until every
-        // admitted callback joins. On failure it is deliberately quarantined.
+        // SAFETY: a heap-stable ManuallyDrop Session is held until every
+        // admitted callback joins. On failure it is quarantined.
         unsafe { &*(self.session.load(Ordering::Acquire) as *const Session) }
     }
     fn bind(&self) -> Arc<Binding> {
@@ -212,7 +212,7 @@ unsafe extern "C" fn wait(_: *mut c_void, p: *mut c_void, units: u32, timeout: u
     result
 }
 unsafe extern "C" fn signal(_: *mut c_void, p: *mut c_void, units: u32) -> Status {
-    // SAFETY: ACPICA retains this semaphore until matching deletion after quiescence.
+    // SAFETY: ACPICA keeps this semaphore until matching deletion after quiescence.
     let sem = unsafe { &*p.cast::<Sem>() };
     if units == 0 {
         return BAD_PARAMETER.0;
@@ -241,7 +241,7 @@ unsafe extern "C" fn thread(_: *mut c_void) -> u64 {
         .map_or(1, |id| id.get().checked_add(1).unwrap())
 }
 unsafe extern "C" fn portal_wait(p: *mut c_void) {
-    // SAFETY: queue retains this exact Scene through callback completion.
+    // SAFETY: queue keeps this exact Scene through callback completion.
     let scene = unsafe { &*p.cast::<Scene>() };
     assert_eq!(
         scene.runtime().firmware_role_current(),
@@ -250,7 +250,7 @@ unsafe extern "C" fn portal_wait(p: *mut c_void) {
     scene.invoke("WAIT", 1, 3);
 }
 unsafe extern "C" fn portal_signal(p: *mut c_void) {
-    // SAFETY: queue retains this exact Scene through callback completion.
+    // SAFETY: queue keeps this exact Scene through callback completion.
     let scene = unsafe { &*p.cast::<Scene>() };
     assert_eq!(
         scene.runtime().firmware_role_current(),
@@ -259,7 +259,7 @@ unsafe extern "C" fn portal_signal(p: *mut c_void) {
     scene.invoke("SIGN", 2, 4);
 }
 unsafe extern "C" fn notify_wait(p: *mut c_void) {
-    // SAFETY: queue retains this exact Scene through callback completion.
+    // SAFETY: queue keeps this exact Scene through callback completion.
     let scene = unsafe { &*p.cast::<Scene>() };
     assert_eq!(
         scene.runtime().firmware_role_current(),
@@ -268,7 +268,7 @@ unsafe extern "C" fn notify_wait(p: *mut c_void) {
     scene.invoke("WAIT", 5, 7);
 }
 unsafe extern "C" fn notify_signal(p: *mut c_void) {
-    // SAFETY: queue retains this exact Scene through callback completion.
+    // SAFETY: queue keeps this exact Scene through callback completion.
     let scene = unsafe { &*p.cast::<Scene>() };
     assert_eq!(
         scene.runtime().firmware_role_current(),
@@ -277,7 +277,7 @@ unsafe extern "C" fn notify_signal(p: *mut c_void) {
     scene.invoke("SIGN", 6, 8);
 }
 unsafe extern "C" fn gpe_signal(p: *mut c_void) {
-    // SAFETY: queue retains this exact Scene through callback completion.
+    // SAFETY: queue keeps this exact Scene through callback completion.
     let scene = unsafe { &*p.cast::<Scene>() };
     assert_eq!(
         scene.runtime().firmware_role_current(),
@@ -286,12 +286,12 @@ unsafe extern "C" fn gpe_signal(p: *mut c_void) {
     scene.invoke("SIGN", 9, 10);
 }
 unsafe extern "C" fn general_wait(p: *mut c_void) {
-    // SAFETY: queue retains Scene and its separate semaphore through actual join.
+    // SAFETY: queue keeps Scene and its separate semaphore through join.
     let scene = unsafe { &*p.cast::<Scene>() };
     assert_eq!(scene.runtime().firmware_role_current(), Ok(None));
     scene.bind();
     assert_eq!(
-        // SAFETY: this genuine fixture semaphore is owned by Scene through all waits.
+        // SAFETY: this fixture semaphore is owned by Scene through all waits.
         unsafe {
             wait(
                 ptr::null_mut(),
@@ -330,11 +330,11 @@ fn run_wait_signal(policy: work::ReservationPolicy) {
     services.wait_semaphore = wait;
     services.signal_semaphore = signal;
     services.thread_id = thread;
-    // SAFETY: serialized real ACPICA fixture. Keep the actual heap Session
+    // SAFETY: serialized real ACPICA fixture. Keep the heap Session
     // quarantined on any failure until no frame can reference it.
     let mut session = core::mem::ManuallyDrop::new(Box::new(
         // SAFETY: TEST_SERIAL excludes every other Session and fixture services
-        // retain their actual table/allocation state through Session teardown.
+        // keep their table/allocation state through Session teardown.
         unsafe { Session::start(services, Mode::InterpreterOnly) }.unwrap(),
     ));
     let scene = Arc::new(Scene {
@@ -359,20 +359,20 @@ fn run_wait_signal(policy: work::ReservationPolicy) {
     let p = Arc::as_ptr(&scene) as *mut c_void;
     for _ in 0..8 {
         // SAFETY: Scene owns all callback state and the enclosing real Session
-        // remains heap-stable through all admitted jobs and actual retirement.
+        // remains heap-stable through all admitted jobs and retirement.
         unsafe { r.queue().execute(work::Kind::General, general_wait, p) }.unwrap();
         assert_eq!(r.step(), Ok(true));
     }
-    // SAFETY: two distinct portal stacks retain both actual AML frames.
+    // SAFETY: two distinct portal stacks keep both AML frames.
     unsafe { r.queue().execute_portal(portal_wait, p) }.unwrap();
     // SAFETY: this matching Scene and Session outlive the signaler's callback.
     unsafe { r.queue().execute_portal(portal_signal, p) }.unwrap();
     let deadline = work::Cpu::ticks(&*cpu) + 1_000_000_000;
     assert_eq!(r.drain(deadline), Err(WorkError::Pending));
     assert_eq!(*scene.events.lock().unwrap(), vec![1, 2, 4, 3]);
-    // SAFETY: FIFO-start Notify callbacks retain independent real stacks.
+    // SAFETY: FIFO-start Notify callbacks keep independent real stacks.
     unsafe { r.queue().execute(work::Kind::Notify, notify_wait, p) }.unwrap();
-    // SAFETY: the second Notify worker signals after the first genuinely parks.
+    // SAFETY: the second Notify worker signals after the first parks.
     unsafe { r.queue().execute(work::Kind::Notify, notify_signal, p) }.unwrap();
     assert_eq!(
         r.drain(work::Cpu::ticks(&*cpu) + 1_000_000_000),
@@ -380,11 +380,11 @@ fn run_wait_signal(policy: work::ReservationPolicy) {
     );
     assert_eq!(*scene.events.lock().unwrap(), vec![1, 2, 4, 3, 5, 6, 8, 7]);
     // SAFETY: portal waits while a separately reserved GPE-role continuation
-    // executes actual Signal AML. Triggering the role here models GPE dispatch;
+    // executes Signal AML. Triggering the role here models GPE dispatch;
     // this test does not claim a physical SCI/GPE interrupt source.
     unsafe { r.queue().execute_portal(portal_wait, p) }.unwrap();
     assert_eq!(r.step(), Ok(true));
-    // SAFETY: GPE callback's Scene/Session remain retained through completion.
+    // SAFETY: GPE callback's Scene/Session remain held through completion.
     unsafe { r.queue().execute_gpe(gpe_signal, p) }.unwrap();
     assert_eq!(
         r.drain(work::Cpu::ticks(&*cpu) + 1_000_000_000),
@@ -407,7 +407,7 @@ fn run_wait_signal(policy: work::ReservationPolicy) {
     assert!(scene.wakes.lock().unwrap().is_empty());
     for (id, binding) in core::mem::take(&mut *scene.bindings.lock().unwrap()) {
         // SAFETY: every real AML/general frame joined; no external producer or
-        // C namespace frame retains a binding, and its allocation remains live.
+        // C namespace frame keeps a binding, and its allocation remains live.
         drop(unsafe { r.detach_binding(id) }.unwrap());
         drop(binding);
     }
@@ -417,7 +417,7 @@ fn run_wait_signal(policy: work::ReservationPolicy) {
     drop(executor);
     assert_eq!(dropped.load(Ordering::Relaxed), 16);
     assert_eq!(cpu.flags(), 0x202);
-    // SAFETY: the actual Session has no live queued/parked frames or producer;
+    // SAFETY: the Session has no live queued/parked frames or producer;
     // release only after proved executor retirement, otherwise keep quarantine.
     unsafe { core::mem::ManuallyDrop::drop(&mut session) };
     assert_eq!(SEMAPHORES.load(Ordering::Acquire), 0);

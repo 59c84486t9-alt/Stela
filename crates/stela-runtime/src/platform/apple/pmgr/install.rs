@@ -1,9 +1,9 @@
 //! Ordered T8112 native program installation, from original J473 LLB
 //! 0x142c0/0x4d1b4/0x4d2cc/0x4dcd8/0x4ec98/0x4f1b4.
 //!
-//! Supplied metadata, firmware history and native images are actual inputs.
+//! Supplied metadata, firmware history and native images are inputs.
 //! This does not compile the source tables, supply their live AP effects,
-//! reconstruct initial SRAM, qualify a hardware trigger or retire instructions.
+//! reconstruct initial SRAM, check a hardware trigger or retire instructions.
 //! Each effect goes through the owning controller's normal checked physical
 //! route. Release controller/bus borrows before dispatch; never run two program
 //! installations concurrently against the same physical controller/SRAM.
@@ -71,7 +71,7 @@ pub struct History {
     pub activation: [Option<u8>; 2],
 }
 
-/// Actual NUB metadata words at physical0x23d050000/4 when the native pool is
+/// NUB metadata words at physical0x23d050000/4 when the native pool is
 /// first initialized. Reuse the resulting pool if later firmware rewrites
 /// those words; recomputing it would substitute a different allocation epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,7 @@ pub struct NubPool {
 }
 impl NubPool {
     pub fn from_metadata(metadata: Metadata) -> Result<Self, Error> {
-        // Original W-register shift deliberately truncates the second term.
+        // Original W-register shift truncates the second term.
         let start = NUB_BASE
             + u64::from(metadata.first_page & 0xff) * 4096
             + u64::from(metadata.pages.wrapping_shl(12));
@@ -245,7 +245,7 @@ struct Flight {
 }
 
 /// Owns one immutable installation and its committed prefix. `published()`
-/// means only that these configuration effects committed through actual routes;
+/// means only that these configuration effects committed through routes;
 /// it supplies no hardware trigger, instruction retirement or PS handoff value.
 /// There is no reset/image replacement/uncertainty clearing API.
 pub struct Installation {
@@ -358,7 +358,7 @@ impl Installation {
         for placement in &placements {
             bind(&mut steps, *placement, 0);
         }
-        // Allocation publishes actual pointers before any native image bytes.
+        // Allocation publishes pointers before any native image bytes.
         for placement in &placements {
             bind(&mut steps, *placement, placement.code);
         }
@@ -707,7 +707,7 @@ mod tests {
     use {stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram};
 
     /// Test-only captured configuration bank, without any hardware execution or
-    /// completion semantics. All SRAM data still traverses the actual RAM API.
+    /// completion semantics. All SRAM data still traverses the RAM API.
     #[derive(Default)]
     struct Captured {
         words: BTreeMap<u64, u64>,
@@ -823,7 +823,7 @@ mod tests {
         match action {
             Action::DmbSy => {
                 // The test has one synchronous RAM/Bus participant. This host
-                // fence does not qualify the multi-PE production adapter.
+                // fence does not check the multi-PE production adapter.
                 fence(Ordering::SeqCst);
                 Outcome::Ordered
             }
@@ -961,7 +961,7 @@ mod tests {
         let bank = bus.device_mut::<Power>(id).unwrap();
         assert_eq!(bank.pending_configuration().count(), 64);
         assert!(bank.advance(&mut access).is_err());
-        // The bank retains actual configured fields; it has no trigger->PC or
+        // The bank keeps configured fields; it has no trigger->PC or
         // native instruction retirement method that could invent PS effects.
         assert_eq!(
             bank.read(0x23d2d0214, Width::Word, &mut access),
@@ -1064,7 +1064,7 @@ mod tests {
             install.finish(&claim, Outcome::NoEffect("target preflight refused")),
             Err(FinishError::NoEffect("target preflight refused"))
         );
-        // An external change cannot cause this retained RMW to be silently reread.
+        // An external change cannot cause this RMW to be silently reread.
         bus.device_mut::<Captured>(id)
             .unwrap()
             .words
@@ -1098,7 +1098,7 @@ mod tests {
         let mut ram = Ram::new(NUB_BASE, 0x40000);
         let mut sink = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut sink);
-        // Reach the first actual DMB after its setup store has committed.
+        // Reach the first DMB after its setup store has committed.
         loop {
             let claim = install.begin().unwrap().unwrap();
             let action = install.dispatch(&claim).unwrap();
@@ -1311,7 +1311,7 @@ mod tests {
             pages: 0x10002e,
         })
         .unwrap();
-        // Exact native W-shift wraps the high bits; it does not widen them.
+        // Native W-shift wraps the high bits; it does not widen them.
         assert_eq!(pool.tables(), [0x23df30000, 0x23df30100]);
         assert_eq!(pool.code_start(), 0x23df30200);
     }
@@ -1331,7 +1331,7 @@ mod tests {
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         let quad =
             |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-        assert_eq!(word(0x4ac), 0xd5033fbf); // actual helper is DMB SY
+        assert_eq!(word(0x4ac), 0xd5033fbf); // helper is DMB SY
         assert_eq!(word(0x4b0), 0xd65f03c0);
         let branch = word(0x26634);
         let displacement = ((branch << 6) as i32 >> 4) as isize;

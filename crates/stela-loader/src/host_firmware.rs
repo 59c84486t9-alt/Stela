@@ -224,7 +224,7 @@ impl<'a> Manifest<'a> {
     }
 
     /// Build metadata in the active allocator; permanent pages are never copied.
-    /// Each slice must actually remain immutable and mapped for this catalog's
+    /// Each slice must remain immutable and mapped for this catalog's
     /// lifetime. Physical-to-reference construction belongs to the platform.
     pub fn catalog(&self, bytes: &[&'static [u8]]) -> Result<Catalog, Error> {
         self.catalog_with(bytes, Vec::new())

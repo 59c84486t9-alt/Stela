@@ -128,7 +128,7 @@ impl Nor {
         Ok(())
     }
 
-    /// CS active low; a rising edge terminates the command, retaining all
+    /// CS active low; a rising edge terminates the command, keeping all
     /// bytes between falling/rising edges across controller transfers.
     pub fn select(&mut self, selected: bool) -> Result<(), &'static str> {
         if self.selected == selected {

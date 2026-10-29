@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of Linux sdhci.c/h, Copyright 2005-2008 Pierre Ossman;
-// MMC/SD protocol sequencing retains the source notices in THIRD_PARTY.md.
-//! Native polled SDHCI storage with retained host and generation-bound cards.
-//! SD/SDHC/SDXC and eMMC user-area access share the actual command engine.
+// MMC/SD protocol sequencing keeps the source notices in THIRD_PARTY.md.
+//! Native polled SDHCI storage with kept host and generation-bound cards.
+//! SD/SDHC/SDXC and eMMC user-area access share the command engine.
 use crate::{
     Clock, Deadline, Handoff,
     block::{BlockDevice, BlockError, Command, Finished, Identity},
@@ -67,12 +67,12 @@ pub fn matches(function: &Function) -> bool {
 }
 
 /// Candidate selection from copied identity DATA; owned attachment still
-/// revalidates actual configuration and platform requirements.
+/// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
     function.class[0..2] == [0x08, 0x05] && matches!(function.class[2], 0 | 1)
 }
 
-/// Native PCI slots, including empty sockets retained for explicit polling.
+/// Native PCI slots, including empty sockets kept for explicit polling.
 pub struct Attached {
     pub hosts: Vec<Host>,
     pub cards: Vec<Card>,
@@ -80,7 +80,7 @@ pub struct Attached {
 }
 
 /// Attach only MMIO already mapped by the normal firmware handoff. Vendor
-/// electrical/reset/clock quirks require their own qualified source profiles.
+/// electrical/reset/clock quirks require their own checked source profiles.
 pub fn attach(
     function: &mut Function,
     handoff: &Handoff,
@@ -109,14 +109,14 @@ pub fn attach(
     ))
 }
 
-/// Whether later host clock/power operations require retained PCI ownership.
+/// Whether later host clock/power operations require kept PCI ownership.
 pub fn requires_owned_config(function: &Function) -> bool {
     let profile = Profile::select(function.vendor, function.device);
     matches(function) && (profile.retained_config() || profile.gli())
 }
 
-/// Consume the actual enumerated function for profiles requiring future PCI
-/// configuration. All slots share that original authority, without raw ECAM aliases.
+/// Consume the enumerated function for profiles requiring future PCI
+/// configuration. All slots share that original permission, without raw ECAM aliases.
 pub fn attach_owned(
     mut function: Function,
     handoff: &Handoff,
@@ -311,7 +311,7 @@ enum Phase {
     },
 }
 
-/// Actual architectural registers captured after acknowledged host reset.
+/// Architectural registers captured after acknowledged host reset.
 #[derive(Clone, Copy, Debug)]
 pub struct HostInfo {
     pub specification_version: u8,
@@ -326,7 +326,7 @@ pub struct Host {
     inner: Rc<RefCell<Engine>>,
 }
 impl Host {
-    /// Retained primary/cleanup diagnostics require no physical access.
+    /// Primary/cleanup diagnostics require no physical access.
     pub fn last_failure(&self) -> Option<Failure> {
         self.inner.borrow().last_failure.clone()
     }
@@ -514,7 +514,7 @@ impl BlockDevice for Card {
             let notify = c.medium.as_ref().is_some_and(|medium| medium.notify);
             // A notified MMC may stop accepting commands until power cycles.
             // Fence every alias before the notification starts, and never send
-            // CMD13 after its actual R1b/DAT0 completion.
+            // CMD13 after its R1b/DAT0 completion.
             c.medium = None;
             if notify {
                 c.power_off_notify()?;
@@ -896,7 +896,7 @@ impl Engine {
                 }
                 Err(gli::gl9755::ClockFailure::Authority(error)) => {
                     // A changed D0/decode/requester epoch denies further MMIO.
-                    // Retain the original owner without touching stale BARs.
+                    // Keep the original owner without touching stale BARs.
                     return Err(self.quarantine_authority(error));
                 }
                 Err(gli::gl9755::ClockFailure::Hardware(error)) => {
@@ -931,7 +931,7 @@ impl Engine {
         let (divisor, actual) = clock_divisor(self.version, self.base_hz, hz)?;
         let field = (divisor & 0xff) << 8 | (divisor & 0x300) >> 2;
         if self.profile.retained_config() {
-            // The retained O2 profile qualifies its own PLL/card-detect hook.
+            // The kept O2 profile checks its own PLL/card-detect hook.
             self.registers.write16(CLOCK, field | CLOCK_INTERNAL);
             if self.o2_card_present()? {
                 self.registers
@@ -948,7 +948,7 @@ impl Engine {
     }
     fn power_off(&mut self) -> Result<(), BlockError> {
         if self.profile.gli() && !self.uhs_failed && self.healthy().is_ok() {
-            // Normal power transitions run the actual vendor clock-off hook.
+            // Normal power transitions run the vendor clock-off hook.
             // A permanently fenced owner keeps the immediate containment path.
             self.set_clock(0)?;
         }
@@ -1120,7 +1120,7 @@ mod owned_tests {
             for kind in [Kind::Sd, Kind::Mmc] {
                 let mut backing = vec![0u64; 128 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: the retained controller owns every physical buffer in this fixture.
+                // SAFETY: the controller owns every physical buffer in this fixture.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let chip = Rc::new(RefCell::new(O2Chip::new(device)));
@@ -1202,7 +1202,7 @@ mod owned_tests {
         }
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: both slot engines retain disjoint DMA allocations even on PCI faults.
+        // SAFETY: both slot engines keep disjoint DMA allocations even on PCI faults.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let chip = Rc::new(RefCell::new(O2Chip::new(0x8320)));
         let slot0 = o2_slot(&chip, Kind::Sd, true);
@@ -1290,7 +1290,7 @@ mod owned_tests {
         for pll in [false, true] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: failed clock proof cannot publish or recycle its retained payloads.
+            // SAFETY: failed clock proof cannot publish or recycle its payloads.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let chip = Rc::new(RefCell::new(O2Chip::new(0x8221)));
             let slot = o2_slot(&chip, Kind::Sd, false);

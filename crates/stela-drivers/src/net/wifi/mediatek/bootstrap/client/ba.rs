@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2018 Felix Fietkau <nbd@nbd.name>
 // Copyright (C) 2023 MediaTek Inc.
-//! Actual recipient BA command/queue ownership; canonical Station owns the air
+//! Recipient BA command/queue ownership; canonical Station owns the air
 //! negotiation. No copied session, raw AMPDU or command encoder enables a BA.
 use super::*;
 use crate::net::wifi::mediatek::reorder::Reorder;
@@ -39,9 +39,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         self.state().station.next_tx_block_ack_deadline()
     }
 
-    /// Apply only restrictive canonical timeout/cancellation, retaining its
+    /// Apply only restrictive canonical timeout/cancellation, keeping its
     /// native owner. Firmware disable and any resulting protected local DELBA
-    /// still require actual drain/ACK and separately guarded publication.
+    /// still require drain/ACK and separately guarded publication.
     pub fn poll_block_ack_timers(&mut self, now: u64) -> Result<(), Error> {
         let s = self.state_mut();
         if s.phase != Phase::Associated {
@@ -162,16 +162,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 
     /// Execute the pending canonical BA action under the same whole-profile
-    /// management authority as the current modern association. A successful
+    /// management permission as the current modern association. A successful
     /// Program queues its exact air response for another real publication;
     /// command ACK and packet enqueue are never reported as an air ACK.
     ///
     /// # Safety
-    /// The same exact-controller/retained-policy/armed-autonomous-user contract
-    /// as `configure_modern` applies through this source BA command and actual
+    /// The same exact-controller/kept-policy/armed-autonomous-user contract
+    /// as `configure_modern` applies through this source BA command and
     /// descriptor publication. This serialized owner has no concurrent RX,
     /// BAR, timer, key retirement or teardown callback. Platform timer servicing
-    /// must obey `next_receive_deadline`; stop cancels those actual users.
+    /// must obey `next_receive_deadline`; stop cancels those users.
     pub unsafe fn progress_block_ack<
         H: wifi::regulatory::HardwarePolicy,
         O: wifi::regulatory::OsPolicy,
@@ -325,7 +325,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
     }
 
-    /// Restriction/disconnect-compatible actual BA disable. No new transmit
+    /// Restriction/disconnect-compatible BA disable. No new transmit
     /// permission is needed to stop; a resulting DELBA/replacement action stays
     /// pending until separately admitted. This does not fence requester DMA.
     pub fn progress_block_ack_stop(&mut self) -> Result<(), Error> {
@@ -359,8 +359,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .map_err(Error::BlockAck)?;
         let index = usize::from(session.tid());
         let Some(native) = s.receive_ba[index].as_mut() else {
-            // This exact private start never reached actual publication:
-            // successful or uncertain command publication always retains a
+            // This exact private start never reached publication:
+            // successful or uncertain command publication always keeps a
             // native owner, and uncertainty terminally quarantines Client.
             // There is no hardware/callback/session queue to disable here.
             s.ba_actions.pop_front();
@@ -408,15 +408,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         )
         .map_err(Error::Codec)?;
         if let Err(error) = Self::command(s, Command::StationRecord, &body) {
-            // SAFETY: an uncertain publication retains every owner, as the contract requires.
+            // SAFETY: an uncertain publication keeps every owner, as the contract requires.
             let _ = unsafe {
                 s.station
                     .complete_rx_block_ack(ticket, Completion::Uncertain)
             };
             return Err(error);
         }
-        // Already-owned batches retain their observed session until discarded;
-        // later completed RX is classified under the actual current agreement,
+        // Already-owned batches keep their observed session until discarded;
+        // later completed RX is classified under the current agreement,
         // matching source SSN/PN semantics without inventing a wire generation.
         s.receive_groups.discard_tid(session.tid());
         s.pending_rx.retain(|f| {
@@ -447,7 +447,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let h = parent.head().header();
         let eligible = h.tid.is_some()
             && !h.receiver.is_multicast()
-            && parent.head().bytes()[24] & 0x60 != 0x20; // exact source NOACK equality
+            && parent.head().bytes()[24] & 0x60 != 0x20; // source NOACK equality
         let session = h
             .tid
             .and_then(|tid| s.station.active_rx_block_ack(tid))

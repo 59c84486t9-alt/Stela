@@ -5,7 +5,7 @@
 use super::Verb;
 use alloc::vec::Vec;
 
-/// Codec writes beyond this many distinct targets are not retained.
+/// Codec writes beyond this many distinct targets are not kept.
 const CAPACITY: usize = 4096;
 const SET_FORMAT: u32 = 0x2;
 const SET_AMP: u32 = 0x3;

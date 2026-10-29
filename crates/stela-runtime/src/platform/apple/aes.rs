@@ -280,7 +280,7 @@ pub struct Aes {
     disabled: u32,
     started: bool,
     /// Unsupported DMA may already have committed RAM and chaining state.
-    /// Retain the cause until a qualified recovery can authorize execution.
+    /// Keep the cause until a checked recovery can authorize execution.
     dma_failure: Option<&'static str>,
     fifo: VecDeque<u32>,
     overflow: bool,
@@ -469,7 +469,7 @@ impl Aes {
 
     /// Run every whole command at the head of the started FIFO, moving data
     /// through `port`. A command the model does not implement is refused
-    /// and stays queued. An unsupported DMA transfer retains its cause and
+    /// and stays queued. An unsupported DMA transfer keeps its cause and
     /// command without replay: accepted prefixes and chaining state cannot be
     /// undone or restarted by FIFO submission, START or CLEAR_FIFO.
     pub fn run(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
@@ -748,7 +748,7 @@ impl Lifecycle for Aes {
     }
 
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
-        // Retained gates preserve accepted commands, sticky disable bits,
+        // Gates preserve accepted commands, sticky disable bits,
         // key contexts, chaining values and already pending interrupts.
         self.lifecycle = proposed;
         self.signal(access);

@@ -2,7 +2,7 @@
 //! ALC1220 OEM analog wiring from alc882.c::{alc1220_fixup_gb_x570,
 //! alc1220_fixup_clevo_p950,alc882_fixup_tbl} at Linux
 //! a804c5742bff224d4cb4d25dd383554d598be32b (GPL-2.0-or-later).
-//! PCI subsystem observations come from the retained controller, never AFG f20.
+//! PCI subsystem observations come from the controller, never AFG f20.
 use super::CoefficientChange;
 use crate::{
     audio::{
@@ -48,7 +48,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Ok(());
         }
         // Linux overrides these connections to {0x0c}. This native cut requires
-        // that actual silicon advertises that same first selector entry; it
+        // that silicon advertises that same first selector entry; it
         // never forges graph metadata to claim an unobserved hardware route.
         for node in [0x14, 0x1b] {
             let pin = graph.widget(node).ok_or(Error::UnsupportedTopology)?;

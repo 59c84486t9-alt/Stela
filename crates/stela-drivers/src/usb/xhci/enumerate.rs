@@ -498,7 +498,7 @@ impl Controller {
         Ok(device)
     }
 
-    /// Read every descriptor index, retaining the complete original byte streams.
+    /// Read every descriptor index, keeping the complete original byte streams.
     pub(super) fn configurations(
         &mut self,
         slot: u8,
@@ -682,7 +682,7 @@ impl Controller {
                 )
                 .is_ok();
         let alternate = if multi { MULTI_TT_ALTERNATE } else { 0 };
-        // SET_INTERFACE success is physical authority for this setting. If its
+        // SET_INTERFACE success is physical permission for this setting. If its
         // original descriptor cannot supply a complete status bitmap, refuse
         // before Configure Endpoint, downstream power or child publication.
         let endpoint = hub::usb2_status_endpoint(original, device.speed, alternate, ports)?;

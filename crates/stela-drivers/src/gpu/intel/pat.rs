@@ -1,4 +1,4 @@
-//! Original direct XeLP PAT writes, bound to a live actual Device epoch.
+//! Original direct XeLP PAT writes, bound to a live Device epoch.
 use super::activation::Device;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -15,7 +15,7 @@ pub(super) struct NativeResult {
 }
 const _: () = assert!(core::mem::size_of::<NativeResult>() == 36);
 const _: () = assert!(core::mem::offset_of!(NativeResult, entries) == 20);
-/// Exact original issued sequence and cache policy. The borrow retains the real
+/// Original issued sequence and cache policy. The borrow keeps the real
 /// epoch; this is not an installed/ACK/READY, PTE, DMA or reset-survival token.
 /// Drop performs no implicit rollback, sleep or cleanup. Subsequent bootstrap
 /// must use this same Device, not a copied numeric index or success boolean.

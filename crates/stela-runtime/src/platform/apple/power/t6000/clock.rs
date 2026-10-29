@@ -1,4 +1,4 @@
-//! Matching T6000 native-program clock inputs and retained phase ownership.
+//! Matching T6000 native-program clock inputs and kept phase ownership.
 //!
 //! LLB4a80c/4036c selects parameter29, not the fixed24MHz branch. Its
 //! 1a7f40 descriptor reads292240000 and recursively selects PLL0/1 through
@@ -96,8 +96,8 @@ struct Inputs {
     words: [Observation; Register::ALL.len()],
 }
 
-/// One immutable supplied input image, shared by the actual bus and phase
-/// owner. Writes/programming/lock changes remain unqualified. In particular a
+/// One immutable supplied input image, shared by the bus and phase
+/// owner. Writes/programming/lock changes remain unchecked. In particular a
 /// source frequency calculation is not a native PLL lock observation.
 #[derive(Clone)]
 pub struct Image(Rc<Inputs>);
@@ -149,7 +149,7 @@ impl Image {
     fn pll0(&self) -> Result<u32, Error> {
         // Preserve native W-register arithmetic and the original read-before-
         // disable ordering. A captured disabled control cannot waive unknown
-        // configuration reads which the actual helper performs first.
+        // configuration reads which the helper performs first.
         let configuration = self.raw(Register::Pll0Configuration)?;
         let mut value = (configuration & 0x3fff) << 16;
         value = value.wrapping_mul(1 + ((configuration >> 20) & 1));
@@ -181,7 +181,7 @@ impl Image {
     }
     /// Source query for the admitted parameter29 descriptor. This does not
     /// admit its caller's revision/feature guards, reconstruct firmware caches
-    /// or assert a physical oscillator's phase. Zero is an actual computed
+    /// or assert a physical oscillator's phase. Zero is a computed
     /// disabled/zero-divisor result, not an invented healthy frequency.
     pub fn frequency(&self) -> Result<u32, Error> {
         let raw = self.raw(Register::Selection)?;
@@ -486,7 +486,7 @@ mod tests {
             &[0x10002, 0x10003, 0x20003, 0x30003, 0x20002]
         );
         assert!(parameters[5..].iter().all(|entry| *entry == 0));
-        // Parent2/3 call the actual PLL decoder with0/1, not a fixed24MHz alias.
+        // Parent2/3 call the PLL decoder with0/1, not a fixed24MHz alias.
         for (offset, instance) in [(0x1a76d0, 0), (0x1a7720, 1)] {
             assert_eq!(word(offset), 0x1c);
             assert_eq!(quad(offset + 8), instance);

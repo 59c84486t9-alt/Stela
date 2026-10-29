@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 // Independent bounded test peer: ordinary AES-CMAC blocks over the source BIP
-// AAD/body/MMIE. It never invokes production Cmac/BipKey to fabricate a proof.
+// AAD/body/MMIE. It never invokes production Cmac/BipKey to invent a proof.
 fn cmac(material: &[u8; 16], bytes: &[u8]) -> [u8; 16] {
     let aes = Aes128::new_from_slice(material).unwrap();
     let block = |bytes: &mut [u8; 16]| aes.encrypt_block(aes::Block::from_mut_slice(bytes));
@@ -91,7 +91,7 @@ fn fixture() -> Fixture {
     }));
     let (mut mailbox, wm, _, _) = setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
     let drops = Arc::new(AtomicUsize::new(0));
-    // SAFETY: exclusive actual modeled WCID/BSS and independently empty users.
+    // SAFETY: exclusive modeled WCID/BSS and independently empty users.
     let mut key = unsafe {
         HardwareKey::claim(
             &mailbox,
@@ -111,7 +111,7 @@ fn fixture() -> Fixture {
             ReplaySeed::ZERO,
         )
         .unwrap();
-    // SAFETY: actual model command/RX/TX/IRQ users drained; authenticated model key exchange.
+    // SAFETY: model command/RX/TX/IRQ users drained; authenticated model key exchange.
     unsafe {
         key.install_igtk(
             &mut mailbox,
@@ -154,7 +154,7 @@ fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
     key.authorize(&key_packet(gtk, 9)).unwrap();
     key.authenticate_bip(&packet(gtk, 4, 0x55, 101)).unwrap();
     let before = wm.lock().unwrap().completed.len();
-    // SAFETY: authentic model key exchange; actual combined-batch users drained.
+    // SAFETY: authentic model key exchange; combined-batch users drained.
     let new = unsafe {
         key.rotate_igtk(
             &mut mailbox,
@@ -193,7 +193,7 @@ fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
     key.authorize(&key_packet(gtk, 10)).unwrap();
     for (index, material, identity) in [(4, 0x55, old), (5, 0x66, new)] {
         assert_eq!(
-            // SAFETY: no actual model old users; exact retries cannot reset either IPN.
+            // SAFETY: no model old users; exact retries cannot reset either IPN.
             unsafe {
                 key.rotate_igtk(
                     &mut mailbox,
@@ -223,7 +223,7 @@ fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
     assert!(key.authenticate_bip(&packet(gtk, 4, 0x55, 301)).is_err());
     key.authenticate_bip(&packet(gtk, 4, 0x77, 301)).unwrap();
     // SAFETY: authenticated model peer has retired current index4 material;
-    // actual old users drained. Same-index replacement must keep other index5.
+    // old users drained. Same-index replacement must keep other index5.
     let fourth = unsafe {
         key.rotate_igtk(
             &mut mailbox,
@@ -244,7 +244,7 @@ fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
     ));
     key.authorize(&key_packet(gtk, 11)).unwrap();
     let removed = key.remove(&mut mailbox).unwrap();
-    // SAFETY: actual whole-batch removal ACK and independent model old-user drain.
+    // SAFETY: whole-batch removal ACK and independent model old-user drain.
     unsafe { key.retire_after_drain(removed) }.unwrap();
     drop(key);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -253,7 +253,7 @@ fn actual_live_igtk_ack_retains_both_index_windows_without_data_pn_reset() {
 #[test]
 fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
     let (mut mailbox, mut key, _, wm, _, gtk) = fixture();
-    // SAFETY: actual source-modeled command/key/IRQ users drained and authentic new key.
+    // SAFETY: source-modeled command/key/IRQ users drained and authentic new key.
     unsafe { key.rotate_igtk(&mut mailbox, 4, &[0x66; 16], PacketNumber::new(5).unwrap()) }
         .unwrap();
     let identity = key.installed_igtk().unwrap();
@@ -289,7 +289,7 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
         ),
     ] {
         assert_eq!(
-            // SAFETY: no actual model users; invalid input must not publish.
+            // SAFETY: no model users; invalid input must not publish.
             unsafe {
                 key.rotate_igtk(
                     &mut mailbox,
@@ -305,7 +305,7 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
     assert_eq!(key.installed_igtk(), Some(identity));
     key.authenticate_bip(&packet(gtk, 4, 0x66, 6)).unwrap();
     let removed = key.remove(&mut mailbox).unwrap();
-    // SAFETY: actual model whole-key removal and old-user drain; history must survive.
+    // SAFETY: model whole-key removal and old-user drain; history must survive.
     unsafe { key.retire_after_drain(removed) }.unwrap();
     key.install(
         &mut mailbox,
@@ -336,7 +336,7 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
 fn live_igtk_history_exhaustion_preserves_current_and_other_receive_windows() {
     let (mut mailbox, mut key, _, wm, _, _) = fixture();
     for material in 1..HISTORY_CAPACITY as u8 {
-        // SAFETY: actual modeled old users drained; source peer retired overwritten index.
+        // SAFETY: modeled old users drained; source peer retired overwritten index.
         unsafe {
             key.rotate_igtk(
                 &mut mailbox,
@@ -380,7 +380,7 @@ fn actual_negative_late_or_missing_live_igtk_ack_quarantines_every_key_owner() {
             _ => response.lock().unwrap().drop = true,
         }
         assert!(
-            // SAFETY: no modeled old users; firmware/ACK faults are intentionally real peer
+            // SAFETY: no modeled old users; firmware/ACK faults are real peer
             // outcomes.
             unsafe {
                 key.rotate_igtk(

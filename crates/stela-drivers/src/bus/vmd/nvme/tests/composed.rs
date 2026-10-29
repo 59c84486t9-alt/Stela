@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual VMD hierarchy/lifecycle composed with the shared independent NVMe peer.
+//! VMD hierarchy/lifecycle composed with the shared independent NVMe peer.
 //! All effects run synchronously in one thread. No MappingPlatform callback is
 //! treated as a register-access hook, and no raw device memory races CPU memory.
 use super::*;
@@ -13,7 +13,7 @@ struct Configuration(Arc<Mutex<State>>);
 impl protocol::Access for Configuration {
     fn registers_available(&self) -> bool {
         let state = self.0.lock().unwrap();
-        // Observe actual stored posted-write effects, not Lifecycle::phase or
+        // Observe stored posted-write effects, not Lifecycle::phase or
         // the requested Command value. All three PM capabilities exist here.
         state.parent(COMMAND, 2) & u32::from(MEMORY) != 0
             && PATH.into_iter().all(|base| {
@@ -60,7 +60,7 @@ impl Domain {
     }
 }
 // SAFETY: the independent peer owns CPU pins/device snapshots; this additional
-// observer checks the actual original configuration epoch and every stored BM.
+// observer checks the original configuration epoch and every stored BM.
 // It grants no native requester/alias identity and never invents a drain ACK.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
@@ -79,7 +79,7 @@ unsafe impl DmaDomain for Domain {
                 .events
                 .push(Event::Nvme("scattered_map"));
         }
-        // SAFETY: forwarding the exact retained model pins and request.
+        // SAFETY: forwarding the model pins and request.
         let mapping = unsafe { self.original.map(pages, direction, limit) }?;
         assert!(physical.iter().all(|page| *page != mapping.address));
         Ok(mapping)
@@ -116,13 +116,13 @@ unsafe impl DmaDomain for Domain {
         direction: Direction,
     ) -> Result<u32, DmaError> {
         self.current()?;
-        // SAFETY: original peer performs the actual isolated coherent read.
+        // SAFETY: original peer performs the isolated coherent read.
         unsafe { self.original.read_coherent_u32(mapping, offset, direction) }
     }
     unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
         self.contained()?;
         // SAFETY: independently observed stored BM-clear; peer also requires
-        // actual CC.EN0, no pending command and its own successful drain.
+        // CC.EN0, no pending command and its own successful drain.
         unsafe { self.original.drain_posted_writes() }
     }
 }
@@ -143,7 +143,7 @@ impl Fixture {
         {
             let mut state = state.lock().unwrap();
             for base in PATH {
-                // Preserve the actual PCIe capability and add linked PM v3.
+                // Preserve the PCIe capability and add linked PM v3.
                 state.set(base + 0x40, 2, 0x8010);
                 state.set(base + 0x80, 2, 1);
                 state.set(base + 0x82, 2, 3);
@@ -171,10 +171,10 @@ impl Fixture {
     }
     fn attach_with_clock(&mut self, clock: Clock) -> Attachment<Model> {
         let protocol = &self.protocol;
-        // SAFETY: this isolated fixture retains one actual configuration model,
+        // SAFETY: this isolated fixture keeps one configuration model,
         // its selected independent register peer and original model domain.
         // The private sequence is exactly the public native sequence; no fake
-        // native MMIO authority or actual physical requester claim is supplied.
+        // native MMIO permission or physical requester claim is supplied.
         unsafe {
             attach_with_registers_using(
                 self.host.take().unwrap(),
@@ -207,7 +207,7 @@ impl Fixture {
         assert!(self.protocol.snapshot().mappings.is_empty());
         // All namespace/controller handles must already have been dropped.
         // Dropping the final *model* domain owner retires this isolated binding;
-        // no native DmaDomain detach operation is implied or fabricated.
+        // no native DmaDomain detach operation is implied or invented.
         assert_eq!(Arc::strong_count(self.domain.as_ref().unwrap()), 1);
         drop(self.domain.take());
         self.state.lock().unwrap().epoch += 1;
@@ -220,7 +220,7 @@ impl Fixture {
 #[test]
 fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_return() {
     let mut f = Fixture::new();
-    // Exercise actual bridge and endpoint D3hot->D0 posted PMCSR transitions.
+    // Exercise bridge and endpoint D3hot->D0 posted PMCSR transitions.
     for base in PATH {
         f.state.lock().unwrap().set(base + 0x84, 2, 0x8103);
     }
@@ -245,7 +245,7 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
         disk.flush().unwrap();
     }
     assert_eq!(
-        // SAFETY: intentional negative model probe. The original domain observes actual enabled BM
+        // SAFETY: intentional negative model probe. The original domain observes enabled BM
         // bits and must refuse before any drain acknowledgement.
         unsafe { f.domain.as_ref().unwrap().drain_posted_writes() },
         Err(DmaError::DrainUnavailable)
@@ -265,13 +265,13 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
     assert_eq!(after.pages_released, 6);
     assert!(after.retired && after.drained && !after.enabled && after.mappings.is_empty());
     assert!(returned.is_ready());
-    // Ready is only publication; stale handles still retain the original domain.
+    // Ready is only publication; stale handles still keep the original domain.
     assert!(Arc::strong_count(f.domain.as_ref().unwrap()) > 1);
     {
         let state = f.state.lock().unwrap();
         let events = &state.events;
         assert!(events.contains(&Event::Nvme("scattered_map")));
-        // Original PMCSR W1C status survives every path member's actual wake.
+        // Original PMCSR W1C status survives every path member's wake.
         for base in PATH {
             assert_eq!(state.child(base + 0x84, 2) & 0x8000, 0x8000);
         }

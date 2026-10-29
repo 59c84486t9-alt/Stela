@@ -1,9 +1,9 @@
-//! Retained physical segment-copy effects from matching LLB11008/12104.
+//! Physical segment-copy effects from matching LLB11008/12104.
 //!
-//! Both source/destination addresses and the byte count come from the actual
+//! Both source/destination addresses and the byte count come from the
 //! packet. The source compiler permits one pending copy, emits its join, then
 //! advances the next physical chunk. Nothing here supplies firmware bytes or
-//! makes an unmodeled destination accept DMA. Copy data is retained after a
+//! makes an unmodeled destination accept DMA. Copy data is held after a
 //! real read; a later destination refusal must not repeat that read.
 use super::{Error, FlightKind, InFlight, PacketCursor, RouteOutcome, Sram, control};
 use alloc::{rc::Rc, vec::Vec};
@@ -58,7 +58,7 @@ pub enum Phase {
 pub struct Snapshot {
     pub transfer: Transfer,
     pub phase: Phase,
-    /// Includes an invalid short read retained after quarantine.
+    /// Includes an invalid short read kept after quarantine.
     pub retained_bytes: Option<usize>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,7 +384,7 @@ impl PacketCursor {
         self.pc = packet.end;
         Ok(())
     }
-    /// Source's all-fields join is admitted only after this actual copy's full
+    /// Source's all-fields join is admitted only after this copy's full
     /// physical write committed. Unknown finite joins refuse; neither a wait
     /// operand nor a zero word may stand in for unsettled physical effects.
     pub(crate) fn advance_copy_join(&mut self) -> Result<Completed, Error> {

@@ -26,7 +26,7 @@ pub(super) fn system(text: &str) -> Result<System, Error> {
 
 impl ParseState<'_> {
     /// Consume exactly the value words required by this spelling. Duplicate
-    /// checks deliberately stay on their original side of value parsing.
+    /// checks stay on their original side of value parsing.
     fn apply(&mut self, name: &str) -> Result<(), Error> {
         let options = &mut self.options;
         let mut value = || self.words.next();

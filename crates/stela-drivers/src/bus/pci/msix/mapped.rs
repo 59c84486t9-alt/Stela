@@ -4,7 +4,7 @@ use super::*;
 use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
 use core::ptr::NonNull;
 
-/// Actual UC mappings of at most two disjoint windows of one whole BAR resource.
+/// UC mappings of at most two disjoint windows of one whole BAR resource.
 /// The windows allow a small table/PBA without mapping a huge device aperture.
 pub struct MappedBar {
     bar: PhysicalSpan,
@@ -12,10 +12,10 @@ pub struct MappedBar {
 }
 impl MappedBar {
     /// # Safety
-    /// `bar` is this actual function's complete reserved memory BAR at the
-    /// retained reset/assignment epoch. Mappings are actual owned mappings of
-    /// its table/PBA registers with PCI DWORD access and UC ordering qualified
-    /// for this device. Their resource owner must retain that full BAR grant.
+    /// `bar` is this function's complete reserved memory BAR at the
+    /// reset/assignment epoch. Mappings are owned mappings of
+    /// its table/PBA registers with PCI DWORD access and UC ordering checked
+    /// for this device. Their resource owner must keep that full BAR grant.
     /// No firmware/driver/CPU alias may mutate or revoke the table/resources.
     /// Errors return the exact mappings; no device access is performed here.
     pub unsafe fn new(
@@ -67,13 +67,13 @@ impl MappedBar {
         }
         Err(IoError)
     }
-    /// Returned mappings still require actual acknowledged retirement, after all
+    /// Returned mappings still require acknowledged retirement, after all
     /// native source/callback/CPU users have drained; this does not retire them.
     pub fn into_mappings(self) -> [Option<Mapping>; 2] {
         self.mappings
     }
 }
-// SAFETY: unsafe construction binds actual retained resources/UC mappings;
+// SAFETY: unsafe construction binds kept resources/UC mappings;
 // checked pointers and native volatile DWORDs implement the access contract.
 unsafe impl BarAccess for MappedBar {
     fn physical_span(&self) -> PhysicalSpan {
@@ -93,7 +93,7 @@ unsafe impl BarAccess for MappedBar {
     }
     fn read32(&self, offset: u64) -> Result<u32, IoError> {
         let pointer = self.pointer(offset)?;
-        // SAFETY: pointer validates actual retained aligned UC register mapping.
+        // SAFETY: pointer validates kept aligned UC register mapping.
         Ok(unsafe { core::ptr::read_volatile(pointer.as_ptr()) })
     }
     fn write32(&mut self, offset: u64, value: u32) -> Result<(), IoError> {

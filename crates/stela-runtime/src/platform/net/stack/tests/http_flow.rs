@@ -1,4 +1,4 @@
-//! Request redirects and refusal controls through actual smoltcp connections.
+//! Request redirects and refusal controls through smoltcp connections.
 use super::*;
 struct Peer {
     lan: Lan,

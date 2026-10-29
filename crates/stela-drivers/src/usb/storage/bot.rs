@@ -4,7 +4,7 @@
 // Copyright 1999-2002 Matthew Dharm; 2000 David L. Brown, Jr.;
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
 // Block-zero ordering: Linux sd.c, Drew Eckhardt 1992; Eric Youngdale
-// 1993-1995, 1999. Retained lifecycle uses Stela's shared xHCI authority.
+// 1993-1995, 1999. Lifecycle uses Stela's shared xHCI permission.
 use super::super::xhci::{
     DEVICE_TO_HOST, Device, Interface, Operation, RECIPIENT_INTERFACE, TYPE_CLASS,
 };
@@ -35,7 +35,7 @@ pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
     quirks::Flags::from_device(device).map(|_| ())
 }
 
-/// Private seam: every native transfer returns only after completion or actual
+/// Private seam: every native transfer returns only after completion or
 /// xHCI cancellation. An error may leave poison; ready must expose it before
 /// the CPU touches either DMA buffer again. No hosted USB API is used.
 pub(super) trait Io {
@@ -272,8 +272,8 @@ impl Io for Native {
     }
 }
 
-/// The unique owner can move to a fresh transport only after actual whole-device
-/// retirement and successful native reconstruction. Retained old media aliases
+/// The unique owner can move to a fresh transport only after whole-device
+/// retirement and successful native reconstruction. Old media aliases
 /// keep their poisoned Bot, whose buffer slots are then permanently empty.
 /// This never manufactures another DmaBuffer or rewinds its allocator.
 struct TransportBuffer(Option<DmaBuffer>);
@@ -406,7 +406,7 @@ impl<I: Io> Bot<I> {
             max_lun,
         ))
     }
-    /// Perform actual transport admission before committing any moved buffers.
+    /// Perform transport admission before committing any moved buffers.
     fn startup(io: &mut I, interface: u8, flags: quirks::Flags) -> Result<u8, BlockError> {
         io.ready()?;
         let request = setup(
@@ -677,7 +677,7 @@ impl<I: Io> Bot<I> {
         self.tag = self.tag.wrapping_add(1);
         let wrapper = cbw(self.tag, lun, cdb, length, is_in);
         self.wrapper.bytes_mut()[..31].copy_from_slice(&wrapper);
-        // BULK32 pads the actual native transfer; stale wrapper bytes cannot
+        // BULK32 pads the native transfer; stale wrapper bytes cannot
         // leak through the extra donor-defined byte.
         let cbw_length = self.flags.cbw_len();
         self.wrapper.bytes_mut()[31] = 0;
@@ -959,9 +959,9 @@ impl Bot<Native> {
             device.quarantine();
         }
     }
-    /// Reconstruct the genuine attachment while retaining its two transport
+    /// Reconstruct the attachment while keeping its two transport
     /// allocations. Root-leaf reset also reuses the controller's retired
-    /// resources; downstream reset retains the existing allocation behavior.
+    /// resources; downstream reset keeps the existing allocation behavior.
     /// Every fallible reconstruction step precedes moving either buffer owner.
     pub fn reset_and_rebind(
         &mut self,
@@ -1088,7 +1088,7 @@ impl Bot<Native> {
             // acknowledged all old endpoint DMA, and fresh configuration and
             // endpoint commands have acknowledged the replacement. No request
             // in the new transport refers to either application buffer yet.
-            // Move the actual unique owners; old aliases stay poisoned and
+            // Move the unique owners; old aliases stay poisoned and
             // cannot inspect or submit these addresses again.
             let mut buffer = self.buffer.transfer();
             let mut wrapper = self.wrapper.transfer();

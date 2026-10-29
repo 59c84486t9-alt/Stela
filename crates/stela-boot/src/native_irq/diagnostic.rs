@@ -1,4 +1,4 @@
-//! Actual EDU MSI lifecycle under the source-bound QEMU TCG fixture grant.
+//! EDU MSI lifecycle under the source-bound QEMU TCG fixture grant.
 use alloc::{format, string::String, sync::Arc};
 use core::{
     arch::asm,
@@ -20,7 +20,7 @@ pub(super) struct Edu {
 }
 impl Edu {
     pub(super) fn read(&self, offset: usize) -> u32 {
-        // SAFETY: actual retained root-stable UC EDU BAR, checked by the
+        // SAFETY: root-stable UC EDU BAR, checked by the
         // enclosing exclusive QEMU-only fixture before ownership transfer.
         unsafe { ((self.base + offset) as *const u32).read_volatile() }
     }
@@ -41,7 +41,7 @@ impl Edu {
         self.bad_ack.load(Ordering::Relaxed)
     }
     fn dma_idle(&self) -> bool {
-        // SAFETY: actual owned EDU DMA_COMMAND supports a 64-bit read.
+        // SAFETY: owned EDU DMA_COMMAND supports a 64-bit read.
         unsafe { ((self.base + 0x98) as *const u64).read_volatile() & 1 == 0 }
     }
 }
@@ -53,7 +53,7 @@ impl Handler for Edu {
         if self.read(0x24) != 0 {
             self.bad_ack.fetch_add(1, Ordering::Relaxed);
         }
-        // Release publishes actual cause/ACK observation to the waiting owner.
+        // Release publishes cause/ACK observation to the waiting owner.
         self.received.fetch_add(1, Ordering::Release);
         if cause == 0 {
             Disposition::NotMine
@@ -78,7 +78,7 @@ impl EduSource {
 // SAFETY: only the exact QEMU EDU fixture creates this source, after DMA has
 // completed, BusMaster is off and VT-d shutdown acknowledged. It has no queued
 // worker/timer; RUN-clear/idle, cause ACK and synchronous TCG device callbacks
-// qualify stopped DMA/posted interrupts. This is not physical PCI quiescence.
+// check stopped DMA/posted interrupts. This is not physical PCI quiescence.
 unsafe impl Source for EduSource {
     fn mask(&mut self) -> Result<(), IrqError> {
         let offset = u16::from(self.msi.offset);
@@ -224,8 +224,8 @@ pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Res
         crate::engine::interrupts::TIMER_VECTOR,
         clock.ticks_per_microsecond * 1_000_000,
     );
-    // SAFETY: same strict TCG/SMM-off single-BSP fixture, actual installed
-    // reserved-vector IDT and permanently retained identity UC APIC mapping.
+    // SAFETY: same strict TCG/SMM-off single-BSP fixture, installed
+    // reserved-vector IDT and permanently kept identity UC APIC mapping.
     unsafe { super::initialize(apic_base, apic_registers, timeout) }
         .map_err(|error| format!("native IRQ attach: {error:?}"))?;
     let edu = Arc::new(Edu {
@@ -284,7 +284,7 @@ pub(crate) fn run(
     if retired.route().vector() != vector {
         return Err(String::from("EDU MSI retired a different route"));
     }
-    // Recover exactly the original uniquely owned Function after actual
+    // Recover exactly the original uniquely owned Function after
     // source/IRR/ISR/callback/work drain. No second ECAM enumeration or cloned
     // configuration/root owner is introduced by the following INTx phase.
     // SAFETY: concrete source owns the stopped EDU/Function. Keep its original
@@ -303,7 +303,7 @@ pub(crate) fn run(
         ));
     }
     // Trigger a new device cause after acknowledged MSI disable/detach. The
-    // retained observer must see no callback before the cause is cleared.
+    // observer must see no callback before the cause is cleared.
     edu.write(0x60, 2);
     // SAFETY: no heap or resource lock is held, the IDT handler is installed and interrupts are
     // masked again right after the wait.
@@ -327,5 +327,5 @@ pub(crate) fn run(
     ))
 }
 
-// Actual retained native configuration owner, never a CPU-bound raw transport.
+// Native configuration owner, never a CPU-bound raw transport.
 type Function = PciFunction<OwnedConfig>;

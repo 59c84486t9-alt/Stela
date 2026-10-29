@@ -130,7 +130,7 @@ impl Inputs {
     /// Hash-only first use. Repeats reopen safely and check identity/cap without
     /// copying or rehashing a compiler/common header for every translation unit.
     pub fn verify(&mut self, key: Key) -> Result<Binding> { Ok(self.capture(key, false)?.0) }
-    /// Temporary actual bytes for a parser/object scanner; not retained here.
+    /// Temporary bytes for a parser/object scanner; not kept here.
     pub fn read(&mut self, key: Key) -> Result<Vec<u8>> { self.capture(key, true)?.1.ok_or_else(|| "missing captured bytes".to_owned()) }
     /// Explicit caller-owned source-provenance directory capability. None is
     /// the selected root. Below-root directories are no-follow and guarded.
@@ -210,7 +210,7 @@ mod platform {
     fn component(value: &OsStr) -> Result<CString> { CString::new(value.as_bytes()).map_err(|error| format!("invalid input component: {error}")) }
     fn open_at(parent: RawFd, name: &OsStr, flags: i32) -> Result<File> {
         let name = component(name)?;
-        // SAFETY: live retained parent, terminated name, no creation vararg.
+        // SAFETY: live parent, terminated name, no creation vararg.
         let fd = unsafe { libc::openat(parent, name.as_ptr(), flags) };
         require!(fd >= 0, "no-follow open {:?}: {}", name, io::Error::last_os_error());
         // SAFETY: successful openat uniquely transfers descriptor ownership.
@@ -257,7 +257,7 @@ mod platform {
             let parent = self.walk(parent_path, hook)?;
             let name = relative.file_name().ok_or("input filename missing")?; let encoded = component(name)?;
             let mut metadata = MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: live retained parent, terminated name, writable stat storage.
+            // SAFETY: live parent, terminated name, writable stat storage.
             require!(unsafe { libc::fstatat(parent.as_raw_fd(), encoded.as_ptr(), metadata.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0, "no-follow input stat {}: {}", relative.display(), io::Error::last_os_error());
             // SAFETY: successful fstatat initialized stat fields used below.
             let before_path = convert(unsafe { metadata.assume_init_ref() })?;
@@ -294,7 +294,7 @@ mod platform {
             loop {
                 // SAFETY: supported platform's thread-local errno cell.
                 unsafe { *errno() = 0 };
-                // SAFETY: unique live DIR remains retained through iteration.
+                // SAFETY: unique live DIR remains held through iteration.
                 let entry = unsafe { libc::readdir(directory.0) };
                 if entry.is_null() {
                     // SAFETY: the supported errno accessor supplies this calling
@@ -307,11 +307,11 @@ mod platform {
                 require!(names.len() < limit, "input directory entry count exceeds bound");
                 names.push(OsString::from_vec(name.to_vec()));
             }
-            // SAFETY: live DIR uniquely retains the borrowed descriptor through
+            // SAFETY: live DIR uniquely keeps the borrowed descriptor through
             // the following fstat; no File takes ownership of that descriptor.
             let descriptor = unsafe { libc::dirfd(directory.0) };
             let mut metadata = MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: retained descriptor and writable exact stat storage.
+            // SAFETY: descriptor and writable exact stat storage.
             require!(unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } == 0, "directory stat failed");
             // SAFETY: successful fstat initialized fields read by convert.
             let after = convert(unsafe { metadata.assume_init_ref() })?;

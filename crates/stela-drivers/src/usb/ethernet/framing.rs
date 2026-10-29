@@ -28,7 +28,7 @@ pub fn encode(frame: &[u8], output: &mut [u8]) -> Result<usize, &'static str> {
 }
 
 /// Validate the entire block before exposing any frames. Device-supplied
-/// lengths never index outside the actual completed transfer; FCS is removed.
+/// lengths never index outside the completed transfer; FCS is removed.
 pub fn decode(bytes: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     if bytes.len() > AGGREGATE {
         return Err("RTL815x oversized RX aggregate");

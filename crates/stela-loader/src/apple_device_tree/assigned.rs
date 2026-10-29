@@ -3,7 +3,7 @@
 //! XNU's CPU parser enumerates every `/cpus` child; `state` identifies the
 //! boot PE, it does not disable an unassigned PE. Firmware `cpu-id` and
 //! `l2-cache-id` are separate from the kernel's dense IDs and our resource
-//! IDs. IDs are preserved by default; an explicitly qualified recipe may
+//! IDs. IDs are preserved by default; an explicitly checked recipe may
 //! project CPU IDs and their watchdog records together. Source identities and
 //! startup/interrupt/power payloads are preserved in either case.
 //! Source coordinates: original 26A434 J314s iBoot SHA-256
@@ -15,11 +15,11 @@
 //! logical IDs/physical cluster/cache topology. Public XNU xnu-12377.121.6
 //! machine_routines.c, IOPlatformExpert.cpp and AppleARMSMP.cpp independently
 //! explain these interfaces; that distinct release is not the binary's source.
-//! The fixed cluster-count producer alone does not qualify reduced-cluster
-//! consumer semantics: callers must supply qualified field rules explicitly.
+//! The fixed cluster-count producer alone does not check reduced-cluster
+//! consumer semantics: callers must supply checked field rules explicitly.
 //!
 //! This module does not admit the supplied source/resource bindings or create
-//! additional hardware slots, native workers or initial lifecycle authority.
+//! additional hardware slots, native workers or initial lifecycle permission.
 use super::{DeviceTree, Node};
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
@@ -35,7 +35,7 @@ const CPUS: &str = "/cpus";
 const RUNNING: &[u8] = b"running\0";
 const WAITING: &[u8] = b"waiting\0";
 
-/// Explicit source-node/resource association supplied by the qualified owner.
+/// Explicit source-node/resource association supplied by the checked owner.
 /// IDs are not interpreted as firmware IDs, addresses, masks or phandles.
 #[derive(Debug, Clone, Copy)]
 pub struct NodeBinding<'a> {
@@ -54,7 +54,7 @@ pub enum Count {
     Clusters,
     CoreType(u8),
 }
-/// A source-qualified count property. Values have the original u32 encoding.
+/// A source-checked count property. Values have the original u32 encoding.
 /// Absent fields are created only when explicitly listed by the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct CountField<'a> {
@@ -69,20 +69,20 @@ pub enum ReferenceEncoding {
     /// Every u32 cell names the original firmware cpu-id (not logical ID).
     FirmwareCpuIds,
 }
-/// A source-qualified external CPU reference list. A reference to a removed
-/// CPU refuses projection; its consumers need their own qualified adaptation.
+/// A source-checked external CPU reference list. A reference to a removed
+/// CPU refuses projection; its consumers need their own checked adaptation.
 #[derive(Debug, Clone, Copy)]
 pub struct ReferenceField<'a> {
     pub path: &'a str,
     pub property: &'a str,
     pub encoding: ReferenceEncoding,
 }
-/// Immutable input identity and actual retained CPU resource bindings. Every
+/// Immutable input identity and kept CPU resource bindings. Every
 /// original CPU is independently shape/identity validated before projection;
 /// removed CPUs need no invented executor or lifecycle IDs. The source owner
-/// must still qualify all topology consumers; arbitrary property bytes
+/// must still check all topology consumers; arbitrary property bytes
 /// are not guessed to be phandles, IDs or CPU masks. This metadata grants no
-/// device/executor authority or completeness credit for unqualified consumers.
+/// device/executor permission or completeness credit for unchecked consumers.
 #[derive(Debug)]
 pub struct SourceBindings<'a> {
     pub source_set_sha256: [u8; 32],
@@ -90,7 +90,7 @@ pub struct SourceBindings<'a> {
     pub nodes: &'a [NodeBinding<'a>],
     pub counts: &'a [CountField<'a>],
     pub references: &'a [ReferenceField<'a>],
-    /// Explicitly qualified coordinated consumer recipe; ordinary projections
+    /// Explicitly checked coordinated consumer recipe; ordinary projections
     /// preserve source IDs and cannot opt into renumbering implicitly.
     pub cpu_ids: CpuIdRecipe<'a>,
 }
@@ -311,7 +311,7 @@ impl<'p, 's> Projection<'p, 's> {
         let mut affinities = BTreeSet::new();
         // Source enumeration and native ownership are separate phases. Validate
         // ALL original nodes, including those that will be removed, without
-        // requiring fabricated resources for an unassigned hardware slot.
+        // requiring invented resources for an unassigned hardware slot.
         for node in &cpus.children {
             shape(node, plan.profile().soc)?;
             let reg = word(node, "reg")?;
@@ -488,8 +488,8 @@ impl<'p, 's> Projection<'p, 's> {
                 u32::try_from(count)?.to_le_bytes().to_vec(),
             )?;
         }
-        // Known topology fields cannot silently retain stale counts/masks or
-        // unqualified reference schemas. Source owners must list each one.
+        // Known topology fields cannot silently keep stale counts/masks or
+        // unchecked reference schemas. Source owners must list each one.
         fn consumers(node: &Node, path: &str, locations: &BTreeSet<(&str, &str)>) -> Result<()> {
             if !path.starts_with("/cpus/") {
                 for p in &node.properties {

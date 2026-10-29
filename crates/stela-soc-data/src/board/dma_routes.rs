@@ -3,7 +3,7 @@ use super::{Iommu, Node, String, Vec, format};
 
 /// Declared mapper context and its assigned incoming native DMA stream.
 /// This does not resolve a buffer address, strip a relocation tag, or grant
-/// access without the actual placed DART and its live translation tables.
+/// access without the placed DART and its live translation tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeDmaRoute {
     pub mapper: u32,
@@ -72,7 +72,7 @@ pub(super) fn native_dma_mapper_list(node: &Node<'_>, key: &str) -> Result<Vec<u
 }
 
 /// Assign a modeled native endpoint its declared incoming route while
-/// retaining its OS mapper context. This is a Stela endpoint assignment,
+/// keeping its OS mapper context. This is a Stela endpoint assignment,
 /// not an observation of an Apple bus transaction.
 pub(super) fn native_mapper_input(dart: &Iommu, context: u32) -> Result<u32, String> {
     if !dart.sids.is_empty() && !dart.sids.contains(&context) {

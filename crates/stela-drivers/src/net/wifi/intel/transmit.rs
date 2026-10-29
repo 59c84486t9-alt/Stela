@@ -61,16 +61,16 @@ impl LegacyRate {
     }
 }
 /// Pure inputs corresponding to the source station and rate selection. These
-/// copied observations grant no actual station, antenna, rate or key authority.
+/// copied observations grant no station, antenna, rate or key permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parameters {
     pub station_authorized: Option<bool>,
     /// Source explicit host/injected-rate path, distinct from firmware RS.
     pub force_host_rate: bool,
     pub host_rate: LegacyRate,
-    /// Source actual selected A=1 or B=2, not a PHY mask/default selection.
+    /// Source selected A=1 or B=2, not a PHY mask/default selection.
     pub host_antenna: u8,
-    /// Actual future owner must retain the generation-bound firmware key and
+    /// Future owner must keep the generation-bound firmware key and
     /// firmware nonce context through publication and all completion/drain.
     pub firmware_encryption: bool,
 }
@@ -193,9 +193,9 @@ impl Prepared {
     pub fn host_rate(&self) -> Option<u32> {
         self.host_rate
     }
-    /// TVQM queue identity is 9-bit; the source echo sequence deliberately
-    /// contains only its low5 bits. Actual completion must use the complete
-    /// source response queue and retained epoch, never this echo alone.
+    /// TVQM queue identity is 9-bit; the source echo sequence
+    /// contains only its low5 bits. Completion must use the complete
+    /// source response queue and kept epoch, never this echo alone.
     pub fn encode(&self, queue: u16, index: u16) -> Result<Encoded, Error> {
         if queue >= 512 {
             return Err(Error::Queue);
@@ -233,7 +233,7 @@ impl Encoded {
     pub fn command(&self) -> &[u8] {
         &self.command
     }
-    /// Actual source TB0 is bidirectional coherent firmware storage; callers
+    /// Source TB0 is bidirectional coherent firmware storage; callers
     /// must not map it read-only or overwrite before a real CPU handoff.
     pub fn first_tb(&self) -> &[u8] {
         &self.command[..FIRST_TB_BYTES]

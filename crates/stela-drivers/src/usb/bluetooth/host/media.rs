@@ -53,7 +53,7 @@ pub(super) struct Native {
     alt6_packet_flow: bool,
 }
 impl Hci<Host> {
-    /// Owned SCO/queued wideband for an actually initialized source QCA profile.
+    /// Owned SCO/queued wideband for an initialized source QCA profile.
     pub fn into_qca_media(
         mut self,
         dma: &mut dyn DmaAllocator,
@@ -64,7 +64,7 @@ impl Hci<Host> {
         crate::usb::bluetooth::qca::media::Session::start(self)
     }
     /// Open USB2 CVSD SCO on this already initialized exact Realtek function.
-    /// The host stack supplies actual voice state and owns HCI command credits.
+    /// The host stack supplies voice state and owns HCI command credits.
     pub fn into_realtek_sco(
         mut self,
         dma: &mut dyn DmaAllocator,
@@ -74,8 +74,8 @@ impl Hci<Host> {
         self.io.media = Some(Native::new(bindings, dma)?);
         crate::usb::bluetooth::realtek::media::Session::start(self)
     }
-    /// Enable this PC's MT7925 media extension with retained live initialization
-    /// evidence and an actual current HCI command allowance. This must precede
+    /// Enable this PC's MT7925 media extension with kept live initialization
+    /// evidence and a current HCI command allowance. This must precede
     /// concurrent host/guest stack ownership; it neither performs nor permits a
     /// shared Wi-Fi/Bluetooth reset. All DMA comes from this attachment's owner.
     pub fn into_mt7925_media(
@@ -135,7 +135,7 @@ impl Native {
         Ok(())
     }
     fn select(host: &mut Host, interface: u8, alternate: u8) -> Result<(), BlockError> {
-        // Genuine standard SET_INTERFACE completion, never just a local plan.
+        // Standard SET_INTERFACE completion, never just a local plan.
         host.control(
             xhci::setup(1, 11, u16::from(alternate), u16::from(interface), 0),
             &[],
@@ -408,7 +408,7 @@ impl Native {
                     self.alt6_packet_flow = !self.alt6_packet_flow;
                 }
                 // Separate buffers for all services; none is overwritten before
-                // its actual terminal completion or acknowledged cancellation.
+                // its terminal completion or acknowledged cancellation.
                 let mut offset = 0;
                 for (b, &length) in self.output.iter_mut().zip(&lengths) {
                     if deadline.passed() {
@@ -511,7 +511,7 @@ impl Native {
         if pair.alternate == 6 {
             self.alt6_packet_flow = !self.alt6_packet_flow;
         }
-        // Retain the intended packet before its first publication. Any later
+        // Keep the intended packet before its first publication. Any later
         // failure closes/quarantines all previously published service owners.
         self.queued_output.push_back(QueuedOutput {
             sequence,
@@ -593,7 +593,7 @@ impl Native {
                     cause: alloc::boxed::Box::new(BlockError::Timeout.into()),
                 });
             }
-            buffer.queued = None; // Only an actual terminal service releases DMA.
+            buffer.queued = None; // Only a terminal service releases DMA.
             packet.retired += 1;
             if done.status != IsoStatus::Success || done.bytes != packet.lengths[index] {
                 return Err(media::Error::QueuedOutput {
@@ -940,7 +940,7 @@ mod tests {
             .unwrap();
             let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
             // This is the shared fixture's real submitted interrupt/bulk TD,
-            // not a fabricated completion. The endpoint plan is local test data.
+            // not an invented completion. The endpoint plan is local test data.
             let mut pair = native.bindings.iso();
             pair.input.address = 0x82;
             pair.output.address = 2;
@@ -1031,11 +1031,11 @@ mod tests {
             .unwrap();
         assert_eq!(done.status, IsoStatus::Success);
         assert_eq!(done.bytes, length);
-        assert!(native.output.iter().all(|b| b.queued.is_none())); // Payload done; schedule still retained.
+        assert!(native.output.iter().all(|b| b.queued.is_none())); // Payload done; schedule still held.
         native.quiesce(&mut hci.io).unwrap();
-        assert!(fixture.commands().contains(&(15, dci))); // Actual Stop Endpoint ACK.
-        assert!(fixture.commands().contains(&(16, dci))); // Actual Set Dequeue ACK resets Queue.next.
-        fixture.set_mfindex(8192); // Old FrameID is outside the actual scheduling window.
+        assert!(fixture.commands().contains(&(15, dci))); // Stop Endpoint ACK.
+        assert!(fixture.commands().contains(&(16, dci))); // Set Dequeue ACK resets Queue.next.
+        fixture.set_mfindex(8192); // Old FrameID is outside the scheduling window.
         // Reuse the exact SCO repost operation from Native::resume. This opaque
         // fixture models ISO rings only, not ordinary interrupt/HCI enumeration.
         if realtek {
@@ -1096,7 +1096,7 @@ mod tests {
     fn queued_wideband_services(speed: u8) {
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive fixture memory outlives every retained native TD.
+        // SAFETY: exclusive fixture memory outlives every native TD.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let fixture = xhci::model::iso_class_fixture(&mut dma, speed);
         let controller = fixture.controller();
@@ -1191,11 +1191,11 @@ mod tests {
             }
         }
         assert_eq!(native.poll_sco_output(&mut hci.io).unwrap(), None);
-        // Complete the actual 30 ring TDs. The hardware model reads native TRB
+        // Complete the 30 ring TDs. The hardware model reads native TRB
         // lengths: an empty interval cannot masquerade as the 63-byte payload.
         assert_eq!(service_times.len(), 30);
-        assert_eq!(service_times[14] - service_times[6], 64); // actual 8ms between payloads
-        assert_eq!(service_times[21] - service_times[14], 56); // actual 7ms between payloads
+        assert_eq!(service_times[14] - service_times[6], 64); // 8ms between payloads
+        assert_eq!(service_times[21] - service_times[14], 56); // 7ms between payloads
         assert_eq!(service_times[29] - service_times[21], 64);
         for now in service_times {
             fixture.service_at(pair.output.dci(), u32::from(now), 1);
@@ -1250,7 +1250,7 @@ mod tests {
             .map(|b| b.dma.bytes().to_vec())
             .collect();
         // Deterministically inject an already expired real raw-clock deadline
-        // after actual publication. This does not claim five physical seconds
+        // after publication. This does not claim five physical seconds
         // elapsed or change calibration to invent a timeout.
         native.queued_output.front_mut().unwrap().deadline = hci.io.clock.try_deadline(0).unwrap();
         assert!(
@@ -1270,7 +1270,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             retained
         );
-        native.quiesce(&mut hci.io).unwrap(); // actual retirement, never local timeout credit
+        native.quiesce(&mut hci.io).unwrap(); // retirement, never local timeout credit
         assert_eq!(
             native
                 .poll_sco_output(&mut hci.io)

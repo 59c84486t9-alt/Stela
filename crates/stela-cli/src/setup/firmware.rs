@@ -1,4 +1,4 @@
-//! Vendor firmware provisioning for an exact native-driver requirement inventory.
+//! Vendor firmware provisioning for a native-driver requirement inventory.
 //! Network/cache policy stays in the CLI; the loader validates pins/packages.
 use anyhow::{Context, Result, ensure};
 use reqwest::{blocking::Client, header, redirect::Policy};

@@ -220,7 +220,7 @@ pub struct Amcc {
 }
 
 // An explicit model snapshot remains independent. Firmware handles, in
-// contrast, share only the actual controller's plane/coherency state.
+// contrast, share only the controller's plane/coherency state.
 impl Clone for Amcc {
     fn clone(&self) -> Self {
         Self {
@@ -656,7 +656,7 @@ fn invalidate(plane: &mut Plane, register: u64, value: u64) -> Result<(), &'stat
 
 fn retire_invalidation(plane: &mut Plane, register: u64) {
     let dsid = ((register - 0x13ffc) / 4) as u8;
-    // This actual memory-controller model stores no dirty cache lines.
+    // This memory-controller model stores no dirty cache lines.
     // All PE/DMA/GPU writes copy directly to shared RAM, and a completed
     // DMA call owns no deferred writeback. Establish their visibility before
     // retiring the command; no successful completion is sent while a native

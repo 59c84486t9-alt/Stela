@@ -57,13 +57,13 @@ pub struct Registers<'a, I: Io> {
 }
 impl<'a, I: Io> Registers<'a, I> {
     /// # Safety
-    /// `io` and `report` belong to the same actual retained PCI requester and
-    /// uninterrupted boot/reset epoch, not merely matching Profile fingerprints.
-    /// Actual source BB/RF domain enable has completed; the full mapped BAR
+    /// `io` and `report` belong to the same PCI requester and
+    /// uninterrupted boot/reset epoch, not matching Profile fingerprints.
+    /// Source BB/RF domain enable has completed; the full mapped BAR
     /// covers both RF windows through 0x5000. Source table/calibration ordering
     /// is caller-owned; use only for operations admitted at the current phase.
     /// No IRQ/reset/RF/PHY/calibration worker competes with this process/deferred
-    /// borrow. Actual native queues, DMA pins and claims remain retained. The
+    /// borrow. Native queues, DMA pins and claims remain held. The
     /// native Io's calibrated delays wait at least the requested duration.
     pub unsafe fn new(io: &'a mut I, report: &Report) -> Result<Self, Error> {
         let profile = io.profile();
@@ -95,7 +95,7 @@ impl<'a, I: Io> Registers<'a, I> {
         if self.io.read16(REG_MCUFW_CTRL)? & FW_READY_MASK != FW_READY {
             return Err(Error::FirmwareNotReady);
         }
-        // Exact source domain-enable bits from rtw8822c_phy_set_param. Their
+        // Source domain-enable bits from rtw8822c_phy_set_param. Their
         // readback is only a prerequisite, never proof of calibrated RF state.
         let bb = self.io.read8(REG_SYS_FUNC_EN)?;
         let rf = self.io.read8(REG_RF_CTRL)?;
@@ -141,7 +141,7 @@ impl<'a, I: Io> Registers<'a, I> {
         }
         Ok(value)
     }
-    /// Source PHY table sentinel/extra delay, under the same actual exclusive
+    /// Source PHY table sentinel/extra delay, under the same exclusive
     /// RF borrow. Delay completion is not a hardware/RF-completion observation.
     pub(super) fn table_delay_us(&mut self, microseconds: u64) -> Result<(), Error> {
         if self.failed {
@@ -280,7 +280,7 @@ mod tests {
     }
     struct ModelIo(Arc<Mutex<Model>>);
     // SAFETY: exclusive serialized deterministic MMIO/RF/firmware model;
-    // no actual requester, calibration, DMA or physical firmware claim.
+    // no requester, calibration, DMA or physical firmware claim.
     unsafe impl Io for ModelIo {
         fn profile(&self) -> Profile {
             self.0.lock().unwrap().profile
@@ -405,7 +405,7 @@ mod tests {
             if op == 2 {
                 assert!(failed.is_ok());
                 continue;
-            } // Different direct target; whole-word guard is per actual observation.
+            } // Different direct target; whole-word guard is per observation.
             assert_eq!(
                 failed,
                 Err(Error::AmbiguousObservation {
@@ -466,7 +466,7 @@ mod tests {
         // driver, worker or DMA touches them.
         let mut rf = unsafe { Registers::new(&mut io, &report) }.unwrap();
         let calls = m.lock().unwrap().calls;
-        // Five pre-read guard observations + actual RF read, then the final
+        // Five pre-read guard observations + RF read, then the final
         // identity guard must reject a reset/replacement before returning data.
         m.lock().unwrap().mutate_at = Some((calls + 7, 0xf0, 4, 0));
         assert_eq!(rf.read(Path::A, 0x18, RF_MASK), Err(Error::IdentityChanged));
@@ -508,7 +508,7 @@ mod tests {
         }
         struct NoSubmission(Arc<AtomicBool>);
         // SAFETY: register-only test fixture never submits DMA; all beacon
-        // calls fail/panic, and quarantine observably retains actual owner.
+        // calls fail/panic, and quarantine observably keeps owner.
         unsafe impl io::BeaconQueue for NoSubmission {
             fn submit(&mut self, _: &[u8]) -> Result<(), io::Error> {
                 panic!("RF cannot submit DMA")
@@ -532,8 +532,8 @@ mod tests {
         bar.set(REG_RSV_CTRL, 7 << 24);
         bar.set(REG_WLRF1, 0x07000000);
         bar.set(REG_C2HEVT, 0x19);
-        // SAFETY: aligned retained register fixture, no physical requester or
-        // operational DMA claim. NativeIo executes actual volatile operations.
+        // SAFETY: aligned kept register fixture, no physical requester or
+        // operational DMA claim. NativeIo executes volatile operations.
         let mut io = unsafe {
             io::NativeIo::new(
                 bar.pointer(),
@@ -579,7 +579,7 @@ mod tests {
         assert!(quarantined.load(Ordering::SeqCst));
         drop(io);
         drop(bar);
-        assert!(weak.upgrade().is_some()); // Actual BAR owner quarantined.
+        assert!(weak.upgrade().is_some()); // BAR owner quarantined.
     }
     #[test]
     #[ignore = "oracle: STELA_REALTEK_WIFI_RF_ORACLE"]

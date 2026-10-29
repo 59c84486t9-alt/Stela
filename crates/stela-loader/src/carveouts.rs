@@ -350,7 +350,7 @@ impl Reservation {
     }
 }
 
-/// Place required protocol-sized ranges back to back inside actual guest DRAM.
+/// Place required protocol-sized ranges back to back inside guest DRAM.
 /// The alignment padding is reserved too; at least one managed page must remain.
 pub fn reserve(table: &[Carveout], dram_base: u64, dram_bytes: u64) -> Result<Reservation> {
     ensure!(

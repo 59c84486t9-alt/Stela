@@ -33,17 +33,17 @@ unsafe extern "C" {
     fn stela_linux_resources_initialize(request: *const Request) -> c_int;
 }
 
-/// Lost whole-kernel owners retained with their original catalog/provider.
+/// Lost whole-kernel owners kept with their original catalog/provider.
 /// This is an ownership diagnostic, never a task/current/readiness capability.
 pub fn retained_owners() -> u64 {
     RETAINED.load(Ordering::Relaxed)
 }
 
 /// Consumes the one canonical catalog for kernel-lifetime root caches. C also
-/// irreversibly retains its descriptor owner once initialization starts, even
+/// irreversibly keeps its descriptor owner once initialization starts, even
 /// before any slab payload exists. A second kernel cannot reset those globals.
 ///
-/// There is no full-kernel teardown yet. Drop/forget retains this catalog and
+/// There is no full-kernel teardown yet. Drop/forget keeps this catalog and
 /// provider; it cannot release mappings under live global caches. Per-task
 /// resources must still use their original reference/RCU releases. This type
 /// grants no task/current, child stack loan, device or native service entry.
@@ -62,12 +62,12 @@ impl<P: Provider> KernelResources<P> {
         }
     }
     /// Initialize original UID/exec-state caches, in their explicit boot order.
-    /// A refusal retains the same owner. No borrowed native authority escapes.
+    /// A refusal keeps the same owner. No borrowed native permission escapes.
     /// A started or partial attempt is never retried or rolled back as empty.
     ///
     /// # Safety
     /// The catalog's original same-CPU/root/process/IRQ exclusion contract holds
-    /// throughout this call and owner exit; `entered` borrows that actual native
+    /// throughout this call and owner exit; `entered` borrows that native
     /// entered guard. No producer can race initialization or retarget mappings.
     /// This is taskless global-resource preparation, not permission to execute
     /// any current-dependent original helper or register a native C task.
@@ -85,9 +85,9 @@ impl<P: Provider> KernelResources<P> {
                 bytes: size_of::<Request>() as u32,
                 page_generation: self.catalog.generation(),
             };
-            // SAFETY: fixed repr(C) request names the SAME retained catalog;
-            // exclusive actual context is the caller's contract. C permanently
-            // retains the catalog before creating any original global cache.
+            // SAFETY: fixed repr(C) request names the SAME catalog;
+            // exclusive context is the caller's contract. C permanently
+            // keeps the catalog before creating any original global cache.
             unsafe { stela_linux_resources_initialize(&request) }
         };
         entered.check().map_err(Error::Work)?;
@@ -115,7 +115,7 @@ impl<P: Provider> KernelResources<P> {
 impl<P: Provider> Drop for KernelResources<P> {
     fn drop(&mut self) {
         if self.owns {
-            // No native entered guard is retained on a possibly stale stack.
+            // No native entered guard is held on a possibly stale stack.
             // Keep the real provider/context; C's kernel-root hold additionally
             // refuses unregister independently of Rust handle/borrow lifetime.
             let _ = RETAINED.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {

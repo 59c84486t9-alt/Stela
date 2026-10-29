@@ -1,4 +1,4 @@
-//! External interrupt resources joined to the actual native mapping and CPU
+//! External interrupt resources joined to the native mapping and CPU
 //! owners. MADT and _CRS describe routes; neither can create an MMIO lease or
 //! establish ownership of the devices sharing a physical line.
 use super::{NativePlatform, ioapic, madt};
@@ -40,7 +40,7 @@ fn quarantine_mapping() {
     });
 }
 
-/// A concrete installed mapping retained by the IOAPIC unit, including every
+/// A concrete installed mapping kept by the IOAPIC unit, including every
 /// active or quarantined pin. Raw accesses never re-enter the mapping service
 /// (whose address checks and locks require process context) from a hard IRQ.
 pub(crate) struct Registers {
@@ -49,8 +49,8 @@ pub(crate) struct Registers {
     scope: ManuallyDrop<Arc<ProcessScope>>,
     mmio: ioapic::Mmio,
 }
-// SAFETY: only Root constructs this adapter from the actual exclusive UC lease.
-// Unit serializes the selector/window with actual same-CPU IRQ exclusion. The
+// SAFETY: only Root constructs this adapter from the exclusive UC lease.
+// Unit serializes the selector/window with same-CPU IRQ exclusion. The
 // mapping and native CPU/root lease outlive all raw MMIO accesses and quarantine.
 unsafe impl ioapic::Registers for Registers {
     fn read(&self, index: u8) -> u32 {
@@ -63,18 +63,18 @@ unsafe impl ioapic::Registers for Registers {
 impl Drop for Registers {
     fn drop(&mut self) {
         if self.scope.check().is_err() || self.cpu.in_interrupt() {
-            // Preserve the actual mapping AND CPU/root owner on an invalid
+            // Preserve the mapping AND CPU/root owner on an invalid
             // final-release context. No affine resource is destroyed here.
             quarantine_mapping();
             return;
         }
-        // SAFETY: this is the last Unit reference. A programmed Pin retains
+        // SAFETY: this is the last Unit reference. A programmed Pin keeps
         // Unit until complete registry/RemoteIRR/work retirement; a failed or
-        // abandoned Pin permanently retains it. No register user remains.
+        // abandoned Pin permanently keeps it. No register user remains.
         if unsafe { self.mapping.retire() }.is_err() {
             quarantine_mapping();
-            // SAFETY: Process context is qualified. Mapping::drop records native
-            // quarantine while retaining its actual resource/table provider;
+            // SAFETY: Process context is checked. Mapping::drop records native
+            // quarantine while keeping its resource/table provider;
             // keep the separate descriptor/CPU lease pinned as well.
             unsafe { ManuallyDrop::drop(&mut self.mapping) };
             return;
@@ -90,7 +90,7 @@ impl Drop for Registers {
 type Unit = ioapic::Unit<Registers, NativePlatform>;
 pub(crate) type Source = ioapic::Pin<Registers, NativePlatform>;
 
-/// One actual complete MADT unit inventory. The original Authority supplies
+/// One complete MADT unit inventory. The original Permission supplies
 /// registered exclusive resources and all-root UC mapping acknowledgements;
 /// this layer never registers an address from a firmware descriptor as owned.
 pub(crate) struct Root {
@@ -104,14 +104,14 @@ pub(crate) struct Root {
     _local: PhantomData<*mut ()>,
 }
 impl Root {
-    /// Original process/deferred CPU view, including actual IRQ metadata.
-    /// Its process-context save/check intentionally refuses a guest shadow CR3.
+    /// Original process/deferred CPU view, including IRQ metadata.
+    /// Its process-context save/check refuses a guest shadow CR3.
     pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
         self.cpu.clone()
     }
 
-    /// Build a contributor's all-root, actual IRQ-save guard in process
-    /// context. The permanent native registry retains its original typed
+    /// Build a contributor's all-root, IRQ-save guard in process
+    /// context. The permanent native registry keeps its original typed
     /// APIC/IDT/GS/root adapter; no CPU or vector grant is reconstructed.
     pub(crate) fn irq_platform(&self) -> Result<Arc<dyn Platform>, Error> {
         self.scope.check().map_err(Error::Cpu)?;
@@ -123,12 +123,12 @@ impl Root {
     }
 
     /// # Safety
-    /// The main-owned execution grant and Authority belong to this actual
-    /// post-EBS CPU/root epoch. `madt` is its retained original table. Every
+    /// The main-owned execution grant and Permission belong to this
+    /// post-EBS CPU/root epoch. `madt` is its original table. Every
     /// IOAPIC selector/window has been handed off exclusively, with no firmware,
     /// SMM, other CPU or controller owner; interrupt remapping is off. APIC EOI
     /// broadcast remains enabled until every pin retires. This does not grant
-    /// any individual pin: claim separately retains every physical contributor.
+    /// any individual pin: claim separately keeps every physical contributor.
     pub(crate) unsafe fn attach(
         execution: &crate::native_clock::DriverExecution<'_>,
         authority: &Authority,
@@ -136,7 +136,7 @@ impl Root {
     ) -> Result<Self, Error> {
         let scope = execution.process_scope().map_err(Error::Cpu)?;
         let cpu = scope.cpu().map_err(Error::Cpu)?;
-        // SAFETY: actual complete external-controller/main handoff is required
+        // SAFETY: complete external-controller/main handoff is required
         // by this constructor; adopt joins the existing IDT/APIC owner only.
         unsafe { super::adopt(execution) }.map_err(Error::Irq)?;
         NativePlatform(()).check_cpu().map_err(Error::Irq)?;
@@ -167,7 +167,7 @@ impl Root {
                     return Err(Error::Mapping(error));
                 }
             };
-            // SAFETY: actual original resource-backed, all-root UC mapping.
+            // SAFETY: original resource-backed, all-root UC mapping.
             let mmio = unsafe { ioapic::Mmio::new(address) }.map_err(Error::Irq)?;
             let registers = Registers {
                 mapping: ManuallyDrop::new(mapping),
@@ -175,8 +175,8 @@ impl Root {
                 scope: ManuallyDrop::new(scope.clone()),
                 mmio,
             };
-            // SAFETY: actual exclusive unit handoff is required by attach's
-            // caller, and retained original mapping/CPU ownership is above.
+            // SAFETY: exclusive unit handoff is required by attach's
+            // caller, and kept original mapping/CPU ownership is above.
             let unit = unsafe {
                 ioapic::Unit::attach(
                     registers,
@@ -189,7 +189,7 @@ impl Root {
             spans.push((*descriptor, unit.pins()));
             units.push((*descriptor, unit));
         }
-        // Validate complete actual hardware spans and every inter-unit overlap
+        // Validate complete hardware spans and every inter-unit overlap
         // even before any consumer asks for a route. No guessed pin capacity.
         for (unit, _) in &spans {
             routing
@@ -261,7 +261,7 @@ impl Root {
 
 /// Borrows the exact root and original namespace inspection. A different
 /// snapshot, integer GSI, cloned AML handle or copied descriptor cannot be
-/// substituted between resolution and actual complete-group ownership.
+/// substituted between resolution and complete-group ownership.
 pub(crate) struct ResolvedLine<'r, 'd, 'a> {
     root: &'r Root,
     device: &'d DeviceResources<'a>,
@@ -274,25 +274,25 @@ impl ResolvedLine<'_, '_, '_> {
     /// SCI/GPE/INTx aliases), stopped/drained from its previous owner. Its fixed
     /// callback group must have identical membership. Namespace/resource
     /// mutation and pin-sharing changes are excluded until full retirement.
-    /// Contributors remain in their qualified powered state; wake capability
+    /// Contributors remain in their checked powered state; wake capability
     /// metadata supplies no wake-enable, suspend or power-transition grant.
     pub(crate) unsafe fn claim(self, devices: Box<dyn ioapic::Devices>) -> Result<Source, Error> {
         // A failed context check cannot authorize release of device/root owners
-        // in a foreign or hard-IRQ context. Keep them retained on that failure.
+        // in a foreign or hard-IRQ context. Keep them kept on that failure.
         let mut devices = ManuallyDrop::new(devices);
         self.root.scope.check().map_err(Error::Cpu)?;
         if self.root.cpu.in_interrupt() {
             return Err(Error::Cpu(WorkError::InterruptContext));
         }
-        // SAFETY: Remaining refusals occur on the qualified process CPU before any
+        // SAFETY: Remaining refusals occur on the checked process CPU before any
         // programming; ordinary final release is safe for this stopped group.
         let devices = unsafe { ManuallyDrop::take(&mut devices) };
         if Sha256::digest(self.root.madt).as_slice() != self.root.madt_hash {
             return Err(Error::Route(madt::RouteError::InvalidTable));
         }
         self.device.revalidate().map_err(Error::Resource)?;
-        // SAFETY: caller supplies the complete actual stopped sharer group;
-        // original CRS, actual MADT owner and hardware pin bounds were checked.
+        // SAFETY: caller supplies the complete stopped sharer group;
+        // original CRS, MADT owner and hardware pin bounds were checked.
         unsafe { self.unit.claim(self.line, devices) }.map_err(Error::Irq)
     }
 }

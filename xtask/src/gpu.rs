@@ -79,18 +79,18 @@ pub enum Command {
         /// does not authenticate the selected private compiler profile.
         #[arg(long, value_enum, requires = "air_input")]
         air_fp_profile: Option<AirFpProfile>,
-        /// Qualify the bounded threadgroup fixtures: original Apple module,
+        /// Check the bounded threadgroup fixtures: original Apple module,
         /// LLVM static WG64 module, then LLVM dynamic WG64 module. This is
         /// offline shader/packet checking, never GPU execution.
         #[arg(long, num_args = 3, requires = "llvm_library", value_names = ["APPLE", "STATIC", "DYNAMIC"])]
         threadgroup_inputs: Vec<PathBuf>,
-        /// Qualify unchanged triangle VS/FS and sampled-texture AIR inputs.
+        /// Check unchanged triangle VS/FS and sampled-texture AIR inputs.
         /// Textures currently must refuse explicitly; no GPU work is submitted.
         #[arg(long, num_args = 2, requires = "llvm_library", value_names = ["TRIANGLE", "TEXTURE"])]
         render_inputs: Vec<PathBuf>,
     },
     /// Compile NVIDIA's resource-manager and display cores for native Stela
-    /// or as Linux reference objects, retaining unresolved platform imports.
+    /// or as Linux reference objects, keeping unresolved platform imports.
     Nvidia {
         #[arg(long, value_enum, default_value_t = nvidia::Target::Stela)]
         target: nvidia::Target,

@@ -5,7 +5,7 @@
 //!
 //! The two buses share one payload mailbox and are owned by one Controller.
 //! Requests are individual firmware messages. Combined repeated-START semantics
-//! are not established by the donor and are deliberately not fabricated here.
+//! are not established by the donor and are not invented here.
 use super::{Address, Clock, Timer};
 use crate::bus::dma::DmaBuffer;
 use core::sync::atomic::{Ordering, fence};
@@ -22,12 +22,12 @@ pub const ACPI_ID: &str = "AMDI0011";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoError;
-/// Ordered access to the actual MP2 BAR2 registers and byte payload window.
+/// Ordered access to the MP2 BAR2 registers and byte payload window.
 /// # Safety
-/// The provider retains the actual exclusively owned PCI function, powered BAR2
+/// The provider keeps the exclusively owned PCI function, powered BAR2
 /// UC mapping and firmware/reset epoch. No other CPU, firmware/AML driver or IRQ
 /// handler accesses either bus or mailbox. It grants ordered volatile accesses;
-/// errors may follow effects. It must remain valid when deliberately leaked.
+/// errors may follow effects. It must remain valid when leaked.
 pub unsafe trait Registers {
     fn read32(&mut self, offset: usize) -> Result<u32, IoError>;
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError>;
@@ -45,7 +45,7 @@ pub enum Speed {
     Mhz3_4 = 4,
 }
 impl Speed {
-    /// Largest source-defined speed not exceeding the actual peripheral/board
+    /// Largest source-defined speed not exceeding the peripheral/board
     /// limit. An absent/too-low limit is refused, rather than guessed as 400kHz.
     pub fn from_limit(hz: u32) -> Result<Self, ErrorKind> {
         match hz {
@@ -111,7 +111,7 @@ pub struct Error {
     pub published: bool,
 }
 
-/// Exclusive owner for both adapters, the shared mailbox and one retained DMA
+/// Exclusive owner for both adapters, the shared mailbox and one DMA
 /// bounce allocation. A timed-out command has no reset primitive in this
 /// protocol: the whole owner is quarantined, including the other bus.
 pub struct Controller<R: Registers + 'static, T: Timer + 'static = Clock> {
@@ -127,12 +127,12 @@ pub struct Controller<R: Registers + 'static, T: Timer + 'static = Clock> {
 }
 impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
     /// # Safety
-    /// Registers retain the actual exclusive 1022:15e6 BAR2 owner. Both firmware
+    /// Registers keep the exclusive 1022:15e6 BAR2 owner. Both firmware
     /// buses are stopped and no old DMA/request/IRQ callback is outstanding.
-    /// The platform masks actual PCI interrupt delivery for the complete polled
+    /// The platform masks PCI interrupt delivery for the complete polled
     /// lifetime; clearing the source event/INTEN registers is not a PCI mask.
     /// The supplied private bounce allocation is coherent, reachable by this
-    /// actual requester, not shared, and remains pinned for the rest of boot.
+    /// requester, not shared, and remains pinned for the rest of boot.
     /// Speed inputs are observed board/peripheral limits; None means no adapter
     /// is granted. The clock is calibrated, monotonic and advancing.
     pub unsafe fn claim(
@@ -259,7 +259,7 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
             }
             self.deadline(bus)?;
             if event != 0 {
-                // Match the actual completion before touching caller output.
+                // Match the completion before touching caller output.
                 let response = event & 3;
                 let status = (event >> 2) & 31;
                 let event_bus = (event >> 8) & 15;
@@ -350,7 +350,7 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
         })();
         self.finish(result)
     }
-    /// Read output is committed only after a matching actual event and all
+    /// Read output is committed only after a matching event and all
     /// payload accesses succeed. Partial mailbox reads stay private on errors.
     pub fn read(&mut self, bus: BusId, address: Address, bytes: &mut [u8]) -> Result<(), Error> {
         let (speed, address) = self.data_preflight(bus, address, bytes.len())?;
@@ -376,7 +376,7 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
         self.finish(result)
     }
     /// Release only after both real disable acknowledgments and no uncertain
-    /// request. The retained DMA allocation itself remains boot-lifetime pinned.
+    /// request. The kept DMA allocation itself remains boot-lifetime pinned.
     pub fn release(mut self) -> Result<(R, T, DmaBuffer), Self> {
         if self.failed.is_some() || self.enabled != [false; 2] {
             return Err(self);
@@ -472,8 +472,8 @@ mod tests {
                 let data = if inline {
                     &mut self.payload[..length]
                 } else {
-                    // SAFETY: fixture owns a retained real region allocation and the
-                    // actual firmware command/address selects its bounded payload.
+                    // SAFETY: fixture owns a real region allocation and the
+                    // firmware command/address selects its bounded payload.
                     unsafe { core::slice::from_raw_parts_mut(self.address as *mut u8, length) }
                 };
                 if op == 0 {
@@ -502,7 +502,7 @@ mod tests {
     }
     #[derive(Clone)]
     struct Model(Rc<RefCell<Device>>);
-    // SAFETY: one controller serializes this single actual device model. Clones are
+    // SAFETY: one controller serializes this single device model. Clones are
     // fixture inspection handles, never another mailbox driver.
     unsafe impl Registers for Model {
         fn read32(&mut self, offset: usize) -> Result<u32, IoError> {
@@ -584,14 +584,14 @@ mod tests {
             drops: drops.clone(),
         })));
         // The existing RegionAllocator grants boot-lifetime identity DMA; the
-        // fixture deliberately retains its actual heap allocation for that epoch.
+        // fixture keeps its heap allocation for that epoch.
         let raw = Box::leak(vec![0u8; 8192].into_boxed_slice());
         let start = raw.as_mut_ptr() as u64;
-        // SAFETY: exclusively retained, mapped native RAM, no other allocator.
+        // SAFETY: exclusively kept, mapped native RAM, no other allocator.
         let mut allocator = unsafe { RegionAllocator::new(start..start + 8192) };
         let buffer = allocator.allocate(MAX_LENGTH, 1).unwrap();
         // SAFETY: fixture has an exclusive initially stopped native model and
-        // coherent retained payload; bus identity/speeds are explicit fixture facts.
+        // coherent kept payload; bus identity/speeds are explicit fixture facts.
         let host = unsafe {
             Controller::claim(
                 model.clone(),
@@ -992,7 +992,7 @@ mod tests {
         let (r, t, buffer) = host.release().ok().unwrap();
         let physical = buffer.bus_address();
         // SAFETY: same real private stopped model and RAM ownership as fixture;
-        // deliberately invalid scalar config must be rejected without publication.
+        // invalid scalar config must be rejected without publication.
         let (kind, (r, _t, buffer)) = unsafe { Controller::claim(r, t, buffer, [None, None], 100) }
             .err()
             .unwrap();

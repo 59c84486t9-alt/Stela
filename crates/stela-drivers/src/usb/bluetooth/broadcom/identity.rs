@@ -32,7 +32,7 @@ impl UsbIdentity {
 }
 
 /// Exact Linux btusb BCM_PATCHRAM vendor/interface entries. This is candidate
-/// admission only; genuine HCI version/manufacturer still binds firmware.
+/// admission only; HCI version/manufacturer still binds firmware.
 pub fn is_vendor_interface(device: &Device, interface: &Interface) -> bool {
     let usb = UsbIdentity::read(device);
     interface.number == 0
@@ -112,7 +112,7 @@ pub struct Identity {
     pub verbose: [u8; 7],
     pub features: [u8; 9],
     pub local_name: Vec<u8>,
-    /// Actual fc5a response, may differ from descriptor identity; no substitution.
+    /// Fc5a response, may differ from descriptor identity; no substitution.
     pub product: [u8; 5],
 }
 impl Identity {

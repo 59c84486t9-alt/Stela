@@ -613,7 +613,7 @@ fn noncontiguous_clusters_and_unqualified_status_or_cache_consumers_refuse() {
         .unwrap()
         .apply(&mut tree)
         .unwrap();
-    // A mechanical synthetic count test, not qualification of the Apple
+    // A mechanical synthetic count test, not validation of the Apple
     // fixed-count producer's reduced-cluster consumers.
     assert_eq!(
         word(tree.node(CPUS).unwrap(), "cpu-cluster-count").unwrap(),
@@ -1101,7 +1101,7 @@ fn original_j314s_subsets_roundtrip_without_firmware_id_or_resource_extrapolatio
                 cpm_impl: Some(read_range(node, "cpm-impl-reg")),
             });
             // Test-only association IDs: original PMGR/executor ownership
-            // is not manufactured or qualified by a DT projection replay.
+            // is not manufactured or checked by a DT projection replay.
             inventory.powers.push(PowerResource {
                 id: power(100 + cluster.0 as u16),
                 cores: vec![],

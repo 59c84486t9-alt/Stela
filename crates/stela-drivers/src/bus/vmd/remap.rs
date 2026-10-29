@@ -12,7 +12,7 @@ const VECTOR_MASK: u32 = 1;
 const ENTRY_BYTES: u64 = 16;
 const MSI_ADDRESS: u64 = 0xfee0_0000;
 
-/// Immutable source list, held by the actual parent IRQ registration. Unlike
+/// Immutable source list, held by the parent IRQ registration. Unlike
 /// Linux's RCU list, membership changes require complete source retirement;
 /// dispatch allocates, locks and drops no references in hard IRQ context.
 pub struct Fanout {
@@ -75,7 +75,7 @@ impl Assignments {
     }
     /// # Safety
     /// The exact child's source is masked, stopped and drained, the native CPU
-    /// registration has retired and no fanout callback may retain this child.
+    /// registration has retired and no fanout callback may keep this child.
     pub unsafe fn release(&mut self, index: u8) -> Result<(), Error> {
         if index < self.first {
             return Err(Error::Address);
@@ -177,15 +177,15 @@ fn write<R: Registers>(host: &mut Host<R>, offset: u64, value: u32) -> Result<()
     Ok(())
 }
 impl<R: Registers> Host<R> {
-    /// Program actual parent MSI-X table while every vector is masked. The
+    /// Program parent MSI-X table while every vector is masked. The
     /// first software-only vector on client profiles stays unused and masked.
     ///
     /// # Safety
-    /// Every message is from the actual native IRQ registry and its retained
+    /// Every message is from the native IRQ registry and its kept
     /// Fanout is published before a parent vector can be enabled. All children,
     /// old parent messages and callbacks are stopped/drained. These routes and
-    /// callbacks must remain retained through this host's retirement. This API
-    /// programs hardware but does not create IRQ-controller authority.
+    /// callbacks must remain held through this host's retirement. This API
+    /// programs hardware but does not create IRQ-controller permission.
     pub unsafe fn program_parent_vectors(&mut self, messages: &[MsiMessage]) -> Result<u16, Error> {
         self.check_live()?;
         let layout = discover(self)?;
@@ -227,7 +227,7 @@ impl<R: Registers> Host<R> {
         })
     }
     /// # Safety
-    /// Actual live native parent registrations retain published handlers for
+    /// Live native parent registrations keep published handlers for
     /// every enabled vector; children carry only matching remapped messages.
     /// No unprogrammed vector may be enabled. The range must be the exact range
     /// successfully programmed by program_parent_vectors in this same epoch.

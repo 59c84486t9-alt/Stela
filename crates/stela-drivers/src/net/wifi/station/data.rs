@@ -3,7 +3,7 @@
 // and net/mac80211/{rx.c,tx.c,wpa.c}. Original notices in THIRD_PARTY.md.
 //! Single-MSDU data/control-port framing. TX output is an explicit hardware
 //! work plan: its MPDU is plaintext, and required hardware cipher/MIC work must
-//! be completed by the selected actual vendor path before successful TX.
+//! be completed by the selected vendor path before successful TX.
 
 use super::{
     AssociationContext, Phase, PortPolicy, RegulatoryPolicy, Station, phy::AccessCategory,
@@ -80,7 +80,7 @@ pub struct Qos<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SequenceOwner {
     /// Preserve the shared host-prepared sequence in the vendor's MAC header/
-    /// descriptor input. This does not prove the actual on-air sequence.
+    /// descriptor input. This does not prove the on-air sequence.
     Host,
     /// The source-backed vendor path explicitly assigns sequence in the device.
     Device,
@@ -90,9 +90,9 @@ pub enum SequenceOwner {
 pub enum SequenceAssignment {
     /// Prepared host input, never an observed on-air sequence.
     Host(u16),
-    /// Device owns actual air assignment. QoS may still carry the canonical
+    /// Device owns air assignment. QoS may still carry the canonical
     /// source software sequence input for ADDBA bookkeeping; that input is
-    /// never an on-air observation. Actual descriptor must request device mode.
+    /// never an on-air observation. Descriptor must request device mode.
     Device,
 }
 
@@ -150,7 +150,7 @@ impl TxPlan {
     }
     /// Vendor queue must revalidate epoch/full key identity before publishing
     /// DMA, implement every requested protection/sequence effect or return unsupported,
-    /// and retain key/counter resources until actual hardware/work retirement.
+    /// and keep key/counter resources until hardware/work retirement.
     pub fn into_parts(self) -> (u64, Channel, Vec<u8>, Protection, SequenceAssignment, bool) {
         (
             self.epoch,
@@ -228,7 +228,7 @@ impl Station {
         })
     }
 
-    /// Recheck immediately before actual queue publication, serialized with
+    /// Recheck immediately before queue publication, serialized with
     /// station/key retirement and policy changes. This is permission to submit
     /// the plan, never evidence of DMA ownership, cipher execution or air ACK.
     /// A caller holding a plan must keep its key epoch alive until the plan is
@@ -242,7 +242,7 @@ impl Station {
         self.validate_tx_plan_refs(plan, keys, policy)
     }
 
-    /// The same publication check for separately retained key owners. Borrowed
+    /// The same publication check for separately kept key owners. Borrowed
     /// entries refer to the original slots; no key or nonce state is recreated.
     pub fn validate_tx_plan_refs<K: Borrow<KeySlot>>(
         &self,
@@ -299,7 +299,7 @@ impl Station {
         Ok(())
     }
 
-    /// RX epoch must come from the actual retained firmware/RX context, not a
+    /// RX epoch must come from the firmware/RX context, not a
     /// current-epoch lookup that retags old deferred frames.
     pub fn receive_msdu(
         &self,
@@ -311,7 +311,7 @@ impl Station {
     }
 
     /// Borrow separately owned slots exclusively for this RX operation. Replay
-    /// mutation occurs in the actual selected slot. Safe Rust forbids aliasing
+    /// mutation occurs in the selected slot. Safe Rust forbids aliasing
     /// mutable entries; the implementation never manufactures references.
     pub fn receive_msdu_refs<K: BorrowMut<KeySlot>>(
         &self,
@@ -423,7 +423,7 @@ impl Station {
         Ok(Ingress::Data(ethernet))
     }
 
-    /// Deliver a genuinely complete post-order parent already checked by the
+    /// Deliver a complete post-order parent already checked by the
     /// canonical aggregate gate. This never authorizes a raw same-PN member or
     /// repeats the parent's replay update. Current context, original installed
     /// keys and controlled-port activation are rechecked before any output.
@@ -501,7 +501,7 @@ impl Station {
     }
 
     /// Single-MSDU QoS with source-backed device sequence assignment. The
-    /// exact current acknowledged context supplies WMM; a copied capability or
+    /// current acknowledged context supplies WMM; a copied capability or
     /// TID cannot bypass it. The TID is sent as given: `data_tid` chooses it
     /// as `ieee80211_select_queue` does. No BA/A-MSDU permission is implied.
     pub fn prepare_qos_msdu_refs<K: BorrowMut<KeySlot>>(
@@ -523,7 +523,7 @@ impl Station {
             .try_reserve_exact(2)
             .map_err(|_| Error::NoMemory)?;
         plan.plaintext[0] |= 0x80;
-        // Insert before the actual IV/PN reserve, if any. The body remains
+        // Insert before the IV/PN reserve, if any. The body remains
         // plaintext and the existing selected original key owns cipher work.
         plan.plaintext.splice(24..24, [tid, 0]);
         let sequence = self.allocate_qos_sequence(context, tid).map_err(|e| {
@@ -553,7 +553,7 @@ impl Station {
         self.prepare_msdu_refs(epoch, ethernet, class, sequence_owner, keys, policy)
     }
 
-    /// Prepare against borrowed original slots from independently retained
+    /// Prepare against borrowed original slots from independently kept
     /// hardware owners, using exactly the same admission and nonce algorithm.
     pub fn prepare_msdu_refs<K: BorrowMut<KeySlot>>(
         &mut self,
@@ -692,7 +692,7 @@ fn subframes(mut bytes: &[u8], receiver: Mac, split_member: bool) -> Result<Vec<
         if destination.is_multicast() || destination == receiver {
             out.try_reserve(1).map_err(|_| Error::NoMemory)?;
             // Source reuses the final linear skb without trimming up to three
-            // trailing bytes. Preserve those actual bytes and the original
+            // trailing bytes. Preserve those bytes and the original
             // length field for non-SNAP frames, rather than inventing a new
             // length or silently discarding observed trailing padding.
             let payload = if last { &bytes[14..] } else { &bytes[14..end] };
@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     fn station(policy: PortPolicy, host: bool) -> (Station, Vec<KeySlot>) {
-        // The full association/actual-ACK transition is covered by parent tests;
+        // The full association/ACK transition is covered by parent tests;
         // these fixtures start at its established input boundary.
         let mut elements = vec![0, 1, b'x', 1, 1, 0x8c];
         if policy == PortPolicy::Controlled {
@@ -1647,7 +1647,7 @@ mod tests {
         for variant in 0..5 {
             let mut bytes = valid.bytes().to_vec();
             match variant {
-                0 => bytes[10] ^= 4, // actual AP transmitter mismatch
+                0 => bytes[10] ^= 4, // AP transmitter mismatch
                 1 => bytes[4] ^= 4,  // foreign unicast receiver
                 2 => bytes[1] |= 4,  // more fragments
                 3 => bytes[22] |= 1, // nonzero fragment number

@@ -13,8 +13,8 @@ struct Native {
     current: AtomicBool,
     dropped: Arc<AtomicUsize>,
 }
-// SAFETY: actual isolated model display association and shared domain grants,
-// retained through the real modeled router/link/DMA configuration sequence.
+// SAFETY: isolated model display association and shared domain grants,
+// through the real modeled router/link/DMA configuration sequence.
 unsafe impl Reservation for Native {
     fn grant(&self) -> Grant {
         self.grant
@@ -50,7 +50,7 @@ fn fixture(credits: Credits, max_mbps: u32) -> Fixture {
         ..
     } = link_fixture_with_protocol(1, false, 0x0e0101);
     let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 3);
-    // SAFETY: actual isolated modeled configured routers and reciprocal link.
+    // SAFETY: isolated modeled configured routers and reciprocal link.
     let mut link =
         unsafe { link::Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
     let linked = Box::new(drive_link(
@@ -377,7 +377,7 @@ fn actual_dp_cm_caps_video_nfc_aux_paths_dprx_and_normal_stop_keep_original_owne
             } = f;
             let initial = peer.csr;
             let initial_nfc = peer.credits[0];
-            // SAFETY: exact actual modeled CM, GPU association and resource epoch.
+            // SAFETY: modeled CM, GPU association and resource epoch.
             let mut activate =
                 unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
             let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -406,7 +406,7 @@ fn actual_dp_cm_caps_video_nfc_aux_paths_dprx_and_normal_stop_keep_original_owne
                 0
             );
             let start = peer.writes.len();
-            // SAFETY: modeled display submissions closed; independent payload lifetimes stay retained.
+            // SAFETY: modeled display submissions closed; independent payload lifetimes stay held.
             let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
             let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
             let channel = stop.into_channel();
@@ -432,7 +432,7 @@ fn actual_dp_cm_caps_video_nfc_aux_paths_dprx_and_normal_stop_keep_original_owne
                 Ok(r) => r,
                 Err(_) => panic!("real guarded local reuse"),
             };
-            // SAFETY: original actual link/reservation returned only after complete local stop.
+            // SAFETY: original link/reservation returned only after complete local stop.
             let mut again =
                 unsafe { Activate::new(channel, reusable.link, reusable.reservation, cursor.now) }
                     .unwrap();
@@ -440,7 +440,7 @@ fn actual_dp_cm_caps_video_nfc_aux_paths_dprx_and_normal_stop_keep_original_owne
             let mut channel = again.into_channel();
             drop(owner);
             assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 0));
-            // SAFETY: independent synthetic CM holds complete restored/retained ownership through final drain.
+            // SAFETY: independent synthetic CM holds complete restored/kept ownership through final drain.
             unsafe { active.retire() };
             assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 1));
             channel_release(&mut channel);
@@ -472,7 +472,7 @@ fn inject_write_failure(
         let selected = peer.writes.len() != before && peer.writes.len() == target;
         // HPD clear is W1C/self-clearing and may immediately reassert. Its
         // observable negative is a controller rejection, never a fake sticky-bit
-        // readback requirement that would discard a genuine new HPD event.
+        // readback requirement that would discard a new HPD event.
         let hpd = selected
             && peer
                 .writes
@@ -522,7 +522,7 @@ fn each_actual_dp_activation_write_handles_ack_loss_controller_rejection_and_obs
                 mut cursor,
                 dropped,
             } = f;
-            // SAFETY: same genuine modeled requester/link and protected resource chain.
+            // SAFETY: same modeled requester/link and protected resource chain.
             let mut activate =
                 unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
             inject_write_failure(
@@ -563,13 +563,13 @@ fn each_actual_dp_stop_write_retains_entire_payload_link_and_accounting_chain_on
                 mut cursor,
                 dropped,
             } = f;
-            // SAFETY: exact actual isolated modeled link/GPU association and native reservation.
+            // SAFETY: exact isolated modeled link/GPU association and native reservation.
             let mut activate =
                 unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
             let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
             let channel = activate.into_channel();
             peer.writes.clear();
-            // SAFETY: actual modeled submissions closed; independent payload owners retained.
+            // SAFETY: modeled submissions closed; independent payload owners kept.
             let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
             inject_write_failure(
                 &mut peer,
@@ -609,7 +609,7 @@ fn unsupported_bandwidth_mode_and_invalid_observed_dp_caps_never_publish_handsha
             mut cursor,
             ..
         } = f;
-        // SAFETY: same actual model; unsupported observed hardware capabilities are refused.
+        // SAFETY: same model; unsupported observed hardware capabilities are refused.
         let mut activate = unsafe { Activate::new(channel, linked, owner, cursor.now) }.unwrap();
         activate.poll(cursor.now).unwrap();
         let mut rejected = false;
@@ -646,7 +646,7 @@ fn handshake_and_dprx_busy_replies_cannot_extend_fixed_overall_windows() {
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: exact actual modeled link and protected native allocations.
+        // SAFETY: modeled link and protected native allocations.
         let mut activate =
             unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
         activate.poll(cursor.now).unwrap();
@@ -715,7 +715,7 @@ fn nfc_underflow_and_each_pending_video_or_aux_hop_never_authorize_local_reuse()
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: exact actual modeled link and full native ownership chain.
+        // SAFETY: modeled link and full native ownership chain.
         let mut activate =
             unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
         let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -726,7 +726,7 @@ fn nfc_underflow_and_each_pending_video_or_aux_hop_never_authorize_local_reuse()
             peer.paths[fault / 2].raw[fault % 2][1] |= PENDING;
             peer.paths[fault / 2].hold_hop[fault % 2] = true;
         }
-        // SAFETY: host submissions closed; every independent payload owner retained.
+        // SAFETY: host submissions closed; every independent payload owner kept.
         let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
         stop.poll(cursor.now).unwrap();
         let mut failed = false;
@@ -782,7 +782,7 @@ fn actual_dp_grant_rejection_revoked_or_unconsumed_receipts_preserve_exact_owner
             _ => unreachable!(),
         }
         let writes = model.state.lock().unwrap().writes.len();
-        // SAFETY: intentionally invalid actual model metadata is refused before publication.
+        // SAFETY: invalid model metadata is refused before publication.
         assert!(unsafe { Activate::new(channel, linked, owner, cursor.now) }.is_err());
         assert_eq!(writes, model.state.lock().unwrap().writes.len());
     }
@@ -798,7 +798,7 @@ fn actual_dp_grant_rejection_revoked_or_unconsumed_receipts_preserve_exact_owner
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: exact actual modeled resource and native display association.
+        // SAFETY: modeled resource and native display association.
         let mut activate =
             unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
         let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
@@ -886,12 +886,12 @@ fn unchanged_linux_dp_complete_write_transcript_matches_actual_native_dma() {
             mut cursor,
             dropped,
         } = f;
-        // SAFETY: actual isolated modeled link, GPU association and source grants.
+        // SAFETY: isolated modeled link, GPU association and source grants.
         let mut activate =
             unsafe { Activate::new(channel, linked, owner.clone(), cursor.now) }.unwrap();
         let active = drive(&mut peer, &domain, &model, &mut activate, &mut cursor);
         let channel = activate.into_channel();
-        // SAFETY: actual model submissions closed and all independent owners held.
+        // SAFETY: model submissions closed and all independent owners held.
         let mut stop = unsafe { Stop::new(channel, active, cursor.now) }.unwrap();
         let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
         let mut channel = stop.into_channel();
@@ -947,7 +947,7 @@ fn unchanged_linux_dp_complete_write_transcript_matches_actual_native_dma() {
             Err(_) => panic!("actual guarded local reuse"),
         };
         drop(owner);
-        // SAFETY: independent synthetic CM retains this fully stopped original link.
+        // SAFETY: independent synthetic CM keeps this fully stopped original link.
         unsafe { reusable.link.retire() };
         drop(reusable.reservation);
         assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 1));

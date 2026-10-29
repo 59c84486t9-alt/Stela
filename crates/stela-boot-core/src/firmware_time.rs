@@ -3,7 +3,7 @@ use core::fmt;
 pub mod interval;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Raw UEFI calendar fields. These copied values confer no source authority.
+/// Raw UEFI calendar fields. These copied values confer no source permission.
 /// `timezone_minutes` is the EFI field; `0x07ff` means unspecified.
 pub struct Time {
     pub year: u16,
@@ -57,7 +57,7 @@ impl fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Normalize fields only. The caller separately admits the actual RTC source,
+/// Normalize fields only. The caller separately admits the RTC source,
 /// serialized runtime-service gate and continuous-counter epoch/correlation.
 /// UEFI 2.11 §8.3.1 defines UTC = Local + TimeZone. Daylight adjustment is already
 /// reflected in both local time and timezone; adding another hour is incorrect.

@@ -1,4 +1,4 @@
-//! Explicit32-stack prototype: actual worker count, bounded jobs and legacy isolation.
+//! Explicit32-stack prototype: worker count, bounded jobs and legacy isolation.
 use super::*;
 use core::sync::atomic::AtomicUsize;
 fn prototype() -> ReservationPolicy {
@@ -23,7 +23,7 @@ fn refused<const N: usize>(
     let q = unsafe { Queue::<N>::new(cpu.clone(), owner.clone()) }.unwrap();
     let pointer = Arc::as_ptr(&owner) as *mut c_void;
     let ticket = if queued {
-        // SAFETY: the queue retains this counter; refused construction may not run/drop it.
+        // SAFETY: the queue keeps this counter; refused construction may not run/drop it.
         Some(unsafe { q.execute(Kind::General, count_queued, pointer) }.unwrap())
     } else {
         None
@@ -43,7 +43,7 @@ fn refused<const N: usize>(
     q.close().unwrap();
     old.runtime().drain(cpu.ticks() + 1_000_000_000).unwrap();
     assert_eq!(owner.load(Ordering::Relaxed), usize::from(queued));
-    // SAFETY: admitted counter callback returned, queue closed, no retained producer exists.
+    // SAFETY: admitted counter callback returned, queue closed, no kept producer exists.
     unsafe { old.runtime().retire() }.unwrap();
     drop(old);
     assert_eq!(dropped.load(Ordering::Relaxed), count + 16);
@@ -76,14 +76,14 @@ struct Saturation {
 }
 impl Saturation {
     fn runtime(&self) -> Pin<&Runtime<64>> {
-        // SAFETY: callback owner publishes one pinned executor before admission and retains it through detach.
+        // SAFETY: callback owner publishes one pinned executor before admission and keeps it through detach.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<64>))
         }
     }
 }
 unsafe extern "C" fn park_actual(context: *mut c_void) {
-    // SAFETY: every accepted job retains the exact Saturation allocation through actual join.
+    // SAFETY: every accepted job keeps the exact Saturation allocation through join.
     let f = unsafe { &*context.cast::<Saturation>() };
     let r = f.runtime();
     let binding = Arc::new(Binding {
@@ -96,7 +96,7 @@ unsafe extern "C" fn park_actual(context: *mut c_void) {
     assert_eq!(r.park_if_blocked(), Ok(ParkOutcome::Resumed));
 }
 unsafe extern "C" fn mark_extra(context: *mut c_void) {
-    // SAFETY: the queue retains this exact Saturation allocation until callback completion.
+    // SAFETY: the queue keeps this exact Saturation allocation until callback completion.
     let f = unsafe { &*context.cast::<Saturation>() };
     f.extra.store(true, Ordering::Release);
 }
@@ -112,23 +112,23 @@ fn actual_saturation(policy: ReservationPolicy, count: usize) {
         .store(r.get_ref() as *const Runtime<64> as u64, Ordering::Release);
     let p = Arc::as_ptr(&f) as *mut c_void;
     for _ in 0..count - 8 {
-        // SAFETY: each General job retains f and a distinct actual mapped stack until explicit wake.
+        // SAFETY: each General job keeps f and a distinct mapped stack until explicit wake.
         unsafe { r.queue.execute(Kind::General, park_actual, p) }.unwrap();
     }
-    // SAFETY: dedicated service callback retains f through its explicit wake/join.
+    // SAFETY: dedicated service callback keeps f through its explicit wake/join.
     unsafe { r.start_service(park_actual, p) }.unwrap();
-    // SAFETY: control callback uses its own actual reserved frame and the same retained owner.
+    // SAFETY: control callback uses its own reserved frame and the same owner.
     unsafe { r.start_firmware(park_actual, p) }.unwrap();
-    // SAFETY: serial GPE's actual accepted job retains f through release.
+    // SAFETY: serial GPE's accepted job keeps f through release.
     unsafe { r.queue.execute_gpe(park_actual, p) }.unwrap();
     for _ in 0..2 {
-        // SAFETY: accepted Portal permit owns its actual distinct idle continuation.
+        // SAFETY: accepted Portal permit owns its distinct idle continuation.
         unsafe { r.queue.execute_portal(park_actual, p) }.unwrap();
-        // SAFETY: accepted Notify permit owns its actual distinct idle continuation.
+        // SAFETY: accepted Notify permit owns its distinct idle continuation.
         unsafe { r.queue.execute(Kind::Notify, park_actual, p) }.unwrap();
     }
     assert_eq!(
-        // SAFETY: Foreground retains f even after Pending; no owner is reclaimed early.
+        // SAFETY: Foreground keeps f even after Pending; no owner is reclaimed early.
         unsafe { r.call_foreground(park_actual, p, cpu.ticks() + 1_000_000_000) },
         Err(WorkError::Pending)
     );
@@ -147,7 +147,7 @@ fn actual_saturation(policy: ReservationPolicy, count: usize) {
             assert!(a.stack_end <= b.stack_start || b.stack_end <= a.stack_start);
         }
     }
-    // SAFETY: extra ordinary work is retained in a queue slot, never a phantom continuation.
+    // SAFETY: extra ordinary work is held in a queue slot, never a phantom continuation.
     let queued = unsafe { r.queue.execute(Kind::General, mark_extra, p) }.unwrap();
     assert_eq!(r.step(), Ok(false));
     assert_eq!(f.parked.lock().unwrap().len(), count);
@@ -162,7 +162,7 @@ fn actual_saturation(policy: ReservationPolicy, count: usize) {
     assert_eq!(r.queue.completed(queued), Ok(true));
     assert!(f.extra.load(Ordering::Acquire));
     for (_, wake, _) in core::mem::take(&mut *f.parked.lock().unwrap()) {
-        // SAFETY: all jobs actually returned; this fixture stopped every wake source before detach.
+        // SAFETY: all jobs returned; this fixture stopped every wake source before detach.
         drop(unsafe { r.detach_binding(wake.context_id()) }.unwrap());
     }
     // SAFETY: queue closed, all real frames joined and bindings detached; no hardware/source exists.

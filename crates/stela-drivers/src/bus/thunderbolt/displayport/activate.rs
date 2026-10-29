@@ -49,7 +49,7 @@ pub struct Activate<R: Registers> {
 }
 impl<R: Registers> Activate<R> {
     /// # Safety
-    /// Idle Channel, Linked and actual native Reservation identify one exact
+    /// Idle Channel, Linked and native Reservation identify one exact
     /// requester/reset/topology lifetime. Reservation's real display association,
     /// shared allocator/bandwidth/permission and independent payload proofs hold.
     /// ```compile_fail
@@ -194,8 +194,8 @@ impl<R: Registers> Activate<R> {
         let owner = active.pending[index]
             .take()
             .ok_or(Error::UnexpectedReceipt)?;
-        // SAFETY: exact current native grant, protected preflight plan and original
-        // retained link/path chain; all clock/storage bounds precede mutation.
+        // SAFETY: current native grant, protected preflight plan and original
+        // link/path chain; all clock/storage bounds precede mutation.
         self.path = Some(unsafe {
             if index == 0 {
                 path::Activate::start_pcie(
@@ -454,7 +454,7 @@ impl<R: Registers> Activate<R> {
                         let mut slot = self.slots[i].take().ok_or(Error::UnexpectedReceipt)?;
                         slot.write(path);
                         // SAFETY: exact-layout preallocated slot now contains the
-                        // actual completed path and its unique prior owner chain.
+                        // completed path and its unique prior owner chain.
                         let previous = unsafe { slot.assume_init() };
                         self.retained.as_mut().unwrap().previous = Some(previous);
                         if let Err(e) = self.start_path(i + 1, now) {

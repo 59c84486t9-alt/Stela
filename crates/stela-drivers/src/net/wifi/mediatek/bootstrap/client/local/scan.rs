@@ -6,7 +6,7 @@
 // Copyright 2013-2014 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
-//! Ordinary full source probe IE selection over retained MT7925 capabilities.
+//! Ordinary full source probe IE selection over kept MT7925 capabilities.
 use super::{Advertisement, LocalError, extension, ie};
 use crate::net::wifi::{Band, mediatek::mcu::domain};
 use alloc::vec::Vec;
@@ -56,10 +56,10 @@ impl Selection {
     }
 }
 
-/// Source mac80211 ordinary full probe contents. Reuse this retained device's
+/// Source mac80211 ordinary full probe contents. Reuse this device's
 /// independently source-checked capability issuer, omitting association WMM and
 /// placing HE6 after EHT as ieee80211_put_preq_ies_band does. Probe SMPS is OFF.
-/// No custom PHY IE may supply capabilities on behalf of this actual device.
+/// No custom PHY IE may supply capabilities on behalf of this device.
 pub(in crate::net::wifi::mediatek::bootstrap::client) fn elements(
     advertisement: &Advertisement,
     selection: Selection,
@@ -99,7 +99,7 @@ pub(in crate::net::wifi::mediatek::bootstrap::client) fn elements(
 /// Compose OS probe metadata around this device's generated PHY elements.
 /// Prefix splitting follows mac80211's contiguous groups, never sorting an IE
 /// across an earlier unknown element. MT7925's source MCU helper omits the
-/// separate `common_ies` tail; explicitly retain it in EACH native band TLV.
+/// separate `common_ies` tail; explicitly keep it in EACH native band TLV.
 /// The caller checks the firmware's shared budget before scan ownership.
 pub(in crate::net::wifi::mediatek::bootstrap::client) fn with_extra(
     advertisement: &Advertisement,

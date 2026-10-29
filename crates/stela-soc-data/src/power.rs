@@ -1,4 +1,4 @@
-//! Source-qualified SOC power register families and their actual word offsets.
+//! Source-checked SOC power register families and their word offsets.
 //! Configuration layout never establishes physical readiness or progression.
 use alloc::vec::Vec;
 pub const STATUS: u64 = 0x24;

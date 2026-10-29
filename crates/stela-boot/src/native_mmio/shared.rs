@@ -52,7 +52,7 @@ struct Backing {
 // SAFETY: Source validates every immutable span against the captured MCFG,
 // root bridge windows or HPET descriptor and final non-RAM memory inventory.
 // The HPET constructor additionally requires its real whole-controller handoff;
-// this backing only retains that original capture and checked physical extent.
+// this backing only keeps that original capture and checked physical extent.
 unsafe impl ResourceBacking for Backing {
     fn physical_span(&self) -> PhysicalSpan {
         self.span
@@ -367,9 +367,9 @@ struct Bus {
     resource: Resource,
 }
 
-/// The owned MMIO authority over the captured firmware description.
+/// The owned MMIO permission over the captured firmware description.
 pub(crate) struct Source {
-    /// The actual original BSP owner, independent of finite RAM absence scopes.
+    /// The original BSP owner, independent of finite RAM absence scopes.
     /// Keep this affine pin on Source; shared MappingPlatform instances do not
     /// gain a foreign-CPU root ownership or destruction permission.
     identity: Arc<RootIdentity>,
@@ -381,7 +381,7 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    /// Activate the authority on the boot processor, after `host::install`
+    /// Activate the permission on the boot processor, after `host::install`
     /// and before the other host processors start; the TSC runs at `tsc_hz`.
     ///
     /// # Safety
@@ -631,7 +631,7 @@ impl Source {
 
     /// Reserve the registers at `span`, which an ACPI device's `_CRS` names,
     /// when the final memory map leaves them outside RAM and they avoid the
-    /// local APIC. The authority refuses a span that overlaps another
+    /// local APIC. The permission refuses a span that overlaps another
     /// reservation.
     ///
     /// # Safety
@@ -669,13 +669,13 @@ fn out8(port: u16, value: u8) {
     };
 }
 
-/// A mapping retained by every pin using the controller. Unit serializes
+/// A mapping kept by every pin using the controller. Unit serializes
 /// selector/window pairs with local interrupt exclusion.
 pub(crate) struct IoapicRegisters {
     mapping: core::mem::ManuallyDrop<stela_drivers::bus::mmio::owned::Mapping>,
     mmio: crate::native_irq::ioapic::Mmio,
 }
-// SAFETY: the all-root UC mapping is retained for every access; IOAPIC Unit
+// SAFETY: the all-root UC mapping is held for every access; IOAPIC Unit
 // serializes selector/window operations on the owning boot processor.
 unsafe impl crate::native_irq::ioapic::Registers for IoapicRegisters {
     fn read(&self, index: u8) -> u32 {
@@ -692,7 +692,7 @@ impl Drop for IoapicRegisters {
         {
             return;
         }
-        // SAFETY: the last Unit owner has gone, every pin retired or retained
+        // SAFETY: the last Unit owner has gone, every pin retired or kept
         // the Unit in quarantine, and this is the owning process CPU.
         let _ = unsafe { self.mapping.retire() };
         // SAFETY: same final process context. Failed retirement is quarantined
@@ -797,7 +797,7 @@ impl Source {
                             unsafe {
                                 command.write_volatile(command.read_volatile() | (1 << 10));
                             }
-                            // SAFETY: same retained command register readback.
+                            // SAFETY: same command register readback.
                             if unsafe { command.read_volatile() } & (1 << 10) == 0 {
                                 return Err(Error::InvalidPlatformReply);
                             }
@@ -823,7 +823,7 @@ impl Source {
         self.platform.wire().fadt()
     }
 
-    /// Mask the PICs and the same retained IOAPIC owners used by SCI routes.
+    /// Mask the PICs and the same IOAPIC owners used by SCI routes.
     ///
     /// # Safety
     /// The boot processor owns these PICs and complete IOAPIC handoff.

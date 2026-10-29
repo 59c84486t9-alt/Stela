@@ -146,7 +146,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             });
         }
         // Updating even an unchanged address list flushes smoltcp's ARP/ND
-        // cache. Change it only for an actual rejected global candidate; a
+        // cache. Change it only for a rejected global candidate; a
         // normal poll must not disrupt unrelated established TCP connections.
         let remove = self.iface.ip_addrs().iter().any(|cidr| {
             matches!(cidr, IpCidr::Ipv6(cidr) if cidr.address() != self.phy.local_ipv6 && self.conflicts.contains(&cidr.address()))

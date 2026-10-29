@@ -3,7 +3,7 @@
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Pure source DQA/thermal/LTR/device-power command contracts. Preparation is
-//! not actual initialization, thermal handoff, D3 transition or RF authority.
+//! not initialization, thermal handoff, D3 transition or RF permission.
 use super::{
     super::{command::Id, firmware::Firmware},
     lari::Observation,
@@ -70,7 +70,7 @@ impl Control {
             return Ok(None);
         }
         // Source capability12 uses its fixed v1 queue0 structure even when
-        // actual firmware has no DQA CMD_VERSIONS row. No guessed header ABI.
+        // firmware has no DQA CMD_VERSIONS row. No guessed header ABI.
         Self::make(
             fw,
             Kind::Dqa,
@@ -244,7 +244,7 @@ pub enum CtdpOperation {
     Report,
 }
 /// Total device consumption budget in mW, distinct from RF transmit dBm/EIRP.
-/// Unavailable is qualified BIOS-source exhaustion, not missing capture/AML.
+/// Unavailable is checked BIOS-source exhaustion, not missing capture/AML.
 pub fn maximum_budget(radio_id: u32, bios: PowerBudget) -> Result<u32, Error> {
     let default = match (radio_id >> 12) & 0xfff {
         0x105 | 0x108 => 2000,

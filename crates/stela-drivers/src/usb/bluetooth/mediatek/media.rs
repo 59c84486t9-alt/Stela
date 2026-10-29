@@ -611,7 +611,7 @@ pub(in crate::usb::bluetooth) mod tests {
             )
             .is_err()
         );
-        // Complete CC with additional return bytes is retained verbatim; source
+        // Complete CC with additional return bytes is held verbatim; source
         // does not define an exact proprietary return-parameter structure.
         let m = Model {
             no_complete: true,
@@ -756,7 +756,7 @@ pub(in crate::usb::bluetooth) mod tests {
         s.hci.io.iso.push_back(Read::Data(vec![1, 0, 2, 0, 8]));
         assert!(s.poll().unwrap().is_empty());
         s.submit_command(&[3, 0x0c, 0]).unwrap();
-        assert_eq!(s.last_reset().unwrap().command_credits, 0); // Preserve actual zero, never invent credit.
+        assert_eq!(s.last_reset().unwrap().command_credits, 0); // Preserve zero, never invent credit.
         assert!(s.submit(Kind::Sco, &[1, 0, 0]).is_err());
         assert!(
             s.poll()
