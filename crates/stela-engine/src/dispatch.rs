@@ -129,7 +129,7 @@ impl LeafDispatcher {
         let leaf = self
             .leaves
             .get(&entry.0)
-            .ok_or(refuse!("unregistered guest entry", entry = entry.0))?;
+            .ok_or_else(|| refuse!("unregistered guest entry", entry = entry.0))?;
         let prepared = prepare_leaf(&leaf.source, entry, &self.cache_root)?;
         require!(
             prepared.manifest.identity.source_sha256 == leaf.source_sha256,

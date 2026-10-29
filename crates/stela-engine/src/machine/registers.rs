@@ -35,7 +35,7 @@ use super::system::Register;
 use super::timer::agt;
 use alloc::vec::Vec;
 use stela_compiler::aarch64::system::registers::{Direction, Encoding, RegisterAccess};
-use stela_contracts::Feature;
+use stela_contracts::{Feature, identity::Identity};
 
 /// Identification and fixed registers of one declared CPU profile. A register
 /// without a value refuses: profile values need evidence.
@@ -51,8 +51,6 @@ pub struct CpuProfile {
     /// `fixed` alone.
     pub processors: Vec<Identity>,
 }
-
-use stela_contracts::identity::Identity;
 
 /// Encodings named by the Arm ARM and by m1n1 `cpu_regs.h`.
 pub mod encodings {

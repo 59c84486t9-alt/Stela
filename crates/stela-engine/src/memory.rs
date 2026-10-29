@@ -167,11 +167,9 @@ impl OwnedMemory {
             length as u64 <= MAX_IMAGE_MEMORY_BYTES,
             "guest access exceeds memory limit"
         );
-        let end = address.checked_add(length as u64).ok_or(refuse!(
-            "guest access address overflow",
-            address,
-            length
-        ))?;
+        let end = address
+            .checked_add(length as u64)
+            .ok_or_else(|| refuse!("guest access address overflow", address, length))?;
         if length == 0 {
             return Ok(());
         }

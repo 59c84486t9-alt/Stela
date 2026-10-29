@@ -19,10 +19,12 @@ pub(super) fn validate_clock_exit(
     source: &[u8],
 ) -> Result<ClockInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    Ok(decode_clock_instruction(exit, word)?.ok_or(refuse!(
-        "clock exit does not identify a reviewed instruction",
-        exit = exit.0
-    ))?)
+    Ok(decode_clock_instruction(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "clock exit does not identify a reviewed instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 pub(super) fn validate_pauth_exit(
@@ -33,10 +35,12 @@ pub(super) fn validate_pauth_exit(
     source: &[u8],
 ) -> Result<PointerAuthentication> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    Ok(decode_pointer_authentication(exit, word)?.ok_or(refuse!(
-        "PAuth exit does not identify a reviewed instruction",
-        exit = exit.0
-    ))?)
+    Ok(decode_pointer_authentication(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "PAuth exit does not identify a reviewed instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 /// Every consumed aligned word is a source-map boundary, checked at preparation.
@@ -82,34 +86,36 @@ pub(super) fn validate_interior_word(
         entry = entry.0,
         source_bytes
     );
-    entry.0.checked_add(source_bytes as u64).ok_or(refuse!(
-        "numerical consumed guest extent overflow",
-        entry = entry.0
-    ))?;
-    let prefix = entry.0.checked_sub(region_base).ok_or(refuse!(
-        "numerical block precedes immutable source",
-        entry = entry.0
-    ))? as usize;
+    entry
+        .0
+        .checked_add(source_bytes as u64)
+        .ok_or_else(|| refuse!("numerical consumed guest extent overflow", entry = entry.0))?;
+    let prefix = entry
+        .0
+        .checked_sub(region_base)
+        .ok_or_else(|| refuse!("numerical block precedes immutable source", entry = entry.0))?
+        as usize;
     let end = prefix
         .checked_add(source_bytes)
-        .ok_or(refuse!("numerical block extent overflow", entry = entry.0))?;
+        .ok_or_else(|| refuse!("numerical block extent overflow", entry = entry.0))?;
     require!(
         end <= source.len(),
         "numerical block exceeds immutable source",
         entry = entry.0,
         source_bytes
     );
-    let relative = exit.0.checked_sub(entry.0).ok_or(refuse!(
-        "numerical exit precedes consumed block",
-        exit = exit.0
-    ))? as usize;
+    let relative = exit
+        .0
+        .checked_sub(entry.0)
+        .ok_or_else(|| refuse!("numerical exit precedes consumed block", exit = exit.0))?
+        as usize;
     require!(
         relative < source_bytes,
         "numerical exit exceeds consumed block",
         exit = exit.0
     );
     word(source, prefix + relative)
-        .ok_or(refuse!("numerical exit exceeds immutable source", exit = exit.0).into())
+        .ok_or_else(|| refuse!("numerical exit exceeds immutable source", exit = exit.0).into())
 }
 
 /// Native exit metadata must identify the final immutable source instruction;
@@ -129,10 +135,7 @@ pub(super) fn validate_terminal_word(
     let terminal = entry
         .0
         .checked_add((source_bytes - INSTRUCTION_BYTES) as u64)
-        .ok_or(refuse!(
-            "native helper terminal address overflow",
-            entry = entry.0
-        ))?;
+        .ok_or_else(|| refuse!("native helper terminal address overflow", entry = entry.0))?;
     require!(
         exit.0 == terminal,
         "native helper exit differs from consumed terminal instruction",
@@ -141,9 +144,9 @@ pub(super) fn validate_terminal_word(
     );
     let offset = terminal
         .checked_sub(region_base)
-        .ok_or(refuse!("native helper precedes source region", terminal))?;
+        .ok_or_else(|| refuse!("native helper precedes source region", terminal))?;
     word(source, offset as usize)
-        .ok_or(refuse!("native helper exceeds immutable source", terminal).into())
+        .ok_or_else(|| refuse!("native helper exceeds immutable source", terminal).into())
 }
 
 /// The instruction word at `offset` in `source`.
@@ -160,10 +163,12 @@ pub(super) fn validate_system_exit(
     source: &[u8],
 ) -> Result<SystemInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    Ok(decode_system_instruction(exit, word)?.ok_or(refuse!(
-        "native System exit is not an immutable System instruction",
-        exit = exit.0
-    ))?)
+    Ok(decode_system_instruction(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "native System exit is not an immutable System instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 pub(super) fn validate_thread_register_exit(
@@ -175,10 +180,12 @@ pub(super) fn validate_thread_register_exit(
 ) -> Result<ThreadRegisterInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
     decode_thread_register_instruction(exit, word)?
-        .ok_or(refuse!(
-            "thread-register exit does not identify a reviewed instruction",
-            exit = exit.0
-        ))
+        .ok_or_else(|| {
+            refuse!(
+                "thread-register exit does not identify a reviewed instruction",
+                exit = exit.0
+            )
+        })
         .map_err(Into::into)
 }
 
@@ -191,10 +198,12 @@ pub(super) fn validate_amx_exit(
 ) -> Result<stela_compiler::amx::AmxInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
     stela_compiler::amx::decode(exit, word)?
-        .ok_or(refuse!(
-            "AMX exit does not identify an AMX instruction",
-            exit = exit.0
-        ))
+        .ok_or_else(|| {
+            refuse!(
+                "AMX exit does not identify an AMX instruction",
+                exit = exit.0
+            )
+        })
         .map_err(Into::into)
 }
 
@@ -206,10 +215,12 @@ pub(super) fn validate_trap_exit(
     source: &[u8],
 ) -> Result<SynchronousTrap> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    Ok(decode_trap(exit, word)?.ok_or(refuse!(
-        "trap exit does not identify a reviewed instruction",
-        exit = exit.0
-    ))?)
+    Ok(decode_trap(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "trap exit does not identify a reviewed instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 pub(super) fn validate_source_map(

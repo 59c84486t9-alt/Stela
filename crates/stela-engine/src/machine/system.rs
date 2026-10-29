@@ -15,8 +15,7 @@ pub mod helpers;
 
 pub use file::File;
 pub use generated::{ACCESSORS, Register};
-use stela_contracts::Chip;
-use stela_contracts::Feature;
+use stela_contracts::{Chip, Feature};
 
 /// How an access ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

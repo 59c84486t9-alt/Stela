@@ -88,7 +88,7 @@ impl BlockRuntime {
         let cache_root = self.preparation.cache_root(pc)?;
         let (base, region) = self
             .region(pc)
-            .ok_or(refuse!("unmapped preparation entry", pc = pc.0))?;
+            .ok_or_else(|| refuse!("unmapped preparation entry", pc = pc.0))?;
         require!(region.end - pc.0 >= 4, "truncated preparation instruction");
         let offset = (pc.0 - base) as usize;
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
@@ -139,7 +139,7 @@ impl BlockRuntime {
         );
         let (base, region) = self
             .region(pc)
-            .ok_or(refuse!("unmapped preparation entry", pc = pc.0))?;
+            .ok_or_else(|| refuse!("unmapped preparation entry", pc = pc.0))?;
         require!(region.end - pc.0 >= 4, "truncated preparation instruction");
         let offset = (pc.0 - base) as usize;
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;

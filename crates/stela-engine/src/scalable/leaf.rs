@@ -260,7 +260,7 @@ impl PreparedScalableLeaf {
 
 fn memory_status(raw: u32) -> Result<MemoryStatus> {
     MemoryStatus::from_code(raw)
-        .ok_or(refuse!("memory service returned an unknown status", raw).into())
+        .ok_or_else(|| refuse!("memory service returned an unknown status", raw).into())
 }
 
 #[cfg(all(

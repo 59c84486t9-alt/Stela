@@ -400,10 +400,12 @@ impl CheckedMemoryBlock {
                 refuse!("unknown checked memory status", status = view.fault_kind),
             )?;
         let access = stela_compiler::context::memory::FaultAccess::from_code(view.fault_access)
-            .ok_or(refuse!(
-                "unknown checked memory fault access",
-                access = view.fault_access
-            ))?;
+            .ok_or_else(|| {
+                refuse!(
+                    "unknown checked memory fault access",
+                    access = view.fault_access
+                )
+            })?;
         let fault = (status != stela_compiler::context::memory::MemoryStatus::Success).then_some(
             MemoryFault {
                 access,

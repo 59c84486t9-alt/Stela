@@ -201,7 +201,7 @@ impl BlockRuntime {
     fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
         let (base, region) = self
             .region(pc)
-            .ok_or(refuse!("instruction mapping disappeared", pc = pc.0))?;
+            .ok_or_else(|| refuse!("instruction mapping disappeared", pc = pc.0))?;
         if let Some(block) = self.loaded.get(&pc.0) {
             require!(
                 block.region_base == base && block.generation == region.generation,
@@ -531,10 +531,10 @@ impl BlockRuntime {
             let block = self
                 .loaded
                 .get(&pc.0)
-                .ok_or(refuse!("loaded block disappeared", pc = pc.0))?;
+                .ok_or_else(|| refuse!("loaded block disappeared", pc = pc.0))?;
             let (_, current) = self
                 .region(pc)
-                .ok_or(refuse!("loaded block unmapped", pc = pc.0))?;
+                .ok_or_else(|| refuse!("loaded block unmapped", pc = pc.0))?;
             require!(
                 block.generation == current.generation && block.source_bytes > 0,
                 "refusing stale block execution"

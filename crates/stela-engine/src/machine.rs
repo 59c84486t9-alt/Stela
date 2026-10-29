@@ -37,7 +37,6 @@ pub use engine::{
     Statistics, Stop, Transition, Translations, window,
 };
 pub use registers::{CpuProfile, Lines};
-use stela_contracts::Chip;
-use stela_contracts::caches;
 #[cfg(test)]
 pub(crate) use stela_contracts::chip::test_chip;
+use stela_contracts::{Chip, caches};
