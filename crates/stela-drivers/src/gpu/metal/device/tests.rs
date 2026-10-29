@@ -1020,8 +1020,9 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
         stage_input: None,
         linked_functions: LinkedFunctions {
             functions,
-            private_functions: Vec::new(),
             libraries: alloc::vec![7],
+            max_call_stack_depth: 4,
+            ..LinkedFunctions::default()
         },
         support_indirect_command_buffers: false,
     };
@@ -1050,6 +1051,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
             }],
             private_functions: Vec::new(),
             libraries: alloc::vec![7],
+            max_call_stack_depth: 4,
         }
     );
     assert_eq!(

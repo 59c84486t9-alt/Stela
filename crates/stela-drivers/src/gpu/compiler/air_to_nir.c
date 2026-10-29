@@ -3258,10 +3258,10 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
-      /* Inlining leaves only the calls that can reach recursion, and
-       * dispatch only calls through other pointers than a table's. */
+      /* Inlining leaves no call of a defined function, and dispatch only
+       * calls through other pointers than a table's. */
       if (stela_air_defined_function(callee))
-         return fail(t, STELA_AIR_INSTRUCTION, "recursive function calls are unsupported");
+         return fail(t, STELA_AIR_INSTRUCTION, "a function call was not inlined");
       if (!LLVMIsAFunction(callee))
          return fail(t, STELA_AIR_INSTRUCTION, "function pointers come only from visible function tables");
       if (LLVMIsAFunction(callee)) {
@@ -4306,7 +4306,8 @@ translate(const void *bitcode, size_t size, const char *entry,
        !stela_air_link_modules(&t.metadata, options->modules, options->module_count) ||
        !stela_air_dispatch_tables(&t.metadata, options->linked_functions,
                                   options->linked_function_count) ||
-       !stela_air_inline_calls(&t.metadata))
+       !stela_air_inline_calls(&t.metadata, LLVMGetNamedFunction(t.module, entry),
+                               options->max_call_stack_depth, options->max_instructions))
       goto done;
    t.layout = t.metadata.layout;
    t.air_minor = t.metadata.air_minor;

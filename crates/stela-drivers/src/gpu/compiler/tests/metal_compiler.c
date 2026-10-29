@@ -256,6 +256,39 @@ static const char *linked =
    "define i64 @wide(i64 %x) {\nret i64 %x\n}\n"
    "!air.visible = !{}\n";
 
+/* A kernel storing over the value its data holds what handle 1 of its
+ * table returns for it: @down adds 2 per call it makes through the table
+ * until its argument is zero, and @split adds 1 per call it makes twice. */
+static const char *recursive =
+   "declare ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1), i32)\n"
+   "define i32 @down(ptr addrspace(1) %table, i32 %x) {\n"
+   "entry:\n%zero = icmp eq i32 %x, 0\nbr i1 %zero, label %done, label %next\n"
+   "next:\n%f = call ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1)"
+   " %table, i32 0)\n%less = sub i32 %x, 1\n"
+   "%r = call i32 %f(ptr addrspace(1) %table, i32 %less)\n%s = add i32 %r, 2\nbr label %done\n"
+   "done:\n%v = phi i32 [0, %entry], [%s, %next]\nret i32 %v\n}\n"
+   "define i32 @split(ptr addrspace(1) %table, i32 %x) {\n"
+   "entry:\n%zero = icmp eq i32 %x, 0\nbr i1 %zero, label %done, label %next\n"
+   "next:\n%f = call ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1)"
+   " %table, i32 0)\n%less = sub i32 %x, 1\n"
+   "%a = call i32 %f(ptr addrspace(1) %table, i32 %less)\n"
+   "%b = call i32 %f(ptr addrspace(1) %table, i32 %less)\n"
+   "%s = add i32 %a, %b\n%t = add i32 %s, 1\nbr label %done\n"
+   "done:\n%v = phi i32 [0, %entry], [%t, %next]\nret i32 %v\n}\n"
+   "define void @recursive(ptr addrspace(1) %table, ptr addrspace(1) %data) {\n"
+   "%f = call ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1) %table,"
+   " i32 0)\n%n = load i32, ptr addrspace(1) %data, align 4\n"
+   "%v = call i32 %f(ptr addrspace(1) %table, i32 %n)\n"
+   "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @recursive, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.visible_function_table\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.read\", !\"air.arg_type_name\", !\"visible_function_table\", !\"air.arg_name\","
+   " !\"table\"}\n"
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n";
+
 /* Stores the external function of its bias constant: a library with an
  * offset constant of the same index defines it, adding the offset. */
 static const char *biased =
@@ -994,6 +1027,70 @@ expect_store(const struct air_effect_store *store, bool shared, uint64_t address
       assert(store->values[i].u32 == values[i]);
 }
 
+/* What recursive stores over 3 with function linked at handle 1 and calls
+ * through tables nested at most depth deep, or ~0u if it fails to compile. */
+static uint32_t
+recursion_result(const char *function, uint32_t depth, struct stela_air_error *error)
+{
+   const struct stela_air_linked_function linked = {function, strlen(function)};
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .linked_functions = &linked, .linked_function_count = 1,
+      .max_call_stack_depth = depth,
+   };
+   nir_shader *shader = compile(recursive, "recursive", &specialization, error);
+   if (!shader)
+      return ~0u;
+   enum { FUNCTIONS = 0x100, DATA = 0x200 };
+   static uint8_t memory[0x300];
+   uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+   memset(memory, 0, sizeof(memory));
+   put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
+   put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + FUNCTIONS);
+   put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES + 8, BASE + DATA);
+   put64(memory + FUNCTIONS, 1);
+   put32(memory + DATA, 3);
+   const struct air_effect_environment environment = {
+      .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+      .push_size = sizeof(push),
+   };
+   /* The oracle reads the invocation's linear index and SSA values, and
+    * refuses undefined ones, which structurizing leaves in its path
+    * variables and for the paths a phi does not take. */
+   const nir_lower_compute_system_values_options linear = {.lower_cs_local_id_to_index = true};
+   nir_lower_compute_system_values(shader, &linear);
+   nir_lower_vars_to_ssa(shader);
+   nir_lower_undef_to_zero(shader, NULL);
+   nir_opt_dce(shader);
+   struct air_effect_store trace[1];
+   struct air_effect_run run = air_effect_execute_in(shader, 100000, trace, 1, &environment);
+   stela_metal_release(shader);
+   if (run.status != AIR_EFFECT_COMPLETE)
+      fprintf(stderr, "recursive: %s\n", run.detail);
+   assert(run.status == AIR_EFFECT_COMPLETE && run.stores == 1);
+   assert(trace[0].address == BASE + DATA && trace[0].bits == 32 && trace[0].components == 1);
+   return trace[0].values[0].u32;
+}
+
+/* Recursion through function tables runs to the pipeline's call stack
+ * depth, and a call nested deeper calls none. */
+static void
+recursion_unrolls_to_the_call_stack_depth(void)
+{
+   struct stela_air_error error;
+   assert(recursion_result("down", 4, &error) == 6);
+   assert(recursion_result("down", 9, &error) == 6);
+   assert(recursion_result("down", 2, &error) == 4);
+   assert(recursion_result("down", 1, &error) == 2);
+   assert(recursion_result("down", 0, &error) == 0);
+   /* Two calls per level: 1 + 2 * (1 + 2 * 1). */
+   assert(recursion_result("split", 3, &error) == 7);
+   /* Unrolling past the compilation budget, or the depth Stela unrolls. */
+   assert(recursion_result("split", 40, &error) == ~0u && error.kind == STELA_AIR_LIMIT &&
+          strstr(error.detail, "instruction budget"));
+   assert(recursion_result("down", 1000, &error) == ~0u && error.kind == STELA_AIR_LIMIT &&
+          strstr(error.detail, "call stack depth"));
+}
+
 /* A kernel of indirect commands takes each dispatch's threadgroup shape
  * and threadgroup buffer placement, and its threads past the shape skip
  * it. */
@@ -1045,6 +1142,7 @@ main(void)
    arrays_reflect_each_slot();
    defined_functions_inline_into_their_callers();
    linked_functions_resolve_tables_and_externals();
+   recursion_unrolls_to_the_call_stack_depth();
    linked_modules_specialize_their_function_constants();
    command_encoding_reflects_barriers();
    glsl_type_singleton_decref();

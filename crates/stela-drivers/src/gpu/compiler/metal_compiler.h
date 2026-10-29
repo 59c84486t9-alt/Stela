@@ -141,8 +141,11 @@ struct stela_metal_specialization {
    const struct stela_air_module *modules;
    const struct stela_air_linked_function *linked_functions;
    uint32_t module_count, linked_function_count;
+   /* The stage's maxCallStackDepth, to which recursion through visible
+    * function tables unrolls. */
+   uint32_t max_call_stack_depth;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 104u
+#define STELA_METAL_SPECIALIZATION_BYTES 112u
 #define STELA_METAL_MODULE_BYTES 32u
 #define STELA_METAL_LINKED_FUNCTION_BYTES 16u
 /* The metal_abi.h layouts it points to. */

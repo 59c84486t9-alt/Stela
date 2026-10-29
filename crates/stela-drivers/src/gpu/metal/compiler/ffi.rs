@@ -248,6 +248,7 @@ pub struct Specialization {
     pub(super) linked_functions: *const LinkedFunction,
     pub(super) module_count: u32,
     pub(super) linked_function_count: u32,
+    pub(super) max_call_stack_depth: u32,
 }
 
 /// `struct stela_metal_tessellation`: the raw values of the pipeline's

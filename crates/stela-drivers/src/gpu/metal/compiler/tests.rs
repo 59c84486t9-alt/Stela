@@ -32,6 +32,7 @@ struct Compiled {
     /// The bytes of each linked module and its function constant values.
     modules: Vec<(usize, Option<Values>)>,
     linked_functions: Vec<String>,
+    max_call_stack_depth: u32,
 }
 
 /// Function constant values by index.
@@ -242,6 +243,7 @@ unsafe extern "C" fn compile(
             stage_in_indices,
             modules,
             linked_functions,
+            max_call_stack_depth: specialization.max_call_stack_depth,
         });
         ptr::without_provenance_mut(0x1000 * fake.compiled.len())
     })
@@ -572,12 +574,14 @@ fn compilations_carry_their_specialization_and_release_through_the_service() {
             [
                 Compiled {
                     varyings: linked,
+                    max_call_stack_depth: 1,
                     ..Compiled::default()
                 },
                 Compiled {
                     workgroup_size: [64, 2, 1],
                     lengths: vec![(1, 512)],
                     constants: vec![(2, vec![1, 0])],
+                    max_call_stack_depth: 1,
                     ..Compiled::default()
                 },
             ]
@@ -690,16 +694,16 @@ fn linked_modules_reach_the_service_once_each() {
         functions: vec![kernel(), kernel()],
         private_functions: vec![function(dynamic, "kernel", tint.clone())],
         libraries: vec![dynamic],
+        max_call_stack_depth: 3,
     });
     compiler
         .compile(library, "kernel", &specialization)
         .unwrap();
     assert_eq!(modules(), [(8, Some(tint.clone()))]);
     FAKE.with_borrow(|fake| {
-        assert_eq!(
-            fake.compiled.last().unwrap().linked_functions,
-            ["kernel", "kernel"]
-        );
+        let compiled = fake.compiled.last().unwrap();
+        assert_eq!(compiled.linked_functions, ["kernel", "kernel"]);
+        assert_eq!(compiled.max_call_stack_depth, 3);
     });
     // A dynamic library's module alone has no values.
     let preloaded = linked(Linking {

@@ -25,7 +25,11 @@ bool stela_air_dispatch_tables(struct stela_air_metadata *m,
                                const struct stela_air_linked_function *functions, unsigned count);
 
 /* Inlines each call to a function the module defines into its caller, so a
- * function's calls reach only AIR's. A call that can reach recursion stays,
- * for translation to refuse. */
-bool stela_air_inline_calls(struct stela_air_metadata *m);
+ * function's calls reach only AIR's. Recursion entry's calls reach through
+ * function tables unrolls into entry to max_call_stack_depth nested calls
+ * through tables, within max_instructions; a call nested deeper calls none.
+ * Other recursion is refused. Without an entry, calls that can reach
+ * recursion stay. */
+bool stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
+                            unsigned max_call_stack_depth, unsigned max_instructions);
 #endif

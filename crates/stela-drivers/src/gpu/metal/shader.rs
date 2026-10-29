@@ -460,7 +460,7 @@ pub struct Specialization {
 /// What a pipeline stage links into its function (`MTLLinkedFunctions` and
 /// `preloadedLibraries`): visible functions and dynamic libraries. Calls of
 /// external functions resolve to any of them.
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Linking {
     /// The functions visible function tables call: handle `i + 1` calls
     /// the `i`-th, and handle zero none.
@@ -468,6 +468,21 @@ pub struct Linking {
     /// Functions only external calls reach (`privateFunctions`).
     pub private_functions: Vec<LinkedFunction>,
     pub libraries: Vec<u64>,
+    /// The stage's `maxCallStackDepth`: recursion through function tables
+    /// unrolls to this many nested calls, and a call nested deeper calls
+    /// none.
+    pub max_call_stack_depth: u32,
+}
+
+impl Default for Linking {
+    fn default() -> Self {
+        Self {
+            functions: Vec::new(),
+            private_functions: Vec::new(),
+            libraries: Vec::new(),
+            max_call_stack_depth: 1,
+        }
+    }
 }
 
 /// A visible function a stage links: its library, its entry and its

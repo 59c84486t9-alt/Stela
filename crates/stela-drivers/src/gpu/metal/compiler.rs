@@ -347,6 +347,7 @@ impl AirCompiler {
             linked_functions: functions.as_ptr(),
             module_count: count(modules.len())?,
             linked_function_count: count(functions.len())?,
+            max_call_stack_depth: linking.max_call_stack_depth,
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;

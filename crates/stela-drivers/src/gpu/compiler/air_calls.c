@@ -5,9 +5,12 @@
  * defines is inlined by LLVM's always-inline pass, bottom-up, so the
  * callee's own calls are inlined first.
  *
- * Metal permits recursion only through function tables, whose depth a
- * pipeline bounds; the inliner cannot unroll it. A function whose calls reach
- * a cycle keeps its call sites, which translation refuses.
+ * Metal permits recursion only through function tables, and a pipeline's
+ * maxCallStackDepth bounds how deeply those calls nest: Metal reserves each
+ * thread's stack for that depth. Recursion therefore unrolls into the entry
+ * one call through a table at a time, to that depth; a call nested deeper
+ * calls none, as a call of an unknown handle does. Recursion that no table
+ * call breaks is refused.
  *
  * A pipeline links its linked functions' libraries and its dynamic libraries
  * into the function's module. A visible function table is device memory of
@@ -28,8 +31,11 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Beyond any call chain Metal compiles, it bounds the walk of hostile input. */
+/* Beyond any call chain Metal compiles, it bounds the walk of hostile input,
+ * and the depth recursion unrolls to. */
 #define MAX_CALL_DEPTH 256u
+/* The attribute marking a dispatcher. */
+#define DISPATCHER "stela.dispatcher"
 /* The function types a function calls through tables. */
 #define MAX_DISPATCH_TYPES 64u
 #define MAX_NAME_BYTES 4096u
@@ -62,11 +68,20 @@ defined_callee(LLVMValueRef inst)
    return callee && stela_air_defined_function(callee) ? callee : NULL;
 }
 
-/* Records in states whether fn's calls reach a cycle, and each function's
- * they reach; *cyclic receives fn's. */
+/* Whether fn dispatches calls through function tables. */
 static bool
-visit(struct stela_air_metadata *m, struct hash_table *states, LLVMValueRef fn, unsigned depth,
-      bool *cyclic)
+is_dispatcher(LLVMValueRef fn)
+{
+   return LLVMGetStringAttributeAtIndex(fn, LLVMAttributeFunctionIndex, DISPATCHER,
+                                        strlen(DISPATCHER)) != NULL;
+}
+
+/* Records in states whether fn's calls reach a cycle, and each function's
+ * they reach; *cyclic receives fn's. Calls of dispatchers count unless
+ * tables is false. */
+static bool
+visit(struct stela_air_metadata *m, struct hash_table *states, LLVMValueRef fn, bool tables,
+      unsigned depth, bool *cyclic)
 {
    struct hash_entry *entry = _mesa_hash_table_search(states, fn);
    if (entry) {
@@ -84,8 +99,10 @@ visit(struct stela_air_metadata *m, struct hash_table *states, LLVMValueRef fn, 
       for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
            inst = LLVMGetNextInstruction(inst)) {
          LLVMValueRef callee = defined_callee(inst);
+         if (callee && !tables && is_dispatcher(callee))
+            callee = NULL;
          bool reached = false;
-         if (callee && !visit(m, states, callee, depth + 1, &reached))
+         if (callee && !visit(m, states, callee, tables, depth + 1, &reached))
             return false;
          reaches |= callee && reached;
       }
@@ -113,32 +130,21 @@ attribute(const char *name)
    return LLVMGetEnumAttributeKindForName(name, strlen(name));
 }
 
-bool
-stela_air_inline_calls(struct stela_air_metadata *m)
+/* Lets the inliner inline fn wherever a call allows it. */
+static void
+inline_always(LLVMValueRef fn)
 {
-   struct hash_table *states = _mesa_pointer_hash_table_create(NULL);
-   if (!states)
-      return fail(m, STELA_AIR_ALLOCATION, "call graph allocation failed");
-   bool walked = true, inlined = false;
-   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {
-      bool cyclic;
-      walked = !stela_air_defined_function(fn) || visit(m, states, fn, 0, &cyclic);
-   }
-   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {
-      struct hash_entry *entry = _mesa_hash_table_search(states, fn);
-      if (!entry || (uintptr_t)entry->data != ACYCLIC || !called(fn))
-         continue;
-      /* optnone requires noinline. */
-      LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("optnone"));
-      LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("noinline"));
-      LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-                              LLVMCreateEnumAttribute(LLVMGetModuleContext(m->module),
-                                                      attribute("alwaysinline"), 0));
-      inlined = true;
-   }
-   _mesa_hash_table_destroy(states, NULL);
-   if (!walked || !inlined)
-      return walked;
+   /* optnone requires noinline. */
+   LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("optnone"));
+   LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("noinline"));
+   LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+                           LLVMCreateEnumAttribute(LLVMGetTypeContext(LLVMTypeOf(fn)),
+                                                   attribute("alwaysinline"), 0));
+}
+
+static bool
+run_inliner(struct stela_air_metadata *m)
+{
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
    if (!options)
       return fail(m, STELA_AIR_ALLOCATION, "pass options allocation failed");
@@ -149,6 +155,163 @@ stela_air_inline_calls(struct stela_air_metadata *m)
       return fail(m, STELA_AIR_INSTRUCTION, "LLVM refused to inline the module's calls");
    }
    return true;
+}
+
+/* Whether call may not be inlined. */
+static bool
+held(LLVMValueRef call)
+{
+   return LLVMGetCallSiteEnumAttribute(call, LLVMAttributeFunctionIndex, attribute("noinline"));
+}
+
+/* Keeps the inliner from inlining call. */
+static void
+hold(LLVMValueRef call)
+{
+   if (!held(call))
+      LLVMAddCallSiteAttribute(call, LLVMAttributeFunctionIndex,
+                               LLVMCreateEnumAttribute(LLVMGetTypeContext(LLVMTypeOf(call)),
+                                                       attribute("noinline"), 0));
+}
+
+/* The entry's calls of defined functions: those of dispatchers or others,
+ * held or released. */
+struct entry_calls {
+   unsigned dispatches, others, released, instructions;
+};
+
+static struct entry_calls
+entry_calls(LLVMValueRef entry, unsigned limit)
+{
+   struct entry_calls calls = {0};
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(entry); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst && calls.instructions <= limit;
+           inst = LLVMGetNextInstruction(inst)) {
+         calls.instructions++;
+         LLVMValueRef callee = defined_callee(inst);
+         if (!callee)
+            continue;
+         if (is_dispatcher(callee))
+            calls.dispatches++;
+         else
+            calls.others++;
+         calls.released += !held(inst);
+      }
+   }
+   return calls;
+}
+
+/* Releases the entry's held calls of dispatchers, or of other functions. */
+static void
+release(LLVMValueRef entry, bool dispatchers)
+{
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(entry); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = defined_callee(inst);
+         if (callee && is_dispatcher(callee) == dispatchers)
+            LLVMRemoveCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, attribute("noinline"));
+      }
+   }
+}
+
+/* Replaces the entry's calls of dispatchers with calls of none, which
+ * return zero. */
+static void
+drop_dispatches(LLVMValueRef entry)
+{
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(entry); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      LLVMValueRef next;
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = next) {
+         next = LLVMGetNextInstruction(inst);
+         LLVMValueRef callee = defined_callee(inst);
+         if (!callee || !is_dispatcher(callee))
+            continue;
+         LLVMTypeRef type = LLVMTypeOf(inst);
+         if (LLVMGetTypeKind(type) != LLVMVoidTypeKind)
+            LLVMReplaceAllUsesWith(inst, LLVMConstNull(type));
+         LLVMInstructionEraseFromParent(inst);
+      }
+   }
+}
+
+/* Unrolls the recursion the entry's calls reach to depth calls through
+ * tables, within max_instructions. Every call of a defined function is held
+ * and its callee inlined only where the entry releases it: first the calls
+ * of one depth that are not through tables, then those through tables,
+ * which bring the next depth's. */
+static bool
+unroll(struct stela_air_metadata *m, LLVMValueRef entry, unsigned depth, unsigned max_instructions)
+{
+   if (depth > MAX_CALL_DEPTH)
+      return fail(m, STELA_AIR_LIMIT, "recursion's maximum call stack depth exceeded");
+   struct hash_table *states = _mesa_pointer_hash_table_create(NULL);
+   if (!states)
+      return fail(m, STELA_AIR_ALLOCATION, "call graph allocation failed");
+   bool cyclic = false, walked = visit(m, states, entry, false, 0, &cyclic);
+   _mesa_hash_table_destroy(states, NULL);
+   if (!walked)
+      return false;
+   if (cyclic)
+      return fail(m, STELA_AIR_INSTRUCTION, "recursive calls outside function tables are unsupported");
+   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn; fn = LLVMGetNextFunction(fn)) {
+      for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+           block = LLVMGetNextBasicBlock(block)) {
+         for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+              inst = LLVMGetNextInstruction(inst)) {
+            LLVMValueRef callee = defined_callee(inst);
+            if (callee) {
+               hold(inst);
+               inline_always(callee);
+            }
+         }
+      }
+   }
+   for (unsigned level = 0;;) {
+      struct entry_calls calls = entry_calls(entry, max_instructions);
+      if (calls.instructions > max_instructions)
+         return fail(m, STELA_AIR_LIMIT, "unrolled recursion exceeds the instruction budget");
+      if (calls.released)
+         return fail(m, STELA_AIR_INSTRUCTION, "LLVM refused to inline the module's calls");
+      if (!calls.others && !calls.dispatches)
+         return true;
+      if (!calls.others && level == depth) {
+         drop_dispatches(entry);
+         return true;
+      }
+      level += !calls.others;
+      release(entry, !calls.others);
+      if (!run_inliner(m))
+         return false;
+   }
+}
+
+bool
+stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
+                       unsigned max_call_stack_depth, unsigned max_instructions)
+{
+   struct hash_table *states = _mesa_pointer_hash_table_create(NULL);
+   if (!states)
+      return fail(m, STELA_AIR_ALLOCATION, "call graph allocation failed");
+   bool walked = true, inlined = false, recursive = false;
+   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {
+      bool cyclic;
+      walked = !stela_air_defined_function(fn) || visit(m, states, fn, true, 0, &cyclic);
+      recursive |= walked && fn == entry && cyclic;
+   }
+   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {
+      struct hash_entry *state = _mesa_hash_table_search(states, fn);
+      if (!state || (uintptr_t)state->data != ACYCLIC || !called(fn))
+         continue;
+      inline_always(fn);
+      inlined = true;
+   }
+   _mesa_hash_table_destroy(states, NULL);
+   if (!walked || (inlined && !run_inliner(m)))
+      return false;
+   return !recursive || unroll(m, entry, max_call_stack_depth, max_instructions);
 }
 
 /* Whether module is valid AIR compiled as m's module was, after
@@ -245,6 +408,8 @@ dispatcher(struct dispatching *d, LLVMTypeRef type)
    LLVMValueRef fn = LLVMAddFunction(d->m->module, "stela.dispatch",
                                      LLVMFunctionType(result, types, params + 1, false));
    LLVMSetLinkage(fn, LLVMInternalLinkage);
+   LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+                           LLVMCreateStringAttribute(context, DISPATCHER, strlen(DISPATCHER), "", 0));
    LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context, fn, "entry");
    LLVMBasicBlockRef none = LLVMAppendBasicBlockInContext(context, fn, "none");
    LLVMPositionBuilderAtEnd(d->builder, none);

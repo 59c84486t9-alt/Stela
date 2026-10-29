@@ -124,11 +124,11 @@ impl RenderObject {
     }
 }
 
-/// `MTLLinkedFunctions` and the `preloadedLibraries` of a pipeline stage,
-/// with the device's function ids and the compiler's library ids. Every
-/// function compiles into the stage, so `binaryFunctions` join
-/// `functions`.
-#[derive(Clone, Debug, Default)]
+/// `MTLLinkedFunctions`, the `preloadedLibraries` and the call stack depth
+/// of a pipeline stage, with the device's function ids and the compiler's
+/// library ids. Every function compiles into the stage, so
+/// `binaryFunctions` join `functions`.
+#[derive(Clone, Debug)]
 pub struct LinkedFunctions {
     /// The visible functions the stage's function tables call.
     pub functions: Vec<FunctionId>,
@@ -136,6 +136,20 @@ pub struct LinkedFunctions {
     pub private_functions: Vec<FunctionId>,
     /// Dynamic libraries resolving external calls.
     pub libraries: Vec<u64>,
+    /// The stage's `maxCallStackDepth` (`maxVertexCallStackDepth`,
+    /// `maxFragmentCallStackDepth`, ...).
+    pub max_call_stack_depth: u32,
+}
+
+impl Default for LinkedFunctions {
+    fn default() -> Self {
+        Self {
+            functions: Vec::new(),
+            private_functions: Vec::new(),
+            libraries: Vec::new(),
+            max_call_stack_depth: Linking::default().max_call_stack_depth,
+        }
+    }
 }
 
 /// `MTLRenderPipelineDescriptor` with the device's function ids.
@@ -850,6 +864,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 functions: entries(&linked.functions)?,
                 private_functions: entries(&linked.private_functions)?,
                 libraries: linked.libraries.clone(),
+                max_call_stack_depth: linked.max_call_stack_depth,
             },
         })
     }

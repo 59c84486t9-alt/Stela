@@ -316,6 +316,9 @@ struct stela_air_options {
    unsigned module_count;
    const struct stela_air_linked_function *linked_functions;
    unsigned linked_function_count;
+   /* The pipeline stage's maxCallStackDepth: how deeply calls through
+    * tables nest when they recurse. */
+   unsigned max_call_stack_depth;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources

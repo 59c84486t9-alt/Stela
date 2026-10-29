@@ -476,6 +476,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .module_count = specialization->module_count,
       .linked_functions = specialization->linked_functions,
       .linked_function_count = specialization->linked_function_count,
+      .max_call_stack_depth = specialization->max_call_stack_depth,
    };
    if (compute) {
       memcpy(resources.workgroup_size, specialization->workgroup_size,

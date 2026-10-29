@@ -2230,7 +2230,7 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       goto done;
    }
    if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m) ||
-       !stela_air_inline_calls(&m))
+       !stela_air_inline_calls(&m, NULL, 0, 0))
       goto done;
    char prefix[40];
    snprintf(prefix, sizeof(prefix), "air64_v2%u-apple-macosx", m.air_minor);
