@@ -7,9 +7,11 @@
  *   stela_metal_corpus [--sm SM] MODULE.air...
  *
  * A kernel takes a 64-thread threadgroup and every threadgroup buffer its
- * declared bytes; a fragment function is linked with the varyings it reads;
+ * declared bytes; a render function is linked with the varyings it writes
+ * or reads;
  * a post-tessellation vertex function takes its patch's default
- * tessellation; required function constants take zero. Exits nonzero when
+ * tessellation, and each of its attributes a buffer of its own; required
+ * function constants take zero. Exits nonzero when
  * any entry point is refused. */
 #include "compiler/glsl_types.h"
 #include "compiler/metal_compiler.h"
@@ -61,6 +63,18 @@ constant_bytes(const char *type, size_t length)
    return 16;
 }
 
+/* The MTLVertexFormat of 32-bit lanes that carries an attribute. */
+static uint32_t
+attribute_format(const struct stela_metal_attribute_use *attribute)
+{
+   uint32_t lanes = attribute->components;
+   switch (attribute->primitive) {
+   case STELA_AIR_FLOAT: case STELA_AIR_HALF: return 27 + lanes; /* Float */
+   case STELA_AIR_UINT: case STELA_AIR_USHORT: case STELA_AIR_UCHAR: return 35 + lanes; /* UInt */
+   default: return 31 + lanes; /* Int */
+   }
+}
+
 /* Compiles entry, which reflected into reflection: NULL after reporting
  * why in error. */
 static nir_shader *
@@ -84,16 +98,13 @@ compile(const uint8_t *air, size_t size, const char *entry,
    specialization.threadgroup_lengths = lengths;
    specialization.threadgroup_length_count = reflection.threadgroup_count;
    static struct stela_metal_linked_varying varyings[STELA_METAL_VARYINGS];
-   if (stage == STELA_METAL_FRAGMENT) {
-      for (unsigned i = 0; i < reflection.varying_count; i++) {
-         const struct stela_metal_varying *varying = &reflection.varyings[i];
-         varyings[i] = (struct stela_metal_linked_varying){
-            reflection.names + varying->identifier, varying->identifier_bytes,
-            varying->per_primitive};
-      }
-      specialization.varyings = varyings;
-      specialization.varying_count = reflection.varying_count;
+   for (unsigned i = 0; i < reflection.varying_count; i++) {
+      const struct stela_metal_varying *varying = &reflection.varyings[i];
+      varyings[i] = (struct stela_metal_linked_varying){
+         reflection.names + varying->identifier, varying->identifier_bytes, varying->per_primitive};
    }
+   specialization.varyings = varyings;
+   specialization.varying_count = reflection.varying_count;
    static struct stela_air_constant_value constants[STELA_METAL_FUNCTION_CONSTANTS];
    static const uint8_t zeros[16];
    unsigned constant_count = 0;
@@ -110,6 +121,20 @@ compile(const uint8_t *air, size_t size, const char *entry,
       .quad = reflection.patch == STELA_AIR_PATCH_QUAD, .max_factor = 16,
       .partition = STELA_METAL_PARTITION_POW2, .step = STELA_METAL_FACTOR_STEP_PER_PATCH,
    };
+   static struct stela_metal_stage_in stage_in;
+   memset(&stage_in, 0, sizeof(stage_in));
+   for (unsigned i = 0; i < reflection.attribute_count; i++) {
+      const struct stela_metal_attribute_use *attribute = &reflection.attributes[i];
+      stage_in.attributes[attribute->index] = (struct stela_metal_stage_in_attribute){
+         attribute_format(attribute), 0, attribute->index};
+      stage_in.layouts[attribute->index] = (struct stela_metal_stage_in_layout){
+         16, attribute->patch_control_point ? STELA_METAL_STEP_PER_PATCH_CONTROL_POINT :
+             reflection.patch ? STELA_METAL_STEP_PER_PATCH : STELA_METAL_STEP_THREAD_POSITION_IN_GRID_X,
+         1};
+   }
+   /* Vertex functions fetch through the pipeline's vertex input instead. */
+   if (reflection.attribute_count && (stage == STELA_METAL_KERNEL || reflection.patch))
+      specialization.stage_in = &stage_in;
    if (reflection.patch)
       specialization.tessellation = &tessellation;
    return stela_metal_compile(air, size, entry, target, &specialization, error);
