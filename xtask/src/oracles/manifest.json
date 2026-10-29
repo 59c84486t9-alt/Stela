@@ -3056,7 +3056,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_uas_reset_order_and_block_zero_cdb_match",
-    "source": "crates/stela-drivers/src/usb/storage/uas.rs",
+    "source": "crates/stela-drivers/src/usb/storage/uas/tests/linux_oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_USB_UAS_RECOVERY_ORACLE"
@@ -3066,7 +3066,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_uas_builders_and_enclosure_rows_match",
-    "source": "crates/stela-drivers/src/usb/storage/uas.rs",
+    "source": "crates/stela-drivers/src/usb/storage/uas/tests/linux_oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_USB_UAS_ORACLE"
