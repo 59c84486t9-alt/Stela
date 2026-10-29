@@ -1,13 +1,9 @@
 //! Elantech sliced/custom commands, register effects and i8042 reports.
 use super::*;
 use alloc::collections::BTreeMap;
-#[path = "elantech_tests/controls_tests.rs"]
 mod controls_tests;
-#[path = "elantech_tests/trackpoint_tests.rs"]
 mod trackpoint_tests;
-#[path = "elantech_tests/v3_tests.rs"]
 mod v3_tests;
-#[path = "elantech_tests/v4_tests.rs"]
 mod v4_tests;
 pub(super) struct Action {
     pub(super) reply: Vec<u8>,

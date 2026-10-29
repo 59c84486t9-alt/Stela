@@ -313,7 +313,7 @@ impl UsbInput {
 
 #[cfg(test)]
 mod tests {
-    use super::super::touch_tests::SINGLE;
+    use super::super::tests::touch::SINGLE;
     use super::*;
     use alloc::vec;
     fn fixture() -> (Descriptor, events::Decoder, Assembler) {

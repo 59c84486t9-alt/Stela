@@ -11,8 +11,6 @@ pub mod ish;
 pub mod ps2;
 pub mod rmi;
 pub mod sfh;
-#[cfg(test)]
-mod timing_tests;
 pub mod touchpad;
 pub mod virtio;
 
@@ -65,3 +63,6 @@ pub enum Input {
     /// Mouse horizontal wheel (AC Pan) detents, positive right.
     MouseHWheel(i8),
 }
+
+#[cfg(test)]
+mod tests;

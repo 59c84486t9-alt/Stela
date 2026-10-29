@@ -663,3 +663,7 @@ fn retired_identity_refuses_old_hid_control_poll_and_restart_without_dma_mutatio
     assert_eq!(hardware.borrow().seen, commands);
     assert_eq!(hardware.borrow().setup, requests);
 }
+
+mod delimiter;
+mod sparse;
+pub(super) mod touch;

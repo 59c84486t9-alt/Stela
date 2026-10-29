@@ -8,8 +8,6 @@ use alloc::rc::{Rc, Weak};
 use core::cell::RefCell;
 
 #[cfg(test)]
-mod native_tests;
-#[cfg(test)]
 mod tests;
 pub(in crate::usb) mod transport;
 

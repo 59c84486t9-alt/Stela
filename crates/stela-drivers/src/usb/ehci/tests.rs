@@ -11,17 +11,11 @@ use alloc::{sync::Arc, vec};
 use core::{alloc::Layout, ops::Range, ptr::NonNull};
 use std::sync::Mutex;
 extern crate std;
-#[path = "admission_tests.rs"]
 mod admission_tests;
-#[path = "configuration_tests.rs"]
 mod configuration_tests;
-#[path = "detach_tests.rs"]
 mod detach_tests;
-#[path = "periodic_tests.rs"]
 mod periodic_tests;
-#[path = "recovery_tests.rs"]
 mod recovery_tests;
-#[path = "suspend_tests.rs"]
 mod suspend_tests;
 
 const OP: usize = 0x20;

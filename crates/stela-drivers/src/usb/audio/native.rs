@@ -252,7 +252,8 @@ impl UsbAudio {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod generation;
     use super::*;
     use crate::usb::xhci;
     use alloc::rc::Rc;
@@ -376,6 +377,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) mod generation_tests;

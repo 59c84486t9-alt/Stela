@@ -6,8 +6,6 @@ mod comparison;
 mod complex;
 mod estimate;
 mod extrema_scale;
-#[cfg(all(test, feature = "std", target_arch = "x86_64"))]
-mod fused_native_tests;
 mod minmax;
 mod refinement;
 mod rounding;

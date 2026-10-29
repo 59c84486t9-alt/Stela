@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 //! Native completed RX/DMA, exact private sessions and live firmware update peers.
 use super::*;
-use crate::net::wifi::mediatek::mailbox::key::bip::rotation_tests::frame;
+use crate::net::wifi::mediatek::mailbox::key::bip::tests::rotation::frame;
 
 fn group_received(driver: &mut Native, model: &Model, index: u8, key: u8, pn: u64) -> Received {
     let mut raw = incoming_bytes(&frame(index, key, pn), None, false);

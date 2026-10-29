@@ -632,6 +632,7 @@ fn resolve_bytes(code: &mut [u8], patch: Patch, target: usize) {
 
 #[cfg(test)]
 mod tests {
+    mod span;
     use super::*;
     use alloc::vec;
 
@@ -877,6 +878,3 @@ mod tests {
         assert_eq!(count, 3);
     }
 }
-
-#[cfg(test)]
-mod span_tests;

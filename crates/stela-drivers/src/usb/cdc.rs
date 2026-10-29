@@ -27,8 +27,6 @@
 //! NetworkConnection notifications on the interrupt endpoint set the
 //! carrier (ECM 6.3.1, and alike in NCM); until one arrives the link is
 //! taken to be up. Frames above the 1514-byte Ethernet maximum are refused.
-#[cfg(test)]
-pub(crate) mod generation_tests;
 mod ntb;
 
 use super::xhci::{
@@ -467,4 +465,4 @@ impl Link for UsbNet {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

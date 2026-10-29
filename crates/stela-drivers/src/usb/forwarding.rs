@@ -17,8 +17,6 @@ use alloc::{collections::BTreeMap, vec::Vec};
 mod configuration;
 mod descriptors;
 mod isochronous;
-#[cfg(test)]
-mod native_tests;
 mod transfer;
 
 /// A request identity belongs to one owner and is never reused in its lifetime.
@@ -249,6 +247,7 @@ impl xhci::Host {
 
 #[cfg(test)]
 mod tests {
+    mod native;
     use super::*;
     use crate::{bus::dma::RegionAllocator, usb::xhci::model};
     use alloc::{rc::Rc, vec};

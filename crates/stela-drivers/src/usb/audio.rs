@@ -128,4 +128,4 @@ pub use stream::{AudioDevice, MixerState, Progress};
 pub(crate) use stream::tests::configuration as test_configuration;
 
 #[cfg(test)]
-pub(crate) use native::generation_tests;
+pub(crate) use native::tests::generation as generation_tests;

@@ -29,9 +29,6 @@ use super::{
 };
 use alloc::{sync::Arc, vec::Vec};
 
-#[cfg(test)]
-mod sparse_tests;
-
 const GENERIC_DESKTOP_X: u32 = 0x0001_0030;
 const GENERIC_DESKTOP_Y: u32 = 0x0001_0031;
 const GENERIC_DESKTOP_WHEEL: u32 = 0x0001_0038;
@@ -682,6 +679,7 @@ pub fn parse(descriptor: &[u8]) -> Result<Reports, ParseError> {
 
 #[cfg(test)]
 mod tests {
+    mod sparse;
     use super::*;
 
     #[test]

@@ -3,7 +3,6 @@
 //! Unbound MAC object and owned command DMA; no PHY/scan substitution.
 use super::{ax200_country_tests::Os, ax200_scan_tests::finish_mcc, ax200_tests::*, *};
 use core::sync::atomic::AtomicBool;
-#[path = "ax200_mld_mac_tests.rs"]
 mod mld_tests;
 pub(super) struct Native {
     pub(super) domain: Arc<Domain>,

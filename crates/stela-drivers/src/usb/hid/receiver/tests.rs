@@ -333,3 +333,5 @@ fn all_fifteen_successful_signatures_remain_consumed_until_physical_retirement()
     assert_eq!(g.routes[0].view.feature_signatures_used, 15);
     assert!(g.routes[0].view.version.is_none());
 }
+
+mod native;

@@ -717,5 +717,4 @@ fn elan_resume_reset_and_source_quick_wake_have_distinct_real_queue_effects() {
     }
 }
 
-#[path = "high_precision_tests.rs"]
 mod high_precision_tests;

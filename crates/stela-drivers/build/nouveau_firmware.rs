@@ -103,7 +103,7 @@ pub fn tests(linux: &Linux, tests: &mut Tests) {
     }
     println!("cargo:rerun-if-changed={}", generator.display());
     for file in ["firmware.c", "firmware_retained.c"] {
-        println!("cargo:rerun-if-changed=src/gpu/nouveau/tests/{file}");
+        println!("cargo:rerun-if-changed=tests/reference/nouveau/{file}");
     }
     run(&mut prepare);
     for file in ["nouveau_firmware_helpers.inc", "source-receipt.json"] {
@@ -129,7 +129,7 @@ pub fn tests(linux: &Linux, tests: &mut Tests) {
         .iter()
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
-    let authored = "src/gpu/nouveau/tests/firmware.c";
+    let authored = "tests/reference/nouveau/firmware.c";
     check_declarations(&build, &[PathBuf::from(authored)]);
     tests.add(&build, "nouveau_firmware_authored", authored, &archives);
     if retained {
@@ -137,7 +137,7 @@ pub fn tests(linux: &Linux, tests: &mut Tests) {
             "cargo:rerun-if-changed={}",
             generated.join("nouveau_firmware_real_boot.inc").display()
         );
-        let source = "src/gpu/nouveau/tests/firmware_retained.c";
+        let source = "tests/reference/nouveau/firmware_retained.c";
         check_declarations(&build, &[PathBuf::from(source)]);
         tests.add(&build, "nouveau_firmware_retained", source, &archives);
     }

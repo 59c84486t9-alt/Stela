@@ -272,7 +272,7 @@ fn generations(kind: Kind) {
                         c.drain();
                     }
                     let before = backing.clone();
-                    identity::raw_tests::refuse(&mut c, slot, data.physical(), trb);
+                    identity::tests::raw::refuse(&mut c, slot, data.physical(), trb);
                     assert_eq!(backing, before);
                     if let Some(ticket) = ordinary {
                         assert_eq!(
@@ -373,7 +373,7 @@ fn generations(kind: Kind) {
                         c.drain();
                     }
                     let before = backing.clone();
-                    identity::raw_tests::refuse(&mut c, slot, data.physical(), trb);
+                    identity::tests::raw::refuse(&mut c, slot, data.physical(), trb);
                     assert_eq!(backing, before);
                     assert_eq!(
                         c.completed_iso(&ticket),
@@ -498,12 +498,11 @@ fn matching_disable_ack_permanently_fences_raw_access_before_fatal_health_failur
         assert!(c.power.retained(slot));
         let data = dma.allocate(64, 64).unwrap();
         let before = backing.clone();
-        identity::raw_tests::refuse(&mut c, slot, data.physical(), 0);
+        identity::tests::raw::refuse(&mut c, slot, data.physical(), 0);
         assert_eq!(backing, before);
     }
 }
 
-#[path = "slot_resource_tests.rs"]
 mod slot_resource_tests;
 
 #[test]

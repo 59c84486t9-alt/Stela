@@ -7,8 +7,6 @@
 mod asix;
 pub mod firmware;
 mod framing;
-#[cfg(test)]
-pub(crate) mod generation_tests;
 mod identity;
 mod registers;
 pub mod rtl815x;
@@ -462,7 +460,8 @@ impl Link for UsbEthernet {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod generation;
     use super::*;
 
     #[test]

@@ -23,8 +23,6 @@
 #[cfg(test)]
 pub mod install;
 pub mod sequencer;
-#[cfg(all(test, feature = "std"))]
-mod t6000_tuning_source_tests;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
@@ -312,6 +310,8 @@ impl MmioDevice for Pmgr {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "std")]
+    mod t6000_tuning_source;
     use super::*;
     use stela_contracts::interrupt::InterruptLatch;
 

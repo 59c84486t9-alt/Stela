@@ -15,19 +15,13 @@
 //! EP0 controls use descriptor lengths and status-stage acknowledgements;
 //! endpoint stop/restart shares the controller's DMA retirement permission.
 mod control;
-#[cfg(test)]
-mod delimiter_tests;
 pub mod descriptor;
 mod error;
 pub mod events;
 mod lifecycle;
 pub mod receiver;
 mod report;
-#[cfg(test)]
-mod sparse_tests;
 mod touch;
-#[cfg(test)]
-mod touch_tests;
 pub mod translate;
 mod usages;
 

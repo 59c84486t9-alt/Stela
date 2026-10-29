@@ -9,8 +9,6 @@ pub(super) mod descriptor;
 #[cfg(test)]
 pub(super) mod model;
 mod power;
-#[cfg(test)]
-mod runtime_tests;
 mod superspeed;
 #[cfg(test)]
 pub(super) mod tests;

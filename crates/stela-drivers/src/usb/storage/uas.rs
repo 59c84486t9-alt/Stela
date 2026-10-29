@@ -932,7 +932,4 @@ fn status_iu(bytes: &[u8], tag: u16) -> Option<Frame> {
 }
 
 #[cfg(test)]
-mod reset_reuse_tests;
-
-#[cfg(test)]
 mod tests;

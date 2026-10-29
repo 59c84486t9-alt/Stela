@@ -9,4 +9,4 @@ pub mod tps6598x;
 pub mod ucsi;
 
 #[cfg(test)]
-mod clock_tests;
+mod tests;

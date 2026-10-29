@@ -1,9 +1,7 @@
 //! Initial offline-AP memory types, copied from the live BSP configuration.
 //! This is not an update protocol for an already participating processor.
 use crate::topology::Snapshot;
-#[path = "memory_types/amd.rs"]
 pub mod amd;
-#[path = "memory_types/ranges.rs"]
 mod ranges;
 
 pub const CAP: u32 = 0xfe;

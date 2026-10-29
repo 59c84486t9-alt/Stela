@@ -337,7 +337,8 @@ impl Drop for Host {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod generation;
     use super::*;
     use crate::{
         bus::dma::RegionAllocator,
@@ -542,6 +543,3 @@ mod tests {
         assert_eq!(backing, after);
     }
 }
-
-#[cfg(test)]
-pub(crate) mod generation_tests;

@@ -36,8 +36,6 @@ use pci::{Control, Controller, Profile};
 mod registers;
 use registers::*;
 #[cfg(test)]
-mod clock_tests;
-#[cfg(test)]
 mod model;
 // QEMU's qtest socket is a Unix-domain socket.
 #[cfg(all(test, unix))]

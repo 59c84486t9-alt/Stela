@@ -890,3 +890,5 @@ fn intel_wide_bus_crc_failure_never_publishes_or_revives_legacy_alias() {
         before
     );
 }
+
+mod clock;

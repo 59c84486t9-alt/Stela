@@ -858,4 +858,4 @@ impl<B: MediaIo> Drop for Session<B> {
 }
 
 #[cfg(test)]
-pub(in crate::usb::bluetooth) mod generation_tests;
+pub(in crate::usb::bluetooth) mod tests;

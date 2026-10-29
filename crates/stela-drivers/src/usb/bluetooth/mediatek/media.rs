@@ -66,7 +66,7 @@ impl From<BlockError> for Error {
 }
 
 #[cfg(test)]
-pub(in crate::usb::bluetooth) use session::generation_tests;
+pub(in crate::usb::bluetooth) use session::tests::generation as generation_tests;
 
 #[cfg(test)]
 pub(in crate::usb::bluetooth) mod tests {

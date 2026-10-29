@@ -23,8 +23,6 @@ mod designware;
 pub mod timing;
 
 pub use designware::{Config, DesignWare, MmioRegisters, Registers, Speed, Timing};
-#[cfg(test)]
-mod timer_tests;
 
 /// One unshifted I²C target address; the controller supplies the direction bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,3 +198,6 @@ impl fmt::Display for Error {
         write!(f, "I2C {:?} (recovery {:?})", self.kind, self.recovery)
     }
 }
+
+#[cfg(test)]
+mod tests;

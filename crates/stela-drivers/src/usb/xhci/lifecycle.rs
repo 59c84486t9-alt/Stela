@@ -5,12 +5,6 @@
 //! identity of the old generation then fails.
 use super::*;
 
-#[cfg(test)]
-mod downstream_tests;
-#[cfg(test)]
-mod generation_tests;
-#[cfg(test)]
-mod queued_tests;
 mod recovery;
 mod suspend;
 
@@ -827,3 +821,6 @@ impl Host {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

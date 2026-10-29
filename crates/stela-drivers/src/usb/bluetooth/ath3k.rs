@@ -185,4 +185,4 @@ impl<B: Io> Bootloader<B> {
 }
 
 #[cfg(test)]
-pub(crate) use host::generation_tests;
+pub(crate) use host::tests::generation as generation_tests;

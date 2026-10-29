@@ -631,3 +631,5 @@ fn malformed_parameters_and_short_size_commands_abort_before_ncm_data_activation
         assert!(model.borrow().outgoing.is_empty());
     }
 }
+
+pub(crate) mod generation;
