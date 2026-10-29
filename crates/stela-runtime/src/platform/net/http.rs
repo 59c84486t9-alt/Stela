@@ -4,7 +4,8 @@
 //! response is framed by Content-Length, chunked transfer coding or the end
 //! of the connection, and a range's by Content-Length alone. Interim 1xx
 //! responses are skipped; any other non-2xx status is an error. Redirects
-//! and other transfer codings are refused.
+//! are exposed by `response_head` for explicit request policy; the simple
+//! response reader and unsupported transfer codings refuse them.
 mod url;
 pub use url::{Scheme, Url, UrlError};
 
@@ -85,7 +86,7 @@ pub fn get_range(
     Ok(request("GET", host, path, &fields)?.into_bytes())
 }
 
-/// The fields of a final 2xx response head that frame its body.
+/// The fields of a final response head that frame its body and redirection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Head {
     pub status: u16,
@@ -95,6 +96,8 @@ pub struct Head {
     pub range: Option<(u64, u64, u64)>,
     /// Bytes before the body, interim responses included.
     pub size: usize,
+    pub location: Option<String>,
+    pub etag: Option<String>,
 }
 
 /// `bytes a-b/size` (RFC 9110 14.4).
@@ -108,13 +111,25 @@ fn content_range(value: &str) -> Option<(u64, u64, u64)> {
 /// The final response head in `bytes`, once complete. A non-2xx status is
 /// an error. `closed` says the server ended the connection.
 pub fn head(bytes: &[u8], closed: bool) -> Result<Option<Head>, NetError> {
+    let parsed = response_head(bytes, closed)?;
+    if let Some(head) = &parsed
+        && !(200..300).contains(&head.status)
+    {
+        return Err(NetError::Status(head.status));
+    }
+    Ok(parsed)
+}
+
+/// Parse a final head with Location for the request owner's redirect policy.
+/// Every interim head consumes the same bounded total header budget.
+pub fn response_head(bytes: &[u8], closed: bool) -> Result<Option<Head>, NetError> {
     let mut start = 0;
     loop {
         let mut fields = [httparse::EMPTY_HEADER; MAX_FIELDS];
         let mut response = httparse::Response::new(&mut fields);
         let size = match response.parse(&bytes[start..]) {
             Ok(httparse::Status::Complete(size)) => size,
-            Ok(httparse::Status::Partial) if bytes.len() - start > MAX_HEADER => {
+            Ok(httparse::Status::Partial) if bytes.len() > MAX_HEADER => {
                 return Err(http_error("response header too large"));
             }
             Ok(httparse::Status::Partial) if closed => {
@@ -123,14 +138,17 @@ pub fn head(bytes: &[u8], closed: bool) -> Result<Option<Head>, NetError> {
             Ok(httparse::Status::Partial) => return Ok(None),
             Err(error) => return Err(NetError::Http(format!("response header: {error}"))),
         };
+        if start + size > MAX_HEADER {
+            return Err(http_error("response header too large"));
+        }
         let status = response.code.unwrap_or_default();
+        if status == 101 {
+            return Err(http_error("protocol switch is unsupported"));
+        }
         if (100..200).contains(&status) {
             // An interim response has no body; the final one follows.
             start += size;
             continue;
-        }
-        if !(200..300).contains(&status) {
-            return Err(NetError::Status(status));
         }
         let mut head = Head {
             status,
@@ -138,6 +156,8 @@ pub fn head(bytes: &[u8], closed: bool) -> Result<Option<Head>, NetError> {
             chunked: false,
             range: None,
             size: start + size,
+            location: None,
+            etag: None,
         };
         for field in response.headers.iter() {
             let value = core::str::from_utf8(field.value)
@@ -152,15 +172,32 @@ pub fn head(bytes: &[u8], closed: bool) -> Result<Option<Head>, NetError> {
                 }
                 head.length = Some(length);
             } else if field.name.eq_ignore_ascii_case("transfer-encoding") {
+                if head.chunked {
+                    return Err(http_error("duplicate Transfer-Encoding"));
+                }
                 if !value.eq_ignore_ascii_case("chunked") {
                     return Err(NetError::Http(format!("transfer coding {value:?}")));
                 }
                 head.chunked = true;
+            } else if field.name.eq_ignore_ascii_case("location") {
+                if head.location.replace(String::from(value)).is_some() {
+                    return Err(http_error("duplicate Location"));
+                }
+            } else if field.name.eq_ignore_ascii_case("etag") {
+                if head.etag.replace(String::from(value)).is_some() {
+                    return Err(http_error("duplicate ETag"));
+                }
             } else if field.name.eq_ignore_ascii_case("content-range") {
+                if head.range.is_some() {
+                    return Err(http_error("duplicate Content-Range"));
+                }
                 head.range = Some(
                     content_range(value).ok_or_else(|| http_error("malformed Content-Range"))?,
                 );
             }
+        }
+        if head.chunked && head.length.is_some() {
+            return Err(http_error("Transfer-Encoding and Content-Length conflict"));
         }
         return Ok(Some(head));
     }
@@ -180,6 +217,9 @@ pub fn response(bytes: &[u8], closed: bool) -> Result<Option<Response>, NetError
         return Ok(None);
     };
     let body = &bytes[head.size..];
+    if body.len() > MAX_BODY {
+        return Err(http_error("response body too large"));
+    }
     let body = if head.chunked {
         match chunks(body)? {
             Some(body) => body,
@@ -229,7 +269,7 @@ fn chunks(mut bytes: &[u8]) -> Result<Option<Vec<u8>>, NetError> {
         }
         let size = usize::try_from(size)
             .ok()
-            .filter(|size| body.len() + size <= MAX_BODY)
+            .filter(|size| body.len().checked_add(*size).is_some_and(|n| n <= MAX_BODY))
             .ok_or_else(|| http_error("response body too large"))?;
         if bytes.len() < size + 2 {
             return Ok(None);
@@ -254,6 +294,8 @@ pub struct Ranged {
     pub size: Option<u64>,
     /// Body bytes still due.
     pub left: u64,
+    identity: Option<(String, u64)>,
+    failed: bool,
 }
 
 impl Ranged {
@@ -263,14 +305,58 @@ impl Ranged {
             end,
             head: Some(Vec::new()),
             size: None,
-            left: end - start + 1,
+            left: end
+                .checked_sub(start)
+                .and_then(|n| n.checked_add(1))
+                .unwrap_or(0),
+            identity: None,
+            failed: start > end
+                || end
+                    .checked_sub(start)
+                    .and_then(|n| n.checked_add(1))
+                    .is_none(),
         }
+    }
+
+    /// Bind a resumed range to the exact strong validator and object length
+    /// in its input receipt before any response body is handed to the caller.
+    pub fn with_identity(start: u64, end: u64, etag: &str, bytes: u64) -> Result<Self, NetError> {
+        let opaque = etag
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .ok_or_else(|| http_error("range needs a strong quoted ETag"))?;
+        if opaque
+            .bytes()
+            .any(|b| b != 0x21 && !(0x23..=0x7e).contains(&b) && b < 0x80)
+        {
+            return Err(http_error("range ETag contains invalid bytes"));
+        }
+        if start > end || end >= bytes {
+            return Err(NetError::Invalid("HTTP range identity extent"));
+        }
+        let mut range = Self::new(start, end);
+        range.identity = Some((String::from(etag), bytes));
+        Ok(range)
     }
 
     /// Takes `bytes` as they arrived, handing body bytes to `body`. Returns
     /// whether the range is complete. `closed` says the server ended the
     /// connection after them.
     pub fn feed(
+        &mut self,
+        bytes: &[u8],
+        closed: bool,
+        body: impl FnMut(&[u8]),
+    ) -> Result<bool, NetError> {
+        if self.failed {
+            return Err(http_error("range already failed"));
+        }
+        let result = self.feed_once(bytes, closed, body);
+        self.failed |= result.is_err();
+        result
+    }
+
+    fn feed_once(
         &mut self,
         bytes: &[u8],
         closed: bool,
@@ -284,10 +370,21 @@ impl Ranged {
                 self.head = Some(so_far);
                 return Ok(false);
             };
+            if head.status != 206 {
+                return Err(http_error("response is not a partial range"));
+            }
             match head.range {
                 Some((first, last, size))
                     if (first, last) == (self.start, self.end) && !head.chunked =>
                 {
+                    if let Some((etag, expected_size)) = &self.identity {
+                        if head.etag.as_deref() != Some(etag.as_str()) {
+                            return Err(http_error("range ETag changed or absent"));
+                        }
+                        if size != *expected_size {
+                            return Err(http_error("range object length changed"));
+                        }
+                    }
                     self.size = Some(size)
                 }
                 _ => return Err(http_error("response is not the requested range")),
@@ -437,6 +534,80 @@ mod tests {
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 19-10/100\r\n\r\n",
         ] {
             assert!(Ranged::new(10, 19).feed(wrong, false, |_| ()).is_err());
+        }
+    }
+    #[test]
+    fn response_head_preserves_redirects_but_refuses_ambiguous_framing() {
+        let redirect =
+            b"HTTP/1.1 302 Found\r\nLocation: ../next?sig=%2b\r\nContent-Length: 0\r\n\r\n";
+        let parsed = response_head(redirect, false).unwrap().unwrap();
+        assert_eq!(parsed.status, 302);
+        assert_eq!(parsed.location.as_deref(), Some("../next?sig=%2b"));
+        assert_eq!(head(redirect, false), Err(NetError::Status(302)));
+        for bytes in [&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"[..], b"HTTP/1.1 302 Found\r\nLocation: /a\r\nLocation: /b\r\n\r\n", b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-1/2\r\nContent-Range: bytes 0-1/3\r\n\r\n",b"HTTP/1.1 101 Switching Protocols\r\n\r\n"] { assert!(response_head(bytes,false).is_err()); }
+        let mut bytes = b"HTTP/1.1 100 Continue\r\n\r\n".repeat(MAX_HEADER / 20);
+        bytes.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        assert!(response_head(&bytes, false).is_err());
+    }
+    #[test]
+    fn range_identity_and_failed_state_precede_body_publication() {
+        let good=b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-1/10\r\nContent-Length: 2\r\nETag: \"v1\"\r\n\r\nab";
+        let mut range = Ranged::with_identity(0, 1, "\"v1\"", 10).unwrap();
+        let mut body = Vec::new();
+        assert!(
+            range
+                .feed(good, false, |b| body.extend_from_slice(b))
+                .unwrap()
+        );
+        assert_eq!(body, b"ab");
+        for wrong in [
+            String::from_utf8(good.to_vec())
+                .unwrap()
+                .replace("v1", "v2"),
+            String::from_utf8(good.to_vec())
+                .unwrap()
+                .replace("/10", "/11"),
+            String::from_utf8(good.to_vec())
+                .unwrap()
+                .replace("206 Partial Content", "200 OK"),
+            String::from_utf8(good.to_vec())
+                .unwrap()
+                .replace("ETag: \"v1\"\r\n", ""),
+        ] {
+            let mut range = Ranged::with_identity(0, 1, "\"v1\"", 10).unwrap();
+            let mut delivered = 0;
+            assert!(
+                range
+                    .feed(wrong.as_bytes(), false, |b| delivered += b.len())
+                    .is_err()
+            );
+            assert_eq!(delivered, 0);
+            assert!(
+                range
+                    .feed(b"injected body", false, |b| delivered += b.len())
+                    .is_err()
+            );
+            assert_eq!(delivered, 0);
+        }
+        for etag in ["W/\"v1\"", "unquoted", "\"bad\r\nheader\""] {
+            assert!(Ranged::with_identity(0, 1, etag, 10).is_err());
+        }
+    }
+    #[test]
+    fn malicious_lengths_refuse_without_arithmetic_panics_or_publication() {
+        assert!(response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\nffffffffffffffff\r\n",false).is_err());
+        let mut oversized = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        oversized.resize(oversized.len() + MAX_BODY + 1, b'a');
+        assert!(response(&oversized, true).is_err());
+        for (start, end) in [(2, 1), (0, u64::MAX)] {
+            let mut range = Ranged::new(start, end);
+            assert!(
+                range
+                    .feed(b"HTTP/1.1 206 Partial Content\r\n\r\n", false, |_| panic!(
+                        "invalid extent cannot publish"
+                    ))
+                    .is_err()
+            );
         }
     }
 }
