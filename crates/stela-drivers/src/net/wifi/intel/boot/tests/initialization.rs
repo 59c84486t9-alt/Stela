@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+// Copyright (C) 2007-2014, 2018-2026 Intel Corporation
+// Copyright (C) 2013-2015 Intel Mobile Communications GmbH
+// Copyright (C) 2016-2017 Intel Deutschland GmbH
+use super::*;
+
+pub(super) fn command_ready<'a>(
+    mut boot: RomBoot<'a, Model>,
+    empty: &'a resources::Catalog,
+    source: &Source,
+    domain: &Domain,
+    state: &Arc<Mutex<ModelState>>,
+) -> RomBoot<'a, Model> {
+    event(state, 1);
+    boot.poll().unwrap();
+    let mut packet = rx_packet(1, 0xcafe, 0);
+    set_sku(&mut packet, [0; 3]);
+    complete(&boot, domain, 0, 1, &packet);
+    boot.poll().unwrap().unwrap();
+    assert!(matches!(
+        unsafe { boot.begin_pnvm(empty, Observations::default(), source) }.unwrap(),
+        PnvmProgress::Skipped
+    ));
+    boot
+}
+
+pub(super) fn command_packet(
+    id: crate::net::wifi::intel::command::Id,
+    sequence: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut bytes = vec![0; 4096];
+    bytes[..4].copy_from_slice(&(4u32 + payload.len() as u32).to_le_bytes());
+    bytes[4] = id.opcode;
+    bytes[5] = id.group;
+    bytes[6..8].copy_from_slice(&sequence.to_le_bytes());
+    bytes[8..8 + payload.len()].copy_from_slice(payload);
+    let next = (8 + payload.len()).next_multiple_of(64);
+    bytes[next..next + 4].copy_from_slice(&0x55550000u32.to_le_bytes());
+    bytes
+}
+
+pub(super) fn command_id() -> crate::net::wifi::intel::command::Id {
+    crate::net::wifi::intel::command::Id {
+        group: 2,
+        opcode: 3,
+        version: 1,
+    }
+}
+
+pub(super) fn alive_ax210<'a>(
+    catalog: &'a resources::Catalog,
+    step: StepConfiguration<'a>,
+    source: &Source,
+    domain: &Arc<Domain>,
+    state: &Arc<Mutex<ModelState>>,
+    drops: &Arc<AtomicUsize>,
+) -> RomBoot<'a, Model> {
+    let mut boot = start_ax210(catalog, step, source, domain, state, drops);
+    event(state, 1);
+    boot.poll().unwrap();
+    complete(&boot, domain, 0, 1, &rx_packet(1, 0xcafe, 0));
+    boot.poll().unwrap().unwrap();
+    boot
+}
+
+pub(super) fn drive_nvm<'a>(
+    boot: RomBoot<'a, Model>,
+    source: &Source,
+    domain: &Domain,
+    state: &Arc<Mutex<ModelState>>,
+) -> UnifiedNvm<'a, Model> {
+    use crate::net::wifi::intel::nvm::Request;
+    state
+        .lock()
+        .unwrap()
+        .registers
+        .extend([(0x388, 0x02123456), (0x38c, 0x789a)]);
+    let init = boot.initialize_on_device_nvm();
+    let before = state.lock().unwrap().ops.len();
+    let mut init = match init.begin_radio() {
+        Err(owner) => *owner,
+        Ok(_) => panic!("uninitialized owner admitted"),
+    };
+    assert_eq!(state.lock().unwrap().ops.len(), before);
+    unsafe { init.advance(source) }.unwrap();
+    complete(
+        &init.boot,
+        domain,
+        1,
+        2,
+        &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
+    );
+    unsafe { init.advance(source) }.unwrap();
+    complete(
+        &init.boot,
+        domain,
+        2,
+        3,
+        &command_packet(Request::AccessComplete.id(), 1, &[]),
+    );
+    unsafe { init.advance(source) }.unwrap();
+    complete(
+        &init.boot,
+        domain,
+        3,
+        4,
+        &command_packet(
+            crate::net::wifi::intel::command::Id {
+                group: 0,
+                opcode: 4,
+                version: 0,
+            },
+            0x8000,
+            &[0x76],
+        ),
+    );
+    unsafe { init.advance(source) }.unwrap();
+    complete(
+        &init.boot,
+        domain,
+        4,
+        5,
+        &command_packet(Request::GetInformation.id(), 2, &nvm_response()),
+    );
+    assert_eq!(
+        unsafe { init.advance(source) }.unwrap(),
+        InitializationProgress::Observed
+    );
+    init
+}
+
+pub(super) fn drive_cold_prefix<'a>(
+    init: UnifiedNvm<'a, Model>,
+    source: &Source,
+    domain: &Domain,
+) -> (ColdRadio<'a, Model>, u16, u16) {
+    let expected = crate::net::wifi::intel::radio::InitialPlan::prepare(
+        &init.boot.firmware,
+        init.boot.profile.family(),
+        &init.receipt().unwrap().information,
+    )
+    .unwrap();
+    let mut radio = init.begin_radio().unwrap_or_else(|_| panic!("actual NVM"));
+    unsafe { radio.advance(source) }.unwrap();
+    for (i, command) in expected.commands().iter().enumerate() {
+        let mut id = command.id();
+        if id.group == 0 {
+            id.group = 1;
+        }
+        complete(
+            &radio.initialized.boot,
+            domain,
+            5 + i as u16,
+            6 + i as u16,
+            &command_packet(id, 3 + i as u16, &[]),
+        );
+        unsafe { radio.advance(source) }.unwrap();
+    }
+    assert_eq!(radio.phase(), ColdRadioPhase::PlatformConfigurationRequired);
+    let count = expected.commands().len() as u16;
+    (radio, 3 + count, 5 + count)
+}
