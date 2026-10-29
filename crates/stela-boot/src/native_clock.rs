@@ -109,10 +109,12 @@ pub(crate) struct RootCpu {
     task: u16,
     max_cpuid: u32,
     thermal_eax: u32,
+    deadline_control: tsc::DeadlineControl,
     source: Prepared,
     previous: AtomicU64,
     elapsed: AtomicU64,
     closed: AtomicBool,
+    health: source::Health,
 }
 impl RootCpu {
     fn controller(&self) -> Apic {
@@ -126,21 +128,34 @@ impl RootCpu {
         // descriptors and original root catalog before device access.
         self.identity.check_irq_cpu()
     }
-    /// Caller holds local IRQ exclusion; all fields are separate from State.
+    /// Caller holds actual local IRQ exclusion. A source fault does not
+    /// revoke the time-free CPU identity needed to drain/release resources.
+    fn sample_ticks(&self) -> Result<u64, WorkError> {
+        self.health.check()?;
+        let result = (|| {
+            self.deadline_control.check()?;
+            // SAFETY: original owner and CPU remain retained. Source checks
+            // real control/power eligibility around the coherent read.
+            let mut raw = unsafe { self.source.read()? };
+            let previous = self.previous.load(Ordering::Relaxed);
+            if raw == previous {
+                raw = self.source.progress_after(previous)?;
+            }
+            let elapsed = self
+                .elapsed
+                .load(Ordering::Relaxed)
+                .checked_add(self.source.delta(previous, raw)?)
+                .ok_or(WorkError::Exhausted)?;
+            self.previous.store(raw, Ordering::Relaxed);
+            self.elapsed.store(elapsed, Ordering::Release);
+            Ok(elapsed)
+        })();
+        result.map_err(|error| self.health.fail(error))
+    }
     fn sample(&self) -> Result<u64, WorkError> {
-        // SAFETY: exact retained source; HPET validates actual IRQ CPU/root before MMIO.
-        let raw = unsafe { self.source.read()? };
-        let elapsed = self
-            .elapsed
-            .load(Ordering::Relaxed)
-            .checked_add(
-                self.source
-                    .delta(self.previous.load(Ordering::Relaxed), raw)?,
-            )
-            .ok_or(WorkError::Exhausted)?;
-        self.previous.store(raw, Ordering::Relaxed);
-        self.elapsed.store(elapsed, Ordering::Release);
-        self.source.ns(elapsed)
+        self.source
+            .ns(self.sample_ticks()?)
+            .map_err(|error| self.health.fail(error))
     }
     fn now(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
@@ -159,10 +174,7 @@ impl RootCpu {
 unsafe impl Cpu for RootCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
         self.affinity()?;
-        if root() != self.root {
-            return Err(WorkError::CorruptContext);
-        }
-        Ok(())
+        self.identity.check_clock_root()
     }
     fn in_interrupt(&self) -> bool {
         self.affinity().is_err() || host::root_irq_active()
@@ -186,6 +198,114 @@ unsafe impl Cpu for RootCpu {
     fn fatal(&self, error: WorkError) -> ! {
         crate::output::arguments(format_args!("NATIVE CLOCK FATAL {error:?}\n"));
         crate::output::fatal("native clock/root contract failed")
+    }
+}
+
+/// Continuous-source identity retained with the original physical CPU owner.
+/// Cloning retains ownership; it neither migrates sampling nor rebases time.
+#[derive(Clone)]
+pub(crate) struct CounterEpoch {
+    cpu: Arc<RootCpu>,
+}
+#[derive(Clone)]
+pub(crate) struct CounterSample {
+    epoch: CounterEpoch,
+    ticks: u64,
+}
+/// A sealed pairing of the existing installed CPU, clock and idle producer.
+/// Its private fields cannot pair an unrelated Cpu/Idle with a counter epoch.
+pub(crate) struct ClockServices {
+    state: Arc<State>,
+    clock: Arc<dyn Clock>,
+    idle: Arc<dyn Idle>,
+}
+impl ClockServices {
+    pub(crate) fn check_identity(
+        &self,
+        identity: &Arc<host::RootIdentity>,
+    ) -> Result<(), WorkError> {
+        self.state.process()?;
+        if !Arc::ptr_eq(identity, &self.state.cpu.identity) {
+            return Err(WorkError::WrongCpu);
+        }
+        self.state.cpu.health.check()?;
+        self.state
+            .cpu
+            .source
+            .continuous_period()
+            .map_err(|error| self.state.cpu.health.fail(error))?;
+        Ok(())
+    }
+    pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
+        self.state.cpu_view.clone()
+    }
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+    pub(crate) fn idle(&self) -> Arc<dyn Idle> {
+        self.idle.clone()
+    }
+    pub(crate) fn epoch(&self) -> Result<CounterEpoch, WorkError> {
+        self.check_identity(&self.state.cpu.identity)?;
+        Ok(CounterEpoch {
+            cpu: self.state.cpu.clone(),
+        })
+    }
+}
+pub(crate) use source::ElapsedBounds;
+impl CounterEpoch {
+    /// Nominal monotonic nanoseconds for transport deadlines. UTC callers use
+    /// sample/elapsed_bounds, which retain the source's outward uncertainty.
+    pub(crate) fn now_ns(&self) -> Result<u64, WorkError> {
+        let sample = self.sample()?;
+        self.cpu
+            .source
+            .ns(sample.ticks)
+            .map_err(|error| self.cpu.health.fail(error))
+    }
+    pub(crate) fn sample(&self) -> Result<CounterSample, WorkError> {
+        self.cpu.health.check()?;
+        self.cpu.check_cpu()?;
+        self.cpu
+            .source
+            .continuous_period()
+            .map_err(|error| self.cpu.health.fail(error))?;
+        let flags = flags_disable();
+        let result = self.cpu.sample_ticks();
+        // Restore depends only on the real time-free CPU identity. A failed
+        // source must not prevent resources from being drained on that CPU.
+        // SAFETY: exact same CPU's enclosing IRQ save; no switch/callback.
+        unsafe {
+            self.cpu.restore(flags);
+        }
+        let ticks = result?;
+        self.cpu.check_cpu()?;
+        self.cpu.health.check()?;
+        Ok(CounterSample {
+            epoch: self.clone(),
+            ticks,
+        })
+    }
+
+    pub(crate) fn elapsed_bounds(
+        &self,
+        start: &CounterSample,
+        end: &CounterSample,
+    ) -> Result<ElapsedBounds, WorkError> {
+        if !Arc::ptr_eq(&self.cpu, &start.epoch.cpu) || !Arc::ptr_eq(&self.cpu, &end.epoch.cpu) {
+            return Err(WorkError::InvalidTicket);
+        }
+        // A retained old reading never supplies readiness after detach,
+        // control/root loss or a source transition.
+        self.sample()?;
+        let ticks = end
+            .ticks
+            .checked_sub(start.ticks)
+            .ok_or(WorkError::CorruptContext)?;
+        self.cpu
+            .source
+            .elapsed_bounds(ticks)
+            .map_err(|error| self.cpu.health.fail(error))
     }
 }
 
@@ -256,6 +376,11 @@ impl State {
         Ok(())
     }
     fn rearm(&self, now: u64) -> Result<(), WorkError> {
+        self.cpu.health.check()?;
+        self.cpu
+            .deadline_control
+            .check()
+            .map_err(|error| self.cpu.health.fail(error))?;
         let next = self
             .heartbeat
             .load(Ordering::Relaxed)
@@ -266,6 +391,9 @@ impl State {
             .div_ceil(u128::from(pm::NS))
             .clamp(1, u128::from(u32::MAX)) as u32;
         let apic = self.cpu.controller();
+        if apic.read(apic::DIVIDE) & 0b1011 != 0b1011 {
+            return Err(self.cpu.health.fail(WorkError::CorruptContext));
+        }
         apic.write(apic::LVT_TIMER, u32::from(interrupts::TIMER_VECTOR));
         apic.write(apic::INITIAL, ticks);
         Ok(())
@@ -506,6 +634,8 @@ impl Installed {
         source: Prepared,
     ) -> Result<Self, WorkError> {
         identity.check_dispatch()?;
+        source.admit(&identity)?;
+        source.continuous_period()?;
         // SAFETY: caller retains the genuine physical controller/root/deadline
         // owner; source admission below checks the exact same identity.
         unsafe { Self::attach_identity(identity, source) }
@@ -517,17 +647,12 @@ impl Installed {
     ) -> Result<Self, WorkError> {
         identity.check_dispatch()?;
         source.admit(&identity)?;
-        let max_cpuid = core::arch::x86_64::__cpuid(0).eax;
-        if max_cpuid < 6 {
-            return Err(WorkError::Unavailable);
-        }
-        let thermal_eax = core::arch::x86_64::__cpuid(6).eax;
+        let deadline_control = tsc::DeadlineControl::capture()?;
+        let max_cpuid = deadline_control.max_cpuid();
+        let thermal_eax = deadline_control.thermal_eax();
         // ARAT is the actual local timer's invariant-rate/idle prerequisite;
         // the existing guest timer or successful periodic delivery supplies no
         // such proof. Refuse before CLI, calibration, ownership or publication.
-        if thermal_eax & (1 << 2) == 0 {
-            return Err(WorkError::Unavailable);
-        }
         // Keep a source owner outside the IRQ-off closure so failed admission
         // cannot perform its final Mapping/root owner release before restore.
         let deferred_source = source.clone();
@@ -572,10 +697,12 @@ impl Installed {
                 task: observed.task,
                 max_cpuid,
                 thermal_eax,
+                deadline_control,
                 source,
                 previous: AtomicU64::new(previous),
                 elapsed: AtomicU64::new(0),
                 closed: AtomicBool::new(false),
+                health: source::Health::new(),
             });
             let apic_hz = calibrate(&cpu)?;
             let now = cpu.sample()?;
@@ -616,6 +743,30 @@ impl Installed {
         }
         drop(deferred_source);
         result
+    }
+    /// Only the real installed native source can mint a continuous epoch.
+    /// A scoped fixture or bounded PM counter cannot satisfy this constructor.
+    pub(crate) fn epoch(&self) -> Result<CounterEpoch, WorkError> {
+        self.state.process()?;
+        self.state.cpu.health.check()?;
+        self.state
+            .cpu
+            .source
+            .continuous_period()
+            .map_err(|error| self.state.cpu.health.fail(error))?;
+        self.state.cpu.now()?;
+        Ok(CounterEpoch {
+            cpu: self.state.cpu.clone(),
+        })
+    }
+
+    pub(crate) fn services(&self) -> Result<ClockServices, WorkError> {
+        self.epoch()?;
+        Ok(ClockServices {
+            state: Arc::clone(&self.state),
+            clock: Arc::clone(&self.clock),
+            idle: Arc::clone(&self.idle),
+        })
     }
     pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
         self.state.cpu_view.clone()

@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Private actual-CPU calibration candidate. No Cpu/Clock/Idle implementation,
+//! Native HPET power qualification and private actual-CPU TSC calibration.
+//! TSC remains a candidate: no Cpu/Clock/Idle implementation,
 //! Prepared variant or service grant can be constructed from this observation.
 //! Absent ADJUST remains an explicit owned-watchdog requirement; a temporary
 //! HPET active-spin reference is not that persistent watchdog or PC10 proof.
+mod deadline;
+pub(super) use deadline::Control as DeadlineControl;
+mod hpet_power;
 use super::{HpetCounter, WorkError};
 use crate::{engine::host::RootIdentity, handoff::Handoff, native_smp::firmware};
 use alloc::sync::Arc;
@@ -10,6 +14,7 @@ use core::{
     arch::{asm, x86_64::__cpuid_count},
     marker::PhantomData,
 };
+pub(super) use hpet_power::PowerControl;
 use stela_boot_core::{
     topology::Snapshot,
     tsc::{self, Calibration, CounterPolicy, RateRequirement, Sample},
@@ -52,7 +57,7 @@ pub(crate) struct Candidate {
 }
 // Baseline CPUID is genuinely serializing on admitted x86-64. Do not presume
 // AMD LFENCE ordering or use unqualified RDTSCP/TSC_AUX as an affinity lease.
-fn ordered() -> u64 {
+pub(super) fn ordered() -> u64 {
     let _ = __cpuid_count(0, 0);
     let (low, high): (u32, u32);
     // SAFETY: only called after actual retained-CPU TSC feature admission.
