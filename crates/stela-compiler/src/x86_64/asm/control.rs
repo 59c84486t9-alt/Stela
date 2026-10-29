@@ -11,6 +11,11 @@ pub(crate) enum HighByte {
 }
 
 impl Asm<'_> {
+    /// One-byte INT3 (#BP), also used between aligned code entries.
+    pub(crate) fn int3(&mut self) {
+        self.fixed(&[0xcc]);
+    }
+
     /// `ud2` (0F 0B): raise #UD.
     pub(crate) fn ud2(&mut self) {
         self.fixed(&[0x0f, 0x0b]);
@@ -52,6 +57,11 @@ mod tests {
         build(&mut code.asm());
         assert_eq!(code.instructions(), 1);
         code
+    }
+
+    #[test]
+    fn one_byte_breakpoint() {
+        assert_eq!(one(|asm| asm.int3()), [0xcc]);
     }
 
     #[test]

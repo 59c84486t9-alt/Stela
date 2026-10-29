@@ -314,7 +314,11 @@ mod tests {
                 .iter()
                 .map(|&row| table[usize::from(state_bytes[usize::from(row)])])
                 .collect();
-            let mut code = Code::from(WRAPPER.to_vec());
+            let mut code = Code::new();
+            let body = code.asm().call();
+            code.asm().ret();
+            code.asm().bind(body);
+            assert_eq!(code.as_slice(), WRAPPER);
             emit(
                 &mut code,
                 &Operand {
@@ -324,7 +328,7 @@ mod tests {
                 },
                 TargetCpu::Baseline,
             );
-            code.push(0xc3); // ret
+            code.asm().ret();
             assert!(code.len() <= PAGE);
             for offset in [0, WRAPPER.len()] {
                 let mut state = GuestState::default();

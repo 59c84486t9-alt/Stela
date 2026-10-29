@@ -108,6 +108,16 @@ impl Code {
             .extend_from_slice(&source.bytes[span.start.bytes..span.end.bytes]);
         self.instructions += span.instructions();
     }
+    /// Replace a fixed-size field without changing buffer length or count.
+    pub(crate) fn patch<const N: usize>(&mut self, offset: usize, bytes: [u8; N]) {
+        let end = offset
+            .checked_add(N)
+            .expect("patch field offset does not overflow");
+        self.bytes
+            .get_mut(offset..end)
+            .expect("patch field lies in emitted code")
+            .copy_from_slice(&bytes);
+    }
     /// Move the instructions emitted after `at` into a separate buffer.
     pub(crate) fn split_off(&mut self, at: Checkpoint) -> Self {
         assert!(at.bytes <= self.bytes.len() && at.instructions <= self.instructions);
@@ -138,15 +148,6 @@ impl Code {
     pub(crate) fn clear(&mut self) {
         self.bytes.clear();
         self.instructions = 0;
-    }
-}
-
-impl From<Vec<u8>> for Code {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-            instructions: 0,
-        }
     }
 }
 
@@ -231,12 +232,6 @@ impl core::ops::Deref for Code {
     type Target = Vec<u8>;
     fn deref(&self) -> &Vec<u8> {
         &self.bytes
-    }
-}
-
-impl core::ops::DerefMut for Code {
-    fn deref_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.bytes
     }
 }
 
@@ -1266,12 +1261,16 @@ impl<'a> Asm<'a> {
     /// Point `patch` at the current position.
     pub(crate) fn bind(&mut self, patch: Patch) {
         let target = self.code.len();
-        resolve(self.code, patch, target);
+        resolve_bytes(self.code, patch, target);
     }
 }
 
 /// Point `patch` in `code` at `target`.
-pub(crate) fn resolve(code: &mut [u8], patch: Patch, target: usize) {
+pub(crate) fn resolve(code: &mut Code, patch: Patch, target: usize) {
+    resolve_bytes(&mut code.bytes, patch, target);
+}
+
+fn resolve_bytes(code: &mut [u8], patch: Patch, target: usize) {
     let distance = target as i64 - patch.end() as i64;
     if patch.short {
         code[patch.at] = i8::try_from(distance).expect("rel8 branch in range") as u8;
@@ -1504,7 +1503,7 @@ mod tests {
             a.mov(Size::Dword, Gpr::Rax, Gpr::Rax);
             a.bind(forward);
             let back = a.jmp8();
-            resolve(a.code, back, 0);
+            resolve_bytes(a.code, back, 0);
         });
         assert_eq!(code, [0x75, 2, 0x89, 0xc0, 0xeb, 0xfa]);
         assert_eq!(count, 3);
@@ -1517,7 +1516,7 @@ mod tests {
             a.mov(Size::Dword, Gpr::Rax, Gpr::Rax);
             a.bind(forward);
             let back = a.jmp();
-            resolve(a.code, back, 0);
+            resolve_bytes(a.code, back, 0);
         });
         assert_eq!(
             code,
@@ -1533,6 +1532,31 @@ mod tests {
 mod span_tests {
     use super::*;
     use crate::x86_64::asm::Gpr;
+
+    #[test]
+    fn fixed_field_patching_preserves_length_and_count() {
+        let mut code = Code::new();
+        let jump = code.asm().jmp();
+        let bytes = code.len();
+        let count = code.instructions();
+        code.patch(jump.offset(), 42_i32.to_le_bytes());
+        assert_eq!((code.len(), code.instructions()), (bytes, count));
+        assert_eq!(*code, [0xe9, 42, 0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "patch field lies in emitted code")]
+    fn field_patch_refuses_out_of_bounds() {
+        let mut code = Code::new();
+        code.asm().nop();
+        code.patch(1, [0u8; 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "patch field offset does not overflow")]
+    fn field_patch_refuses_offset_overflow() {
+        Code::new().patch(usize::MAX, [0u8; 4]);
+    }
 
     #[test]
     fn spans_keep_inline_data_and_internal_branches_without_counting_data() {

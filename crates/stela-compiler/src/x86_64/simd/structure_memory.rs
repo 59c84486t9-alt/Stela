@@ -226,8 +226,8 @@ fn scalar_state_transfer(code: &mut Code, load: bool, bytes: u8, state_offset: u
     }
 }
 
-fn patch_jump(code: &mut [u8], offset: usize) {
+fn patch_jump(code: &mut Code, offset: usize) {
     let displacement = i32::try_from(code.len() - offset - size_of::<i32>())
         .expect("bounded structure-transfer body");
-    code[offset..offset + size_of::<i32>()].copy_from_slice(&displacement.to_le_bytes());
+    code.patch(offset, displacement.to_le_bytes());
 }

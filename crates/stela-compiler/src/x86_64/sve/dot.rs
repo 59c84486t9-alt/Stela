@@ -294,7 +294,6 @@ pub(crate) fn emit_integer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn floating_and_unallocated_operands_decline_without_partial_output() {
@@ -328,7 +327,8 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = Code::from(vec![0xcc]);
+            let mut code = Code::new();
+            code.asm().int3();
             assert!(!emit_integer(
                 &mut code,
                 &operand,

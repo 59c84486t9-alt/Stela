@@ -525,7 +525,6 @@ fn zero_rows(code: &mut Code, count: usize, step: usize, length: VectorLength, z
 mod tests {
     use super::*;
     use crate::aarch64::sme::movement::decode;
-    use alloc::vec;
 
     #[test]
     fn rejected_debug_and_short_length_emit_nothing() {
@@ -538,7 +537,8 @@ mod tests {
             0xc0c4_0400,
         ] {
             let operand = decode(word).unwrap();
-            let mut code = Code::from(vec![0x90]);
+            let mut code = Code::new();
+            code.asm().nop();
             let error = emit(&mut code, &operand, length, TargetCpu::Baseline).unwrap_err();
             assert!(matches!(
                 error,

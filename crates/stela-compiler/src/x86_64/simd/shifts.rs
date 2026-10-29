@@ -604,9 +604,9 @@ fn lane_branch(code: &mut Code, condition: LaneBranch) -> usize {
     }
     .offset()
 }
-fn resolve_lane_branch(code: &mut [u8], patch: usize) {
+fn resolve_lane_branch(code: &mut Code, patch: usize) {
     let relative = i32::try_from(code.len() - patch - 4).expect("lane recipe rel32");
-    code[patch..patch + 4].copy_from_slice(&relative.to_le_bytes());
+    code.patch(patch, relative.to_le_bytes());
 }
 #[derive(Clone, Copy)]
 enum LaneShift {

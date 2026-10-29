@@ -190,6 +190,7 @@ impl Prefix {
             )?;
         }
         debug_assert!(fixups.is_empty(), "context block prefix cannot transfer");
+        let mut terminal_bytes = Vec::new();
         match self.terminal {
             Some(Terminal::Shared(plan)) => {
                 let shared = plan.compile()?;
@@ -201,7 +202,7 @@ impl Prefix {
                         .into_iter()
                         .map(|(pc, at)| (pc, at + offset)),
                 );
-                code.extend(shared.native.x86_64_code);
+                terminal_bytes = shared.native.x86_64_code;
             }
             Some(Terminal::Numerical(instruction)) => {
                 let pc = instruction.instruction_pc();
@@ -246,9 +247,11 @@ impl Prefix {
             }
             None => x86_64::block::direct_exit(&mut code, self.next_pc, ExitKind::Fallthrough),
         }
+        let mut bytes = code.into_bytes();
+        bytes.extend(terminal_bytes);
         Ok(CompiledBlock {
             native: NativeBlock {
-                x86_64_code: code.into_bytes(),
+                x86_64_code: bytes,
                 source_map,
             },
             source_bytes: self.source_bytes,

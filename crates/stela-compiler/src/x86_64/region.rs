@@ -1830,10 +1830,11 @@ mod tests {
             Some(vec![7, 14, 17, 24])
         );
         for index in 0..raw.len() {
-            let mut mutated = raw.clone();
+            let mut mutated = raw.as_slice().to_vec();
             mutated[index] ^= 1;
             assert!(recipes::ordinary_load_ends(&mutated, 1, 15, Some(16), -255).is_none());
         }
+        let mut raw = raw.into_bytes();
         raw.push(0x90);
         assert!(recipes::ordinary_load_ends(&raw, 1, 15, Some(16), -255).is_none());
     }
@@ -1894,7 +1895,7 @@ mod tests {
                 let ends = recipes::ordinary_load_ends(&raw, bytes, 15, selected, -255).unwrap();
                 assert_eq!(ends.last(), Some(&raw.len()));
                 for index in 0..raw.len() {
-                    let mut mutated = raw.clone();
+                    let mut mutated = raw.as_slice().to_vec();
                     mutated[index] ^= 1;
                     assert!(
                         recipes::ordinary_load_ends(&mutated, bytes, 15, selected, -255).is_none()
@@ -2060,7 +2061,7 @@ mod tests {
                 let base = slot(base).unwrap();
                 assert!(ends(&raw, bytes, base, [Some(16), Some(17)]).is_some());
                 for index in 0..raw.len() {
-                    let mut changed = raw.clone();
+                    let mut changed = raw.as_slice().to_vec();
                     changed[index] ^= 1;
                     assert!(ends(&changed, bytes, base, [Some(16), Some(17)]).is_none());
                 }
@@ -2658,7 +2659,7 @@ mod tests {
                     );
                 }
                 for index in 0..raw.len() {
-                    let mut changed = raw.clone();
+                    let mut changed = raw.as_slice().to_vec();
                     changed[index] ^= 1;
                     assert!(ends(&changed, bytes).is_none());
                 }
@@ -2696,7 +2697,7 @@ mod tests {
                 };
                 assert!(ends(&raw, bytes).is_some());
                 for index in 0..raw.len() {
-                    let mut changed = raw.clone();
+                    let mut changed = raw.as_slice().to_vec();
                     changed[index] ^= 1;
                     assert!(ends(&changed, bytes).is_none());
                 }

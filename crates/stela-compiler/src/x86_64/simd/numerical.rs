@@ -186,11 +186,11 @@ pub(in crate::x86_64) fn emit_fma(
 pub(in crate::x86_64) fn branch(code: &mut Code, condition: Condition) -> usize {
     code.asm().jcc(condition.cond()).offset()
 }
-pub(in crate::x86_64) fn resolve(code: &mut [u8], patch: usize, target: usize) {
+pub(in crate::x86_64) fn resolve(code: &mut Code, patch: usize, target: usize) {
     let target = i64::try_from(target).expect("numerical branch target fits i64");
     let next = i64::try_from(patch + size_of::<i32>()).expect("numerical branch source fits i64");
     let distance = i32::try_from(target - next).expect("bounded numerical branch");
-    code[patch..patch + size_of::<i32>()].copy_from_slice(&distance.to_le_bytes());
+    code.patch(patch, distance.to_le_bytes());
 }
 /// Refuse retained numerical enables unless AH suppresses exceptions.
 pub(super) fn guard_ah0_exceptions(code: &mut Code, helper: &mut Vec<usize>) {

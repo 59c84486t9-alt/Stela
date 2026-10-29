@@ -231,7 +231,6 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn half_and_non_minmax_shapes_emit_no_frame() {
@@ -267,7 +266,8 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = Code::from(vec![0x90]);
+            let mut code = Code::new();
+            code.asm().nop();
             assert!(
                 !emit(
                     &mut code,

@@ -37,9 +37,9 @@ fn size(bytes: u8) -> Size {
     }
 }
 
-fn resolve(code: &mut [u8], patch: usize) {
+fn resolve(code: &mut Code, patch: usize) {
     let delta = i32::try_from(code.len() - patch - 4).expect("bounded FP bit lowering");
-    code[patch..patch + 4].copy_from_slice(&delta.to_le_bytes());
+    code.patch(patch, delta.to_le_bytes());
 }
 
 fn load_lane(code: &mut Code, vector: u8, bytes: u8, rcx: bool) {

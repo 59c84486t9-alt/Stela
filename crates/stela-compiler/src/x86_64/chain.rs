@@ -278,7 +278,7 @@ fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
         asm.bind(interrupted);
     }
     super::block::direct_exit_with(&mut asm, target, kind);
-    code[transfer.offset()..transfer.end()].copy_from_slice(&relative.to_le_bytes());
+    code.patch(transfer.offset(), relative.to_le_bytes());
     debug_assert_eq!(code.len(), THUNK_BYTES - 10 + policy.extra_bytes());
     Some(code.into_bytes())
 }
@@ -378,7 +378,7 @@ pub fn jump(at: u64, to: u64) -> Option<[u8; JUMP_BYTES]> {
     let relative = relative(at + JUMP_BYTES as u64, to)?;
     let mut code = Code::new();
     let field = code.asm().jmp();
-    code[field.offset()..field.end()].copy_from_slice(&relative.to_le_bytes());
+    code.patch(field.offset(), relative.to_le_bytes());
     code.try_into().ok()
 }
 

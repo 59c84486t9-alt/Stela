@@ -90,7 +90,8 @@ mod tests {
             Operation::TraceSynchronization,
             Operation::OtherHint { immediate: 127 },
         ] {
-            let mut code = Code::from(sentinel.clone());
+            let mut code = Code::new();
+            code.asm().data(&sentinel);
             assert_eq!(emit(&mut code, &operation), Err(EmitError::ContextRequired));
             assert_eq!(code, sentinel);
         }

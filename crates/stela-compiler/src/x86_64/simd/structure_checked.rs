@@ -831,7 +831,7 @@ mod tests {
             ) -> Self {
                 let mut code = crate::scalable_context::context_wrapper();
                 checked(operand, profile).emit_context(&mut code, GUEST_PC, target);
-                code.push(0xc3);
+                code.asm().ret();
                 Self::new(&code)
             }
 

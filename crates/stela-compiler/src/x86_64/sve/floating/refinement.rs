@@ -221,7 +221,6 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn addends_are_exact_two_and_one_point_five() {
@@ -273,7 +272,9 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = Code::from(vec![0xaa]);
+            let mut code = Code::new();
+            // Opaque data witnesses that refusal leaves the buffer unchanged.
+            code.asm().data(&[0xaa]);
             assert!(
                 !emit(
                     &mut code,

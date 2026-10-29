@@ -245,10 +245,10 @@ fn release(code: &mut Code, frame: &Frame) {
         .alu_imm32(Alu::Add, Size::Qword, Rsp, frame.bytes as i32);
 }
 
-fn patch(code: &mut [u8], displacement: usize, destination: usize) {
+fn patch(code: &mut Code, displacement: usize, destination: usize) {
     let relative = i32::try_from(destination as i64 - (displacement + REL32_BYTES) as i64)
         .expect("numerical guard exceeds rel32 range");
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
+    code.patch(displacement, relative.to_le_bytes());
 }
 
 /// Commit all staged outputs after the final guard. Every supplied conditional
@@ -346,7 +346,9 @@ mod tests {
             vec![Output::Predicate(1); 2],
             vec![Output::Z(0); 5],
         ] {
-            let mut code = Code::from(vec![0xaa]);
+            let mut code = Code::new();
+            // Opaque data witnesses that refusal leaves the buffer unchanged.
+            code.asm().data(&[0xaa]);
             assert!(begin(&mut code, length, &outputs, Environment::Exact).is_err());
             assert_eq!(code, [0xaa]);
         }

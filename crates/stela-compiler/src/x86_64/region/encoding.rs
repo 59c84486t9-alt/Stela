@@ -398,10 +398,10 @@ pub fn conditional_jump(code: &mut Code, condition: NativeCondition) -> usize {
     code.asm().jcc(condition.cond()).offset()
 }
 
-pub fn patch_relative(code: &mut [u8], displacement: usize, target: usize) {
+pub fn patch_relative(code: &mut Code, displacement: usize, target: usize) {
     let relative = i32::try_from(target as isize - (displacement + RELATIVE_BYTES) as isize)
         .expect("bounded block displacement fits i32");
-    code[displacement..displacement + RELATIVE_BYTES].copy_from_slice(&relative.to_le_bytes());
+    code.patch(displacement, relative.to_le_bytes());
 }
 
 /// Zero skips exactly the following near jump; no host flags change.

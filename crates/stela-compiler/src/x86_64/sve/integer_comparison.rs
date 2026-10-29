@@ -375,7 +375,6 @@ pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, targ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn optional_doubleword_opcodes_require_exact_tier() {
@@ -425,7 +424,8 @@ mod tests {
 
     #[test]
     fn reserved_element_width_does_not_emit_prefix() {
-        let mut code = Code::from(vec![0x90]);
+        let mut code = Code::new();
+        code.asm().nop();
         assert_eq!(
             emit_compare_chunk(
                 &mut code,

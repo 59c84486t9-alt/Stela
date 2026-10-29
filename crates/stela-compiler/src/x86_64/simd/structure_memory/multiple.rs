@@ -389,8 +389,8 @@ fn shuffled_interleaved(
     patch_relative(code, done, target);
 }
 
-fn patch_relative(code: &mut [u8], displacement: usize, target: usize) {
+fn patch_relative(code: &mut Code, displacement: usize, target: usize) {
     let relative =
         i32::try_from(target - displacement - size_of::<i32>()).expect("bounded shuffle pool");
-    code[displacement..displacement + size_of::<i32>()].copy_from_slice(&relative.to_le_bytes());
+    code.patch(displacement, relative.to_le_bytes());
 }

@@ -402,8 +402,7 @@ impl Leaf {
                     .map_err(|_| {
                         CompileError::new(crate::CompileErrorKind::NativeBranchOverflow)
                     })?;
-            code[displacement..displacement + size_of::<i32>()]
-                .copy_from_slice(&relative.to_le_bytes());
+            code.patch(displacement, relative.to_le_bytes());
         }
         Ok(NativeBlock {
             x86_64_code: code.into_bytes(),

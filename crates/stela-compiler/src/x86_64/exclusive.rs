@@ -424,10 +424,6 @@ mod tests {
         const MAP_ANONYMOUS: i32 = 0x20;
         const TEST_PC: u64 = 0x4100_0000;
         const TEST_ADDRESS: u64 = 0x5200_0000;
-        const ENTRY: &[u8] = &[
-            0x41, 0x57, 0x49, 0x89, 0xf7, 0xe8, 3, 0, 0, 0, 0x41, 0x5f, 0xc3,
-        ];
-        const RET: u8 = 0xc3;
 
         struct Executable {
             pointer: *mut c_void,
@@ -435,9 +431,9 @@ mod tests {
         }
         impl Executable {
             fn new(operand: &Operand) -> Self {
-                let mut bytes = Code::from(ENTRY.to_vec());
+                let mut bytes = crate::scalable_context::context_wrapper();
                 emit_context(&mut bytes, operand, TEST_PC).unwrap();
-                bytes.push(RET);
+                bytes.asm().ret();
                 assert!(bytes.len() <= CODE_ALLOCATION_BYTES);
                 // SAFETY: private anonymous memory becomes RX after exact bytes copy.
                 let pointer = unsafe {
@@ -1154,7 +1150,8 @@ mod tests {
         ];
         for operand in invalid {
             assert!(requirements(&operand).is_err());
-            let mut code = Code::from(vec![0x90]);
+            let mut code = Code::new();
+            code.asm().nop();
             assert!(emit_context(&mut code, &operand, 0x1000).is_err());
             assert_eq!(code, [0x90]);
         }
@@ -1319,10 +1316,6 @@ mod tests {
     #[test]
     fn profile_specialization_preserves_gpr_clear_bytes() {
         const SOURCE_PC: u64 = 0x4100_0000;
-        const ENTRY: &[u8] = &[
-            0x41, 0x57, 0x49, 0x89, 0xf7, 0xe8, 3, 0, 0, 0, 0x41, 0x5f, 0xc3,
-        ];
-        const RET: u8 = 0xc3;
         const HISTORICAL_CLEAR_BODY: usize = 0;
         const HISTORICAL_GPR_WORD_LOAD_BODY: usize = 25;
         const HISTORICAL_SP_WORD_LOAD_BODY: usize = 97;
@@ -1344,8 +1337,8 @@ mod tests {
         let historical =
             std::env::var_os("STELA_EXCLUSIVE_HISTORICAL_BODIES").map(std::path::PathBuf::from);
         for (operand, historical_body) in cases {
-            let mut enabled = Code::from(ENTRY.to_vec());
-            let mut disabled = Code::from(ENTRY.to_vec());
+            let mut enabled = crate::scalable_context::context_wrapper();
+            let mut disabled = crate::scalable_context::context_wrapper();
             super::emit_context(
                 &mut enabled,
                 &CheckedOperand::new(operand, CheckedMemoryProfile::SpAlignmentEnabled).unwrap(),
@@ -1358,8 +1351,8 @@ mod tests {
                 SOURCE_PC,
             )
             .unwrap();
-            enabled.push(RET);
-            disabled.push(RET);
+            enabled.asm().ret();
+            disabled.asm().ret();
             if let Some(path) = &historical {
                 assert_eq!(
                     enabled,

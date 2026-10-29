@@ -102,10 +102,10 @@ fn shuffle(code: &mut Code, dst: u8, src: u8, control: u8, target: TargetCpu) {
     Host::ShuffleDword.register_imm(code, dst, src, control, target);
 }
 
-fn patch_relative(code: &mut [u8], immediate: usize, destination: usize) {
+fn patch_relative(code: &mut Code, immediate: usize, destination: usize) {
     let displacement = i32::try_from(destination as isize - (immediate + 4) as isize)
         .expect("bounded outer row body fits rel32");
-    code[immediate..immediate + 4].copy_from_slice(&displacement.to_le_bytes());
+    code.patch(immediate, displacement.to_le_bytes());
 }
 
 fn stage_vector(

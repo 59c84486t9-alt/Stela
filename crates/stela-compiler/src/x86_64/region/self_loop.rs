@@ -26,14 +26,15 @@ pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) ->
     encoding::patch_relative(&mut code, body_jump, body);
     encoding::decrement_stored_budget(&mut code);
     let prefix = code.len();
-    code.extend(native.x86_64_code);
+    let mut bytes = code.into_bytes();
+    bytes.extend(native.x86_64_code);
     for (_, offset) in &mut native.source_map {
         *offset += prefix;
     }
     if let Some((_, offset)) = native.source_map.first_mut() {
         *offset = 0;
     }
-    native.x86_64_code = code.into_bytes();
+    native.x86_64_code = bytes;
     native
 }
 

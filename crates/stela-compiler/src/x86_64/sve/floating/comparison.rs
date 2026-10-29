@@ -193,11 +193,11 @@ pub(crate) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn half_refusal_emits_no_frame_or_guard() {
-        let mut code = Code::from(vec![0x90]);
+        let mut code = Code::new();
+        code.asm().nop();
         let operand = Operand {
             kind: Kind::Equal,
             format: Format::Half,

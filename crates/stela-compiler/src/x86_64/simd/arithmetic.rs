@@ -346,7 +346,7 @@ struct StickyPath {
 }
 
 /// Resolve the sticky path's branches to the full path, which begins here.
-fn enter_full(code: &mut [u8], sticky: &mut StickyPath) -> usize {
+fn enter_full(code: &mut Code, sticky: &mut StickyPath) -> usize {
     let full = code.len();
     for &patch in &sticky.full {
         resolve(code, patch, full);
@@ -428,7 +428,7 @@ fn emit_scalar(
 }
 
 /// Resolve the jump past the full path, which ends here.
-fn finish(code: &mut [u8], sticky: StickyPath, full: usize, operand: &Operand) -> ColdSplit {
+fn finish(code: &mut Code, sticky: StickyPath, full: usize, operand: &Operand) -> ColdSplit {
     let done = code.len();
     resolve(code, sticky.done, done);
     ColdSplit {

@@ -190,7 +190,11 @@ impl Library {
         let mut code = Vec::new();
         let mut offsets = [0; 16];
         for (kernel, offset) in Kernel::ALL.into_iter().zip(&mut offsets) {
-            code.resize(code.len().next_multiple_of(64), INT3);
+            let padding = code.len().next_multiple_of(64) - code.len();
+            let mut asm = Asm::new(&mut code);
+            for _ in 0..padding {
+                asm.int3();
+            }
             *offset = code.len();
             code.extend(emit(kernel, tier));
         }
@@ -211,7 +215,6 @@ impl Library {
     }
 }
 
-const INT3: u8 = 0xcc;
 const MXCSR_ARM_ENVIRONMENT: u32 = 0x1f80;
 const SINGLE_DEFAULT_NAN: u32 = 0x7fc0_0000;
 const DOUBLE_DEFAULT_NAN: u64 = 0x7ff8_0000_0000_0000;

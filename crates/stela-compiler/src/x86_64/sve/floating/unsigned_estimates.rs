@@ -36,10 +36,10 @@ const RSQRT_FIRST_BIN: u32 = ESTIMATE_UNIT / 2;
 const LAST_BIN_EXCLUSIVE: u32 = ESTIMATE_UNIT * 2;
 
 /// Point the RIP-relative displacement field at `displacement` to `destination`.
-fn patch_rip(code: &mut [u8], displacement: usize, destination: usize) {
+fn patch_rip(code: &mut Code, displacement: usize, destination: usize) {
     let relative = i32::try_from(destination as i64 - (displacement + REL32_BYTES) as i64)
         .expect("unsigned estimate body exceeds rel32 range");
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
+    code.patch(displacement, relative.to_le_bytes());
 }
 
 fn first_bin(kind: EstimateKind) -> u32 {

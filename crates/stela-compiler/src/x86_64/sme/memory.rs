@@ -490,7 +490,6 @@ fn emit_vectors(
 mod tests {
     use super::*;
     use crate::aarch64::sme::memory::decode;
-    use alloc::vec;
 
     const GENERIC_HALFWORD_LOAD: u32 = 0xa140_2000;
     const SP_HALFWORD_LOAD: u32 = 0xa140_23e0;
@@ -507,7 +506,8 @@ mod tests {
             (QUADWORD_TILE_LOAD, TargetCpu::Cx16),
             (QUADWORD_TILE_STORE, TargetCpu::AtomicLoad16),
         ] {
-            let mut code = Code::from(vec![NOP]);
+            let mut code = Code::new();
+            code.asm().nop();
             let error = emit(&mut code, &decode(word).unwrap(), length, target, 0).unwrap_err();
             assert_eq!(error.available, target);
             assert_eq!(

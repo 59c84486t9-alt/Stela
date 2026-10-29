@@ -1374,7 +1374,7 @@ impl Emitter {
             let destination = *offsets.get(&target.0).ok_or_else(error)?;
             let relative = destination as i128 - (displacement + 4) as i128;
             let relative = i32::try_from(relative).map_err(|_| error())?;
-            code[displacement..displacement + 4].copy_from_slice(&relative.to_le_bytes());
+            code.patch(displacement, relative.to_le_bytes());
         }
         Ok(block.into_native())
     }
@@ -1410,12 +1410,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        const MOV_RAX_RDI: [u8; 3] = [0x48, 0x89, 0xf8];
-        const MOVABS_RDX: [u8; 2] = [0x48, 0xba];
         const OTHER_BITS: u64 = 0xa5a5_5a5a_c3c3_3c3c;
-        const SUB_RAX_RSI: [u8; 3] = [0x48, 0x29, 0xf0];
-        const ADD_RAX_RSI: [u8; 3] = [0x48, 0x01, 0xf0];
-        const RET: u8 = 0xc3;
         const VALUES: [u64; 8] = [
             0,
             1,
@@ -1446,12 +1441,18 @@ mod tests {
             n << 31 | z << 30 | c << 29 | v << 28
         };
         for borrow in [false, true] {
-            let mut code = Code::from(MOV_RAX_RDI.to_vec());
-            code.extend(MOVABS_RDX);
-            code.extend(OTHER_BITS.to_le_bytes());
-            code.extend(if borrow { SUB_RAX_RSI } else { ADD_RAX_RSI });
+            let mut code = Code::new();
+            code.asm()
+                .mov(asm::Size::Qword, asm::Gpr::Rax, asm::Gpr::Rdi);
+            code.asm().mov_imm64(asm::Gpr::Rdx, OTHER_BITS);
+            code.asm().alu(
+                if borrow { asm::Alu::Sub } else { asm::Alu::Add },
+                asm::Size::Qword,
+                asm::Gpr::Rax,
+                asm::Gpr::Rsi,
+            );
             capture_nzcv(&mut code, borrow);
-            code.push(RET);
+            code.asm().ret();
             // SAFETY: private anonymous memory, RX after the copy and
             // unmapped after the calls; the code touches no memory.
             unsafe {
@@ -1497,8 +1498,6 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        const LOAD_EAX_NZCV: [u8; 6] = [0x8b, 0x87, 0, 1, 0, 0];
-        const MOVZX_EAX_AL_RET: [u8; 4] = [0x0f, 0xb6, 0xc0, 0xc3];
         const LOW_BITS: u32 = 0x0fff_ffff;
         let holds = |condition: u8, nzcv: u32| {
             let (n, z, c, v) = (nzcv & 8 != 0, nzcv & 4 != 0, nzcv & 2 != 0, nzcv & 1 != 0);
@@ -1515,14 +1514,26 @@ mod tests {
         };
         for loaded in [false, true] {
             for condition in 0..14 {
-                let mut code = Code::from(if loaded {
-                    LOAD_EAX_NZCV.to_vec()
-                } else {
-                    vec![]
-                });
+                let mut code = Code::new();
+                if loaded {
+                    code.asm().mov_load(
+                        asm::Size::Dword,
+                        asm::Gpr::Rax,
+                        asm::Mem::base_disp32(
+                            asm::Gpr::Rdi,
+                            core::mem::offset_of!(crate::GuestState, nzcv) as i32,
+                        ),
+                    );
+                }
                 let host = condition_holds(&mut code, condition, loaded).unwrap();
                 code.asm().setcc(host, asm::Gpr::Rax);
-                code.extend(MOVZX_EAX_AL_RET);
+                code.asm().movzx(
+                    asm::Size::Dword,
+                    asm::Gpr::Rax,
+                    asm::Size::Byte,
+                    asm::Gpr::Rax,
+                );
+                code.asm().ret();
                 // SAFETY: private anonymous memory, RX after the copy and
                 // unmapped after the calls; the code reads only `state`.
                 unsafe {
@@ -1577,8 +1588,6 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        const MOV_RAX_RSI: [u8; 3] = [0x48, 0x89, 0xf0];
-        const RET: u8 = 0xc3;
         const BASE: u64 = 0xffff_ffff_ffff_ff00;
         // Bit 31 set, so UXTW and SXTW differ, and high bits SXTW drops.
         const INDEX: u64 = 0x8000_0001_fedc_ba98;
@@ -1589,9 +1598,11 @@ mod tests {
             rdx: u64,
         }
         let run = |body: &dyn Fn(&mut Code)| -> Result {
-            let mut code = Code::from(MOV_RAX_RSI.to_vec());
+            let mut code = Code::new();
+            code.asm()
+                .mov(asm::Size::Qword, asm::Gpr::Rax, asm::Gpr::Rsi);
             body(&mut code);
-            code.push(RET);
+            code.asm().ret();
             let mut state = crate::GuestState::default();
             state.x[usize::from(INDEX_REGISTER)] = INDEX;
             // SAFETY: private anonymous memory, RX after the copy and

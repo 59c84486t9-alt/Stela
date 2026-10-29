@@ -68,7 +68,7 @@ fn emit_table(code: &mut Code, operand: &Operand) {
     debug_assert_eq!(code.len() - table, TABLE_BYTES as usize);
     let displacement = i32::try_from(table - table_base - size_of::<i32>())
         .expect("bounded CRC instruction table displacement");
-    code[table_base..table_base + size_of::<i32>()].copy_from_slice(&displacement.to_le_bytes());
+    code.patch(table_base, displacement.to_le_bytes());
 }
 
 /// The reflected CRC one data bit at a time over the accumulator XOR the
