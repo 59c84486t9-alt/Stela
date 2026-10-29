@@ -225,6 +225,8 @@ pub struct Features {
     pub descriptor_binding_update_unused_while_pending: bool,
     pub descriptor_binding_sampled_image_update_after_bind: bool,
     pub descriptor_binding_storage_image_update_after_bind: bool,
+    pub descriptor_binding_uniform_texel_buffer_update_after_bind: bool,
+    pub descriptor_binding_storage_texel_buffer_update_after_bind: bool,
     pub shader_sampled_image_array_non_uniform_indexing: bool,
     pub shader_storage_image_array_non_uniform_indexing: bool,
     pub buffer_device_address: bool,

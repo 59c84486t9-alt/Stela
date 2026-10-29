@@ -193,6 +193,8 @@ pub fn requirements(features: &Features) -> [Requirement; 18] {
             "descriptorBindingUpdateAfterBind",
             features.descriptor_binding_sampled_image_update_after_bind
                 && features.descriptor_binding_storage_image_update_after_bind
+                && features.descriptor_binding_uniform_texel_buffer_update_after_bind
+                && features.descriptor_binding_storage_texel_buffer_update_after_bind
                 && features.descriptor_binding_update_unused_while_pending,
         ),
         requirement(
