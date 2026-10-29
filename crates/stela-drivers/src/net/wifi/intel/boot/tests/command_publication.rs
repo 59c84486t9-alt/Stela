@@ -16,6 +16,8 @@ fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
         let drops = Arc::new(AtomicUsize::new(0));
         let boot = start(&catalog, &source, &domain, &state, &drops);
         let mut boot = command_ready(boot, &empty, &source, &domain, &state);
+        // SAFETY: Source supplies fresh exclusive RAM in this boot owner's model domain;
+        // command_id selects the fixture transport API and has no indirect DMA objects.
         let ticket = unsafe { boot.submit_command(command_id(), &[0; 40], &source) }.unwrap();
         let live = domain.records.lock().unwrap().live.len();
         let mut packet = command_packet(command_id(), sequence, &[1]);
@@ -46,6 +48,8 @@ fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
     let drops = Arc::new(AtomicUsize::new(0));
     let boot = start(&catalog, &source, &domain, &state, &drops);
     let mut first = command_ready(boot, &empty, &source, &domain, &state);
+    // SAFETY: The first polling owner retains its own source/domain and fresh RAM;
+    // this fixture command has no external firmware objects or indirect allocations.
     let ticket = unsafe { first.submit_command(command_id(), &[], &source) }.unwrap();
     let other_source = Source::default();
     let other_domain = Arc::new(Domain::default());
@@ -59,6 +63,8 @@ fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
         &other_drops,
     );
     let mut other = command_ready(boot, &empty, &other_source, &other_domain, &other_state);
+    // SAFETY: This second epoch uses other_source and other_domain, never the first
+    // owner's backing; the serialized model command has no indirect DMA resources.
     let other_ticket = unsafe { other.submit_command(command_id(), &[], &other_source) }.unwrap();
     assert_eq!(ticket.sequence(), other_ticket.sequence());
     assert_ne!(ticket, other_ticket);
@@ -102,6 +108,8 @@ fn hcmd_publication_faults_retain_real_owner_and_all_exposed_dma() {
             let mut s = state.lock().unwrap();
             s.fail = Some(s.ops.len() + 1);
         }
+        // SAFETY: The same model owner/source retain all mappings through injected failures;
+        // only serialized allocation/visibility/producer operations can fail here.
         assert!(unsafe { boot.submit_command(command_id(), &[0; 40], &source) }.is_err());
         assert_eq!(
             domain.records.lock().unwrap().live.len(),
@@ -146,6 +154,8 @@ fn hcmd_ring_and_sequence_wrap_match_each_family_without_reusing_live_slots() {
         let staged = crate::net::wifi::intel::identity::stage(&p, &catalog).unwrap();
         let awake = awake_profile(state.clone(), drops.clone(), p);
         let boot = if ax210 {
+            // SAFETY: The AX210 model has exclusive Source/domain RAM and synchronous register
+            // observations; NoIwlmei retains this sole reset owner with no SAP or IRQ user.
             unsafe {
                 RomBoot::start_ax210(
                     awake,
@@ -159,6 +169,8 @@ fn hcmd_ring_and_sequence_wrap_match_each_family_without_reusing_live_slots() {
                 )
             }
         } else {
+            // SAFETY: The AX200 model uses fresh exclusive Source RAM attached to this Domain;
+            // Model serializes register/completion effects and has no competing reset worker.
             unsafe { RomBoot::start(awake, staged, &source, Some(domain.clone()), 512) }
         }
         .unwrap();
@@ -168,6 +180,8 @@ fn hcmd_ring_and_sequence_wrap_match_each_family_without_reusing_live_slots() {
         let count = if ax210 { 132u16 } else { 260u16 };
         let slots = if ax210 { 128u16 } else { 32u16 };
         for n in 0..count {
+            // SAFETY: Each prior command completed and reclaimed before this iteration; the
+            // same model owner/source publish this direct payload without indirect resources.
             let ticket = unsafe { boot.submit_command(command_id(), &[n as u8], &source) }.unwrap();
             assert_eq!(ticket.sequence(), n & 255);
             let wire = device_read(&domain, ring, usize::from(n & (slots - 1)) * 256, 256);
@@ -213,6 +227,8 @@ fn hcmd_exhausted_boot_rx_credit_refuses_publication() {
     let mut boot = command_ready(boot, &empty, &source, &domain, &state);
     // All posted credits are consumed by real completed RX notifications,
     // not by an invented successful repost in this boot-only receiver.
+    // SAFETY: The polling owner retains its original model source/domain and RAM;
+    // this fixture command has no indirect resources, and completions are serialized.
     let ticket = unsafe { boot.submit_command(command_id(), &[], &source) }.unwrap();
     for index in 1..24 {
         let seq = if index == 23 {
@@ -233,6 +249,8 @@ fn hcmd_exhausted_boot_rx_credit_refuses_publication() {
     let ops = state.lock().unwrap().ops.len();
     let maps = domain.records.lock().unwrap().maps;
     assert!(matches!(
+        // SAFETY: The original model epoch/source remain exclusive even with no RX credit;
+        // the direct fixture payload has no indirect resources before publication refusal.
         unsafe { boot.submit_command(command_id(), &[0; 40], &source) },
         Err(Error::CompletionCredit)
     ));
