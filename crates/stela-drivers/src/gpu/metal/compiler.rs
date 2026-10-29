@@ -64,6 +64,7 @@ const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::SIMDGROUP)
     .union(ShaderFeatures::QUADGROUP)
     .union(ShaderFeatures::ARGUMENT_BUFFERS)
+    .union(ShaderFeatures::INDIRECT_COMMAND_ENCODING)
     .union(ShaderFeatures::LAYERED_RENDERING)
     .union(ShaderFeatures::VERTEX_AMPLIFICATION)
     .union(ShaderFeatures::TESSELLATION)

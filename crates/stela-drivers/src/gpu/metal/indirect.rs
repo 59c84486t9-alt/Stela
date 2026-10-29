@@ -20,9 +20,9 @@
 //! blit resets and copies run on the GPU in order, and encoders execute
 //! the records. Records hold what the GPU can express: draws and indexed
 //! draws under the encoder's rasterizer state, of pipelines that support
-//! indirect command buffers, and dispatches. Shaders cannot encode
-//! commands, which needs the compiler's
-//! [`ShaderFeatures::INDIRECT_COMMAND_ENCODING`].
+//! indirect command buffers, and dispatches. Shaders encode commands
+//! through the `command_buffer` an argument buffer holds
+//! ([`ShaderFeatures::INDIRECT_COMMAND_ENCODING`]).
 //!
 //! [`ShaderFeatures::INDIRECT_COMMAND_ENCODING`]: super::capabilities::ShaderFeatures::INDIRECT_COMMAND_ENCODING
 use super::{
