@@ -2,11 +2,12 @@
 use super::{Host, NativeCode, NativeFault, Preparation};
 use crate::translations::{Digest, StoredBlock};
 use alloc::collections::BTreeMap;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::block::{
     CompiledBlock, FaultRecovery, RecoveryQualificationError, RecoveryTemplate,
     UnqualifiedFaultRecovery,
 };
+use stela_compiler::{NativeBlock, x86_64::chain::DirectExit};
 
 #[derive(Clone)]
 pub(super) struct OwnedPatch {
@@ -24,11 +25,24 @@ pub(super) enum NativeAdapter {
     MirroredRead,
 }
 
+pub(super) struct CodeTemplate {
+    pub(super) native: NativeBlock,
+    pub(super) source_bytes: usize,
+    pub(super) direct_exits: Vec<DirectExit>,
+}
+
+/// An installed owner retains one row bank. Portable records have no minted
+/// authority; successful lazy qualification replaces that bank, never duplicates it.
+enum RecoveryRows {
+    Pending(Box<[UnqualifiedFaultRecovery]>),
+    Qualified(Box<[FaultRecovery]>),
+}
+
 pub(super) struct CodeRecovery {
-    pub(super) template: StoredBlock,
+    pub(super) template: CodeTemplate,
     input: Vec<u8>,
     preparation: Arc<Preparation>,
-    qualified: Option<Vec<FaultRecovery>>,
+    rows: RecoveryRows,
     source_record: Option<SourceRecord>,
     source_record_checked: bool,
     #[cfg(test)]
@@ -97,24 +111,59 @@ impl CodeRecovery {
 
     #[cfg(test)]
     pub(super) fn test_make_pending(&mut self) {
-        self.qualified = None;
+        self.rows = RecoveryRows::Pending(self.test_portable_rows().into_boxed_slice());
     }
     #[cfg(test)]
-    pub(super) fn test_rows_mut(&mut self) -> &mut Vec<FaultRecovery> {
-        self.qualified.as_mut().expect("actual emitted plan")
+    pub(super) fn test_rows_mut(&mut self) -> &mut [FaultRecovery] {
+        match &mut self.rows {
+            RecoveryRows::Qualified(rows) => rows,
+            RecoveryRows::Pending(_) => panic!("actual emitted plan"),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_portable_rows(&self) -> Vec<UnqualifiedFaultRecovery> {
+        match &self.rows {
+            RecoveryRows::Qualified(rows) => {
+                rows.iter().map(UnqualifiedFaultRecovery::from).collect()
+            }
+            RecoveryRows::Pending(rows) => rows.to_vec(),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_pending_rows_mut(&mut self) -> &mut [UnqualifiedFaultRecovery] {
+        match &mut self.rows {
+            RecoveryRows::Pending(rows) => rows,
+            RecoveryRows::Qualified(_) => panic!("explicitly pending fixture"),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_push_pending(&mut self, row: UnqualifiedFaultRecovery) {
+        let mut rows = self.test_portable_rows();
+        rows.push(row);
+        self.rows = RecoveryRows::Pending(rows.into_boxed_slice());
     }
     /// A portable request may only reject this legacy implementation. Absence
     /// of tags never grants private/APX admission: that must be derived from an
     /// actual compiler/profile ABI permit before future eager invocation.
     pub(super) fn portable_requires_unavailable_capture(&self) -> bool {
-        use stela_compiler::block::{RecoverySource, RetirementPhase};
-        self.template.fault_recovery.iter().any(|row| {
-            row.retirement.phase() != RetirementPhase::Before
-                || row.bindings.iter().any(|binding| match binding.source {
+        use stela_compiler::block::{
+            RecoveryBinding, RecoverySource, RetirementPhase, RetirementPoint,
+        };
+        let requires = |retirement: RetirementPoint, bindings: &[RecoveryBinding]| {
+            retirement.phase() != RetirementPhase::Before
+                || bindings.iter().any(|binding| match binding.source {
                     RecoverySource::HostRegister(register) => register >= 16,
                     RecoverySource::NativeSpill(_) => true,
                 })
-        })
+        };
+        match &self.rows {
+            RecoveryRows::Pending(rows) => rows
+                .iter()
+                .any(|row| requires(row.retirement, &row.bindings)),
+            RecoveryRows::Qualified(rows) => rows
+                .iter()
+                .any(|row| requires(row.retirement, &row.bindings)),
+        }
     }
     pub(super) fn matches_source(&self, source: &[u8]) -> bool {
         source.get(..self.input.len()) == Some(self.input.as_slice())
@@ -256,21 +305,15 @@ impl CodeRecovery {
         input: Vec<u8>,
         preparation: Arc<Preparation>,
     ) -> Self {
-        let rows = block
-            .fault_recovery
-            .iter()
-            .map(UnqualifiedFaultRecovery::from)
-            .collect();
         Self {
-            template: StoredBlock {
+            template: CodeTemplate {
                 native: block.native,
                 source_bytes: block.source_bytes,
                 direct_exits: block.direct_exits,
-                fault_recovery: rows,
             },
             input,
             preparation,
-            qualified: Some(block.fault_recovery),
+            rows: RecoveryRows::Qualified(block.fault_recovery.into_boxed_slice()),
             source_record: None,
             source_record_checked: false,
             #[cfg(test)]
@@ -283,10 +326,14 @@ impl CodeRecovery {
         preparation: Arc<Preparation>,
     ) -> Self {
         Self {
-            template,
+            template: CodeTemplate {
+                native: template.native,
+                source_bytes: template.source_bytes,
+                direct_exits: template.direct_exits,
+            },
             input,
             preparation,
-            qualified: None,
+            rows: RecoveryRows::Pending(template.fault_recovery.into_boxed_slice()),
             source_record: None,
             source_record_checked: false,
             #[cfg(test)]
@@ -305,7 +352,7 @@ impl CodeRecovery {
             }
             self.source_record_checked = true;
         }
-        if self.qualified.is_none() {
+        if let RecoveryRows::Pending(rows) = &self.rows {
             #[cfg(test)]
             {
                 self.qualification_attempts += 1;
@@ -320,52 +367,18 @@ impl CodeRecovery {
                         source_map: &self.template.native.source_map,
                         source_bytes: self.template.source_bytes,
                         direct_exits: &self.template.direct_exits,
-                        recovery: &self.template.fault_recovery,
+                        recovery: rows,
                     },
                 )
                 .map_err(NativeFailureReason::Qualification)?;
-            self.qualified = Some(block.fault_recovery);
+            self.rows = RecoveryRows::Qualified(block.fault_recovery.into_boxed_slice());
         }
-        Ok(self.qualified.as_deref().expect("qualified above"))
+        match &self.rows {
+            RecoveryRows::Qualified(rows) => Ok(rows),
+            RecoveryRows::Pending(_) => unreachable!("qualified above"),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::Fetched;
-    use super::super::tests::{BASE, machine};
-
-    #[test]
-    fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
-        let mut machine = machine(&[0x91000400, 0xf9400043, 0xd4000001]);
-        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
-            panic!("actual emission");
-        };
-        let mut owner = machine.fault_recovery.remove(&index).unwrap();
-        owner.test_make_pending();
-        let started = std::time::Instant::now();
-        let first = owner.qualify(BASE).unwrap().to_vec();
-        let cold = started.elapsed();
-        assert!(
-            first
-                .iter()
-                .any(|row| row.site.kind() == stela_compiler::block::RecoverySiteKind::GuestAccess)
-        );
-        let started = std::time::Instant::now();
-        for _ in 0..32 {
-            assert_eq!(owner.qualify(BASE).unwrap(), first);
-        }
-        let cached = started.elapsed();
-        assert_eq!(
-            owner.qualification_attempts, 1,
-            "only the first actual fault re-emits the plan"
-        );
-        eprintln!(
-            "dispatcher recovery qualification: source={} native={} cold_ns={} cached_average_ns={} (current host; no native guest entered)",
-            owner.input.len(),
-            owner.template.native.x86_64_code.len(),
-            cold.as_nanos(),
-            cached.as_nanos() / 32
-        );
-    }
-}
+mod tests;

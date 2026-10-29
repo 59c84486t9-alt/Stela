@@ -7410,15 +7410,14 @@ mod tests {
         let Ok(Fetched::Block(index)) = machine.fetch_block(entry, false) else {
             panic!("actual compiled native block");
         };
-        let row = machine.fault_recovery[&index]
-            .template
-            .fault_recovery
+        let rows = machine.fault_recovery[&index].test_portable_rows();
+        let row = rows
             .iter()
             .find(|row| row.retirement.instruction_pc().0 == pc && row.site == kind)
             .unwrap_or_else(|| {
                 panic!(
                     "no {kind:?} site for {pc:#x} in entry {entry:#x}: {:?}",
-                    machine.fault_recovery[&index].template.fault_recovery
+                    rows
                 )
             });
         (index, row.start)

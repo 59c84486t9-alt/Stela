@@ -130,11 +130,11 @@ fn portable_guest_tag_on_internal_frame_cannot_mint_projection_authority() {
     let (mut machine, index, _) = fixture();
     let owner = machine.fault_recovery.get_mut(&index).unwrap();
     owner.test_make_pending();
-    let mut forged = owner.template.fault_recovery[0].clone();
+    let mut forged = owner.test_pending_rows_mut()[0].clone();
     forged.start = 0;
     forged.end = 1;
     forged.site = RecoverySiteKind::GuestAccess;
-    owner.template.fault_recovery.push(forged);
+    owner.test_push_pending(forged);
     terminal(
         machine,
         index,
@@ -148,8 +148,7 @@ fn portable_missing_guest_tag_is_refused_instead_of_falling_back_to_source_map()
     let owner = machine.fault_recovery.get_mut(&index).unwrap();
     owner.test_make_pending();
     owner
-        .template
-        .fault_recovery
+        .test_pending_rows_mut()
         .iter_mut()
         .find(|row| row.start == offset)
         .unwrap()
