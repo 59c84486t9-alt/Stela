@@ -368,15 +368,17 @@ fn run(mode: Mode) {
         assert_eq!(r.owned_escrows.get(), 1);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         assert_eq!(
-            // SAFETY: deliberate refusal probe: owned markers and a real blocked
-            // frame reject before the detach path uses assumed quiescence.
+            // SAFETY: all external fixture producers stopped; this actual CPU
+            // retains backing and the parked frame. Checked owned/frame state
+            // must refuse before any retirement release.
             unsafe { r.retire() },
             Err(WorkError::Pending)
         );
         r.queue.close().unwrap();
         assert_eq!(
-            // SAFETY: negative queue refusal probe retains every frame/resource;
-            // marked ownership rejects before release could use quiescence.
+            // SAFETY: external producers stopped and all valid CPU/backing
+            // owners remain retained. Checked marked ownership must refuse
+            // before any queue retirement can release owners.
             unsafe { r.queue.retire() },
             Err(WorkError::Pending)
         );

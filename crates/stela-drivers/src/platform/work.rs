@@ -549,9 +549,13 @@ impl<const N: usize> Queue<N> {
         Ok(())
     }
     /// # Safety
-    /// All real IRQ/driver/firmware/work producers have stopped and cannot call
-    /// execute again. No executor is active or suspended; every admitted job
-    /// completed. Mere close is not producer or callback synchronization.
+    /// External IRQ/driver/firmware/work producers have stopped and cannot
+    /// concurrently enqueue or resume an executor. Retain the actual owner,
+    /// CPU/process authority and backing through genuine Runtime retirement.
+    /// Retained jobs, active/suspended callbacks and reservation markers are
+    /// checked refusal conditions: Pending/Closed does not retire or release
+    /// them. Mere close is not producer synchronization, and queue retirement
+    /// alone is not a task-stack or terminal C lifecycle proof.
     pub unsafe fn retire(&self) -> Result<(), WorkError> {
         self.process()?;
         let mut g = self.lock()?;
@@ -1884,9 +1888,13 @@ impl<const N: usize> Runtime<N> {
         }
     }
     /// # Safety
-    /// Actual producers/IRQ/work/reset users have been stopped and cannot
-    /// enqueue or resume this executor; no callback/current native frame exists.
-    /// Timeout/failed drain is not retirement authority and retains every owner.
+    /// External IRQ/work/reset and driver users have stopped and cannot
+    /// concurrently enqueue, resume or mutate this executor. Actual owner,
+    /// CPU/process authority and stack backing remain valid throughout the call.
+    /// Current/suspended callbacks, reservations, escrows and bindings are checked
+    /// before retirement; Pending/Closed retains them. Timeout/failed drain is
+    /// not retirement authority. Idle dispatcher continuation frames do not
+    /// attest execution of an original terminal C lifecycle.
     pub unsafe fn retire(self: Pin<&Self>) -> Result<(), WorkError> {
         self.queue.process()?;
         if self.queue.abandoned.load(Ordering::Acquire) {
