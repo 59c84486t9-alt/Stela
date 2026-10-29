@@ -219,11 +219,14 @@ impl TessellationArguments {
 
 /// What the backend's internal accumulate kernel reads at the push
 /// constants' `arguments`: runs of 64-bit query results, each summed into
-/// its own destination. Thread `n` sums run `n`.
+/// its own destination. Thread `n` sums run `n`: the `count` results at
+/// `results[first + j * stride]`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AccumulateArguments {
     /// Address of the first result.
     pub results: u64,
+    /// Results between consecutive elements of a run.
+    pub stride: u32,
     /// (first result, result count, destination address).
     pub runs: Vec<(u32, u32, u64)>,
 }
@@ -244,7 +247,7 @@ impl AccumulateArguments {
         };
         writer.u64(self.results);
         writer.u32(self.runs.len() as u32);
-        writer.u32(0);
+        writer.u32(self.stride);
         for &(first, count, destination) in &self.runs {
             writer.u32(first);
             writer.u32(count);

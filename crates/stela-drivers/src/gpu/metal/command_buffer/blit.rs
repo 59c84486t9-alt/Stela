@@ -140,7 +140,7 @@ impl BlitTexture<'_> {
 }
 
 impl CommandBuffer {
-    fn blit(&mut self) -> Result<()> {
+    pub(super) fn blit(&mut self) -> Result<()> {
         ensure(
             matches!(self.encoder, Encoder::Blit),
             "no blit command encoder is encoding",

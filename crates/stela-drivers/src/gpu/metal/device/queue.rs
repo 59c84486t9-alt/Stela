@@ -13,7 +13,9 @@ use crate::gpu::metal::{
     },
     binding::ResourceId,
     command_buffer::{
-        CommandBuffer, ComputePipelineState, DynamicFeatures, RenderPipelineState, Resolver,
+        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, RenderPipelineState,
+        Resolver,
+        counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
         render::PassBoundary,
     },
     error::{Error, Result, ensure, require},
@@ -27,7 +29,7 @@ use crate::gpu::metal::{
     upload::{Chunk, ChunkSource},
     vulkan::{
         BufferCreate, BufferUsage, MemoryProperties, PipelineStatistics,
-        backend::{Backend, Object},
+        backend::{Backend, BufferAllocation, Object},
         object::{
             BufferInfo, ImageView, Memory, MemoryRequest, Pipeline, QueryPool, QueryPoolInfo,
             QueryType, Semaphore,
@@ -36,15 +38,37 @@ use crate::gpu::metal::{
 };
 use alloc::vec::Vec;
 
-/// Queries per occlusion pool.
-const OCCLUSION_QUERIES: u32 = 256;
+/// Queries per occlusion or statistics pool.
+const POOL_QUERIES: u32 = 256;
+
+/// A `MTLCounterSet` the device samples.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterSet {
+    Timestamp,
+    Statistic,
+}
+
+/// A counter sample buffer's samples.
+#[derive(Clone, Copy, Debug)]
+enum CounterStorage {
+    Timestamps(QueryPool),
+    /// `MTLCounterResultStatistic`s in host-visible memory, initially
+    /// `MTLCounterErrorValue`.
+    Statistics(BufferAllocation),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CounterBuffer {
+    storage: CounterStorage,
+    count: u32,
+}
 
 /// What a submitted command buffer holds until it completes.
 #[derive(Debug)]
 struct InFlight {
     serial: u64,
     chunks: Vec<Chunk>,
-    pools: Vec<QueryPool>,
+    pools: Vec<(QueryType, QueryPool)>,
 }
 
 #[derive(Debug, Default)]
@@ -52,10 +76,10 @@ pub(super) struct Queue {
     /// Upload chunks with their memory; free ones are reused.
     chunks: Vec<(Chunk, Memory)>,
     free_chunks: Vec<Chunk>,
-    free_pools: Vec<QueryPool>,
+    free_pools: Vec<(QueryType, QueryPool)>,
     in_flight: Vec<InFlight>,
     events: Slab<Semaphore>,
-    counters: Slab<(QueryPool, u32)>,
+    counters: Slab<CounterBuffer>,
 }
 
 /// One attachment of a [`RenderPassRequest`].
@@ -89,8 +113,8 @@ pub struct RenderPassRequest {
     pub tile_memory: bool,
     pub sample_positions: Vec<[f32; 2]>,
     pub rasterization_rate_map: bool,
-    /// `sampleBufferAttachments`.
-    pub timestamps: Vec<(CounterBufferId, u32, PassBoundary)>,
+    /// `sampleBufferAttachments`: (sample buffer, sample index, boundary).
+    pub counter_samples: Vec<(CounterBufferId, u32, PassBoundary)>,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -188,16 +212,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .visibility_result_buffer
             .map(|buffer| self.buffer(buffer))
             .transpose()?;
-        let mut timestamps = Vec::with_capacity(request.timestamps.len());
-        for &(counters, index, boundary) in &request.timestamps {
-            let (pool, count) = *self.queue.counters.get(counters.0)?;
-            ensure(
-                index < count,
-                "sample index beyond the counter sample buffer",
-            )?;
-            timestamps.push((pool, index, boundary));
-        }
-        commands.begin_render(plan, visibility, timestamps)
+        let samples = request
+            .counter_samples
+            .iter()
+            .map(|&(counters, index, boundary)| {
+                Ok((self.counter_sample(counters, index)?, boundary))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        commands.begin_render(&mut self.resolver(), plan, visibility, samples)
     }
 
     fn pass_textures(
@@ -282,7 +304,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `commit`: submits the command buffer and returns its serial.
     pub fn commit(&mut self, commands: CommandBuffer) -> Result<u64> {
         let serial = self.submitted + 1;
-        let mut recording = commands.commit((self.timeline, serial))?;
+        let completion = (self.timeline, serial);
+        let mut recording = commands.commit(&mut self.resolver(), completion)?;
         // CPU-copy writes reach the images first, after the opening barrier.
         let uploads = self.take_cpu_copy_uploads();
         recording.segments[0].commands.splice(1..1, uploads);
@@ -352,9 +375,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.queue.in_flight = pending;
         for flight in done {
             self.queue.free_chunks.extend(flight.chunks);
-            for pool in flight.pools {
-                self.backend.reset_queries(pool, 0, OCCLUSION_QUERIES);
-                self.queue.free_pools.push(pool);
+            for (query_type, pool) in flight.pools {
+                self.backend.reset_queries(pool, 0, POOL_QUERIES);
+                self.queue.free_pools.push((query_type, pool));
             }
         }
         let (ready, waiting): (Vec<_>, Vec<_>) = core::mem::take(&mut self.deferred)
@@ -406,50 +429,153 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// `newCounterSampleBufferWithDescriptor:` for the timestamp counter set.
-    pub fn new_counter_sample_buffer(&mut self, count: u32) -> Result<CounterBufferId> {
+    /// `newCounterSampleBufferWithDescriptor:`.
+    pub fn new_counter_sample_buffer(
+        &mut self,
+        set: CounterSet,
+        count: u32,
+    ) -> Result<CounterBufferId> {
         ensure(count > 0, "counter sample buffers hold samples")?;
-        require(
-            self.capabilities.timestamp_frequency != 0,
-            "timestamp counters",
-        )?;
-        let info = QueryPoolInfo {
-            query_type: QueryType::Timestamp,
-            count,
-            statistics: PipelineStatistics::EMPTY,
+        let storage = match set {
+            CounterSet::Timestamp => {
+                require(
+                    self.capabilities.timestamp_frequency != 0,
+                    "timestamp counters",
+                )?;
+                let info = QueryPoolInfo {
+                    query_type: QueryType::Timestamp,
+                    count,
+                    statistics: PipelineStatistics::EMPTY,
+                };
+                let pool = self.backend.create_query_pool(&info)?;
+                self.backend.reset_queries(pool, 0, count);
+                CounterStorage::Timestamps(pool)
+            }
+            CounterSet::Statistic => {
+                require(self.capabilities.statistic_counters, "statistic counters")?;
+                let size = u64::from(count) * STATISTIC_SAMPLE_BYTES;
+                let info = BufferInfo {
+                    size,
+                    usage: BufferUsage::TRANSFER_SRC
+                        | BufferUsage::TRANSFER_DST
+                        | BufferUsage::STORAGE_BUFFER
+                        | BufferUsage::SHADER_DEVICE_ADDRESS,
+                    flags: BufferCreate::EMPTY,
+                };
+                let request = MemoryRequest {
+                    required: MemoryProperties::HOST_VISIBLE | MemoryProperties::HOST_COHERENT,
+                    preferred: MemoryProperties::HOST_CACHED,
+                    mapped: true,
+                };
+                let allocation = self.backend.create_buffer(&info, request)?;
+                let unsampled = alloc::vec![0xff; size as usize];
+                if let Err(error) = self.backend.write_memory(allocation.memory, 0, &unsampled) {
+                    self.backend.destroy(Object::Buffer(allocation.buffer));
+                    self.backend.destroy(Object::Memory(allocation.memory));
+                    return Err(error);
+                }
+                self.allocated += allocation.allocated;
+                CounterStorage::Statistics(allocation)
+            }
         };
-        let pool = self.backend.create_query_pool(&info)?;
-        self.backend.reset_queries(pool, 0, count);
-        Ok(CounterBufferId(self.queue.counters.insert((pool, count))))
+        let buffer = CounterBuffer { storage, count };
+        Ok(CounterBufferId(self.queue.counters.insert(buffer)))
     }
 
-    /// The query pool command buffers sample into.
-    pub fn counter_pool(&self, id: CounterBufferId) -> Result<(QueryPool, u32)> {
+    fn counter_buffer(&self, id: CounterBufferId) -> Result<CounterBuffer> {
         self.queue.counters.get(id.0).copied()
     }
 
-    /// `resolveCounterRange:` on the CPU; `None` while a sample is pending.
+    /// Where sample `index` of `id` lands.
+    pub fn counter_sample(&self, id: CounterBufferId, index: u32) -> Result<CounterSample> {
+        let buffer = self.counter_buffer(id)?;
+        ensure(
+            index < buffer.count,
+            "sample index beyond the counter sample buffer",
+        )?;
+        Ok(match buffer.storage {
+            CounterStorage::Timestamps(pool) => CounterSample::Timestamp { pool, query: index },
+            CounterStorage::Statistics(allocation) => CounterSample::Statistic(
+                allocation.address + u64::from(index) * STATISTIC_SAMPLE_BYTES,
+            ),
+        })
+    }
+
+    /// The samples `resolveCounters:inRange:…` copies.
+    pub fn counter_range(
+        &self,
+        id: CounterBufferId,
+        first: u32,
+        count: u32,
+    ) -> Result<CounterRange> {
+        let buffer = self.counter_buffer(id)?;
+        ensure(
+            first
+                .checked_add(count)
+                .is_some_and(|end| end <= buffer.count),
+            "range beyond the counter sample buffer",
+        )?;
+        Ok(match buffer.storage {
+            CounterStorage::Timestamps(pool) => CounterRange::Timestamps { pool, first, count },
+            CounterStorage::Statistics(allocation) => CounterRange::Statistics(BufferRef {
+                buffer: allocation.buffer,
+                offset: u64::from(first) * STATISTIC_SAMPLE_BYTES,
+                address: allocation.address + u64::from(first) * STATISTIC_SAMPLE_BYTES,
+                length: u64::from(count) * STATISTIC_SAMPLE_BYTES,
+            }),
+        })
+    }
+
+    /// `resolveCounterRange:` on the CPU, as 64-bit values. Timestamps are
+    /// `None` while a sample is pending; statistics read as their command
+    /// buffers last wrote them, which Metal resolves only after completion.
     pub fn resolve_counters(
         &mut self,
         id: CounterBufferId,
         first: u32,
         count: u32,
     ) -> Result<Option<Vec<u64>>> {
-        let (pool, size) = self.counter_pool(id)?;
+        let buffer = self.counter_buffer(id)?;
         ensure(
-            first.checked_add(count).is_some_and(|end| end <= size),
+            first
+                .checked_add(count)
+                .is_some_and(|end| end <= buffer.count),
             "range beyond the counter sample buffer",
         )?;
-        let mut results = alloc::vec![0; count as usize];
-        Ok(self
-            .backend
-            .query_results(pool, first, &mut results)?
-            .then_some(results))
+        match buffer.storage {
+            CounterStorage::Timestamps(pool) => {
+                let mut results = alloc::vec![0; count as usize];
+                Ok(self
+                    .backend
+                    .query_results(pool, first, &mut results)?
+                    .then_some(results))
+            }
+            CounterStorage::Statistics(allocation) => {
+                let mut bytes =
+                    alloc::vec![0; (u64::from(count) * STATISTIC_SAMPLE_BYTES) as usize];
+                let offset = u64::from(first) * STATISTIC_SAMPLE_BYTES;
+                self.backend
+                    .read_memory(allocation.memory, offset, &mut bytes)?;
+                let values = bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|&value| u64::from_le_bytes(value))
+                    .collect();
+                Ok(Some(values))
+            }
+        }
     }
 
     pub fn destroy_counter_sample_buffer(&mut self, id: CounterBufferId) -> Result<()> {
-        let (pool, _) = self.queue.counters.remove(id.0)?;
-        self.defer(Object::QueryPool(pool));
+        let buffer = self.queue.counters.remove(id.0)?;
+        match buffer.storage {
+            CounterStorage::Timestamps(pool) => self.defer(Object::QueryPool(pool)),
+            CounterStorage::Statistics(allocation) => {
+                self.defer(Object::Buffer(allocation.buffer));
+                self.release_memory(allocation.memory, allocation.allocated);
+            }
+        }
         Ok(())
     }
 
@@ -533,22 +659,23 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         self.device.mesh_variant(state.id, object, mesh)
     }
 
-    fn occlusion_pool(&mut self) -> Result<(QueryPool, u32)> {
-        let pool = match self.device.queue.free_pools.pop() {
-            Some(pool) => pool,
-            None => {
-                let info = QueryPoolInfo {
-                    query_type: QueryType::Occlusion,
-                    count: OCCLUSION_QUERIES,
-                    statistics: PipelineStatistics::EMPTY,
-                };
-                let pool = self.device.backend.create_query_pool(&info)?;
-                self.device
-                    .backend
-                    .reset_queries(pool, 0, OCCLUSION_QUERIES);
-                pool
-            }
+    fn query_pool(&mut self, query_type: QueryType) -> Result<(QueryPool, u32)> {
+        let free = &mut self.device.queue.free_pools;
+        if let Some(index) = free.iter().position(|&(free, _)| free == query_type) {
+            return Ok((free.swap_remove(index).1, POOL_QUERIES));
+        }
+        let statistics = if query_type == QueryType::PipelineStatistics {
+            counters::STATISTICS
+        } else {
+            PipelineStatistics::EMPTY
         };
-        Ok((pool, OCCLUSION_QUERIES))
+        let info = QueryPoolInfo {
+            query_type,
+            count: POOL_QUERIES,
+            statistics,
+        };
+        let pool = self.device.backend.create_query_pool(&info)?;
+        self.device.backend.reset_queries(pool, 0, POOL_QUERIES);
+        Ok((pool, POOL_QUERIES))
     }
 }

@@ -264,7 +264,8 @@ pub enum Command {
         query: u32,
         stage: PipelineStages,
     },
-    /// 64-bit results, waiting for availability.
+    /// 64-bit results. With `wait` the copy waits for availability;
+    /// without it, unavailable results leave their destination unchanged.
     CopyQueryResults {
         pool: QueryPool,
         first: u32,
@@ -272,6 +273,7 @@ pub enum Command {
         dst: Buffer,
         offset: u64,
         stride: u64,
+        wait: bool,
     },
     /// Sums runs of 64-bit query results into their visibility results:
     /// the backend binds its internal accumulate kernel and dispatches one

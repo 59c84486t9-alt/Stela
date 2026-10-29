@@ -15,6 +15,7 @@
 //! and maps unchanged.
 use super::{
     BufferRef, CommandBuffer, Encoder, Recorder, RenderPipelineState, Resolver, buffer_slot,
+    counters::CounterSample,
 };
 use crate::gpu::metal::{
     abi::{
@@ -36,7 +37,7 @@ use crate::gpu::metal::{
             Attachment, Barrier, Command, DepthStencil, Rect, Rendering, VertexBuffer,
             Viewport as VkViewport,
         },
-        object::{Buffer, ImageView, QueryPool},
+        object::{Buffer, ImageView, QueryPool, QueryType},
     },
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -61,13 +62,21 @@ pub struct ScissorRect {
     pub height: u64,
 }
 
-/// Where a render pass samples timestamps (`sampleBufferAttachments`).
+/// Where a render pass samples counters (`sampleBufferAttachments`).
+/// Statistics count whole pass instances, so start boundaries sample before
+/// the pass and end boundaries after it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PassBoundary {
     StartOfVertex,
     EndOfVertex,
     StartOfFragment,
     EndOfFragment,
+}
+
+impl PassBoundary {
+    const fn starts(self) -> bool {
+        matches!(self, Self::StartOfVertex | Self::StartOfFragment)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,7 +132,9 @@ pub(super) struct RenderState {
     factors: Option<FactorBuffer>,
     factor_scale: f32,
     visibility: Visibility,
-    timestamps: Vec<(QueryPool, u32, PassBoundary)>,
+    samples: Vec<(CounterSample, PassBoundary)>,
+    /// Timestamp queries the pass writes, reset before it begins.
+    pub(super) timestamp_resets: Vec<(QueryPool, u32)>,
 }
 
 /// The active render encoder, borrowing only the encoder field so the
@@ -140,9 +151,10 @@ impl CommandBuffer {
     /// views the device resolved.
     pub fn begin_render(
         &mut self,
+        resolver: &mut dyn Resolver,
         pass: RenderPassPlan<ImageView>,
         visibility_buffer: Option<BufferRef>,
-        timestamps: Vec<(QueryPool, u32, PassBoundary)>,
+        samples: Vec<(CounterSample, PassBoundary)>,
     ) -> Result<()> {
         self.idle()?;
         ensure(
@@ -150,10 +162,17 @@ impl CommandBuffer {
             "the visibility result buffer was not resolved",
         )?;
         self.bindings.reset();
+        for &(sample, boundary) in &samples {
+            if let (CounterSample::Statistic(destination), true) = (sample, boundary.starts()) {
+                self.recorder.sample_statistics(resolver, destination)?;
+            }
+        }
         self.recorder.access(RENDER_PASS);
+        self.recorder.pause_statistics();
         let begin = self.recorder.commands().len();
         self.recorder
             .push(Command::BeginRendering(rendering(&pass, true, true)));
+        self.recorder.resume_statistics(resolver, false)?;
         let mut state = RenderState {
             pass,
             begins: alloc::vec![begin],
@@ -170,13 +189,12 @@ impl CommandBuffer {
                 buffer: visibility_buffer,
                 ..Visibility::default()
             },
-            timestamps,
+            samples,
+            timestamp_resets: Vec::new(),
         };
-        for &(pool, query, boundary) in &state.timestamps {
-            if matches!(
-                boundary,
-                PassBoundary::StartOfVertex | PassBoundary::StartOfFragment
-            ) {
+        for &(sample, boundary) in &state.samples {
+            if let (CounterSample::Timestamp { pool, query }, true) = (sample, boundary.starts()) {
+                state.timestamp_resets.push((pool, query));
                 self.recorder.push(Command::WriteTimestamp {
                     pool,
                     query,
@@ -240,16 +258,26 @@ impl CommandBuffer {
     ) -> Result<()> {
         state.pass.finish()?;
         end_query(&mut self.recorder, &mut state.visibility);
-        for &(pool, query, boundary) in &state.timestamps {
+        for &(sample, boundary) in &state.samples {
             let stage = match boundary {
                 PassBoundary::EndOfVertex => PipelineStages::VERTEX_SHADER,
                 PassBoundary::EndOfFragment => PipelineStages::FRAGMENT_SHADER,
                 PassBoundary::StartOfVertex | PassBoundary::StartOfFragment => continue,
             };
-            self.recorder
-                .push(Command::WriteTimestamp { pool, query, stage });
+            if let CounterSample::Timestamp { pool, query } = sample {
+                state.timestamp_resets.push((pool, query));
+                self.recorder
+                    .push(Command::WriteTimestamp { pool, query, stage });
+            }
         }
+        self.recorder.pause_statistics();
         self.recorder.push(Command::EndRendering);
+        self.recorder.resume_statistics(resolver, false)?;
+        for &(sample, boundary) in &state.samples {
+            if let (CounterSample::Statistic(destination), false) = (sample, boundary.starts()) {
+                self.recorder.sample_statistics(resolver, destination)?;
+            }
+        }
 
         let last = state.begins.len() - 1;
         let commands = self.recorder.commands();
@@ -257,15 +285,16 @@ impl CommandBuffer {
             commands[index] =
                 Command::BeginRendering(rendering(&state.pass, instance == 0, instance == last));
         }
-        if !state.timestamps.is_empty() {
-            let resets = state
-                .timestamps
-                .iter()
-                .map(|&(pool, first, _)| Command::ResetQueryPool {
-                    pool,
-                    first,
-                    count: 1,
-                });
+        if !state.timestamp_resets.is_empty() {
+            let resets =
+                state
+                    .timestamp_resets
+                    .iter()
+                    .map(|&(pool, first)| Command::ResetQueryPool {
+                        pool,
+                        first,
+                        count: 1,
+                    });
             let at = state.begins[0];
             commands.splice(at..at, resets.collect::<Vec<_>>());
         }
@@ -305,6 +334,7 @@ impl CommandBuffer {
                     dst,
                     offset,
                     stride: 8,
+                    wait: true,
                 });
             }
             return Ok(());
@@ -327,6 +357,7 @@ impl CommandBuffer {
                     dst,
                     offset: at,
                     stride: 8,
+                    wait: true,
                 });
                 next += 1;
             }
@@ -335,6 +366,7 @@ impl CommandBuffer {
         let count = runs.len() as u32;
         let arguments = AccumulateArguments {
             results: scratch.address,
+            stride: 1,
             runs,
         };
         let arguments = self.recorder.upload(
@@ -738,6 +770,7 @@ impl CommandBuffer {
     /// and resumes behind a barrier.
     pub fn render_memory_barrier(
         &mut self,
+        resolver: &mut dyn Resolver,
         scope: BarrierScope,
         after: RenderStages,
         before: RenderStages,
@@ -750,6 +783,7 @@ impl CommandBuffer {
             "barriers name stages Vulkan has",
         )?;
         end_query(&mut self.recorder, &mut render.visibility);
+        self.recorder.pause_statistics();
         self.recorder.push(Command::EndRendering);
         self.recorder.push(Command::Barrier(Barrier {
             src_stages,
@@ -765,7 +799,7 @@ impl CommandBuffer {
             false,
         )));
         render.begins.push(index);
-        Ok(())
+        self.recorder.resume_statistics(resolver, false)
     }
 
     pub fn draw_primitives(
@@ -928,7 +962,7 @@ impl CommandBuffer {
             first_vertex: patch_start,
             first_instance: base_instance,
         };
-        self.amplified(resolver, draw)
+        self.patch_draw(resolver, draw)
     }
 
     /// The indirect patch draws: `MTLDrawPatchIndirectArguments` (patch
@@ -947,13 +981,21 @@ impl CommandBuffer {
         )?;
         let offset = indirect.at(offset, 16)?;
         self.prepare_patches(resolver, source)?;
-        self.amplified(
+        self.patch_draw(
             resolver,
             Command::DrawIndirect {
                 buffer: indirect.buffer,
                 offset,
             },
         )
+    }
+
+    /// A patch draw counts in its own statistics interval: its synthesized
+    /// vertex stage is not a Metal vertex function.
+    fn patch_draw(&mut self, resolver: &mut dyn Resolver, draw: Command) -> Result<()> {
+        self.recorder.split_statistics(resolver, true)?;
+        self.amplified(resolver, draw)?;
+        self.recorder.split_statistics(resolver, false)
     }
 
     /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`.
@@ -1274,9 +1316,9 @@ impl CommandBuffer {
                 (pool, next)
             }
             _ => {
-                let (pool, count) = resolver.occlusion_pool()?;
+                let (pool, count) = resolver.query_pool(QueryType::Occlusion)?;
                 ensure(count > 0, "occlusion pools hold queries")?;
-                self.recorder.query_pools.push(pool);
+                self.recorder.query_pools.push((QueryType::Occlusion, pool));
                 visibility.pool = Some((pool, 1, count));
                 (pool, 0)
             }

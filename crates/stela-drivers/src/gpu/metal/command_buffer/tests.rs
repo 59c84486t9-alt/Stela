@@ -1,6 +1,7 @@
 use super::{
     blit::{BlitTexture, BufferLayout, Region},
-    render::{PatchSource, Viewport},
+    counters::{CounterRange, CounterSample},
+    render::{PassBoundary, PatchSource, Viewport},
     *,
 };
 use crate::gpu::metal::{
@@ -36,7 +37,7 @@ use crate::gpu::metal::{
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, PipelineBindPoint, PipelineStages,
         command::{Barrier, BufferCopy},
-        object::{Image, ImageView, ShaderCode},
+        object::{Image, ImageView, QueryType, ShaderCode},
     },
 };
 use alloc::vec::Vec;
@@ -92,7 +93,7 @@ impl Resolver for MockResolver {
         Ok(Pipeline(900))
     }
 
-    fn occlusion_pool(&mut self) -> Result<(QueryPool, u32)> {
+    fn query_pool(&mut self, _: QueryType) -> Result<(QueryPool, u32)> {
         self.pools += 1;
         Ok((QueryPool(self.pools), 2))
     }
@@ -259,7 +260,12 @@ fn patch_draws_upload_their_tessellation_arguments() {
     let mut resolver = MockResolver::default();
     let mut commands = CommandBuffer::new(FEATURES);
     commands
-        .begin_render(pass(&color, StoreAction::Store, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     commands.set_render_pipeline_state(&patch_state()).unwrap();
     let source = PatchSource {
@@ -305,7 +311,7 @@ fn patch_draws_upload_their_tessellation_arguments() {
         .draw_patches_indirect(&mut resolver, &source, buffer(6, 64), 16)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let commands = &recording.segments[0].commands;
 
     assert!(commands.contains(&Command::SetPrimitiveTopology(
@@ -364,7 +370,12 @@ fn a_draw_binds_state_buffers_and_tables() {
     let mut resolver = MockResolver::default();
     let mut commands = CommandBuffer::new(FEATURES);
     commands
-        .begin_render(pass(&color, StoreAction::Store, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     commands
         .set_render_pipeline_state(&render_state(1))
@@ -389,7 +400,7 @@ fn a_draw_binds_state_buffers_and_tables() {
         .draw_primitives(&mut resolver, PrimitiveType::TriangleStrip, 0, 4, 1, 0)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 5)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 5)).unwrap();
 
     assert_eq!(recording.segments.len(), 1);
     let segment = &recording.segments[0];
@@ -478,17 +489,23 @@ fn render_barriers_split_the_pass_and_keep_its_contents() {
     let mut resolver = MockResolver::default();
     let mut commands = CommandBuffer::new(FEATURES);
     commands
-        .begin_render(pass(&color, StoreAction::DontCare, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::DontCare, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     commands
         .render_memory_barrier(
+            &mut resolver,
             BarrierScope::TEXTURES,
             RenderStages::FRAGMENT,
             RenderStages::FRAGMENT,
         )
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let begins: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -519,7 +536,12 @@ fn deferred_store_actions_must_be_set() {
     let mut resolver = MockResolver::default();
     let mut commands = CommandBuffer::new(FEATURES);
     commands
-        .begin_render(pass(&color, StoreAction::Unknown, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Unknown, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     assert_eq!(
         commands.end_encoding(&mut resolver),
@@ -528,7 +550,12 @@ fn deferred_store_actions_must_be_set() {
 
     let mut commands = CommandBuffer::new(FEATURES);
     commands
-        .begin_render(pass(&color, StoreAction::Unknown, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Unknown, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     commands
         .set_store_action(
@@ -547,6 +574,7 @@ fn visibility_results_copy_or_sum_their_queries() {
     let mut commands = CommandBuffer::new(FEATURES);
     commands
         .begin_render(
+            &mut resolver,
             pass(&color, StoreAction::Store, true),
             Some(visibility),
             Vec::new(),
@@ -567,7 +595,7 @@ fn visibility_results_copy_or_sum_their_queries() {
             .unwrap();
     }
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let commands = &recording.segments[0].commands;
     assert_eq!(
         count(commands, |command| matches!(
@@ -585,7 +613,10 @@ fn visibility_results_copy_or_sum_their_queries() {
     );
     assert_eq!(
         recording.query_pools,
-        [QueryPool(1), QueryPool(2)],
+        [
+            (QueryType::Occlusion, QueryPool(1)),
+            (QueryType::Occlusion, QueryPool(2))
+        ],
         "a second pool once the first is full"
     );
     let Some(&Command::AccumulateResults { arguments, runs }) = commands.last() else {
@@ -624,7 +655,12 @@ fn amplified_draws_repeat_per_view() {
     let mut resolver = MockResolver::default();
     let mut commands = CommandBuffer::new(FEATURES);
     commands
-        .begin_render(pass(&color, StoreAction::Store, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     commands
         .set_render_pipeline_state(&render_state(2))
@@ -639,7 +675,7 @@ fn amplified_draws_repeat_per_view() {
         .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let views: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -673,7 +709,12 @@ fn draws_are_validated_against_the_pipeline_and_pass() {
         "no encoder"
     );
     commands
-        .begin_render(pass(&color, StoreAction::Store, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     assert_eq!(
         commands.begin_blit(),
@@ -704,7 +745,12 @@ fn draws_are_validated_against_the_pipeline_and_pass() {
     commands.end_encoding(&mut resolver).unwrap();
 
     commands
-        .begin_render(pass(&other, StoreAction::Store, false), None, Vec::new())
+        .begin_render(
+            &mut resolver,
+            pass(&other, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
         .unwrap();
     assert_eq!(
         commands.set_render_pipeline_state(&render_state(1)),
@@ -806,7 +852,7 @@ fn stage_in_dispatches_pass_their_region() {
         Some(&layout),
         "the compiler specializes on the layout"
     );
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let pushed: Vec<PushConstants> = recording.segments[0]
         .commands
         .iter()
@@ -855,7 +901,10 @@ fn serial_dispatches_order_writes_and_concurrent_ones_do_not() {
             .dispatch_threads(&mut resolver, [100, 1, 1], threads)
             .unwrap();
         commands.end_encoding(&mut resolver).unwrap();
-        (commands.commit((Semaphore(1), 1)).unwrap(), resolver)
+        (
+            commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap(),
+            resolver,
+        )
     };
     let (serial, resolver) = run(DispatchType::Serial, true);
     assert_eq!(barriers(&serial), 1);
@@ -917,7 +966,7 @@ fn encoders_after_writes_wait_for_them() {
         .copy_buffer(buffer(4, 64), 0, buffer(5, 64), 0, 64)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let barrier = recording.segments[0]
         .commands
         .iter()
@@ -949,7 +998,7 @@ fn unaligned_fills_copy_their_edges() {
         .fill_buffer(&mut resolver, buffer(6, 64), 41, 2, 0xcd)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let commands = &recording.segments[0].commands;
     assert!(commands.contains(&Command::FillBuffer {
         buffer: Buffer(6),
@@ -1025,7 +1074,7 @@ fn buffer_texture_copies_use_texel_strides() {
         .unwrap();
     commands.generate_mipmaps(target, true).unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
     let copies: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -1061,19 +1110,27 @@ fn buffer_texture_copies_use_texel_strides() {
 fn events_split_command_buffers_into_submissions() {
     let mut resolver = MockResolver::default();
     let mut commands = CommandBuffer::new(FEATURES);
-    commands.encode_wait_for_event(Semaphore(7), 3).unwrap();
+    commands
+        .encode_wait_for_event(&mut resolver, Semaphore(7), 3)
+        .unwrap();
     commands.begin_blit().unwrap();
     commands
         .copy_buffer(buffer(4, 64), 0, buffer(5, 64), 0, 64)
         .unwrap();
     assert!(
-        commands.encode_signal_event(Semaphore(8), 1).is_err(),
+        commands
+            .encode_signal_event(&mut resolver, Semaphore(8), 1)
+            .is_err(),
         "events wait for the encoder to end"
     );
     commands.end_encoding(&mut resolver).unwrap();
-    commands.encode_signal_event(Semaphore(8), 1).unwrap();
-    commands.encode_wait_for_event(Semaphore(7), 4).unwrap();
-    let recording = commands.commit((Semaphore(1), 9)).unwrap();
+    commands
+        .encode_signal_event(&mut resolver, Semaphore(8), 1)
+        .unwrap();
+    commands
+        .encode_wait_for_event(&mut resolver, Semaphore(7), 4)
+        .unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 9)).unwrap();
     let shape: Vec<_> = recording
         .segments
         .iter()
@@ -1138,5 +1195,274 @@ fn bindings_validate_slots_and_offsets() {
         commands
             .set_compute_sampler(&mut resolver, ResourceId(5), None, 16)
             .is_err()
+    );
+}
+
+/// The bytes uploaded at `address`.
+fn uploaded(recording: &Recording, address: u64) -> &[u8] {
+    let (chunk, bytes) = recording
+        .uploads
+        .iter()
+        .find(|(chunk, _)| (chunk.address..chunk.address + chunk.size).contains(&address))
+        .expect("an upload holds the address");
+    &bytes[(address - chunk.address) as usize..]
+}
+
+fn word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+fn double(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+#[test]
+fn statistic_samples_sum_intervals_no_query_spans() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let first = 9 << 32;
+    commands
+        .sample_counters(&mut resolver, CounterSample::Statistic(first), false)
+        .unwrap();
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    commands.set_render_pipeline_state(&patch_state()).unwrap();
+    commands
+        .set_tessellation_factor_buffer(Some(buffer(4, 1024)), 96, 48)
+        .unwrap();
+    let source = PatchSource {
+        control_points: 4,
+        patch_indices: None,
+        control_point_indices: Some((buffer(5, 4096), 64)),
+    };
+    commands
+        .draw_patches(&mut resolver, &source, 0, 1, 1, 0)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    commands
+        .sample_counters(&mut resolver, CounterSample::Statistic(first + 64), false)
+        .unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    let mut active = false;
+    for command in commands {
+        match command {
+            Command::BeginQuery { .. } => active = true,
+            Command::EndQuery { .. } => active = false,
+            Command::BeginRendering(_) | Command::EndRendering => {
+                assert!(!active, "no statistics query spans a pass boundary");
+            }
+            _ => {}
+        }
+    }
+    assert!(!active, "commit ends the last interval");
+    // Before the pass, the pass up to the patch draw, the patch draw, the
+    // rest of the pass, after the pass, and after the second sample.
+    assert_eq!(
+        count(commands, |c| matches!(c, Command::BeginQuery { .. })),
+        6
+    );
+    assert!(
+        recording
+            .query_pools
+            .iter()
+            .all(|&(query_type, _)| query_type == QueryType::PipelineStatistics)
+    );
+    let copies: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            &Command::CopyQueryResults {
+                first,
+                count,
+                stride,
+                wait,
+                ..
+            } => Some((first, count, stride, wait)),
+            _ => None,
+        })
+        .collect();
+    // Two queries per mock pool: the five ended intervals copy in three runs.
+    assert_eq!(
+        copies,
+        [(0, 2, 56, true), (0, 2, 56, true), (0, 1, 56, true)]
+    );
+    let cleared: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            &Command::FillBuffer { size, data, .. } => Some((size, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cleared, [(8, 0)], "the patch draw's vertex invocations");
+
+    let Some(&Command::AccumulateResults { arguments, runs }) = commands.last() else {
+        panic!("{:?}", commands.last())
+    };
+    assert_eq!(runs, 14, "seven counted members per sample");
+    let encoded = uploaded(&recording, arguments);
+    assert_eq!(word(encoded, 12), 7, "one interval's results apart");
+    let run = |index: usize| {
+        let at = AccumulateArguments::RUNS_OFFSET as usize + 16 * index;
+        (
+            word(encoded, at),
+            word(encoded, at + 4),
+            double(encoded, at + 8),
+        )
+    };
+    assert_eq!(
+        run(0),
+        (4, 0, first),
+        "the first sample precedes every interval"
+    );
+    assert_eq!(run(7), (4, 5, first + 64), "tessellation input patches");
+    assert_eq!(run(8), (0, 5, first + 72), "vertex invocations");
+    assert_eq!(run(13), (6, 5, first + 120), "compute kernel invocations");
+    assert!(
+        (0..14).all(|index| run(index).2 != first + 64 + 48),
+        "fragments passed keeps the error value"
+    );
+}
+
+#[test]
+fn render_pass_timestamps_reset_before_the_pass() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let pool = QueryPool(30);
+    let sample = |query| CounterSample::Timestamp { pool, query };
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            alloc::vec![
+                (sample(0), PassBoundary::StartOfVertex),
+                (sample(1), PassBoundary::EndOfFragment),
+            ],
+        )
+        .unwrap();
+    commands
+        .sample_counters(&mut resolver, sample(2), true)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+    let begin = commands
+        .iter()
+        .position(|command| matches!(command, Command::BeginRendering(_)))
+        .unwrap();
+    for query in 0..3 {
+        let reset = commands.iter().position(|command| {
+            *command
+                == Command::ResetQueryPool {
+                    pool,
+                    first: query,
+                    count: 1,
+                }
+        });
+        assert!(reset.is_some_and(|reset| reset < begin), "query {query}");
+    }
+    assert!(commands.contains(&Command::WriteTimestamp {
+        pool,
+        query: 2,
+        stage: PipelineStages::ALL_COMMANDS,
+    }));
+    assert!(commands.contains(&Command::WriteTimestamp {
+        pool,
+        query: 1,
+        stage: PipelineStages::FRAGMENT_SHADER,
+    }));
+}
+
+#[test]
+fn blits_resolve_counters_on_the_gpu() {
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let samples = buffer(9, 128);
+    commands
+        .sample_counters(
+            &mut resolver,
+            CounterSample::Statistic(samples.address),
+            false,
+        )
+        .unwrap();
+    commands.begin_blit().unwrap();
+    let timestamps = CounterRange::Timestamps {
+        pool: QueryPool(30),
+        first: 1,
+        count: 2,
+    };
+    assert!(
+        commands
+            .resolve_counters(&mut resolver, timestamps, buffer(5, 64), 4)
+            .is_err(),
+        "results are 8-byte aligned"
+    );
+    commands
+        .resolve_counters(&mut resolver, timestamps, buffer(5, 64), 8)
+        .unwrap();
+    commands
+        .resolve_counters(
+            &mut resolver,
+            CounterRange::Statistics(samples),
+            buffer(6, 256),
+            0,
+        )
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    let fill = commands
+        .iter()
+        .position(|command| {
+            *command
+                == Command::FillBuffer {
+                    buffer: Buffer(5),
+                    offset: 8,
+                    size: 16,
+                    data: u32::MAX,
+                }
+        })
+        .expect("untaken samples hold the error value");
+    let copy = commands
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                Command::CopyQueryResults {
+                    first: 1,
+                    count: 2,
+                    wait: false,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(fill < copy);
+    let accumulate = commands
+        .iter()
+        .position(|command| matches!(command, Command::AccumulateResults { .. }))
+        .unwrap();
+    let resolved = commands
+        .iter()
+        .position(|command| matches!(command, Command::CopyBuffer { src: Buffer(9), .. }))
+        .unwrap();
+    assert!(
+        accumulate < resolved,
+        "pending statistic samples resolve first"
+    );
+    assert_eq!(
+        count(commands, |c| matches!(c, Command::AccumulateResults { .. })),
+        1,
+        "commit has nothing left to resolve"
     );
 }

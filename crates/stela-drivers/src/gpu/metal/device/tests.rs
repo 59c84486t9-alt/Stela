@@ -1,6 +1,6 @@
 use super::{
     pipelines::{ComputePipelineRequest, MeshPipelineRequest, RenderPipelineRequest},
-    queue::{AttachmentRequest, RenderPassRequest},
+    queue::{AttachmentRequest, CounterSet, RenderPassRequest},
     *,
 };
 use crate::gpu::metal::{
@@ -11,7 +11,10 @@ use crate::gpu::metal::{
         StoreActionOptions, SwizzleChannels, TessellationPartitionMode, TextureType, TextureUsage,
     },
     capabilities::{ShaderFeatures, Size},
-    command_buffer::Segment,
+    command_buffer::{
+        Segment,
+        counters::{COUNTER_ERROR_VALUE, CounterSample},
+    },
     heap::HeapDescriptor,
     nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
     pipeline::{
@@ -911,7 +914,7 @@ fn render_passes_resolve_cached_attachment_views() {
         tile_memory: false,
         sample_positions: Vec::new(),
         rasterization_rate_map: false,
-        timestamps: Vec::new(),
+        counter_samples: Vec::new(),
     };
     let mut views = Vec::new();
     for _ in 0..2 {
@@ -969,7 +972,9 @@ fn shared_events_and_counters() {
     assert_eq!(device.wait_event(event, 5, 0), Ok(true));
     assert_eq!(device.wait_event(event, 6, 0), Ok(false));
 
-    let counters = device.new_counter_sample_buffer(4).unwrap();
+    let counters = device
+        .new_counter_sample_buffer(CounterSet::Timestamp, 4)
+        .unwrap();
     assert_eq!(device.resolve_counters(counters, 0, 4), Ok(None));
     device.backend().queries_ready = true;
     assert_eq!(
@@ -977,10 +982,52 @@ fn shared_events_and_counters() {
         Ok(Some(alloc::vec![0, 10]))
     );
     assert!(device.resolve_counters(counters, 3, 2).is_err());
-    let (pool, _) = device.counter_pool(counters).unwrap();
+    let sample = device.counter_sample(counters, 0).unwrap();
+    assert!(matches!(sample, CounterSample::Timestamp { query: 0, .. }));
+    assert!(device.counter_sample(counters, 4).is_err());
     let mut commands = device.new_command_buffer();
-    commands.sample_timestamp(pool, 0, true).unwrap();
+    commands
+        .sample_counters(&mut device.resolver(), sample, true)
+        .unwrap();
     device.commit(commands).unwrap();
     device.destroy_counter_sample_buffer(counters).unwrap();
     device.destroy_event(event).unwrap();
+}
+
+#[test]
+fn statistic_samples_start_as_error_values() {
+    let mut device = device();
+    let counters = device
+        .new_counter_sample_buffer(CounterSet::Statistic, 2)
+        .unwrap();
+    let values = device.resolve_counters(counters, 1, 1).unwrap().unwrap();
+    assert_eq!(
+        values, [COUNTER_ERROR_VALUE; 8],
+        "one MTLCounterResultStatistic"
+    );
+    let CounterSample::Statistic(first) = device.counter_sample(counters, 0).unwrap() else {
+        panic!("statistic buffers hold statistic samples")
+    };
+    assert_eq!(
+        device.counter_sample(counters, 1),
+        Ok(CounterSample::Statistic(first + 64))
+    );
+    let mut commands = device.new_command_buffer();
+    commands
+        .sample_counters(
+            &mut device.resolver(),
+            CounterSample::Statistic(first),
+            false,
+        )
+        .unwrap();
+    device.commit(commands).unwrap();
+    let segment = &device.backend().submissions.last().unwrap()[0];
+    assert!(
+        segment
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::AccumulateResults { runs: 7, .. })),
+        "commit resolves the sample's seven counted members"
+    );
+    device.destroy_counter_sample_buffer(counters).unwrap();
 }

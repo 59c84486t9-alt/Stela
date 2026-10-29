@@ -17,15 +17,15 @@ use super::{
     shader::{Interface, Specialization, Stage},
     upload::{Chunk, ChunkSource, Upload, UploadArena},
     vulkan::{
-        PipelineStages,
         command::Command,
-        object::{Buffer, Pipeline, QueryPool, Semaphore},
+        object::{Buffer, Pipeline, QueryPool, QueryType, Semaphore},
     },
 };
 use alloc::{boxed::Box, vec::Vec};
 
 pub mod blit;
 pub mod compute;
+pub mod counters;
 pub mod render;
 
 /// A Metal buffer as commands see it.
@@ -98,8 +98,9 @@ pub trait Resolver: ChunkSource {
         mesh: [u32; 3],
     ) -> Result<Pipeline>;
 
-    /// A reset occlusion query pool and its query count.
-    fn occlusion_pool(&mut self) -> Result<(QueryPool, u32)>;
+    /// A reset query pool of `query_type` and its query count; pipeline
+    /// statistics pools count [`counters::STATISTICS`].
+    fn query_pool(&mut self, query_type: QueryType) -> Result<(QueryPool, u32)>;
 }
 
 /// Optional dynamic states the device enabled; see [`Capabilities`].
@@ -137,8 +138,8 @@ pub struct Recording {
     /// Upload chunks and the bytes to copy into them before submission;
     /// they return to the pool on completion.
     pub uploads: Vec<(Chunk, Vec<u8>)>,
-    /// Occlusion pools to recycle on completion.
-    pub query_pools: Vec<QueryPool>,
+    /// Query pools to reset and recycle on completion.
+    pub query_pools: Vec<(QueryType, QueryPool)>,
 }
 
 /// One stage's argument table and whether the GPU copy is current.
@@ -269,7 +270,8 @@ struct Recorder {
     segments: Vec<Segment>,
     hazards: Hazards,
     uploads: UploadArena,
-    query_pools: Vec<QueryPool>,
+    query_pools: Vec<(QueryType, QueryPool)>,
+    statistics: Option<counters::Statistics>,
 }
 
 impl Recorder {
@@ -279,6 +281,7 @@ impl Recorder {
             hazards: Hazards::default(),
             uploads: UploadArena::default(),
             query_pools: Vec::new(),
+            statistics: None,
         };
         recorder.start_segment(Vec::new());
         recorder
@@ -384,8 +387,15 @@ impl CommandBuffer {
     }
 
     /// `encodeSignalEvent:value:`: work encoded so far signals the event.
-    pub fn encode_signal_event(&mut self, event: Semaphore, value: u64) -> Result<()> {
+    pub fn encode_signal_event(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        event: Semaphore,
+        value: u64,
+    ) -> Result<()> {
         self.idle()?;
+        // Statistics queries end with their segment.
+        self.recorder.pause_statistics();
         self.recorder
             .segments
             .last_mut()
@@ -393,11 +403,16 @@ impl CommandBuffer {
             .signals
             .push((event, value));
         self.recorder.start_segment(Vec::new());
-        Ok(())
+        self.recorder.resume_statistics(resolver, false)
     }
 
     /// `encodeWaitForEvent:value:`: later work waits for the event.
-    pub fn encode_wait_for_event(&mut self, event: Semaphore, value: u64) -> Result<()> {
+    pub fn encode_wait_for_event(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        event: Semaphore,
+        value: u64,
+    ) -> Result<()> {
         self.idle()?;
         let current = self.recorder.segments.last().expect("a segment");
         // A segment holding only its opening barrier can take the wait.
@@ -408,15 +423,23 @@ impl CommandBuffer {
                 .expect("a segment")
                 .waits
                 .push((event, value));
-        } else {
-            self.recorder.start_segment(alloc::vec![(event, value)]);
+            return Ok(());
         }
-        Ok(())
+        self.recorder.pause_statistics();
+        self.recorder.start_segment(alloc::vec![(event, value)]);
+        self.recorder.resume_statistics(resolver, false)
     }
 
     /// `commit`: the recording, whose last segment signals `completion`.
-    pub fn commit(mut self, completion: (Semaphore, u64)) -> Result<Recording> {
+    /// Statistic samples not yet resolved are written last.
+    pub fn commit(
+        mut self,
+        resolver: &mut dyn Resolver,
+        completion: (Semaphore, u64),
+    ) -> Result<Recording> {
         self.idle()?;
+        self.recorder.pause_statistics();
+        self.recorder.resolve_statistics(resolver)?;
         let last = self.recorder.segments.last_mut().expect("a segment");
         last.signals.push(completion);
         // An empty trailing segment left by a final signal still carries the
@@ -426,35 +449,6 @@ impl CommandBuffer {
             uploads: self.recorder.uploads.finish(),
             query_pools: self.recorder.query_pools,
         })
-    }
-
-    /// `sampleCountersInBuffer:atSampleIndex:withBarrier:` outside render
-    /// passes, and encoder-boundary samples: a timestamp after the work so
-    /// far (`barrier`) or as soon as the GPU reaches it.
-    pub fn sample_timestamp(&mut self, pool: QueryPool, index: u32, barrier: bool) -> Result<()> {
-        ensure(
-            !matches!(self.encoder, Encoder::Render(_)),
-            "render passes sample at stage boundaries",
-        )?;
-        if barrier {
-            self.recorder.full_barrier();
-        }
-        self.recorder.push(Command::ResetQueryPool {
-            pool,
-            first: index,
-            count: 1,
-        });
-        let stage = if barrier {
-            PipelineStages::ALL_COMMANDS
-        } else {
-            PipelineStages::TOP_OF_PIPE
-        };
-        self.recorder.push(Command::WriteTimestamp {
-            pool,
-            query: index,
-            stage,
-        });
-        Ok(())
     }
 }
 

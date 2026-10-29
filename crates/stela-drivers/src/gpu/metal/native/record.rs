@@ -579,16 +579,23 @@ impl Recorder<'_> {
                     dst,
                     offset,
                     stride,
-                } => device.cmd_copy_query_pool_results(
-                    buffer,
-                    handle(pool.0),
-                    first,
-                    count,
-                    handle(dst.0),
-                    offset,
-                    stride,
-                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
-                ),
+                    wait,
+                } => {
+                    let mut flags = vk::QueryResultFlags::TYPE_64;
+                    if wait {
+                        flags |= vk::QueryResultFlags::WAIT;
+                    }
+                    device.cmd_copy_query_pool_results(
+                        buffer,
+                        handle(pool.0),
+                        first,
+                        count,
+                        handle(dst.0),
+                        offset,
+                        stride,
+                        flags,
+                    );
+                }
                 &Command::AccumulateResults { arguments, runs } => {
                     self.accumulate(arguments, runs);
                 }

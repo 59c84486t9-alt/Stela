@@ -75,6 +75,7 @@ impl ApiFeatures {
     pub const IMPLEMENTED: Self = Self::HEAPS
         .union(Self::INDIRECT_DRAW_DISPATCH)
         .union(Self::TIMESTAMP_COUNTERS)
+        .union(Self::STATISTIC_COUNTERS)
         .union(Self::PROGRAMMABLE_SAMPLE_POSITIONS)
         .union(Self::SHARED_EVENTS)
         .union(Self::TESSELLATION);
@@ -265,6 +266,8 @@ pub struct Capabilities {
     pub wireframe: bool,
     /// Timestamp ticks per second; zero without timestamp counters.
     pub timestamp_frequency: u64,
+    /// `MTLCommonCounterSetStatistic` is among `counterSets`.
+    pub statistic_counters: bool,
     /// `MTLVertexStepFunctionConstant`, which needs zero divisors.
     pub constant_vertex_step: bool,
     counter_sampling: [bool; 5],
@@ -683,11 +686,17 @@ impl Derivation<'_> {
             limits.timestamp_compute_and_graphics && limits.timestamp_period > 0.0,
             ApiFeatures::TIMESTAMP_COUNTERS,
         ));
-        if timestamps {
+        let statistics = self.check(api(
+            "statistic counters",
+            features.pipeline_statistics_query,
+            ApiFeatures::STATISTIC_COUNTERS,
+        ));
+        let counters = timestamps || statistics;
+        if counters {
             // Tile dispatches exist only on Apple GPUs.
             self.gap("tile-dispatch counter sampling", Cause::AppleArchitecture);
         }
-        let counter_sampling = [timestamps, timestamps, timestamps, false, timestamps];
+        let counter_sampling = [counters, counters, counters, false, counters];
 
         let texture_sample_counts = limits.framebuffer_color_sample_counts
             & limits.framebuffer_depth_sample_counts
@@ -859,6 +868,7 @@ impl Derivation<'_> {
             } else {
                 0
             },
+            statistic_counters: statistics,
             constant_vertex_step,
             counter_sampling,
             vertex_formats,
