@@ -2826,7 +2826,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_asix_led_eeprom_mmd_fields",
-    "source": "crates/stela-drivers/src/usb/ethernet/asix.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/asix/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ASIX_LED_ORACLE"
@@ -2836,7 +2836,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_asix_negotiated_queue_and_medium_fields",
-    "source": "crates/stela-drivers/src/usb/ethernet/asix.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/asix/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ASIX_LINK_ORACLE"
@@ -2846,7 +2846,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_asix_eeprom_and_efuse_checksum_mutations",
-    "source": "crates/stela-drivers/src/usb/ethernet/asix.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/asix/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ASIX_CHECKSUM_ORACLE"
@@ -2856,7 +2856,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_asix_exact_ids_and_shared_callback_flags",
-    "source": "crates/stela-drivers/src/usb/ethernet/asix.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/asix/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ASIX_IDS_ORACLE"
@@ -2866,7 +2866,7 @@
   {
     "package": "stela-drivers",
     "test": "pinned_real_firmware_files_parse_all_observed_block_effects",
-    "source": "crates/stela-drivers/src/usb/ethernet/firmware.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/firmware/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
@@ -2876,7 +2876,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_firmware_validators_match_real_and_mutated_fields",
-    "source": "crates/stela-drivers/src/usb/ethernet/firmware.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/firmware/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL815X_FIRMWARE_ORACLE"
@@ -2906,7 +2906,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_8153b_link_register_effects",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8153b.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8153b/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL8153B_LINK_ORACLE"
@@ -2916,7 +2916,7 @@
   {
     "package": "stela-drivers",
     "test": "real_firmware_8153b_full_startup_and_link",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8153b.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8153b/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
@@ -2946,7 +2946,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_rtl8156a_enable_register_effects",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL8156A_ENABLE_ORACLE"
@@ -2956,7 +2956,7 @@
   {
     "package": "stela-drivers",
     "test": "real_firmware_8156a_full_startup_link_and_stop",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
@@ -2966,7 +2966,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_rtl8156b_enable_register_effects",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156b.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156b/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL8156B_ENABLE_ORACLE"
@@ -2976,7 +2976,7 @@
   {
     "package": "stela-drivers",
     "test": "real_firmware_8156b_full_startup_link_and_stop",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156b.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/rtl8156b/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
@@ -2986,7 +2986,7 @@
   {
     "package": "stela-drivers",
     "test": "real_firmware_uploads_preserve_payloads_order_and_final_version",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/upload.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/upload/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
@@ -2996,7 +2996,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_rtl8152_revision_init_and_station_effects",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL8152_REVISION_ORACLE"
@@ -3006,7 +3006,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_ocp_request_trace_matches_native_helpers",
-    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x.rs",
+    "source": "crates/stela-drivers/src/usb/ethernet/rtl815x/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTL8152_ORACLE"
@@ -3036,7 +3036,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_cbw_builder_matches_all_luns_and_transfer_profiles",
-    "source": "crates/stela-drivers/src/usb/storage/bot.rs",
+    "source": "crates/stela-drivers/src/usb/storage/bot/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_USB_BOT_CBW_ORACLE"
@@ -3076,7 +3076,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_intel_pmc_packet_oracle",
-    "source": "crates/stela-drivers/src/usb/typec/mux/pmc.rs",
+    "source": "crates/stela-drivers/src/usb/typec/mux/pmc/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_INTEL_PMC_MUX_ORACLE"
@@ -3086,7 +3086,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_mux_and_retimer_programming_oracle",
-    "source": "crates/stela-drivers/src/usb/typec/mux.rs",
+    "source": "crates/stela-drivers/src/usb/typec/mux/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TYPEC_MUX_ORACLE"
@@ -3096,7 +3096,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_tps_block_and_task_oracle",
-    "source": "crates/stela-drivers/src/usb/typec/tps6598x.rs",
+    "source": "crates/stela-drivers/src/usb/typec/tps6598x/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TYPEC_DISCRETE_ORACLE"
@@ -3106,7 +3106,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_dp_source_and_cam_oracle",
-    "source": "crates/stela-drivers/src/usb/typec/ucsi/altmode.rs",
+    "source": "crates/stela-drivers/src/usb/typec/ucsi/altmode/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_UCSI_DP_ORACLE"
@@ -3116,7 +3116,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_ccg_start_oracle",
-    "source": "crates/stela-drivers/src/usb/typec/ucsi/ccg.rs",
+    "source": "crates/stela-drivers/src/usb/typec/ucsi/ccg/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TYPEC_DISCRETE_ORACLE"
@@ -3126,7 +3126,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_notifications_and_command_ack_oracle",
-    "source": "crates/stela-drivers/src/usb/typec/ucsi.rs",
+    "source": "crates/stela-drivers/src/usb/typec/ucsi/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_UCSI_ORACLE"
