@@ -41,7 +41,9 @@ mod general_reservation;
 mod reservation;
 mod stack_requirement;
 #[cfg(target_arch = "x86_64")]
-pub use general_reservation::{AssignedGeneral, EnteredProcess, GeneralReservation};
+pub use general_reservation::{
+    AssignedGeneral, EnteredProcess, GeneralReservation, OwnedGeneralEscrow,
+};
 pub use stack_requirement::{StackProfile, StackRequirement};
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 pub(crate) mod test_support;
@@ -788,6 +790,7 @@ impl<const N: usize> Drop for WakeHandle<N> {
 enum TaskState {
     Idle,
     Reserved,
+    Escrow,
     Ready,
     Running,
     Runnable,
@@ -803,6 +806,7 @@ struct Task {
     job: Option<(usize, Job)>,
     flags: u64,
     draining: bool,
+    owned_escrows: usize,
     binding: Option<Arc<dyn SwitchBinding>>,
     signal: Arc<WakeSignal>,
 }
@@ -822,6 +826,7 @@ pub struct Runtime<const N: usize> {
     cursor: Cell<usize>,
     retired: Cell<bool>,
     pending_reservations: Cell<usize>,
+    owned_escrows: Cell<usize>,
     service_started: Cell<bool>,
     firmware_started: Cell<bool>,
     firmware_turn: Cell<bool>,
@@ -936,6 +941,7 @@ impl<const N: usize> Runtime<N> {
                 job: None,
                 flags: 0,
                 draining: false,
+                owned_escrows: 0,
                 binding: None,
                 signal: Arc::new(WakeSignal {
                     service: layout.lane(index) == Lane::Service,
@@ -978,6 +984,7 @@ impl<const N: usize> Runtime<N> {
             cursor: Cell::new(0),
             retired: Cell::new(false),
             pending_reservations: Cell::new(0),
+            owned_escrows: Cell::new(0),
             service_started: Cell::new(false),
             firmware_started: Cell::new(false),
             firmware_turn: Cell::new(true),
@@ -1703,7 +1710,7 @@ impl<const N: usize> Runtime<N> {
                         TaskState::Ready | TaskState::Runnable => true,
                         TaskState::Blocked => task.signal.pending.load(Ordering::Acquire),
                         TaskState::Idle => queued_lanes[lane_index(task.lane)],
-                        TaskState::Running | TaskState::Reserved => false,
+                        TaskState::Running | TaskState::Reserved | TaskState::Escrow => false,
                     }
             })
         }
@@ -1885,7 +1892,7 @@ impl<const N: usize> Runtime<N> {
         if self.queue.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        if self.pending_reservations.get() != 0 {
+        if self.pending_reservations.get() != 0 || self.owned_escrows.get() != 0 {
             return Err(WorkError::Pending);
         }
         if self.domain().is_some_and(|domain| !domain.retired()) {
@@ -1927,7 +1934,11 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
         // SAFETY: covered by this function's own safety contract.
         unsafe { (job.callback)(job.context as *mut c_void) };
         executor.valid();
-        if executor.pending_reservations.get() != 0 {
+        // SAFETY: this actual completing frame owns its immutable task index;
+        // only its entered creator can alter the per-job escrow count. Peer
+        // callbacks may complete while another creator retains an owned escrow.
+        let owned_escrows = unsafe { (*executor.task(index)).owned_escrows };
+        if executor.pending_reservations.get() != 0 || owned_escrows != 0 {
             executor.queue.abandoned.store(true, Ordering::Release);
             quarantine();
             executor.queue.cpu.fatal(WorkError::Pending);
@@ -1986,7 +1997,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
 #[cfg(target_arch = "x86_64")]
 impl<const N: usize> Drop for Runtime<N> {
     fn drop(&mut self) {
-        if self.retired.get() {
+        if self.retired.get() && self.owned_escrows.get() == 0 {
             // SAFETY: retirement proved no task frame or stack is still live.
             unsafe { ManuallyDrop::drop(&mut self.tasks) };
             // SAFETY: successful retirement also required actual domain release.
@@ -2185,7 +2196,7 @@ impl<const N: usize> Executor<N> {
 impl<const N: usize> Drop for Executor<N> {
     fn drop(&mut self) {
         let process = self.runtime.queue.process().is_ok();
-        if process && self.runtime.retired.get() {
+        if process && self.runtime.retired.get() && self.runtime.owned_escrows.get() == 0 {
             // SAFETY: the runtime retired, so no task or provider can resume it.
             unsafe {
                 ManuallyDrop::drop(&mut self.runtime);

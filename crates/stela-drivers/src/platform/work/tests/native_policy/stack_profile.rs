@@ -303,3 +303,5 @@ fn nonempty_queue_refuses_profile_without_reinterpreting_its_original_callback()
 }
 
 mod general_reservation;
+
+mod owned_escrow;

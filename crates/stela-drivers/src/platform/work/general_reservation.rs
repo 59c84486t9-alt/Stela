@@ -1,5 +1,7 @@
 //! Affine actual-worker/job reservation under a borrowed entered process guard.
 use super::*;
+mod owned;
+pub use owned::OwnedGeneralEscrow;
 /// Actual borrowed platform process-entry authority, independent of task IDs.
 ///
 /// # Safety
