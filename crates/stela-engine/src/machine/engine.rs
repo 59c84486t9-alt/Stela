@@ -4351,7 +4351,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let found = record
                 .as_ref()
                 .and_then(|record| record.find(offset as u16, context))
-                .and_then(|entry| entry.rebase(page));
+                .and_then(|entry| entry.rebase(page, &source));
             if let Some(compiled) = found {
                 if !within(&compiled) {
                     return Ok(None);

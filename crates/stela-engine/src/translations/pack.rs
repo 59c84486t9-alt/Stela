@@ -721,7 +721,7 @@ mod tests {
             record
                 .find(8, &context)
                 .unwrap()
-                .rebase(0x1_0000_4000)
+                .rebase(0x1_0000_4000, &offer(0x1_0000_4008, first).input)
                 .is_some()
         );
         assert_eq!(next.counters.loaded, 1);

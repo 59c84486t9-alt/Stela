@@ -64,6 +64,7 @@ impl Offer {
         };
         crate::translations::prove(
             &self.block,
+            &self.input,
             self.page,
             self.pc,
             self.context,

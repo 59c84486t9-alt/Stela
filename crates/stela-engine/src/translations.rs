@@ -20,7 +20,7 @@ use stela_compiler::{
 
 /// The bytes of the fetch page a record covers: no block leaves it.
 pub const PAGE_BYTES: usize = 4096;
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 const RECORD_MAGIC: [u8; 8] = *b"STLTPAGE";
 const HEADER_BYTES: usize = 88;
 const TRAILER_BYTES: usize = 32;
@@ -89,6 +89,10 @@ pub struct Entry {
     /// The page offset of its entry PC.
     pub offset: u16,
     pub source_bytes: u16,
+    /// Exact admitted instruction bytes given to the compiler, including any
+    /// analyzed suffix beyond the emitted block. Raw fetch-page identity and
+    /// the preparation context remain separate record bindings.
+    pub input: Vec<u8>,
     /// Native code, each relocation field holding `value - page`.
     pub code: Vec<u8>,
     /// Code offsets of the relocation fields, ascending.
@@ -101,7 +105,15 @@ pub struct Entry {
 
 impl Entry {
     /// The block as compiled at the page whose address is `page`.
-    pub fn rebase(&self, page: u64) -> Option<CompiledBlock> {
+    pub fn rebase(&self, page: u64, admitted: &[u8]) -> Option<CompiledBlock> {
+        if !self.consistent() || admitted.get(..self.input.len())? != self.input {
+            return None;
+        }
+        if !page.is_multiple_of(PAGE_BYTES as u64) {
+            return None;
+        }
+        page.checked_add(u64::from(self.offset))?
+            .checked_add(u64::from(self.source_bytes))?;
         let mut code = self.code.clone();
         for &at in &self.relocations {
             let field = code.get_mut(at as usize..at as usize + FIELD_BYTES)?;
@@ -145,6 +157,11 @@ impl Entry {
             && self.source_bytes != 0
             && self.offset.is_multiple_of(4)
             && self.source_bytes.is_multiple_of(4)
+            && self.input.len() >= usize::from(self.source_bytes)
+            && self.input.len().is_multiple_of(4)
+            && usize::from(self.offset)
+                .checked_add(self.input.len())
+                .is_some_and(|end| end <= PAGE_BYTES)
             && self.relocations.windows(2).all(|pair| {
                 pair[0]
                     .checked_add(FIELD_BYTES as u32)
@@ -254,6 +271,8 @@ impl Record {
             out.extend(entry.context.0);
             out.extend(entry.offset.to_le_bytes());
             out.extend(entry.source_bytes.to_le_bytes());
+            out.extend((entry.input.len() as u16).to_le_bytes());
+            out.extend(&entry.input);
             out.extend((entry.code.len() as u32).to_le_bytes());
             out.extend((entry.relocations.len() as u32).to_le_bytes());
             for offset in &entry.relocations {
@@ -384,6 +403,11 @@ impl<'a> Reader<'a> {
         let context = self.digest()?;
         let offset = self.u16()?;
         let source_bytes = self.u16()?;
+        let input_bytes = usize::from(self.u16()?);
+        if input_bytes > PAGE_BYTES {
+            return Err(FormatError::Entry);
+        }
+        let input = self.take(input_bytes)?.to_vec();
         let code_bytes = self.u32()? as usize;
         let relocations = (0..self.count(4)?)
             .map(|_| self.u32())
@@ -419,6 +443,7 @@ impl<'a> Reader<'a> {
             context,
             offset,
             source_bytes,
+            input,
             code,
             relocations,
             source_map,
@@ -448,6 +473,7 @@ pub fn probe_displacements(page: u64) -> [u64; 2] {
 /// the same.
 pub fn prove(
     block: &CompiledBlock,
+    input: &[u8],
     page: u64,
     pc: u64,
     context: Digest,
@@ -534,6 +560,7 @@ pub fn prove(
         context,
         offset: page_offset(pc)?,
         source_bytes: u16::try_from(block.source_bytes).ok()?,
+        input: input.to_vec(),
         code: stored,
         relocations,
         source_map: block
@@ -588,6 +615,7 @@ mod tests {
         ];
         prove(
             &block,
+            source,
             PAGE,
             pc,
             Digest::of(b"context"),
@@ -603,7 +631,7 @@ mod tests {
         assert!(entry.relocations.len() >= 3, "{:?}", entry.relocations);
         for other in [0x2_3456_8000u64, 0x4000, 0x7fff_0000_0000] {
             let expected = compile(&source, other + 0x40);
-            let rebased = entry.rebase(other).unwrap();
+            let rebased = entry.rebase(other, &source).unwrap();
             assert_eq!(
                 rebased.native.x86_64_code, expected.native.x86_64_code,
                 "page {other:#x}"
@@ -613,6 +641,74 @@ mod tests {
             assert_eq!(rebased.fault_recovery, expected.fault_recovery);
             assert_eq!(rebased.source_bytes, expected.source_bytes);
         }
+    }
+
+    #[test]
+    fn stored_source_witness_requires_the_exact_admitted_compiler_prefix() {
+        // The compiler stops at B, but the complete offered analysis input is
+        // retained. Changing that suffix must not silently change its witness.
+        let source = words(&[0x1400_0002, 0xd503_201f, 0xd65f_03c0]);
+        let entry = proved(&source, 0x40).expect("relocatable branch");
+        assert_eq!(entry.source_bytes, 4);
+        assert_eq!(entry.input, source);
+        let translator = translator_id();
+        let key = Digest::of(b"raw fetch page identity");
+        let mut record = Record::new(translator, key);
+        record.insert(entry.clone());
+        let decoded = Record::decode(&record.encode(), &translator, &key).unwrap();
+        let held = &decoded.entries[0];
+        assert_eq!(held.input, source);
+        assert!(held.rebase(PAGE, &source).is_some());
+        for at in 0..source.len() {
+            let mut changed = source.clone();
+            changed[at] ^= 1;
+            assert!(held.rebase(PAGE, &changed).is_none(), "input byte {at}");
+        }
+        for length in 0..source.len() {
+            assert!(held.rebase(PAGE, &source[..length]).is_none());
+        }
+        let mut longer_window = source.clone();
+        longer_window.extend(words(&[0xd503_201f]));
+        assert!(held.rebase(PAGE, &longer_window).is_some());
+        assert!(held.rebase(u64::MAX - 3, &source).is_none());
+        assert!(held.rebase(!(PAGE_BYTES as u64 - 1), &source).is_some());
+        assert!(held.rebase(PAGE + 4, &source).is_none());
+    }
+
+    #[test]
+    fn source_witness_geometry_is_checked_even_with_a_valid_record_checksum() {
+        let source = words(&[0x1400_0002, 0xd503_201f, 0xd65f_03c0]);
+        let original = proved(&source, 0x40).unwrap();
+        let translator = translator_id();
+        let key = Digest::of(b"raw fetch page identity");
+        for input in [
+            vec![],
+            vec![0; 3],
+            vec![0; PAGE_BYTES],
+            vec![0; PAGE_BYTES + 4],
+        ] {
+            let mut entry = original.clone();
+            entry.input = input;
+            assert!(!entry.consistent());
+            assert!(entry.rebase(PAGE, &source).is_none());
+            let mut record = Record::new(translator, key);
+            record.insert(entry);
+            assert_eq!(
+                Record::decode(&record.encode(), &translator, &key),
+                Err(FormatError::Entry)
+            );
+        }
+        let mut legacy = Record::new(translator, key);
+        legacy.insert(original);
+        let mut bytes = legacy.encode();
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let end = bytes.len() - TRAILER_BYTES;
+        let checksum = Sha256::digest(&bytes[..end]);
+        bytes[end..].copy_from_slice(&checksum);
+        assert_eq!(
+            Record::decode(&bytes, &translator, &key),
+            Err(FormatError::Schema)
+        );
     }
 
     #[test]
