@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn source_suspend_resume_keeps_same_real_ring_and_starts_a_fresh_capture_epoch() {
-    use crate::audio::acp_pdm::trace_assertions::assert_ring_invalidation;
+    use crate::audio::acp_pdm::test_support::assert_ring_invalidation;
     for power_gate in [false, true] {
         let (mut controller, device, source) = ready(1, 4096);
         let address = controller.capture.as_ref().unwrap().dma.address().unwrap();

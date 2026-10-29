@@ -228,3 +228,6 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
     }
     Ok(identity)
 }
+
+#[cfg(test)]
+mod tests;

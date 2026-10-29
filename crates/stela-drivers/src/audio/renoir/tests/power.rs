@@ -73,38 +73,6 @@ fn suspended_shutdown_reproves_power_and_reset_before_releasing_owners() {
 }
 
 #[test]
-fn power_clock_and_iova_limit_failures_do_not_publish_dma() {
-    let (mut controller, device, source) = fixture(1);
-    device.lock().unwrap().power_never = true;
-    assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
-    assert_eq!(device.lock().unwrap().maps, 0);
-    device.lock().unwrap().power_never = false;
-    device.lock().unwrap().ignore_write = Some(0x1424);
-    assert_eq!(controller.initialize(), Err(Error::RegisterRejected(CLOCK)));
-    device.lock().unwrap().ignore_write = None;
-    controller.initialize().unwrap();
-    // Narrow the platform ceiling before allocating anything. The real
-    // model domain refuses its high IOVA; no PA fallback is permitted.
-    controller.config.dma_address_bits = 32;
-    assert_eq!(
-        controller.prepare_capture(&source, CAPTURE_FORMAT, 4096),
-        Err(Error::Dma(DmaError::AddressLimit))
-    );
-    assert_eq!(source.drops.load(Ordering::Relaxed), 1);
-    assert_eq!(device.lock().unwrap().maps, 0);
-    assert!(controller.capture.is_none());
-    assert!(
-        !device
-            .lock()
-            .unwrap()
-            .writes
-            .iter()
-            .any(|(offset, _)| *offset == 0x10000)
-    );
-    controller.shutdown().unwrap();
-}
-
-#[test]
 fn successful_but_late_power_and_reset_accesses_do_not_advance_initialization() {
     // Both a successful request effect and its successful ready read must
     // fit the phase budget. The clock advances inside that access.
@@ -172,22 +140,4 @@ fn successful_but_late_power_and_reset_accesses_do_not_advance_initialization() 
     assert_eq!(controller.initialize(), Err(Error::Timeout(Phase::PowerOn)));
     assert!(device.lock().unwrap().writes.is_empty());
     controller.shutdown().unwrap();
-}
-
-#[test]
-fn native_read_failure_has_priority_over_clock_expiry_after_that_access() {
-    let (mut controller, device, source) = ready(1, 4096);
-    {
-        let mut model = device.lock().unwrap();
-        model.fail_after_write = Some(0x2c08);
-        model.jump_read = Some((0x2c08, u32::MAX, 100_001));
-    }
-    assert_eq!(
-        controller.start(),
-        Err(Error::RegisterUnavailable(DMA_ENABLE))
-    );
-    assert_eq!(controller.state(), State::Faulted);
-    assert_eq!(source.drops.load(Ordering::Relaxed), 0);
-    controller.shutdown().unwrap();
-    assert_eq!(source.drops.load(Ordering::Relaxed), 1);
 }

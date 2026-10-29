@@ -11,7 +11,7 @@ fn check_ps_cache_lifecycle<P: Profile>(
     ),
     readback: u32,
 ) {
-    use crate::audio::acp_pdm::trace_assertions::assert_ring_invalidation;
+    use crate::audio::acp_pdm::test_support::assert_ring_invalidation;
     device.lock().unwrap().atu_readback = readback;
     controller.initialize().unwrap();
     assert!(

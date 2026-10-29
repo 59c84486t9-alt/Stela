@@ -3,39 +3,23 @@
 extern crate std;
 use super::super::{PcmFormat, acp_pdm::check_dma_range};
 use super::*;
+use crate::audio::acp_pdm::test_support::Source;
 use crate::bus::dma::{
-    mapping::DomainMapping,
-    memory::{PageBacking, PageGeometry, PinnedPages},
+    mapping::{Direction as DmaDirection, DmaError, DomainMapping},
+    memory::{CacheAttribute, CpuMapping},
     pages::DmaPages,
 };
-use crate::bus::dma::{
-    mapping::{Direction as DmaDirection, DmaError},
-    memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
-};
-use alloc::{boxed::Box, vec::Vec};
-use core::sync::atomic::Ordering;
+use alloc::vec::Vec;
 use core::{
-    cell::UnsafeCell,
     ops::Range,
-    ptr::NonNull,
-    sync::atomic::{AtomicU64, AtomicUsize},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use std::sync::Mutex;
 
 const IOVA: u64 = 0x1_8000_0000;
-#[repr(align(4096))]
-struct Ram([u8; 32768]);
-struct Backing {
-    ram: Box<UnsafeCell<Ram>>,
-    physical: Vec<u64>,
-    drops: Arc<AtomicUsize>,
-}
-
-struct Source {
-    drops: Arc<AtomicUsize>,
-    geometry: u8,
-}
-
+/// The revisions this profile admits; single-revision cases use the first.
+const REVISIONS: &[u8] = &[1];
+const REVISION: u8 = REVISIONS[0];
 struct Translation {
     token: DomainMapping,
     cpu: CpuMapping,
@@ -151,14 +135,7 @@ fn fixture(revision: u8) -> (Controller<Model, Time>, Arc<Mutex<Device>>, Source
         )
     }
     .unwrap();
-    (
-        controller,
-        device,
-        Source {
-            drops: Arc::new(AtomicUsize::new(0)),
-            geometry: 12,
-        },
-    )
+    (controller, device, Source::new())
 }
 fn ready(revision: u8, period: usize) -> (Controller<Model, Time>, Arc<Mutex<Device>>, Source) {
     let (mut controller, device, source) = fixture(revision);
@@ -245,14 +222,27 @@ fn assert_claim_refuses(cfg: Config<'_>) {
 }
 
 mod admission;
-mod cache_retirement;
-mod capture;
+#[expect(
+    clippy::duplicate_mod,
+    reason = "every family runs these against its own model"
+)]
+#[path = "../acp_pdm/family_tests/clocked.rs"]
+mod clocked;
+#[expect(
+    clippy::duplicate_mod,
+    reason = "every family runs these against its own model"
+)]
+#[path = "../acp_pdm/family_tests/common.rs"]
+mod common;
 mod device;
 mod domain;
 mod interrupts;
-mod memory;
-mod payload;
+#[expect(
+    clippy::duplicate_mod,
+    reason = "every family runs these against its own model"
+)]
+#[path = "../acp_pdm/family_tests/period_delivery.rs"]
+mod period_delivery;
 mod power;
 mod recovery;
-mod streaming;
 mod suspend_resume;

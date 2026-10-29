@@ -19,6 +19,8 @@ pub(super) mod access;
 use access::Deadline;
 pub(super) mod pci;
 pub(super) mod registers;
+#[cfg(test)]
+pub(super) mod test_support;
 pub use registers::Registers;
 use registers::*;
 
@@ -1031,76 +1033,4 @@ pub(super) fn check_dma_range(
         return Err(Error::DmaAddress);
     }
     Ok(())
-}
-
-/// Assertions over independent model write traces, not a translation-cache
-/// implementation or a cache-completion/ACK model. Source addresses and order
-/// below come from the pinned YC/Renoir/PS DMA configuration and ring helpers.
-#[cfg(test)]
-pub(super) mod trace_assertions {
-    use alloc::vec::Vec;
-
-    pub(in crate::audio) fn assert_ring_invalidation(
-        writes: &[(usize, u32)],
-        iova: u64,
-        sram: u32,
-        period_bytes: usize,
-        started: bool,
-    ) {
-        let ring_bytes = period_bytes * 4;
-        let pages = ring_bytes.div_ceil(4096);
-        let mut expected = vec![(0xc04, sram | 0x8000_0000), (0xc00, 2)];
-        for page in 0..pages {
-            let address = iova + (page * 4096) as u64;
-            expected.push((0x10000 + page * 8, address as u32));
-            expected.push((0x10004 + page * 8, (address >> 32) as u32 | 0x8000_0000));
-        }
-        for page in pages..8 {
-            expected.push((0x10004 + page * 8, 0));
-        }
-        expected.extend([
-            (0x2c0c, 0x0400_0000),
-            (0x2c10, ring_bytes as u32),
-            (0x2c20, period_bytes as u32),
-            (0xc40, 1),
-        ]);
-        let observed: Vec<_> = writes
-            .iter()
-            .copied()
-            .filter(|(offset, value)| {
-                (*offset == 0xc04 && *value != 0)
-                    || matches!(*offset, 0xc00 | 0xc40 | 0x2c0c | 0x2c10 | 0x2c20)
-                    || (0x10000..0x10040).contains(offset)
-            })
-            .collect();
-        assert_eq!(
-            observed, expected,
-            "exact PTE/ring sequence must end with one required invalidate1 request"
-        );
-        let invalidations: Vec<_> = writes
-            .iter()
-            .enumerate()
-            .filter(|(_, (offset, _))| *offset == 0xc40)
-            .collect();
-        assert_eq!(
-            invalidations.len(),
-            1,
-            "required request cannot be absent or duplicated"
-        );
-        let invalidate = invalidations[0].0;
-        for request in [(0x2c04, 1), (0x2c08, 1)] {
-            let starts: Vec<_> = writes
-                .iter()
-                .enumerate()
-                .filter(|(_, actual)| **actual == request)
-                .collect();
-            assert_eq!(starts.len(), usize::from(started));
-            if started {
-                assert!(
-                    invalidate < starts[0].0,
-                    "PDM/DMA cannot start before required cache request"
-                );
-            }
-        }
-    }
 }
