@@ -32,7 +32,6 @@ use crate::gpu::metal::{
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, FrontFace, IndexType,
         PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, SampleCounts,
-        ShaderStages,
         command::{
             Attachment, Barrier, Command, DepthStencil, Rect, Rendering, VertexBuffer,
             Viewport as VkViewport,
@@ -1097,12 +1096,11 @@ impl CommandBuffer {
             .pipeline
             .as_ref()
             .ok_or(Error::Invalid("no render pipeline state is set"))?;
+        // Variants add the object and mesh stages, so the plan lacks them.
         let has_object = pipeline
-            .plan
-            .info
-            .stages
+            .interfaces
             .iter()
-            .any(|(stage, _)| *stage == ShaderStages::TASK);
+            .any(|interface| interface.stage == Stage::Object);
         let group = if has_object {
             object_threads
         } else {

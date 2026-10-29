@@ -24,8 +24,9 @@ use crate::gpu::metal::{
     pass::{AttachedTexture, AttachmentDescriptor, RenderPassDescriptor, Target, render_pass},
     pipeline::{
         ColorAttachmentDescriptor, ComputePipelineDescriptor, MAX_COLOR_ATTACHMENTS,
-        RenderPipelineDescriptor, RenderTargets, TessellatedVertex, TessellationDescriptor,
-        compute_pipeline, render_pipeline, tessellation,
+        MeshRenderPipelineDescriptor, RenderPipelineDescriptor, RenderTargets, TessellatedVertex,
+        TessellationDescriptor, compute_pipeline, mesh_render_pipeline, render_pipeline,
+        tessellation,
     },
     pixel_format::PixelFormat,
     resource::TextureDescriptor,
@@ -385,6 +386,57 @@ fn patch_draws_upload_their_tessellation_arguments() {
         factor_scale: 2.0,
     };
     assert_eq!(arguments, expected.encode());
+}
+
+/// The grid of `drawMeshThreads` is covered by threadgroups of the stage it
+/// launches: the object function when there is one.
+#[test]
+fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut targets = RenderTargets::default();
+    targets.color_attachments[0].pixel_format = Some(PixelFormat::Rgba8Unorm);
+    for (object, groups) in [(true, [4, 1, 1]), (false, [13, 1, 1])] {
+        let object_function = interface(Stage::Object);
+        let mesh_function = interface(Stage::Mesh);
+        let descriptor = MeshRenderPipelineDescriptor {
+            object_function: object.then_some(&object_function),
+            mesh_function: &mesh_function,
+            fragment_function: None,
+            targets,
+            max_vertex_amplification_count: 1,
+        };
+        let state = RenderPipelineState {
+            id: 2,
+            pipeline: None,
+            plan: mesh_render_pipeline(&capabilities(), &descriptor).unwrap(),
+            interfaces: object
+                .then(|| object_function.clone())
+                .into_iter()
+                .chain([mesh_function.clone()])
+                .collect(),
+        };
+        let mut resolver = MockResolver::default();
+        let mut commands = CommandBuffer::new(FEATURES);
+        commands
+            .begin_render(
+                &mut resolver,
+                pass(&color, StoreAction::Store, false),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        commands.set_render_pipeline_state(&state).unwrap();
+        commands
+            .draw_mesh_threads(&mut resolver, [100, 1, 1], [32, 1, 1], [8, 1, 1])
+            .unwrap();
+        commands.end_encoding(&mut resolver).unwrap();
+        let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+        assert!(
+            recording.segments[0]
+                .commands
+                .contains(&Command::DrawMeshTasks(groups))
+        );
+    }
 }
 
 fn buffer(id: u64, length: u64) -> BufferRef {
