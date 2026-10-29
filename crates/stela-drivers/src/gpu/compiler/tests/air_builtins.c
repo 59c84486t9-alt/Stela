@@ -81,21 +81,22 @@ static const char *vertex_metadata =
 
 static const char *fragment_body =
    "define <4 x float> @fragment(i1 %front, i32 %sample, i32 %mask, i32 %primitive, i32 %layer,"
-   " i32 %viewport, i32 %lane) {\n"
+   " i32 %viewport, i32 %lane, <2 x float> %point) {\n"
    "ret <4 x float> zeroinitializer\n}\n";
 
 static const char *fragment_metadata =
    "!air.fragment = !{!2}\n"
    "!2 = !{ptr @fragment, !3, !4}\n"
    "!3 = !{!5}\n!5 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\"}\n"
-   "!4 = !{!40, !41, !42, !43, !44, !45, !46}\n"
+   "!4 = !{!40, !41, !42, !43, !44, !45, !46, !47}\n"
    BUILTIN(40, 0, "front_facing", "bool")
    BUILTIN(41, 1, "sample_id", "uint")
    BUILTIN(42, 2, "sample_mask_in", "uint")
    BUILTIN(43, 3, "primitive_id", "uint")
    BUILTIN(44, 4, "render_target_array_index", "uint")
    BUILTIN(45, 5, "viewport_array_index", "uint")
-   BUILTIN(46, 6, "thread_index_in_simdgroup", "uint");
+   BUILTIN(46, 6, "thread_index_in_simdgroup", "uint")
+   BUILTIN(47, 7, "point_coord", "float2");
 
 static struct stela_metal_stage primary = {.table = STELA_METAL_TABLE_PRIMARY};
 static struct stela_metal_stage fragment = {.table = STELA_METAL_TABLE_FRAGMENT};
@@ -262,6 +263,7 @@ fragment_builtins_read_the_rasterizer(void)
    assert(census.intrinsics[nir_intrinsic_load_sample_id] == 1);
    assert(census.intrinsics[nir_intrinsic_load_sample_mask_in] == 1);
    assert(census.intrinsics[nir_intrinsic_load_subgroup_invocation] == 1);
+   assert(census.intrinsics[nir_intrinsic_load_point_coord] == 1);
    assert(reads_input(shader, VARYING_SLOT_PRIMITIVE_ID));
    assert(reads_input(shader, VARYING_SLOT_LAYER));
    assert(reads_input(shader, VARYING_SLOT_VIEWPORT));

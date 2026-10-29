@@ -868,6 +868,7 @@ builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned
       {"air.primitive_id", STELA_AIR_PRIMITIVE_ID, FRAGMENT, 1},
       {"air.render_target_array_index", STELA_AIR_RENDER_TARGET_ARRAY_INDEX_IN, FRAGMENT, 1},
       {"air.viewport_array_index", STELA_AIR_VIEWPORT_ARRAY_INDEX_IN, FRAGMENT, 1},
+      {"air.point_coord", STELA_AIR_POINT_COORD, FRAGMENT, 2},
    };
    unsigned stage = render && render->entry.stage == STELA_AIR_VERTEX ?
                        (render->entry.patch ? PATCH : VERTEX) :
@@ -1662,8 +1663,10 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             type = LLVMGetElementType(type);
          }
          unsigned width = LLVMGetTypeKind(type) == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(type) : 0;
-         if (components > lanes ||
-             (builtin == STELA_AIR_FRONT_FACING ? width != 1 : width != 16 && width != 32))
+         bool typed = builtin == STELA_AIR_FRONT_FACING ? width == 1 :
+                      builtin == STELA_AIR_POINT_COORD ? LLVMGetTypeKind(type) == LLVMFloatTypeKind :
+                      width == 16 || width == 32;
+         if (components > lanes || !typed)
             return fail(t, STELA_AIR_ARGUMENT, "unsupported builtin type at %u", index);
       }
       if (io) {

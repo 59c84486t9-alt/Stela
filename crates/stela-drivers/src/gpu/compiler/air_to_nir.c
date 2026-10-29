@@ -672,6 +672,9 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
       return flat_input(t, VARYING_SLOT_LAYER, "air.render_target_array_index");
    case STELA_AIR_VIEWPORT_ARRAY_INDEX_IN:
       return flat_input(t, VARYING_SLOT_VIEWPORT, "air.viewport_array_index");
+   case STELA_AIR_POINT_COORD:
+      /* Both Metal's and Vulkan's have an upper-left origin. */
+      return nir_load_point_coord(b);
    case STELA_AIR_BUILTIN_NONE:
    case STELA_AIR_BUILTIN_COUNT:
       break;
@@ -694,7 +697,8 @@ builtin_argument(struct translator *t, enum stela_air_builtin builtin, LLVMValue
       type = LLVMGetElementType(type);
    }
    value = nir_trim_vector(&t->b, value, components);
-   return LLVMGetIntTypeWidth(type) == 16 ? nir_u2u16(&t->b, value) : value;
+   return LLVMGetTypeKind(type) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(type) == 16 ?
+      nir_u2u16(&t->b, value) : value;
 }
 
 /* A stage-in attribute at location in its type, as fetch_attribute reads
