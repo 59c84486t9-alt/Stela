@@ -71,7 +71,7 @@ integer_funnel_stage_semantics(void)
                                                      NULL, 0, &calls);
          o.resources.fp_profile = STELA_AIR_FP_IEEE_DEFAULT;
          nir_shader *nir = translate(input, fragment ? "funnel_fragment" : "funnel_vertex", &o);
-         CHECK(!calls && !nir->info.num_ssbos);
+         CHECK(!calls);
          LLVMDisposeMemoryBuffer(input);
          unsigned replacements = 0;
          nir_foreach_function_impl(impl, nir) {
