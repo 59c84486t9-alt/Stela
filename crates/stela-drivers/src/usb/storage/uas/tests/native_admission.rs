@@ -22,11 +22,12 @@ fn native_uas_admission_rejects_foreign_generation_before_configuration_or_dma()
         let first_accesses = first_hardware.borrow().accesses;
         let second_accesses = second_hardware.borrow().accesses;
         let remaining = first_dma.remaining();
-        // Deliberately mismatch the actual enumerated identity and host.
-        // Generation validation must refuse before the unsafe ownership
-        // promise could publish class effects on this unrelated attachment.
+        // Deliberately mismatch two independently valid enumerated owners.
+        // The checked setup boundary rejects this before class configuration
+        // or DMA; the unsafe Host::new grant requires a matched attachment.
         assert!(
-            unsafe { Host::new(first.clone(), &second_device, binding, &mut first_dma) }.is_err()
+            Host::configure_native(first.clone(), &second_device, &binding, &mut first_dma)
+                .is_err()
         );
         assert_eq!(first_hardware.borrow().accesses, first_accesses);
         assert_eq!(second_hardware.borrow().accesses, second_accesses);
