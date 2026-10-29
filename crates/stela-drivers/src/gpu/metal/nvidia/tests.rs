@@ -267,7 +267,7 @@ fn missing_families_name_the_layer_that_lacks_them() {
 }
 
 #[test]
-fn todays_compiler_advertises_no_family() {
+fn compute_only_compilers_advertise_no_family() {
     let chip = Chip::find(0x1b3).unwrap();
     let capabilities = Capabilities::derive(
         &nvk(chip, 16 << 30),
