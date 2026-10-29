@@ -373,6 +373,16 @@ if stela_air_llvm != ''
   )
   test('stela_metal_compiler', stela_metal_compiler_test, suite : 'stela')
   if with_nvidia
+    # The shader coverage sweep over AIR modules compiled from MSL; a tool,
+    # since its inputs are Apple compiler output.
+    stela_metal_corpus = executable(
+      'stela_metal_corpus',
+      'tests/metal_corpus.c',
+      include_directories : [inc_include, inc_src, inc_gpu],
+      dependencies : stela_air_test_dependencies,
+      link_with : [stela_metal_compiler, stela_metal_abi, stela_air_test_links],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
     stela_nvidia_air_render_test = executable(
       'stela_nvidia_air_render_test',
       '../nvidia/tests/air_render.c',
