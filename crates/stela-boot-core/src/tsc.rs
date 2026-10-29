@@ -6,11 +6,13 @@
 //! must observe the real retained owner/controls, reliability and progress.
 mod calibration;
 mod features;
+mod sequence;
 pub use calibration::{RateWindow, RationalRate, ReferenceScale, Sample, wrapped_delta};
 pub use features::{
     CounterPolicy, Deadline, HpetPowerConstraint, RateRequirement, Reliability, Serialization,
     counter_policy, hpet_power_constraint,
 };
+pub use sequence::CounterSequence;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     MalformedCapture,
@@ -30,6 +32,7 @@ pub enum Error {
     Disturbed,
     Overflow,
     InconsistentRate,
+    AdjustmentChanged,
 }
 #[cfg(test)]
 mod tests;

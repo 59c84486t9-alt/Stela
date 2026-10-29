@@ -145,6 +145,14 @@ impl RateWindow {
         }
         Ok(result)
     }
+    /// Compare the exact rational, without rounding a marginal rate into the
+    /// accepted interval. Products of two u64 values fit in u128.
+    pub fn contains_rate(self, rate: RationalRate) -> bool {
+        let numerator = u128::from(rate.numerator());
+        let denominator = u128::from(rate.denominator());
+        u128::from(self.minimum_hz) * denominator <= numerator
+            && numerator <= u128::from(self.maximum_hz) * denominator
+    }
     pub fn contains(self, hz: u64) -> bool {
         self.minimum_hz <= hz && hz <= self.maximum_hz
     }
