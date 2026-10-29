@@ -239,6 +239,9 @@ pub struct Interface {
     pub max_total_threads: Option<u32>,
     /// The function reads `[[amplification_id]]`.
     pub amplification: bool,
+    /// The function's module may set or copy an indirect command's
+    /// barrier.
+    pub command_barriers: bool,
     pub constants: Vec<FunctionConstant>,
     pub features: ShaderFeatures,
 }
@@ -353,7 +356,11 @@ pub enum Reflection {
     /// A `[[visible]]` function, with its module's function constants:
     /// pipelines link it into their stages, which call it directly or
     /// through visible function tables.
-    Visible(Vec<FunctionConstant>),
+    Visible {
+        constants: Vec<FunctionConstant>,
+        /// As [`Interface::command_barriers`].
+        command_barriers: bool,
+    },
 }
 
 impl Reflection {
@@ -362,21 +369,32 @@ impl Reflection {
             Self::Stage(interface) => {
                 FunctionType::from_raw(interface.stage.raw()).expect("stages are function types")
             }
-            Self::Visible(_) => FunctionType::Visible,
+            Self::Visible { .. } => FunctionType::Visible,
         }
     }
 
     pub fn constants(&self) -> &[FunctionConstant] {
         match self {
             Self::Stage(interface) => &interface.constants,
-            Self::Visible(constants) => constants,
+            Self::Visible { constants, .. } => constants,
+        }
+    }
+
+    /// Whether the function's module may set or copy an indirect command's
+    /// barrier.
+    pub fn command_barriers(&self) -> bool {
+        match self {
+            Self::Stage(interface) => interface.command_barriers,
+            Self::Visible {
+                command_barriers, ..
+            } => *command_barriers,
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::Stage(interface) => interface.validate(),
-            Self::Visible(constants) => validate_constants(constants),
+            Self::Visible { constants, .. } => validate_constants(constants),
         }
     }
 }
@@ -554,6 +572,7 @@ pub(crate) mod tests {
             static_threadgroup_bytes: 0,
             max_total_threads: None,
             amplification: false,
+            command_barriers: false,
             constants: Vec::new(),
             features: ShaderFeatures::EMPTY,
         }

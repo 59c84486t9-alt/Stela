@@ -152,6 +152,8 @@ pub struct Reflection {
     pub(super) barycentrics: u32,
     pub(super) interpolants: u32,
     pub(super) function_tables: u32,
+    pub(super) commands: u32,
+    pub(super) command_barriers: u32,
     pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
     pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
     pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],

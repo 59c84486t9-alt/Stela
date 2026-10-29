@@ -126,6 +126,9 @@
 #define STELA_METAL_RECORD_DRAW_INDEXED 2u
 #define STELA_METAL_RECORD_DISPATCH 1u
 #define STELA_METAL_RECORD_DISPATCH_THREADS 2u
+/* A buffer a shader binds in a record comes without a length; the record
+ * bounds it at the most a 32-bit length states. */
+#define STELA_METAL_RECORD_UNBOUNDED 0xffffffffu
 
 /* TessellationArguments, which a patch draw's stages read at the push
  * constants' arguments address. Bindings are (address, length); the draw's
@@ -212,6 +215,14 @@ nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
                                              void *stage);
 nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool integer,
                                              void *stage);
+
+/* stela_air_command_count and stela_air_encode_command over the records of
+ * a GPU-resident indirect command buffer, whose gpuResourceID is their
+ * address. Commands past the buffer and slots past their tables write
+ * nothing, and copies need records of one stride. */
+nir_def *stela_metal_command_count(nir_builder *b, nir_def *buffer, void *stage);
+bool stela_metal_encode_command(nir_builder *b, const struct stela_air_command *command,
+                                struct stela_air_command_encoding *encoding, void *stage);
 
 /* The device's internal kernels, entry point "main", in workgroups of
  * STELA_METAL_KERNEL_WORKGROUP threads. Options may be NULL: the Vulkan

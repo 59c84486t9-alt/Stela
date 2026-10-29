@@ -227,6 +227,25 @@ static const char *linked =
    "define i64 @wide(i64 %x) {\nret i64 %x\n}\n"
    "!air.visible = !{}\n";
 
+/* A kernel that makes one call on command 0 of an argument buffer's
+ * indirect command buffer. */
+#define COMMANDS(command) \
+   "declare void @air." command "_render_command(ptr addrspace(1), i32)\n" \
+   "define void @commands(ptr addrspace(1) %icb) {\n" \
+   "%cb = load ptr addrspace(1), ptr addrspace(1) %icb, align 8\n" \
+   "call void @air." command "_render_command(ptr addrspace(1) %cb, i32 0)\n" \
+   "ret void\n}\n" \
+   "!air.kernel = !{!0}\n!0 = !{ptr @commands, !1, !2}\n!1 = !{}\n!2 = !{!3}\n" \
+   "!3 = !{i32 0, !\"air.indirect_buffer\", !\"air.buffer_size\", i32 8, !\"air.location_index\"," \
+   " i32 0, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.struct_type_info\", !4," \
+   " !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\", i32 8, !\"air.arg_type_name\"," \
+   " !\"Commands\", !\"air.arg_name\", !\"icb\"}\n" \
+   "!4 = !{i32 0, i32 8, i32 0, !\"command_buffer\", !\"commands\", !\"air.indirect_argument\", !5}\n" \
+   "!5 = !{i32 0, !\"air.command_buffer\", !\"air.location_index\", i32 0, i32 1," \
+   " !\"air.arg_type_name\", !\"command_buffer\", !\"air.arg_name\", !\"commands\"}\n"
+static const char *resets = COMMANDS("reset");
+static const char *barriers = COMMANDS("set_barrier");
+
 #define VERTEX_RESULT "<{ <4 x float>, <2 x float> }>"
 
 static const char *vertex =
@@ -786,6 +805,27 @@ linked_functions_resolve_tables_and_externals(void)
    assert(!compile_linked(tables, "tables", twice, 2, functions, 3, &error));
 }
 
+/* Kernels that encode indirect commands reflect so, and whether they may
+ * set a command's barrier. */
+static void
+command_encoding_reflects_barriers(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(kernel, "kernel", &reflection, &error));
+   assert(!reflection.commands && !reflection.command_barriers);
+   assert(reflect(resets, "commands", &reflection, &error));
+   assert(reflection.commands && !reflection.command_barriers);
+   assert(reflect(barriers, "commands", &reflection, &error));
+   assert(reflection.commands && reflection.command_barriers);
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(barriers, "commands", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "commands: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+}
+
 int
 main(void)
 {
@@ -800,6 +840,7 @@ main(void)
    arrays_reflect_each_slot();
    defined_functions_inline_into_their_callers();
    linked_functions_resolve_tables_and_externals();
+   command_encoding_reflects_barriers();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

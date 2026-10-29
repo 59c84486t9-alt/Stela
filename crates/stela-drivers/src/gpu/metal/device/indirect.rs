@@ -91,9 +91,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let (layout, image) = object.contents.resident_image()?;
         let records = self.new_shared_buffer(&image)?;
         let object = self.indirect.get_mut(id.0)?;
-        Arc::make_mut(&mut object.contents).make_resident(layout);
+        let contents = Arc::make_mut(&mut object.contents);
+        contents.make_resident(layout);
+        if self.command_barriers {
+            contents.note_barriers();
+        }
         object.records = Some(records);
         Ok((layout, self.buffer(records)?))
+    }
+
+    /// Notes that shaders may set or copy indirect commands' barriers, which
+    /// executions of every GPU-resident buffer then order.
+    pub(super) fn note_command_barriers(&mut self) {
+        self.command_barriers = true;
+        for object in self.indirect.entries.iter_mut().flatten() {
+            if object.records.is_some() {
+                Arc::make_mut(&mut object.contents).note_barriers();
+            }
+        }
     }
 
     /// Writes the CPU's encoding of GPU-resident buffers to their records,

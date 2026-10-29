@@ -38,7 +38,7 @@ impl FunctionObject {
     fn interface(&self) -> Result<&Interface> {
         match &self.reflection {
             Reflection::Stage(interface) => Ok(interface.as_ref()),
-            Reflection::Visible(_) => Err(Error::Invalid("a visible function is not a stage")),
+            Reflection::Visible { .. } => Err(Error::Invalid("a visible function is not a stage")),
         }
     }
 }
@@ -212,6 +212,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     "a required function constant has no value",
                 )?,
             }
+        }
+        if reflection.command_barriers() {
+            self.note_command_barriers();
         }
         let function = FunctionObject {
             library,
@@ -778,7 +781,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for &id in functions() {
             let function = self.pipelines.functions.get(id.0)?;
             ensure(
-                matches!(function.reflection, Reflection::Visible(_)),
+                matches!(function.reflection, Reflection::Visible { .. }),
                 "linked functions are visible functions",
             )?;
             // The compiler links a module without its library's values.

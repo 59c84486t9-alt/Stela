@@ -636,12 +636,15 @@ fn visible_functions_reflect_their_constants_and_only_link() {
     let specialization = Specialization::default();
     assert_eq!(
         compiler.reflect(library, "kernel", &specialization),
-        Ok(Reflection::Visible(vec![FunctionConstant {
-            name: String::from("tint"),
-            data_type: DataType::Float,
-            index: 2,
-            required: false,
-        }]))
+        Ok(Reflection::Visible {
+            constants: vec![FunctionConstant {
+                name: String::from("tint"),
+                data_type: DataType::Float,
+                index: 2,
+                required: false,
+            }],
+            command_barriers: false,
+        })
     );
     assert_eq!(
         compiler.compile(library, "kernel", &specialization),

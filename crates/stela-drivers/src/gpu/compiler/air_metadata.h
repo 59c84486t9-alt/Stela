@@ -98,6 +98,12 @@ struct stela_air_inspection {
    bool denorms_disable, fast_math;
    const struct stela_air_function_constant *function_constants;
    unsigned function_constant_count;
+   unsigned commands; /* enum stela_air_command_use flags. */
+};
+/* What a module's functions do with indirect command buffers. */
+enum stela_air_command_use {
+   STELA_AIR_COMMANDS_ENCODE = 1, /* Encode commands or read a buffer's size. */
+   STELA_AIR_COMMANDS_BARRIERS = 2, /* Set or copy a command's barrier. */
 };
 enum stela_air_primitive {
    STELA_AIR_PRIMITIVE_UNKNOWN,
@@ -441,6 +447,11 @@ enum stela_air_field_kind {
    STELA_AIR_FIELD_ARGUMENTS, /* A nested argument buffer's address. */
    STELA_AIR_FIELD_TEXTURE, /* A texture's 64-bit MTLResourceID. */
    STELA_AIR_FIELD_SAMPLER, /* A sampler's 64-bit MTLResourceID. */
+   /* An indirect command buffer's or a pipeline state's 64-bit
+    * gpuResourceID, which only AIR's command functions use. */
+   STELA_AIR_FIELD_COMMANDS,
+   STELA_AIR_FIELD_RENDER_PIPELINE,
+   STELA_AIR_FIELD_COMPUTE_PIPELINE,
 };
 /* One argument of an argument buffer: count elements filling size bytes at
  * offset. Addresses and resource IDs are aligned 8-byte elements. The

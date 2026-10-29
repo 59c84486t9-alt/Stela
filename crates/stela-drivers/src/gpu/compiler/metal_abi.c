@@ -180,6 +180,170 @@ nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture 
                     nir_imm_int64(b, 0));
 }
 
+nir_def *stela_metal_command_count(nir_builder *b, nir_def *buffer, void *stage)
+{
+   (void)stage;
+   return load(b, buffer, STELA_METAL_INDIRECT_COUNT, 32);
+}
+
+/* Command index's record in the buffer at buffer: its address, the record
+ * stride, and whether the buffer holds it. The header never changes. */
+struct record {
+   nir_def *buffer, *address, *stride, *valid;
+};
+
+static struct record record_at(nir_builder *b, nir_def *buffer, nir_def *index)
+{
+   nir_def *stride = load(b, buffer, STELA_METAL_INDIRECT_STRIDE, 32);
+   nir_def *first = nir_iadd_imm(b, buffer, STELA_METAL_INDIRECT_HEADER_BYTES);
+   return (struct record){
+      .buffer = buffer,
+      .address = nir_iadd(b, first, nir_imul(b, nir_u2u64(b, index), nir_u2u64(b, stride))),
+      .stride = stride,
+      .valid = nir_ult(b, index, load(b, buffer, STELA_METAL_INDIRECT_COUNT, 32)),
+   };
+}
+
+/* The address of a record's part at a uint offset, if any, plus a constant
+ * one. */
+static nir_def *record_part(nir_builder *b, const struct record *record, nir_def *offset,
+                            unsigned constant)
+{
+   nir_def *address = nir_iadd_imm(b, record->address, constant);
+   return offset ? nir_iadd(b, address, nir_u2u64(b, offset)) : address;
+}
+
+static void put(struct stela_air_command_encoding *encoding, nir_def *address, nir_def *value,
+                nir_def *valid)
+{
+   assert(encoding->store_count < STELA_AIR_COMMAND_STORES);
+   encoding->stores[encoding->store_count++] =
+      (struct stela_air_command_store){address, value, valid};
+}
+
+/* A buffer slot of the record's table of the stage, and a vertex buffer's
+ * stride word, zero for the pipeline's. */
+static void bind_buffer(nir_builder *b, const struct record *record,
+                        const struct stela_air_command *command,
+                        struct stela_air_command_encoding *encoding)
+{
+   unsigned table = command->binding.stage == STELA_AIR_FRAGMENT;
+   nir_def *start = load(b, record->buffer, STELA_METAL_INDIRECT_TABLES + 4u * table, 32);
+   nir_def *slots = load(b, record->buffer, STELA_METAL_INDIRECT_TABLE_SLOTS + 4u * table, 32);
+   nir_def *slot = command->binding.slot;
+   nir_def *valid = nir_iand(b, record->valid, nir_ult(b, slot, slots));
+   nir_def *address = nir_iadd(b, start, nir_imul_imm(b, slot, 8));
+   nir_def *length = nir_iadd(b, address, nir_imul_imm(b, slots, 8));
+   put(encoding, record_part(b, record, address, 0), command->binding.address, valid);
+   put(encoding, record_part(b, record, length, 0),
+       nir_imm_int64(b, STELA_METAL_RECORD_UNBOUNDED), valid);
+   if (command->binding.stage != STELA_AIR_VERTEX)
+      return;
+   nir_def *words = load(b, record->buffer, STELA_METAL_INDIRECT_WORDS, 32);
+   nir_def *word_count = load(b, record->buffer, STELA_METAL_INDIRECT_WORD_COUNT, 32);
+   nir_def *stride = command->binding.stride;
+   put(encoding, record_part(b, record, nir_iadd(b, words, nir_imul_imm(b, slot, 4)), 0),
+       nir_bcsel(b, nir_ieq_imm(b, stride, -1), nir_imm_int(b, 0), nir_u2u32(b, stride)),
+       nir_iand(b, record->valid, nir_ult(b, slot, word_count)));
+}
+
+/* A draw's action and arguments, and an indexed draw's indices: their
+ * address, the bytes the draw reads and their MTLIndexType. */
+static void draw(nir_builder *b, const struct record *record,
+                 const struct stela_air_command *command,
+                 struct stela_air_command_encoding *encoding)
+{
+   bool indexed = command->op == STELA_AIR_COMMAND_DRAW_INDEXED;
+   nir_def *valid = record->valid, *zero = nir_imm_int(b, 0);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_ACTION),
+       nir_imm_int(b, indexed ? STELA_METAL_RECORD_DRAW_INDEXED : STELA_METAL_RECORD_DRAW), valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_VERTICES),
+       nir_vec4(b, command->draw.count, command->draw.instances,
+                indexed ? zero : command->draw.first_vertex,
+                indexed ? command->draw.base_vertex : zero),
+       valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_BASE_INSTANCE),
+       nir_vec2(b, command->draw.base_instance, command->draw.primitive), valid);
+   if (!indexed)
+      return;
+   nir_def *bytes = nir_imul_imm(b, nir_u2u64(b, command->draw.count), command->draw.index_bytes);
+   nir_def *length = nir_u2u32(b, nir_umin(b, bytes, nir_imm_int64(b, UINT32_MAX)));
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_INDEX_ADDRESS),
+       command->draw.indices, valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_INDEX_LENGTH),
+       nir_vec2(b, length, nir_imm_int(b, command->draw.index_bytes == 4)), valid);
+}
+
+bool stela_metal_encode_command(nir_builder *b, const struct stela_air_command *command,
+                                struct stela_air_command_encoding *encoding, void *stage)
+{
+   (void)stage;
+   struct record record = record_at(b, command->buffer, command->index);
+   nir_def *valid = record.valid;
+   switch (command->op) {
+   case STELA_AIR_COMMAND_RESET:
+      /* A zeroed record is a reset command. */
+      encoding->destination = record.address;
+      encoding->bytes = record.stride;
+      encoding->copy_valid = valid;
+      return true;
+   case STELA_AIR_COMMAND_COPY: {
+      struct record source = record_at(b, command->source.buffer, command->source.index);
+      encoding->destination = record.address;
+      encoding->source = source.address;
+      encoding->bytes = record.stride;
+      encoding->copy_valid = nir_iand(b, nir_iand(b, valid, source.valid),
+                                      nir_ieq(b, record.stride, source.stride));
+      return true;
+   }
+   case STELA_AIR_COMMAND_SET_BARRIER:
+   case STELA_AIR_COMMAND_CLEAR_BARRIER:
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_BARRIER),
+          nir_imm_int(b, command->op == STELA_AIR_COMMAND_SET_BARRIER), valid);
+      return true;
+   case STELA_AIR_COMMAND_PIPELINE:
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_PIPELINE), command->pipeline,
+          valid);
+      return true;
+   case STELA_AIR_COMMAND_BUFFER:
+      bind_buffer(b, &record, command, encoding);
+      return true;
+   case STELA_AIR_COMMAND_THREADGROUP_LENGTH: {
+      nir_def *words = load(b, record.buffer, STELA_METAL_INDIRECT_WORDS, 32);
+      nir_def *word_count = load(b, record.buffer, STELA_METAL_INDIRECT_WORD_COUNT, 32);
+      nir_def *slot = command->threadgroup.slot;
+      put(encoding, record_part(b, &record, nir_iadd(b, words, nir_imul_imm(b, slot, 4)), 0),
+          command->threadgroup.length, nir_iand(b, valid, nir_ult(b, slot, word_count)));
+      return true;
+   }
+   case STELA_AIR_COMMAND_STAGE_IN_REGION:
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_STAGE_IN_ORIGIN),
+          command->region.origin, valid);
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_STAGE_IN_SIZE),
+          command->region.size, valid);
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_STAGE_IN), nir_imm_int(b, 1),
+          valid);
+      return true;
+   case STELA_AIR_COMMAND_DRAW:
+   case STELA_AIR_COMMAND_DRAW_INDEXED:
+      draw(b, &record, command, encoding);
+      return true;
+   case STELA_AIR_COMMAND_DISPATCH_THREADGROUPS:
+   case STELA_AIR_COMMAND_DISPATCH_THREADS: {
+      bool threads = command->op == STELA_AIR_COMMAND_DISPATCH_THREADS;
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_ACTION),
+          nir_imm_int(b, threads ? STELA_METAL_RECORD_DISPATCH_THREADS : STELA_METAL_RECORD_DISPATCH),
+          valid);
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_GRID), command->dispatch.grid,
+          valid);
+      put(encoding, record_part(b, &record, NULL, STELA_METAL_RECORD_THREADS),
+          command->dispatch.threads, valid);
+      return true;
+   }
+   }
+   return false;
+}
+
 /* A compute kernel's builder with its arguments address and thread index,
  * inside `if (thread < count)` for the u32 count at count_offset. */
 static nir_builder kernel(const nir_shader_compiler_options *options, const char *name,

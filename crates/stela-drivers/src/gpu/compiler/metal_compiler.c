@@ -90,6 +90,8 @@ module_facts(struct reflecting *r, const struct stela_air_inspection *info)
 {
    struct stela_metal_reflection *out = r->out;
    r->denorms_disable = info->denorms_disable;
+   out->commands = !!(info->commands & STELA_AIR_COMMANDS_ENCODE);
+   out->command_barriers = !!(info->commands & STELA_AIR_COMMANDS_BARRIERS);
    for (unsigned i = 0; i < info->function_constant_count; i++) {
       const struct stela_air_function_constant *constant = &info->function_constants[i];
       struct stela_metal_function_constant *row = &out->function_constants[i];
@@ -464,6 +466,8 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .bind_sampler_id = stela_metal_bind_sampler_id,
       .resource_id = stela_metal_resource_id,
       .texture_levels = stela_metal_texture_levels,
+      .command_count = stela_metal_command_count,
+      .encode_command = stela_metal_encode_command,
       .load_device_value = stela_metal_load_device_value,
       .fetch_attribute = patch || stage_in ? fetch_attribute : NULL,
       .constants = specialization->constants,

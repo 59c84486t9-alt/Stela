@@ -172,7 +172,7 @@ if stela_air_llvm != ''
   stela_air = static_library(
     'stela_air_to_nir',
     ['air_to_nir.c', 'air_metadata.c', 'air_texture.c', 'air_call.c', 'air_math.c', 'air_simd.c',
-     'air_constants.c', 'air_calls.c'],
+     'air_constants.c', 'air_calls.c', 'air_commands.c'],
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
   )
@@ -342,6 +342,16 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_argument_buffer', stela_air_argument_buffer_test, suite : 'stela')
+  stela_air_commands_test = executable(
+    'stela_air_commands_test',
+    'tests/air_commands.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_commands', stela_air_commands_test, suite : 'stela')
   stela_air_mesh_test = executable(
     'stela_air_mesh_test',
     'tests/air_mesh.c',

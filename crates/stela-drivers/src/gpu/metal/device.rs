@@ -114,6 +114,9 @@ pub struct Device<B: Backend, C: Compiler> {
     pipelines: pipelines::Pipelines,
     execution_sets: execution_sets::ExecutionSets,
     indirect: Slab<indirect::IndirectObject>,
+    /// A function's module may set or copy indirect commands' barriers, so
+    /// any GPU-resident buffer's commands may have them.
+    command_barriers: bool,
     queue: queue::Queue,
 }
 
@@ -151,6 +154,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             pipelines: pipelines::Pipelines::default(),
             execution_sets: execution_sets::ExecutionSets::default(),
             indirect: Slab::default(),
+            command_barriers: false,
             queue: queue::Queue::default(),
         })
     }

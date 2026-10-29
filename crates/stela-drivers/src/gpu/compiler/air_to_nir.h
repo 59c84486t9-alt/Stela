@@ -76,6 +76,93 @@ typedef nir_def *(*stela_air_texture_levels)(nir_builder *b,
                                              const struct stela_air_texture *texture,
                                              nir_def *id, void *data);
 
+/* AIR's indirect command functions (air_commands.c), as Metal's
+ * render_command and compute_command methods. */
+enum stela_air_command_op {
+   STELA_AIR_COMMAND_RESET,
+   STELA_AIR_COMMAND_COPY,
+   STELA_AIR_COMMAND_SET_BARRIER,
+   STELA_AIR_COMMAND_CLEAR_BARRIER,
+   STELA_AIR_COMMAND_PIPELINE,
+   STELA_AIR_COMMAND_BUFFER,
+   STELA_AIR_COMMAND_THREADGROUP_LENGTH,
+   STELA_AIR_COMMAND_STAGE_IN_REGION,
+   STELA_AIR_COMMAND_DRAW,
+   STELA_AIR_COMMAND_DRAW_INDEXED,
+   STELA_AIR_COMMAND_DISPATCH_THREADGROUPS,
+   STELA_AIR_COMMAND_DISPATCH_THREADS,
+};
+/* One call on command `index` (a uint) of the indirect command buffer
+ * whose 64-bit gpuResourceID is `buffer`. Operands are uints unless noted. */
+struct stela_air_command {
+   enum stela_air_command_op op;
+   bool render; /* A render_command's, otherwise a compute_command's. */
+   nir_def *buffer, *index;
+   union {
+      /* COPY: the command it copies. */
+      struct {
+         nir_def *buffer, *index;
+      } source;
+      /* PIPELINE: the pipeline state's 64-bit gpuResourceID. */
+      nir_def *pipeline;
+      /* BUFFER: a 64-bit address bound at slot of a vertex or fragment
+       * function, or of a kernel when stage is zero, with a 64-bit vertex
+       * stride that is ~0 when the call names none. */
+      struct {
+         enum stela_air_stage stage;
+         nir_def *slot, *address, *stride;
+      } binding;
+      /* THREADGROUP_LENGTH. */
+      struct {
+         nir_def *slot, *length;
+      } threadgroup;
+      /* STAGE_IN_REGION: uvec3s. */
+      struct {
+         nir_def *origin, *size;
+      } region;
+      /* DRAW and DRAW_INDEXED: an MTLPrimitiveType, the vertex or index
+       * count and the instance count; a draw's first vertex, an indexed
+       * draw's indices' 64-bit address, their index_bytes and its signed
+       * base vertex; and the base instance. */
+      struct {
+         nir_def *primitive, *count, *instances, *first_vertex, *indices, *base_vertex,
+            *base_instance;
+         unsigned index_bytes;
+      } draw;
+      /* DISPATCH_*: the threadgroups or threads of the grid, and the
+       * threads per threadgroup, as uvec3s. */
+      struct {
+         nir_def *grid, *threads;
+      } dispatch;
+   };
+};
+/* command_buffer::size(): the command count, as a uint, of the indirect
+ * command buffer whose gpuResourceID is buffer. Emits straight-line NIR at
+ * the cursor; returning NULL refuses compilation. */
+typedef nir_def *(*stela_air_command_count)(nir_builder *b, nir_def *buffer, void *data);
+/* The writes that encode a command, which the translator makes: each store
+ * of value at its 64-bit address when its 1-bit valid holds, in order, and
+ * then, when bytes is set and copy_valid holds, a copy of bytes (a uint
+ * multiple of 16) to destination from source, or of zeros without a
+ * source. Addresses are aligned to their values' components, and copies
+ * to 16 bytes. */
+#define STELA_AIR_COMMAND_STORES 6u
+struct stela_air_command_store {
+   nir_def *address, *value, *valid;
+};
+struct stela_air_command_encoding {
+   unsigned store_count;
+   struct stela_air_command_store stores[STELA_AIR_COMMAND_STORES];
+   nir_def *destination, *source, *bytes, *copy_valid;
+};
+/* Encodes command as the writes in *encoding, building straight-line NIR at
+ * the cursor. An invalid buffer or pipeline state is undefined, as in
+ * Metal, but no write may leave the buffer for an index or slot past it.
+ * Returning false refuses compilation. */
+typedef bool (*stela_air_encode_command)(nir_builder *b, const struct stela_air_command *command,
+                                         struct stela_air_command_encoding *encoding,
+                                         void *data);
+
 struct stela_air_threadgroup_view {
    uint64_t size; /* Exact nonempty per-dispatch byte extent, not type_size. */
    unsigned alignment;
@@ -192,6 +279,10 @@ struct stela_air_options {
    /* Storage textures' level counts; NULL refuses get_num_mip_levels of
     * them. */
    stela_air_texture_levels texture_levels;
+   /* Indirect command buffers and pipeline states in argument buffers;
+    * NULL refuses AIR's command functions. */
+   stela_air_command_count command_count;
+   stela_air_encode_command encode_command;
    /* Device values; NULL refuses the builtins that read them. With it,
     * kernel threads outside a dispatchThreads grid return before the
     * function runs, as Metal's smaller edge threadgroups never run them. */

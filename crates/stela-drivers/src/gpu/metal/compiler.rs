@@ -550,7 +550,10 @@ impl Selected<'_> {
             entry: self.name.to_string(),
         };
         let reflection = if u64::from(reflection.stage) == FunctionType::Visible.raw() {
-            Reflection::Visible(constants(&reflection)?)
+            Reflection::Visible {
+                constants: constants(&reflection)?,
+                command_barriers: reflection.command_barriers != 0,
+            }
         } else {
             Reflection::Stage(Box::new(interface(&reflection)?))
         };
@@ -811,7 +814,8 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         ShaderFeatures::PULL_MODEL_INTERPOLATION,
         r.interpolants != 0,
     )
-    .with(ShaderFeatures::FUNCTION_POINTERS, r.function_tables != 0);
+    .with(ShaderFeatures::FUNCTION_POINTERS, r.function_tables != 0)
+    .with(ShaderFeatures::INDIRECT_COMMAND_ENCODING, r.commands != 0);
     let interface = Interface {
         stage,
         patch,
@@ -831,6 +835,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         static_threadgroup_bytes: r.threadgroup_bytes,
         max_total_threads: (r.max_total_threads != 0).then_some(r.max_total_threads),
         amplification: r.amplification != 0,
+        command_barriers: r.command_barriers != 0,
         constants,
         features,
     };

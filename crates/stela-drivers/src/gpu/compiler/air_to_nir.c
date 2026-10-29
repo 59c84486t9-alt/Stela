@@ -2,6 +2,7 @@
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
 #include "air_calls.h"
+#include "air_commands.h"
 #include "air_constants.h"
 #include "air_math.h"
 #include "air_simd.h"
@@ -59,6 +60,9 @@ struct value {
    const struct stela_air_sampler *sampler;
    nir_def *id;
    bool array;
+   /* The argument buffer field of an indirect command buffer or pipeline
+    * state whose gpuResourceID is id, which only command calls use. */
+   const struct stela_air_field *object;
    /* A two-member result: a texture call's {texel, residency} or cmpxchg's
     * {old value, exchanged}. A member is NULL when nothing reads it. */
    nir_def *members[2];
@@ -2468,6 +2472,131 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
    return put_pair(t, inst, result, residency);
 }
 
+static nir_def *
+command_resource(void *translator, LLVMValueRef value, enum stela_air_field_kind kind)
+{
+   struct translator *t = translator;
+   const struct value *v = find_value(t, value);
+   if (!v || !v->object || v->object->kind != kind) {
+      fail(t, STELA_AIR_ARGUMENT, "command call operand is not its argument buffer field");
+      return NULL;
+   }
+   return v->id;
+}
+
+/* A buffer a command binds: a device or constant buffer's address, or none. */
+static nir_def *
+command_address(void *translator, LLVMValueRef value)
+{
+   struct translator *t = translator;
+   if (LLVMIsAConstantPointerNull(value))
+      return nir_imm_int64(&t->b, 0);
+   const struct value *v = pointer_value(t, value);
+   if (!v || !v->pointer_root || v->storage || v->constant_data || v->ssbo || v->array ||
+       v->object || !v->def || v->def->bit_size != 64) {
+      fail(t, STELA_AIR_MEMORY, "indirect commands bind device or constant buffer addresses");
+      return NULL;
+   }
+   return v->def;
+}
+
+/* Copies bytes to encoding's destination, 16 at a time: a loop of the flat
+ * CFG. */
+static bool
+command_copy(struct translator *t, const struct stela_air_command_encoding *encoding)
+{
+   nir_builder *b = &t->b;
+   nir_block *entry = nir_cursor_current_block(b->cursor);
+   nir_block *header = new_block(t), *body = new_block(t), *exit = new_block(t);
+   nir_phi_instr *phi = nir_phi_instr_create(b->shader);
+   if (!header || !body || !exit || !phi)
+      return fail(t, STELA_AIR_ALLOCATION, "AIR command copy allocation failed");
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_goto(b, header);
+   /* The offset PHI heads the header once both its sources exist. */
+   nir_def_init(&phi->instr, &phi->def, 1, 32);
+   b->cursor = nir_after_block(header);
+   nir_goto_if(b, body, nir_ult(b, &phi->def, encoding->bytes), exit);
+   b->cursor = nir_after_block(body);
+   nir_def *offset = nir_u2u64(b, &phi->def);
+   nir_def *chunk = encoding->source ?
+      nir_load_global(b, 4, 32, nir_iadd(b, encoding->source, offset), .align_mul = 16) :
+      nir_imm_zero(b, 4, 32);
+   nir_store_global(b, chunk, nir_iadd(b, encoding->destination, offset), .align_mul = 16);
+   nir_def *next = nir_iadd_imm(b, &phi->def, 16);
+   nir_goto(b, header);
+   nir_phi_instr_add_src(phi, entry, zero);
+   nir_phi_instr_add_src(phi, body, next);
+   nir_instr_insert(nir_before_block(header), &phi->instr);
+   b->cursor = nir_after_block(exit);
+   return true;
+}
+
+/* An indirect command's encoding: its stores, under guards that consecutive
+ * stores with one condition share, then its copy under its own. */
+static bool
+command_writes(struct translator *t, const struct stela_air_command_encoding *encoding)
+{
+   if (encoding->store_count > STELA_AIR_COMMAND_STORES)
+      return fail(t, STELA_AIR_ARGUMENT, "command callback exceeded its stores");
+   for (unsigned i = 0; i < encoding->store_count;) {
+      nir_def *valid = encoding->stores[i].valid;
+      struct memory_guard guard;
+      if (!memory_guard_begin(t, valid, &guard))
+         return false;
+      for (; i < encoding->store_count && encoding->stores[i].valid == valid; i++) {
+         const struct stela_air_command_store *store = &encoding->stores[i];
+         nir_store_global(&t->b, store->value, store->address,
+                          .align_mul = store->value->bit_size / 8);
+      }
+      memory_guard_end(t, &guard, NULL);
+   }
+   if (!encoding->bytes)
+      return true;
+   struct memory_guard guard;
+   if (!memory_guard_begin(t, encoding->copy_valid, &guard) || !command_copy(t, encoding))
+      return false;
+   memory_guard_end(t, &guard, NULL);
+   return true;
+}
+
+/* A call of one of AIR's indirect command functions; false with no error
+ * when the call is something else. */
+static bool
+command_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const char *name,
+             size_t name_length, bool *lowered)
+{
+   const struct stela_air_command_context context = {
+      .call = {.b = &t->b, .error = t->error, .translator = t, .operand = texture_operand},
+      .resource_id = command_resource, .address = command_address,
+   };
+   struct stela_air_command command;
+   bool size;
+   switch (stela_air_command_call(&context, inst, callee, name, name_length, &command, &size)) {
+   case STELA_AIR_CALL_OTHER:
+      *lowered = false;
+      return true;
+   case STELA_AIR_CALL_FAILED:
+      return false;
+   case STELA_AIR_CALL_LOWERED:
+      break;
+   }
+   *lowered = true;
+   const struct stela_air_options *o = t->options;
+   if (!o->command_count || !o->encode_command)
+      return fail(t, STELA_AIR_INSTRUCTION, "indirect command functions are unbound");
+   if (size) {
+      nir_def *count = o->command_count(&t->b, command.buffer, o->binding_data);
+      if (!count || count->num_components != 1 || count->bit_size != 32)
+         return fail(t, STELA_AIR_ARGUMENT, "command count callback refused a buffer");
+      return put_value(t, inst, count, 0);
+   }
+   struct stela_air_command_encoding encoding = {0};
+   if (!o->encode_command(&t->b, &command, &encoding, o->binding_data))
+      return fail(t, STELA_AIR_ARGUMENT, "command callback refused an indirect command");
+   return command_writes(t, &encoding);
+}
+
 /* extractvalue of a two-member result. */
 static bool
 pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
@@ -2761,10 +2890,32 @@ array_load(struct translator *t, LLVMValueRef inst, const struct value *address)
    return put_id(t, inst, address->texture, address->sampler, id);
 }
 
+/* The address space of the pointer a load of field yields, zero for inline
+ * data. */
+static unsigned
+field_space(const struct stela_air_field *field)
+{
+   switch (field->kind) {
+   case STELA_AIR_FIELD_DATA:
+      return 0;
+   case STELA_AIR_FIELD_BUFFER:
+   case STELA_AIR_FIELD_ARGUMENTS:
+      return field->buffer.address_space;
+   case STELA_AIR_FIELD_SAMPLER:
+      return 2;
+   case STELA_AIR_FIELD_TEXTURE:
+   case STELA_AIR_FIELD_COMMANDS:
+   case STELA_AIR_FIELD_RENDER_PIPELINE:
+   case STELA_AIR_FIELD_COMPUTE_PIPELINE:
+      return 1;
+   }
+   return 0;
+}
+
 /* A load of an address or resource ID from an argument buffer, or of a
  * texture or sampler array's handle. An address roots the pointers derived
  * from it, with its field's access; an ID names its texture or sampler for
- * texture calls. */
+ * texture calls, or its command buffer or pipeline state for command calls. */
 static bool
 argument_load(struct translator *t, LLVMValueRef inst)
 {
@@ -2780,18 +2931,27 @@ argument_load(struct translator *t, LLVMValueRef inst)
       return false;
    LLVMTypeRef type = LLVMTypeOf(inst);
    unsigned space = LLVMGetPointerAddressSpace(type);
-   unsigned expected = field->kind == STELA_AIR_FIELD_TEXTURE ? 1 :
-                       field->kind == STELA_AIR_FIELD_SAMPLER ? 2 :
-                       field->kind == STELA_AIR_FIELD_DATA ? 0 : field->buffer.address_space;
+   unsigned expected = field_space(field);
    if (!expected || space != expected || LLVMPointerSizeForAS(t->layout, space) != 8)
       return fail(t, STELA_AIR_TYPE, "pointer load differs from its argument buffer field");
    nir_def *loaded = memory_access(t, address, NULL, NULL, 0, 1, 64, LLVMGetAlignment(inst));
    if (!loaded)
       return false;
-   if (field->kind == STELA_AIR_FIELD_TEXTURE)
+   switch (field->kind) {
+   case STELA_AIR_FIELD_TEXTURE:
       return put_id(t, inst, &field->texture, NULL, loaded);
-   if (field->kind == STELA_AIR_FIELD_SAMPLER)
+   case STELA_AIR_FIELD_SAMPLER:
       return put_id(t, inst, NULL, &field->sampler, loaded);
+   case STELA_AIR_FIELD_COMMANDS:
+   case STELA_AIR_FIELD_RENDER_PIPELINE:
+   case STELA_AIR_FIELD_COMPUTE_PIPELINE:
+      if (!put_id(t, inst, NULL, NULL, loaded))
+         return false;
+      find_value(t, inst)->object = field;
+      return true;
+   default:
+      break;
+   }
    if (!put_value(t, inst, loaded, field->buffer.access))
       return false;
    struct value *value = find_value(t, inst);
@@ -3115,6 +3275,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (lowered)
          return true;
       if (!air_atomic_call(t, inst, callee, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!command_call(t, inst, callee, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;

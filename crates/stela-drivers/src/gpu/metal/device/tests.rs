@@ -279,8 +279,9 @@ impl Backend for MockBackend {
 /// `"object"`, `"mesh"`, the post-tessellation `"patch"`, `"unlinked"`, a
 /// fragment function reading a varying nothing outputs, `"constants"`, a
 /// kernel with a required and an optional function constant, and the
-/// visible functions `"visible"` and `"tinted"`, whose module has a
-/// function constant.
+/// visible functions `"visible"`, `"barriers"`, whose module sets indirect
+/// commands' barriers, and `"tinted"`, whose module has a function
+/// constant.
 #[derive(Default)]
 struct MockCompiler {
     compiled: Vec<Specialization>,
@@ -345,13 +346,23 @@ impl Compiler for MockCompiler {
     }
     fn reflect(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Reflection> {
         match entry {
-            "visible" => Ok(Reflection::Visible(Vec::new())),
-            "tinted" => Ok(Reflection::Visible(alloc::vec![FunctionConstant {
-                name: String::from("tint"),
-                data_type: DataType::Float,
-                index: 0,
-                required: false,
-            }])),
+            "visible" => Ok(Reflection::Visible {
+                constants: Vec::new(),
+                command_barriers: false,
+            }),
+            "barriers" => Ok(Reflection::Visible {
+                constants: Vec::new(),
+                command_barriers: true,
+            }),
+            "tinted" => Ok(Reflection::Visible {
+                constants: alloc::vec![FunctionConstant {
+                    name: String::from("tint"),
+                    data_type: DataType::Float,
+                    index: 0,
+                    required: false,
+                }],
+                command_barriers: false,
+            }),
             _ => reflected(entry).map(|interface| Reflection::Stage(Box::new(interface))),
         }
     }
@@ -1848,10 +1859,9 @@ fn indirect_commands_execute_snapshots_of_their_buffer() {
     assert!(device.indirect_command_buffer(icb).is_err());
 }
 
-#[test]
-fn handing_out_an_indirect_address_keeps_commands_as_records() {
-    let mut device = device();
-    let descriptor = IndirectCommandBufferDescriptor {
+/// Draws under inherited state with one vertex buffer.
+fn draws() -> IndirectCommandBufferDescriptor {
+    IndirectCommandBufferDescriptor {
         command_types: IndirectCommandType::DRAW,
         inherit_pipeline_state: true,
         inherit_buffers: false,
@@ -1869,8 +1879,31 @@ fn handing_out_an_indirect_address_keeps_commands_as_records() {
         max_mesh_buffer_bind_count: 0,
         support_ray_tracing: false,
         support_dynamic_attribute_stride: false,
-    };
-    let icb = device.new_indirect_command_buffer(&descriptor, 2).unwrap();
+    }
+}
+
+#[test]
+fn functions_that_set_command_barriers_order_resident_buffers() {
+    let mut device = device();
+    let resident = device.new_indirect_command_buffer(&draws(), 1).unwrap();
+    device
+        .indirect_command_buffer_resource_id(resident)
+        .unwrap();
+    let later = device.new_indirect_command_buffer(&draws(), 1).unwrap();
+    let barriers =
+        |device: &Device<_, _>, id| device.indirect_command_buffer(id).unwrap().has_barriers();
+    device.new_function(1, "visible", Vec::new()).unwrap();
+    assert!(!barriers(&device, resident));
+    device.new_function(1, "barriers", Vec::new()).unwrap();
+    assert!(barriers(&device, resident));
+    device.indirect_command_buffer_resource_id(later).unwrap();
+    assert!(barriers(&device, later));
+}
+
+#[test]
+fn handing_out_an_indirect_address_keeps_commands_as_records() {
+    let mut device = device();
+    let icb = device.new_indirect_command_buffer(&draws(), 2).unwrap();
     device
         .indirect_command_buffer_mut(icb)
         .unwrap()

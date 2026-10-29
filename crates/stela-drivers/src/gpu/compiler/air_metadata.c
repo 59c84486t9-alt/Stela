@@ -1187,6 +1187,9 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
       {"air.indirect_buffer", STELA_AIR_FIELD_ARGUMENTS},
       {"air.texture", STELA_AIR_FIELD_TEXTURE},
       {"air.sampler", STELA_AIR_FIELD_SAMPLER},
+      {"air.command_buffer", STELA_AIR_FIELD_COMMANDS},
+      {"air.render_pipeline_state", STELA_AIR_FIELD_RENDER_PIPELINE},
+      {"air.compute_pipeline_state", STELA_AIR_FIELD_COMPUTE_PIPELINE},
    };
    LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
    unsigned count, position, k = 0;
@@ -1247,6 +1250,9 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
       return fail(m, STELA_AIR_METADATA, "argument buffer field lacks a location");
    switch (field->kind) {
    case STELA_AIR_FIELD_DATA:
+   case STELA_AIR_FIELD_COMMANDS:
+   case STELA_AIR_FIELD_RENDER_PIPELINE:
+   case STELA_AIR_FIELD_COMPUTE_PIPELINE:
       return true;
    case STELA_AIR_FIELD_TEXTURE:
       field->texture = (struct stela_air_texture){.argument = argument, .index = index,
@@ -2124,6 +2130,49 @@ inspection_diagnostic(LLVMDiagnosticInfoRef info, void *data)
    LLVMDisposeMessage(message);
 }
 
+/* Whether a name's first `stem` bytes are, or end with, text. */
+static bool
+stem_is(const char *name, size_t stem, const char *text)
+{
+   return stem == strlen(text) && !memcmp(name, text, stem);
+}
+static bool
+stem_ends(const char *name, size_t stem, const char *text)
+{
+   size_t bytes = strlen(text);
+   return stem > bytes && !memcmp(name + stem - bytes, text, bytes);
+}
+
+/* The module's enum stela_air_command_use, from the AIR command functions
+ * its code calls (air_commands.c). Copies carry a command's barrier. */
+static unsigned
+command_use(LLVMModuleRef module)
+{
+   static const char *const barriers[] = {
+      "air.set_barrier_render_command", "air.set_barrier_compute_command",
+      "air.copy_render_command", "air.copy_compute_command",
+   };
+   unsigned use = 0;
+   for (LLVMValueRef fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
+      size_t bytes;
+      const char *name = LLVMGetValueName2(fn, &bytes);
+      const char *dot = bytes > 4 ? memchr(name + 4, '.', bytes - 4) : NULL;
+      size_t stem = dot ? (size_t)(dot - name) : bytes;
+      if (!LLVMIsDeclaration(fn) || !LLVMGetFirstUse(fn) || stem < 4 || memcmp(name, "air.", 4))
+         continue;
+      bool command = stem_ends(name, stem, "_render_command") ||
+                     stem_ends(name, stem, "_compute_command") ||
+                     stem_is(name, stem, "air.get_size_command_buffer");
+      if (command)
+         use |= STELA_AIR_COMMANDS_ENCODE;
+      for (unsigned i = 0; command && i < ARRAY_SIZE(barriers); i++) {
+         if (stem_is(name, stem, barriers[i]))
+            use |= STELA_AIR_COMMANDS_BARRIERS;
+      }
+   }
+   return use;
+}
+
 static bool
 inspect(const void *bitcode, size_t size, unsigned max_entries,
          stela_air_visit_entry visit, void *data, struct stela_air_error *error,
@@ -2199,6 +2248,7 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       .denorms_disable = m.denorms_disable, .fast_math = m.fast_math,
       .function_constants = constants, .function_constant_count = constant_count,
       .ident = m.ident, .ident_bytes = m.ident_bytes,
+      .commands = command_use(m.module),
    };
    if (render_name) {
       struct stela_air_render render = {.entry = {.stage = stage}};
