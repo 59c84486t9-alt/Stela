@@ -39,7 +39,7 @@ fn run(command: &mut Command) {
 }
 
 #[test]
-#[ignore = "oracle: STELA_TEST_SM3_QEMU, STELA_TEST_LLVM_MC, STELA_TEST_LLD"]
+#[ignore = "oracle: STELA_TEST_LLD, STELA_TEST_LLVM_MC, STELA_TEST_SM3_QEMU"]
 fn baseline_sm3_matches_stock_aarch64_qemu() {
     let input = |key| PathBuf::from(std::env::var_os(key).expect(key));
     let qemu = input("STELA_TEST_SM3_QEMU");
