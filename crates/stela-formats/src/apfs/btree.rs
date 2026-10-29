@@ -265,6 +265,14 @@ pub struct Tree {
     pub base_oid: Option<u64>,
 }
 
+/// One node and its position while seeking through a B-tree.
+struct VisitNode {
+    block: Vec<u8>,
+    /// Only the first branch compares keys with the requested lower bound.
+    first: bool,
+    depth: usize,
+}
+
 impl Tree {
     /// Open the tree whose root node is at physical address `root`. A
     /// hashed tree needs its `seal`; `seal_root` asks for the root node to
@@ -389,21 +397,33 @@ impl Tree {
         callback: &mut Callback<'_>,
     ) -> Result<()> {
         let root = read_node(device, self.root, self.headerless)?;
-        self.visit_node(device, omap, root, true, 0, compare, callback)
-            .map(|_| ())
+        self.visit_node(
+            device,
+            omap,
+            VisitNode {
+                block: root,
+                first: true,
+                depth: 0,
+            },
+            compare,
+            callback,
+        )
+        .map(|_| ())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn visit_node<R: ReadAt>(
         &self,
         device: &mut Device<R>,
         omap: Option<&Omap>,
-        block: Vec<u8>,
-        first: bool,
-        depth: usize,
+        visit: VisitNode,
         compare: &Compare<'_>,
         callback: &mut Callback<'_>,
     ) -> Result<Visit> {
+        let VisitNode {
+            block,
+            first,
+            depth,
+        } = visit;
         if depth > MAX_DEPTH {
             return Err(ApfsError::Malformed("B-tree is deeper than 16 levels"));
         }
@@ -437,8 +457,17 @@ impl Tree {
             let (_, value) = node.entry(index, &self.info)?;
             let child = self.child(device, omap, value)?;
             let first = first && index == start;
-            if self.visit_node(device, omap, child, first, depth + 1, compare, callback)?
-                == Visit::Stop
+            if self.visit_node(
+                device,
+                omap,
+                VisitNode {
+                    block: child,
+                    first,
+                    depth: depth + 1,
+                },
+                compare,
+                callback,
+            )? == Visit::Stop
             {
                 return Ok(Visit::Stop);
             }
