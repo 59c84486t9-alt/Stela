@@ -182,33 +182,89 @@ pub trait ConfigSpace {
 }
 
 /// A function's 4 KiB of ECAM configuration space.
+/// A context-bound config transport. Owned and retained-owned arms delegate
+/// every effect to the original mapping owner; no copied pointer bypass exists.
 pub struct EcamConfig {
-    registers: Mmio,
+    transport: EcamTransport,
+    _context: core::marker::PhantomData<*mut ()>,
 }
-
+enum EcamTransport {
+    Raw(Mmio),
+    Owned(owned::OwnedConfig),
+    Retained(&'static mut owned::OwnedConfig),
+}
+impl EcamConfig {
+    pub fn from_owned(config: owned::OwnedConfig) -> Self {
+        Self {
+            transport: EcamTransport::Owned(config),
+            _context: core::marker::PhantomData,
+        }
+    }
+    /// Borrow exactly one actual whole-boot configuration owner. The exclusive
+    /// borrow cannot outlive or duplicate its original retained resource grant.
+    pub fn from_retained(config: &'static mut owned::OwnedConfig) -> Self {
+        Self {
+            transport: EcamTransport::Retained(config),
+            _context: core::marker::PhantomData,
+        }
+    }
+    pub fn into_owned(self) -> Result<owned::OwnedConfig, Self> {
+        match self.transport {
+            EcamTransport::Owned(config) => Ok(config),
+            _ => Err(self),
+        }
+    }
+    unsafe fn raw(base: u64) -> Self {
+        Self {
+            // SAFETY: caller owns this actual live mapped UC ECAM function
+            // and excludes every competing accessor for the transport life.
+            transport: EcamTransport::Raw(unsafe { Mmio::new(base) }),
+            _context: core::marker::PhantomData,
+        }
+    }
+}
 impl ConfigSpace for EcamConfig {
     fn read8(&self, offset: u16) -> u8 {
-        self.registers.read8(usize::from(offset))
+        match &self.transport {
+            EcamTransport::Raw(registers) => registers.read8(usize::from(offset)),
+            EcamTransport::Owned(config) => config.read8(offset),
+            EcamTransport::Retained(config) => config.read8(offset),
+        }
     }
-
-    fn read16(&self, offset: u16) -> u16 {
-        self.registers.read16(usize::from(offset))
-    }
-
-    fn read32(&self, offset: u16) -> u32 {
-        self.registers.read32(usize::from(offset))
-    }
-
-    fn write32(&mut self, offset: u16, value: u32) {
-        self.registers.write32(usize::from(offset), value)
-    }
-
     fn write8(&mut self, offset: u16, value: u8) {
-        self.registers.write8(usize::from(offset), value)
+        match &mut self.transport {
+            EcamTransport::Raw(registers) => registers.write8(usize::from(offset), value),
+            EcamTransport::Owned(config) => config.write8(offset, value),
+            EcamTransport::Retained(config) => config.write8(offset, value),
+        }
     }
-
+    fn read16(&self, offset: u16) -> u16 {
+        match &self.transport {
+            EcamTransport::Raw(registers) => registers.read16(usize::from(offset)),
+            EcamTransport::Owned(config) => config.read16(offset),
+            EcamTransport::Retained(config) => config.read16(offset),
+        }
+    }
     fn write16(&mut self, offset: u16, value: u16) {
-        self.registers.write16(usize::from(offset), value)
+        match &mut self.transport {
+            EcamTransport::Raw(registers) => registers.write16(usize::from(offset), value),
+            EcamTransport::Owned(config) => config.write16(offset, value),
+            EcamTransport::Retained(config) => config.write16(offset, value),
+        }
+    }
+    fn read32(&self, offset: u16) -> u32 {
+        match &self.transport {
+            EcamTransport::Raw(registers) => registers.read32(usize::from(offset)),
+            EcamTransport::Owned(config) => config.read32(offset),
+            EcamTransport::Retained(config) => config.read32(offset),
+        }
+    }
+    fn write32(&mut self, offset: u16, value: u32) {
+        match &mut self.transport {
+            EcamTransport::Raw(registers) => registers.write32(usize::from(offset), value),
+            EcamTransport::Owned(config) => config.write32(offset, value),
+            EcamTransport::Retained(config) => config.write32(offset, value),
+        }
     }
 }
 
@@ -302,18 +358,104 @@ impl<C> Function<C> {
 
 impl<C: ConfigSpace> Function<C> {
     pub fn new(address: Address, config: C) -> Option<Self> {
+        Self::try_new(address, config).ok()
+    }
+
+    /// Return the actual config owner on absent/CRS responses. No device
+    /// quiescence or mapping-retirement permission follows from either value.
+    pub fn try_new(address: Address, config: C) -> Result<Self, C> {
         let id = config.read32(VENDOR);
         if matches!(id as u16, 0xffff | VENDOR_NOT_READY) {
-            return None;
+            return Err(config);
         }
         let class = config.read32(CLASS);
-        Some(Self {
+        Ok(Self {
             address,
             vendor: id as u16,
             device: (id >> 16) as u16,
             class: [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
             config,
         })
+    }
+
+    /// Scan actual config owners and release each read-only observation before
+    /// returning copied discovery DATA. The callbacks retain all mapping/root
+    /// authority; the result grants no current configuration or device access.
+    pub fn inventory_with<E>(
+        window: &EcamWindow,
+        mut open: impl FnMut(Address) -> Result<Option<Self>, E>,
+        mut release: impl FnMut(Self) -> Result<(), E>,
+    ) -> Result<Vec<Identity>, E> {
+        let mut scans = [None; 256];
+        scans[usize::from(window.start_bus)] = Some(BusScan::All);
+        let mut identities = Vec::new();
+        for bus in window.start_bus..=window.end_bus {
+            let Some(scan) = scans[usize::from(bus)] else {
+                continue;
+            };
+            let mut observe = |function: Self| -> Result<(bool, u8), E> {
+                let multi = function.config.read8(HEADER_TYPE) & 0x80 != 0;
+                let next = if scan == BusScan::Ari {
+                    function
+                        .extended_capability(EXTENDED_ARI)
+                        .map_or(0, |ari| (function.config.read32(ari + 4) >> 8) as u8)
+                } else {
+                    0
+                };
+                if let Some((secondary, scan)) = function.secondary()
+                    && secondary > bus
+                {
+                    scans[usize::from(secondary)] = Some(scan);
+                }
+                identities.push(function.identity());
+                release(function)?;
+                Ok((multi, next))
+            };
+            match scan {
+                BusScan::Ari => {
+                    let mut number = 0u8;
+                    loop {
+                        let address = Address {
+                            segment: window.segment,
+                            bus,
+                            device: number >> 3,
+                            function: number & 7,
+                        };
+                        let Some(function) = open(address)? else {
+                            break;
+                        };
+                        let (_, next) = observe(function)?;
+                        if next <= number {
+                            break;
+                        }
+                        number = next;
+                    }
+                }
+                scan => {
+                    for device in 0..if scan == BusScan::OneChild { 1 } else { 32 } {
+                        for number in 0..8 {
+                            let address = Address {
+                                segment: window.segment,
+                                bus,
+                                device,
+                                function: number,
+                            };
+                            let Some(function) = open(address)? else {
+                                if number == 0 {
+                                    break;
+                                }
+                                continue;
+                            };
+                            let (multi, _) = observe(function)?;
+                            if number == 0 && !multi {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(identities)
     }
 
     pub fn config(&mut self) -> &mut C {
@@ -694,11 +836,8 @@ impl Function {
             };
             let offset =
                 (u64::from(bus) << 20) | (u64::from(device) << 15) | (u64::from(function) << 12);
-            let config = EcamConfig {
-                // SAFETY: the window is mapped; this is one function's page,
-                // covered by this function's own safety contract.
-                registers: unsafe { Mmio::new(window.base + offset) },
-            };
+            // SAFETY: forwarded actual exclusive mapped-window contract.
+            let config = unsafe { EcamConfig::raw(window.base + offset) };
             (address, config)
         };
         let mut scans = [None; 256];
@@ -784,12 +923,131 @@ mod tests {
     use super::*;
 
     #[test]
+    fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() {
+        extern crate std;
+        use alloc::boxed::Box;
+        use core::sync::atomic::Ordering;
+        let address = Address {
+            segment: 0,
+            bus: 0,
+            device: 2,
+            function: 0,
+        };
+        let (owner, counters) = owned::tests::fixture(address);
+        // Deliberately retained whole-boot owner, exactly as the production
+        // LegacyControllerOwner will retain its original config and BAR leases.
+        let owner = Box::leak(Box::new(owner));
+        let mut config = EcamConfig::from_retained(owner);
+        config.write32(0x40, 0xa5c3_5a7e);
+        config.write8(0x41, 0x12);
+        assert_eq!(config.read32(0x40), 0xa5c3_127e);
+        config.write16(0x42, 0x4b36);
+        assert_eq!(config.read16(0x42), 0x4b36);
+        let config = match config.into_owned() {
+            Ok(_) => panic!("borrow is not recoverable ownership"),
+            Err(config) => config,
+        };
+        let before = counters.contexts.load(Ordering::Relaxed);
+        counters
+            .fail_context_at
+            .store(before + 1, Ordering::Relaxed);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.read8(0))).is_err()
+        );
+        counters.fail_context_at.store(0, Ordering::Relaxed);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.read32(4094))).is_err()
+        );
+        drop(config);
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn owned_inventory_releases_every_present_config_before_returning_data() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        struct Observed {
+            words: [u32; 64],
+            live: Rc<Cell<usize>>,
+        }
+        impl Drop for Observed {
+            fn drop(&mut self) {
+                self.live.set(self.live.get() - 1);
+            }
+        }
+        impl ConfigSpace for Observed {
+            fn read32(&self, offset: u16) -> u32 {
+                self.words[usize::from(offset) / 4]
+            }
+            fn write32(&mut self, _: u16, _: u32) {
+                panic!("discovery must not write configuration");
+            }
+        }
+        let live = Rc::new(Cell::new(0));
+        let released = Cell::new(0);
+        let window = EcamWindow {
+            base: 0xe000_0000,
+            segment: 0,
+            start_bus: 0,
+            end_bus: 0,
+        };
+        let found = Function::<Observed>::inventory_with(
+            &window,
+            |address| -> Result<_, ()> {
+                assert_eq!(
+                    live.get(),
+                    0,
+                    "last actual owner must retire before another opens"
+                );
+                if address.device != 2 || address.function != 0 {
+                    return Ok(None);
+                }
+                let mut words = [0; 64];
+                words[0] = 0x11e8_1234;
+                words[2] = 0xff00_0000;
+                live.set(live.get() + 1);
+                Ok(Function::new(
+                    address,
+                    Observed {
+                        words,
+                        live: live.clone(),
+                    },
+                ))
+            },
+            |function| {
+                assert_eq!(live.get(), 1);
+                released.set(released.get() + 1);
+                drop(function);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(live.get(), 0);
+        assert_eq!(released.get(), 1);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0],
+            Identity {
+                address: Address {
+                    segment: 0,
+                    bus: 0,
+                    device: 2,
+                    function: 0
+                },
+                vendor: 0x1234,
+                device: 0x11e8,
+                class: [0xff, 0, 0]
+            }
+        );
+    }
+
+    #[test]
     fn native_ecam_narrow_stores_preserve_adjacent_status_and_vendor_bytes() {
         let mut words = [0xa5c3_5a7eu32; 1024];
-        let mut config = EcamConfig {
-            // SAFETY: this test exclusively owns the aligned backing allocation.
-            registers: unsafe { Mmio::new(words.as_mut_ptr() as u64) },
-        };
+        // SAFETY: this test exclusively owns the aligned backing allocation.
+        let mut config = unsafe { EcamConfig::raw(words.as_mut_ptr() as u64) };
         config.write8(0x44, 0x78);
         assert_eq!(config.read32(0x44), 0xa5c3_5a78);
         config.write8(0x47, 0x12);

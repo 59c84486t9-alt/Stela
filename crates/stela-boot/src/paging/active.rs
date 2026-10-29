@@ -152,7 +152,7 @@ impl Context {
 /// One real builder after successful native activation. Its fields/constructor
 /// are private; root numbers or Handoff records cannot instantiate this owner.
 pub(crate) struct RetainedRoot {
-    tables: FrameCatalog,
+    pub(super) tables: FrameCatalog,
     context: Context,
     closed: AtomicBool,
 }
@@ -178,7 +178,7 @@ impl RetainedRoot {
 /// pins; carrying this value does not authorize arbitrary MMIO or configuration.
 #[must_use = "retain the actual activated table owner through every native consumer"]
 pub(crate) struct ActivatedTables {
-    root: Arc<RetainedRoot>,
+    pub(super) root: Arc<RetainedRoot>,
     _local: PhantomData<*mut ()>,
 }
 impl ActivatedTables {

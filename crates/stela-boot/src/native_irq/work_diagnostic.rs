@@ -15,7 +15,7 @@ use stela_drivers::{
     Clock,
     bus::{
         irq::{Disposition, Handler, IrqError, Platform, Route, RouteRequest, Source},
-        pci::Function,
+        pci::{Function as PciFunction, owned::OwnedConfig},
     },
     platform::work::{Cpu, Executor, Kind, Queue, WorkError},
 };
@@ -374,9 +374,8 @@ pub(crate) fn run(
         events: events.clone(),
         clock,
     });
-    let mut registration = super::service()
-        .map_err(|e| format!("IRQ service: {e:?}"))?
-        .request(source, handler.clone())
+    let mut registration = super::CONTROLLER
+        .request_owned(*source, handler.clone())
         .map_err(|e| format!("IRQ work request: {e:?}"))?;
     let vector = registration.vector();
     // Dispatcher deliberately permits actual MSI progress. All callbacks run
@@ -421,9 +420,20 @@ pub(crate) fn run(
     }
     // This exercises the source's two real quiescence/drain phases. The queued
     // job is pending here and cannot release device/context resources early.
-    registration
+    let retired = registration
         .retire()
         .map_err(|e| format!("IRQ work mask/synchronize/drain: {e:?}"))?;
+    // SAFETY: actual route+callback+work drain just completed on this BSP;
+    // keep returned callback while consuming its original concrete source.
+    let (source, returned_handler, _route) = unsafe { retired.into_parts() };
+    let WorkSource {
+        inner,
+        executor: source_executor,
+        ..
+    } = *source;
+    crate::native_dma::diagnostic::retire_function(inner.function)?;
+    drop(source_executor);
+    drop(returned_handler);
     if events.worker.load(Ordering::Acquire) != 1
         || events.errors.load(Ordering::Acquire) != 0
         || Arc::strong_count(&handler) != 1
@@ -745,3 +755,5 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         interrupt_flag = const IF,
     );
 }
+
+type Function = PciFunction<OwnedConfig>;

@@ -13,10 +13,12 @@ use stela_drivers::{
             mapping::{Direction, DmaMapping},
             memory::{CacheAttribute, PageSource},
         },
-        pci::{Bar, CAPABILITY_VENDOR, ConfigSpace, Function},
+        pci::{Bar, CAPABILITY_VENDOR, ConfigSpace, Function as PciFunction, owned::OwnedConfig},
     },
 };
 use stela_runtime::pc::acpi;
+
+type Function = PciFunction<OwnedConfig>;
 
 const EDU_VENDOR: u16 = 0x1234;
 const EDU_DEVICE: u16 = 0x11e8;
@@ -34,14 +36,17 @@ const DMA_TO_RAM: u64 = 2;
 const BYTES: usize = 4096;
 const TIMEOUT_US: u64 = 2_000_000;
 
-pub(crate) struct Prepared {
+pub(crate) struct Prepared<F = stela_drivers::bus::pci::Identity> {
     pub(super) hardware: HardwareUnit,
-    pub(super) functions: Vec<Function>,
+    pub(super) functions: Vec<F>,
     pub(super) edu: usize,
     virtio: usize,
     pub(super) edu_registers: Range<u64>,
     virtio_status: u64,
+    virtio_resource: Range<u64>,
+    bars: Vec<[Option<Bar>; 6]>,
     pub(super) clock: Clock,
+    pub(super) register_mappings: Vec<stela_drivers::bus::mmio::owned::Mapping>,
     level: Option<crate::native_irq::level_diagnostic::Prepared>,
     pub(super) second: Option<(usize, Range<u64>)>,
 }
@@ -57,11 +62,67 @@ fn memory_bar(bar: Option<Bar>) -> Result<Range<u64>, String> {
     Ok(address..end)
 }
 
-fn translation_features_stopped(function: &mut Function) -> Result<(), String> {
+fn observed_bars(
+    observation: &crate::pci_io::FunctionObservation,
+) -> Result<[Option<Bar>; 6], String> {
+    let mut result = [None; 6];
+    for (index, regions) in observation.bars.iter().enumerate() {
+        let regions = match regions {
+            Ok(regions) => regions,
+            Err(crate::pci_io::Error::Firmware(uefi::Status::UNSUPPORTED)) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "fixture BAR observation {} bar={index}: {error}",
+                    observation.address
+                ));
+            }
+        };
+        if regions.len() != 1 {
+            return Err(String::from(
+                "fixture BAR needs one exact firmware descriptor",
+            ));
+        }
+        let region = &regions[0];
+        if region.host != region.pci {
+            return Err(String::from(
+                "fixture BAR requires identity host/PCI translation",
+            ));
+        }
+        let bytes = region
+            .pci
+            .end
+            .checked_sub(region.pci.start)
+            .filter(|bytes| *bytes != 0)
+            .ok_or("invalid fixture BAR observation")?;
+        let start = 16 + index * 4;
+        let raw = u32::from_le_bytes(observation.header[start..start + 4].try_into().unwrap());
+        result[index] = Some(match region.resource_type {
+            0 => Bar::Memory {
+                address: region.pci.start,
+                size: bytes,
+                prefetchable: raw & 8 != 0,
+                wide: raw & 6 == 4,
+            },
+            1 => Bar::Io {
+                port: u32::try_from(region.pci.start).map_err(|_| "fixture IO port overflow")?,
+                size: u32::try_from(bytes).map_err(|_| "fixture IO span overflow")?,
+            },
+            _ => return Err(String::from("fixture BAR resource type unsupported")),
+        });
+    }
+    Ok(result)
+}
+
+fn translation_features_stopped<C: ConfigSpace>(
+    function: &mut PciFunction<C>,
+) -> Result<(), String> {
     for (offset, id) in function.capabilities() {
         if id == 0x10 && function.config().read16(u16::from(offset) + 8) & (1 << 11) != 0 {
             return Err(String::from("fixture PCIe NoSnoop is enabled"));
         }
+    }
+    if !function.capabilities().iter().any(|(_, id)| *id == 0x10) {
+        return Ok(());
     }
     let mut visited = Vec::new();
     let mut offset = 0x100u16;
@@ -97,8 +158,9 @@ fn translation_features_stopped(function: &mut Function) -> Result<(), String> {
 }
 
 impl Prepared {
-    /// Before EBS, with firmware callbacks excluded by TPL_HIGH_LEVEL. No
-    /// takeover or DMA occurs here; BAR sizing restores decoding immediately.
+    /// Before EBS at application TPL: only scoped firmware protocol reads and
+    /// owned copied DATA. No config accessor, callback or pool buffer crosses
+    /// EBS. Native BAR sizing occurs only after actual device quiescence.
     pub(crate) fn prepare(handoff: &Handoff, isolation: bool) -> Result<Self, String> {
         let hv = core::arch::x86_64::__cpuid(0x4000_0000);
         let signature = [
@@ -128,8 +190,34 @@ impl Prepared {
         if fadt.get(48..54) != Some(&[0; 6]) {
             return Err(String::from("fixture requires QEMU SMM off"));
         }
-        // SAFETY: actual firmware ECAM mapping; TPL excludes firmware callbacks.
-        let mut functions = unsafe { Function::enumerate(&handoff.ecam[0]) };
+        let census = crate::pci_io::capture_configurations()
+            .map_err(|error| format!("fixture firmware config: {error}"))?;
+        if !census.failures.is_empty() {
+            return Err(format!(
+                "incomplete fixture firmware inventory: {:?}",
+                census.failures
+            ));
+        }
+        let mut observations = Vec::new();
+        for mut observation in census.functions {
+            let bars = observed_bars(&observation)?;
+            let config = observation
+                .configuration
+                .take()
+                .ok_or("fixture configuration DATA missing")?;
+            let function = PciFunction::try_new(observation.address, config)
+                .map_err(|_| "fixture firmware function absent or CRS")?;
+            observations.push((function, bars));
+        }
+        observations.sort_by_key(|(function, _)| {
+            (
+                function.address.segment,
+                function.address.bus,
+                function.address.device,
+                function.address.function,
+            )
+        });
+        let (mut functions, observed): (Vec<_>, Vec<_>) = observations.into_iter().unzip();
         let mut edus = Vec::new();
         let (mut edu, mut virtio, mut host, mut isa) = (None, None, false, false);
         for (index, function) in functions.iter_mut().enumerate() {
@@ -199,12 +287,13 @@ impl Prepared {
         if hardware.bytes > 65536 {
             return Err(String::from("fixture remapping register span unsupported"));
         }
-        let edu_registers = memory_bar(functions[edu].bars()[0])?;
+        let edu_registers = memory_bar(observed[edu][0])?;
         if edu_registers.end - edu_registers.start != 1 << 20 {
             return Err(String::from("unexpected EDU register span"));
         }
-        let bars = functions[virtio].bars();
+        let bars = observed[virtio];
         let mut virtio_status = None;
+        let mut virtio_resource = None;
         for (offset, id) in functions[virtio].capabilities() {
             if id != CAPABILITY_VENDOR {
                 continue;
@@ -231,6 +320,7 @@ impl Prepared {
             if bytes < 0x15 || start.checked_add(bytes).is_none_or(|end| end > bar.end) {
                 return Err(String::from("virtio common capability outside BAR"));
             }
+            virtio_resource = Some(bar);
             if virtio_status.replace(start + 0x14).is_some() {
                 return Err(String::from("duplicate virtio common capability"));
             }
@@ -244,7 +334,7 @@ impl Prepared {
         };
         let second = if isolation {
             let i = edus[1];
-            let bar = memory_bar(functions[i].bars()[0])?;
+            let bar = memory_bar(observed[i][0])?;
             if bar.end - bar.start != 1 << 20 {
                 return Err(String::from("unexpected second EDU register span"));
             }
@@ -256,13 +346,19 @@ impl Prepared {
             level,
             second,
             hardware,
-            functions,
+            functions: functions
+                .into_iter()
+                .map(|function| function.identity())
+                .collect(),
             edu,
             virtio,
             edu_registers,
             virtio_status: virtio_status
                 .ok_or_else(|| String::from("virtio reset register missing"))?,
+            virtio_resource: virtio_resource.ok_or("virtio register BAR missing")?,
+            bars: observed,
             clock: handoff.clock,
+            register_mappings: Vec::new(),
         })
     }
 
@@ -270,7 +366,7 @@ impl Prepared {
         let mut ranges = alloc::vec![
             self.hardware.base..self.hardware.base + self.hardware.bytes as u64,
             self.edu_registers.clone(),
-            self.virtio_status & !4095..(self.virtio_status & !4095) + 4096,
+            self.virtio_resource.clone(),
         ];
         if let Some(level) = &self.level {
             ranges.push(level.mapping());
@@ -281,6 +377,110 @@ impl Prepared {
         ranges
     }
 
+    pub(crate) fn bind(
+        self,
+        source: &crate::paging::config::Source,
+    ) -> Result<Prepared<Function>, String> {
+        let mut actual = Vec::new();
+        for window in source.windows() {
+            actual.extend(
+                source
+                    .inventory(&window)
+                    .map_err(|error| format!("fixture owned inventory: {error}"))?,
+            );
+        }
+        actual.sort_by_key(|identity| {
+            (
+                identity.address.segment,
+                identity.address.bus,
+                identity.address.device,
+                identity.address.function,
+            )
+        });
+        if actual != self.functions {
+            return Err(String::from(
+                "fixture requester observations changed at native handoff",
+            ));
+        }
+        let ranges = self.mappings();
+        let mut functions = Vec::new();
+        for (index, identity) in self.functions.into_iter().enumerate() {
+            let config = source
+                .config(identity.address)
+                .map_err(|error| format!("fixture owned config: {error}"))?;
+            let mut function = Function::try_new(identity.address, config)
+                .map_err(|_| "fixture requester disappeared during owned bind")?;
+            if function.identity() != identity {
+                return Err(String::from(
+                    "fixture identity changed during native ownership bind",
+                ));
+            }
+            translation_features_stopped(&mut function)?;
+            for (bar, plan) in self.bars[index].iter().enumerate() {
+                let Some(plan) = plan else {
+                    continue;
+                };
+                let raw = function.config().read32(16 + bar as u16 * 4);
+                let address = match *plan {
+                    Bar::Memory {
+                        wide, prefetchable, ..
+                    } => {
+                        if raw & 1 != 0 || (raw & 6 == 4) != wide || (raw & 8 != 0) != prefetchable
+                        {
+                            return Err(String::from("fixture BAR kind changed during owned bind"));
+                        }
+                        u64::from(raw & !15)
+                            | if wide {
+                                u64::from(function.config().read32(20 + bar as u16 * 4)) << 32
+                            } else {
+                                0
+                            }
+                    }
+                    Bar::Io { .. } => {
+                        if raw & 1 == 0 {
+                            return Err(String::from("fixture IO BAR kind changed"));
+                        }
+                        u64::from(raw & !3)
+                    }
+                };
+                let expected = match *plan {
+                    Bar::Memory { address, .. } => address,
+                    Bar::Io { port, .. } => u64::from(port),
+                };
+                if address != expected {
+                    return Err(String::from(
+                        "fixture BAR address changed during owned bind",
+                    ));
+                }
+            }
+            functions.push(function);
+        }
+        let mut register_mappings = Vec::new();
+        for span in ranges {
+            let permit = RegisterSpan { source, span };
+            register_mappings.push(
+                source
+                    .fixture_registers(&permit)
+                    .map_err(|error| format!("fixture real register owner: {error}"))?,
+            );
+        }
+        Ok(Prepared {
+            hardware: self.hardware,
+            functions,
+            register_mappings,
+            edu: self.edu,
+            virtio: self.virtio,
+            edu_registers: self.edu_registers,
+            virtio_status: self.virtio_status,
+            virtio_resource: self.virtio_resource,
+            bars: self.bars,
+            clock: self.clock,
+            level: self.level,
+            second: self.second,
+        })
+    }
+}
+impl Prepared<Function> {
     fn device(&self) -> Device {
         Device {
             edu_registers: self.edu_registers.clone(),
@@ -384,6 +584,22 @@ impl Prepared {
             }
             device.write32(0x20, 0);
             device.write32(0x64, u32::MAX);
+        }
+        // Device-specific reset/idle ACK above establishes real fixture
+        // quiescence. Only now size BARs through actual native config owners;
+        // firmware descriptors were candidates, never native access grants.
+        for (index, function) in self.functions.iter_mut().enumerate() {
+            let selected = index == self.edu
+                || index == self.virtio
+                || self
+                    .second
+                    .as_ref()
+                    .is_some_and(|(second, _)| index == *second);
+            if selected && function.bars() != self.bars[index] {
+                return Err(String::from(
+                    "native BAR sizing disagrees with firmware observation",
+                ));
+            }
         }
         Ok(())
     }
@@ -580,19 +796,59 @@ impl Prepared {
                 self.clock,
                 work,
             )?;
+            for function in self.functions {
+                retire_function(function)?;
+            }
+            retire_registers(self.register_mappings)?;
             return Ok((dma, irq));
         }
         let (irq, function) =
             crate::native_irq::diagnostic::run(function, self.edu_registers.start, self.clock)?;
         // Other fixture owners can release now; the original EDU Function
         // passes directly from DMA through MSI retirement into the INTx phase.
-        drop(self.functions);
+        for function in self.functions {
+            retire_function(function)?;
+        }
         let level = self
             .level
             .ok_or_else(|| String::from("single fixture missing level preparation"))?
             .run(function, self.edu_registers.start, self.clock)?;
+        retire_registers(self.register_mappings)?;
         Ok((dma, format!("{irq}; {level}")))
     }
+}
+
+/// Affine actual fixture grant: no public numeric constructor. Created only
+/// after Source rebind revalidated all real owned requester/config identities.
+pub(crate) struct RegisterSpan<'a> {
+    source: &'a crate::paging::config::Source,
+    span: Range<u64>,
+}
+impl RegisterSpan<'_> {
+    pub(crate) fn for_source(&self, source: &crate::paging::config::Source) -> Option<Range<u64>> {
+        core::ptr::eq(source, self.source).then(|| self.span.clone())
+    }
+}
+pub(crate) fn retire_registers(
+    mappings: Vec<stela_drivers::bus::mmio::owned::Mapping>,
+) -> Result<(), String> {
+    for mut mapping in mappings {
+        // SAFETY: callers just completed exact fixture DMA/IRQ/work/posted
+        // drain and have released all callbacks; no access can restart.
+        unsafe { mapping.retire() }
+            .map_err(|error| format!("fixture register retirement: {error:?}"))?;
+    }
+    Ok(())
+}
+
+/// # Safety of the surrounding caller
+/// This exact fixture completed real device/DMA/IRQ/work/posted-write drain.
+/// No other view or callback can start using the original config mapping.
+pub(crate) fn retire_function(function: Function) -> Result<(), String> {
+    let mut mapping = function.into_config().into_mapping();
+    // SAFETY: all callers are final acknowledged fixture teardown, not a
+    // vendor read or BM-disable guess. Busy/error retains the original lease.
+    unsafe { mapping.retire() }.map_err(|error| format!("original config retirement: {error:?}"))
 }
 
 pub(crate) enum Report {

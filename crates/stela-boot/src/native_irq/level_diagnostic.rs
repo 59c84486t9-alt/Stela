@@ -20,7 +20,7 @@ use stela_drivers::{
         irq::{
             Disposition, Handler, IrqError, LineRoute, Platform, Polarity, SharedHandlers, Trigger,
         },
-        pci::{ConfigSpace, Function},
+        pci::{ConfigSpace, Function as PciFunction, owned::OwnedConfig},
     },
 };
 use stela_runtime::pc::acpi;
@@ -37,6 +37,13 @@ const DSDT_HASH: [u8; 32] = [
 const INTEL_DSDT_HASH: [u8; 32] = [
     0xdf, 0xe8, 0xaf, 0xc1, 0x3a, 0x17, 0x52, 0x62, 0xe7, 0xbf, 0x69, 0x71, 0x0b, 0xf7, 0x73, 0x8c,
     0x11, 0xd2, 0x20, 0x51, 0x99, 0x8d, 0x20, 0xd8, 0x20, 0x68, 0x5f, 0x37, 0x3e, 0x31, 0xcf, 0x80,
+];
+// Independently captured/evaluated 2GiB input for the actual retained-root
+// configuration fixture. Exact provenance is in the non-normative research
+// receipt; this table binding supplies no production root/controller grant.
+const OWNED_CONFIG_DSDT_HASH: [u8; 32] = [
+    0x20, 0xc1, 0x76, 0xc7, 0x6d, 0xdc, 0xcc, 0x1f, 0x50, 0x22, 0xce, 0xd4, 0x94, 0x27, 0x5c, 0x36,
+    0x94, 0xb0, 0x99, 0x81, 0x65, 0x80, 0x8a, 0xae, 0x0e, 0x88, 0x79, 0x22, 0x68, 0xcc, 0x3d, 0xb4,
 ];
 const LINE: LineRoute = LineRoute {
     gsi: 22,
@@ -103,7 +110,7 @@ impl Prepared {
         let dsdt_hash = Sha256::digest(dsdt).into();
         if dsdt.len() != 8098
             || &dsdt[..4] != b"DSDT"
-            || ![DSDT_HASH, INTEL_DSDT_HASH].contains(&dsdt_hash)
+            || ![DSDT_HASH, INTEL_DSDT_HASH, OWNED_CONFIG_DSDT_HASH].contains(&dsdt_hash)
         {
             return Err(String::from(
                 "fixture actual DSDT differs from ACPICA route receipt",
@@ -194,7 +201,7 @@ impl Prepared {
             unit.claim(
                 LINE,
                 Box::new(Contributors {
-                    function,
+                    function: Some(function),
                     edu: edu.clone(),
                 }),
             )
@@ -327,19 +334,45 @@ impl Handler for Member {
     }
 }
 struct Contributors {
-    function: Function,
+    function: Option<Function>,
     edu: Arc<Edu>,
+}
+impl Drop for Contributors {
+    fn drop(&mut self) {
+        // Pin releases contributors ONLY after its actual registry/IOAPIC/
+        // callback drain; uncertain Pin drop retains the ManuallyDrop owner.
+        if let Some(function) = self.function.take()
+            && let Err(error) = crate::native_dma::diagnostic::retire_function(function)
+        {
+            crate::output::arguments(format_args!("INTx config retirement refused: {error}\n"));
+            crate::output::fatal("INTx config owner remains quarantined");
+        }
+    }
 }
 // SAFETY: exact synchronous QEMU fixture only, no DMA command/worker/timer,
 // all other sharers stopped; INTx-disable readback and real EDU idle/cause ACK.
 unsafe impl Devices for Contributors {
     fn mask(&mut self) -> Result<(), IrqError> {
-        let command = self.function.config().read16(4);
+        let command = self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .read16(4);
         if command == u16::MAX {
             return Err(IrqError::FailedRead);
         }
-        self.function.config().write16(4, command | INTX_DISABLE);
-        let actual = self.function.config().read16(4);
+        self.function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .write16(4, command | INTX_DISABLE);
+        let actual = self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .read16(4);
         if actual == u16::MAX {
             return Err(IrqError::FailedRead);
         }
@@ -350,7 +383,12 @@ unsafe impl Devices for Contributors {
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
         let dma = unsafe { ((self.edu.base + 0x98) as *const u64).read_volatile() };
-        let command = self.function.config().read16(4);
+        let command = self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .read16(4);
         if command == u16::MAX {
             return Err(IrqError::FailedRead);
         }
@@ -364,15 +402,29 @@ unsafe impl Devices for Contributors {
         Ok(())
     }
     unsafe fn enable(&mut self) -> Result<(), IrqError> {
-        let command = self.function.config().read16(4);
+        let command = self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .read16(4);
         if command == u16::MAX {
             return Err(IrqError::FailedRead);
         }
         if command & 4 != 0 {
             return Err(IrqError::Quiesce);
         }
-        self.function.config().write16(4, command & !INTX_DISABLE);
-        let actual = self.function.config().read16(4);
+        self.function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .write16(4, command & !INTX_DISABLE);
+        let actual = self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config()
+            .read16(4);
         if actual == u16::MAX {
             return Err(IrqError::FailedRead);
         }
@@ -382,3 +434,6 @@ unsafe impl Devices for Contributors {
         Ok(())
     }
 }
+
+// Actual retained native configuration owner, never a CPU-bound raw transport.
+type Function = PciFunction<OwnedConfig>;

@@ -2,7 +2,7 @@
 //! or a cache-policy bit never grants this ownership or DMA coherency.
 use crate::vtd::VtdError;
 use stela_drivers::bus::pci::{
-    CapabilityError, ConfigSpace, Function, requester::RequesterBinding,
+    CapabilityError, ConfigSpace, Function, owned::OwnedConfig, requester::RequesterBinding,
 };
 
 pub struct RequesterClaim {
@@ -10,7 +10,7 @@ pub struct RequesterClaim {
     owner: Owner,
 }
 enum Owner {
-    Pci(Function),
+    Pci(Function<OwnedConfig>),
     /// A driver's binding: the driver keeps the configuration owner, and
     /// with it bus mastering.
     Binding(RequesterBinding),
@@ -41,7 +41,7 @@ impl RequesterClaim {
     /// uses its permanently retained host-check root. Native production attach
     /// needs the canonical owned MMIO/root-epoch adapter, not this contract
     /// inferred from an ECAM address. No operation/final release runs in IRQ.
-    pub unsafe fn from_stopped_pci(function: Function) -> Result<Self, VtdError> {
+    pub unsafe fn from_stopped_pci(function: Function<OwnedConfig>) -> Result<Self, VtdError> {
         if function.address.segment != 0 || function.address.bus != 0 {
             return Err(VtdError::Unsupported);
         }
@@ -173,7 +173,7 @@ impl RequesterClaim {
         }
         Ok(())
     }
-    pub fn into_function(self) -> Result<Function, VtdError> {
+    pub fn into_function(self) -> Result<Function<OwnedConfig>, VtdError> {
         match self.owner {
             Owner::Pci(function) => Ok(function),
             Owner::Binding(_) => Err(VtdError::Unsupported),

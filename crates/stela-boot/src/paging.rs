@@ -3,6 +3,8 @@
 use crate::cpu::msr;
 use alloc::vec::Vec;
 mod active;
+#[cfg(feature = "diagnostics")]
+pub(crate) mod config;
 pub(crate) use active::{ActivatedTables, RootError};
 use core::{
     arch::{asm, naked_asm},

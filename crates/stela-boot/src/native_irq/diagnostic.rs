@@ -8,7 +8,7 @@ use stela_drivers::{
     Clock,
     bus::{
         irq::{Disposition, Handler, IrqError, Route, RouteRequest, Source},
-        pci::{ConfigSpace, Function, Msi},
+        pci::{ConfigSpace, Function as PciFunction, Msi, owned::OwnedConfig},
     },
 };
 
@@ -64,7 +64,7 @@ impl Handler for Edu {
 }
 
 pub(super) struct EduSource {
-    function: Function,
+    pub(super) function: Function,
     msi: Msi,
     edu: Arc<Edu>,
 }
@@ -320,3 +320,6 @@ pub(crate) fn run(
         function,
     ))
 }
+
+// Actual retained native configuration owner, never a CPU-bound raw transport.
+type Function = PciFunction<OwnedConfig>;

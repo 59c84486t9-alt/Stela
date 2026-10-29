@@ -96,7 +96,11 @@ fn roundtrip(device: &Device, send: &Buffer, receive: &Buffer, seed: u8) -> Resu
 
 /// Called only after Prepared's actual common post-EBS quiescence sequence.
 /// Any error is fatal to host-check; uncertain mappings/contexts quarantine.
-pub(super) fn run(mut prepared: Prepared) -> Result<String, String> {
+pub(super) fn run(
+    mut prepared: Prepared<
+        stela_drivers::bus::pci::Function<stela_drivers::bus::pci::owned::OwnedConfig>,
+    >,
+) -> Result<String, String> {
     let (second_index, second_bar) = prepared
         .second
         .take()
@@ -269,7 +273,16 @@ pub(super) fn run(mut prepared: Prepared) -> Result<String, String> {
     drop(domains);
     // SAFETY: all requesters stopped, all contexts detached with hardware ACK.
     unsafe { unit.shut_down() }.map_err(|e| format!("isolation TE-off ACK: {e:?}"))?;
-    drop((owner_a, owner_b, prepared.functions));
+    for owner in [owner_a, owner_b] {
+        let function = owner
+            .into_function()
+            .map_err(|error| format!("isolation original config owner: {error:?}"))?;
+        super::diagnostic::retire_function(function)?;
+    }
+    for function in prepared.functions {
+        super::diagnostic::retire_function(function)?;
+    }
+    super::diagnostic::retire_registers(prepared.register_mappings)?;
     Ok(format!(
         "QEMU two-EDU rid_a=0x0010 did_a={did_a} rid_b=0x0018 did_b={did_b} same_iova=disjoint-ram send_pa_a={:#x} receive_pa_a={:#x} protected_pa_a={:#x} send_pa_b={:#x} receive_pa_b={:#x} roundtrip_a=verified roundtrip_b=verified wrong_domain_rid={:#06x} wrong_domain_address={:#x} wrong_domain_reason={:#x} retained_ram=unchanged owner_access=verified other_context_after_detach=verified teardown=context+IOTLB+TE-off-ack",
         send_a.pages.physical_pages()[0],

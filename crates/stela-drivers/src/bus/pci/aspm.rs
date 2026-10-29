@@ -291,7 +291,7 @@ mod tests {
     use super::*;
     use crate::{
         Clock,
-        bus::pci::{Address, EcamConfig, Mmio},
+        bus::pci::{Address, EcamConfig},
     };
     use alloc::{rc::Rc, vec};
     use core::cell::RefCell;
@@ -458,10 +458,8 @@ mod tests {
     #[test]
     fn ecam_halfword_store_does_not_replace_the_adjacent_halfword() {
         let mut words = [0xc000_a5a3u32; 64];
-        let mut config = EcamConfig {
-            // SAFETY: this test owns the complete aligned register backing.
-            registers: unsafe { Mmio::new(words.as_mut_ptr() as u64) },
-        };
+        // SAFETY: the fixture owns this exact stable ECAM backing.
+        let mut config = unsafe { EcamConfig::raw(words.as_mut_ptr() as u64) };
         config.write16(0x50, 0xa5a0);
         assert_eq!(words[20], 0xc000_a5a0);
         config.write16(0x52, 0x1234);
