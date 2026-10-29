@@ -58,6 +58,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
         let init = drive_nvm(boot, &source, &domain, &state);
         let cold = init.begin_radio().unwrap_or_else(|_| panic!("actual NVM"));
         let before = state.lock().unwrap().ops.len();
+        // SAFETY: RadioBios belongs to the same modeled function and moves into this call;
+        // a prefix refusal returns that exact owned service without namespace reads.
         let rejected = unsafe {
             cold.begin_lari(RadioBios {
                 drops: bios_drops.clone(),
@@ -77,6 +79,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
             &cold.initialized_nvm().information,
         )
         .unwrap();
+        // SAFETY: The refused prefix returned the original boot owner and its Domain;
+        // the same exclusive Source remains live while the cold plan is first published.
         unsafe { cold.advance(&source) }.unwrap();
         for (i, command) in expected.commands().iter().enumerate() {
             let mut id = command.id();
@@ -90,10 +94,16 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 6 + i as u16,
                 &command_packet(id, 3 + i as u16, &[]),
             );
+            // SAFETY: Each prefix response completed synchronously in that retained domain;
+            // cold and Source retain all mapped RAM through reclaim and next publication.
             unsafe { cold.advance(&source) }.unwrap();
         }
+        // SAFETY: bios is the original modeled service returned by refusal, with no owner
+        // substitution; it moves into LARI after this same boot prefix has completed.
         let mut lari = unsafe { cold.begin_lari(bios) }.unwrap_or_else(|_| panic!("real prefix"));
         assert_eq!(
+            // SAFETY: The original boot/domain and BIOS service remain owned by LARI;
+            // Source supplies exclusive model RAM for its schema-selected direct commands.
             unsafe { lari.advance(&source) }.unwrap(),
             LariPhase::Waiting {
                 command: expected_ids[0]
@@ -149,6 +159,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
             assert_eq!(emitted, encoded.bytes());
             let bell = state.lock().unwrap().registers[&0x460];
             assert_eq!(
+                // SAFETY: No completion has been injected since publication; the original LARI
+                // owner/domain retain pending mappings and Source while polling without resend.
                 unsafe { lari.advance(&source) }.unwrap(),
                 LariPhase::Waiting { command: id.opcode }
             );
@@ -165,6 +177,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 r.cpu_sync_fail = Some(r.cpu_syncs + 1);
                 drop(r);
                 assert!(matches!(
+                    // SAFETY: The response completed synchronously, and injected CPU-sync failure
+                    // cannot release its backing: this same LARI owner/source retain the mapping.
                     unsafe { lari.advance(&source) },
                     Err(LariError::Boot(Error::CommandReclaim(_)))
                 ));
@@ -173,6 +187,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
                 domain.records.lock().unwrap().cpu_sync_fail = None;
             }
             assert_eq!(
+                // SAFETY: The failed reclaim retained all original owner/domain mappings; clearing
+                // the model injection permits retry with the same exclusive Source and response.
                 unsafe { lari.advance(&source) }.unwrap(),
                 commands
                     .get(i + 1)
@@ -187,6 +203,8 @@ pub(super) fn exercise_lari_bios(actual: bool) {
         }
         let ops = state.lock().unwrap().ops.len();
         assert_eq!(
+            // SAFETY: The completed LARI state still owns its original BIOS/source/domain;
+            // this final observation has no new publication or competing model device user.
             unsafe { lari.advance(&source) }.unwrap(),
             LariPhase::RxQueueConfigurationRequired
         );
