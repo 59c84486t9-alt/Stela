@@ -337,40 +337,46 @@ simd_functions_lower_to_subgroup_operations(void)
 {
    nir_shader *shader = lowered(
       "declare i32 @air.simd_shuffle.u.i32(i32, i16)\n"
-      "declare float @air.simd_shuffle_down.f.f32(float, i16)\n"
-      "declare <2 x half> @air.quad_shuffle_xor.f.v2f16(<2 x half>, i16)\n"
+      "declare float @air.simd_shuffle_down.f32(float, i16)\n"
+      "declare <2 x half> @air.quad_shuffle_xor.v2f16(<2 x half>, i16)\n"
       "declare i64 @air.simd_broadcast.u.i64(i64, i16)\n"
       "declare i32 @air.simd_sum.s.i32(i32)\n"
       "declare i16 @air.simd_max.s.i16(i16)\n"
-      "declare float @air.quad_sum.f.f32(float)\n"
+      "declare float @air.quad_sum.f32(float)\n"
       "declare i32 @air.simd_prefix_exclusive_sum.u.i32(i32)\n"
       "declare i32 @air.quad_prefix_inclusive_product.u.i32(i32)\n"
       "declare i1 @air.simd_all(i1)\n"
-      "declare i64 @air.simd_ballot(i1)\n"
-      "declare i1 @air.quad_is_first()\n",
+      "declare i64 @air.simd_ballot.i64(i1)\n"
+      "declare i1 @air.quad_is_first()\n"
+      "declare float @air.simd_shuffle_and_fill_down.f32(float, float, i16, i16)\n"
+      "declare i32 @air.quad_shuffle_and_fill_up.u.i32(i32, i32, i16, i16)\n",
       "%a = call i32 @air.simd_shuffle.u.i32(i32 1, i16 3)\n"
       "%f = bitcast i32 %a to float\n"
-      "%b = call float @air.simd_shuffle_down.f.f32(float %f, i16 1)\n"
-      "%h = call <2 x half> @air.quad_shuffle_xor.f.v2f16(<2 x half> <half 0xH3C00, half 0xH4000>, i16 1)\n"
+      "%b = call float @air.simd_shuffle_down.f32(float %f, i16 1)\n"
+      "%h = call <2 x half> @air.quad_shuffle_xor.v2f16(<2 x half> <half 0xH3C00, half 0xH4000>, i16 1)\n"
       "%w = call i64 @air.simd_broadcast.u.i64(i64 5, i16 0)\n"
       "%s = call i32 @air.simd_sum.s.i32(i32 %a)\n"
       "%m = call i16 @air.simd_max.s.i16(i16 -3)\n"
-      "%q = call float @air.quad_sum.f.f32(float %b)\n"
+      "%q = call float @air.quad_sum.f32(float %b)\n"
       "%e = call i32 @air.simd_prefix_exclusive_sum.u.i32(i32 %s)\n"
       "%p = call i32 @air.quad_prefix_inclusive_product.u.i32(i32 %e)\n"
       "%v = icmp eq i32 %p, 0\n"
       "%all = call i1 @air.simd_all(i1 %v)\n"
-      "%ballot = call i64 @air.simd_ballot(i1 %all)\n"
+      "%ballot = call i64 @air.simd_ballot.i64(i1 %all)\n"
       "%first = call i1 @air.quad_is_first()\n"
       "%hb = bitcast <2 x half> %h to i32\n"
       "%wt = trunc i64 %w to i32\n%bt = trunc i64 %ballot to i32\n"
       "%me = sext i16 %m to i32\n%qb = bitcast float %q to i32\n"
       "%x0 = xor i32 %hb, %wt\n%x1 = xor i32 %x0, %bt\n%x2 = xor i32 %x1, %me\n"
       "%x3 = xor i32 %x2, %qb\n%fz = zext i1 %first to i32\n%x4 = xor i32 %x3, %fz\n"
-      "store i32 %x4, ptr addrspace(1) %out, align 4\nret void\n");
+      "%fd = call float @air.simd_shuffle_and_fill_down.f32(float %f, float %q, i16 2, i16 8)\n"
+      "%fu = call i32 @air.quad_shuffle_and_fill_up.u.i32(i32 %x4, i32 %a, i16 1, i16 4)\n"
+      "%fb = bitcast float %fd to i32\n%x5 = xor i32 %fu, %fb\n"
+      "store i32 %x5, ptr addrspace(1) %out, align 4\nret void\n");
    /* Data moves through 32-bit shuffles: one each for the shuffles, two for
-    * the 64-bit broadcast and four for the quad scan. */
-   assert(count(shader, nir_intrinsic_shuffle) == 9);
+    * the 64-bit broadcast, four for the quad scan and two, of the value and
+    * of the fill, for each shuffle and fill. */
+   assert(count(shader, nir_intrinsic_shuffle) == 13);
    assert(count(shader, nir_intrinsic_reduce) == 3);
    assert(count(shader, nir_intrinsic_exclusive_scan) == 1);
    assert(count(shader, nir_intrinsic_vote_all) == 1);
@@ -381,14 +387,20 @@ simd_functions_lower_to_subgroup_operations(void)
       {"declare i32 @air.simd_shuffle.u.i32(i32, i32)\n",
        "%a = call i32 @air.simd_shuffle.u.i32(i32 1, i32 3)\nret void\n"},
       /* Bitwise functions take integers. */
-      {"declare float @air.simd_and.f.f32(float)\n",
-       "%a = call float @air.simd_and.f.f32(float 1.0)\nret void\n"},
-      {"declare i16 @air.simd_ballot(i1)\n", "%a = call i16 @air.simd_ballot(i1 true)\nret void\n"},
+      {"declare float @air.simd_and.f32(float)\n",
+       "%a = call float @air.simd_and.f32(float 1.0)\nret void\n"},
+      {"declare i16 @air.simd_ballot.i16(i1)\n",
+       "%a = call i16 @air.simd_ballot.i16(i1 true)\nret void\n"},
+      /* A fill's delta and modulo are i16s. */
+      {"declare float @air.simd_shuffle_and_fill_up.f32(float, float, i16, i32)\n",
+       "%a = call float @air.simd_shuffle_and_fill_up.f32(float 1.0, float 2.0, i16 1, i32 4)\n"
+       "ret void\n"},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(refusals); i++)
       refused(refusals[i][0], refusals[i][1], STELA_AIR_TYPE);
-   refused("declare i32 @air.simd_shuffle.f.i32(i32, i16)\n",
-           "%a = call i32 @air.simd_shuffle.f.i32(i32 1, i16 3)\nret void\n", STELA_AIR_INSTRUCTION);
+   /* Integers carry their sign. */
+   refused("declare i32 @air.simd_shuffle.i32(i32, i16)\n",
+           "%a = call i32 @air.simd_shuffle.i32(i32 1, i16 3)\nret void\n", STELA_AIR_INSTRUCTION);
 }
 
 int

@@ -1,15 +1,17 @@
 /* SPDX-License-Identifier: MIT */
-/* AIR's SIMD-group and quad-group functions. DXMT's AIR builder
- * (src/airconv/nt/air_builder.cpp) records air.simd_shuffle, air.quad_shuffle
- * and air.quad_shuffle_xor as "air.<function>.<type>(value, i16 lane)", the
- * type unsigned ("u.i32") or float ("f.f32"). The other functions follow that
- * convention under their MSL names. Min, max and the widening of narrow
- * integers read the sign, so signed types ("s.i32") are accepted too. Votes
- * take and return booleans and carry no type:
+/* AIR's SIMD-group and quad-group functions, as Apple's compiler names
+ * them after their MSL builtins:
  *
+ *   air.<simd|quad>_<function>.<type>(value[, i16 lane])
+ *   air.<simd|quad>_shuffle_and_fill_<up|down>.<type>(value, fill, i16 delta,
+ *                                                    i16 modulo)
  *   air.<simd|quad>_<all|any>(i1) -> i1
- *   air.<simd|quad>_ballot(i1) -> i32 or i64
+ *   air.<simd|quad>_ballot.<i32|i64>(i1)
  *   air.<simd|quad>_is_first() -> i1
+ *
+ * A floating-point type is bare ("f32", "v2f16"); an integer one carries its
+ * sign ("u.i32", "s.i16"), which min, max and the widening of narrow
+ * integers read.
  *
  * A quad-group is four consecutive SIMD lanes. Data moves through one 32-bit
  * shuffle from a computed lane, which every backend supports. Out-of-range
@@ -21,7 +23,7 @@
 enum operation {
    /* Data movement. */
    SHUFFLE, SHUFFLE_XOR, SHUFFLE_UP, SHUFFLE_DOWN, ROTATE_UP, ROTATE_DOWN, BROADCAST,
-   BROADCAST_FIRST,
+   BROADCAST_FIRST, FILL_UP, FILL_DOWN,
    /* Reductions and scans. */
    SUM, PRODUCT, MIN, MAX, AND, OR, XOR, INCLUSIVE_SUM, INCLUSIVE_PRODUCT, EXCLUSIVE_SUM,
    EXCLUSIVE_PRODUCT,
@@ -39,6 +41,7 @@ static const struct {
    {"shuffle_up", SHUFFLE_UP, true}, {"shuffle_down", SHUFFLE_DOWN, true},
    {"shuffle_rotate_up", ROTATE_UP, true}, {"shuffle_rotate_down", ROTATE_DOWN, true},
    {"broadcast", BROADCAST, true}, {"broadcast_first", BROADCAST_FIRST, false},
+   {"shuffle_and_fill_up", FILL_UP, true}, {"shuffle_and_fill_down", FILL_DOWN, true},
    {"sum", SUM, false}, {"product", PRODUCT, false}, {"min", MIN, false}, {"max", MAX, false},
    {"and", AND, false}, {"or", OR, false}, {"xor", XOR, false},
    {"prefix_inclusive_sum", INCLUSIVE_SUM, false},
@@ -124,6 +127,24 @@ move(nir_builder *b, enum operation operation, nir_def *v, nir_def *operand, con
    return moved;
 }
 
+/* A shuffle and fill: within each modulo lanes of the group, the value
+ * delta lanes down (up), or where that passes the segment's end (start), the
+ * fill delta lanes down (up) wrapped into the segment. */
+static nir_def *
+fill(nir_builder *b, enum operation operation, nir_def *v, nir_def *filling, nir_def *delta,
+     nir_def *modulo, const struct group *g)
+{
+   delta = nir_u2u32(b, delta);
+   modulo = nir_u2u32(b, modulo);
+   nir_def *index = nir_umod(b, g->index, modulo);
+   nir_def *segment = nir_iadd(b, g->base, nir_isub(b, g->index, index));
+   nir_def *source = operation == FILL_DOWN ? nir_iadd(b, index, delta) :
+                                              nir_isub(b, nir_iadd(b, index, modulo), delta);
+   nir_def *inside = operation == FILL_DOWN ? nir_ult(b, source, modulo) : nir_uge(b, source, modulo);
+   source = nir_iadd(b, segment, nir_umod(b, source, modulo));
+   return nir_bcsel(b, inside, shuffle(b, v, source), shuffle(b, filling, source));
+}
+
 /* The operation combining two values of a reduction or scan. */
 static nir_op
 combination(enum operation operation, bool floating, bool sign)
@@ -193,23 +214,31 @@ static enum stela_air_call_status
 typed(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
       enum operation operation, bool lane, bool quad, bool floating, bool sign, nir_def **result)
 {
-   if (!stela_air_call_plain(c, call, callee, lane ? 2 : 1))
+   /* A fill's value and fill, then its delta and modulo. */
+   bool filled = operation == FILL_UP || operation == FILL_DOWN;
+   unsigned values = filled ? 2 : 1, operands = values + (filled ? 2 : lane);
+   if (!stela_air_call_plain(c, call, callee, operands))
       return STELA_AIR_CALL_FAILED;
    LLVMTypeRef type = LLVMTypeOf(LLVMGetOperand(call, 0));
    LLVMTypeRef i16 = LLVMInt16TypeInContext(LLVMGetTypeContext(type));
-   if (LLVMTypeOf(call) != type || (lane && LLVMTypeOf(LLVMGetOperand(call, 1)) != i16) ||
-       (floating && (operation == AND || operation == OR || operation == XOR)))
+   bool shaped = LLVMTypeOf(call) == type &&
+                 !(floating && (operation == AND || operation == OR || operation == XOR));
+   for (unsigned i = 0; i < operands; i++)
+      shaped &= LLVMTypeOf(LLVMGetOperand(call, i)) == (i < values ? type : i16);
+   if (!shaped)
       return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported SIMD-group function types"),
              STELA_AIR_CALL_FAILED;
    if (floating && operation >= SUM && !c->fp_environment(c->translator))
       return STELA_AIR_CALL_FAILED;
-   nir_def *v = c->operand(c->translator, LLVMGetOperand(call, 0));
-   nir_def *operand = lane ? c->operand(c->translator, LLVMGetOperand(call, 1)) : NULL;
-   if (!v || (lane && !operand))
-      return STELA_AIR_CALL_FAILED;
+   nir_def *v[4];
+   for (unsigned i = 0; i < operands; i++) {
+      if (!(v[i] = c->operand(c->translator, LLVMGetOperand(call, i))))
+         return STELA_AIR_CALL_FAILED;
+   }
    struct group g = group(c->b, quad);
-   *result = operation < SUM ? move(c->b, operation, v, operand, &g) :
-                               reduce(c->b, operation, v, floating, sign, &g);
+   *result = filled ? fill(c->b, operation, v[0], v[1], v[2], v[3], &g) :
+             operation < SUM ? move(c->b, operation, v[0], lane ? v[1] : NULL, &g) :
+                               reduce(c->b, operation, v[0], floating, sign, &g);
    return STELA_AIR_CALL_LOWERED;
 }
 
@@ -265,7 +294,12 @@ stela_air_simd_call(const struct stela_air_call_context *c, LLVMValueRef call, L
    const char *prefix = quad ? "air.quad_" : "air.simd_";
    char expected[96];
    for (unsigned i = 0; i < ARRAY_SIZE(votes); i++) {
-      snprintf(expected, sizeof(expected), "%s%s", prefix, votes[i].name);
+      /* A ballot is named by the mask it returns. */
+      char mask[16] = "";
+      if (votes[i].operation == BALLOT)
+         stela_air_call_overload(LLVMTypeOf(call), mask, sizeof(mask));
+      snprintf(expected, sizeof(expected), "%s%s%s%s", prefix, votes[i].name, *mask ? "." : "",
+               mask);
       if (stela_air_call_named(name, bytes, expected))
          return vote(c, call, callee, votes[i].operation, quad, result);
    }
@@ -279,8 +313,8 @@ stela_air_simd_call(const struct stela_air_call_context *c, LLVMValueRef call, L
    stela_air_call_overload(type, overload, sizeof(overload));
    for (unsigned i = 0; i < ARRAY_SIZE(functions); i++) {
       for (unsigned sign = 0; sign < (floating ? 1u : 2u); sign++) {
-         snprintf(expected, sizeof(expected), "%s%s.%s.%s", prefix, functions[i].name,
-                  floating ? "f" : sign ? "s" : "u", overload);
+         snprintf(expected, sizeof(expected), "%s%s.%s%s", prefix, functions[i].name,
+                  floating ? "" : sign ? "s." : "u.", overload);
          if (stela_air_call_named(name, bytes, expected))
             return typed(c, call, callee, functions[i].operation, functions[i].lane, quad, floating,
                          sign, result);
