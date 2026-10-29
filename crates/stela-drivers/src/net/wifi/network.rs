@@ -1,5 +1,5 @@
 //! The Wi-Fi network the mount's configuration names (`--wifi`, `--wifi-key`,
-//! `--wifi-country`), for whichever Wi-Fi adapter probe attaches. The secret
+//! `--wifi-country`), for whichever Wi-Fi adapter joins it. The secret
 //! never appears in `Debug` output.
 use alloc::{string::String, vec::Vec};
 use core::fmt;
@@ -10,18 +10,18 @@ pub const SSID_BYTES: usize = 32;
 
 /// The network to join.
 #[derive(Clone)]
-pub struct WifiConfig {
+pub struct Network {
     /// One to [`SSID_BYTES`] bytes.
     pub ssid: Vec<u8>,
-    pub secret: WifiSecret,
+    pub secret: Secret,
     /// An ISO 3166 alpha-2 country code in uppercase ASCII; none leaves the
     /// adapter firmware's default regulatory domain.
     pub country: Option<[u8; 2]>,
 }
 
-impl fmt::Debug for WifiConfig {
+impl fmt::Debug for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WifiConfig")
+        f.debug_struct("Network")
             .field("ssid", &String::from_utf8_lossy(&self.ssid))
             .field("secret", &self.secret)
             .field(
@@ -34,14 +34,14 @@ impl fmt::Debug for WifiConfig {
 
 /// A WPA2-PSK or WPA3-SAE credential.
 #[derive(Clone)]
-pub enum WifiSecret {
+pub enum Secret {
     /// Eight to 63 printable ASCII characters.
     Passphrase(Passphrase),
     /// The 256-bit pre-shared key, from 64 hex digits.
     Psk(Zeroizing<[u8; 32]>),
 }
 
-impl fmt::Debug for WifiSecret {
+impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Passphrase(_) => "Passphrase(..)",
@@ -66,7 +66,7 @@ impl Passphrase {
 
 /// Why a key file holds no usable secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WifiSecretError {
+pub enum SecretError {
     /// Neither 8 to 63 characters nor 64 hex digits.
     Length,
     /// A character outside printable ASCII.
@@ -75,7 +75,7 @@ pub enum WifiSecretError {
     BadHex,
 }
 
-impl fmt::Display for WifiSecretError {
+impl fmt::Display for SecretError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Length => {
@@ -87,22 +87,22 @@ impl fmt::Display for WifiSecretError {
     }
 }
 
-impl WifiSecret {
+impl Secret {
     /// The secret a key file holds: a passphrase, or a PSK as 64 hex digits.
     /// One trailing `\n` or `\r\n` is dropped.
-    pub fn parse(file: &[u8]) -> Result<Self, WifiSecretError> {
+    pub fn parse(file: &[u8]) -> Result<Self, SecretError> {
         let text = file
             .strip_suffix(b"\r\n")
             .or_else(|| file.strip_suffix(b"\n"))
             .unwrap_or(file);
         if !text.iter().all(|byte| (0x20..0x7f).contains(byte)) {
-            return Err(WifiSecretError::NotAscii);
+            return Err(SecretError::NotAscii);
         }
         match text.len() {
             64 => {
                 let mut key = Zeroizing::new([0u8; 32]);
                 for (byte, pair) in key.iter_mut().zip(text.as_chunks::<2>().0) {
-                    let digit = |c: u8| (c as char).to_digit(16).ok_or(WifiSecretError::BadHex);
+                    let digit = |c: u8| (c as char).to_digit(16).ok_or(SecretError::BadHex);
                     *byte = (digit(pair[0])? << 4 | digit(pair[1])?) as u8;
                 }
                 Ok(Self::Psk(key))
@@ -115,18 +115,18 @@ impl WifiSecret {
                     len: len as u8,
                 }))
             }
-            _ => Err(WifiSecretError::Length),
+            _ => Err(SecretError::Length),
         }
     }
 }
 
-impl WifiSecret {
+impl Secret {
     /// The pairwise master key for `ssid`: the PSK itself, or the
     /// passphrase's PBKDF2 derivation (IEEE 802.11-2020 J.4.1).
     pub fn pmk(&self, ssid: &[u8]) -> Zeroizing<[u8; 32]> {
         match self {
             Self::Passphrase(passphrase) => {
-                crate::net::wifi::supplicant::passphrase_psk(passphrase.as_bytes(), ssid)
+                super::supplicant::passphrase_psk(passphrase.as_bytes(), ssid)
             }
             Self::Psk(psk) => psk.clone(),
         }
@@ -139,16 +139,15 @@ mod tests {
 
     #[test]
     fn a_passphrase_derives_its_pmk_and_a_psk_is_its_own() {
-        let pmk = WifiSecret::parse(b"password").unwrap().pmk(b"IEEE");
+        let pmk = Secret::parse(b"password").unwrap().pmk(b"IEEE");
         assert_eq!(pmk[..4], [0xf4, 0x2c, 0x6f, 0xc5]);
-        let psk = WifiSecret::parse(&b"0f".repeat(32)).unwrap();
+        let psk = Secret::parse(&b"0f".repeat(32)).unwrap();
         assert_eq!(*psk.pmk(b"any"), [0x0f; 32]);
     }
 
     #[test]
     fn a_passphrase_keeps_its_characters_without_the_line_end() {
-        let WifiSecret::Passphrase(phrase) = WifiSecret::parse(b"correct horse\r\n").unwrap()
-        else {
+        let Secret::Passphrase(phrase) = Secret::parse(b"correct horse\r\n").unwrap() else {
             panic!("passphrase expected");
         };
         assert_eq!(phrase.as_bytes(), b"correct horse");
@@ -157,36 +156,30 @@ mod tests {
     #[test]
     fn sixty_four_hex_digits_are_a_psk() {
         let text = b"0f".repeat(32);
-        let WifiSecret::Psk(key) = WifiSecret::parse(&text).unwrap() else {
+        let Secret::Psk(key) = Secret::parse(&text).unwrap() else {
             panic!("PSK expected");
         };
         assert_eq!(*key, [0x0f; 32]);
         let mut bad = text.clone();
         bad[5] = b'g';
-        assert_eq!(WifiSecret::parse(&bad).err(), Some(WifiSecretError::BadHex));
+        assert_eq!(Secret::parse(&bad).err(), Some(SecretError::BadHex));
     }
 
     #[test]
     fn short_long_and_control_character_keys_are_refused() {
+        assert_eq!(Secret::parse(b"short").err(), Some(SecretError::Length));
+        assert_eq!(Secret::parse(&[b'a'; 65]).err(), Some(SecretError::Length));
         assert_eq!(
-            WifiSecret::parse(b"short").err(),
-            Some(WifiSecretError::Length)
-        );
-        assert_eq!(
-            WifiSecret::parse(&[b'a'; 65]).err(),
-            Some(WifiSecretError::Length)
-        );
-        assert_eq!(
-            WifiSecret::parse(b"tab\there!").err(),
-            Some(WifiSecretError::NotAscii)
+            Secret::parse(b"tab\there!").err(),
+            Some(SecretError::NotAscii)
         );
     }
 
     #[test]
     fn debug_output_hides_the_secret() {
-        let config = WifiConfig {
+        let config = Network {
             ssid: b"Home".to_vec(),
-            secret: WifiSecret::parse(b"hunter22").unwrap(),
+            secret: Secret::parse(b"hunter22").unwrap(),
             country: Some(*b"US"),
         };
         let shown = alloc::format!("{config:?}");

@@ -7,7 +7,7 @@
 //! the other bands first, then the 6 GHz channels the known BSSes' Reduced
 //! Neighbor Reports and the PSC rule select.
 
-use super::{Error, MAX_SIX_GHZ, MAX_SSID_BYTES, Request, SixGhz, result};
+use super::{super::network::SSID_BYTES, Error, MAX_SIX_GHZ, Request, SixGhz, result};
 use crate::net::{
     Mac,
     wifi::{Band, Channel},
@@ -70,7 +70,7 @@ fn ssid(elements: &[u8]) -> Option<&[u8]> {
         .ok()?
         .into_iter()
         .find(|(id, _)| *id == SSID)?;
-    (ssid.len() <= MAX_SSID_BYTES).then_some(ssid)
+    (ssid.len() <= SSID_BYTES).then_some(ssid)
 }
 
 /// `cfg80211_parse_colocated_ap`: the 6 GHz APs a BSS's RNR elements report

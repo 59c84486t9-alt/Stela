@@ -65,7 +65,7 @@ fn validate_lengths(
         || ssids.len() > protocol::MAX_SSIDS
         || ssids
             .iter()
-            .any(|ssid| ssid.len() > protocol::MAX_SSID_BYTES)
+            .any(|ssid| ssid.len() > crate::net::wifi::network::SSID_BYTES)
         || elements.len() > protocol::MAX_EXTRA_ELEMENTS
         || six_ghz.len() > protocol::MAX_SIX_GHZ
     {

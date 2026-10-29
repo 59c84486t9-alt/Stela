@@ -415,7 +415,7 @@ pub struct Selection<'a> {
     /// Whole USB disks for the guest, by serial number.
     pub usb_disks: &'a [String],
     /// The Wi-Fi network to join; without one a Wi-Fi adapter stays down.
-    pub wifi: Option<&'a stela_drivers::probe::WifiConfig>,
+    pub wifi: Option<&'a stela_drivers::net::wifi::network::Network>,
     /// With `--external-disks`, the guest hub's free ports, which every disk
     /// left over fills in probe order.
     pub external: Option<usize>,

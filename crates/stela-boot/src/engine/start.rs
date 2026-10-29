@@ -1804,7 +1804,10 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
 /// The network `--wifi` names, with the secret of the key file the loader
 /// read, whose bytes are wiped here. A file it cannot use is reported once,
 /// without its contents, and no network is joined.
-fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::probe::WifiConfig> {
+fn wifi_network(
+    handoff: &Handoff,
+    options: &Options,
+) -> Option<stela_drivers::net::wifi::network::Network> {
     let ssid = options.ssid.as_ref()?;
     let path = options
         .wifi_key
@@ -1825,7 +1828,7 @@ fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::p
             bytes,
         )
     };
-    let secret = stela_drivers::probe::WifiSecret::parse(key);
+    let secret = stela_drivers::net::wifi::network::Secret::parse(key);
     for byte in key.iter_mut() {
         // SAFETY: a byte of the key, which nothing else reads.
         unsafe { core::ptr::write_volatile(byte, 0) };
@@ -1843,7 +1846,7 @@ fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::p
         .wifi_country
         .as_deref()
         .and_then(|code| code.as_bytes().try_into().ok());
-    Some(stela_drivers::probe::WifiConfig {
+    Some(stela_drivers::net::wifi::network::Network {
         ssid: ssid.as_bytes().to_vec(),
         secret,
         country,

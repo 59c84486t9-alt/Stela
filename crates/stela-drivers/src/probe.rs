@@ -34,9 +34,8 @@ pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
 pub mod services;
-pub mod wifi;
+use crate::net::wifi::network::Network;
 pub use services::{NativeServices, ServiceError};
-pub use wifi::{WifiConfig, WifiSecret, WifiSecretError};
 
 /// A controller refusal keeps its original typed details for boot diagnostics.
 /// In particular, firmware names and integrity/target errors are never replaced
@@ -482,7 +481,7 @@ struct WifiInputs<'a> {
     clock: Clock,
     observations: net::wifi::intel::platform::Observations,
     firmware: &'static dyn crate::firmware::Provider,
-    network: &'a WifiConfig,
+    network: &'a Network,
 }
 
 /// Attach the Intel Wi-Fi function at `address` for `wifi.network`, reading
@@ -582,7 +581,7 @@ pub unsafe fn probe_with_provider(
     dma: &mut dyn DmaAllocator,
     firmware: &'static dyn crate::firmware::Provider,
     services: Option<&dyn NativeServices>,
-    wifi: Option<&WifiConfig>,
+    wifi: Option<&Network>,
 ) -> Devices {
     let mut devices = Devices {
         bluetooth_platform: captures.bluetooth,
@@ -1032,9 +1031,9 @@ mod tests {
             completion: None,
         };
         let firmware = handoff_provider(&handoff);
-        let network = WifiConfig {
+        let network = Network {
             ssid: b"test".to_vec(),
-            secret: WifiSecret::parse(b"test passphrase").unwrap(),
+            secret: crate::net::wifi::network::Secret::parse(b"test passphrase").unwrap(),
             country: None,
         };
         let address = Address {

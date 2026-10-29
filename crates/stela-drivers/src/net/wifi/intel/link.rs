@@ -39,11 +39,11 @@ use crate::{
         Link, LinkError, Mac,
         wifi::{
             Band,
+            network::Network,
             regulatory::database::{self, Database},
             scan::{self as protocol, result::Bss},
         },
     },
-    probe::WifiConfig,
 };
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::any::Any;
@@ -103,7 +103,7 @@ pub struct Inputs<B> {
     pub clock: Clock,
     pub bios: B,
     pub database: Database,
-    pub network: WifiConfig,
+    pub network: Network,
 }
 
 enum Stage<Q: BootIo, B: BiosIo> {
@@ -149,7 +149,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     clock: Clock,
     bios: Option<B>,
     database: Option<Database>,
-    network: WifiConfig,
+    network: Network,
     deadline: Option<Deadline>,
     scanning: bool,
     beacons: Option<Arc<Beacons>>,

@@ -8,7 +8,7 @@ use crate::net::wifi::intel::{
     nvm::Request as NvmRequest,
     policy::{WORLD, tests::regdb},
 };
-use crate::probe::{WifiConfig, WifiSecret};
+use crate::net::wifi::network::{Network, Secret};
 use alloc::boxed::Box;
 use zeroize::Zeroizing;
 
@@ -197,9 +197,9 @@ fn bring_up(
             (*b"00", &[(2_402_000, 2_472_000, 0, 2000)]),
             (*b"US", &[(2_402_000, 2_472_000, flags, 3000)]),
         ]),
-        network: WifiConfig {
+        network: Network {
             ssid: b"test".to_vec(),
-            secret: WifiSecret::Psk(Zeroizing::new([0; 32])),
+            secret: Secret::Psk(Zeroizing::new([0; 32])),
             country,
         },
     };

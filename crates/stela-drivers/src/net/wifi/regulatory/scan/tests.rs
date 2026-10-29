@@ -384,7 +384,7 @@ fn owned_snapshot_preserves_every_nested_byte_and_six_ghz_field_after_input_drop
 }
 #[test]
 fn every_snapshot_allocation_length_is_checked_against_canonical_request_limits() {
-    let ssids = vec![vec![0; protocol::MAX_SSID_BYTES]; protocol::MAX_SSIDS];
+    let ssids = vec![vec![0; crate::net::wifi::network::SSID_BYTES]; protocol::MAX_SSIDS];
     let channels = vec![FIRST; protocol::MAX_CHANNELS];
     let elements = vec![0; protocol::MAX_EXTRA_ELEMENTS];
     let target = SixGhz {
@@ -412,7 +412,12 @@ fn every_snapshot_allocation_length_is_checked_against_canonical_request_limits(
         Err(Error::Mismatch)
     );
     assert_eq!(
-        validate_lengths(&[FIRST], &[vec![0; protocol::MAX_SSID_BYTES + 1]], &[], &[]),
+        validate_lengths(
+            &[FIRST],
+            &[vec![0; crate::net::wifi::network::SSID_BYTES + 1]],
+            &[],
+            &[]
+        ),
         Err(Error::Mismatch)
     );
     assert_eq!(

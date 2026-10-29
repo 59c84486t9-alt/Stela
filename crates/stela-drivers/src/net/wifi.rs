@@ -10,6 +10,7 @@ mod allocation;
 pub mod frame;
 pub mod intel;
 pub mod mediatek;
+pub mod network;
 pub mod realtek;
 pub mod regulatory;
 pub mod sae;

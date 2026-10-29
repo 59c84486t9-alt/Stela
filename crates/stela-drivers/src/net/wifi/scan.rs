@@ -19,7 +19,6 @@ static NEXT_SCAN: super::Identities = super::Identities::new();
 // sources. These are not capabilities: vendor encoders must enforce narrower
 // negotiated firmware limits and built-probe/reserved-page bounds.
 pub(super) const MAX_SSIDS: usize = 4;
-pub(super) const MAX_SSID_BYTES: usize = 32;
 pub(super) const MAX_SIX_GHZ: usize = 64;
 pub(super) const MAX_CHANNELS: usize = 64;
 pub(super) const MAX_EXTRA_ELEMENTS: usize = 384;
@@ -105,7 +104,11 @@ impl Request {
         {
             return Err(Error::Invalid("duplicate scan channel"));
         }
-        if ssids.len() > MAX_SSIDS || ssids.iter().any(|ssid| ssid.len() > MAX_SSID_BYTES) {
+        if ssids.len() > MAX_SSIDS
+            || ssids
+                .iter()
+                .any(|ssid| ssid.len() > super::network::SSID_BYTES)
+        {
             return Err(Error::Invalid("scan SSID count/length"));
         }
         if extra_elements.len() > MAX_EXTRA_ELEMENTS {
